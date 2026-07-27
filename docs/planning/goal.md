@@ -3,7 +3,8 @@
 > 这份文档是项目的**唯一权威来源**，记录三件事：我们要做什么、做过哪些重大决策（以及为什么）、
 > 现在走到哪了。做了新的重大决策或完成一个阶段就回来更新这里。
 >
-> 相关文档：`00-getting-started.md`（方法论与心态）· `01-roadmap.md`（分阶段执行计划）
+> 相关文档：`00-getting-started.md`（方法论与心态）· `01-roadmap.md`（**当前 Phase 的实施步骤**，
+> 眼下是 Phase A；它服从本文档的决策，冲突时以本文档为准）
 >
 > 最后更新：2026-07-27
 
@@ -75,9 +76,13 @@ Django Admin 本身就能当半个 MVP，几乎不写前端就能增删改查。
 + admin 里 JS 隐藏无关字段来处理。
 
 ### D5 · 会变的分类做成字典表，不做 Python 枚举
-`RelationshipType` 是数据库表。基金会以后想加"理事会成员"、"紧急联系人"这类关系，
+`RelationshipType` 是数据库表。基金会以后想加"紧急联系人"、"推荐人"这类关系，
 在 admin 里加一行就行 —— 不用改代码、不用写迁移、不用重新部署。
-**这是"需求变了还能用"最直接的体现**，后续 Skill、活动类型、捐款类型一律照此办理。
+**这是"需求变了还能用"最直接的体现**，后续 Skill、Department、活动类型、捐款类型、
+付款方式一律照此办理。
+
+> 注意"理事会成员"**不是**关系类型 —— 理事走 `kind=board` 的 `Assignment`（见 D11）。
+> 判断方法：**这个人在基金会担任的职务 → `Assignment`；这个人和另一个人/组织之间的联系 → `Relationship`。**
 
 ### D6 · 一张通用 Relationship 表表达人与人 / 人与外部组织的关系
 `Relationship(contact_a, contact_b, relationship_type, start_date, end_date)`
@@ -226,6 +231,10 @@ CiviCRM 把它们拆成独立的一对多表。我们现在用单字段。
 
 ### ✅ 已完成 —— 数据核心设计，这是目前最有价值的部分
 
+> 这部分已经按 D4–D9 验证过，**除非某条 D 记录被修订，否则不要动**。
+> 尤其是：一张 Contact 表管人和机构、字典表而非枚举、自建 Language、业务规则在 model 层。
+> 另外**有测试** —— 这是后面敢重构的唯一底气，新增模型时一并补测试是硬要求。
+
 `contact` app 里已建好并有测试覆盖：
 
 - **`Contact`** —— 人和组织统一表（见 D4）。含姓名（法定名/偏好名/机构名）、
@@ -241,37 +250,76 @@ CiviCRM 把它们拆成独立的一对多表。我们现在用单字段。
   以及两段 JS（按 contact_type 隐藏无关名字字段、按国家切换州的下拉/文本框）。
 - **测试** —— 覆盖名字与类型的匹配规则、地址州的美国/非美国两种情况、Language 的排序与筛选。
 
-### 🚧 进行中 —— Phase A 地基加固（详见 `01-roadmap.md`）
+### 🚧 进行中 —— Phase A 地基加固
 
-这些属于"现在改成本≈0，以后改很痛"，排在所有新功能之前：
+**具体怎么做见 `01-roadmap.md`**（那份文档现在只讲 Phase A 的实施步骤）。
+这些事的共同点是"**现在改成本≈0，以后改很痛**"，所以排在所有新功能之前。
+验收标准是**功能上什么都没变、测试全绿**。
 
-| 事项 | 状态 |
-|------|------|
-| 自定义 User model（`AUTH_USER_MODEL`，按 D12 带可空 Contact 外键） | ⬜ 未开始 · **最紧急**，一旦有真实用户数据就极难改 |
-| 从 SQLite 切到 Postgres | ⬜ 未开始 · 本机 `postgresql@18` 已装 |
-| `SECRET_KEY` / `DEBUG` / `ALLOWED_HOSTS` 进环境变量 | ⬜ 未开始 · 现 key 已进 git 历史，上线前必须换新的 |
-| 建 `core` app，`TimeStampedModel` 从 `contact` 迁出 | ⬜ 未开始 |
-| 移除装了没用的 `countries_plus` / `languages_plus` | ⬜ 未开始 |
-| `Relationship` 加数据库约束（禁自我关系、禁重复） | ⬜ 未开始 |
-| 审计日志（`django-simple-history`） | ⬜ 未开始 |
-| 写 `README.md`（删空的 `READ.md`） | ⬜ 未开始 |
+| 事项 | 为什么不能拖 | 状态 |
+|------|------------|------|
+| 自定义 User model（`AUTH_USER_MODEL`，按 D12 带可空 Contact 外键） | Django 项目一旦有真实用户数据，换 `AUTH_USER_MODEL` 极其痛苦（要手写数据迁移、重建外键）。现在库里只有测试数据，成本≈0 | ⬜ 未开始 · **最紧急** |
+| 从 SQLite 切到 Postgres | 两者在约束、JSONField、大小写敏感、并发上行为不同。等写了几个月业务逻辑才切，等于所有东西重测一遍。本机 `postgresql@18` 已装 | ⬜ 未开始 |
+| `SECRET_KEY` / `DEBUG` / `ALLOWED_HOSTS` / `STATIC_ROOT` 进环境变量 | 现 key 已进 git 历史，**已泄露的 key 不能再用**，上线前必须换新的；配置越早拆干净，上线时越不手忙脚乱 | ⬜ 未开始 |
+| 建 `core` app，`TimeStampedModel` 从 `contact` 迁出 | 下一个 app（volunteer / event）要用它就得 `from contact.models import ...`，依赖方向反了，以后想单独理解或替换 `contact` 会被缠住 | ⬜ 未开始 |
+| 移除装了没用的 `countries_plus` / `languages_plus` | 它们各自在库里建了几千行的表。既然已按 D8 自建 `Language`，删掉减少依赖和迁移噪音 | ⬜ 未开始 |
+| `Relationship` 加数据库约束（禁自我关系、禁重复） | 现在可以存"Alice 是 Alice 的母亲"，也可以把同一段关系重复存 10 遍。约束加在数据库层，脏数据永远进不来 | ⬜ 未开始 |
+| 审计日志（`django-simple-history`） | "谁在什么时候改了这条记录"在基金会场景下是刚需，且是我们自己定的"值得抄"的一条。先挂 `Contact`，`Assignment` / `Contribution` 之后必挂 | ⬜ 未开始 |
+| 写 `README.md`（删空的 `READ.md`） | 半年后的你（或下一个接手的人）需要知道怎么把这个项目跑起来 | ⬜ 未开始 |
 
 ### ⬜ 未开始 —— 后续阶段
 
-- **Phase B** 人与活动 MVP：`Assignment` / `Department`（字典表）/ `VolunteerProfile` / `Skill`
-  / `Event` / `Participation`（工时）→ 做完就让基金会开始真用
-  - `Assignment` 是这一阶段的核心表，员工和志愿者的岗位共用它（`kind` 区分，见 D11）；
-    **不建 `EmployeeProfile`**
-  - `reports_to` 是自引用外键，admin 里要用 autocomplete，且 `Assignment.__str__`
-    必须可读（如「张三 — 项目协调员」），否则下拉框没法用
-  - `kind` 三种取值 employee / volunteer / board 一次做齐；`department` 和
-    `employment_type` 都必须可空（理事两个都没有）
-  - 要写的约束和测试：`reports_to` 不能指向自己那一行；一人多岗（同时两个 Assignment、
-    各有不同上级）必须能存下并能分别查出 —— 这正是 D11 修订要解决的场景，
-    值得作为一个明确的测试用例钉住；再加一个"执行总监 reports_to 理事长"的用例，
-    确认汇报线能跨 kind 连接
-- **Phase C** 资金追踪：`Contribution`（金额用 `DecimalField`，必须挂审计），第一批自己写的统计页面
-- **Phase D** 上线运营：部署、**备份并演练恢复**、用 Django Group 做权限、CSV 导出、`check --deploy`
+> 这里记"要建什么、为什么"，不记具体步骤。每个 Phase 开工前，把当时的实施细节写进
+> `01-roadmap.md`（那份文档一次只服务一个 Phase）。
+
+#### Phase B · 人与活动 MVP —— 做完就让基金会开始真用
+
+`Assignment` 是这一阶段的核心表，员工 / 志愿者 / 理事的岗位共用它（`kind` 区分），
+**不建 `EmployeeProfile`**（见 D11）。
+
+| 模型 | 字段要点 |
+|------|---------|
+| `Department` | 字典表（见 D5），admin 里能加 |
+| `Assignment` | `contact` / `kind`(employee·volunteer·board) / `title` / `department`(**可空**) / `reports_to`(自引用 FK，可空) / `employment_type`(**可空**) / `start_date` / `end_date` / `is_active`。**挂 simple-history** —— 岗位历史靠起止日期 + 审计日志保留 |
+| `Skill` | 字典表（见 D5） |
+| `VolunteerProfile` | OneToOne → `Contact`。`skills`(M2M → Skill) / `background_check_status` + 审查日期 / `availability_notes`。**不含** title / 上级 / 任职起始日（那些是岗位，归 `Assignment`）；**不含**紧急联系人（走 `Relationship`，见 D6） |
+| `Event` | 名称 / 类型（字典表） / 起止时间 / 地点 / 负责人(FK → Contact) / 状态 / 容量 |
+| `Participation` | FK Event + FK Contact + 角色 + 状态（报名·出席·缺席） + **hours**。这张中间表是整个系统的价值所在 —— 工时统计、志愿者活跃度、活动回顾全靠它 |
+
+实现要点：
+
+- `department` 和 `employment_type` 必须可空（理事两个都没有）；`kind` 三种取值一次做齐。
+- `reports_to` 指向 `Assignment` 而非 `Contact`（见 D11）。admin 里必须用 autocomplete，
+  且 `Assignment.__str__` 必须可读（如「张三 — 项目协调员」），否则下拉框没法用。
+- Admin：`Event` 页面用 inline 直接登记参与者；`Contact` 页面用 inline 显示 TA 的
+  Assignment 和参加过的活动。
+- **必须写的约束和测试**：
+  1. `reports_to` 不能指向自己那一行（`CheckConstraint`）；
+  2. **一人多岗** —— 同一个 Contact 有两个 Assignment、各有不同上级，能存下且能分别查出。
+     这正是 D11 修订要解决的场景，值得作为明确的测试用例钉住；
+  3. **跨 kind 的汇报线** —— 执行总监（employee）`reports_to` 理事长（board）。
+- **验收：基金会的人能在浏览器里录一个真志愿者、开一个真活动、登记出席和工时。**
+  到这一步就交给他们用，不要等"全做完了"再给人看 —— 真实使用暴露的需求比现在猜的准得多。
+
+#### Phase C · 资金追踪
+
+- `Contribution`：FK Contact（捐款人） / `amount` + `currency` / `received_date` /
+  `financial_type`（字典表：一般捐赠·指定用途·实物） / `payment_method`（字典表） /
+  `status`（pending·completed·refunded） / 收据编号 / 关联 `Event`（可空 —— 某次活动筹到的钱） / 备注
+- 金额一律 `DecimalField`，**永远不用 `FloatField`**。
+- **必须挂 simple-history** —— 钱的记录必须能追溯是谁改的。
+- 第一批自己写的页面（不再是 admin）：本月/本年捐款总额、某活动总工时、志愿者活跃排行。
+  这时候上 HTMX 刚好（见 D2）。
+
+#### Phase D · 上线与真实运营
+
+- 部署：Render 或 Fly.io + 托管 Postgres（保持 D3：一个 `pg_dump` 就能带走）
+- **备份**：定时 `pg_dump` 到对象存储，并且**真的演练一次恢复**。没验证过的备份等于没有备份。
+- 权限：用 Django Group 划分角色（管理员 / 项目协调员 / 只读），按 D12 不看"是不是员工"来判断，
+  也别自造权限引擎
+- CSV 导出、简单报表
+- 安全：`SECURE_SSL_REDIRECT`、HSTS、`SESSION_COOKIE_SECURE`，
+  跑 `manage.py check --deploy` 到没有警告
 
 ---
 
@@ -293,5 +341,9 @@ CiviCRM 把它们拆成独立的一对多表。我们现在用单字段。
 
 ## 六、下一步
 
-开始 Phase A 的前三项（自定义 User + Postgres + 配置进环境变量）。
-这三件事互相咬合，一起做比分开做省事，验收标准是**功能上什么都没变、测试全绿**。
+按 `01-roadmap.md` 走完 Phase A。核心是三件互相咬合的事 ——
+**配置进环境变量 → 切 Postgres → 自定义 User**，一起做比分开做省事：
+所有改结构的动作都赶在切库之前完成，然后在一个全新的空 Postgres 库上一次性建表，
+就不用处理任何数据迁移。
+
+验收标准是**功能上什么都没变、测试全绿**。

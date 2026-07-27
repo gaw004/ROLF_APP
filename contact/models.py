@@ -1,0 +1,234 @@
+from django.core.exceptions import ValidationError
+from django.db import models
+from phonenumber_field.modelfields import PhoneNumberField
+from django_countries.fields import CountryField
+
+
+class TimeStampedModel(models.Model):
+    """Abstract base: adds created/updated timestamps to any model that inherits it."""
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="time created")
+    updated_at = models.DateTimeField(auto_now=True, verbose_name="time updated")
+
+    class Meta:
+        abstract = True
+
+
+class Language(models.Model):
+    """One ISO 639-3 language.
+
+    Seeded from pycountry (~7,900 rows) by a data migration, and editable in the
+    admin afterwards. We keep our own table rather than using django-languages-plus
+    because that table is keyed on the 2-letter ISO 639-1 code, which excludes
+    Mandarin (cmn), Cantonese (yue), Hmong and many others.
+    """
+
+    class Type(models.TextChoices):
+        LIVING = "L", "Living"
+        EXTINCT = "E", "Extinct"
+        HISTORICAL = "H", "Historical"
+        CONSTRUCTED = "C", "Constructed"
+        SPECIAL = "S", "Special"
+
+    code = models.CharField(
+        max_length=3, primary_key=True, verbose_name="ISO 639-3 code",
+    )
+    name = models.CharField(max_length=150, help_text="Official ISO 639-3 name.")
+    display_name = models.CharField(
+        max_length=150, db_index=True,
+        help_text="Name shown in dropdowns. Defaults to the ISO name.",
+    )
+    alt_names = models.CharField(
+        max_length=255, blank=True,
+        help_text="Other names this language can be found by, comma separated. "
+                  "Searched but not displayed.",
+    )
+    language_type = models.CharField(
+        max_length=1, choices=Type.choices, default=Type.LIVING,
+    )
+    # Higher ranks sort first, so the languages we serve most often sit at the top
+    # of the dropdown ahead of the alphabetical list.
+    pin_rank = models.PositiveSmallIntegerField(
+        default=0, help_text="Higher numbers sort to the top of the list. 0 = unpinned.",
+    )
+
+    class Meta:
+        ordering = ["-pin_rank", "display_name"]
+
+    def __str__(self):
+        return self.display_name
+
+
+class Contact(TimeStampedModel):
+    """A person OR an organization. contact_type distinguishes them."""
+
+    # --- Type: individual vs organization (the CiviCRM approach) ---
+    class ContactType(models.TextChoices):
+        INDIVIDUAL = "individual", "Individual"
+        ORGANIZATION = "organization", "Organization"
+
+    contact_type = models.CharField(
+        max_length=20,
+        choices=ContactType.choices,
+        default=ContactType.INDIVIDUAL,
+        db_index=True,
+    )
+
+    # --- Name fields ---
+    legal_first_name = models.CharField(max_length=100, blank=True)
+    legal_last_name = models.CharField(max_length=100, blank=True, db_index=True)
+    preferred_name = models.CharField(max_length=100, blank=True)
+    organization_name = models.CharField(
+        max_length=200, blank=True,
+        help_text="Used when contact_type is organization.",
+    )
+    # Which name fields apply to which contact type. The admin hides the others
+    # (contact_type_toggle.js) and save() clears them.
+    NAME_FIELDS = {
+        ContactType.INDIVIDUAL: ["legal_first_name", "legal_last_name", "preferred_name"],
+        ContactType.ORGANIZATION: ["organization_name"],
+    }
+
+    # --- Contact info ---
+    email = models.EmailField(blank=True, db_index=True)
+    # Stores in E.164 international format (+1..., +44...); region lets users type local US numbers.
+    phone = PhoneNumberField(blank=True, region="US")
+
+    # --- Demographics ---
+    class Gender(models.TextChoices):
+        FEMALE = "female", "Female"
+        MALE = "male", "Male"
+        OTHER = "other", "Other"
+        UNSPECIFIED = "unspecified", "Prefer not to say"
+
+    gender = models.CharField(
+        max_length=20, choices=Gender.choices, blank=True,
+    )
+    birth_date = models.DateField(null=True, blank=True)
+
+    # Full ISO 639-3 language list; see the Language model above. The dropdown is
+    # narrowed to living languages — the extinct and historical ones are still in
+    # the table (and editable in the Language admin), just not offered here.
+    # PROTECT: don't allow deleting a language that contacts still reference.
+    preferred_language = models.ForeignKey(
+        Language,
+        on_delete=models.PROTECT,
+        null=True, blank=True,
+        limit_choices_to={"language_type": Language.Type.LIVING},
+        related_name="+",   # no reverse accessor needed from Language back to Contact
+    )
+
+    class CommunicationMethod(models.TextChoices):
+        EMAIL = "email", "Email"
+        PHONE = "phone", "Phone"
+        SMS = "sms", "SMS"
+        MAIL = "mail", "Postal mail"
+
+    preferred_communication_method = models.CharField(
+        max_length=20, choices=CommunicationMethod.choices, blank=True,
+    )
+
+    # --- Structured address (single address, Google-Places-ready later) ---
+    address_street = models.CharField(max_length=255, blank=True)
+    address_city = models.CharField(max_length=100, blank=True)
+    # Free text so non-US addresses keep their province/region. For US addresses the
+    # admin swaps in the 50-state dropdown (address_state_toggle.js), which stores
+    # the usual 2-letter abbreviation.
+    address_state = models.CharField(
+        max_length=100, blank=True, verbose_name="state / province / region",
+    )
+    address_postal_code = models.CharField(max_length=20, blank=True)
+    # Full ISO 3166 country dropdown, provided by django-countries.
+    address_country = CountryField(blank=True, default="US")
+
+    # --- Status & bookkeeping ---
+    is_active = models.BooleanField(default=True, db_index=True)
+    notes = models.TextField(blank=True)
+    # created_at / updated_at come from TimeStampedModel
+
+    class Meta:
+        ordering = ["legal_last_name", "legal_first_name"]
+
+    def clean(self):
+        """Require the name that matches the contact type."""
+        super().clean()
+        if self.contact_type == self.ContactType.ORGANIZATION:
+            if not self.organization_name:
+                raise ValidationError({
+                    "organization_name": "An organization needs an organization name.",
+                })
+        elif self.contact_type == self.ContactType.INDIVIDUAL:
+            if not self.legal_last_name:
+                raise ValidationError({
+                    "legal_last_name": "An individual needs a legal last name.",
+                })
+
+    def save(self, *args, **kwargs):
+        """Blank out the name fields that don't apply to this contact type.
+
+        Keeps the record unambiguous: an organization never carries a leftover
+        first name from before the type was switched.
+        """
+        for contact_type, fields in self.NAME_FIELDS.items():
+            if contact_type != self.contact_type:
+                for field in fields:
+                    setattr(self, field, "")
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        if self.contact_type == self.ContactType.ORGANIZATION:
+            return self.organization_name or "(unnamed organization)"
+        full = f"{self.legal_first_name} {self.legal_last_name}".strip()
+        return self.preferred_name or full or self.email or f"Contact #{self.pk}"
+
+
+class RelationshipType(models.Model):
+    """A dictionary of relationship kinds: 'volunteer at', 'manages', 'parent of'."""
+
+    # Label as seen from A -> B, e.g. "manages"
+    name_a_to_b = models.CharField(max_length=100)
+    # Reverse label B -> A, e.g. "managed by". Optional but useful for display.
+    name_b_to_a = models.CharField(max_length=100, blank=True)
+    description = models.CharField(max_length=255, blank=True)
+
+    def __str__(self):
+        return self.name_a_to_b
+
+
+class Relationship(TimeStampedModel):
+    """Connects two contacts with a typed, dated relationship.
+
+    Example rows:
+      (Alice, RedCross, 'volunteer at')
+      (Bob, Alice, 'manages')
+      (Carol, Ming, 'parent of')
+    """
+
+    contact_a = models.ForeignKey(
+        Contact,
+        on_delete=models.CASCADE,
+        related_name="relationships_as_a",
+    )
+    contact_b = models.ForeignKey(
+        Contact,
+        on_delete=models.CASCADE,
+        related_name="relationships_as_b",
+    )
+    relationship_type = models.ForeignKey(
+        RelationshipType,
+        on_delete=models.PROTECT,
+        related_name="relationships",
+    )
+
+    start_date = models.DateField(null=True, blank=True)
+    end_date = models.DateField(null=True, blank=True)
+    is_active = models.BooleanField(default=True, db_index=True)
+    # created_at / updated_at come from TimeStampedModel
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["contact_a", "relationship_type"]),
+            models.Index(fields=["contact_b", "relationship_type"]),
+        ]
+
+    def __str__(self):
+        return f"{self.contact_a} — {self.relationship_type} → {self.contact_b}"

@@ -54,6 +54,9 @@ INSTALLED_APPS = [
     'phonenumber_field',
     'django_countries',
     'localflavor',
+    # Listed before the apps that import from it, so the dependency direction
+    # is obvious from reading this list: core holds what everything shares.
+    'core',
     'contact',
 ]
 

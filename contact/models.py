@@ -3,14 +3,7 @@ from django.db import models
 from phonenumber_field.modelfields import PhoneNumberField
 from django_countries.fields import CountryField
 
-
-class TimeStampedModel(models.Model):
-    """Abstract base: adds created/updated timestamps to any model that inherits it."""
-    created_at = models.DateTimeField(auto_now_add=True, verbose_name="time created")
-    updated_at = models.DateTimeField(auto_now=True, verbose_name="time updated")
-
-    class Meta:
-        abstract = True
+from core.models import TimeStampedModel
 
 
 class Language(models.Model):

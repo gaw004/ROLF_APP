@@ -2,6 +2,7 @@
 __pycache__/
 *.pyc
 db.sqlite3
+*.bak
 .env
 .DS_Store
 .envrc

@@ -61,7 +61,7 @@ def unseed_languages(apps, schema_editor):
 class Migration(migrations.Migration):
 
     dependencies = [
-        ("contact", "0002_language_alter_contact_address_state_and_more"),
+        ("contact", "0001_initial"),
     ]
 
     operations = [

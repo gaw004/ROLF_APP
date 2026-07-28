@@ -2,15 +2,9 @@ from django.core.exceptions import ValidationError
 from django.db import models
 from phonenumber_field.modelfields import PhoneNumberField
 from django_countries.fields import CountryField
+from simple_history.models import HistoricalRecords
 
-
-class TimeStampedModel(models.Model):
-    """Abstract base: adds created/updated timestamps to any model that inherits it."""
-    created_at = models.DateTimeField(auto_now_add=True, verbose_name="time created")
-    updated_at = models.DateTimeField(auto_now=True, verbose_name="time updated")
-
-    class Meta:
-        abstract = True
+from core.models import TimeStampedModel
 
 
 class Language(models.Model):
@@ -145,11 +139,42 @@ class Contact(TimeStampedModel):
     notes = models.TextField(blank=True)
     # created_at / updated_at come from TimeStampedModel
 
+    # Who changed what, and when. Dictionary tables like Language do not need
+    # this; Assignment (Phase B) and Contribution (Phase C) must have it.
+    history = HistoricalRecords()
+
     class Meta:
         ordering = ["legal_last_name", "legal_first_name"]
+        constraints = [
+            # ⚠️ PAIRED WITH Contact.clean() — see goal.md D14.
+            # This constraint is what actually enforces the rule: it holds for
+            # every write path, including objects.create(), bulk_create() and
+            # psql. clean() states the same rule again purely so the admin can
+            # attach the error to the offending field. CHANGE ONE, CHANGE BOTH.
+            #
+            # The values have to be written out as literals: a nested class body
+            # cannot see the enclosing class's namespace, so ContactType.INDIVIDUAL
+            # here would raise NameError. Keep them in step with ContactType above.
+            models.CheckConstraint(
+                condition=(
+                    (models.Q(contact_type="individual") & ~models.Q(legal_last_name=""))
+                    | (models.Q(contact_type="organization") & ~models.Q(organization_name=""))
+                ),
+                name="contact_name_matches_type",
+                violation_error_message=(
+                    "An individual needs a legal last name; "
+                    "an organization needs an organization name."
+                ),
+            ),
+        ]
 
     def clean(self):
-        """Require the name that matches the contact type."""
+        """Require the name that matches the contact type.
+
+        ⚠️ PAIRED WITH the `contact_name_matches_type` constraint in Meta above
+        — see goal.md D14. The constraint is the enforcement; this method only
+        exists to point at the field that is wrong. CHANGE ONE, CHANGE BOTH.
+        """
         super().clean()
         if self.contact_type == self.ContactType.ORGANIZATION:
             if not self.organization_name:
@@ -229,6 +254,59 @@ class Relationship(TimeStampedModel):
             models.Index(fields=["contact_a", "relationship_type"]),
             models.Index(fields=["contact_b", "relationship_type"]),
         ]
+        # ⚠️ ALL THREE ARE PAIRED WITH Relationship.clean() — see goal.md D14.
+        # These constraints are the enforcement; clean() restates them only to
+        # attach errors to the right field in the admin. CHANGE ONE, CHANGE BOTH.
+        constraints = [
+            models.CheckConstraint(
+                condition=~models.Q(contact_a=models.F("contact_b")),
+                name="relationship_no_self_reference",
+                violation_error_message="A contact cannot be related to themselves.",
+            ),
+            models.UniqueConstraint(
+                fields=["contact_a", "contact_b", "relationship_type", "start_date"],
+                name="relationship_unique_per_type_and_start",
+                # Without this, Postgres treats NULL != NULL and the same
+                # relationship with no start date could be stored any number of
+                # times — which is the most likely duplicate, not the rarest.
+                # Needs PG 15+; we are on 18.
+                nulls_distinct=False,
+                violation_error_message="This relationship has already been recorded.",
+            ),
+            models.CheckConstraint(
+                condition=(
+                    models.Q(end_date__isnull=True)
+                    | models.Q(start_date__isnull=True)
+                    | models.Q(end_date__gte=models.F("start_date"))
+                ),
+                name="relationship_end_date_not_before_start_date",
+                violation_error_message="The end date cannot be before the start date.",
+            ),
+        ]
+
+    def clean(self):
+        """Restate the Meta constraints as field-level errors for the admin.
+
+        ⚠️ PAIRED WITH the constraints in Meta above — see goal.md D14. The
+        database is what enforces these; this method only decides which field
+        turns red. CHANGE ONE, CHANGE BOTH.
+
+        The duplicate rule is deliberately not repeated here: it has no single
+        offending field to point at, and Django's own constraint validation
+        already reports it. See the constraint named
+        `relationship_unique_per_type_and_start`.
+        """
+        super().clean()
+        # relationship_no_self_reference
+        if self.contact_a_id and self.contact_a_id == self.contact_b_id:
+            raise ValidationError({
+                "contact_b": "A contact cannot be related to themselves.",
+            })
+        # relationship_end_date_not_before_start_date
+        if self.start_date and self.end_date and self.end_date < self.start_date:
+            raise ValidationError({
+                "end_date": "The end date cannot be before the start date.",
+            })
 
     def __str__(self):
         return f"{self.contact_a} — {self.relationship_type} → {self.contact_b}"

@@ -54,11 +54,16 @@ INSTALLED_APPS = [
     'phonenumber_field',
     'django_countries',
     'localflavor',
+    'accounts',
     # Listed before the apps that import from it, so the dependency direction
     # is obvious from reading this list: core holds what everything shares.
     'core',
     'contact',
 ]
+
+# Set before the first migrate, while no user table exists yet — swapping this
+# out later means hand-written data migrations and rebuilt foreign keys.
+AUTH_USER_MODEL = "accounts.User"
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',

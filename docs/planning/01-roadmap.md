@@ -508,9 +508,13 @@ def test_end_date_cannot_be_before_start_date(self):
 > `with self.assertRaises(IntegrityError), transaction.atomic():` —— 少了 `atomic()`
 > 事务会被标记为中止，同一个测试里后面的查询全会报错。
 >
-> ⚠️ 实现时**顺便验一下** Django 的 Python 侧 `validate_constraints()` 对
-> `nulls_distinct=False` 的处理是否和数据库一致。如果不一致（admin 放行但数据库拒绝），
-> 那就是 `clean()` 必须补上的地方 —— 到时候把结论写回本节。
+> ✅ **未决点已验证（实施时实测）**：Django 的 Python 侧 `validate_constraints()`
+> **认** `nulls_distinct=False`，行为与数据库一致 —— `full_clean()` 会拦下
+> `start_date` 同为空的重复行，且用的就是约束上写的 `violation_error_message`。
+> 所以 `clean()` 里**不需要**再手写一遍重复检查（也确实没写）。
+>
+> 另外在 psql 里核对了四条约束真的落地了，不是「Django 以为建了」：
+> `\d` 显示 `UNIQUE NULLS NOT DISTINCT (contact_a_id, contact_b_id, relationship_type_id, start_date)`。
 
 ---
 

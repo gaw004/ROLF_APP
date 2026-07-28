@@ -1,8 +1,11 @@
+import datetime
+
 from django.core.exceptions import ValidationError
+from django.db import IntegrityError, transaction
 from django.test import TestCase
 
 from .forms import ContactAdminForm
-from .models import Contact, Language
+from .models import Contact, Language, Relationship, RelationshipType
 
 
 class ContactNameByTypeTests(TestCase):
@@ -104,3 +107,93 @@ class LanguageTests(TestCase):
         self.assertEqual(
             choices.exclude(language_type=Language.Type.LIVING).count(), 0
         )
+
+
+class ContactNameConstraintTests(TestCase):
+    """The name rule at the database level (goal.md D9 / D14).
+
+    Contact.clean() only runs from ModelForms and explicit full_clean() calls —
+    save() never invokes it. These tests take the paths that used to slip past
+    the rule entirely.
+    """
+
+    def test_create_bypassing_full_clean_still_cannot_break_the_name_rule(self):
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            Contact.objects.create(contact_type=Contact.ContactType.INDIVIDUAL)
+
+    def test_organization_without_a_name_is_rejected_at_the_database(self):
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            Contact.objects.create(contact_type=Contact.ContactType.ORGANIZATION)
+
+    def test_bulk_create_cannot_break_the_name_rule_either(self):
+        # bulk_create skips save() and therefore every Python-level hook. It is
+        # also what a data import would use, which is exactly when bad rows arrive.
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            Contact.objects.bulk_create([
+                Contact(contact_type=Contact.ContactType.INDIVIDUAL, legal_last_name="Ok"),
+                Contact(contact_type=Contact.ContactType.INDIVIDUAL),
+            ])
+
+
+class RelationshipConstraintTests(TestCase):
+    """The three Relationship constraints, plus the field-level errors that pair
+    with them (goal.md D14)."""
+
+    def setUp(self):
+        self.alice = Contact.objects.create(
+            contact_type=Contact.ContactType.INDIVIDUAL, legal_last_name="Alice")
+        self.bob = Contact.objects.create(
+            contact_type=Contact.ContactType.INDIVIDUAL, legal_last_name="Bob")
+        self.parent_of = RelationshipType.objects.create(
+            name_a_to_b="parent of", name_b_to_a="child of")
+
+    def test_cannot_relate_a_contact_to_itself(self):
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            Relationship.objects.create(
+                contact_a=self.alice, contact_b=self.alice,
+                relationship_type=self.parent_of,
+            )
+
+    def test_self_reference_error_points_at_the_contact_field(self):
+        # This is what the clean() layer buys us: the admin marks contact_b
+        # rather than dropping a database message at the top of the form.
+        relationship = Relationship(
+            contact_a=self.alice, contact_b=self.alice,
+            relationship_type=self.parent_of,
+        )
+        with self.assertRaises(ValidationError) as caught:
+            relationship.full_clean()
+        self.assertIn("contact_b", caught.exception.message_dict)
+
+    def test_cannot_store_the_same_relationship_twice(self):
+        # Both rows have start_date=None, which is the case that only holds
+        # because of nulls_distinct=False — Postgres would otherwise consider
+        # two NULLs distinct and let the duplicate through.
+        Relationship.objects.create(
+            contact_a=self.alice, contact_b=self.bob,
+            relationship_type=self.parent_of,
+        )
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            Relationship.objects.create(
+                contact_a=self.alice, contact_b=self.bob,
+                relationship_type=self.parent_of,
+            )
+
+    def test_end_date_cannot_be_before_start_date(self):
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            Relationship.objects.create(
+                contact_a=self.alice, contact_b=self.bob,
+                relationship_type=self.parent_of,
+                start_date=datetime.date(2023, 1, 1),
+                end_date=datetime.date(2020, 1, 1),
+            )
+
+    def test_an_open_ended_relationship_is_still_allowed(self):
+        # The date constraint must not reject the ordinary case of a
+        # relationship that has started and has not ended.
+        relationship = Relationship.objects.create(
+            contact_a=self.alice, contact_b=self.bob,
+            relationship_type=self.parent_of,
+            start_date=datetime.date(2020, 1, 1),
+        )
+        self.assertIsNone(relationship.end_date)

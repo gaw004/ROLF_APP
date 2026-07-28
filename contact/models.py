@@ -2,6 +2,7 @@ from django.core.exceptions import ValidationError
 from django.db import models
 from phonenumber_field.modelfields import PhoneNumberField
 from django_countries.fields import CountryField
+from simple_history.models import HistoricalRecords
 
 from core.models import TimeStampedModel
 
@@ -137,6 +138,10 @@ class Contact(TimeStampedModel):
     is_active = models.BooleanField(default=True, db_index=True)
     notes = models.TextField(blank=True)
     # created_at / updated_at come from TimeStampedModel
+
+    # Who changed what, and when. Dictionary tables like Language do not need
+    # this; Assignment (Phase B) and Contribution (Phase C) must have it.
+    history = HistoricalRecords()
 
     class Meta:
         ordering = ["legal_last_name", "legal_first_name"]

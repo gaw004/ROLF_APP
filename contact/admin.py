@@ -1,4 +1,5 @@
 from django.contrib import admin
+from simple_history.admin import SimpleHistoryAdmin
 
 from .forms import ContactAdminForm
 from .models import Contact, Language, Relationship, RelationshipType
@@ -14,7 +15,9 @@ class RelationshipInline(admin.TabularInline):
 
 
 @admin.register(Contact)
-class ContactAdmin(admin.ModelAdmin):
+class ContactAdmin(SimpleHistoryAdmin):
+    """SimpleHistoryAdmin rather than ModelAdmin: adds the History button."""
+
     form = ContactAdminForm
     list_display = ["__str__", "contact_type", "email", "phone", "is_active"]
     list_filter = ["contact_type", "is_active", "gender", "address_country"]

@@ -528,8 +528,8 @@ pip install django-simple-history && pip freeze > requirements.txt
 ```
 
 - `INSTALLED_APPS` 加 `'simple_history'`；
-- `MIDDLEWARE` 加 `'simple_history.middleware.HistoryRequestMiddleware'`
-  （**放在 `AuthenticationMiddleware` 之后**，否则记不到"是谁改的"，只能记到改了什么）；
+- `MIDDLEWARE` 加 `'simple_history.middleware.HistoryRequestMiddleware'`，
+  按库文档放在 `AuthenticationMiddleware` 之后；
 - `Contact` 加 `history = HistoricalRecords()`，并让 `ContactAdmin` 继承
   `SimpleHistoryAdmin`（admin 里就多出一个 History 按钮）；
 - `makemigrations` + `migrate`。
@@ -542,12 +542,36 @@ pip install django-simple-history && pip freeze > requirements.txt
 
 ### 测试（决策 #9）
 
+### ⚠️ 计划外：admin 路径根本不经过 middleware（实施时才发现）
+
+最初只写了一条「改一条 Contact，`history_user` 记到人」的测试，走的是 admin。
+**把 middleware 整条删掉，这个测试照样绿** —— 因为
+`simple_history/admin.py:317` 直接做了 `obj._history_user = request.user`，
+`SimpleHistoryAdmin` 自己就把人填上了，压根不查 thread-local。
+
+也就是说：**middleware 覆盖的是 admin 以外的所有保存路径** ——
+Phase C 的 HTMX 页面、以后的 API、任何自己写的 view。只测 admin 等于没测 middleware。
+
+最终写了四条：
+
 ```python
-def test_editing_a_contact_records_who_changed_it(self):
-    # 改一次 Contact → 多一条历史记录，且 history_user 记到了操作的人。
-    # 不写这条的话，middleware 顺序放错导致「只记了改什么、没记谁改的」
-    # 只能靠肉眼在 admin 里发现 —— 而这恰恰是审计日志最容易失效的方式。
+# 走 admin（不经过 middleware，测的是 SimpleHistoryAdmin）
+def test_editing_a_contact_records_the_previous_value(self):
+def test_editing_through_the_admin_records_who_changed_it(self):
+
+# 走真实中间件栈：用 override_settings(ROOT_URLCONF=...) 挂一个测试专用的
+# 非 admin view，在请求里保存 Contact
+def test_saving_during_a_non_admin_request_records_the_user(self):
+def test_the_middleware_is_installed(self):
 ```
+
+后两条已验证：删掉 middleware 后会红（`AssertionError: None != <User: coordinator>`）。
+
+> **顺带纠正一个流传的说法**：常说 `HistoryRequestMiddleware` "必须放在
+> `AuthenticationMiddleware` 之后，否则记不到是谁改的"。**实测排序不影响结果** ——
+> 这个 middleware 只是把 request 对象存进 thread-local，`request.user` 是保存时才读的，
+> 那时 `AuthenticationMiddleware` 已经在同一个对象上填好了。
+> 把它挪到 Auth 之前，历史测试照样全绿。按文档顺序放是因为没有代价，不是因为放错会坏。
 
 **另外肉眼验一次**：admin 里改一条 Contact，History 页面能看到改了什么、谁改的、什么时候。
 

@@ -55,6 +55,7 @@ INSTALLED_APPS = [
     'phonenumber_field',
     'django_countries',
     'localflavor',
+    'simple_history',
     'accounts',
     # Listed before the apps that import from it, so the dependency direction
     # is obvious from reading this list: core holds what everything shares.
@@ -74,6 +75,13 @@ MIDDLEWARE = [
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
+    # After AuthenticationMiddleware, as the library documents. The position
+    # turns out not to actually matter: this middleware only stashes the request
+    # object, and request.user is read later, at save time, by which point
+    # AuthenticationMiddleware has populated it on that same object. Verified by
+    # moving it earlier — the history tests still pass. Kept here anyway because
+    # following the documented order costs nothing.
+    'simple_history.middleware.HistoryRequestMiddleware',
 ]
 
 ROOT_URLCONF = 'config.urls'

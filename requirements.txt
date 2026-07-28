@@ -1,10 +1,12 @@
 asgiref==3.12.1
+dj-database-url==3.1.2
 Django==5.2.16
 django-countries==9.0.0
 django-localflavor==5.0
 django-phonenumber-field==8.5.0
 phonenumbers==9.0.35
-psycopg2-binary==2.9.12
+psycopg==3.3.4
+psycopg-binary==3.3.4
 pycountry==26.2.16
 python-dotenv==1.2.2
 python-stdnum==2.2

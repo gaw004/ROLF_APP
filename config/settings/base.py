@@ -11,6 +11,7 @@ DJANGO_SETTINGS_MODULE at it directly.
 import os
 from pathlib import Path
 
+import dj_database_url
 from dotenv import load_dotenv
 
 # config/settings/base.py -> config/settings -> config -> project root.
@@ -96,14 +97,12 @@ WSGI_APPLICATION = 'config.wsgi.application'
 
 
 # --- Database ---------------------------------------------------------------
-# Replaced by a DATABASE_URL-driven Postgres config in A6.
+# A single DATABASE_URL rather than five separate settings: managed platforms
+# (Render, Fly.io) inject exactly this variable, so deploying in Phase D needs
+# no change here. Required, so a missing URL stops the process rather than
+# silently falling back to a local database.
 
-DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
-    }
-}
+DATABASES = {"default": dj_database_url.parse(env("DATABASE_URL", required=True))}
 
 
 # --- Authentication ---------------------------------------------------------

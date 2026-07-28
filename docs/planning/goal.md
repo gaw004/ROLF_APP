@@ -71,13 +71,16 @@ Django Admin 本身就能当半个 MVP，几乎不写前端就能增删改查。
 ### D4 · Contact：人和组织统一成一张表
 用 `contact_type` 字段区分 individual / organization。这是 CiviCRM 的核心洞察。
 
-> CiviCRM 本身有**三种**：Individual / Household / Organization。我们只取两种 ——
-> "家庭"这个概念对本基金会是否有用还不知道，等真实使用暴露需求再说。
-> 真要加的话，除了 `TextChoices` 还要改 D9 那条 `CheckConstraint`（两处）。
 **为什么**：捐款人可能是公司，活动主办方可能是机构。拆成两张表的话，
 所有"跟某个联系人有关"的功能（捐款、关系、通信记录）都要写两遍。
-**代价**：有些字段只对一种类型有意义 —— 已用 `Contact.clean()` 校验 + `save()` 清空
-+ admin 里 JS 隐藏无关字段来处理。
+
+**代价**：有些字段只对一种类型有意义 —— 用
+`contact_name_matches_type` 约束强制 + `Contact.clean()` 给字段级提示（见 D9 / D14）
++ `save()` 清空不适用的字段 + admin 里 JS 隐藏无关字段来处理。
+
+> CiviCRM 本身有**三种**：Individual / Household / Organization。我们只取两种 ——
+> "家庭"这个概念对本基金会是否有用还不知道，等真实使用暴露需求再说。
+> 真要加的话，除了 `TextChoices` 还要改 D9 那条 `CheckConstraint`（两处，见 D14 的注释纪律）。
 
 ### D5 · 会变的分类做成字典表，不做 Python 枚举
 `RelationshipType` 是数据库表。基金会以后想加"紧急联系人"、"推荐人"这类关系，
@@ -286,25 +289,35 @@ admin 里的人看不懂。所以每条业务约束**写两层**：
 ### ✅ 已完成 —— 数据核心设计，这是目前最有价值的部分
 
 > 这部分已经按 D4–D9 验证过，**除非某条 D 记录被修订，否则不要动**。
-> 尤其是：一张 Contact 表管人和机构、字典表而非枚举、自建 Language、业务规则在 model 层。
+> 尤其是：一张 Contact 表管人和机构、字典表而非枚举、自建 Language、业务规则落数据库约束。
 > 另外**有测试** —— 这是后面敢重构的唯一底气，新增模型时一并补测试是硬要求。
 
-`contact` app 里已建好并有测试覆盖：
+已建好并有测试覆盖（Phase A 后的状态，共 27 个测试）：
+
+**`contact` app：**
 
 - **`Contact`** —— 人和组织统一表（见 D4）。含姓名（法定名/偏好名/机构名）、
   联系方式、人口统计（性别、生日、偏好语言、偏好联系方式）、结构化地址、
-  `is_active` 状态、备注。
+  `is_active` 状态、备注。带 `contact_name_matches_type` 约束 + 修改历史。
 - **`RelationshipType`** —— 关系类型字典表（见 D5），带正反双向标签（如 `parent of` / `child of`）。
   注意：`manages` / `managed by` 已不用于组织架构，汇报线走 `Assignment`（见 D6 适用范围、D11）。
 - **`Relationship`** —— 连接两个 Contact，带类型和起止日期（见 D6）。
-- **`Language`** —— 自建 ISO 639-3 表（见 D8），数据迁移已灌入约 7900 行，
+  三条数据库约束：禁自我关系、禁完全相同的重复行（`NULLS NOT DISTINCT`）、`end_date >= start_date`。
+  **镜像重复**（同一件事换个方向录一遍）数据库表达不了，**没有处理**。
+- **`Language`** —— 自建 ISO 639-3 表（见 D8），数据迁移已灌入 7923 行，
   English / Mandarin / Cantonese 已 pin 到最前。
-- **`TimeStampedModel`** —— 抽象基类，给所有表加 created_at / updated_at。
-- **Admin** —— 完整配置：搜索、筛选、autocomplete、Relationship inline，
+- **Admin** —— 完整配置：搜索、筛选、autocomplete、Relationship inline、History 按钮，
   以及两段 JS（按 contact_type 隐藏无关名字字段、按国家切换州的下拉/文本框）。
-- **测试** —— 覆盖名字与类型的匹配规则、地址州的美国/非美国两种情况、Language 的排序与筛选。
 
-### 🚧 进行中 —— Phase A 地基加固
+**`core` app：** `TimeStampedModel` 抽象基类（给所有表加 created_at / updated_at），
+以及一条全项目的迁移守卫测试（忘了 `makemigrations` 会当场变红）。
+
+**`accounts` app：** 自定义 `User`（见 D12），带可空的 OneToOne → `Contact`。
+
+**基础设施：** Postgres 18 + psycopg 3；配置拆成 `base`/`dev`/`prod` 包，敏感值走环境变量；
+`django-simple-history` 已挂 `Contact`（`Assignment` / `Contribution` 之后必挂）。
+
+### ✅ 已完成 —— Phase A 地基加固
 
 **具体怎么做见 `01-roadmap.md`**（那份文档现在只讲 Phase A 的实施步骤）。
 这些事的共同点是"**现在改成本≈0，以后改很痛**"，所以排在所有新功能之前。
@@ -322,17 +335,17 @@ admin 里的人看不懂。所以每条业务约束**写两层**：
 
 | 事项 | 为什么不能拖 | 状态 |
 |------|------------|------|
-| 自定义 User model（`AUTH_USER_MODEL`，按 D12 带可空 Contact 外键） | Django 项目一旦有真实用户数据，换 `AUTH_USER_MODEL` 极其痛苦（要手写数据迁移、重建外键）。现在库里只有测试数据，成本≈0 | ⬜ 未开始 · **最紧急** |
-| 从 SQLite 切到 Postgres | 两者在约束、JSONField、大小写敏感、并发上行为不同。等写了几个月业务逻辑才切，等于所有东西重测一遍。本机 `postgresql@18` 已装 | ⬜ 未开始 |
-| `SECRET_KEY` / `DEBUG` / `ALLOWED_HOSTS` / `STATIC_ROOT` 进环境变量 | 现 key 已进 git 历史，**已泄露的 key 不能再用**，上线前必须换新的；配置越早拆干净，上线时越不手忙脚乱 | ⬜ 未开始 |
-| 建 `core` app，`TimeStampedModel` 从 `contact` 迁出 | 下一个 app（volunteer / event）要用它就得 `from contact.models import ...`，依赖方向反了，以后想单独理解或替换 `contact` 会被缠住 | ⬜ 未开始 |
-| 移除装了没用的 `countries_plus` / `languages_plus` | 它们各自在库里建了几千行的表。既然已按 D8 自建 `Language`，删掉减少依赖和迁移噪音 | ⬜ 未开始 |
-| `Relationship` 加数据库约束（禁自我关系、禁**完全相同**的重复行、`end_date >= start_date`） | 现在可以存"Alice 是 Alice 的母亲"，也可以把同一段关系重复存 10 遍，还能存"2020 年结束、2023 年开始"。约束加在数据库层，脏数据永远进不来；等表里有了真数据再加，就得先清洗存量数据 | ⬜ 未开始 |
-| `Contact` 姓名规则加 `CheckConstraint`（见 D9 修订） | D9 原以为规则已经生效，其实 `save()` 不调 `clean()` —— 脚本和 `bulk_create` 一直能绕过去。这是"规则形同虚设"，不是"规则不够严" | ⬜ 未开始 |
-| `DEFAULT_AUTO_FIELD` 设成 `BigAutoField` | 现在库要重建，改是免费的；有数据之后要 ALTER 每张表的主键**和所有指向它的外键列**。顺带消掉 `manage.py check` 现有的 3 条 W042 警告 | ⬜ 未开始 |
-| `TIME_ZONE` 从 `UTC` 改成 `America/Los_Angeles` | ⚠️ **严格说它不满足上面的准入标准** —— `USE_TZ=True`，库里存的是 UTC，以后改也是一行的事、不痛。它是靠"顺手"进来的，不是靠规则进来的。做它是因为确实一行；记在这里是为了提醒：下一个"顺手"的东西要挡回去 | ⬜ 未开始 |
-| 审计日志（`django-simple-history`） | "谁在什么时候改了这条记录"在基金会场景下是刚需，且是我们自己定的"值得抄"的一条。先挂 `Contact`，`Assignment` / `Contribution` 之后必挂 | ⬜ 未开始 |
-| 写 `README.md`（删空的 `READ.md`） | 半年后的你（或下一个接手的人）需要知道怎么把这个项目跑起来 | ⬜ 未开始 |
+| 自定义 User model（`AUTH_USER_MODEL`，按 D12 带可空 Contact 外键） | Django 项目一旦有真实用户数据，换 `AUTH_USER_MODEL` 极其痛苦（要手写数据迁移、重建外键）。现在库里只有测试数据，成本≈0 | ✅ 完成 |
+| 从 SQLite 切到 Postgres | 两者在约束、JSONField、大小写敏感、并发上行为不同。等写了几个月业务逻辑才切，等于所有东西重测一遍。本机 `postgresql@18` 已装 | ✅ 完成 |
+| `SECRET_KEY` / `DEBUG` / `ALLOWED_HOSTS` / `STATIC_ROOT` 进环境变量 | 现 key 已进 git 历史，**已泄露的 key 不能再用**，上线前必须换新的；配置越早拆干净，上线时越不手忙脚乱 | ✅ 完成 |
+| 建 `core` app，`TimeStampedModel` 从 `contact` 迁出 | 下一个 app（volunteer / event）要用它就得 `from contact.models import ...`，依赖方向反了，以后想单独理解或替换 `contact` 会被缠住 | ✅ 完成 |
+| 移除装了没用的 `countries_plus` / `languages_plus` | 它们各自在库里建了几千行的表。既然已按 D8 自建 `Language`，删掉减少依赖和迁移噪音 | ✅ 完成 |
+| `Relationship` 加数据库约束（禁自我关系、禁**完全相同**的重复行、`end_date >= start_date`） | 现在可以存"Alice 是 Alice 的母亲"，也可以把同一段关系重复存 10 遍，还能存"2020 年结束、2023 年开始"。约束加在数据库层，脏数据永远进不来；等表里有了真数据再加，就得先清洗存量数据 | ✅ 完成 |
+| `Contact` 姓名规则加 `CheckConstraint`（见 D9 修订） | D9 原以为规则已经生效，其实 `save()` 不调 `clean()` —— 脚本和 `bulk_create` 一直能绕过去。这是"规则形同虚设"，不是"规则不够严" | ✅ 完成 |
+| `DEFAULT_AUTO_FIELD` 设成 `BigAutoField` | 现在库要重建，改是免费的；有数据之后要 ALTER 每张表的主键**和所有指向它的外键列**。顺带消掉 `manage.py check` 现有的 3 条 W042 警告 | ✅ 完成 |
+| `TIME_ZONE` 从 `UTC` 改成 `America/Los_Angeles` | ⚠️ **严格说它不满足上面的准入标准** —— `USE_TZ=True`，库里存的是 UTC，以后改也是一行的事、不痛。它是靠"顺手"进来的，不是靠规则进来的。做它是因为确实一行；记在这里是为了提醒：下一个"顺手"的东西要挡回去 | ✅ 完成 |
+| 审计日志（`django-simple-history`） | "谁在什么时候改了这条记录"在基金会场景下是刚需，且是我们自己定的"值得抄"的一条。先挂 `Contact`，`Assignment` / `Contribution` 之后必挂 | ✅ 完成 |
+| 写 `README.md`（删空的 `READ.md`） | 半年后的你（或下一个接手的人）需要知道怎么把这个项目跑起来 | ✅ 完成 |
 
 ### ⬜ 未开始 —— 后续阶段
 
@@ -408,9 +421,13 @@ admin 里的人看不懂。所以每条业务约束**写两层**：
 
 ## 六、下一步
 
-按 `01-roadmap.md` 走完 Phase A。核心是三件互相咬合的事 ——
-**配置进环境变量 → 切 Postgres → 自定义 User**，一起做比分开做省事：
-所有改结构的动作都赶在切库之前完成，然后在一个全新的空 Postgres 库上一次性建表，
-就不用处理任何数据迁移。
+**Phase A 已完成**（2026-07-27，分支 `phase-a`，A1–A10 全部验收通过，27 个测试全绿）。
 
-验收标准见上面 Phase A 那一节：**不新增任何功能，原本合法的数据仍然全部能存，测试全绿。**
+下一步是 **Phase B · 人与活动 MVP**，要建的表和实现要点见上面那一节。开工前先做两件事：
+
+1. 把 `01-roadmap.md` 换成 Phase B 的实施步骤（那份文档一次只服务一个 Phase）；
+2. 重读 D10 / D11 —— `Assignment` 是 Phase B 的核心表，而 D11 是被修订过的决策，
+   **修订的理由比结论更重要**，照着旧直觉写会重新掉进同一个坑。
+
+Phase B 的验收是：**基金会的人能在浏览器里录一个真志愿者、开一个真活动、登记出席和工时。**
+到那一步就交给他们用，不要等"全做完了"再给人看。

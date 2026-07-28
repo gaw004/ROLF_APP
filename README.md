@@ -84,6 +84,11 @@ of migrations rather than with the number of tests. A suite that is annoying to
 run stops being run. Drop the flag after changing migrations, or the schema in
 the reused database will be stale.
 
+One catch: `--keepdb` leaves `test_rolf_dev` behind, so the next plain
+`manage.py test` stops to ask whether it may delete it — which fails outright
+when nothing is there to answer, such as in CI. Either keep using `--keepdb`,
+pass `--noinput`, or `dropdb test_rolf_dev` once.
+
 ## Layout
 
 ```

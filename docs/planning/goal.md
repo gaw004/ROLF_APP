@@ -105,8 +105,10 @@
 - [索引](#索引)
 
 **数据质量：重复、幽灵记录、单一真相**
-- [单一真相：`Assignment` 不加 `is_active`](#单一真相assignment-不加-is_active并且删掉-relationshipis_active) — 并删掉 `Relationship.is_active`
-- [三个 `is_active` 是三个概念](#三个-is_active-是三个概念) — `Contact` / `Position` / 派生的「在职」
+- [单一真相：删掉 `Relationship.is_active`](#单一真相删掉-relationshipis_activeassignment-用-status不用-is_active)
+- [`Assignment.status`：状态与任期正交](#assignmentstatus状态和任期是正交的两个维度2026-07-28-修订) — **不用截断 `end_date` 表达请假**
+- [两个谓词：`.active()` 和 `.serving()`](#两个谓词active-和-serving) — 状态只能 AND，不能替代
+- [四个 `is_active` / 状态是四个概念](#四个-is_active--状态是四个概念) — `Contact` / `Position` / 任期 / `status`
 - [`is_reference_only` 的纪律：`people()`](#is_reference_only-的纪律contactobjectspeople)
 - [`Contact` 重名的处理](#contact-重名的处理必须赶在建那些-autocomplete-之前) — 必须赶在建 autocomplete 之前
 - [紧急联系人的录入与去重](#紧急联系人的录入与去重) — 自动建 ✅ / 自动认 ❌
@@ -230,7 +232,7 @@ Django Admin 本身就能当半个 MVP，几乎不写前端就能增删改查。
 
 | `TextChoices`（代码按它分支） | 字典表 + `code`（纯标签） |
 |---|---|
-| `Contact.contact_type`、`Position.kind`、`Event.status`、`Participation.status`、`BackgroundCheck.status` | `RelationshipType`、`Ministry`、`EmploymentType`、`EventType`、`ParticipationRole`、`Skill`、Phase C 的 `financial_type` / `payment_method` |
+| `Contact.contact_type`、`Position.kind`、`Assignment.status`、`Event.status`、`Participation.status`、`BackgroundCheck.status` | `RelationshipType`、`Ministry`、`EmploymentType`、`EventType`、`ParticipationRole`、`Skill`、Phase C 的 `financial_type` / `payment_method` |
 
 > `kind` 挂在 `Position` 而不是 `Assignment`，理由见 D11 —— 空缺编制也必须说得出自己是有薪岗还是志愿岗。
 
@@ -1004,7 +1006,7 @@ D17 让 `payroll` 独立成 app 正是这个道理（"一个 Group 直接不给 
 |------|-----|---------|
 | `Ministry` | `org` | **不是纯字典表** —— 基金会的服务单元（食物银行、报税志愿、ESL…）。字段：`code`（唯一·不可改，见 D5）/ `name` / `description` / `is_active` / 成立日期（可空）。行政职能（财务、行政）也是这张表里的行，不另建 `Department` —— 一个组织没必要拆两套单元。**不挂 simple-history**（已确认：改动频率极低，不值得一张历史表）。<br>**这张表不能推迟**，理由见下面「Ministry 视图」 |
 | `Position` | `org` | **编制表 —— 组织架构的骨架，与人无关**（见 D11 第二次修订）。`code`（唯一·不可改，见 D5）/ `name`（职务名，给人看）/ `kind`（`TextChoices`：employee·volunteer·board）/ `ministry`(FK，**可空** —— 理事席位没有)/ `reports_to`(自引用 FK → `Position`，可空)/ `is_leader`（布尔，**给代码查**）/ `is_active` / `description`。**挂 simple-history**（组织架构变更必须留痕）。**一个 `Position` 可以有多个在职 `Assignment`** —— 它是编制类型不是座位，所以这张表是几十行量级 |
-| `Assignment` | `org` | **任职表 —— 谁在什么时候占了哪个编制。** `contact`(FK) / `position`(FK → `Position`) / `employment_type`(FK，**可空**) / `start_date` / `end_date`。**没有 `kind` / `title` / `ministry` / `is_leader` / `reports_to`** —— 全部搬去 `Position` 了。**不加 `is_active`** —— 见下面「单一真相」。**挂 simple-history** |
+| `Assignment` | `org` | **任职表 —— 谁在什么时候占了哪个编制。** `contact`(FK) / `position`(FK → `Position`) / `employment_type`(FK，**可空**) / **`status`（`TextChoices`：active·on_leave·suspended，默认 active）** / `start_date` / `end_date`。**没有 `kind` / `title` / `ministry` / `is_leader` / `reports_to`** —— 全部搬去 `Position` 了。**不加 `is_active`**，但**有 `status`** —— 状态和任期是正交的两个维度，见下面「`Assignment.status`」。**挂 simple-history** |
 | `EmploymentType` | `org` | 字典表：`code`（唯一·不可改）/ `name` / `is_active`。**取值基金会还没定**（全职 / 兼职 / 合同 / 实习只是我们猜的），所以做成字典表而不是 `TextChoices` —— 以后加一行就行，不改代码不写迁移。符合 D5 的判定规则：目前没有任何代码按它分支 |
 | `EventType` | `events` | 字典表：`code`（唯一·不可改）/ `name` / `is_active` |
 | `Event` | `events` | `name` / `event_type`(FK) / **`ministry`(FK，可空)** / `start_time` / `end_time` / `location` / `owner`(FK → `Contact`) / `status`（`TextChoices`：planned·confirmed·completed·cancelled）/ `capacity`（可空，**参考值，不强制**，见下） |
@@ -1080,6 +1082,11 @@ def active(self, on=None):
   测试边界都变成免费的。
 
 `local_today()` 的时区口径见 **D16** —— 那条是硬性的，`timezone.now().date()` 会错一天。
+
+> ⚠️ **`.active()` 只管日期，不管状态。** `Assignment` 另有一个 `.serving()`
+> （= `.active()` AND `status=active`），请假 / 停职的人在 `.active()` 里**仍然算数**。
+> 两个都对，用哪个取决于问题是"他还属不属于这个团队"还是"他今天能不能当值" ——
+> 见下面「`Assignment.status`」。**`Relationship` 只有 `.active()`**，关系不会被停职。
 
 顺带：显示姓名时记得 `select_related("contact")`，否则每行一次查询（N+1）。
 
@@ -1212,7 +1219,7 @@ Phase B 一次加十几个外键，其中一个选错是灾难级的：
 
 | 索引 | 服务什么查询 |
 |---|---|
-| `Assignment`：`Index(fields=["position", "end_date"])` | ministry 页面的第二段："这些编制上现在有谁"。`end_date` 进索引让在职判定不用回表 |
+| `Assignment`：`Index(fields=["position", "status", "end_date"])` | ministry 页面的第二段："这些编制上现在谁在当值"。`.serving()` 三个条件（编制 + 状态 + 日期）一次覆盖；`.active()` 走最左两列里的 `position` 也够用 |
 | `Position`：`Index(fields=["ministry", "kind", "is_active"])` | ministry 页面的第一段："这个 ministry 有哪些编制、分别是什么 kind"。**这张表只有几十行，索引基本是象征性的** —— 建它是为了 Phase C 组织架构图和以后规模变大，现在别指望它带来可测的差别 |
 | `Event`：`Index(fields=["start_time"])` | 近期活动、admin 的 `date_hierarchy`、Phase C 的"本月活动" |
 | `Event`：`Index(fields=["ministry", "start_time"])` | "食物银行这个月办了几场" —— ministry 视图的第二个数字 |
@@ -1220,16 +1227,14 @@ Phase B 一次加十几个外键，其中一个选错是灾难级的：
 | 各字典表的 `code` | `unique=True` 自带 |
 
 小提醒：Django 给 FK 自动建单列索引，所以 `Position` 上 `(ministry, kind, is_active)` 建好之后
-`ministry` 单列索引就冗余了（最左前缀覆盖）；`Assignment` 上 `(position, end_date)` 之于
+`ministry` 单列索引就冗余了（最左前缀覆盖）；`Assignment` 上 `(position, status, end_date)` 之于
 `position` 同理。数据量小无所谓，知道就行。
 
-##### 单一真相：`Assignment` 不加 `is_active`，并且**删掉 `Relationship.is_active`**
+##### 单一真相：删掉 `Relationship.is_active`；`Assignment` 用 `status`，**不用** `is_active`
 
 `Relationship` 现在同时有 `is_active` 和 `end_date`（`contact/models.py:247-249`），
 于是可以存出 `is_active=True` + `end_date=2020-01-01` 这种自相矛盾的行。
 **这违反 D11 自己那句"不是两处都能记，是只有一处能记"。**
-
-`Assignment` 不重犯：在职状态由日期**派生**，做成上面那个 `.active()` + model property + admin 筛选器。
 
 **`Relationship.is_active` 在本阶段删掉**（2026-07-28 修订，原计划是"既存字段不动"）。
 改口的理由是原理由站不住：Phase A 刚把库整个重建过，现在只有开发数据，而这个字段
@@ -1239,19 +1244,84 @@ Phase B 一次加十几个外键，其中一个选错是灾难级的：
 （"现在改成本≈0，以后改很痛"），就是现在删。删完 `Relationship` 复用同一个
 `.active()` mixin，全项目只有一处日期派生逻辑。
 
-##### 三个 `is_active` 是三个概念
+**关系不会被"停职"** —— 张三要么在某段时间是 XX 公司的员工，要么不是；配偶关系没有
+"暂时中止"这个状态。所以 `Relationship` 只需要日期，这条决定不受下面的修订影响。
 
-同名不同义，而 ministry 页面**三个都要用到**：
+#### `Assignment.status`：状态和任期是正交的两个维度（2026-07-28 修订）
+
+> **本条改过一次。** 原文是"`Assignment` 不加 `is_active`，在职状态完全由日期派生"。
+> **结论对了一半，理由对了，但漏掉了一个真实需求。**（基金会已确认**跟踪请假 / 停职**。）
+
+**漏掉的是什么**：志愿者出国三个月、员工休产假 / 病假、背景审查过期待复核 ——
+这些**任职关系并没有结束**，只是当前不能服务。只有日期的话，唯一能表达它的办法
+就是**把 `end_date` 截断、回来再建一行**，而那会：
+
+- **算错任期长度** —— 一段连续三年的服务变成"两年 + 三个月空档 + 半年"，
+  资历、累计服务时长、周年识别全部失真；
+- **篡改真实的合同 / 志愿协议日期**（员工场景下有合规含义）；
+- 原始日期只剩在 simple-history 里 —— **可追溯但主表答不出**，
+  和 D11 第二次修订判死刑的是同一种病。
+
+**但修法不是加回一个 `is_active`。** 那会原封不动地把矛盾请回来
+（`is_active=True` + `end_date=2020` 照样存得进去）。
+
+```python
+Assignment(
+    start_date, end_date,                      # 任期 —— 唯一真相，不因请假而改动
+    status = active | on_leave | suspended,    # 任期「之内」的当前状态（TextChoices）
+)
+```
+
+**`status` 里绝不能有 "ended" / "已结束" 这一项。** 那就是把 `end_date` 记两处，
+正是本节要杜绝的东西。**结束只由日期表达。**
+
+##### 两个谓词：`.active()` 和 `.serving()`
+
+```python
+# core 的共享 mixin —— Assignment / Relationship 通用，纯日期
+def active(self, on=None):    ...        # 在任期内 / 生效中
+
+# Assignment 专有
+def serving(self, on=None):
+    return self.active(on).filter(status=Status.ACTIVE)   # 在任期内 AND 当前可服务
+```
+
+> **规矩一句话：`status` 只能和日期做 AND，永远不能单独用。**
+
+这条规矩解掉了原来那个矛盾。`status=on_leave` + `end_date=2020` 读作
+"他 2020 年离任，离任时正在休假" —— **不矛盾，只是陈旧且无害**，
+因为 `serving()` 已经先 AND 了日期，结束了的任职无论什么 status 都不会被算进去。
+
+**所以不加"状态必须和日期一致"的约束** —— 那需要在 `CheckConstraint` 里引用"今天"，
+而"今天"不是不可变表达式，数据库拒绝。**靠 AND 的查询纪律，不靠约束。**
+
+> **病根辨析（重要）**：原来 `Relationship.is_active` 之所以危险，不是因为"有两个维度"，
+> 而是因为 admin 把它当成了日期的**替代筛选项**（`list_filter = ["is_active"]`
+> 能独立按它过滤，给出错误答案）。**两个维度被当成二选一才是病，正交本身不是。**
+
+**已知限制：只记当前状态，不记请假历史。** "谁在去年三月请过假"这个问题
+`status` 答不出来（只能翻 simple-history）。真要的话按 D15 三条件检验：
+一个人可以有多段请假 → 基数破 → 必须用表（`Leave(assignment, start, end, reason)`）。
+**现在不做**，见推迟清单。
+
+##### 四个 `is_active` / 状态是四个概念
+
+同名不同义，而 ministry 页面**四个都要用到**：
 
 | 字段 | 含义 | 反例 |
 |---|---|---|
 | `Contact.is_active` | **这条档案还在不在用**（也当重复记录合并后的墓碑用） | 已停用档案的人**仍可能**挂着在职任职 |
 | `Position.is_active` | **这个编制还设不设** | 编制还设着、但没人在任 = **空缺**，不是 inactive |
-| `Assignment` 的「在职」 | 由 `start_date` / `end_date` **派生**，不是字段 | 见「单一真相」—— 这张表**没有** `is_active` |
+| `Assignment` 的「在任期内」 | 由 `start_date` / `end_date` **派生**，不是字段 | 这张表**没有** `is_active` |
+| `Assignment.status` | **任期之内当前能不能服务** | 请假中的人**仍然在任期内**，不能靠改日期把他弄出去 |
 
-**规定：ministry 页面的在职人员查询必须同时过滤
-`.active()` + `contact__is_active=True` + `position__is_active=True`。**
-漏第三个的症状是"撤销的编制上还挂着人"。
+**规定：ministry 页面的在职人员查询必须过滤
+`.serving()` + `contact__is_active=True` + `position__is_active=True`。**
+漏 `position__is_active` 的症状是"撤销的编制上还挂着人"；
+用 `.active()` 而不是 `.serving()` 的症状是"请假的人还在当值名单上"。
+
+> 但**花名册**（谁属于这个 ministry）该用 `.active()` —— 请假的人还是这个团队的成员。
+> **当值名单用 `.serving()`，花名册用 `.active()`**，两个都对，别混。
 
 ##### `is_reference_only` 的纪律：`Contact.objects.people()`
 
@@ -1468,15 +1538,19 @@ Ministry: Food Pantry
 **查询长什么样**（Phase B 建完之后）：
 
 ```python
-active = Assignment.objects.active().filter(
+# 当值名单：.serving() —— 请假 / 停职的人不该出现在"现在谁在管"里
+on_duty = Assignment.objects.serving().filter(
     position__ministry__code="food_pantry",
     position__is_active=True,
     contact__is_active=True,
 ).select_related("contact", "position")          # 两个都要，否则每行两次查询
 
-leaders    = active.filter(position__is_leader=True)
-employees  = active.filter(position__kind="employee")
-volunteers = active.filter(position__kind="volunteer")
+leaders    = on_duty.filter(position__is_leader=True)
+employees  = on_duty.filter(position__kind="employee")
+volunteers = on_duty.filter(position__kind="volunteer")
+
+# 花名册：.active() —— 请假的人仍然是这个团队的成员，只是标注状态
+roster = Assignment.objects.active().filter(position__ministry__code="food_pantry")
 
 vacancies = Position.objects.filter(ministry__code="food_pantry").vacant()
 
@@ -1752,6 +1826,9 @@ Phase A 的 A10 用了"每条钉住什么"的清单，本阶段沿用。下面�
 | 同一人同一 `Position` 的**两段任职**（不同 `start_date`）能存两行 | 离开又回来是合法的 |
 | 一人多岗各有不同上级，能分别查出 | D11 第一次修订要解决的歧义 |
 | **换人不动下属**：给某 `Position` 换一个在任者，其下属编制的 `reports_to` 一个字节没变 | **D11 第二次修订的全部意义就在这一条**，其余测试都可以没有，这条不能没有 |
+| **请假不动日期**：`status=on_leave` 后 `.serving()` 排除他、`.active()` **仍然包含他**，且 `start_date`/`end_date` 一个字节没变 | 状态与任期正交 —— 这条钉住"永远不用截断 `end_date` 表达请假" |
+| `status=on_leave` + `end_date` 在过去时，`.serving()` 和 `.active()` **都**排除他 | `status` 只收窄不覆盖；陈旧状态是惰性的，不会把已离任的人放回来 |
+| `Assignment.Status` 里**没有** "ended" 之类的取值 | 结束只由日期表达，不许记两处 |
 | **空缺**：`Position` 的在职 `Assignment` 全部结束后进入 `vacant()`，且仍带着 kind / ministry / 下属 | 空缺是一等状态，不是"碰巧查不到人" |
 | `is_active=False` 的 `Position` **不出现**在 `vacant()` 里 | 撤销 ≠ 空缺 |
 | `vacant(on=某日)` 能改变结果 | 时钟可注入，同 `.active()` |
@@ -1880,6 +1957,7 @@ Phase A 的 A10 用了"每条钉住什么"的清单，本阶段沿用。下面�
 | 薪酬 / 工资数据 | 见 D11，敏感度最高且 MVP 无功能需要 | 要算人力成本或做预算报表时，连同权限方案一起设计 |
 | 一个编制多个上级（矩阵式实线/虚线汇报） | 见 D11，小基金会极少有；`Position.reports_to` 现在是单个外键 | 真的出现双线汇报时，把 `reports_to` 改成多对多 |
 | **带日期的编制层级（组织架构的历史）** | D11 第二次修订解决了"**换人**"，没解决"**重组**"。`Position.reports_to` 是无日期的可变字段，改了旧架构就只剩 simple-history。这是 D15「载体二」第二个条件（关系自己没有属性）的边界 —— 一旦汇报线需要起止日期，条件就破了，按规则必须升级成表 | 需要回答"**2025 年 3 月的组织架构长什么样**"时。做法是给编制层级单独一张带 `start_date` / `end_date` 的表（`PositionReportingLine`），`Position.reports_to` 降级为"当前值"的缓存或直接删掉。**这是双时态建模，成本不低，别顺手做** |
+| **请假 / 停职的历史（`Leave` 表）** | `Assignment.status` 只记**当前**状态，答不出"谁在去年三月请过假"（只能翻 simple-history）。按 D15 三条件检验：一个人可以有多段请假 → **基数条件破了** → 严格说该用表。现在不做，因为基金会当前的需求是"这个人今天能不能排班"，不是历史统计 | 需要按请假历史做统计、或需要给请假本身记起止和事由时。形状：`Leave(assignment, start_date, end_date, reason)`，建的时候同期带上 `end_date >= start_date` 和 simple-history；`Assignment.status` 降级成派生值或保留为当前值缓存 |
 | **`Position.headcount`（编制人数）** | 现在一个 `Position` 可以有任意多个在职 `Assignment`，所以 `vacant()` 只认"一个人都没有"，表达不了"3 个坑填了 2 个" | 真的需要按编制数做招聘缺口统计时 —— 加一个整数字段即可，**不改结构**，`vacant()` 改成比较在职人数与 `headcount` |
 | Membership / 会员制 | 基金会未必有会员概念 | 需求出现时 |
 | REST API、前后端分离 | Admin + HTMX 能撑很久 | 要做志愿者自助登录的手机端时 |
@@ -1930,10 +2008,35 @@ Phase B 的验收是：**你自己能在本机跑通一遍完整流程** —— 
 | 1 | 未成年志愿者有没有同意书 / 家长授权流程 | 基金会 | 只决定 `Guardianship` 什么时候建，Phase B 已绕开 |
 | 2 | 背景审查有效期多长 | 基金会 | 先用 730 天占位，`base.py` 里注明是未确认默认值 |
 | 3 | `EmploymentType` 的实际取值 | 基金会 | 不影响建模 —— 正因为不知道才做成字典表，到时候 admin 里加行 |
+| ~~4~~ | ~~跟不跟踪请假 / 停职~~ | ✅ **已答复（2026-07-28）：跟踪。** 因此 `Assignment.status` 进 Phase B，见「`Assignment.status`」 | — |
+| 5 | `status` 除 `on_leave` / `suspended` 外还需要哪几种 | 基金会 | 不阻塞 —— 它是 `TextChoices`（`serving()` 要按它分支，符合 D5 判定规则），加值就是改代码，接受 |
 
 ---
 
 ## 七、2026-07-28 修订记录了什么
+
+### 第五轮 · `Assignment.status`：状态与任期正交
+
+> 起因：一轮外部评审指出"用日期派生完全替代 `is_active`"混淆了「状态」和「任期」，
+> 举例请假 / 停职。**对 `Assignment` 成立，对 `Relationship` 不成立**（关系不会被停职）。
+> 基金会已确认**跟踪请假 / 停职**，所以这条进 Phase B。
+
+| # | 改了什么 | 为什么 |
+|---|---------|-------|
+| a | `Assignment` 加 `status`（`TextChoices`：active·on_leave·suspended） | 只有日期的话，表达请假的唯一办法是**截断 `end_date` 再新建一行** —— 那会算错任期长度、篡改真实协议日期，且原始日期只剩在 simple-history 里 |
+| b | **不是加回 `is_active`** | 那会原封不动把矛盾请回来（`is_active=True` + `end_date=2020` 照样存得进去）。**评审说的"`is_active`（或者一个 status 枚举）"，这两个不是同义词** |
+| c | 拆成两个谓词：`.active()`（纯日期，共享）+ `.serving()`（AND status，`Assignment` 专有） | 规矩一句话：**`status` 只能和日期做 AND，永远不能单独用** |
+| d | 明确**不加**"状态必须和日期一致"的约束 | 那要在 `CheckConstraint` 里引用"今天"，不是不可变表达式，数据库拒绝。靠查询纪律，不靠约束 —— 而且 `status=on_leave` + 已过期的 `end_date` 是**惰性的**，`serving()` 先 AND 了日期 |
+| e | ministry 页面：**当值名单用 `.serving()`，花名册用 `.active()`** | 请假的人不该在"现在谁在管"里，但仍然是这个团队的成员 |
+| f | 索引从 `(position, end_date)` 改成 `(position, status, end_date)` | `.serving()` 三个条件一次覆盖 |
+| g | 推迟清单新增「请假历史（`Leave` 表）」 | `status` 只记**当前**状态。按 D15 三条件，一个人可以有多段请假 → 基数破 → 严格说该用表。如实记下这是个已知限制 |
+
+**教训：原方案的病根被诊断错了。** 当初删 `Relationship.is_active` 的理由是
+"两个维度会互相矛盾"，于是推广成"任何时候都不该有第二个维度"。
+**真正的病根不是"有两个维度"，而是"两个维度被当成二选一"** ——
+旧 `Relationship` 的 `list_filter = ["is_active"]` 能**独立**按它过滤，绕开日期给出错误答案。
+只要规定状态永远只能 AND、不能替代，正交本身完全安全。
+**把一次正确的删除过度推广成一条普适规则，是这次的错。**
 
 ### 第四轮 · Admin 的边界（新增 D18）
 

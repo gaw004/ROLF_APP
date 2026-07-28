@@ -199,6 +199,11 @@ class DateRangeQuerySet(models.QuerySet):
 **`start_date` 那一半不能漏**：只看 `end_date` 的话，一个 `start_date=2027-01-01`、
 没有结束日期的岗位**今天就算在职**，而且不报错。
 
+> ⚠️ **`active()` 只管日期，`core` 这一层不认识 `status`。**
+> `Assignment` 在 B5 会自己加一个 `serving()`（= `active()` AND `status=active`），
+> **不要把 `status` 塞进这个共享 mixin** —— `Relationship` 没有状态这回事，
+> 关系不会被"停职"。见 `goal.md`「`Assignment.status`」。
+
 用法（B3 / B5 都这么接）：
 
 ```python
@@ -945,19 +950,49 @@ class PositionQuerySet(models.QuerySet):
 ### `Assignment`（任职 —— 谁在什么时候占了哪个编制）
 
 ```python
+class AssignmentQuerySet(DateRangeQuerySet):
+    def serving(self, on=None):
+        """在任期内 AND 当前可服务。ministry 的「当值名单」用它。
+
+        ⚠️ status 只能和日期做 AND，永远不能单独用 —— 单独用就退回了
+        Relationship.is_active 那个「两个维度被当成二选一」的老病。
+        花名册（谁属于这个团队）用 active()，请假的人仍然是成员。
+        """
+        return self.active(on).filter(status=Assignment.Status.ACTIVE)
+
+
 class Assignment(TimeStampedModel):
+    class Status(models.TextChoices):
+        ACTIVE    = "active",    "在岗"
+        ON_LEAVE  = "on_leave",  "请假中"
+        SUSPENDED = "suspended", "停职"
+        # ⚠️ 绝不加 "ended" —— 结束只由 end_date 表达，加了就是记两处。
+
     contact         = FK(Contact, CASCADE, related_name="assignments")
     position        = FK(Position, PROTECT, related_name="assignments")
     employment_type = FK(EmploymentType, PROTECT, null=True, blank=True)
+    status          = CharField(choices=Status, default=Status.ACTIVE)
     start_date      = DateField(null=True, blank=True)
     end_date        = DateField(null=True, blank=True)
 
     history = HistoricalRecords()
-    objects = Manager.from_queryset(DateRangeQuerySet)()
+    objects = Manager.from_queryset(AssignmentQuerySet)()
 ```
 
-**就这五个字段。** 没有 `kind` / `title` / `ministry` / `is_leader` / `reports_to`，
-它们全在 `Position` 上。**不加 `is_active`** —— 在职由日期派生。
+**六个字段。** 没有 `kind` / `title` / `ministry` / `is_leader` / `reports_to`，
+它们全在 `Position` 上。
+
+**`status` 和任期是正交的两个维度，不是 `is_active` 的马甲**（2026-07-28 新增，
+基金会已确认跟踪请假 / 停职）：
+
+- **不加 `is_active`** —— 那会让 `is_active=True` + `end_date=2020` 存得进去；
+- **`status` 只描述任期「之内」的当前状态** —— 结束永远只由 `end_date` 表达；
+- **请假绝不允许靠截断 `end_date` 表达** —— 那会算错任期长度、篡改真实协议日期，
+  原始日期只剩在 simple-history 里。这是加这个字段的**全部理由**。
+
+**不加"状态必须和日期一致"的约束** —— 那要在 `CheckConstraint` 里引用"今天"，
+不是不可变表达式，数据库会拒绝。而且没必要：`status=on_leave` + 已过期的 `end_date`
+是**惰性的**，`serving()` 先 AND 了日期，已离任的人不会被放回来。
 
 ⚠️ **`position` 用 `PROTECT`。** 写成 `CASCADE` 的话，删一个编制
 → **占过它的所有人的任职历史一起消失**。同 `Participation.contact` 的道理。
@@ -971,8 +1006,10 @@ constraints = [
         nulls_distinct=False,
     ),
 ]
-indexes = [models.Index(fields=["position", "end_date"])]
+indexes = [models.Index(fields=["position", "status", "end_date"])]
 ```
+
+三列一次覆盖 `serving()`（编制 + 状态 + 日期）；`active()` 走最左的 `position` 也够用。
 
 **唯一约束简化了。** 旧版是 `(contact, ministry, kind, title, start_date)`，
 还专门论证过"为什么必须带 `title`"（否则张三在食物银行同时当两个职务时第二行被误杀）——
@@ -1028,6 +1065,12 @@ def test_two_positions_for_one_person_can_have_different_managers(self)
 def test_duplicate_assignment_with_null_start_date_is_rejected(self)    # nulls_distinct
 def test_assignment_end_date_cannot_precede_start_date(self)
 def test_ministry_code_must_be_unique(self)
+
+# —— status 与任期正交（这一组的意义是「永远不用截断 end_date 表达请假」）——
+def test_going_on_leave_leaves_the_tenure_dates_untouched(self)
+def test_a_person_on_leave_is_excluded_from_serving_but_still_in_active(self)
+def test_a_stale_on_leave_status_on_an_ended_tenure_is_inert(self)   # 两个谓词都排除他
+def test_assignment_status_has_no_ended_value(self)                 # 结束只由日期表达
 ```
 
 **验证**：`test` 全绿；admin 里能建 ministry、在它下面建几个 `Position`、
@@ -1216,6 +1259,7 @@ volunteer/management/commands/seed_demo.py   （或放 core，随意，但只此
 - **一个换过人的编制**（一行已结束的 `Assignment` + 一行在职的），且它下面挂着下属编制 ——
   验收"换人不动下属"要用
 - 一个人占两个不同 ministry 的两个 `Position`，两个编制各有不同上级
+- **一个请假中的志愿者**（`status=on_leave`，起止日期完好）—— 验收要用
 - 一条跨 kind 的汇报线：执行总监编制（employee）→ 理事长编制（board）
 - 一个未成年志愿者（有生日）+ 一个只作参照的紧急联系人
 - 一场活动，同一个人两个角色、各自工时
@@ -1264,7 +1308,8 @@ python manage.py dbshell
 - [ ] `org_position.reports_to_id` 的外键是 **`ON DELETE NO ACTION`**（Django 的 `PROTECT`
       在应用层实现，`\d` 里看不到 `SET NULL` 就对了 —— 确认没写成 `CASCADE`）
 - [ ] `Index(ministry, kind, is_active)` 在 `org_position` 上、
-      `Index(position, end_date)` 在 `org_assignment` 上
+      `Index(position, status, end_date)` 在 `org_assignment` 上
+- [ ] `org_assignment` **没有** `is_active` 列（状态走 `status`，结束走 `end_date`）
 
 ### 肉眼跑通（自动化覆盖不到）
 
@@ -1276,6 +1321,10 @@ python manage.py dbshell
 - [ ] **换人不动下属**：给一个有下属的编制换在任者（旧的填 `end_date`、新建一行 `Assignment`），
       确认下属编制的 `reports_to` **一个字节没改**，且旧任者的任职历史还在
       —— **这一条是本轮修订的全部意义，其余都过了它不过就是没做成**
+- [ ] **请假不动日期**：把一个在职志愿者改成 `status=on_leave` →
+      当值名单（`.serving()`）里没有他、花名册（`.active()`）里**仍然有他**，
+      且 `start_date` / `end_date` **一个字节没改**。
+      再改回 `active` → 立刻回到当值名单，**全程没有新建过第二行 `Assignment`**
 - [ ] 录一个志愿者，填一个**系统里没有**的紧急联系人 → 自动建出 reference-only 记录并关联，
       关系必填
 - [ ] 再录第二个志愿者，填**同名同号**的紧急联系人 → 表单**自动关联**到刚才那一条，
@@ -1323,6 +1372,8 @@ python manage.py dbshell
 | 1 | 未成年志愿者有没有同意书 / 家长授权流程 | 决定 `Guardianship` 什么时候建 | 已移出 Phase B，本阶段完全绕开 |
 | 2 | 背景审查有效期多长 | `BACKGROUND_CHECK_VALID_DAYS` | 用 730 天占位，`base.py` 里注明未确认 |
 | 3 | `EmploymentType` 的实际取值 | 字典表里 seed 哪几行 | 正因为不知道才做成字典表；先只 seed 两行，到时候 admin 里加 |
+| ~~4~~ | ~~跟不跟踪请假 / 停职~~ | ✅ **已答复：跟踪** | `Assignment.status` 已进 B5 |
+| 5 | `status` 除 `on_leave` / `suspended` 外还要哪几种 | `Status` 的取值 | 不阻塞 —— 它是 `TextChoices`（`serving()` 按它分支，符合 D5），加值就是改代码 |
 
 ---
 

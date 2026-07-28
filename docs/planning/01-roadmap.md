@@ -191,11 +191,43 @@ pip freeze > requirements.txt
 > 这次安全（当前 `requirements.txt` 里没有别的包依赖它们），但删完**必须**跑
 > `pip check` 确认没有断掉的依赖，别省这一步。
 
-**必须留着的**：`pycountry`（`contact/migrations/0003_seed_languages.py` 靠它灌 7900 行
-语言数据）、`python-stdnum`（`localflavor` 的依赖）。
+**必须留着的**：`pycountry`（seed 迁移靠它灌 7900 行语言数据）、
+`python-stdnum`（`localflavor` 的依赖）。
 
-**验证**：`pip check` 干净；`python manage.py check` 和 `python manage.py test` 依然 11 个全绿
-（此时还在 SQLite 上，测试用的是临时库，不受影响）。
+### ⚠️ 计划外：迁移图会断（实施时才发现）
+
+删掉 `languages_plus` 之后 `manage.py check` **仍然能过**，但 `test` / `migrate` 一跑就：
+
+```
+NodeNotFoundError: Migration contact.0001_initial dependencies reference
+nonexistent parent node ('languages_plus', '0004_auto_20171214_0004')
+```
+
+原因：迁移历史把 D8 的决策过程固化进去了 ——
+`0001` 的 `preferred_language` 原本指向 `languages_plus.Language`，
+`0002` 才建自己的 `Language`、`0004` 再把外键改指过来。删掉那个 app，`0001` 的依赖就悬空了。
+
+**处理（2026-07-27 决策）：重建迁移历史。** 库反正要丢，零风险：
+
+```bash
+cp contact/migrations/0003_seed_languages.py <安全的地方>   # 手写的，必须保住
+rm contact/migrations/000*.py
+python manage.py makemigrations contact                    # 生成干净的 0001_initial
+cp <安全的地方>/0003_seed_languages.py contact/migrations/0002_seed_languages.py
+# 把 seed 迁移里的 dependencies 改成 ("contact", "0001_initial")
+```
+
+结果是两个迁移：`0001_initial` + `0002_seed_languages`，零 `languages_plus` 痕迹，
+`BigAutoField` 从一开始就在（A2 那个 `0005` AlterField 也随之消失，被折进 initial）。
+
+**代价**：迁移历史里看不到「先用现成包、后改自建表」那段转折了。可接受 ——
+`goal.md` D8 本来就是记录这件事的权威位置，迁移文件不是。
+
+> 重建之后 `showmigrations` 会把 `0001_initial` 显示成已应用 `[X]` ——
+> 那是旧 sqlite 库里按名字残留的记录，不是真的。A6 删库后自然消失，不用管。
+
+**验证**：`pip check` 干净；`check` 无警告；`makemigrations --check` 报 "No changes detected"；
+`test` 依然 11 个全绿（语言那几个测试通过 = seed 迁移仍在工作）。
 
 ---
 

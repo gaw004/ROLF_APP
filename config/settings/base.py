@@ -53,8 +53,6 @@ INSTALLED_APPS = [
     'django.contrib.staticfiles',
     'phonenumber_field',
     'django_countries',
-    'countries_plus',
-    'languages_plus',
     'localflavor',
     'contact',
 ]

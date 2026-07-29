@@ -4,7 +4,7 @@ from django.utils.html import format_html
 from simple_history.admin import SimpleHistoryAdmin
 
 from .forms import ContactAdminForm
-from .models import Contact, Language, Relationship, RelationshipType
+from .models import Contact, EmergencyContact, Language, Relationship, RelationshipType
 
 
 class RelationshipAsAInline(admin.TabularInline):
@@ -47,6 +47,19 @@ class RelationshipAsBInline(RelationshipAsAInline):
     verbose_name_plural = "关系（对方那一侧）"
 
 
+class EmergencyContactInline(admin.TabularInline):
+    """Three boxes: name, phone, relationship. No lookup, no matching, no jump.
+
+    Everything the old design needed here — creating a reference-only Contact on
+    the fly, preselecting a match, a safety valve for the ambiguous cases — is
+    simply gone. With no identity to establish there is nothing to get wrong.
+    """
+
+    model = EmergencyContact
+    extra = 0
+    autocomplete_fields = ["relationship_type"]
+
+
 @admin.register(Contact)
 class ContactAdmin(SimpleHistoryAdmin):
     """SimpleHistoryAdmin rather than ModelAdmin: adds the History button."""
@@ -59,7 +72,7 @@ class ContactAdmin(SimpleHistoryAdmin):
         "organization_name", "email",
     ]
     autocomplete_fields = ["preferred_language"]
-    inlines = [RelationshipAsAInline, RelationshipAsBInline]
+    inlines = [EmergencyContactInline, RelationshipAsAInline, RelationshipAsBInline]
     readonly_fields = ["add_relationship"]
 
     fieldsets = [

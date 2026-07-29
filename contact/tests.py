@@ -10,7 +10,9 @@ from django.test import TestCase, override_settings
 from django.urls import path, reverse
 
 from .forms import ContactAdminForm, RelationshipForm
-from .models import Contact, Language, Relationship, RelationshipType
+from .models import (
+    Contact, EmergencyContact, Language, Relationship, RelationshipType,
+)
 from .services import direction_choices
 
 
@@ -560,7 +562,10 @@ class RelationshipDisplayTests(TestCase):
         # bring the whole formset apparatus back, and with it the problem that
         # an inline form cannot see whose page it is on.
         model_admin = admin.site._registry[Contact]
-        inlines = [inline(Contact, admin.site) for inline in model_admin.inlines]
+        inlines = [
+            inline(Contact, admin.site) for inline in model_admin.inlines
+            if inline.model is Relationship
+        ]
         self.assertEqual([i.fk_name for i in inlines], ["contact_a", "contact_b"])
         for inline in inlines:
             self.assertFalse(inline.has_add_permission(None, None))
@@ -674,6 +679,93 @@ class RelationshipActiveTests(TestCase):
         self.assertFalse(ended.is_currently_active)
 
 
+class EmergencyContactTests(TestCase):
+    """B4.2: a dedicated table, with name and phone stored as text.
+
+    The point of the whole design is the last test in this class: nothing an
+    emergency contact does can put a row in Contact.
+    """
+
+    def setUp(self):
+        self.ming = Contact.objects.create(
+            contact_type=Contact.ContactType.INDIVIDUAL, legal_last_name="小明")
+        self.mother_of = RelationshipType.objects.create(
+            code="mother_of", name_a_to_b="母亲", name_b_to_a="子女",
+            usable_as_emergency_contact=True)
+
+    def make(self, person=None, name="王秀英", phone="+14085550101", **kw):
+        return EmergencyContact.objects.create(
+            person=person or self.ming, name=name, phone=phone,
+            relationship_type=kw.pop("relationship_type", self.mother_of), **kw)
+
+    def test_an_emergency_contact_without_a_relationship_type_is_rejected(self):
+        # "Relationship is required" is just null=False here. Splitting the table
+        # out turned what used to need a CheckConstraint into a plain non-null FK.
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            EmergencyContact.objects.create(
+                person=self.ming, name="王秀英", phone="+14085550101",
+                relationship_type=None)
+
+    def test_duplicate_emergency_contact_for_the_same_person_is_rejected(self):
+        self.make()
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            self.make()
+
+    def test_bulk_create_cannot_insert_a_name_differing_only_in_whitespace(self):
+        # Normalisation lives in the constraint expression, not save() — and
+        # this is the path that proves it, because bulk_create skips save().
+        self.make()
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            EmergencyContact.objects.bulk_create([
+                EmergencyContact(person=self.ming, name="  王秀英  ",
+                                 phone="+14085550101",
+                                 relationship_type=self.mother_of),
+            ])
+
+    def test_one_person_can_have_two_different_emergency_contacts(self):
+        # No artificial "at most one" rule: that cap was a side effect of the old
+        # self-FK's shape, never a requirement.
+        self.make()
+        self.make(name="王大明", phone="+14085550102")
+        self.assertEqual(self.ming.emergency_contacts.count(), 2)
+
+    def test_the_same_person_can_be_listed_by_two_different_contacts(self):
+        # And this is the accepted cost: two rows, two copies of the number, and
+        # nothing tying them together.
+        sibling = Contact.objects.create(
+            contact_type=Contact.ContactType.INDIVIDUAL, legal_last_name="小红")
+        self.make()
+        self.make(person=sibling)
+        self.assertEqual(EmergencyContact.objects.filter(name="王秀英").count(), 2)
+
+    def test_deleting_a_contact_deletes_their_emergency_contacts(self):
+        # CASCADE: emergency contacts are attached data with no life of their own.
+        self.make()
+        self.ming.delete()
+        self.assertEqual(EmergencyContact.objects.count(), 0)
+
+    def test_only_flagged_relationship_types_are_offered(self):
+        employee_of = RelationshipType.objects.create(
+            code="employee_of", name_a_to_b="员工", name_b_to_a="雇主")
+        field = EmergencyContact._meta.get_field("relationship_type")
+        offered = RelationshipType.objects.complex_filter(field.get_limit_choices_to())
+        self.assertIn(self.mother_of, offered)
+        self.assertNotIn(employee_of, offered)
+
+    def test_recording_an_emergency_contact_adds_no_contact_row(self):
+        # The verification point of the sixth revision, and the reason the table
+        # exists at all: a neighbour listed here never lands in the table that
+        # every list, export and mailing starts from.
+        before = Contact.objects.count()
+        self.make()
+        self.assertEqual(Contact.objects.count(), before)
+
+    def test_contact_has_no_is_reference_only_field_and_no_emergency_contact_fk(self):
+        field_names = {f.name for f in Contact._meta.get_fields()}
+        self.assertNotIn("is_reference_only", field_names)
+        self.assertNotIn("emergency_contact", field_names)
+
+
 class ContactHistoryTests(TestCase):
     """Audit trail: what changed, and who changed it (goal.md Phase A)."""
 
@@ -731,8 +823,12 @@ class ContactHistoryTests(TestCase):
             "address_postal_code": "",
             "is_active": "on",
             "notes": "",
-            # Two inlines since B3.1: this contact's relationships read from
-            # their side, and the ones where they are the other party.
+            # One management form per inline: emergency contacts (B4.2), plus
+            # the relationships read from each side (B3.1).
+            "emergency_contacts-TOTAL_FORMS": "0",
+            "emergency_contacts-INITIAL_FORMS": "0",
+            "emergency_contacts-MIN_NUM_FORMS": "0",
+            "emergency_contacts-MAX_NUM_FORMS": "1000",
             "relationships_as_a-TOTAL_FORMS": "0",
             "relationships_as_a-INITIAL_FORMS": "0",
             "relationships_as_a-MIN_NUM_FORMS": "0",

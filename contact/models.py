@@ -468,3 +468,70 @@ class Relationship(ConstraintErrorFieldMixin, DateRangeMixin, TimeStampedModel):
 
     def __str__(self):
         return f"{self.contact_a} — {self.relationship_type} → {self.contact_b}"
+
+
+class EmergencyContact(ConstraintErrorFieldMixin, TimeStampedModel):
+    """Somebody to call about `person`. Name and phone are text, deliberately.
+
+    An emergency contact may be a neighbour or a flatmate — somebody who never
+    interacts with the foundation at all. Giving them a Contact row would put
+    them in the table every list, export, mailing and statistic starts from, and
+    then a single Contact.objects.filter(...) that forgets to exclude them mails
+    the volunteer newsletter to a few hundred third parties. That is a privacy
+    incident, not a wrong number. See goal.md D15「载体的第四条判据」.
+
+    The costs are known and accepted, not overlooked:
+      · 王秀英 with three children volunteering is three rows, three copies of
+        her phone number, and nothing linking them;
+      · a fourth copy appears if she volunteers herself;
+      · "who lists 王秀英 as their emergency contact" cannot be answered.
+
+    ⚠️ Do NOT "tidy" name/phone into a FK to Contact. That is the migration this
+       project marked as the painful direction, and it walks the ghost records
+       straight back into Contact. See goal.md D15 and the deferral list.
+    """
+
+    person = models.ForeignKey(
+        Contact, on_delete=models.CASCADE, related_name="emergency_contacts",
+    )
+    # All three are required. An emergency contact with no phone number is
+    # pointless, and one with no relationship does not say who they are.
+    name = models.CharField(max_length=200)
+    phone = PhoneNumberField(region="US")
+    relationship_type = models.ForeignKey(
+        RelationshipType,
+        on_delete=models.PROTECT,
+        related_name="+",
+        limit_choices_to={"usable_as_emergency_contact": True},
+        # Spelling the direction out is not optional: leave it implicit and it
+        # gets entered backwards. a = the emergency contact, b = this person.
+        help_text="读作「紧急联系人 是 本人 的 ___」。"
+                  "例：小明名下填「王秀英」+「母亲」= 王秀英是小明的母亲。",
+    )
+
+    class Meta:
+        # No "one per person" rule. The table supports several by nature; the
+        # foundation happens to need one today. The old self-FK design capped it
+        # at one as a side effect of its shape, which was never the requirement.
+        ordering = ["person", "name"]
+        constraints = [
+            # Stops the same emergency contact being entered twice on one person.
+            # Normalisation goes in the expression, not save() — bulk_create
+            # walks past save() (goal.md D9「归一化通则」).
+            models.UniqueConstraint(
+                "person",
+                Lower(Trim("name")),
+                "phone",
+                name="emergencycontact_unique_per_person",
+                violation_error_message="This emergency contact is already recorded for them.",
+                violation_error_code="emergency_contact_duplicate",
+            ),
+        ]
+
+    def save(self, *args, **kwargs):
+        # Cosmetic, as everywhere else: the constraint above owns uniqueness.
+        self.name = " ".join(self.name.split())
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"{self.name}（{self.relationship_type.name_a_to_b}）"

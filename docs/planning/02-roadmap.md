@@ -1808,6 +1808,51 @@ docstring 已经预警过）。所以表单里加一张 `FIELD_ALIASES`
 > **提交一条违规数据，看到的是表单错误还是 500？**
 > B4.3b 的 `ContactForm`、B4.4 的合并页、以后每一个自定义表单都要过这一问。
 
+### ⚠️ 计划外（B4.4）：捕获 `IntegrityError` 之后，手写 savepoint 回滚是不行的
+
+**症状**：`merge_contacts()` 按 roadmap 写成「每次 `update()` 放进一个 savepoint，
+捕获 `IntegrityError` 就回滚」，唯一约束冲突那条测试报的却不是 `MergeConflict`，
+而是 `TransactionManagementError: An error occurred in the current transaction.`
+
+**根因**：Postgres 一旦报错，整个事务进入 **aborted** 状态 ——
+在回滚到 savepoint 之前，**任何**语句都会被拒。而
+`transaction.savepoint_rollback(sid)` 自己就是一句语句，
+于是它在执行自己的那一刻就先撞上了这道墙。手写 savepoint 这条路是死的。
+
+**修法**（Django 文档的写法）：用内层 `with transaction.atomic():` 包住每次
+`update()`。内层 `atomic` 本身就是一个 savepoint，而且它在异常退出时会
+**顺带把连接状态恢复好**，外面才能继续捕获、继续查询。
+
+```python
+try:
+    with transaction.atomic():          # 这个 atomic 就是 savepoint，不是多余的
+        rows.update(**{field_name: keep})
+except IntegrityError as error:
+    raise MergeConflict(...) from error  # 外层 @transaction.atomic 负责整体回滚
+```
+
+**一般化**：
+> **在 `atomic` 块里捕获数据库异常，必须用内层 `atomic` 包住可能出错的那一句。**
+> 光 `try/except` 不够 —— 它捕到了异常，但连接已经不能再用了。
+> B6 的 `Participation` 批量登记、以后任何「试着写，撞了就换个说法」的代码同理。
+
+### ⚠️ 计划外（B4.5）：`python-dateutil` 没装，也不该为这个装
+
+roadmap 写「算年龄用 `dateutil.relativedelta`」，但项目依赖里没有它。
+为一次「减 18 年」引入一个生产依赖不划算 —— 和 D8 拒绝 `languages-plus`
+是同一把尺子（**包比需求大**）。改用 stdlib：
+
+```python
+try:
+    return on.replace(year=on.year - AGE_OF_MAJORITY)
+except ValueError:                      # 2/29，且落到的那年不是闰年
+    return on.replace(year=..., day=28)
+```
+
+闰日那一支必须往**前**退到 28 号（不是进到 3/1）：
+2028-02-29 减 18 年取 2010-02-28，这样 2010-03-01 出生的人今天仍算未成年 ——
+他确实还差一天满 18。**这一支有专门的测试**，因为它错了不报错，只是差一天。
+
 ### ⚠️ 计划外（B1）：grep 守卫第一次跑，抓到的是它自己
 
 三条 grep 守卫写完第一次跑，两条红了 —— 命中的是**守卫自己**：

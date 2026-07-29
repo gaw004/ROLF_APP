@@ -18,7 +18,7 @@
 
 > **怎么用这份文档**：新接手的人按「一 → 三 → 四」读，其中三里先读
 > [D4](#d4--contact人和组织统一成一张表) / [D10](#d10--人只有一份档案角色编制任职是不同层次) /
-> [D11](#d11--编制-position-与任职-assignment-分开汇报线挂在编制上) / [D15](#d15--关系用什么载体承载三条路--选择规则)
+> [D11](#d11--编制-position-与任职-assignment-分开汇报线挂在编制上) / [D15](#d15--关系用什么载体承载四条判据--选择规则)
 > 这四条 —— 它们决定了"一条信息该放进哪张表"。
 > 已经在写代码的人，日常查的是[三的决策清单](#三重大决策记录)和
 > [Phase B 实现要点](#phase-b--人与活动-mvp--做完就能完整演示一遍)。
@@ -29,12 +29,12 @@
 |---|---|
 | 新加一个分类字段，做成 `TextChoices` 还是字典表？ | [D5 判定规则](#判定规则什么时候用字典表什么时候用-textchoices2026-07-28-补) |
 | 这条信息该放 `Contact` / 角色表 / `Position` / `Assignment`？ | [D10 四层判断标准](#d10--人只有一份档案角色编制任职是不同层次) |
-| 一种新关系该用字段、自引用 FK、通用表还是专用表？ | [D15 三条载体 + 升级触发条件](#d15--关系用什么载体承载三条路--选择规则) |
+| 一种新关系该用字段、自引用 FK、通用表还是专用表？ | [D15 四条判据 + 升级触发条件](#d15--关系用什么载体承载四条判据--选择规则) |
 | 新模型放哪个 app？ | [D17](#d17--app-划分一个-app-一个业务领域敏感数据单独成-app2026-07-28) |
 | 这段代码写在 admin 里行不行？ | [D18 的落点规矩](#逻辑落点的硬规矩成本为零现在就要守) —— 判据：换个界面要不要跟着搬 |
-| 业务规则写成数据库约束还是 `clean()`？ | [D9](#d9--业务规则落到数据库约束) + [D14](#d14--约束是强制层clean-是提示层--两层都写靠注释锁住) |
+| 业务规则写成数据库约束还是 `clean()`？ | [D9](#d9--业务规则落到数据库约束) + [D14](#d14--约束是唯一的规则字段级提示靠映射表不靠重写一遍) |
 | 代码里要取"今天"？ | [D16](#d16--时间与日期的唯一口径2026-07-28) |
-| 某个决定当初为什么改口？ | [D9](#d9--业务规则落到数据库约束) / [D11](#d11--编制-position-与任职-assignment-分开汇报线挂在编制上) / [D15](#d15--关系用什么载体承载三条路--选择规则) 各自的修订说明 + [七](#七2026-07-28-修订记录了什么) |
+| 某个决定当初为什么改口？ | [D9](#d9--业务规则落到数据库约束) / [D11](#d11--编制-position-与任职-assignment-分开汇报线挂在编制上) / [D15](#d15--关系用什么载体承载四条判据--选择规则) 各自的修订说明 + [七](#七2026-07-28-修订记录了什么) |
 | 一个编制没人在任（空缺）怎么表示？ | [D11 第二次修订](#第二次修订为什么-reports_to-不能指向-assignment) + [空缺编制](#空缺编制这次修订的验收点) |
 | Phase B 要建哪些表、必须带哪些约束？ | [Phase B 模型表](#phase-b--人与活动-mvp--做完就能完整演示一遍) + [约束清单](#新表的约束必须和表同期落地延续-a7-的教训) |
 | 某件事为什么现在不做？ | [五、明确推迟的事](#五明确推迟的事) |
@@ -66,10 +66,10 @@
 | [D11](#d11--编制-position-与任职-assignment-分开汇报线挂在编制上) | `Position` + `Assignment` | 一人多岗、空缺编制、汇报线挂在哪（这条**修订过两次**） |
 | [D12](#d12--登录账号user挂在-contact-上与任职状态解耦) | User 挂在 Contact 上 | 登录账号和岗位为什么解耦 |
 | [D13](#d13--单个-email--电话--地址暂不拆表) | 单个 email / 电话 / 地址 | 什么时候才拆成一对多 |
-| [D14](#d14--约束是强制层clean-是提示层--两层都写靠注释锁住) | 约束是强制层，`clean()` 是提示层 | 两层都写，以及必须遵守的注释纪律 |
-| [D15](#d15--关系用什么载体承载三条路--选择规则) | 关系的三条载体 + 选择规则 | **新关系用字段 / 自引用 FK / 通用表 / 专用表**（这条同日改过两次） |
-| ↳ | [载体一 ❌](#载体一contact-上加纯文本字段---已否决同日短暂采纳过又被推翻) · [载体二 ✅](#载体二自引用外键fk-to-self--用在-positionreports_to-和紧急联系人) · [`is_reference_only`](#is_reference_only把幽灵记录从不创建改成贴标签--过滤) · [载体三](#载体三通用表-vs-专用表---混合方案-c) | |
-| ↳ | [当前分配](#当前分配) · [监护人 ≠ 紧急联系人](#监护人--紧急联系人重要区分) · [将来怎么变成 `EmergencyContact`](#将来怎么变成-emergencycontact-专用表) · [⏳ 待确认](#待确认--等待向基金会核实中2026-07-27-起) | |
+| [D14](#d14--约束是唯一的规则字段级提示靠映射表不靠重写一遍) | 约束是唯一的规则 | 字段级提示靠**映射表 + 守卫测试**，不靠把规则写两遍 |
+| [D15](#d15--关系用什么载体承载四条判据--选择规则) | 关系的载体 + 四条判据 | **新关系用字段 / 自引用 FK / 通用表 / 专用表**；**第四条判据「主体性」决定它该不该进 `Contact`**（紧急联系人这一支同日改过**三次**） |
+| ↳ | [载体一 ❌](#载体一contact-上加纯文本字段---已否决同日短暂采纳过又被推翻) · [载体二](#载体二自引用外键fk-to-self--用在-positionreports_to) · [**第四条判据：主体性**](#载体的第四条判据主体性--这个实体该不该进-contact2026-07-28-新增) · [载体三](#载体三通用表-vs-专用表---混合方案-c) · [`EmergencyContact` 的形状](#emergencycontact-的形状以及为什么最终选了文本方案) | |
+| ↳ | [当前分配](#当前分配) · [监护人 ≠ 紧急联系人](#监护人--紧急联系人重要区分) · [`EmergencyContact` 的形状与代价](#emergencycontact-的形状以及为什么最终选了文本方案) · [⏳ 待确认](#待确认--等待向基金会核实中2026-07-27-起) | |
 | [D16](#d16--时间与日期的唯一口径2026-07-28) | 时间与日期的唯一口径 | **"今天"只有一种写法**，另两种会静默错一天 |
 | [D17](#d17--app-划分一个-app-一个业务领域敏感数据单独成-app2026-07-28) | app 划分 | 新模型放哪，以及 `payroll` 为什么必须独立 |
 | [D18](#d18--admin-的边界以及业务逻辑的落点2026-07-28) | Admin 的边界 | **这段逻辑该不该写在 admin 里**；以及权限粒度为什么倒推出一张新表 |
@@ -105,12 +105,13 @@
 - [索引](#索引)
 
 **数据质量：重复、幽灵记录、单一真相**
-- [单一真相：`Assignment` 不加 `is_active`](#单一真相assignment-不加-is_active并且删掉-relationshipis_active) — 并删掉 `Relationship.is_active`
-- [三个 `is_active` 是三个概念](#三个-is_active-是三个概念) — `Contact` / `Position` / 派生的「在职」
-- [`is_reference_only` 的纪律：`people()`](#is_reference_only-的纪律contactobjectspeople)
+- [单一真相：删掉 `Relationship.is_active`](#单一真相删掉-relationshipis_activeassignment-用-status不用-is_active)
+- [`Assignment.status`：状态与任期正交](#assignmentstatus状态和任期是正交的两个维度2026-07-28-修订) — **不用截断 `end_date` 表达请假**
+- [两个谓词：`.active()` 和 `.serving()`](#两个谓词active-和-serving) — 状态只能 AND，不能替代
+- [四个 `is_active` / 状态是四个概念](#四个-is_active--状态是四个概念) — `Contact` / `Position` / 任期 / `status`
 - [`Contact` 重名的处理](#contact-重名的处理必须赶在建那些-autocomplete-之前) — 必须赶在建 autocomplete 之前
-- [紧急联系人的录入与去重](#紧急联系人的录入与去重) — 自动建 ✅ / 自动认 ❌
-- [合并重复记录](#合并重复记录本阶段必做) — 本阶段必做
+- [紧急联系人的录入](#紧急联系人的录入) — 专用表 + 文本，没有查重和关联这回事
+- [合并重复记录](#合并重复记录本阶段做但理由换过一次) — 削减范围时的第一候选
 
 **各表的实现要点**
 - [Ministry 视图：为什么 `Ministry` 不能推迟](#ministry-视图为什么-ministry-表不能推迟)
@@ -198,12 +199,12 @@ Django Admin 本身就能当半个 MVP，几乎不写前端就能增删改查。
 所有"跟某个联系人有关"的功能（捐款、关系、通信记录）都要写两遍。
 
 **代价**：有些字段只对一种类型有意义 —— 用
-`contact_name_matches_type` 约束强制 + `Contact.clean()` 给字段级提示（见 D9 / D14）
+`contact_name_matches_type` 约束强制 + 映射表把错误挂到字段上（见 D9 / D14）
 + `save()` 清空不适用的字段 + admin 里 JS 隐藏无关字段来处理。
 
 > CiviCRM 本身有**三种**：Individual / Household / Organization。我们只取两种 ——
 > "家庭"这个概念对本基金会是否有用还不知道，等真实使用暴露需求再说。
-> 真要加的话，除了 `TextChoices` 还要改 D9 那条 `CheckConstraint`（两处，见 D14 的注释纪律）。
+> 真要加的话，除了 `TextChoices` 还要改 D9 那条 `CheckConstraint` —— **只有这一处**（见 D14）。
 
 ### D5 · 会变的分类做成字典表，不做 Python 枚举
 `RelationshipType` 是数据库表。基金会以后想加"推荐人"、"校友"这类关系，
@@ -230,7 +231,7 @@ Django Admin 本身就能当半个 MVP，几乎不写前端就能增删改查。
 
 | `TextChoices`（代码按它分支） | 字典表 + `code`（纯标签） |
 |---|---|
-| `Contact.contact_type`、`Position.kind`、`Event.status`、`Participation.status`、`BackgroundCheck.status` | `RelationshipType`、`Ministry`、`EmploymentType`、`EventType`、`ParticipationRole`、`Skill`、Phase C 的 `financial_type` / `payment_method` |
+| `Contact.contact_type`、`Position.kind`、`Assignment.status`、`Event.status`、`Participation.status`、`BackgroundCheck.status` | `RelationshipType`、`Ministry`、`EmploymentType`、`EventType`、`ParticipationRole`、`Skill`、Phase C 的 `financial_type` / `payment_method` |
 
 > `kind` 挂在 `Position` 而不是 `Assignment`，理由见 D11 —— 空缺编制也必须说得出自己是有薪岗还是志愿岗。
 
@@ -279,9 +280,10 @@ Django Admin 本身就能当半个 MVP，几乎不写前端就能增删改查。
 - ❌ **法定监护等带专有字段的关系** → 走专用表（见 D15）。
   原因：通用表放不下"同意书签署日期"这类字段。
   **该专用表（`Guardianship`）已于 2026-07-28 推迟到 Phase B 之后**，见推迟清单。
-- ❌ **紧急联系人** → 走 `Contact.emergency_contact` 自引用 FK + `is_reference_only`（见 D15 第二次修订）。
-  原因：只有一个、没有自己的属性、只有一种类型 —— 自引用三条件全满足，用不着关系行。
-  **但关系标签复用本表的 `RelationshipType`**，见下面补强的第三条。
+- ❌ **紧急联系人** → 走专用表 `EmergencyContact`，姓名电话**存文本**（见 D15 第三次修订）。
+  原因**不是**形状放不下（自引用 FK 三条件全过），而是 D15 新增的**第四条判据**：
+  紧急联系人可能是邻居、室友，不是与基金会交互的主体，**不该占一行 `Contact`**。
+  **但关系标签仍然复用本表的 `RelationshipType`**，见下面补强的第三条。
 
 **补强**：`RelationshipType` 要加三个字段：
 
@@ -295,13 +297,14 @@ Django Admin 本身就能当半个 MVP，几乎不写前端就能增删改查。
 
 #### 为什么紧急联系人的关系标签复用本表，而不是另建一张词表（2026-07-28 确认）
 
-`Contact.emergency_contact_relationship` 是一个指向 `RelationshipType` 的外键，
+`EmergencyContact.relationship_type` 是一个指向 `RelationshipType` 的**非空**外键，
 **不新建 `EmergencyRelationship` 词表**。
+（这条 2026-07-28 第三次修订后依然成立 —— 换的是载体，不是词表。）
 
 **收益**：亲属那一簇（母亲 / 父亲 / 配偶 / 子女 / 兄弟姐妹）两边完全重合，
 共用一套词表就不会攒出"母亲 / 妈 / mother"三种写法 —— 而这正是 D15 论证过的
 "字段 → 结构化"那个痛的方向。另外 `RelationshipType` 已经有 `code` 和正反双标签，
-将来迁到 `EmergencyContact` 专用表时词表是现成的。
+拆成 `EmergencyContact` 专用表之后词表直接就用上了。
 
 **代价（要如实说）**：两边并不完全重合。本表按上面第 1 条会有
 `employee of` / `student at` / `referred by` 这类**外部组织归属**的行
@@ -313,9 +316,9 @@ Django Admin 本身就能当半个 MVP，几乎不写前端就能增删改查。
 代码里已有同款先例 —— `Contact.preferred_language` 就是用
 `limit_choices_to={"language_type": LIVING}` 从 7900 行里筛出活语言的。一个布尔解决两个方向的噪音。
 
-> **方向约定（不写死一定会录反）**：`emergency_contact_relationship` 一律读作
+> **方向约定（不写死一定会录反）**：`EmergencyContact.relationship_type` 一律读作
 > **「紧急联系人 是 本人 的 ___」**，即 `name_a_to_b`，其中 a = 紧急联系人、b = 本人。
-> 小明的记录上填 `emergency_contact=王秀英` + `parent of`，意思是"王秀英是小明的母亲"。
+> 小明名下的 `EmergencyContact` 行填 `name=王秀英` + `parent of`，意思是"王秀英是小明的母亲"。
 > admin 的 `help_text` 必须把这句话原样写出来 —— 同 Phase B「录入方向的防线」那一条。
 
 ### D7 · 标准化字段用成熟库，做完整的下拉
@@ -583,44 +586,105 @@ CiviCRM 把它们拆成独立的一对多表。我们现在用单字段。
 **为什么**：单字段够用，且以后要拆随时能加表迁移过去，不是不可逆决策。
 **何时重新考虑**：真的出现"志愿者有工作和私人两个邮箱要分别使用"这类需求时。
 
-### D14 · 约束是强制层，`clean()` 是提示层 —— 两层都写，靠注释锁住
-D9 决定了规则落到数据库约束。但约束报错默认挂在表单顶部、措辞是给程序员看的，
-admin 里的人看不懂。所以每条业务约束**写两层**：
+### D14 · 约束是唯一的规则；字段级提示靠映射表，不靠重写一遍
+> **本条 2026-07-28 重写。** 原方案是"每条业务约束写两层（`CheckConstraint` + `clean()`），
+> **靠注释互相指认**，改一处必须改另一处"。原文自己就承认那是"明知故犯地违反
+> 同一件事只记一个地方"、"代价必须靠纪律兜住"。
+>
+> **一条决策自己写着"必须靠纪律兜住"时，它就是在标注一个待解决的问题，
+> 不是一个可以长期接受的状态。** 现在有了不靠纪律的解法，就换掉。
 
-| 层 | 职责 | 权威性 |
-|----|------|-------|
-| `CheckConstraint` / `UniqueConstraint` | **真正的强制**，所有写入路径都绕不过 | 唯一真相 |
-| `Model.clean()` | 把错误挂到具体字段上、给人话提示 | 纯 UI，不承担兜底 |
+D9 决定了规则落到数据库约束。剩下的问题只有一个：
 
-`clean()` **不是**兜底 —— Django 4.1 起 `full_clean()` 会自动校验约束，
-就算不写 `clean()`，admin 也不会抛 `IntegrityError`，只是提示难看。写它纯粹为了体验。
+> **Django 把约束错误一律挂在 `NON_FIELD_ERRORS`（表单顶部），没有任何内置办法
+> 把它挂到具体字段上。** 而 admin 里的人需要看到"是姓氏这一栏错了"。
 
-**这条明知故犯地违反了"同一件事只记一个地方"**（D11 那句"不是两处都能记，
-是只有一处能记"）。所以必须说清楚为什么这次可以：
+**这是一个呈现问题，不是校验问题。所以解法也应该只动呈现，不重写规则。**
 
-- D11 防的是**数据**记两处 —— 两处会互相矛盾、静默腐烂、且不知道该信哪个；
-- 这里重复的是**校验逻辑** —— 真相唯一（数据库），两处写岔了的后果只是提示变难看，
-  数据永远是对的。
+#### 三件东西，规则只有一份
 
-同一种气味的弱化版，不是同一个错误。但代价必须靠纪律兜住：
+```python
+# ① 唯一的规则 —— 约束本身
+CheckConstraint(
+    condition=...,
+    name="contact_name_matches_type",
+    violation_error_message="个人必须填姓氏，机构必须填机构名。",   # Django 4.1+，人话
+    violation_error_code="name_type_mismatch",                  # Django 5.0+，编程锚点
+)
 
-> **硬性要求：约束和 `clean()` 两处都写注释指认对方。** 用约束的 `name=`（比如
-> `contact_name_matches_type`）互相引用，**不要写行号** —— 行号会漂移，约束名不会。
-> 改一处必须改另一处，code review 时这是一个明确的检查项。
+# ② 唯一的映射 —— 纯呈现元数据，不含任何业务逻辑
+CONSTRAINT_FIELD = {
+    "name_type_mismatch": "legal_last_name",
+    "assignment_end_before_start": "end_date",
+    ...
+}
 
-**适用范围**：`Contact` 的姓名规则、`Relationship` 的三条约束（见 `01-roadmap.md` A7），
+# ③ 一个 mixin，把带 code 的约束错误从 NON_FIELD_ERRORS 改挂到对应字段
+```
+
+**为什么映射表不算"记两处"**：它说的是"**这条错误显示在哪**"，不是"规则是什么"。
+把年龄从 18 改成 16，**只改约束一处**，映射表一个字都不用动 —— 这正是原方案做不到的。
+
+> **也不要退而求其次抽一个 Validator 函数在 `clean()` 里调**（一种常见建议）。
+> 那仍然是两处调用，而且那个 Python 函数**进不了数据库**，规则还得被约束再表达一遍 ——
+> 重复没有消除，只是从"逻辑"降级成了"调用"。**同上一轮"用 `save()` 去支撑
+> 防 `save()` 绕过的约束"是一样的自指。**
+
+#### 把注释纪律换成守卫测试
+
+> **一条测试遍历所有 model 的 `Meta.constraints`，断言每条业务约束都有
+> `violation_error_code`，且在 `CONSTRAINT_FIELD` 里有映射。漏一条当场变红。**
+
+这是文档已经用过三次的套路（迁移守卫、D16 时间守卫、第三轮的 `bulk_create` 测试）：
+**用测试当 lint。** 原方案那句"code review 时这是一个明确的检查项"从**人的纪律**
+变成了**机器的检查**。
+
+#### ⚠️ 一个必须逐条实测的坑
+
+**`CheckConstraint.validate()` 遇到 `FieldError` 会静默跳过** ——
+也就是说，某些约束在 `full_clean()` 阶段**根本不会被校验**，只有真写库时才由数据库拦下
+（表现为 `IntegrityError`，不是友好的表单错误）。
+
+**这不是理论风险**：第三轮那批表达式约束
+（`Least`/`Greatest`/`Coalesce`、`Lower(Trim(...))`）正是最可能触发它的。
+
+> **硬性要求：每条约束都要实测"在 admin 表单里提交违规数据，看到的是表单错误还是
+> `IntegrityError`"。** 测不通的那几条，`clean()` 就得真的写一份 ——
+> **那时它不再是提示层，而是表单层唯一的拦截，必须在代码注释里标明这一点**，
+> 免得后来的人以为它可有可无。
+
+#### 什么情况下 `clean()` 仍然是唯一真相
+
+**跨表规则根本没有约束可依赖**，`CheckConstraint` 表达不了：
+
+- `employment_type` 只对 `kind=employee` 的编制有意义（跨 `Assignment` / `Position`）
+- 汇报线成环（跨行，见 Phase B「汇报线的环」）
+- `Relationship` 缺口 3 的对称归一化（跨表，见那一节）
+
+**这类本来就没有重复问题** —— `clean()` 就是它们的唯一真相。
+但按文档一贯的口径要**如实标注它只是提示层**，`bulk_create` 绕得过去，不粉饰。
+
+**适用范围**：`Contact` 的姓名规则、`Relationship` 的约束（见 `01-roadmap.md` A7），
 以及 Phase B 之后所有新增的业务约束。字典表、`is_active` 这类不涉及业务规则的字段不适用。
 
-### D15 · 关系用什么载体承载：三条路 + 选择规则
+### D15 · 关系用什么载体承载：四条判据 + 选择规则
 > 2026-07-27 讨论的产物。起因是「Assignment 拿走汇报线之后，Relationship 还有存在价值吗？
 > 紧急联系人为什么不直接在 Contact 上加两个字段？」
 >
-> **2026-07-28 修订（第二次，取代同日的第一版）：紧急联系人走「全 FK + `is_reference_only`」，
-> `Guardianship` 推迟到 Phase B 之后。** 同一天里这一条改过两次 ——
-> 第一版改成了 `Contact` 上的纯文本字段，随后被本版取代。
-> 两版都留着，因为**为什么改口比结论更值得记住**（同 D9 / D11）。
+> **紧急联系人这一条 2026-07-28 当天改过三次，全部保留** ——
+> 因为**为什么改口比结论更值得记住**（同 D9 / D11）：
+>
+> | 版本 | 方案 | 为什么被取代 |
+> |---|---|---|
+> | 原始 | 通用 `Relationship` 行 | 放不下"这是谁的紧急联系人"这种归属语义 |
+> | 第一版 | `Contact` 上加纯文本字段（载体一） | 以为"幽灵记录躲不开"，其实躲得开 —— 见载体一 |
+> | 第二版 | 自引用 FK + `is_reference_only` | **形状判对了，主体性判漏了** —— 见「第四条判据」 |
+> | **第三版（现行）** | **专用表 `EmergencyContact`，姓名电话存文本** | — |
+>
+> **`Guardianship` 推迟到 Phase B 之后**，这一点三版都没变。
 
 **结论：混合策略。** 三种载体各有适用面，按下面的规则分配，不搞一刀切。
+**判据有四条：前三条看形状（基数、属性、类型数），第四条看主体性 —— 第四条要先问。**
 
 #### 载体一：`Contact` 上加纯文本字段 —— ❌ 已否决（同日短暂采纳过，又被推翻）
 
@@ -637,15 +701,20 @@ admin 里的人看不懂。所以每条业务约束**写两层**：
 **留下的教训**：当一个方案的全部理由是"为了躲开某个代价"时，先确认那个代价**真的躲不开**。
 这次它躲得开，只是换了个地方付。
 
-#### 载体二：自引用外键（FK to self）—— ✅ 用在 `Position.reports_to` **和紧急联系人**
+#### 载体二：自引用外键（FK to self）—— ✅ 用在 `Position.reports_to`
+
+> **紧急联系人曾经用这条载体（自引用 FK + `is_reference_only`），2026-07-28 已改用专用表。**
+> **不是因为三条件没过 —— 三条件确实全过。** 是因为下面新增的第四条判据（主体性）
+> 一票否决了它。见「载体的第四条判据」。
 
 自引用 FK 的硬性适用条件（三条全满足才能用；破任何一条就必须用表）：
 
-| 条件 | `Position.reports_to` | **紧急联系人** | 监护 |
+| 条件 | `Position.reports_to` | ~~紧急联系人~~ | 监护 |
 |---|---|---|---|
-| 基数：最多一个？ | ✅ 一个编制一个上级 | ✅ **只有一个**（已确认不做第二组） | ❌ 一个孩子可以有父母两个 |
-| 关系自己有属性吗？ | ✅ 没有 —— 编制层级本身没有起止日期 | ✅ **没有** —— 只有一个关系标签，跟着引用方那一行走，没有独立生命周期 | ❌ 有 —— 监护有自己的起止、同意书日期 |
-| 只有一种类型？ | ✅ 一种 | ✅ **一种**（"紧急联系人"就是那一种；"母亲/邻居"是标签，不是类型） | ❌ 多种（法定 / 委托 / …） |
+| 基数：最多一个？ | ✅ 一个编制一个上级 | ✅ 过 | ❌ 一个孩子可以有父母两个 |
+| 关系自己有属性吗？ | ✅ 没有 —— 编制层级本身没有起止日期 | ✅ 过 | ❌ 有 —— 监护有自己的起止、同意书日期 |
+| 只有一种类型？ | ✅ 一种 | ✅ 过 | ❌ 多种（法定 / 委托 / …） |
+| **主体性（新增）** | ✅ 编制是内部实体 | ❌ **不过** —— 见下 | ❌ 不过 |
 
 > ⚠️ **第二行"没有属性"是本条最脆的一格，要盯住。**
 > 汇报线**现在**没有属性，是因为我们接受了"组织重组时旧架构丢失"（D11 代价 3）。
@@ -655,10 +724,6 @@ admin 里的人看不懂。所以每条业务约束**写两层**：
 > （"日期由 Assignment 行携带"——那说的是任职期的日期，不是汇报线的日期，
 > 两者被混为一谈了）。这也是 D11 第二次修订的一条旁证。
 
-> ⚠️ **原文这张表把"紧急联系人"和"监护"并成一列打了 ❌，那是判错了** ——
-> 三条件是拿监护的答案套上去的。单独跑一遍，紧急联系人**三条全过**。
-> 这是本条决策绕远路的根因，记下来。
-
 关键在基数：**自引用 FK 只能表达一对多，且"多"必须在反向那一头。**
 监护本质是多对多（多个监护人 × 多个孩子），FK 做不到 —— 这是关系模型的硬约束，不是偏好。
 用 `guardian_1` / `guardian_2` 拿字段个数去模拟"多个"是典型反模式。
@@ -666,41 +731,33 @@ admin 里的人看不懂。所以每条业务约束**写两层**：
 补充：Django 里写 `ManyToManyField("self", through=...)` 底层照样建中间表。**表省不掉**，
 只能选它是"你自己定义、能加字段"还是"Django 帮你建、你加不了字段"。
 
-**当初否决自引用 FK 的唯一理由**是"FK 的目标仍必须是一条 Contact 记录，
-所以**幽灵记录这个成本一分没省**"。**这条已经被 `is_reference_only` 解掉**，见下。
+#### 载体的第四条判据：主体性 —— 这个实体该不该进 `Contact`？（2026-07-28 新增）
 
-#### `is_reference_only`：把幽灵记录从"不创建"改成"贴标签 + 过滤"
+前三条判据全是**形状**问题（基数、属性、类型数）。它们漏掉了一个更靠前的问题：
 
-`Contact.is_reference_only`（布尔）标记那些**只作为参照存在**的记录 ——
-只有姓名和电话，从没主动跟基金会打过交道。紧急联系人在系统里找不到本人时，
-**由系统就地自动创建**一条这样的记录，FK 指向它。
+> **这个实体是"主动与基金会发生交互的主体"，还是"别人档案上的一项信息"？**
+> 后者**不该进 `Contact`**，哪怕形状上完全放得下。
 
-**录入形态（关键，不然这个方案就是"两步录入"）：**
+`Contact` 是整个系统的心脏 —— 所有列表、导出、统计、群发、以后的权限和分析都从它出发。
+往里塞进从没主动跟基金会打过交道的人，会产生**全局副作用**：
 
-| 情形 | 用户要做的 |
-|---|---|
-| 系统里没这个人 | 填姓名、电话、**选关系** → 保存。后台自动建 reference-only 记录 |
-| 命中唯一一条同名同号 | 填姓名、电话 → **已自动关联**（默认值，可一键撤销），**选关系** → 保存 |
-| 命中多条 | 提示列出候选，点一个或点"新建"，**选关系** → 保存 |
+- **群发陷阱**：任何一处 `Contact.objects.filter(...)` 忘了排除，就是把志愿者通讯
+  发给几百个第三方。这是隐私事故，不是数字不准。
+- **靠纪律保障不够**：规定"所有查询必须走 `Contact.objects.people()`"是一条
+  **需要每个人每次都记得**的规矩。半年后的你、或者下一个接手的人，
+  漏一处的代价和收益完全不对称。**结构性保障 > 纪律性保障。**
+- **基础指标不可信**："真实联系人有多少"这个最基本的数字要靠一个布尔过滤才对。
 
-三种情形都是**一步、一个表单、不跳页**。
+**紧急联系人四条判据里前三条全过、第四条不过 → 用专用表。**
+这条判据同样解释了为什么 `Ministry` **绝不做成 `contact_type=organization` 的 Contact 行**
+（见 Phase B「Ministry 视图」）—— 那条结论早就在文档里，只是当时没有归纳成判据。
 
-**全 FK + `is_reference_only` 换来了什么（这是选它的全部理由）：**
-
-1. **零重复存储** —— 一个家长三个孩子，一条记录被引用三次，改号码改一处
-2. **反查是完整的** —— `contact.listed_as_emergency_contact_by.all()`，不存在"文本那一支查不到"
-3. **就地升级，没有数据搬家** —— reference-only 的家长后来自己来做志愿者，
-   `is_reference_only=False` 补上字段即可，原有引用一行不动。
-   纯文本方案里那些文字是死数据，只能重录
-4. **去重机制只剩一套** —— 重复的 reference-only 就是普通的重复 Contact，
-   走通用的合并功能，不需要为紧急联系人单造一套对账工具
-5. **迁移方向最顺** —— 见下面「将来怎么变成 `EmergencyContact`」
-6. **将来 `Guardianship` 直接受益** —— 监护人往往已经作为 reference-only 存在了
-
-**代价（一条，但每天都在）：** 幽灵记录没有消失，只是变得可过滤。
-纪律从"读取要分支"搬到了"查询要过滤" —— 每个列表、搜索、导出、人数统计
-都必须记得排除 reference-only，漏一处的症状是"联系人总数多了 200"。
-怎么兜住见 Phase B 的 `people()` 一节。
+> **这一条推翻了同日早些时候的 `is_reference_only` 方案。** 当时的论证是
+> "幽灵记录可以用标记 + 过滤解决，所以不必用'不创建'解决"，
+> 于是把纪律从"读取要分支"搬到了"查询要过滤"。
+> **搬对了地方，但没问该不该搬** —— 真正的问题不是幽灵记录怎么读，
+> 而是**它根本不该在那张表里**。
+> **教训：形状判据回答"放得下吗"，主体性判据回答"该不该放"。先问后者。**
 
 #### 载体三：通用表 vs 专用表 —— ✅ 混合（方案 C）
 
@@ -718,17 +775,19 @@ admin 里的人看不懂。所以每条业务约束**写两层**：
 1. 这种关系有自己的字段（不只是 A、B、起止日期）
 2. 这种关系有自己的校验规则或约束
 3. 代码里需要频繁按这个类型精确查询
+4. **对方不是"主动与基金会交互的主体"，不该占一行 `Contact`**（2026-07-28 新增，
+   见上面「载体的第四条判据」）
 
-**三条都不满足 → 留在 `Relationship`。**
+**四条都不满足 → 留在 `Relationship`。**
 
 #### 当前分配
 
 | 关系 | 载体 | 理由 |
 |---|---|---|
 | 汇报线 | `Position.reports_to` 自引用 FK | 自引用三条件全满足（D11）。注意载体是**编制**不是任职 —— 挂到任职上会同时踩坏基数以外的两格 |
-| **紧急联系人** | **`Contact.emergency_contact` 自引用 FK + `is_reference_only`** | 自引用三条件全满足；幽灵记录用标记 + 过滤解决 |
+| **紧急联系人** | **专用表 `EmergencyContact`，姓名/电话存文本** | **触发条件 4** —— 形状上自引用 FK 完全放得下，但紧急联系人不该进 `Contact`。见下面「为什么最终选了文本方案」 |
 | 法定监护人 | 专用表 `Guardianship`，**但推迟到 Phase B 之后** | 满足触发条件 1，但基金会有没有同意书流程尚未答复，见「待确认」 |
-| 外部组织归属 / 配偶 / 推荐人 | 通用 `Relationship` | 三条都不满足，只是 A—B + 日期 |
+| 外部组织归属 / 配偶 / 推荐人 | 通用 `Relationship` | 四条都不满足，只是 A—B + 日期 |
 
 **关系标签复用已有的 `RelationshipType`，不新建词表**（2026-07-28 确认）。
 理由和配套的方向约定见 D6 补强 —— 复用还白捡一个好处：
@@ -741,41 +800,52 @@ admin 里的人看不懂。所以每条业务约束**写两层**：
 - **法定监护人** —— 有法律意义：签同意书、接送、必须被通知。**有自己的字段和起止日期。**
 - **紧急联系人** —— 出事时拨的电话，可能是邻居、同事、室友。**没有任何自己的属性。**
 
-**这个区分正是两者分到不同载体的依据**：有自己属性的走表，没有的走自引用 FK。
-注意分界**不再是"要不要在系统里有身份"** —— 走了 `is_reference_only` 之后，
-两者在系统里都有身份，只是身份的"厚度"不同。
+**两者都走专用表，但表的形状不同**：`Guardianship` 的 `guardian` 是 **FK → `Contact`**
+（监护人有法律身份、要被通知、往往本来就是系统里的人），
+`EmergencyContact` 的姓名电话是**文本**（可能是邻居、室友，与基金会无任何关系）。
+**分界就是第四条判据：这个人是不是主体。**
 
-#### 将来怎么变成 `EmergencyContact` 专用表
-
-**这是所有方案里最容易的起点**，一个纯机械的数据迁移，**没有任何判断**：
+#### `EmergencyContact` 的形状，以及为什么最终选了文本方案
 
 ```python
-EmergencyContact.objects.bulk_create([
-    EmergencyContact(person_id=c.id,
-                     contact_id=c.emergency_contact_id,
-                     relationship_type_id=c.emergency_contact_relationship_id)
-    for c in Contact.objects.exclude(emergency_contact=None).iterator()
-])
-# 然后 RemoveField × 2
+EmergencyContact(
+    person            → Contact (CASCADE),      # 这是谁的紧急联系人
+    name,                                       # 文本
+    phone,                                      # 文本（PhoneNumberField，E.164）
+    relationship_type → RelationshipType,       # 必填（FK 非空，不再需要 CheckConstraint）
+)
 ```
 
-没有去重、没有姓名匹配、没有"这两个王秀英是不是同一个人" ——
-**身份问题在录入那一刻就已经解决了**，每一条都已经是指向真实记录的外键。
-每人 ≤1 条时它还是**可逆**的。
+**换来的（选它的全部理由）：**
 
-对照各方案迁到专用表的成本：
+1. **`Contact` 表恢复纯洁** —— 里面只有主动与基金会交互的实体。
+   `Contact.objects.filter(...)` 再也不可能把通讯发给第三方，
+   **这是结构性保障，不需要任何人记得什么**
+2. **"真实联系人有多少"重新是一个可以直接数的数字**
+3. **基数限制自然消失** —— 表天然支持多个紧急联系人，
+   将来要第二组不用改结构（原方案每人 ≤1 是自引用 FK 的硬限制）
+4. **关系必填变成 FK 非空** —— 比原来那条 `CheckConstraint` 简单
 
-| 起点 | 成本 |
-|---|---|
-| 纯文本字段 | **痛** —— 去重、判断同一人、建 Contact、连关系（正是本条一开始警告的方向） |
-| 混合 FK + 文本 | **一半痛** —— FK 那部分机械，文本那部分还是要人工 |
-| **全 FK + `is_reference_only`** | **机械** —— 上面那几行 |
+**代价（四条，都是真的，都要如实记）：**
 
-**所以按 D15 最看重的那条标准（迁移方向不对称，先规范化以后好退化），
-全 FK 方案是最强的选项**，不是退而求其次。
+1. **重复存储**：王秀英有三个孩子做志愿者 → **三行，电话三份**，改号码要改三处，
+   而且系统不知道这是同一个人
+2. **她自己来做志愿者时会出现第四份** —— `Contact` 里一份，三行文本里各一份，
+   四份之间会各自漂移。**这是最常发生的那种情况**（配偶、也做志愿者的家长）
+3. **没有反查** —— "谁把王秀英列为紧急联系人"只能靠文本模糊匹配
+4. **将来要升级成 FK 版是「痛」的迁移** —— 去重、判断同一人、建 `Contact`、连关系
 
-`is_reference_only` 在迁移之后**仍然有用** —— 它描述的是"这行 Contact 是什么性质"，
-和紧急联系人用什么载体无关。它不是一次性字段。
+> **这四条不是被驳倒了，是被主动接受了。** 判断是：
+> **一次群发隐私事故的代价 > 电话号码存三份的代价**，
+> 前者不可挽回、影响第三方，后者是内部数据质量问题、随时能修。
+> 这是一个**风险不对称**的取舍，不是"哪个设计更优雅"的取舍。
+
+> **同时要诚实记下：这个方案就是「载体一（纯文本字段）」换了个位置。**
+> 载体一被否决的三条理由里，只有第三条（`Contact` 迅速膨胀）因为搬进独立表而消失，
+> 前两条（重复存储、无法反查）**原封不动地继承了下来**。
+> 所以本条决策的历史是：`Relationship` → 纯文本字段 → 全 FK + `is_reference_only`
+> → **专用表 + 文本**（本版）。绕了一圈，回到载体一的数据形状，
+> 但**这一次是知道代价之后选的，不是因为它看起来省事**。
 
 #### 待确认 ⏳ 等待向基金会核实中（2026-07-27 起）
 
@@ -787,7 +857,7 @@ EmergencyContact.objects.bulk_create([
 **状态（2026-07-28 更新）：这张表已整体移出 Phase B。** 原来的安排是"等答复，有就在 Phase B 建"，
 现在改成无条件推迟 —— 因为
 **"活动前通知未成年参与者的家长"这条真实需求在 Phase B 已经闭环**
-（`is_minor` 筛人 + `emergency_contact` 拨号），`Guardianship` 不再是任何功能的前置条件。
+（`is_minor` 筛人 + `EmergencyContact` 拨号），`Guardianship` 不再是任何功能的前置条件。
 答复回来只决定它**什么时候**做，不再阻塞任何东西。
 
 ### D16 · 时间与日期的唯一口径（2026-07-28）
@@ -869,9 +939,9 @@ payroll     （Phase D 之后预留）薪酬
 
 | 逻辑 | 放哪 | 不许放哪 |
 |---|---|---|
-| 跨表写入（合并 Contact、就地建 reference-only、关系方向路由） | `services.py` 或 model 方法 | ❌ `ModelAdmin.save_model()` / `save_related()` |
+| 跨表写入（合并 Contact、关系方向路由） | `services.py` 或 model 方法 | ❌ `ModelAdmin.save_model()` / `save_related()` |
 | 派生判定（`.active()`、`vacant()`、`is_minor`、`find_exact_duplicate()`） | QuerySet 方法 / model property | ❌ admin 的 `get_queryset()` 里就地算 |
-| 校验 | 数据库约束（强制）+ `Model.clean()`（提示），见 D14 | ❌ `ModelForm.clean()` 里写唯一真相 |
+| 校验 | 数据库约束（唯一规则）+ 约束名→字段的映射表，见 D14 | ❌ `ModelForm.clean()` 里写唯一真相；❌ 把规则在 `clean()` 里重写一遍 |
 | 纯呈现（列怎么排、筛选器长什么样、字段显不显示） | ✅ **admin，本来就该在这** | |
 
 判据一句话：**换一个界面，这段代码要不要跟着搬？要搬，就不该在 admin 里。**
@@ -1004,7 +1074,7 @@ D17 让 `payroll` 独立成 app 正是这个道理（"一个 Group 直接不给 
 |------|-----|---------|
 | `Ministry` | `org` | **不是纯字典表** —— 基金会的服务单元（食物银行、报税志愿、ESL…）。字段：`code`（唯一·不可改，见 D5）/ `name` / `description` / `is_active` / 成立日期（可空）。行政职能（财务、行政）也是这张表里的行，不另建 `Department` —— 一个组织没必要拆两套单元。**不挂 simple-history**（已确认：改动频率极低，不值得一张历史表）。<br>**这张表不能推迟**，理由见下面「Ministry 视图」 |
 | `Position` | `org` | **编制表 —— 组织架构的骨架，与人无关**（见 D11 第二次修订）。`code`（唯一·不可改，见 D5）/ `name`（职务名，给人看）/ `kind`（`TextChoices`：employee·volunteer·board）/ `ministry`(FK，**可空** —— 理事席位没有)/ `reports_to`(自引用 FK → `Position`，可空)/ `is_leader`（布尔，**给代码查**）/ `is_active` / `description`。**挂 simple-history**（组织架构变更必须留痕）。**一个 `Position` 可以有多个在职 `Assignment`** —— 它是编制类型不是座位，所以这张表是几十行量级 |
-| `Assignment` | `org` | **任职表 —— 谁在什么时候占了哪个编制。** `contact`(FK) / `position`(FK → `Position`) / `employment_type`(FK，**可空**) / `start_date` / `end_date`。**没有 `kind` / `title` / `ministry` / `is_leader` / `reports_to`** —— 全部搬去 `Position` 了。**不加 `is_active`** —— 见下面「单一真相」。**挂 simple-history** |
+| `Assignment` | `org` | **任职表 —— 谁在什么时候占了哪个编制。** `contact`(FK) / `position`(FK → `Position`) / `employment_type`(FK，**可空**) / **`status`（`TextChoices`：active·on_leave·suspended，默认 active）** / `start_date` / `end_date`。**没有 `kind` / `title` / `ministry` / `is_leader` / `reports_to`** —— 全部搬去 `Position` 了。**不加 `is_active`**，但**有 `status`** —— 状态和任期是正交的两个维度，见下面「`Assignment.status`」。**挂 simple-history** |
 | `EmploymentType` | `org` | 字典表：`code`（唯一·不可改）/ `name` / `is_active`。**取值基金会还没定**（全职 / 兼职 / 合同 / 实习只是我们猜的），所以做成字典表而不是 `TextChoices` —— 以后加一行就行，不改代码不写迁移。符合 D5 的判定规则：目前没有任何代码按它分支 |
 | `EventType` | `events` | 字典表：`code`（唯一·不可改）/ `name` / `is_active` |
 | `Event` | `events` | `name` / `event_type`(FK) / **`ministry`(FK，可空)** / `start_time` / `end_time` / `location` / `owner`(FK → `Contact`) / `status`（`TextChoices`：planned·confirmed·completed·cancelled）/ `capacity`（可空，**参考值，不强制**，见下） |
@@ -1012,10 +1082,10 @@ D17 让 `payroll` 独立成 app 正是这个道理（"一个 Group 直接不给 
 | `Participation` | `events` | `event`(FK) / `contact`(FK) / `role`(FK，可空) / `status`（`TextChoices`：registered·attended·absent·cancelled）/ **`hours`**（`DecimalField(max_digits=6, decimal_places=2)`，可空）。**同一个人在同一次活动里可以有多行**，靠 `role` 区分 —— 见下面「一人一活动多角色」。这张中间表是整个系统的价值所在 —— 工时统计、志愿者活跃度、活动回顾全靠它 |
 | `VolunteerProfile` | `volunteer` | OneToOne → `Contact`。`availability_notes`。**`skills` 这个 M2M 跟着 `Skill` 一起推迟**。**不含** 职务名 / 上级（那些是编制，归 `Position`）/ 任职起始日（归 `Assignment`）；**不含**紧急联系人（已改成 `Contact` 字段，见 D15）；**不含背景审查** —— 见下一行 |
 | `BackgroundCheck` | `volunteer` | **2026-07-28 从 `VolunteerProfile` 拆出来的独立模型**（见 D18）。OneToOne → `Contact`，`CASCADE`。`status`（`TextChoices`）/ `completed_on`（可空）/ `notes`。**挂 simple-history**。<br>**为什么必须是独立模型**：Django 权限粒度是 `app_label.model`，**没有字段级权限**。留在 `VolunteerProfile` 里的话，Phase D 只有两个选择 —— 整张表不给看（连技能和可服务时段一起锁掉，过度）或者全给看（泄露本系统里仅次于薪酬的敏感数据）。拆开之后一个 Group 不授 `volunteer.view_backgroundcheck` 即可。**同 D17 让 `payroll` 独立成 app 的逻辑**，区别只是薪酬是一整块业务领域（用 app），背景审查是一张附属表（用 model）。<br>**现在拆成本≈0**（`volunteer` app 一行代码还没写），以后拆要建表 + 搬字段 + 改引用，而那时表里是真人的审查结果 |
-| `Contact` 加三个字段 | `contact` | `emergency_contact`（自引用 FK → `Contact`，可空，`PROTECT`，`related_name="listed_as_emergency_contact_by"`）/ `emergency_contact_relationship`（FK → `RelationshipType`，`limit_choices_to={"usable_as_emergency_contact": True}`，**填了联系人就必填**）/ `is_reference_only`（布尔，默认 `False`）。**只有一组联系人，不做第二组**（已确认）—— 需要第二组的那天，就是升级成 `EmergencyContact` 专用表的信号。见 D15、下面「紧急联系人的录入与去重」 |
-| `Contact.merge()` | `contact` | **不是新表，是一个功能**：把重复的两条 Contact 合并成一条。原计划推迟，2026-07-28 改为**必须在本阶段做** —— 因为 reference-only 记录会持续制造重复，没有合并就只能眼看着攒。范围和实现见下面「合并重复记录」 |
+| `EmergencyContact` | `contact` | **专用表**（2026-07-28 定案，取代早先的 `Contact.emergency_contact` 自引用 FK + `is_reference_only`）。`person`(FK → `Contact`，`CASCADE`，`related_name="emergency_contacts"`) / `name`（文本，必填）/ `phone`（`PhoneNumberField`，必填）/ `relationship_type`(FK → `RelationshipType`，**非空**，`limit_choices_to={"usable_as_emergency_contact": True}`)。<br>**姓名电话存文本，不指向 `Contact`** —— 紧急联系人可能是邻居、室友，不是与基金会交互的主体，不该占一行 `Contact`（D15 第四条判据）。<br>**表天然支持一人多个紧急联系人**，不加人为的唯一限制（基金会目前只需要一个）。见 D15、下面「紧急联系人的录入」 |
+| `Contact.merge()` | `contact` | **不是新表，是一个功能**：把重复的两条 Contact 合并成一条。范围和实现见下面「合并重复记录」。<br>⚠️ **它进 Phase B 的原始理由已经失效** —— 当时是"reference-only 记录会持续制造重复"，而 reference-only 已经不存在了。**保留在本阶段的新理由**：跨渠道录入（活动签到、志愿者自荐、员工代录）仍然会产生重复，而同名同号硬拦截只挡得住同一表单里的手滑。**如果要削减 Phase B 范围，这是第一个候选** |
 | `RelationshipType` 加两个字段 | `contact` | `code`（唯一·不可改，见 D5 / D6）+ `is_symmetric`（布尔，见 D15）。加到已有表要三步迁移，见下面「`code` 的三步迁移」 |
-| ~~`Guardianship`~~ | — | **移出 Phase B**（2026-07-28 决定）。等基金会答复同意书流程再说 —— 家长通知这条真实需求在本阶段已经靠 `is_minor` + `emergency_contact` 闭环了。见推迟清单 |
+| ~~`Guardianship`~~ | — | **移出 Phase B**（2026-07-28 决定）。等基金会答复同意书流程再说 —— 家长通知这条真实需求在本阶段已经靠 `is_minor` + `EmergencyContact` 闭环了。见推迟清单 |
 | ~~`Skill`~~ | — | **推迟**（见推迟清单）—— 没有任何东西依赖它，ministry 视图不需要它 |
 
 ##### 本阶段内部的硬性顺序
@@ -1081,6 +1151,11 @@ def active(self, on=None):
 
 `local_today()` 的时区口径见 **D16** —— 那条是硬性的，`timezone.now().date()` 会错一天。
 
+> ⚠️ **`.active()` 只管日期，不管状态。** `Assignment` 另有一个 `.serving()`
+> （= `.active()` AND `status=active`），请假 / 停职的人在 `.active()` 里**仍然算数**。
+> 两个都对，用哪个取决于问题是"他还属不属于这个团队"还是"他今天能不能当值" ——
+> 见下面「`Assignment.status`」。**`Relationship` 只有 `.active()`**，关系不会被停职。
+
 顺带：显示姓名时记得 `select_related("contact")`，否则每行一次查询（N+1）。
 
 ##### 新表的约束必须和表同期落地（延续 A7 的教训）
@@ -1098,13 +1173,14 @@ A7 的原话是"等表里有了真数据再加，就得先清洗存量数据"。
 | `Position` | `code` `unique=True` | 同下面字典表那条。`Position` 不是字典表，但 `code` 的作用一样：代码只认 `code`，不认 `name` |
 | `Event` | `end_time >= start_time` | 同上 |
 | `Event` | `capacity IS NULL OR capacity > 0` | 容量 0 或负数没有意义 |
-| `Contact` | `emergency_contact_id != id` | 不能把自己设成自己的紧急联系人。同 `relationship_no_self_reference` 的形状 |
-| `Contact` | `emergency_contact IS NULL OR emergency_contact_relationship IS NOT NULL` | **记了联系人就必须写清关系。** 靠约束，不靠提醒 —— 见下面「关系必填」 |
+| `EmergencyContact` | `UniqueConstraint(person, Lower(Trim(name)), phone)` | 同一个人身上把同一个紧急联系人录两遍。归一化写进表达式，不靠 `save()` —— D9 归一化通则 |
+| `EmergencyContact` | `relationship_type` **FK 非空** | **记了联系人就必须写清关系。** 拆成专用表之后这条从 `CheckConstraint` 降级成一个 `null=False`，是拆表白捡的简化 |
 | `Ministry` / `Position` / `EmploymentType` / `EventType` / `ParticipationRole` | **`UniqueConstraint(Lower("code"))`**（不是 `unique=True`） | 见 D5：不唯一的 `code` 不是锚点，`get(code=...)` 会抛 `MultipleObjectsReturned`。**必须是 `Lower()` 版**，否则 `bulk_create` 能塞进 `Food_Pantry` + `food_pantry` 两行 —— D9 归一化通则 |
 | `RelationshipType` | `UniqueConstraint(Lower(Trim("name_a_to_b")))` | 缺口 2。`Trim` 不能省，理由同上 |
 | `Relationship` | **`UniqueConstraint(Least(a,b), Greatest(a,b), type, Coalesce(start_date, date.min))`** —— **替换** A7 那条，不是并存 | 缺口 3 升级成强制层。镜像重复 `bulk_create` 塞得进来，而 `save()` 的归一化拦不住它 |
 
-按 D14，每条约束都要配 `clean()` 提示层，两处互相注释指认。
+按 D14：每条约束配 `violation_error_message` + `violation_error_code`，在 `CONSTRAINT_FIELD` 里登记一条映射，**不要再写一遍 `clean()`**。
+守卫测试会检查有没有漏登记；另外每条都要实测在表单里是不是真会报错（见 D14 的坑）。
 
 ##### `Assignment` 的唯一约束：一人多岗现在是天然的
 
@@ -1212,7 +1288,7 @@ Phase B 一次加十几个外键，其中一个选错是灾难级的：
 
 | 索引 | 服务什么查询 |
 |---|---|
-| `Assignment`：`Index(fields=["position", "end_date"])` | ministry 页面的第二段："这些编制上现在有谁"。`end_date` 进索引让在职判定不用回表 |
+| `Assignment`：`Index(fields=["position", "status", "end_date"])` | ministry 页面的第二段："这些编制上现在谁在当值"。`.serving()` 三个条件（编制 + 状态 + 日期）一次覆盖；`.active()` 走最左两列里的 `position` 也够用 |
 | `Position`：`Index(fields=["ministry", "kind", "is_active"])` | ministry 页面的第一段："这个 ministry 有哪些编制、分别是什么 kind"。**这张表只有几十行，索引基本是象征性的** —— 建它是为了 Phase C 组织架构图和以后规模变大，现在别指望它带来可测的差别 |
 | `Event`：`Index(fields=["start_time"])` | 近期活动、admin 的 `date_hierarchy`、Phase C 的"本月活动" |
 | `Event`：`Index(fields=["ministry", "start_time"])` | "食物银行这个月办了几场" —— ministry 视图的第二个数字 |
@@ -1220,16 +1296,14 @@ Phase B 一次加十几个外键，其中一个选错是灾难级的：
 | 各字典表的 `code` | `unique=True` 自带 |
 
 小提醒：Django 给 FK 自动建单列索引，所以 `Position` 上 `(ministry, kind, is_active)` 建好之后
-`ministry` 单列索引就冗余了（最左前缀覆盖）；`Assignment` 上 `(position, end_date)` 之于
+`ministry` 单列索引就冗余了（最左前缀覆盖）；`Assignment` 上 `(position, status, end_date)` 之于
 `position` 同理。数据量小无所谓，知道就行。
 
-##### 单一真相：`Assignment` 不加 `is_active`，并且**删掉 `Relationship.is_active`**
+##### 单一真相：删掉 `Relationship.is_active`；`Assignment` 用 `status`，**不用** `is_active`
 
 `Relationship` 现在同时有 `is_active` 和 `end_date`（`contact/models.py:247-249`），
 于是可以存出 `is_active=True` + `end_date=2020-01-01` 这种自相矛盾的行。
 **这违反 D11 自己那句"不是两处都能记，是只有一处能记"。**
-
-`Assignment` 不重犯：在职状态由日期**派生**，做成上面那个 `.active()` + model property + admin 筛选器。
 
 **`Relationship.is_active` 在本阶段删掉**（2026-07-28 修订，原计划是"既存字段不动"）。
 改口的理由是原理由站不住：Phase A 刚把库整个重建过，现在只有开发数据，而这个字段
@@ -1239,43 +1313,100 @@ Phase B 一次加十几个外键，其中一个选错是灾难级的：
 （"现在改成本≈0，以后改很痛"），就是现在删。删完 `Relationship` 复用同一个
 `.active()` mixin，全项目只有一处日期派生逻辑。
 
-##### 三个 `is_active` 是三个概念
+**关系不会被"停职"** —— 张三要么在某段时间是 XX 公司的员工，要么不是；配偶关系没有
+"暂时中止"这个状态。所以 `Relationship` 只需要日期，这条决定不受下面的修订影响。
 
-同名不同义，而 ministry 页面**三个都要用到**：
+#### `Assignment.status`：状态和任期是正交的两个维度（2026-07-28 修订）
+
+> **本条改过一次。** 原文是"`Assignment` 不加 `is_active`，在职状态完全由日期派生"。
+> **结论对了一半，理由对了，但漏掉了一个真实需求。**（基金会已确认**跟踪请假 / 停职**。）
+
+**漏掉的是什么**：志愿者出国三个月、员工休产假 / 病假、背景审查过期待复核 ——
+这些**任职关系并没有结束**，只是当前不能服务。只有日期的话，唯一能表达它的办法
+就是**把 `end_date` 截断、回来再建一行**，而那会：
+
+- **算错任期长度** —— 一段连续三年的服务变成"两年 + 三个月空档 + 半年"，
+  资历、累计服务时长、周年识别全部失真；
+- **篡改真实的合同 / 志愿协议日期**（员工场景下有合规含义）；
+- 原始日期只剩在 simple-history 里 —— **可追溯但主表答不出**，
+  和 D11 第二次修订判死刑的是同一种病。
+
+**但修法不是加回一个 `is_active`。** 那会原封不动地把矛盾请回来
+（`is_active=True` + `end_date=2020` 照样存得进去）。
+
+```python
+Assignment(
+    start_date, end_date,                      # 任期 —— 唯一真相，不因请假而改动
+    status = active | on_leave | suspended,    # 任期「之内」的当前状态（TextChoices）
+)
+```
+
+**`status` 里绝不能有 "ended" / "已结束" 这一项。** 那就是把 `end_date` 记两处，
+正是本节要杜绝的东西。**结束只由日期表达。**
+
+##### 两个谓词：`.active()` 和 `.serving()`
+
+```python
+# core 的共享 mixin —— Assignment / Relationship 通用，纯日期
+def active(self, on=None):    ...        # 在任期内 / 生效中
+
+# Assignment 专有
+def serving(self, on=None):
+    return self.active(on).filter(status=Status.ACTIVE)   # 在任期内 AND 当前可服务
+```
+
+> **规矩一句话：`status` 只能和日期做 AND，永远不能单独用。**
+
+这条规矩解掉了原来那个矛盾。`status=on_leave` + `end_date=2020` 读作
+"他 2020 年离任，离任时正在休假" —— **不矛盾，只是陈旧且无害**，
+因为 `serving()` 已经先 AND 了日期，结束了的任职无论什么 status 都不会被算进去。
+
+**所以不加"状态必须和日期一致"的约束** —— 那需要在 `CheckConstraint` 里引用"今天"，
+而"今天"不是不可变表达式，数据库拒绝。**靠 AND 的查询纪律，不靠约束。**
+
+> **病根辨析（重要）**：原来 `Relationship.is_active` 之所以危险，不是因为"有两个维度"，
+> 而是因为 admin 把它当成了日期的**替代筛选项**（`list_filter = ["is_active"]`
+> 能独立按它过滤，给出错误答案）。**两个维度被当成二选一才是病，正交本身不是。**
+
+**已知限制：只记当前状态，不记请假历史。** "谁在去年三月请过假"这个问题
+`status` 答不出来（只能翻 simple-history）。真要的话按 D15 三条件检验：
+一个人可以有多段请假 → 基数破 → 必须用表（`Leave(assignment, start, end, reason)`）。
+**现在不做**，见推迟清单。
+
+##### 四个 `is_active` / 状态是四个概念
+
+同名不同义，而 ministry 页面**四个都要用到**：
 
 | 字段 | 含义 | 反例 |
 |---|---|---|
 | `Contact.is_active` | **这条档案还在不在用**（也当重复记录合并后的墓碑用） | 已停用档案的人**仍可能**挂着在职任职 |
 | `Position.is_active` | **这个编制还设不设** | 编制还设着、但没人在任 = **空缺**，不是 inactive |
-| `Assignment` 的「在职」 | 由 `start_date` / `end_date` **派生**，不是字段 | 见「单一真相」—— 这张表**没有** `is_active` |
+| `Assignment` 的「在任期内」 | 由 `start_date` / `end_date` **派生**，不是字段 | 这张表**没有** `is_active` |
+| `Assignment.status` | **任期之内当前能不能服务** | 请假中的人**仍然在任期内**，不能靠改日期把他弄出去 |
 
-**规定：ministry 页面的在职人员查询必须同时过滤
-`.active()` + `contact__is_active=True` + `position__is_active=True`。**
-漏第三个的症状是"撤销的编制上还挂着人"。
+**规定：ministry 页面的在职人员查询必须过滤
+`.serving()` + `contact__is_active=True` + `position__is_active=True`。**
+漏 `position__is_active` 的症状是"撤销的编制上还挂着人"；
+用 `.active()` 而不是 `.serving()` 的症状是"请假的人还在当值名单上"。
 
-##### `is_reference_only` 的纪律：`Contact.objects.people()`
+> 但**花名册**（谁属于这个 ministry）该用 `.active()` —— 请假的人还是这个团队的成员。
+> **当值名单用 `.serving()`，花名册用 `.active()`**，两个都对，别混。
 
-`is_reference_only=True` 的记录（自动建出来的紧急联系人）**是幽灵记录，只是被贴了标签**。
-D15 已经写明这是选择方案 F 要付的那一条代价：纪律从"读取要分支"搬到了
-"**查询要过滤**" —— 每个列表、搜索、导出、人数统计都必须记得排除它们，
-漏一处的症状是"联系人总数莫名多了 200"或"导出里混进一堆只有姓名电话的行"。
+##### ~~`is_reference_only` 的纪律：`Contact.objects.people()`~~ —— 已作废
 
-**怎么兜住（照抄 D16 的三层套路）：**
-
-1. **不要**把 `Contact.objects` 改成默认过滤的 manager —— 会让 admin、外键校验、
-   `get()` 的行为变得诡异，是个比原问题更大的坑。**默认 manager 必须是全集。**
-2. 加一个显式的 **`Contact.objects.people()`**（`exclude(is_reference_only=True)`），
-   **规定所有面向人的列表 / 统计 / 导出一律走它**，并写进 `Contact` 的 docstring。
-3. 配一条 **grep 守卫测试** —— 和 `test_no_model_changes_are_missing_a_migration`、
-   D16 的时间守卫同一个套路：用测试当 lint。
-4. admin 的 Contact 列表**默认预选**"仅真实联系人"筛选器，需要时能切到全部。
-
-两条相关的小规则：
-
-- reference-only 记录仍要满足 `contact_name_matches_type` —— **所以只有电话没有姓名时建不出来**，
-  这一点要在录入界面上拦住，而不是等数据库报错。
-- "某个 reference-only 记录已经有了 `Assignment` 或 `Participation`" 说明它早该被提升成正式档案了，
-  做成一条数据质量提示（不做约束 —— 跨表，`CheckConstraint` 表达不了）。
+> **整节删除（2026-07-28）。** `is_reference_only` 和 `Contact.objects.people()` 都不再存在 ——
+> 紧急联系人改用 `EmergencyContact` 专用表，姓名电话存文本，**`Contact` 里根本不会出现幽灵记录**。
+>
+> 这一节原本用了 D16 那套三层套路（显式方法 + 文档 + grep 守卫）来兜住
+> "每个列表、搜索、导出、人数统计都必须记得排除 reference-only"这条纪律。
+> **保留这段记录，是因为它示范了一种应该警惕的解法**：
+> 当你发现自己要靠"所有人每次都记得调用某个方法"来维持正确性时，
+> **先回头问问那个东西是不是根本不该在那张表里** —— 结构性保障不需要任何人记得什么。
+> 判据已经归纳进 D15「载体的第四条判据」。
+>
+> **连带作废的**：`Contact.objects.people()`、它的 grep 守卫测试、
+> admin 列表默认预选"仅真实联系人"筛选器、以及"reference-only 记录不该有 `Assignment`
+> 或 `Participation`"那条数据质量提示。**一条都不要写。**
 
 ##### `Contact` 重名的处理（必须赶在建那些 autocomplete 之前）
 
@@ -1321,78 +1452,61 @@ email 不能设 unique（一家人共用一个邮箱很常见）、电话同理�
    判定函数仍然只有 `find_exact_duplicate()` 一个（见下面第 6 条），
    拦截逻辑本身按 D18 放在 model / services 层，`ContactForm` 只调用。
 3. **合并两条重复记录** —— **本阶段必做**（2026-07-28 从推迟改过来），见下面「合并重复记录」。
-   改口的理由：`is_reference_only` 会持续制造重复记录，没有合并功能就只能眼看着攒，
-   而"攒够了再做"意味着到时候要带着一堆脏数据做。
+   ⚠️ 改口的**原始**理由（`is_reference_only` 会持续制造重复）已经失效，
+   新理由见那一节的开头说明。
 
-##### 紧急联系人的录入与去重
+##### 紧急联系人的录入
 
-紧急联系人走 `Contact.emergency_contact` 自引用 FK（见 D15），系统里没有这个人时
-**由后台就地自动创建**一条 `is_reference_only=True` 的记录。要守住三件事：
+> **本节 2026-07-28 大幅简化。** 原方案（自引用 FK + `is_reference_only`）需要
+> 自动建记录、命中预选、去重判定、安全阀、残留风险五大段。
+> **改用专用表 + 文本之后，这些整体消失了** —— 没有身份要认，就没有认错的可能。
+> **这是选文本方案顺带得到的最大简化，也是它唯一比 FK 版简单的地方。**
 
-**1. 自动建 ✅，自动认 ❌**
+`EmergencyContact` 是 `ContactAdmin` 上的一个 inline，操作员填三样东西：
+**姓名、电话、关系**。没有查重、没有关联、没有预选、不跳页。
 
-| 动作 | 能不能自动 | 为什么 |
-|---|---|---|
-| 系统里**没有**这个人 → 自动建一条 reference-only | ✅ **可以** | 新建一行不会指错人，最坏是多一条重复，事后可合并 |
-| 系统里**有**疑似这个人 → 自动指过去 | ⚠️ **只能做成可见的默认值**，不能静默替换 | 指错了是**静默的**：页面一切正常，只有真出事拨号时才发现打给了错的人 |
+三条要求：
 
-**2. 判定规则：归一化姓名一致 AND 归一化电话一致 —— 只有这一条**
+**1. 关系必填，靠 FK 非空**
 
-姓名归一化 = strip + 连续空白压成一个 + casefold；电话直接比 E.164 字符串。
+`relationship_type` 是非空外键 —— 拆成专用表之后，原来那条
+`emergency_contact IS NULL OR emergency_contact_relationship IS NOT NULL` 的
+`CheckConstraint` 降级成一个 `null=False`。**这是拆表白捡的简化。**
 
-**不要用电话相似度（如"70% 相同"）。** 号码存的是 E.164，`+14085550102` 和
-`+14085550103` 字符相似度 92%，却是**完全不同的两个人** —— 号码没有"接近"这个语义，
-差一位就是另一个号码。而真正需要吸收的格式差异（`(408) 555-0102` / `408-555-0102`）
-`phonenumber_field` 在入库时**已经归一化掉了**（D7 的收益），规范化之后没有剩下的模糊性需要百分比去兜。
+词表复用 `RelationshipType` + `usable_as_emergency_contact` 过滤（见 D6 补强），
+**不新建词表** —— 这一条不受本次修订影响。
 
-漏掉的两种情况恰好都该漏掉：
+**2. 方向约定必须写进 `help_text`**
 
-- **同号不同名** → 一家人共用一个号码，不是同一个人
-- **同名不同号** → 重名的另一个人（重名是合法现实），或本人换了号，太不可靠
+`relationship_type` 一律读作**「紧急联系人 是 本人 的 ___」**，即 `name_a_to_b`。
+小明那一行填 `王秀英` + `parent of` = "王秀英是小明的母亲"。
+**不写死一定会录反** —— 同 B3 关系录入的方向问题。
 
-> **这条规则顺带给了一个很强的隐私性质**：要求姓名和电话**都**完全一致，
-> 意味着提示本身**不披露任何用户尚未输入的信息** —— 必须已经同时知道姓名和号码才可能命中，
-> 命中只是确认了他已掌握的两件事。所以**不需要**做边打字边弹的姓名 autocomplete
-> （那恰恰是唯一会泄露"系统里有个同名的人"的路径），改成两个字段都填完后再检查即可。
-> 提示里也**只显示姓名**，不要带出 email、地址这些用户没输入过的字段。
+**3. 电话必填，用 `PhoneNumberField`**
 
-**3. 命中时把关联做成默认值 —— 这是"用户懒得关联"唯一有效的解法**
+存 E.164（D7）。**一个没有电话的紧急联系人是没有意义的**，所以 `blank=False`。
+姓名同理。
 
-不要做成"提示 + 用户点关联"，做成**命中唯一一条时表单里已经关联好了**，
-要新建反而得多点一下（次要位置的纯文字链接）。
-**懒惰的用户什么都不点、直接保存，做的恰好是对的事。**
+> **不做同名同号查重。** 那套判定（`find_exact_duplicate()`）留给 `Contact` 本身
+> （见上面「`Contact` 重名的处理」），**紧急联系人这一支不需要它** ——
+> 文本行之间没有"是不是同一个人"这个问题要回答，只有"同一个人身上录了两遍"，
+> 那由 `UniqueConstraint(person, Lower(Trim(name)), phone)` 挡住。
 
-这和"不能自动关联"不矛盾，界线是**"静默替换" vs "可见的默认值"**：
-保存前就写在表单上、指名道姓、一次点击可撤销、且 `Contact` 已挂 simple-history 全程留痕。
+⚠️ **要接受的后果**：王秀英有三个孩子做志愿者，就是三行独立的文本，
+改号码要改三处，系统不知道这是同一个人；她自己来做志愿者时还会有第四份。
+**这是 D15 里主动接受的代价，不是遗漏** —— 别在实施时"顺手"加个 FK 把它优化掉，
+那会把幽灵记录请回 `Contact`。
 
-两条安全阀 + 一条残留风险：
+##### 合并重复记录（本阶段做，但理由换过一次）
 
-- **命中 2 条以上时不预选**，退回纯提示让人选 —— 多条命中恰恰说明这是不可靠的场景
-- **提示必须显示关联到了谁**（仅姓名）
-- ⚠️ **残留风险：同名同号的父子 / 母女会被默认关联错。** 在服务对象里"父子同名 + 共用手机号"
-  不是不可能。接受它，因为错了是可见的、可一键撤销、有审计、后台队列也会浮出来。
-  真出过一次事，就把"命中时预选"降级成"只提示不预选" —— 一行开关的事。
-
-**4. 关系必填，且和关联在同一个交互里完成**
-
-`emergency_contact_relationship` 由约束保证"记了联系人就必须填"（见上面的约束表），
-**不是靠提醒**。关系下拉要长在提示块里，和确认关联在同一个视觉块内 ——
-一个在顶部提示条、一个在下面第三个 fieldset 的话，"顺便写清楚"就不会发生。
-词表复用 `RelationshipType` + `usable_as_emergency_contact` 过滤，方向约定见 D6 补强。
-
-**5. 不要阻塞保存，也不要弹窗强制选择**
-
-强制选择会打断那 95% 本来就走默认路径的人；阻塞保存会让人学会绕过系统。
-**把默认设对比逼人做选择有效得多。** 漏网的进下面的队列。
-
-**6. 判定函数只写一处**
-
-`Contact.find_exact_duplicate()` 一个函数，**表单提示、admin 筛选器、批量命令三处共用**。
-三份各写一遍必有一处不一致 —— 同 `.active()` 和 `local_today()` 的纪律。
-配套：`Contact.phone` 现在**没有索引**，这个功能会按它查，加 `db_index=True`；
-几千条数据量下**不要**提前加"归一化姓名"冗余列，真慢了再说。
-
-##### 合并重复记录（本阶段必做）
+> ⚠️ **它进 Phase B 的原始理由已经失效**（2026-07-28）。当时写的是
+> "`is_reference_only` 会持续制造重复，没有合并就只能眼看着攒" ——
+> **而 reference-only 已经不存在了**。
+>
+> **保留在本阶段的新理由**：跨渠道录入（活动签到、志愿者自荐、员工代录）仍然会产生重复，
+> 而「同名同号硬拦截」只挡得住同一个表单里的手滑，挡不住两个人在不同时间各录一次。
+> **但这个理由比原来弱** —— 如果要削减 Phase B 范围，**这是第一个候选**。
+> 削掉的话它回到推迟清单，触发条件是"真的攒出了一批重复"。
 
 **范围：最小可用，不做花哨的逐字段合并界面。**
 
@@ -1468,15 +1582,19 @@ Ministry: Food Pantry
 **查询长什么样**（Phase B 建完之后）：
 
 ```python
-active = Assignment.objects.active().filter(
+# 当值名单：.serving() —— 请假 / 停职的人不该出现在"现在谁在管"里
+on_duty = Assignment.objects.serving().filter(
     position__ministry__code="food_pantry",
     position__is_active=True,
     contact__is_active=True,
 ).select_related("contact", "position")          # 两个都要，否则每行两次查询
 
-leaders    = active.filter(position__is_leader=True)
-employees  = active.filter(position__kind="employee")
-volunteers = active.filter(position__kind="volunteer")
+leaders    = on_duty.filter(position__is_leader=True)
+employees  = on_duty.filter(position__kind="employee")
+volunteers = on_duty.filter(position__kind="volunteer")
+
+# 花名册：.active() —— 请假的人仍然是这个团队的成员，只是标注状态
+roster = Assignment.objects.active().filter(position__ministry__code="food_pantry")
 
 vacancies = Position.objects.filter(ministry__code="food_pantry").vacant()
 
@@ -1496,7 +1614,7 @@ contact.assignments.all()          # 从人那头看服务哪几个 ministry（D
 会过期，而且没有任何机制提醒你它过期了。
 
 真实需求：**"这次活动有哪些未成年参与者、出事或活动前该拨谁的电话"**。
-`Guardianship` 移出 Phase B 之后，这条需求由 `is_minor` + `Contact.emergency_contact`
+`Guardianship` 移出 Phase B 之后，这条需求由 `is_minor` + `EmergencyContact`
 **完整闭环**，不依赖任何未建的表。
 
 三件事，一件都不能少：
@@ -1747,11 +1865,16 @@ Phase A 的 A10 用了"每条钉住什么"的清单，本阶段沿用。下面�
 | `.active(on=某日)` 能改变结果 | 时钟可注入，且没有被冻结在导入时 |
 | 太平洋时间晚 8 点（UTC 已次日）判定不跨天 | D16 的时区口径 |
 | 全项目没有 `date.today()` / `timezone.now().date()`（grep 守卫，放 `core/tests.py`） | D16 —— 同迁移守卫，用测试当 lint |
+| **每条业务约束都有 `violation_error_code` 且在 `CONSTRAINT_FIELD` 里有映射**（遍历所有 model 的 `Meta.constraints`） | D14 —— 把"改一处必须改另一处"的注释纪律换成机器检查 |
+| **每条约束在 admin 表单里提交违规数据时报的是表单错误、不是 `IntegrityError`** | D14 的坑：`CheckConstraint.validate()` 遇 `FieldError` 会静默跳过，表达式约束尤其要逐条实测 |
 | `Assignment` 唯一约束在 `start_date` 为空时生效 | `nulls_distinct=False` —— A7 的教训，新表重钉一遍 |
 | 同一人在同 ministry 的**两个不同 `Position`** 上能各有一行 | 唯一约束没有误伤"一人多岗"（D11 的核心场景） |
 | 同一人同一 `Position` 的**两段任职**（不同 `start_date`）能存两行 | 离开又回来是合法的 |
 | 一人多岗各有不同上级，能分别查出 | D11 第一次修订要解决的歧义 |
 | **换人不动下属**：给某 `Position` 换一个在任者，其下属编制的 `reports_to` 一个字节没变 | **D11 第二次修订的全部意义就在这一条**，其余测试都可以没有，这条不能没有 |
+| **请假不动日期**：`status=on_leave` 后 `.serving()` 排除他、`.active()` **仍然包含他**，且 `start_date`/`end_date` 一个字节没变 | 状态与任期正交 —— 这条钉住"永远不用截断 `end_date` 表达请假" |
+| `status=on_leave` + `end_date` 在过去时，`.serving()` 和 `.active()` **都**排除他 | `status` 只收窄不覆盖；陈旧状态是惰性的，不会把已离任的人放回来 |
+| `Assignment.Status` 里**没有** "ended" 之类的取值 | 结束只由日期表达，不许记两处 |
 | **空缺**：`Position` 的在职 `Assignment` 全部结束后进入 `vacant()`，且仍带着 kind / ministry / 下属 | 空缺是一等状态，不是"碰巧查不到人" |
 | `is_active=False` 的 `Position` **不出现**在 `vacant()` 里 | 撤销 ≠ 空缺 |
 | `vacant(on=某日)` 能改变结果 | 时钟可注入，同 `.active()` |
@@ -1783,13 +1906,12 @@ Phase A 的 A10 用了"每条钉住什么"的清单，本阶段沿用。下面�
 | **`bulk_create` 直插 `Food_Pantry` 与已有 `food_pantry` 冲突** | `Lower("code")` —— 只靠 `save()` 转小写是漏的（D9 归一化通则） |
 | `is_minor` 对 `birth_date=None` 返回"未知"而不是 `False` | 未成年人不会静默消失 |
 | `is_minor` 边界：18 岁生日当天 | |
-| 不能把自己设成自己的紧急联系人 | `CheckConstraint` |
-| 填了 `emergency_contact` 没填关系被拒 | 「关系必填」靠约束不靠提醒 |
-| 同名同号命中 / 同名不同号**不**命中 / 同号不同名**不**命中 | 判定规则的三条边界，一条都不能松 |
-| 命中唯一一条时表单预选了关联；命中 2 条以上时**不**预选 | "懒惰=做对的事"的默认值，以及它的安全阀 |
-| 提示不阻塞保存，且每次保存都重新出现（没有"已忽略"标记） | 不是一次性提示 |
-| 系统里没有该人时自动建出 `is_reference_only=True` 的记录 | 自动建 ✅ |
-| `Contact.objects.people()` 排除 reference-only；grep 守卫拦住直接用 `objects` 做人员列表 | 方案 F 那条代价真的被兜住了 |
+| `EmergencyContact` 不填 `relationship_type` 被拒 | 「关系必填」= FK 非空，拆表白捡的简化 |
+| 同一个人身上录两条同名同号的紧急联系人被拒 | `UniqueConstraint(person, Lower(Trim(name)), phone)` |
+| 一个人可以有**两个不同**的紧急联系人 | 表天然支持多个，没有人为的基数限制 |
+| 删掉一条 `Contact`，他名下的 `EmergencyContact` 跟着删（`CASCADE`） | 紧急联系人是附属数据，没有独立生命周期 |
+| **`Contact` 里没有 `is_reference_only` 字段，也没有 `emergency_contact` 外键** | 幽灵记录不该存在 —— 钉住这次修订的结果 |
+| 同名同号命中 / 同名不同号**不**命中 / 同号不同名**不**命中 | `Contact` 查重规则的三条边界，一条都不能松 |
 | 合并：所有指向被合并方的外键都改指到保留方（含**测试里新造的一张表**，验证是通用遍历而非手写清单） | 漏一张表的症状是记录静默消失 |
 | 合并：一对一冲突（两条都有 `User`）时**拒绝**并说明原因 | 不自作主张删一边 |
 | 合并：唯一约束冲突（同活动同角色都有 `Participation`）时**拒绝** | 同上 |
@@ -1802,11 +1924,10 @@ Phase A 的 A10 用了"每条钉住什么"的清单，本阶段沿用。下面�
    给其中一部分挂上在职的人，页面上分组正确，**且没人在任的那个编制显示在「空缺」组里**；
    把 leader 位上的人换一个（旧的填 `end_date`、新建一行 `Assignment`），
    **确认下属编制的汇报线一个字没改**；
-2. 录一个志愿者（`Contact` + `VolunteerProfile`），填紧急联系人时系统里**没有**那个人 →
-   自动建出 reference-only 记录并关联上，关系必填；
-   再录第二个志愿者，填**同名同号**的紧急联系人 → 表单自动关联到刚才那一条，
-   不产生第二条 reference-only 记录；
-   故意制造一条重复，用合并功能并掉，验证引用全部改指过去；
+2. 录一个志愿者（`Contact` + `VolunteerProfile`），在 inline 里填一个紧急联系人
+   （姓名 + 电话 + 关系，三样都必填，不填关系存不下去）；
+   **确认 `Contact` 列表里没有多出任何一条只有姓名电话的记录**；
+   故意制造一条重复的 `Contact`，用合并功能并掉，验证引用全部改指过去；
 3. 同一个人建两个 `Assignment`、指向两个不同 `Position`、各有不同上级，
    其中一条汇报线跨 kind（employee 编制 → board 编制）；
 4. 开一个活动，给**同一个人登记两个不同角色**、分别记工时，总工时对得上；
@@ -1880,13 +2001,14 @@ Phase A 的 A10 用了"每条钉住什么"的清单，本阶段沿用。下面�
 | 薪酬 / 工资数据 | 见 D11，敏感度最高且 MVP 无功能需要 | 要算人力成本或做预算报表时，连同权限方案一起设计 |
 | 一个编制多个上级（矩阵式实线/虚线汇报） | 见 D11，小基金会极少有；`Position.reports_to` 现在是单个外键 | 真的出现双线汇报时，把 `reports_to` 改成多对多 |
 | **带日期的编制层级（组织架构的历史）** | D11 第二次修订解决了"**换人**"，没解决"**重组**"。`Position.reports_to` 是无日期的可变字段，改了旧架构就只剩 simple-history。这是 D15「载体二」第二个条件（关系自己没有属性）的边界 —— 一旦汇报线需要起止日期，条件就破了，按规则必须升级成表 | 需要回答"**2025 年 3 月的组织架构长什么样**"时。做法是给编制层级单独一张带 `start_date` / `end_date` 的表（`PositionReportingLine`），`Position.reports_to` 降级为"当前值"的缓存或直接删掉。**这是双时态建模，成本不低，别顺手做** |
+| **请假 / 停职的历史（`Leave` 表）** | `Assignment.status` 只记**当前**状态，答不出"谁在去年三月请过假"（只能翻 simple-history）。按 D15 三条件检验：一个人可以有多段请假 → **基数条件破了** → 严格说该用表。现在不做，因为基金会当前的需求是"这个人今天能不能排班"，不是历史统计 | 需要按请假历史做统计、或需要给请假本身记起止和事由时。形状：`Leave(assignment, start_date, end_date, reason)`，建的时候同期带上 `end_date >= start_date` 和 simple-history；`Assignment.status` 降级成派生值或保留为当前值缓存 |
 | **`Position.headcount`（编制人数）** | 现在一个 `Position` 可以有任意多个在职 `Assignment`，所以 `vacant()` 只认"一个人都没有"，表达不了"3 个坑填了 2 个" | 真的需要按编制数做招聘缺口统计时 —— 加一个整数字段即可，**不改结构**，`vacant()` 改成比较在职人数与 `headcount` |
 | Membership / 会员制 | 基金会未必有会员概念 | 需求出现时 |
 | REST API、前后端分离 | Admin + HTMX 能撑很久 | 要做志愿者自助登录的手机端时 |
 | 软删除 | 现有 `is_active` 已覆盖"停用"语义，不同时上两套 | 出现"误删要恢复"的真实事故时 |
-| **`Guardianship` 法定监护专用表** | 2026-07-28 整体移出 Phase B。基金会有没有同意书流程还没答复，而"活动前通知未成年人家长"这条需求已由 `is_minor` + `emergency_contact` 闭环，它不再是任何功能的前置条件（见 D15） | 基金会答复"有同意书流程"时。形状：`minor` / `guardian` → Contact（都 `PROTECT`，不同 `related_name`）/ 监护类型 / 同意书签署日期 / 能否代签 / 起止日期；建的时候**必须**同期带上 `UniqueConstraint(minor, guardian, start_date, nulls_distinct=False)`、`end_date >= start_date`、"监护人不能是自己"、simple-history，以及**两侧的 admin inline**（否则会重犯 `Relationship` 的反向显示缺口）。放 `contact` app（D17） |
-| **紧急联系人升级成 `EmergencyContact` 专用表** | 现在走 `Contact.emergency_contact` 自引用 FK + `is_reference_only`（见 D15），三条件全满足，不需要表。**而且这是所有起点里最好迁的一个**：每条都已经是指向真实记录的外键，迁移是一段纯机械的 `bulk_create` + `RemoveField`，没有去重、没有姓名匹配、没有"这两个王秀英是不是同一个人"，每人 ≤1 条时还是可逆的。关系标签复用 `RelationshipType`，词表到时候现成 | **需要第二个紧急联系人时**（基数条件一破，D15 的规则就要求用表）。次要触发条件：需要给这段关系加起止日期或其他专有字段 |
-| 逐字段合并的交互界面（"保留哪个邮箱、哪个地址"） | 合并功能本身**已进 Phase B**（reference-only 会持续制造重复，不能等）。MVP 阶段规则简单够用：保留方字段优先，被合并方只在保留方为空时补进来 | 真出现"两条都有值且都不想丢"的实际争议时 |
+| **`Guardianship` 法定监护专用表** | 2026-07-28 整体移出 Phase B。基金会有没有同意书流程还没答复，而"活动前通知未成年人家长"这条需求已由 `is_minor` + `EmergencyContact` 闭环，它不再是任何功能的前置条件（见 D15） | 基金会答复"有同意书流程"时。形状：`minor` / `guardian` → Contact（都 `PROTECT`，不同 `related_name`）/ 监护类型 / 同意书签署日期 / 能否代签 / 起止日期；建的时候**必须**同期带上 `UniqueConstraint(minor, guardian, start_date, nulls_distinct=False)`、`end_date >= start_date`、"监护人不能是自己"、simple-history，以及**两侧的 admin inline**（否则会重犯 `Relationship` 的反向显示缺口）。放 `contact` app（D17） |
+| **把 `EmergencyContact.name` / `.phone` 升级成 FK → `Contact`** | 现在存文本（D15 第三次修订，为了不让第三方进 `Contact`）。代价是重复存储、无反查、且当紧急联系人本来就是系统里的人时数据会分裂 —— **这些是主动接受的，不是遗漏**。⚠️ **这是文档里标注为「痛」的那个迁移方向**：要去重、判断同一人、建 `Contact`、连关系，且不可逆 | 重复存储真的造成过一次事故时（打了过期的号码）。**升级前必须先想清楚 D15 第四条判据怎么办** —— 那正是当初选文本的唯一理由，不能因为嫌重复就把它推翻。折中方案是加一个**可空**的 `contact` FK：能关联的关联，关联不上的留文本 |
+| 逐字段合并的交互界面（"保留哪个邮箱、哪个地址"） | 合并功能本身**暂列 Phase B**（理由换过一次，见那一节）。MVP 阶段规则简单够用：保留方字段优先，被合并方只在保留方为空时补进来 | 真出现"两条都有值且都不想丢"的实际争议时 |
 | `Skill` 字典表 + `VolunteerProfile.skills` | 需求不紧急，且**没有任何东西依赖它**（ministry 视图不需要技能）。设计已想清楚：字典表带 `code`（D5 通则）+ M2M 挂 `VolunteerProfile`，要加时照 D5 直接建，无需重新设计 | 真的要按技能找志愿者时（"谁会西班牙语翻译"）。注意语言偏好已有 `Contact.preferred_language`，别和技能混为一谈 |
 | Ministry 的层级（子 ministry） | ERPNext 的 Department 是树形，但小基金会大概率是平的。真要加就是一个可空的 `parent` 自引用 FK —— 按 D15 的三条件检验：最多一个父、无独立属性、只有一种类型，**自引用 FK 正是对的载体** | 真出现"报税志愿下面还分几个小组"时 |
 | `PositionRole` 字典表（取代 `Position.is_leader` 布尔） | 现在只需要区分 leader / 非 leader，一个布尔够了 | 角色长到第三种时（如 leader / 副手 / 培训中），按 D5 升级成带 `code` 的字典表 |
@@ -1930,10 +2052,94 @@ Phase B 的验收是：**你自己能在本机跑通一遍完整流程** —— 
 | 1 | 未成年志愿者有没有同意书 / 家长授权流程 | 基金会 | 只决定 `Guardianship` 什么时候建，Phase B 已绕开 |
 | 2 | 背景审查有效期多长 | 基金会 | 先用 730 天占位，`base.py` 里注明是未确认默认值 |
 | 3 | `EmploymentType` 的实际取值 | 基金会 | 不影响建模 —— 正因为不知道才做成字典表，到时候 admin 里加行 |
+| ~~4~~ | ~~跟不跟踪请假 / 停职~~ | ✅ **已答复（2026-07-28）：跟踪。** 因此 `Assignment.status` 进 Phase B，见「`Assignment.status`」 | — |
+| 5 | `status` 除 `on_leave` / `suspended` 外还需要哪几种 | 基金会 | 不阻塞 —— 它是 `TextChoices`（`serving()` 要按它分支，符合 D5 判定规则），加值就是改代码，接受 |
 
 ---
 
 ## 七、2026-07-28 修订记录了什么
+
+### 第七轮 · D14 重写：约束是唯一规则，提示靠映射表
+
+> 起因：一轮外部评审指出"靠注释保证两处同步 = 迟早不同步"。
+> **它对后果的判断错了，但对方向的判断对了。**
+
+**先纠正严重性**：评审说会导致"脏数据悄悄入库"和"幽灵 Bug" —— **两者都不可能发生**，
+而 D14 原文就写着为什么：约束是唯一强制层，`clean()` 漂移的后果只有两种 ——
+比约束宽则被 `validate_constraints()` 拦下（丑但拦住了），比约束严则误拒合法输入
+（烦人但可见）。**评审把一个体验问题描述成了数据完整性事故。**
+
+**但仍然改了**，因为 D14 自己就承认"明知故犯"、"代价必须靠纪律兜住"：
+
+| # | 改了什么 | 为什么 |
+|---|---------|-------|
+| a | 规则**只写在约束里**，不再在 `clean()` 里重写一遍 | 改一条规则只改一处，漂移在结构上不可能 |
+| b | 字段级提示改用 **`violation_error_code` + `CONSTRAINT_FIELD` 映射表 + 一个 mixin** | Django 把约束错误一律挂 `NON_FIELD_ERRORS`，没有内置的字段挂载。**这是呈现问题，解法只动呈现** |
+| c | **否决**"抽 Validator 函数在 `clean()` 里调"（评审的原提案） | 那仍是两处调用，而且 Python 函数进不了数据库，规则还得被约束再表达一遍 —— **重复没消除，只是从"逻辑"降级成"调用"**。同上一轮"用 `save()` 支撑防 `save()` 绕过的约束"的自指 |
+| d | 注释纪律换成**守卫测试**：遍历 `Meta.constraints`，漏登记映射就变红 | 文档第四次用"测试当 lint"（迁移守卫 / D16 / `bulk_create` / 本条） |
+| e | 新增硬性要求：**逐条实测约束在表单层会不会真报错** | `CheckConstraint.validate()` 遇 `FieldError` **静默跳过** —— 第三轮那批表达式约束（`Least`/`Greatest`/`Coalesce`、`Lower(Trim())`）正是高危区。测不通的，`clean()` 要真写一份并注明"它是表单层唯一拦截" |
+
+**教训：当一条决策自己写着"必须靠纪律兜住"时，它是在标注一个待解决的问题，
+不是一个可以长期接受的状态。** D14 原文把话说得很诚实（"明知故犯"），
+诚实让它撑了很久 —— 但诚实不等于正确，有了不靠纪律的解法就该换掉。
+
+### 第六轮 · 紧急联系人改用专用表，`Contact` 里不再有幽灵记录
+
+> 起因：一轮外部评审指出 `is_reference_only` 是"用幽灵记录污染核心业务表"，
+> 并给出了最强的一击：**任何一处 `Contact.objects.filter(...)` 忘了排除，
+> 就是把志愿者通讯发给几百个第三方 —— 这是隐私事故，不是数字不准。**
+
+| # | 改了什么 | 为什么 |
+|---|---------|-------|
+| a | **D15 新增第四条判据：主体性** | 前三条判据（基数、属性、类型数）全是**形状**问题，漏掉了更靠前的一问：**这个实体是主动与基金会交互的主体，还是别人档案上的一项信息？** 后者不该进 `Contact`，哪怕形状上完全放得下 |
+| b | 紧急联系人改用 **`EmergencyContact` 专用表，姓名电话存文本** | 四条判据里前三条全过、**第四条不过**。`Contact` 恢复纯洁 —— `Contact.objects.filter(...)` 在结构上再也够不着第三方 |
+| c | **删掉 `is_reference_only`、`Contact.emergency_contact`、`Contact.objects.people()` 及其 grep 守卫** | 幽灵记录不存在了，兜住它的那整套纪律也就不需要了 |
+| d | 「紧急联系人的录入与去重」从五大段简化成三条要求 | 没有身份要认，就没有认错的可能。自动建、命中预选、去重判定、安全阀、残留风险**整体消失** —— 这是文本方案唯一比 FK 版简单的地方 |
+| e | 「关系必填」从 `CheckConstraint` 降级成 FK `null=False` | 拆表白捡的简化 |
+| f | 推迟清单里那条「升级成 `EmergencyContact` 专用表」改写成「把文本升级成 FK」 | 方向反过来了，而且**这次是「痛」的那个方向** |
+| g | `Contact.merge()` 的 Phase B 理由**换过一次**，并标注为削减范围时的第一候选 | 原理由（"reference-only 会持续制造重复"）已经失效，新理由（跨渠道录入）比它弱，如实说 |
+
+**如实记下的四条代价**（D15 里详列）：王秀英有三个孩子做志愿者 = 电话存三份且会漂移；
+她自己来做志愿者时出现第四份；没有反查；将来要升级成 FK 是痛的迁移。
+**这四条不是被驳倒了，是被主动接受了** —— 判断是
+**一次群发隐私事故的代价 > 电话号码存三份的代价**，前者不可挽回且影响第三方。
+**这是风险不对称的取舍，不是"哪个设计更优雅"的取舍。**
+
+**两条教训：**
+
+1. **形状判据回答"放得下吗"，主体性判据回答"该不该放"。先问后者。**
+   `is_reference_only` 那一版把纪律从"读取要分支"搬到了"查询要过滤"，
+   **搬对了地方，但没问该不该搬。**
+2. **当你发现自己要靠"所有人每次都记得调用某个方法"来维持正确性时，
+   先回头问那个东西是不是根本不该在那张表里。** 结构性保障不需要任何人记得什么 ——
+   `people()` + grep 守卫那一整套设计，是这条教训的反面教材。
+
+> **顺带**：这条判据同样解释了文档里早就有的另一条结论 ——
+> `Ministry` **绝不做成 `contact_type=organization` 的 Contact 行**。
+> 当时是就事论事写的，现在归纳成了判据。
+
+### 第五轮 · `Assignment.status`：状态与任期正交
+
+> 起因：一轮外部评审指出"用日期派生完全替代 `is_active`"混淆了「状态」和「任期」，
+> 举例请假 / 停职。**对 `Assignment` 成立，对 `Relationship` 不成立**（关系不会被停职）。
+> 基金会已确认**跟踪请假 / 停职**，所以这条进 Phase B。
+
+| # | 改了什么 | 为什么 |
+|---|---------|-------|
+| a | `Assignment` 加 `status`（`TextChoices`：active·on_leave·suspended） | 只有日期的话，表达请假的唯一办法是**截断 `end_date` 再新建一行** —— 那会算错任期长度、篡改真实协议日期，且原始日期只剩在 simple-history 里 |
+| b | **不是加回 `is_active`** | 那会原封不动把矛盾请回来（`is_active=True` + `end_date=2020` 照样存得进去）。**评审说的"`is_active`（或者一个 status 枚举）"，这两个不是同义词** |
+| c | 拆成两个谓词：`.active()`（纯日期，共享）+ `.serving()`（AND status，`Assignment` 专有） | 规矩一句话：**`status` 只能和日期做 AND，永远不能单独用** |
+| d | 明确**不加**"状态必须和日期一致"的约束 | 那要在 `CheckConstraint` 里引用"今天"，不是不可变表达式，数据库拒绝。靠查询纪律，不靠约束 —— 而且 `status=on_leave` + 已过期的 `end_date` 是**惰性的**，`serving()` 先 AND 了日期 |
+| e | ministry 页面：**当值名单用 `.serving()`，花名册用 `.active()`** | 请假的人不该在"现在谁在管"里，但仍然是这个团队的成员 |
+| f | 索引从 `(position, end_date)` 改成 `(position, status, end_date)` | `.serving()` 三个条件一次覆盖 |
+| g | 推迟清单新增「请假历史（`Leave` 表）」 | `status` 只记**当前**状态。按 D15 三条件，一个人可以有多段请假 → 基数破 → 严格说该用表。如实记下这是个已知限制 |
+
+**教训：原方案的病根被诊断错了。** 当初删 `Relationship.is_active` 的理由是
+"两个维度会互相矛盾"，于是推广成"任何时候都不该有第二个维度"。
+**真正的病根不是"有两个维度"，而是"两个维度被当成二选一"** ——
+旧 `Relationship` 的 `list_filter = ["is_active"]` 能**独立**按它过滤，绕开日期给出错误答案。
+只要规定状态永远只能 AND、不能替代，正交本身完全安全。
+**把一次正确的删除过度推广成一条普适规则，是这次的错。**
 
 ### 第四轮 · Admin 的边界（新增 D18）
 
@@ -2011,11 +2217,11 @@ Phase B 的验收是：**你自己能在本机跑通一遍完整流程** —— 
 | # | 改了什么 | 为什么 |
 |---|---------|-------|
 | 1 | 交付策略从"能给基金会的人看"改成"可演示" | 与 Phase B 已修订的验收口径**自相矛盾**，总纲当时漏改了 |
-| 2 | 紧急联系人最终定为 **`Contact.emergency_contact` 自引用 FK + `is_reference_only`**。同一天里改过两次：先从 `Relationship` 改成纯文本字段，当天又推翻改成全 FK | 纯文本方案的全部理由是"躲开幽灵记录"，而幽灵记录其实**躲得开，只是换个地方付** —— 用 `is_reference_only` 标记 + 过滤解决之后，纯文本就只剩缺点了。**留下的教训：当一个方案的全部理由是"为了躲开某个代价"时，先确认那个代价真的躲不开** |
+| 2 | 紧急联系人（当轮）定为 **`Contact.emergency_contact` 自引用 FK + `is_reference_only`**。⚠️ **本条已被第六轮推翻**，现行方案是专用表 + 文本。同一天里改过两次：先从 `Relationship` 改成纯文本字段，当天又推翻改成全 FK | 纯文本方案的全部理由是"躲开幽灵记录"，而幽灵记录其实**躲得开，只是换个地方付** —— 用 `is_reference_only` 标记 + 过滤解决之后，纯文本就只剩缺点了。**留下的教训：当一个方案的全部理由是"为了躲开某个代价"时，先确认那个代价真的躲不开** |
 | 2a | 紧急联系人的关系标签**复用 `RelationshipType`**，加 `usable_as_emergency_contact` 布尔过滤下拉 | 亲属那一簇两边完全重合，共用词表才不会攒出"母亲/妈/mother"。噪音（`employee of` 等外部归属类型）用 `limit_choices_to` 挡掉，同 `preferred_language` 已有的写法 |
 | 2b | 判定规则定为 **归一化姓名一致 AND 归一化电话一致**，否决"电话 70% 相似" | E.164 下差一位就是另一个号码，相似度没有语义（92% 相似 = 完全不同的人）；而格式差异 `phonenumber_field` 早已归一化掉。精确匹配顺带保证**提示不披露用户尚未输入的信息** |
 | 2c | 命中唯一一条时**把关联做成表单默认值** | 解决"用户懒得关联"的唯一有效手段 —— 懒惰的用户直接保存，做的恰好是对的事。与"不能自动关联"的界线是「静默替换 vs 可见的默认值」 |
-| 2d | **合并重复 Contact 从推迟清单移进 Phase B** | `is_reference_only` 会持续制造重复，没有合并只能眼看着攒，而"攒够了再做"意味着带着脏数据做。范围限定为通用外键改指 + 冲突拒绝，逐字段合并 UI 仍推迟 |
+| 2d | **合并重复 Contact 从推迟清单移进 Phase B** | ⚠️ **这条理由已随第六轮失效**（`is_reference_only` 不存在了），新理由见 Phase B 那一节。原文：`is_reference_only` 会持续制造重复，没有合并只能眼看着攒，而"攒够了再做"意味着带着脏数据做。范围限定为通用外键改指 + 冲突拒绝，逐字段合并 UI 仍推迟 |
 | 3 | `Guardianship` 整体移出 Phase B | 改 2 之后"活动前通知家长"已由 `is_minor` + 紧急联系电话闭环，它不再是任何功能的前置条件 |
 | 4 | `.active()` 补上 `start_date` 判定 | 原定义只看 `end_date`，未来才上岗的人**今天就算在职**，而且不报错 |
 | 5 | 新增 **D16 · 时间口径** | `timezone.now().date()` 是 UTC 日期，PT 下午 5 点后判定提前跨天。三层落地：单一入口 + 注入时钟 + ruff `DTZ` 与 grep 守卫 |

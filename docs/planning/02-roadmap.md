@@ -31,6 +31,10 @@
 
 > **2026-07-28 二次修订**：`Position`（编制）从 `Assignment` 里拆出来了，B5 整段重写。
 > 见 `goal.md` D11「第二次修订」和文末「计划外记录」上面的那条说明。
+>
+> **2026-07-28 第九轮**：汇报链遍历收进 `org/services.py::build_org_tree()` 一处，
+> 配 grep 守卫（B1）。原来那条"所有遍历都带 `visited` 兜底"是纪律，现在是结构。
+> 同轮否决了"改用 Postgres `LTREE`"的评审建议 —— 见 `goal.md`「汇报线的环」。
 
 **同时把 `contact` 现有的三个欠账收掉**（关系的反向显示、类型表的 `code`、
 `Contact.__str__` 的重名消歧）—— 它们不收，后面新建的每一个 autocomplete
@@ -60,6 +64,7 @@
 | **把 `EmergencyContact.name` / `.phone` 升级成 FK → `Contact`** | 推迟清单 —— **且这是「痛」的迁移方向**。重复存储是主动接受的代价，别在实施时顺手优化掉 |
 | **带日期的编制层级**（组织架构的历史） | 推迟清单 —— 本阶段解决的是"**换人**"，不是"**重组**"。`Position.reports_to` 改了，旧架构只剩 simple-history |
 | **`Position.headcount`**（编制人数） | 推迟清单 —— `vacant()` 只认"一个人都没有"，表达不了"3 个坑填了 2 个" |
+| **把邻接表换成 `LTREE` / 递归 CTE** | 推迟清单 —— 2026-07-28 评审建议过，未采纳。几十行的表，`build_org_tree()` 一次查询取全表就是最优解。**中途手痒时先读 `goal.md`「为什么不上 Postgres 的 LTREE 扩展」那张表** |
 
 ---
 
@@ -77,7 +82,7 @@
 
 ```
 B0 基线与准备（分支 / ruff / 确认不阻塞项）
- └→ B1 core：local_today() + DateRangeQuerySet + 三条守卫测试 + 建空的 services.py
+ └→ B1 core：local_today() + DateRangeQuerySet + 守卫测试（3 条 grep + 2 条约束）+ 建空的 services.py
      └→ B2 contact①：RelationshipType 收口（code / is_symmetric / 唯一约束）
          └→ B3 contact②：Relationship 收口（双向显示 → 归一化 → 删 is_active）
              └→ B4 contact③：Contact 收口（__str__ / EmergencyContact / 查重 / 合并 / is_minor）
@@ -338,13 +343,36 @@ def test_business_logic_does_not_import_admin(self):
 `save_model` / `save_related` / `get_queryset` 重写"，合起来就是
 "**把 `admin.py` 删掉还剩全部业务逻辑**"。
 
+**再加一条汇报链遍历的守卫测试**（2026-07-28 第九轮新增，用测试当 lint 第六次）：
+
+```python
+def test_nobody_traverses_reports_to_outside_org_services(self):
+    """除 org/services.py 外，不许出现 `.reports_to` 的循环 / 递归用法。
+
+    全项目只有 build_org_tree() 一处遍历汇报链，环的兜底和 N+1 的规避都在它里面。
+    原方案是「所有遍历汇报链的代码一律带 visited 兜底」—— 那是纪律性保障，
+    和 B4.2 判过刑的 Contact.objects.people() 是同一种东西。
+    见 goal.md「汇报线的环」第九轮修订。
+
+    ⚠️ 写法：找 while / for 循环体里出现 reports_to 的行，或 `.reports_to` 与
+       函数自身名字同时出现的行。宁可宽一点（误报了加豁免注释），
+       也别漏 —— 漏掉的症状是 Phase C 的组织架构图挂死。
+       models.py 里作为字段定义的 `reports_to = FK(...)` 不算，按 `= ` 排除。
+    """
+```
+
+⚠️ **这条测试 B1 时会空跑**（`org` app 还不存在），**B5 建 `Position` 时必须回来确认它真的会红** ——
+B9 的清单里有这一项。
+
 **顺带在 B1 就把 `contact/services.py` 建出来**（空文件 + 一行 docstring）。
 B3.1b 的 `orient()` / `direction_choices()` 和 B4.4 的 `merge_contacts()` 都往这里放。
 现在建成本为零，等到用时再建就会有人顺手写进 `models.py` 或 `Form` 里。
+**`org/services.py` 同理 —— B5 一 `startapp` 就建，`build_org_tree()` 是它的第一个住户。**
 
-两条 grep 守卫的写法：遍历项目下的 `*.py`（跳过 `.venv`、`*/migrations/*`
-和 `core/timeutils.py` 自己），正则找 `date.today()` / `timezone.now().date()`，
-以及按文件名过滤后找 `django.contrib.admin`，命中就 fail 并打印文件和行号。
+三条 grep 守卫的写法：遍历项目下的 `*.py`（跳过 `.venv`、`*/migrations/*`
+和 `core/timeutils.py` / `org/services.py` 各自），正则找 `date.today()` / `timezone.now().date()`，
+按文件名过滤后找 `django.contrib.admin`，以及找循环里的 `reports_to`，
+命中就 fail 并打印文件和行号。
 **`ruff` 的 `DTZ` 抓不到 `timezone.now().date()`**（那是 tz-aware 的，
 linter 认为合法），所以这条测试不能省。
 
@@ -1090,7 +1118,9 @@ class Position(TimeStampedModel):
     """一个编制 = 组织结构里的一个格子。没人在任时它照样存在（空缺）。
 
     汇报线挂在这里，不挂在 Assignment 上 —— 换人时下属一行都不用改。见 goal.md D11。
-    ⚠️ 任何递归走 reports_to 的代码必须带 visited 兜底：跨行环路数据库拦不住。
+    ⚠️ 不要自己递归 reports_to —— 走 org.services.build_org_tree()。
+       跨行环路数据库拦不住，环的兜底和 N+1 的规避都在那个函数里，
+       全项目只有它一处遍历汇报链（core/tests.py 有 grep 守卫盯着）。
     """
     code       = SlugField(unique=True)                # 代码只认它，不认 name
     name       = CharField()                           # "项目总监"，save() 归一化空白
@@ -1165,7 +1195,7 @@ class PositionQuerySet(models.QuerySet):
 3. **admin 里要有可见入口** —— `PositionAdmin` 加一个「空缺」`SimpleListFilter`。
    看不见的空缺等于没建这张表。
 
-### 汇报线的环
+### 汇报线的环 + 唯一的一处遍历（2026-07-28 第九轮修订）
 
 `CheckConstraint` 只挡得住深度 1。**A→B→A 是两次各自合法的插入，
 数据库用 CHECK 表达不了跨行环路**，后果是任何递归走 `reports_to` 的代码挂死。
@@ -1174,11 +1204,52 @@ class PositionQuerySet(models.QuerySet):
 
 1. `Position.clean()` 向上走链（带 `visited` 集合、限深 20）拒绝成环。
    按 D14 这**只是提示层** —— `bulk_create` 绕得过去，是已知的不完美，不粉饰。
-2. **所有遍历汇报链的代码一律带 `visited` 兜底**，不假设数据是干净的。
-   这条写进 `Position` 的 docstring（上面骨架里已经写了）。
+2. **全项目只有一处遍历汇报链**：`org/services.py` 的 `build_org_tree()`。
+
+> **第 2 条原文是"所有遍历汇报链的代码一律带 `visited` 兜底"** —— 那是**纪律性保障**，
+> 和 B4.2 判过刑的 `Contact.objects.people()`（"靠所有人每次都记得调用"）是同一种东西。
+> 同一条标准这里没执行，第九轮修订补上。见 `goal.md`「汇报线的环」。
+
+```python
+# org/services.py —— D18 落点：永久资产，Phase C 的组织架构图 import 同一个函数
+def build_org_tree(positions=None):
+    """一次查询取全表，在内存里建树。全项目唯一一处遍历汇报链的代码。
+
+    ⚠️ 环的兜底在这里，不在调用方 —— 调用方拿到的已经是树，
+       不需要知道「数据可能有环」这回事。见 goal.md「汇报线的环」。
+    ⚠️ 一次查询取全表，不要逐级 position.reports_to 往上取（那是 N+1）。
+       Position 是几十行的表，全表取回在内存里建树比任何递归查询都快。
+    """
+    if positions is None:
+        positions = list(Position.objects.select_related("ministry"))
+    by_id = {p.id: p for p in positions}
+    children = defaultdict(list)
+    roots = []
+    for p in positions:
+        seen, cur = set(), p          # 沿 reports_to 上溯，撞到自己就是环
+        while cur.reports_to_id and cur.id not in seen:
+            seen.add(cur.id)
+            cur = by_id.get(cur.reports_to_id)
+            if cur is None:           # 上级不在本次查询范围内，当根处理
+                break
+        ...                           # 成环的那一支挂到根上 + logger.warning
+    return roots
+```
+
+**三个要点，一个都不能省：**
+
+1. **`visited` 在函数里，不在调用方。** 这就是它和原方案的全部区别。
+2. **一次查询。** 测试用 `assertNumQueries(1)` 钉住 —— 防止以后有人改回逐级取。
+3. **喂进一个环不许挂死。** 测试必须用 `bulk_create` 直接插环（`clean()` 绕过去），
+   断言 `build_org_tree()` 正常返回并记了 warning。
 
 > 好消息：环现在只可能出现在几十行的编制表里，而不是每次招人都新增一行的任职表里。
 > 防线照做，但风险等级从"迟早会踩"降到"基本不会踩"。
+
+> **⚠️ 不要换成 LTREE / 递归 CTE。** 2026-07-28 有过一轮这个建议，未采纳 ——
+> 量级不对（几十行）、LTREE 的 path 维护依赖 `save()`（违反 D9，`bulk_create` 绕得过）、
+> 丢掉 `reports_to` 的 `PROTECT`、或者 FK + path 并存违反 D11。
+> **完整论证和重启条件见 `goal.md`「为什么不上 Postgres 的 LTREE 扩展」+ 推迟清单。**
 
 ### `Assignment`（任职 —— 谁在什么时候占了哪个编制）
 
@@ -1281,6 +1352,14 @@ def test_a_reporting_cycle_is_rejected_by_clean(self)            # A→B→A，�
 def test_deleting_a_position_with_reports_is_blocked(self)       # PROTECT，不是 SET_NULL
 def test_deleting_a_position_with_assignments_is_blocked(self)   # 任职历史不跟着消失
 def test_a_reporting_line_can_cross_kinds(self)                  # 执行总监(employee) → 理事长(board)
+
+# —— build_org_tree()：第九轮修订的验收点 ——
+# 前两条钉住「遍历只有一处」这个结构，第三条钉住它没退化回 N+1。
+def test_build_org_tree_survives_a_cycle_inserted_by_bulk_create(self)
+    # clean() 那道防线绕得过去，所以遍历必须自己扛得住脏数据：
+    # 不挂死、不 RecursionError、成环那一支挂到根上并记 warning。
+def test_build_org_tree_nests_children_under_their_manager(self)
+def test_build_org_tree_uses_a_single_query(self)                # assertNumQueries(1)
 
 # —— 空缺（这次修订的验收点）——
 def test_a_position_becomes_vacant_when_its_last_tenure_ends(self)
@@ -1532,6 +1611,9 @@ volunteer/management/commands/seed_demo.py   （或放 core，随意，但只此
       `Contact.objects.all()` 当人员列表，跑测试确认变红，再删掉
 - [ ] **分层守卫真的会红**：临时在 `contact/forms.py` 里写一句
       `from django.contrib import admin`，跑测试确认变红，再删掉
+- [ ] **汇报链遍历守卫真的会红**：临时在 `org/admin.py` 里写一个
+      `while p.reports_to: p = p.reports_to` 的循环，跑测试确认变红，再删掉。
+      **这条必须实测** —— 它 B1 写的时候 `org` 还不存在，是空跑的
 
 ### 分层（不用点浏览器，grep 一遍就行）
 
@@ -1541,6 +1623,8 @@ volunteer/management/commands/seed_demo.py   （或放 core，随意，但只此
       （已有守卫测试，这里是人工复核一遍）
 - [ ] `contact/services.py` 里有 `orient()` / `direction_choices()` / `merge_contacts()`
       三个函数，**它们的函数体里不出现任何 `Form` 或 `ModelAdmin`**
+- [ ] `org/services.py` 里有 `build_org_tree()`，且**全项目只有它一处遍历 `reports_to`**
+      （已有守卫测试，这里人工复核一遍）
 - [ ] **四个 `SimpleListFilter`（生效中 / 空缺 / 疑似重复 / 未成年）的 `queryset()` 里
       没有任何日期计算或业务比较**，每个都只是调一个 QuerySet 方法
 - [ ] `EventAdmin` 里**搜不到** `capacity` 的比较 —— 只有 `obj.is_over_capacity`

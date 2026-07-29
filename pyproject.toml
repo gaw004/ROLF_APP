@@ -1,0 +1,16 @@
+[tool.ruff]
+target-version = "py314"
+exclude = [".venv", "*/migrations/*"]
+
+# 88 是 ruff 的默认值（black 的口径），但 Phase A 的代码是按 ~100 写的，
+# 而 Django 自己的上限是 119。设 100 是为了不因为一个格式偏好去重排既有代码 ——
+# 本项目引入 ruff 的目的是 D16 的 DTZ，不是统一排版风格。
+line-length = 100
+
+[tool.ruff.lint]
+# DTZ = flake8-datetimez，就是为「时区错一天」这类问题存在的规则组。
+# DTZ011 禁 date.today()、DTZ005 禁裸 datetime.now()。见 goal.md D16。
+#
+# ⚠️ DTZ 抓不到 timezone.now().date()（那是 tz-aware 的，linter 认为合法），
+#    所以 core/tests.py 里还有一条 grep 守卫测试，两者缺一不可。
+select = ["E", "F", "DTZ"]

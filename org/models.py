@@ -1,8 +1,10 @@
-"""The organisation chart's skeleton: ministries, employment types, positions.
+"""The organisation chart: ministries, employment types, positions, tenures.
 
 A Position is a box on the chart, not a person. It exists whether or not
 anybody is in it — that is the whole point of the table, and the reason the
 reporting lines hang off it rather than off a tenure record. See goal.md D11.
+
+Assignment is the other half: who is in which box, and between which dates.
 """
 
 from django.core.exceptions import ValidationError
@@ -10,8 +12,11 @@ from django.db import models
 from django.db.models.functions import Lower
 from simple_history.models import HistoricalRecords
 
+from contact.models import Contact
 from core.constraints import ConstraintErrorFieldMixin
 from core.models import ImmutableCodeMixin, TimeStampedModel
+from core.querysets import DateRangeMixin, DateRangeQuerySet
+from core.timeutils import local_today
 
 
 class Ministry(ImmutableCodeMixin, ConstraintErrorFieldMixin, TimeStampedModel):
@@ -101,6 +106,28 @@ class EmploymentType(ImmutableCodeMixin, ConstraintErrorFieldMixin, models.Model
         return self.name
 
 
+class PositionQuerySet(models.QuerySet):
+    def vacant(self, on=None):
+        """Posts that still exist but have nobody serving in them on `on`.
+
+        This query is the first reason the table was split out at all, so it
+        ships with it rather than "later".
+
+        Three parts, none of them optional:
+
+        1. is_active=True — a post that was abolished is not a vacancy, and
+           mixing the two turns the hiring list into fiction.
+        2. `on` is a parameter, like .active() — D16's second layer, and it
+           throws in "which posts were empty last June" for free.
+        3. active(), not serving(): somebody on leave still holds the post, so
+           the box is not open for applications.
+        """
+        on = on or local_today()
+        return self.filter(is_active=True).exclude(
+            pk__in=Assignment.objects.active(on=on).values("position_id")
+        )
+
+
 class Position(ImmutableCodeMixin, ConstraintErrorFieldMixin, TimeStampedModel):
     """One box on the org chart. Vacant is a perfectly normal state for it.
 
@@ -171,6 +198,8 @@ class Position(ImmutableCodeMixin, ConstraintErrorFieldMixin, TimeStampedModel):
     # Org chart changes are exactly the thing somebody asks about a year later.
     history = HistoricalRecords()
 
+    objects = models.Manager.from_queryset(PositionQuerySet)()
+
     class Meta:
         ordering = ["ministry__name", "-is_leader", "name"]
         constraints = [
@@ -225,3 +254,137 @@ class Position(ImmutableCodeMixin, ConstraintErrorFieldMixin, TimeStampedModel):
         # ministries' coordinators apart — the same reason Contact.__str__
         # carries an email address.
         return f"{self.name}（{self.ministry.name}）" if self.ministry_id else self.name
+
+
+class AssignmentQuerySet(DateRangeQuerySet):
+    def serving(self, on=None):
+        """In their term AND able to serve today. The duty roster.
+
+        ⚠️ status may only ever be ANDed with the dates, never used on its own.
+           On its own it is exactly the disease Relationship.is_active had:
+           two independent dimensions collapsed into one, so status=active on a
+           tenure that ended in 2020 reads as "currently serving".
+
+        The roster of who belongs to a team is active(), not this — somebody on
+        leave is still a member of the team.
+        """
+        return self.active(on).filter(status=Assignment.Status.ACTIVE)
+
+
+class Assignment(ConstraintErrorFieldMixin, DateRangeMixin, TimeStampedModel):
+    """One person's tenure in one position, between two dates.
+
+    Six fields. No kind / title / ministry / is_leader / reports_to — all of
+    those describe the box, so they live on Position, and replacing whoever is
+    in the box therefore touches this row alone.
+
+    status and the term are two dimensions at right angles, not is_active in a
+    hat:
+
+    - there is no is_active — it would let is_active=True sit next to
+      end_date=2020, and something would believe it;
+    - status only ever describes where somebody stands *inside* the term.
+      Ending is said by end_date and by nothing else;
+    - leave is never recorded by cutting end_date short. That would falsify the
+      agreed dates and miscount the length of service, leaving the real dates
+      only in the history table. Avoiding that is the entire reason this field
+      exists.
+
+    No "status must agree with the dates" constraint: it would have to name
+    today inside a CheckConstraint, which is not an immutable expression and
+    Postgres refuses it. It is also unnecessary — a stale status=on_leave on an
+    expired term is inert, because serving() ANDs the dates first and the
+    person is already out.
+    """
+
+    class Status(models.TextChoices):
+        ACTIVE = "active", "Serving"
+        ON_LEAVE = "on_leave", "On leave"
+        SUSPENDED = "suspended", "Suspended"
+        # ⚠️ Never add "ended". Ending is what end_date says; a second place to
+        #    say it means two answers to the same question, one of them stale.
+
+    contact = models.ForeignKey(Contact, on_delete=models.CASCADE, related_name="assignments")
+    position = models.ForeignKey(
+        Position,
+        # PROTECT. With CASCADE, deleting one box would take the service
+        # history of everybody who ever held it with it.
+        on_delete=models.PROTECT,
+        related_name="assignments",
+    )
+    employment_type = models.ForeignKey(
+        EmploymentType, on_delete=models.PROTECT, null=True, blank=True, related_name="+",
+    )
+    status = models.CharField(
+        max_length=20,
+        choices=Status.choices,
+        default=Status.ACTIVE,
+        help_text="Where they stand within the tenure. Ending it is the end date's job.",
+    )
+    start_date = models.DateField(null=True, blank=True)
+    end_date = models.DateField(null=True, blank=True)
+
+    history = HistoricalRecords()
+
+    objects = models.Manager.from_queryset(AssignmentQuerySet)()
+
+    class Meta:
+        ordering = ["-start_date", "contact"]
+        constraints = [
+            models.CheckConstraint(
+                condition=(
+                    models.Q(end_date__isnull=True)
+                    | models.Q(start_date__isnull=True)
+                    | models.Q(end_date__gte=models.F("start_date"))
+                ),
+                name="assignment_end_date_not_before_start_date",
+                violation_error_message="The end date cannot be before the start date.",
+                violation_error_code="assignment_end_before_start",
+            ),
+            # Short, and that is the news. The old version was
+            # (contact, ministry, kind, title, start_date), with a paragraph
+            # arguing why title had to be in it — splitting Position out made
+            # that whole argument moot, because two jobs are two positions.
+            # Worth remembering: a constraint that keeps growing columns is
+            # usually a model that has not been split yet.
+            #
+            # nulls_distinct=False is not optional. start_date is nullable and
+            # often left empty, and Postgres treats NULL != NULL, so without it
+            # the constraint would wave through any number of duplicates with
+            # no start date. A7's lesson.
+            models.UniqueConstraint(
+                fields=["contact", "position", "start_date"],
+                name="assignment_unique_tenure",
+                nulls_distinct=False,
+                violation_error_message="This person already has a tenure in this position "
+                                        "starting on that date.",
+                violation_error_code="assignment_duplicate_tenure",
+            ),
+        ]
+        # position + status + end_date covers serving() in one index; active()
+        # uses the leftmost column and is happy with the same one.
+        indexes = [models.Index(fields=["position", "status", "end_date"])]
+
+    def clean(self):
+        """The one rule that spans two tables, and therefore cannot be a constraint.
+
+        employment_type only means anything for a paid post, but kind lives on
+        Position and employment_type lives here — a CheckConstraint cannot see
+        across the join. So it is a hint, and D14 says to record it as a hint
+        rather than dress it up: bulk_create walks past this.
+        """
+        super().clean()
+        if (
+            self.employment_type_id
+            and self.position_id
+            and self.position.kind != Position.Kind.EMPLOYEE
+        ):
+            raise ValidationError({
+                "employment_type": (
+                    "Employment type only applies to employee positions "
+                    f"(this one is {self.position.get_kind_display()})."
+                )
+            })
+
+    def __str__(self):
+        return f"{self.contact} — {self.position}"

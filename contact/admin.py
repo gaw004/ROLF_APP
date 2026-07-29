@@ -3,6 +3,8 @@ from django.urls import reverse
 from django.utils.html import format_html
 from simple_history.admin import SimpleHistoryAdmin
 
+from core.admin import InEffectFilter
+
 from .forms import ContactAdminForm
 from .models import Contact, EmergencyContact, Language, Relationship, RelationshipType
 
@@ -255,29 +257,6 @@ class RelationshipTypeAdmin(admin.ModelAdmin):
         # This only covers the admin — RelationshipType.clean() is what catches
         # a script or a shell doing the same thing.
         return ["code"] if obj else []
-
-
-class InEffectFilter(admin.SimpleListFilter):
-    """In effect / ended, derived from the dates. Replaces the is_active field.
-
-    Every option here is one call to a QuerySet method — no date arithmetic in
-    the filter itself (D18). The old list_filter = ["is_active"] is precisely
-    what made that field dangerous: it could be filtered on independently of the
-    dates, and confidently return the wrong rows.
-    """
-
-    title = "生效中"
-    parameter_name = "in_effect"
-
-    def lookups(self, request, model_admin):
-        return [("yes", "生效中"), ("no", "已结束或未开始")]
-
-    def queryset(self, request, queryset):
-        if self.value() == "yes":
-            return queryset.active()
-        if self.value() == "no":
-            return queryset.exclude(pk__in=queryset.model.objects.active())
-        return queryset
 
 
 @admin.register(Relationship)

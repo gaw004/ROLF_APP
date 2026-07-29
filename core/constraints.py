@@ -43,6 +43,9 @@ CONSTRAINT_FIELD = {
     # org.Position
     "position_code_taken": "code",
     "position_reports_to_self": "reports_to",
+    # org.Assignment
+    "assignment_end_before_start": "end_date",
+    "assignment_duplicate_tenure": "start_date",
 }
 
 

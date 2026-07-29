@@ -1184,8 +1184,15 @@ class ContactHistoryTests(TestCase):
             "address_postal_code": "",
             "is_active": "on",
             "notes": "",
-            # One management form per inline: emergency contacts (B4.2), plus
-            # the relationships read from each side (B3.1).
+            # One management form per inline: emergency contacts (B4.2), the
+            # relationships read from each side (B3.1), and the tenures that
+            # org/admin.py hangs on this page (B5). Adding an inline anywhere
+            # breaks every admin POST test until its four keys land here — the
+            # symptom is a 200 with "ManagementForm data is missing".
+            "assignments-TOTAL_FORMS": "0",
+            "assignments-INITIAL_FORMS": "0",
+            "assignments-MIN_NUM_FORMS": "0",
+            "assignments-MAX_NUM_FORMS": "1000",
             "emergency_contacts-TOTAL_FORMS": "0",
             "emergency_contacts-INITIAL_FORMS": "0",
             "emergency_contacts-MIN_NUM_FORMS": "0",

@@ -1,11 +1,25 @@
+import datetime
+
 from django.contrib import admin
 from django.core.exceptions import ValidationError
 from django.db import IntegrityError, transaction
 from django.db.models import ProtectedError
 from django.test import TestCase
 
-from .models import EmploymentType, Ministry, Position
+from contact.models import Contact
+from core.timeutils import local_today
+
+from .models import Assignment, EmploymentType, Ministry, Position
 from .services import build_org_tree
+
+TODAY = local_today()
+YESTERDAY = TODAY - datetime.timedelta(days=1)
+LAST_YEAR = TODAY - datetime.timedelta(days=365)
+
+
+def make_person(last_name):
+    return Contact.objects.create(
+        contact_type=Contact.ContactType.INDIVIDUAL, legal_last_name=last_name)
 
 
 def make_ministry(code="food_pantry", name="Food Pantry", **kwargs):
@@ -158,3 +172,181 @@ class BuildOrgTreeTests(TestCase):
             sum(1 + len(position.children) for position in roots),
             Position.objects.count(),
         )
+
+
+class VacancyTests(TestCase):
+    """Why Position was split out of Assignment in the first place."""
+
+    def setUp(self):
+        self.ministry = make_ministry()
+        self.position = make_position(
+            "coordinator", "Coordinator", self.ministry, kind=Position.Kind.VOLUNTEER)
+        self.person = make_person("王强")
+
+    def hold(self, **kwargs):
+        return Assignment.objects.create(
+            contact=self.person, position=self.position, **kwargs)
+
+    def test_a_position_becomes_vacant_when_its_last_tenure_ends(self):
+        assignment = self.hold(start_date=LAST_YEAR)
+        self.assertNotIn(self.position, Position.objects.vacant())
+        assignment.end_date = YESTERDAY
+        assignment.save()
+        self.assertIn(self.position, Position.objects.vacant())
+
+    def test_a_vacant_position_still_reports_its_kind_ministry_and_reports(self):
+        # The whole argument for the split: an empty box that cannot say what
+        # it is would be no use to whoever is trying to fill it.
+        junior = make_position("helper", "Helper", self.ministry, reports_to=self.position)
+        vacant = Position.objects.vacant().get(pk=self.position.pk)
+        self.assertEqual(vacant.kind, Position.Kind.VOLUNTEER)
+        self.assertEqual(vacant.ministry, self.ministry)
+        self.assertEqual(list(vacant.direct_reports.all()), [junior])
+
+    def test_an_inactive_position_is_not_listed_as_vacant(self):
+        # Abolished is not the same as open for applications.
+        self.position.is_active = False
+        self.position.save()
+        self.assertNotIn(self.position, Position.objects.vacant())
+
+    def test_vacant_accepts_an_explicit_date(self):
+        self.hold(start_date=LAST_YEAR, end_date=YESTERDAY)
+        self.assertIn(self.position, Position.objects.vacant())
+        self.assertNotIn(self.position, Position.objects.vacant(on=LAST_YEAR))
+
+    def test_a_position_held_by_someone_on_leave_is_not_vacant(self):
+        # vacant() is built on active(), not serving(): the post-holder is away,
+        # not gone, and the box is not open.
+        self.hold(start_date=LAST_YEAR, status=Assignment.Status.ON_LEAVE)
+        self.assertNotIn(self.position, Position.objects.vacant())
+
+    def test_replacing_a_position_holder_does_not_touch_the_reporting_lines(self):
+        """The point of the entire second revision. Everything else can fail; not this."""
+        junior = make_position("helper", "Helper", self.ministry, reports_to=self.position)
+        line_before = junior.reports_to_id
+        outgoing = self.hold(start_date=LAST_YEAR)
+
+        outgoing.end_date = YESTERDAY
+        outgoing.save()
+        Assignment.objects.create(
+            contact=make_person("李梅"), position=self.position, start_date=TODAY)
+
+        junior.refresh_from_db()
+        self.assertEqual(junior.reports_to_id, line_before)
+        # And the person who left still has their service history.
+        self.assertEqual(outgoing.contact.assignments.count(), 1)
+
+
+class AssignmentTests(TestCase):
+    def setUp(self):
+        self.ministry = make_ministry()
+        self.person = make_person("王强")
+        self.cook = make_position("cook", "Cook", self.ministry)
+        self.driver = make_position("driver", "Driver", self.ministry)
+
+    def test_one_person_can_hold_two_positions_in_the_same_ministry(self):
+        # D11's core scenario. The old constraint needed `title` in it to allow
+        # this; two positions make it fall out for free.
+        Assignment.objects.create(contact=self.person, position=self.cook, start_date=TODAY)
+        Assignment.objects.create(contact=self.person, position=self.driver, start_date=TODAY)
+        self.assertEqual(self.person.assignments.count(), 2)
+
+    def test_one_person_can_hold_the_same_position_in_two_separate_stints(self):
+        # Left and came back. Different start dates, so the unique constraint
+        # has no opinion.
+        Assignment.objects.create(
+            contact=self.person, position=self.cook,
+            start_date=LAST_YEAR, end_date=YESTERDAY)
+        Assignment.objects.create(contact=self.person, position=self.cook, start_date=TODAY)
+        self.assertEqual(self.person.assignments.count(), 2)
+
+    def test_two_positions_for_one_person_can_have_different_managers(self):
+        head_cook = make_position("head_cook", "Head Cook", self.ministry, is_leader=True)
+        chair = make_position("chair", "Board Chair", kind=Position.Kind.BOARD)
+        self.cook.reports_to = head_cook
+        self.cook.save()
+        self.driver.reports_to = chair
+        self.driver.save()
+        Assignment.objects.create(contact=self.person, position=self.cook)
+        Assignment.objects.create(contact=self.person, position=self.driver)
+        managers = {a.position.reports_to_id for a in self.person.assignments.all()}
+        self.assertEqual(managers, {head_cook.pk, chair.pk})
+
+    def test_duplicate_assignment_with_null_start_date_is_rejected(self):
+        # nulls_distinct=False. Postgres's default NULL != NULL would let any
+        # number of these through, which is what A7 got wrong.
+        Assignment.objects.create(contact=self.person, position=self.cook)
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            Assignment.objects.create(contact=self.person, position=self.cook)
+
+    def test_assignment_end_date_cannot_precede_start_date(self):
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            Assignment.objects.create(
+                contact=self.person, position=self.cook,
+                start_date=TODAY, end_date=YESTERDAY)
+
+    def test_deleting_a_position_with_assignments_is_blocked(self):
+        # PROTECT: with CASCADE, retiring one box would delete the service
+        # history of everybody who ever held it.
+        Assignment.objects.create(contact=self.person, position=self.cook)
+        with self.assertRaises(ProtectedError), transaction.atomic():
+            self.cook.delete()
+
+    def test_employment_type_on_a_volunteer_position_is_refused_by_clean(self):
+        # Spans two tables (kind is on Position), so no CheckConstraint can see
+        # it — a hint layer, and recorded as one. See goal.md D14.
+        full_time = EmploymentType.objects.create(code="full_time", name="Full time")
+        assignment = Assignment(
+            contact=self.person, position=self.cook, employment_type=full_time)
+        with self.assertRaises(ValidationError) as caught:
+            assignment.full_clean()
+        self.assertIn("employment_type", caught.exception.message_dict)
+
+
+class AssignmentStatusTests(TestCase):
+    """status and the term are orthogonal — leave never edits the dates."""
+
+    def setUp(self):
+        self.ministry = make_ministry()
+        self.person = make_person("王强")
+        self.position = make_position("cook", "Cook", self.ministry)
+        self.assignment = Assignment.objects.create(
+            contact=self.person, position=self.position, start_date=LAST_YEAR)
+
+    def test_going_on_leave_leaves_the_tenure_dates_untouched(self):
+        self.assignment.status = Assignment.Status.ON_LEAVE
+        self.assignment.save()
+        self.assignment.refresh_from_db()
+        self.assertEqual(self.assignment.start_date, LAST_YEAR)
+        self.assertIsNone(self.assignment.end_date)
+
+    def test_a_person_on_leave_is_excluded_from_serving_but_still_in_active(self):
+        # The roster of who is on the team, and the roster of who is on duty
+        # today, are two different questions.
+        self.assignment.status = Assignment.Status.ON_LEAVE
+        self.assignment.save()
+        self.assertIn(self.assignment, Assignment.objects.active())
+        self.assertNotIn(self.assignment, Assignment.objects.serving())
+
+    def test_coming_back_from_leave_needs_no_second_assignment_row(self):
+        self.assignment.status = Assignment.Status.ON_LEAVE
+        self.assignment.save()
+        self.assignment.status = Assignment.Status.ACTIVE
+        self.assignment.save()
+        self.assertIn(self.assignment, Assignment.objects.serving())
+        self.assertEqual(Assignment.objects.count(), 1)
+
+    def test_a_stale_on_leave_status_on_an_ended_tenure_is_inert(self):
+        # Why no "status must agree with the dates" constraint is needed: both
+        # predicates AND the dates, so an out-of-date status cannot bring
+        # anybody back.
+        self.assignment.status = Assignment.Status.ON_LEAVE
+        self.assignment.end_date = YESTERDAY
+        self.assignment.save()
+        self.assertNotIn(self.assignment, Assignment.objects.active())
+        self.assertNotIn(self.assignment, Assignment.objects.serving())
+
+    def test_assignment_status_has_no_ended_value(self):
+        # Ending is said by end_date and nowhere else. A second place to say it
+        # is a second answer, and one of them goes stale.
+        self.assertNotIn("ended", Assignment.Status.values)

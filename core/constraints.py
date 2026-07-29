@@ -37,6 +37,12 @@ CONSTRAINT_FIELD = {
     "relationship_end_before_start": "end_date",
     # contact.EmergencyContact
     "emergency_contact_duplicate": "name",
+    # org.Ministry / org.EmploymentType
+    "ministry_code_taken": "code",
+    "employmenttype_code_taken": "code",
+    # org.Position
+    "position_code_taken": "code",
+    "position_reports_to_self": "reports_to",
 }
 
 

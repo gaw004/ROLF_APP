@@ -9,7 +9,7 @@ from django_countries.fields import CountryField
 from simple_history.models import HistoricalRecords
 
 from core.constraints import ConstraintErrorFieldMixin
-from core.models import TimeStampedModel
+from core.models import ImmutableCodeMixin, TimeStampedModel
 from core.querysets import DateRangeMixin, DateRangeQuerySet
 from core.timeutils import local_today
 
@@ -386,7 +386,7 @@ class Contact(ConstraintErrorFieldMixin, TimeStampedModel):
         return f"{base} #{self.pk}" if self.pk else base
 
 
-class RelationshipType(ConstraintErrorFieldMixin, models.Model):
+class RelationshipType(ImmutableCodeMixin, ConstraintErrorFieldMixin, models.Model):
     """A dictionary of relationship kinds: 'volunteer at', 'parent of', 'spouse of'.
 
     Note 'manages' / 'managed by' are no longer used for the org chart — reporting
@@ -452,7 +452,7 @@ class RelationshipType(ConstraintErrorFieldMixin, models.Model):
         # None of this carries correctness any more — the expression constraints
         # above do. It is here so the stored values are clean and the admin
         # behaves consistently. See goal.md D9「归一化通则」.
-        self.code = self.code.strip().lower()
+        # (`code` itself is lowercased by ImmutableCodeMixin.save().)
         self.name_a_to_b = " ".join(self.name_a_to_b.split())
         self.name_b_to_a = " ".join(self.name_b_to_a.split())
         super().save(*args, **kwargs)
@@ -469,8 +469,9 @@ class RelationshipType(ConstraintErrorFieldMixin, models.Model):
            exist at all — "child of" is already the name_b_to_a of "parent of".
            No reverse type, no reverse relationship rows: the defence belongs at
            the type level, not on every relationship.
-        2. code is immutable once created. editable=False only stops ModelForms;
-           this compares against the value in the database.
+        2. code is immutable once created — the shared rule, borrowed from
+           ImmutableCodeMixin so Ministry / EmploymentType / Position say it
+           the same way.
         """
         super().clean()
         errors = {}
@@ -488,14 +489,9 @@ class RelationshipType(ConstraintErrorFieldMixin, models.Model):
                     f'"{clash.name_a_to_b}". Use that type instead of adding its mirror.'
                 )
 
-        if self.pk:
-            previous = RelationshipType.objects.filter(pk=self.pk).values_list(
-                "code", flat=True).first()
-            if previous is not None and previous != (self.code or "").strip().lower():
-                errors["code"] = (
-                    f'Code cannot be changed once created (it is "{previous}"). '
-                    "Code is what the rest of the system matches on."
-                )
+        code_error = self.code_change_error()
+        if code_error:
+            errors["code"] = code_error
 
         if errors:
             raise ValidationError(errors)

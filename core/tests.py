@@ -87,7 +87,7 @@ class ActiveQuerySetTests(TestCase):
         self.bob = Contact.objects.create(
             contact_type=Contact.ContactType.INDIVIDUAL, legal_last_name="Bob")
         self.parent_of = RelationshipType.objects.create(
-            name_a_to_b="parent of", name_b_to_a="child of")
+            code="parent_of", name_a_to_b="parent of", name_b_to_a="child of")
 
     def relationships(self):
         return DateRangeQuerySet(model=Relationship)

@@ -76,8 +76,19 @@ class LanguageAdmin(admin.ModelAdmin):
 
 @admin.register(RelationshipType)
 class RelationshipTypeAdmin(admin.ModelAdmin):
-    list_display = ["name_a_to_b", "name_b_to_a", "description"]
-    search_fields = ["name_a_to_b", "name_b_to_a"]
+    list_display = [
+        "name_a_to_b", "name_b_to_a", "code",
+        "is_symmetric", "usable_as_emergency_contact",
+    ]
+    list_filter = ["is_symmetric", "usable_as_emergency_contact"]
+    search_fields = ["name_a_to_b", "name_b_to_a", "code"]
+
+    def get_readonly_fields(self, request, obj=None):
+        # Editable when adding, frozen afterwards: code is the anchor every
+        # lookup in the codebase matches on, so renaming it breaks them silently.
+        # This only covers the admin — RelationshipType.clean() is what catches
+        # a script or a shell doing the same thing.
+        return ["code"] if obj else []
 
 
 @admin.register(Relationship)

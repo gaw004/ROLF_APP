@@ -1,4 +1,6 @@
+from django.core.exceptions import ValidationError
 from django.db import models
+from django.db.models.functions import Lower, Trim
 from phonenumber_field.modelfields import PhoneNumberField
 from django_countries.fields import CountryField
 from simple_history.models import HistoricalRecords
@@ -207,14 +209,119 @@ class Contact(ConstraintErrorFieldMixin, TimeStampedModel):
         return self.preferred_name or full or self.email or f"Contact #{self.pk}"
 
 
-class RelationshipType(models.Model):
-    """A dictionary of relationship kinds: 'volunteer at', 'manages', 'parent of'."""
+class RelationshipType(ConstraintErrorFieldMixin, models.Model):
+    """A dictionary of relationship kinds: 'volunteer at', 'parent of', 'spouse of'.
 
-    # Label as seen from A -> B, e.g. "manages"
+    Note 'manages' / 'managed by' are no longer used for the org chart — reporting
+    lines hang off Position.reports_to (goal.md D6 / D11).
+    """
+
+    # Code is what the code matches on, forever. Display names are editable in the
+    # admin, which means filter(name_a_to_b="parent of") stops finding anything the
+    # day somebody renames one — silently, with no error. See goal.md D5 / D6.
+    code = models.SlugField(
+        max_length=50,
+        help_text="Stable identifier used by code. Lowercase, cannot be changed later.",
+    )
+
+    # Label as seen from A -> B, e.g. "parent of"
     name_a_to_b = models.CharField(max_length=100)
-    # Reverse label B -> A, e.g. "managed by". Optional but useful for display.
+    # Reverse label B -> A, e.g. "child of". Empty for symmetric types.
     name_b_to_a = models.CharField(max_length=100, blank=True)
     description = models.CharField(max_length=255, blank=True)
+
+    # Marks 'spouse of' / 'sibling of' explicitly rather than inferring symmetry
+    # from an empty name_b_to_a: whoever enters the type may well type "spouse of"
+    # into both boxes, and then the inference is simply wrong. See goal.md D15.
+    is_symmetric = models.BooleanField(
+        default=False,
+        help_text="The relationship reads the same in both directions (spouse, sibling).",
+    )
+
+    # Emergency contacts reuse this vocabulary (goal.md D6). This boolean keeps
+    # 'employee of' and friends out of that dropdown via limit_choices_to — the
+    # same trick Contact.preferred_language already uses for living languages.
+    usable_as_emergency_contact = models.BooleanField(
+        default=False,
+        help_text="Offer this type when recording an emergency contact.",
+    )
+
+    class Meta:
+        ordering = ["name_a_to_b"]
+        constraints = [
+            # Lower(): a plain UniqueConstraint would happily take "Parent of"
+            # alongside "parent of", which also contradicts the case-insensitive
+            # comparison clean() does below.
+            # Trim() : relying on save() to strip means bulk_create can still
+            #          insert " parent of". See goal.md D9「归一化通则」.
+            models.UniqueConstraint(
+                Lower(Trim("name_a_to_b")),
+                name="relationshiptype_name_a_to_b_ci_unique",
+                violation_error_message="A relationship type with this name already exists.",
+                violation_error_code="reltype_name_taken",
+            ),
+            # Lower("code") rather than unique=True on the field, for the same
+            # reason: save() lowercases, and bulk_create does not call save(), so
+            # Food_Pantry and food_pantry would both go in.
+            models.UniqueConstraint(
+                Lower("code"),
+                name="relationshiptype_code_ci_unique",
+                violation_error_message="A relationship type with this code already exists.",
+                violation_error_code="reltype_code_taken",
+            ),
+        ]
+
+    def save(self, *args, **kwargs):
+        # None of this carries correctness any more — the expression constraints
+        # above do. It is here so the stored values are clean and the admin
+        # behaves consistently. See goal.md D9「归一化通则」.
+        self.code = self.code.strip().lower()
+        self.name_a_to_b = " ".join(self.name_a_to_b.split())
+        self.name_b_to_a = " ".join(self.name_b_to_a.split())
+        super().save(*args, **kwargs)
+
+    def clean(self):
+        """The two rules no constraint can express, because both look at other rows.
+
+        ⚠️ This is the form layer's only interception for these two, not a
+        presentation hint — bulk_create walks straight past it. A known and
+        stated imperfection, see goal.md D14.
+
+        1. Gap 1: a new type's forward name collides with an existing type's
+           reverse name. The root cause is that the reverse type row should never
+           exist at all — "child of" is already the name_b_to_a of "parent of".
+           No reverse type, no reverse relationship rows: the defence belongs at
+           the type level, not on every relationship.
+        2. code is immutable once created. editable=False only stops ModelForms;
+           this compares against the value in the database.
+        """
+        super().clean()
+        errors = {}
+
+        forward = " ".join((self.name_a_to_b or "").split()).casefold()
+        if forward:
+            clash = (
+                RelationshipType.objects.exclude(pk=self.pk)
+                .filter(name_b_to_a__iexact=forward)
+                .first()
+            )
+            if clash:
+                errors["name_a_to_b"] = (
+                    f'"{self.name_a_to_b}" is already the reverse label of '
+                    f'"{clash.name_a_to_b}". Use that type instead of adding its mirror.'
+                )
+
+        if self.pk:
+            previous = RelationshipType.objects.filter(pk=self.pk).values_list(
+                "code", flat=True).first()
+            if previous is not None and previous != (self.code or "").strip().lower():
+                errors["code"] = (
+                    f'Code cannot be changed once created (it is "{previous}"). '
+                    "Code is what the rest of the system matches on."
+                )
+
+        if errors:
+            raise ValidationError(errors)
 
     def __str__(self):
         return self.name_a_to_b

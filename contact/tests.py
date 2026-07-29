@@ -140,6 +140,93 @@ class ContactNameConstraintTests(TestCase):
             ])
 
 
+class RelationshipTypeTests(TestCase):
+    """code, symmetry, and the two duplicate gaps A7's constraints missed (B2)."""
+
+    def make(self, code="parent_of", name_a_to_b="parent of", name_b_to_a="child of", **kw):
+        return RelationshipType.objects.create(
+            code=code, name_a_to_b=name_a_to_b, name_b_to_a=name_b_to_a, **kw)
+
+    def test_code_must_be_unique(self):
+        self.make()
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            self.make(name_a_to_b="guardian of", name_b_to_a="ward of")
+
+    def test_code_is_lowercased_and_stripped_on_save(self):
+        # Cosmetic only: uniqueness is the constraint's job now. Kept so stored
+        # values are clean and the admin behaves the same way every time.
+        self.assertEqual(self.make(code="  Parent_Of  ").code, "parent_of")
+
+    def test_code_cannot_be_changed_once_created(self):
+        relationship_type = self.make()
+        relationship_type.code = "something_else"
+        with self.assertRaises(ValidationError) as caught:
+            relationship_type.full_clean()
+        self.assertIn("code", caught.exception.message_dict)
+
+    def test_the_admin_freezes_code_on_the_change_page_only(self):
+        # editable=False would also block the add form, so immutability is split:
+        # the admin makes it read-only when editing, clean() catches everything else.
+        model_admin = admin.site._registry[RelationshipType]
+        self.assertEqual(model_admin.get_readonly_fields(None, obj=None), [])
+        self.assertEqual(model_admin.get_readonly_fields(None, obj=self.make()), ["code"])
+
+    def test_two_types_with_the_same_name_ignoring_case_are_rejected(self):
+        # Gap 2. A plain UniqueConstraint would let "Parent of" in beside
+        # "parent of", leaving two identical-looking options in the dropdown
+        # and the data split between them.
+        self.make()
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            self.make(code="parent_of_2", name_a_to_b="Parent Of")
+
+    def test_a_forward_name_colliding_with_an_existing_reverse_name_is_rejected(self):
+        # Gap 1: "child of" already exists as the reverse of "parent of". Letting
+        # the mirror type in means the same relationship can be recorded twice,
+        # in two directions, and every constraint stays happy — the duplicate
+        # then shows up twice on the same contact's page.
+        self.make()
+        mirror = RelationshipType(
+            code="child_of", name_a_to_b="Child Of", name_b_to_a="parent of")
+        with self.assertRaises(ValidationError) as caught:
+            mirror.full_clean()
+        self.assertIn("name_a_to_b", caught.exception.message_dict)
+
+    # --- The two below must use bulk_create, and that is the entire point ------
+    # Going through save() they would both pass while verifying nothing:
+    # save() normalises first, so the duplicate never reaches the database.
+    # bulk_create is the path a data import takes, and it skips save() entirely.
+
+    def test_bulk_create_cannot_insert_a_code_differing_only_in_case(self):
+        self.make(code="food_pantry", name_a_to_b="pantry volunteer at")
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            RelationshipType.objects.bulk_create([
+                RelationshipType(code="Food_Pantry", name_a_to_b="something else"),
+            ])
+
+    def test_bulk_create_cannot_insert_a_name_differing_only_in_whitespace(self):
+        self.make()
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            RelationshipType.objects.bulk_create([
+                RelationshipType(code="parent_of_2", name_a_to_b="  parent of  "),
+            ])
+
+    def test_symmetry_is_an_explicit_flag_not_an_inference(self):
+        # Whoever adds the type may well type "spouse of" into both boxes, which
+        # is exactly when "name_b_to_a is empty" stops meaning symmetric.
+        spouse = self.make(
+            code="spouse_of", name_a_to_b="spouse of", name_b_to_a="spouse of",
+            is_symmetric=True)
+        self.assertTrue(spouse.is_symmetric)
+        self.assertFalse(self.make().is_symmetric)
+
+    def test_only_flagged_types_are_offered_for_emergency_contacts(self):
+        self.make(code="mother_of", name_a_to_b="mother of", name_b_to_a="child of",
+                  usable_as_emergency_contact=True)
+        self.make(code="employee_of", name_a_to_b="employee of", name_b_to_a="employer of")
+        offered = RelationshipType.objects.filter(usable_as_emergency_contact=True)
+        self.assertEqual([t.code for t in offered], ["mother_of"])
+
+
 class RelationshipConstraintTests(TestCase):
     """The three Relationship constraints, plus the field-level errors that pair
     with them (goal.md D14)."""
@@ -150,7 +237,7 @@ class RelationshipConstraintTests(TestCase):
         self.bob = Contact.objects.create(
             contact_type=Contact.ContactType.INDIVIDUAL, legal_last_name="Bob")
         self.parent_of = RelationshipType.objects.create(
-            name_a_to_b="parent of", name_b_to_a="child of")
+            code="parent_of", name_a_to_b="parent of", name_b_to_a="child of")
 
     def test_cannot_relate_a_contact_to_itself(self):
         with self.assertRaises(IntegrityError), transaction.atomic():
@@ -160,8 +247,9 @@ class RelationshipConstraintTests(TestCase):
             )
 
     def test_self_reference_error_points_at_the_contact_field(self):
-        # This is what the clean() layer buys us: the admin marks contact_b
-        # rather than dropping a database message at the top of the form.
+        # What the D14 machinery buys us: the admin marks contact_b instead of
+        # dropping a database message at the top of the form. The rule itself is
+        # stated once, in the constraint — see ConstraintFieldErrorTests below.
         relationship = Relationship(
             contact_a=self.alice, contact_b=self.alice,
             relationship_type=self.parent_of,
@@ -224,7 +312,7 @@ class ConstraintFieldErrorTests(TestCase):
         self.bob = Contact.objects.create(
             contact_type=Contact.ContactType.INDIVIDUAL, legal_last_name="Bob")
         self.parent_of = RelationshipType.objects.create(
-            name_a_to_b="parent of", name_b_to_a="child of")
+            code="parent_of", name_a_to_b="parent of", name_b_to_a="child of")
 
     def assertFieldError(self, instance, field):
         with self.assertRaises(ValidationError) as caught:

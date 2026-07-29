@@ -28,6 +28,9 @@ CONSTRAINT_FIELD = {
     "individual_needs_last_name": "legal_last_name",
     "organization_needs_name": "organization_name",
     "contact_type_unknown": "contact_type",
+    # contact.RelationshipType
+    "reltype_name_taken": "name_a_to_b",
+    "reltype_code_taken": "code",
     # contact.Relationship
     "relationship_self_reference": "contact_b",
     "relationship_already_recorded": "contact_b",

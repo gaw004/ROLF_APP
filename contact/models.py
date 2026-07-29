@@ -58,8 +58,43 @@ class Language(models.Model):
         return self.display_name
 
 
+class ContactQuerySet(models.QuerySet):
+    """Derived judgements about contacts, defined once (goal.md D18).
+
+    Every admin filter on Contact calls one of these and does no work of its
+    own — that is what keeps the logic alive when admin.py is eventually deleted.
+    """
+
+    def possible_duplicates(self):
+        """Contacts sharing a normalised name AND a phone number with another row.
+
+        The same rule as Contact.find_exact_duplicates(), asked of the whole
+        table at once: that one answers "is this new person already here?", this
+        one answers "what is already sitting in here twice?".
+        """
+        keyed = self.exclude(phone="").annotate(
+            key_last=Lower(Trim("legal_last_name")),
+            key_first=Lower(Trim("legal_first_name")),
+        )
+        duplicated_keys = (
+            keyed.values("key_last", "key_first", "phone")
+            .annotate(row_count=models.Count("id"))
+            .filter(row_count__gt=1)
+        )
+        matches = models.Q(pk__in=[])
+        for key in duplicated_keys:
+            matches |= models.Q(
+                key_last=key["key_last"],
+                key_first=key["key_first"],
+                phone=key["phone"],
+            )
+        return keyed.filter(matches)
+
+
 class Contact(ConstraintErrorFieldMixin, TimeStampedModel):
     """A person OR an organization. contact_type distinguishes them."""
+
+    objects = models.Manager.from_queryset(ContactQuerySet)()
 
     # --- Type: individual vs organization (the CiviCRM approach) ---
     class ContactType(models.TextChoices):

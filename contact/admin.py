@@ -60,13 +60,38 @@ class EmergencyContactInline(admin.TabularInline):
     autocomplete_fields = ["relationship_type"]
 
 
+class PossibleDuplicateFilter(admin.SimpleListFilter):
+    """Contacts sharing a name and a phone number with another row.
+
+    Presentation only: it calls one QuerySet method and computes nothing itself
+    (D18). Merging happens on /contacts/merge/, which is a page of our own — an
+    admin action would have to inherit admin templates for its confirmation step.
+    """
+
+    title = "疑似重复（同名同号）"
+    parameter_name = "duplicates"
+
+    def lookups(self, request, model_admin):
+        return [("yes", "只看疑似重复")]
+
+    def queryset(self, request, queryset):
+        if self.value() == "yes":
+            return queryset.possible_duplicates()
+        return queryset
+
+
 @admin.register(Contact)
 class ContactAdmin(SimpleHistoryAdmin):
     """SimpleHistoryAdmin rather than ModelAdmin: adds the History button."""
 
     form = ContactAdminForm
-    list_display = ["__str__", "contact_type", "email", "phone", "is_active"]
-    list_filter = ["contact_type", "is_active", "gender", "address_country"]
+    list_display = [
+        "__str__", "contact_type", "email", "phone", "is_active", "merge_link",
+    ]
+    list_filter = [
+        "contact_type", "is_active", "gender", "address_country",
+        PossibleDuplicateFilter,
+    ]
     search_fields = [
         "legal_first_name", "legal_last_name", "preferred_name",
         "organization_name", "email",
@@ -135,6 +160,25 @@ class ContactAdmin(SimpleHistoryAdmin):
                 "重名是合法的，这里只是提醒。",
                 messages.WARNING,
             )
+
+    @admin.display(description="合并")
+    def merge_link(self, obj):
+        """Link to the merge page, with this row as the one to keep.
+
+        Which duplicate it is paired with is decided by the model, not here.
+        """
+        duplicates = Contact.find_exact_duplicates(
+            last_name=obj.legal_last_name,
+            first_name=obj.legal_first_name,
+            phone=obj.phone,
+            exclude_pk=obj.pk,
+        )
+        other = duplicates.first()
+        if other is None:
+            return ""
+        url = reverse("contact:contact_merge")
+        return format_html(
+            '<a href="{}?keep={}&drop={}">合并掉 #{}</a>', url, obj.pk, other.pk, other.pk)
 
     @admin.display(description="")
     def add_relationship(self, obj):

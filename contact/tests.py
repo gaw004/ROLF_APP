@@ -1,4 +1,5 @@
 import datetime
+from pathlib import Path
 
 from django import forms
 from django.conf import settings
@@ -14,7 +15,7 @@ from .forms import ContactAdminForm, RelationshipForm
 from .models import (
     Contact, EmergencyContact, Language, Relationship, RelationshipType,
 )
-from .services import direction_choices
+from .services import MergeConflict, direction_choices, merge_contacts
 
 
 class ContactNameByTypeTests(TestCase):
@@ -882,6 +883,175 @@ class DuplicateInterceptionTests(TestCase):
     def test_force_save_is_not_a_database_column(self):
         field_names = {f.name for f in Contact._meta.get_fields()}
         self.assertNotIn("force_save", field_names)
+
+
+class MergeContactsTests(TestCase):
+    """B4.4: repoint everything, refuse rather than guess, leave a trail."""
+
+    def setUp(self):
+        self.keep = Contact.objects.create(
+            contact_type=Contact.ContactType.INDIVIDUAL,
+            legal_last_name="王强", phone="+14085550101")
+        self.drop = Contact.objects.create(
+            contact_type=Contact.ContactType.INDIVIDUAL,
+            legal_last_name="王强", phone="+14085550101",
+            email="qiang@example.com", address_city="Santa Clara")
+        self.other = Contact.objects.create(
+            contact_type=Contact.ContactType.INDIVIDUAL, legal_last_name="李梅")
+        self.parent_of = RelationshipType.objects.create(
+            code="parent_of", name_a_to_b="父亲", name_b_to_a="儿子",
+            usable_as_emergency_contact=True)
+
+    def test_merge_moves_every_reverse_relation(self):
+        """Nothing may be left pointing at the retired record.
+
+        Rather than listing the foreign keys it expects, this walks
+        Contact._meta.related_objects and demands that each one was either moved
+        or is on an explicit skip list. Add a new FK to Contact without deciding
+        what merging does with it, and this test goes red on the spot — which a
+        hand-written list of assertions would not.
+        """
+        Relationship.objects.create(
+            contact_a=self.drop, contact_b=self.other,
+            relationship_type=self.parent_of)
+        EmergencyContact.objects.create(
+            person=self.drop, name="王秀英", phone="+14085550188",
+            relationship_type=self.parent_of)
+        get_user_model().objects.create_user(
+            username="dropuser", password="x", contact=self.drop)
+
+        merge_contacts(self.keep, self.drop)
+
+        skipped = []
+        for relation in Contact._meta.related_objects:
+            model = relation.related_model
+            if model.__name__.startswith("Historical"):
+                skipped.append(model.__name__)
+                continue
+            left_behind = model._base_manager.filter(
+                **{relation.field.name: self.drop}).count()
+            self.assertEqual(
+                left_behind, 0,
+                f"{model._meta.label} still points at the retired contact")
+        # The skip list is only ever the history tables: those record what
+        # happened at the time and must not be rewritten.
+        self.assertTrue(all(name.startswith("Historical") for name in skipped))
+
+    def test_merge_refuses_when_both_contacts_have_a_user(self):
+        User = get_user_model()
+        User.objects.create_user(username="keepuser", password="x", contact=self.keep)
+        User.objects.create_user(username="dropuser", password="x", contact=self.drop)
+        with self.assertRaises(MergeConflict):
+            merge_contacts(self.keep, self.drop)
+
+    def test_merge_refuses_on_a_unique_constraint_clash(self):
+        # Both are 李梅's father: repointing would produce two identical rows,
+        # which the unordered-pair constraint refuses. Reported, not guessed at.
+        Relationship.objects.create(
+            contact_a=self.keep, contact_b=self.other,
+            relationship_type=self.parent_of)
+        Relationship.objects.create(
+            contact_a=self.drop, contact_b=self.other,
+            relationship_type=self.parent_of)
+        with self.assertRaises(MergeConflict):
+            merge_contacts(self.keep, self.drop)
+
+    def test_a_refused_merge_changes_nothing(self):
+        User = get_user_model()
+        User.objects.create_user(username="keepuser", password="x", contact=self.keep)
+        User.objects.create_user(username="dropuser", password="x", contact=self.drop)
+        EmergencyContact.objects.create(
+            person=self.drop, name="王秀英", phone="+14085550188",
+            relationship_type=self.parent_of)
+        with self.assertRaises(MergeConflict):
+            merge_contacts(self.keep, self.drop)
+        # Partial merges are the one outcome worse than refusing.
+        self.assertEqual(self.drop.emergency_contacts.count(), 1)
+        self.drop.refresh_from_db()
+        self.assertTrue(self.drop.is_active)
+
+    def test_the_kept_record_wins_and_only_blanks_are_filled_in(self):
+        self.keep.address_city = "San Jose"
+        self.keep.save()
+        merge_contacts(self.keep, self.drop)
+        self.keep.refresh_from_db()
+        self.assertEqual(self.keep.address_city, "San Jose")      # keep wins
+        self.assertEqual(self.keep.email, "qiang@example.com")    # blank filled
+
+    def test_the_retired_record_is_deactivated_not_deleted(self):
+        merge_contacts(self.keep, self.drop)
+        self.drop.refresh_from_db()
+        self.assertFalse(self.drop.is_active)
+        self.assertTrue(Contact.objects.filter(pk=self.drop.pk).exists())
+
+    def test_the_merge_leaves_a_note_a_human_can_read(self):
+        merge_contacts(self.keep, self.drop, actor="gabrielle")
+        self.keep.refresh_from_db()
+        self.assertIn(f"已合并 #{self.drop.pk}", self.keep.notes)
+        self.assertIn("gabrielle", self.keep.notes)
+
+    def test_merging_a_contact_into_itself_is_refused(self):
+        with self.assertRaises(MergeConflict):
+            merge_contacts(self.keep, self.keep)
+
+    def test_possible_duplicates_finds_both_sides_of_the_pair(self):
+        found = Contact.objects.possible_duplicates()
+        self.assertIn(self.keep, found)
+        self.assertIn(self.drop, found)
+        self.assertNotIn(self.other, found)
+
+
+class MergePageTests(TestCase):
+    """The project's second self-written page."""
+
+    def setUp(self):
+        self.keep = Contact.objects.create(
+            contact_type=Contact.ContactType.INDIVIDUAL,
+            legal_last_name="王强", phone="+14085550101")
+        self.drop = Contact.objects.create(
+            contact_type=Contact.ContactType.INDIVIDUAL,
+            legal_last_name="王强", phone="+14085550101")
+        self.url = f"{reverse('contact:contact_merge')}?keep={self.keep.pk}&drop={self.drop.pk}"
+
+    def login(self):
+        self.client.force_login(
+            get_user_model().objects.create_superuser(username="staff", password="x"))
+
+    def test_the_merge_page_requires_a_staff_login(self):
+        response = self.client.get(self.url)
+        self.assertEqual(response.status_code, 302)
+        self.assertIn("login", response["Location"])
+
+    def test_a_get_on_the_merge_page_does_not_change_anything(self):
+        # A confirmation step that quietly acted would be worse than no
+        # confirmation step at all.
+        self.login()
+        self.assertEqual(self.client.get(self.url).status_code, 200)
+        self.drop.refresh_from_db()
+        self.assertTrue(self.drop.is_active)
+
+    def test_posting_performs_the_merge_and_redirects_to_the_kept_record(self):
+        self.login()
+        response = self.client.post(self.url)
+        self.assertEqual(response.status_code, 302)
+        self.assertIn(str(self.keep.pk), response["Location"])
+        self.drop.refresh_from_db()
+        self.assertFalse(self.drop.is_active)
+
+    def test_a_missing_contact_is_a_404(self):
+        self.login()
+        merge = reverse("contact:contact_merge")
+        self.assertEqual(self.client.get(merge).status_code, 404)
+        self.assertEqual(
+            self.client.get(f"{merge}?keep={self.keep.pk}&drop=999999").status_code, 404)
+
+    def test_the_page_does_not_extend_any_admin_template(self):
+        # The whole reason this is not an admin action: inheriting
+        # admin/base_site.html is the layer that breaks on upgrade and is thrown
+        # away when the front end arrives.
+        template = (Path(settings.BASE_DIR)
+                    / "contact/templates/contact/merge_confirm.html").read_text()
+        self.assertNotIn("admin/base_site.html", template)
 
 
 class ContactHistoryTests(TestCase):

@@ -1,0 +1,53 @@
+{% comment %}
+Plain, and not extending any admin template — that coupling is exactly what
+kept this out of an admin action (goal.md D18).
+
+Phase C replaces this file; contact_merge() and services.merge_contacts()
+carry over untouched.
+{% endcomment %}
+<!doctype html>
+<html lang="zh">
+<head>
+  <meta charset="utf-8">
+  <title>合并重复联系人</title>
+</head>
+<body>
+  <h1>合并重复联系人</h1>
+
+  <p>疑似重复（同名同号）待处理：{{ waiting }} 条。</p>
+
+  {% if messages %}
+    <ul>
+      {% for message in messages %}<li>{{ message }}</li>{% endfor %}
+    </ul>
+  {% endif %}
+
+  <p>
+    <strong>保留</strong> #{{ keep.pk }} {{ keep }}，
+    <strong>合并掉</strong> #{{ drop.pk }} {{ drop }}。
+    指向被合并方的记录会全部改指到保留方；保留方为空的字段才会从被合并方补进来。
+    被合并方不会被删除，只会停用。
+  </p>
+
+  <table border="1" cellpadding="4">
+    <thead>
+      <tr><th>字段</th><th>保留 #{{ keep.pk }}</th><th>合并掉 #{{ drop.pk }}</th></tr>
+    </thead>
+    <tbody>
+      {% for row in fields %}
+        <tr>
+          <th>{{ row.label }}</th>
+          <td>{{ row.keep|default_if_none:"" }}</td>
+          <td>{{ row.drop|default_if_none:"" }}</td>
+        </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  <form method="post">
+    {% csrf_token %}
+    <button type="submit">确认合并</button>
+    <a href="{% url 'admin:contact_contact_change' keep.pk %}">取消</a>
+  </form>
+</body>
+</html>

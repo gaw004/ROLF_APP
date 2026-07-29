@@ -1865,3 +1865,44 @@ except ValueError:                      # 2/29，且落到的那年不是闰年
 
 > 这不是麻烦，是守卫真的在扫全项目的证据 —— 它连自己都不放过。
 > 换成"跳过 `core/tests.py`"就等于给守卫开了个后门。
+
+### ⚠️ 计划外（B5）：往别的 app 的 admin 上挂 inline，方向是反的
+
+roadmap 写「`ContactAdmin` 加一个 `Assignment` 的 inline」。照字面做，
+就是 `contact/admin.py` 去 `import org.models` —— **依赖方向被倒过来了**
+（D17 定的是 `org` → `contact` → `core`），`contact` 从此装不上除非 `org` 也在。
+
+**修法**：装配写在**下游那个 app** 里。`org/admin.py`：
+
+```python
+admin.site.unregister(Contact)          # contact 在 INSTALLED_APPS 里排在前面，
+                                        # 它的 admin.py 已经跑过了
+@admin.register(Contact)
+class ContactWithAssignmentsAdmin(ContactAdmin):
+    inlines = [*ContactAdmin.inlines, AssignmentInline]
+```
+
+Django 没有比"注销 + 注册一个子类"更窄的钩子。看着别扭，但它是唯一
+不把依赖方向弄反的写法，而且两个 `admin.py` 本来就是一次性配置（D18）。
+
+**一般化**：
+> **跨 app 的 admin 装配一律写在下游 app 里，别让上游去 import 下游。**
+> B6 的 `Participation` 要挂到 `Contact` 页上时，同一套写法再用一次。
+
+### ⚠️ 计划外（B5）：每加一个 inline，所有 admin POST 测试都会变绿灯下的红灯
+
+**第三次踩了**（B3.1 的 `relationships_as_b`、B4.2 的 `emergency_contacts`、
+这次的 `assignments`）。症状每次一模一样：admin 的 POST 测试收到 **200 而不是 302**，
+表单看着没错，`context_data["errors"]` 里写的是
+`ManagementForm data is missing or has been tampered with.`
+
+原因：`ModelAdmin` 会为每个 inline 要一份管理表单，少一份就整页不提交，
+而**它不是字段错误**，所以 200 里看不到任何一个红框。
+
+**修法**：测试的 `_admin_form_data()` 里补上那个 inline 的四个键
+（`TOTAL_FORMS` / `INITIAL_FORMS` / `MIN_NUM_FORMS` / `MAX_NUM_FORMS`）。
+已经在 helper 上写了注释，免得第四次再查一遍。
+
+**一般化**：
+> **加完一个 inline，先跑一遍 admin 的 POST 测试。** 收到 200 就直接去
+> `context_data["errors"]` 里看，不要从表单字段开始找。

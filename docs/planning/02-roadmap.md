@@ -1779,6 +1779,35 @@ URL、第一个视图和第一个模板，出问题时好回退。
 还要改 D9 那条 `CheckConstraint` —— **只有这一处**"现在要读成**两处**
 （`contact_type_is_known` 的白名单 + 新类型自己的姓名规则约束）。
 
+### ⚠️ 计划外（B3.1b）：`ModelForm` 会把不在表单上的字段的约束**整条跳过**
+
+**症状**：`RelationshipForm` 按方案 b 写完，`contact_a` / `contact_b` 刻意不放在表单上
+（那正是这个设计的全部意义 —— 录入的人不该看见 A/B）。结果是：
+录一条重复关系，表单**校验通过**，然后在 `save()` 时炸成 `IntegrityError` 500。
+
+**根因**：`ModelForm._post_clean()` 会把「不在表单上的字段」放进 `exclude`，
+而 `Model.validate_constraints(exclude=...)` **跳过任何提到被排除字段的约束**。
+于是 `relationship_no_self_reference` 和 `relationship_unique_unordered_pair`
+在表单层根本没跑过。
+
+> 这就是 D14 那个「`CheckConstraint.validate()` 会静默跳过」的坑，
+> **只不过是从另一头撞上的** —— D14 提醒的是表达式约束在 `validate()` 里出错被吞掉，
+> 这里是约束压根没被调用。**症状一模一样：表单绿灯，写库时 500。**
+
+**修法**：`RelationshipForm._check_constraints()` 里显式调一次
+`self.instance.validate_constraints()`，把错误 `add_error()` 到表单字段上。
+另外 `CONSTRAINT_FIELD` 把这两条约束映射到 `contact_b`，
+而表单上没有 `contact_b` —— 直接 `add_error("contact_b", ...)` 会抛 `ValueError`
+（`ModelForm._update_errors` 不认识的字段就报错，`core/constraints.py` 的
+docstring 已经预警过）。所以表单里加一张 `FIELD_ALIASES`
+把 `contact_a` / `contact_b` 都落到用户看得见的 `other` 上。
+
+**一般化（新的，记进这里）**：
+> **凡是「表单字段 ≠ 模型字段」的表单，都要问一句：
+> 这条约束在表单层真的跑了吗？** 判定方法和 D9 那句同构 ——
+> **提交一条违规数据，看到的是表单错误还是 500？**
+> B4.3b 的 `ContactForm`、B4.4 的合并页、以后每一个自定义表单都要过这一问。
+
 ### ⚠️ 计划外（B1）：grep 守卫第一次跑，抓到的是它自己
 
 三条 grep 守卫写完第一次跑，两条红了 —— 命中的是**守卫自己**：

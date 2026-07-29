@@ -9,8 +9,9 @@ from django.http import HttpResponse
 from django.test import TestCase, override_settings
 from django.urls import path, reverse
 
-from .forms import ContactAdminForm
+from .forms import ContactAdminForm, RelationshipForm
 from .models import Contact, Language, Relationship, RelationshipType
+from .services import direction_choices
 
 
 class ContactNameByTypeTests(TestCase):
@@ -371,6 +372,263 @@ class ConstraintFieldErrorTests(TestCase):
         self.assertIn("The end date cannot be before the start date.", messages)
 
 
+class RelationshipDirectionTests(TestCase):
+    """B3.1b: either side can record the relationship, and it never comes out
+    reversed. The tests build the form directly — no browser, no admin — which
+    is itself the proof that Phase C can reuse it unchanged."""
+
+    def setUp(self):
+        self.ming = Contact.objects.create(
+            contact_type=Contact.ContactType.INDIVIDUAL, legal_last_name="小明")
+        self.qiang = Contact.objects.create(
+            contact_type=Contact.ContactType.INDIVIDUAL, legal_last_name="王强")
+        self.parent_of = RelationshipType.objects.create(
+            code="parent_of", name_a_to_b="父亲", name_b_to_a="儿子")
+        self.spouse_of = RelationshipType.objects.create(
+            code="spouse_of", name_a_to_b="配偶", is_symmetric=True)
+
+    def choice(self, relationship_type, direction):
+        return f"{relationship_type.pk}:{direction}"
+
+    def submit(self, subject, relationship_type, direction, other):
+        form = RelationshipForm(
+            data={
+                "direction_choice": self.choice(relationship_type, direction),
+                "other": other.pk,
+            },
+            subject=subject,
+        )
+        self.assertTrue(form.is_valid(), form.errors)
+        return form.save()
+
+    def test_choosing_the_reverse_reading_puts_the_other_party_in_contact_a(self):
+        # Standing on 小明's page and saying "小明 is ___'s son" has to store
+        # (王强, 小明, parent of). Under the old rule this could not be recorded
+        # here at all: you had to navigate to 王强's page first.
+        relationship = self.submit(self.ming, self.parent_of, "rev", self.qiang)
+        self.assertEqual(relationship.contact_a, self.qiang)
+        self.assertEqual(relationship.contact_b, self.ming)
+
+    def test_choosing_the_forward_reading_puts_the_subject_in_contact_a(self):
+        relationship = self.submit(self.qiang, self.parent_of, "fwd", self.ming)
+        self.assertEqual(relationship.contact_a, self.qiang)
+        self.assertEqual(relationship.contact_b, self.ming)
+
+    def test_a_symmetric_type_appears_only_once_in_the_direction_choices(self):
+        values = dict(direction_choices(self.ming))
+        self.assertIn(self.choice(self.spouse_of, "fwd"), values)
+        self.assertNotIn(self.choice(self.spouse_of, "rev"), values)
+        # Asymmetric types offer both readings.
+        self.assertIn(self.choice(self.parent_of, "fwd"), values)
+        self.assertIn(self.choice(self.parent_of, "rev"), values)
+
+    def test_the_subject_is_not_offered_as_the_other_party(self):
+        form = RelationshipForm(subject=self.ming)
+        self.assertNotIn(self.ming, form.fields["other"].queryset)
+
+    def test_a_duplicate_is_reported_on_the_form_not_as_an_integrity_error(self):
+        # contact_a / contact_b are not fields on this form, so ModelForm would
+        # skip every constraint that mentions them — the duplicate would only
+        # surface as a 500 at save time. See RelationshipForm._check_constraints.
+        self.submit(self.qiang, self.parent_of, "fwd", self.ming)
+        form = RelationshipForm(
+            data={
+                "direction_choice": self.choice(self.parent_of, "fwd"),
+                "other": self.ming.pk,
+            },
+            subject=self.qiang,
+        )
+        self.assertFalse(form.is_valid())
+        self.assertIn("other", form.errors)
+
+    def test_the_mirrored_entry_is_also_reported_on_the_form(self):
+        # Same pair, same type, entered from the other side: different columns,
+        # same relationship. The unordered-pair constraint sees it.
+        self.submit(self.qiang, self.parent_of, "fwd", self.ming)
+        form = RelationshipForm(
+            data={
+                "direction_choice": self.choice(self.parent_of, "rev"),
+                "other": self.qiang.pk,
+            },
+            subject=self.ming,
+        )
+        self.assertFalse(form.is_valid())
+
+
+class RelationshipPageTests(TestCase):
+    """The project's first non-admin page (B3.1b)."""
+
+    def setUp(self):
+        self.ming = Contact.objects.create(
+            contact_type=Contact.ContactType.INDIVIDUAL, legal_last_name="小明")
+        self.url = reverse("contact:relationship_add")
+
+    def test_the_relationship_page_requires_a_staff_login(self):
+        response = self.client.get(f"{self.url}?subject={self.ming.pk}")
+        self.assertEqual(response.status_code, 302)
+        self.assertIn("login", response["Location"])
+
+    def test_the_relationship_page_404s_without_a_valid_subject(self):
+        self.client.force_login(
+            get_user_model().objects.create_superuser(username="staff", password="x"))
+        self.assertEqual(self.client.get(self.url).status_code, 404)
+        self.assertEqual(self.client.get(f"{self.url}?subject=999999").status_code, 404)
+
+    def test_a_staff_member_sees_the_form(self):
+        self.client.force_login(
+            get_user_model().objects.create_superuser(username="staff", password="x"))
+        response = self.client.get(f"{self.url}?subject={self.ming.pk}")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.context["subject"], self.ming)
+
+
+class RelationshipDisplayTests(TestCase):
+    """B3.1: both sides of a relationship are visible, with the right label."""
+
+    def setUp(self):
+        self.ming = Contact.objects.create(
+            contact_type=Contact.ContactType.INDIVIDUAL, legal_last_name="小明")
+        self.qiang = Contact.objects.create(
+            contact_type=Contact.ContactType.INDIVIDUAL, legal_last_name="王强")
+        self.parent_of = RelationshipType.objects.create(
+            code="parent_of", name_a_to_b="父亲", name_b_to_a="儿子")
+
+    def test_the_reverse_label_is_shown_on_the_other_contact(self):
+        # Recording "王强 父亲 小明" used to leave 王强 invisible on 小明's page:
+        # the row was there, the second label was simply never read.
+        relationship = Relationship.objects.create(
+            contact_a=self.qiang, contact_b=self.ming,
+            relationship_type=self.parent_of)
+        self.assertEqual(relationship.label_from("contact_a"), "父亲")
+        self.assertEqual(relationship.label_from("contact_b"), "儿子")
+
+    def test_a_symmetric_type_falls_back_to_the_forward_label(self):
+        spouse_of = RelationshipType.objects.create(
+            code="spouse_of", name_a_to_b="配偶", is_symmetric=True)
+        relationship = Relationship.objects.create(
+            contact_a=self.qiang, contact_b=self.ming, relationship_type=spouse_of)
+        self.assertEqual(relationship.label_from("contact_a"), "配偶")
+        self.assertEqual(relationship.label_from("contact_b"), "配偶")
+
+    def test_both_inlines_are_read_only(self):
+        # Entry moved to /relationships/add/; leaving an editable row here would
+        # bring the whole formset apparatus back, and with it the problem that
+        # an inline form cannot see whose page it is on.
+        model_admin = admin.site._registry[Contact]
+        inlines = [inline(Contact, admin.site) for inline in model_admin.inlines]
+        self.assertEqual([i.fk_name for i in inlines], ["contact_a", "contact_b"])
+        for inline in inlines:
+            self.assertFalse(inline.has_add_permission(None, None))
+            self.assertEqual(list(inline.readonly_fields), list(inline.fields))
+
+
+class RelationshipSymmetryTests(TestCase):
+    """B3.2: the enforcement layer, and the cosmetic normalisation next to it."""
+
+    def setUp(self):
+        self.qiang = Contact.objects.create(
+            contact_type=Contact.ContactType.INDIVIDUAL, legal_last_name="王强")
+        self.mei = Contact.objects.create(
+            contact_type=Contact.ContactType.INDIVIDUAL, legal_last_name="李梅")
+        self.spouse_of = RelationshipType.objects.create(
+            code="spouse_of", name_a_to_b="配偶", is_symmetric=True)
+        self.parent_of = RelationshipType.objects.create(
+            code="parent_of", name_a_to_b="父亲", name_b_to_a="儿子")
+
+    def test_a_symmetric_relationship_is_normalised_to_lowest_id_first(self):
+        relationship = Relationship.objects.create(
+            contact_a=self.mei, contact_b=self.qiang, relationship_type=self.spouse_of)
+        relationship.refresh_from_db()
+        self.assertEqual(relationship.contact_a_id, min(self.qiang.pk, self.mei.pk))
+
+    def test_an_asymmetric_relationship_is_never_swapped(self):
+        # Direction is the meaning here: swapping turns "王强 is 李梅's father"
+        # into the opposite claim.
+        relationship = Relationship.objects.create(
+            contact_a=self.mei, contact_b=self.qiang, relationship_type=self.parent_of)
+        relationship.refresh_from_db()
+        self.assertEqual(relationship.contact_a_id, self.mei.pk)
+
+    # --- Enforcement: these must bypass save(), which is the entire point ------
+    # Written through save() they would pass while proving nothing: save()
+    # normalises the pair before the database ever sees it. bulk_create is the
+    # path a data import takes.
+
+    def test_bulk_create_cannot_insert_a_mirrored_symmetric_pair(self):
+        Relationship.objects.create(
+            contact_a=self.qiang, contact_b=self.mei, relationship_type=self.spouse_of)
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            Relationship.objects.bulk_create([
+                Relationship(contact_a=self.mei, contact_b=self.qiang,
+                             relationship_type=self.spouse_of),
+            ])
+
+    def test_bulk_create_cannot_insert_a_mirrored_asymmetric_pair(self):
+        # The constraint carries no condition, so this is refused too: one pair
+        # cannot hold "父亲" in both directions.
+        Relationship.objects.create(
+            contact_a=self.qiang, contact_b=self.mei, relationship_type=self.parent_of)
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            Relationship.objects.bulk_create([
+                Relationship(contact_a=self.mei, contact_b=self.qiang,
+                             relationship_type=self.parent_of),
+            ])
+
+    def test_the_same_pair_and_type_can_repeat_with_different_start_dates(self):
+        Relationship.objects.create(
+            contact_a=self.qiang, contact_b=self.mei, relationship_type=self.spouse_of,
+            start_date=datetime.date(2010, 1, 1), end_date=datetime.date(2015, 1, 1))
+        second = Relationship.objects.create(
+            contact_a=self.qiang, contact_b=self.mei, relationship_type=self.spouse_of,
+            start_date=datetime.date(2020, 1, 1))
+        self.assertEqual(Relationship.objects.count(), 2)
+        self.assertIsNotNone(second.pk)
+
+    def test_the_same_pair_and_type_with_both_start_dates_null_is_rejected(self):
+        # What Coalesce(start_date, date.min) buys: two NULLs are equal here,
+        # the same thing nulls_distinct=False does for plain field constraints.
+        Relationship.objects.create(
+            contact_a=self.qiang, contact_b=self.mei, relationship_type=self.spouse_of)
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            Relationship.objects.bulk_create([
+                Relationship(contact_a=self.qiang, contact_b=self.mei,
+                             relationship_type=self.spouse_of),
+            ])
+
+
+class RelationshipActiveTests(TestCase):
+    """B3.3: is_active is gone; being in effect is derived from the dates."""
+
+    def setUp(self):
+        self.qiang = Contact.objects.create(
+            contact_type=Contact.ContactType.INDIVIDUAL, legal_last_name="王强")
+        self.mei = Contact.objects.create(
+            contact_type=Contact.ContactType.INDIVIDUAL, legal_last_name="李梅")
+        self.spouse_of = RelationshipType.objects.create(
+            code="spouse_of", name_a_to_b="配偶", is_symmetric=True)
+
+    def test_relationship_has_no_is_active_field(self):
+        # It and end_date were one fact stored twice, and could disagree
+        # (is_active=True alongside end_date=2020). Pinning its absence.
+        field_names = {f.name for f in Relationship._meta.get_fields()}
+        self.assertNotIn("is_active", field_names)
+
+    def test_relationship_active_uses_the_shared_queryset(self):
+        current = Relationship.objects.create(
+            contact_a=self.qiang, contact_b=self.mei,
+            relationship_type=self.spouse_of, start_date=datetime.date(2020, 1, 1))
+        self.assertIn(current, Relationship.objects.active())
+        self.assertTrue(current.is_currently_active)
+
+    def test_an_ended_relationship_is_not_active(self):
+        ended = Relationship.objects.create(
+            contact_a=self.qiang, contact_b=self.mei,
+            relationship_type=self.spouse_of,
+            start_date=datetime.date(2010, 1, 1), end_date=datetime.date(2015, 1, 1))
+        self.assertNotIn(ended, Relationship.objects.active())
+        self.assertFalse(ended.is_currently_active)
+
+
 class ContactHistoryTests(TestCase):
     """Audit trail: what changed, and who changed it (goal.md Phase A)."""
 
@@ -428,10 +686,16 @@ class ContactHistoryTests(TestCase):
             "address_postal_code": "",
             "is_active": "on",
             "notes": "",
+            # Two inlines since B3.1: this contact's relationships read from
+            # their side, and the ones where they are the other party.
             "relationships_as_a-TOTAL_FORMS": "0",
             "relationships_as_a-INITIAL_FORMS": "0",
             "relationships_as_a-MIN_NUM_FORMS": "0",
             "relationships_as_a-MAX_NUM_FORMS": "1000",
+            "relationships_as_b-TOTAL_FORMS": "0",
+            "relationships_as_b-INITIAL_FORMS": "0",
+            "relationships_as_b-MIN_NUM_FORMS": "0",
+            "relationships_as_b-MAX_NUM_FORMS": "1000",
         }
         data.update(overrides)
         return data

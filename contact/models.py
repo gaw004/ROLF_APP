@@ -1,12 +1,16 @@
+import datetime
+
 from django.core.exceptions import ValidationError
 from django.db import models
-from django.db.models.functions import Lower, Trim
+from django.db.models import Value
+from django.db.models.functions import Coalesce, Greatest, Least, Lower, Trim
 from phonenumber_field.modelfields import PhoneNumberField
 from django_countries.fields import CountryField
 from simple_history.models import HistoricalRecords
 
 from core.constraints import ConstraintErrorFieldMixin
 from core.models import TimeStampedModel
+from core.querysets import DateRangeMixin, DateRangeQuerySet
 
 
 class Language(models.Model):
@@ -327,7 +331,7 @@ class RelationshipType(ConstraintErrorFieldMixin, models.Model):
         return self.name_a_to_b
 
 
-class Relationship(ConstraintErrorFieldMixin, TimeStampedModel):
+class Relationship(ConstraintErrorFieldMixin, DateRangeMixin, TimeStampedModel):
     """Connects two contacts with a typed, dated relationship.
 
     Example rows:
@@ -354,8 +358,12 @@ class Relationship(ConstraintErrorFieldMixin, TimeStampedModel):
 
     start_date = models.DateField(null=True, blank=True)
     end_date = models.DateField(null=True, blank=True)
-    is_active = models.BooleanField(default=True, db_index=True)
+    # No is_active: it and end_date were the same fact recorded twice, and the
+    # pair could contradict each other (is_active=True with end_date in 2020).
+    # Whether a relationship is in effect is derived — see .active() below.
     # created_at / updated_at come from TimeStampedModel
+
+    objects = models.Manager.from_queryset(DateRangeQuerySet)()
 
     class Meta:
         indexes = [
@@ -373,14 +381,28 @@ class Relationship(ConstraintErrorFieldMixin, TimeStampedModel):
                 violation_error_message="A contact cannot be related to themselves.",
                 violation_error_code="relationship_self_reference",
             ),
+            # Replaces A7's (contact_a, contact_b, type, start_date) — not
+            # alongside it. The unordered version is strictly stronger: it covers
+            # every case the old one did, plus the mirrored row A7 could not see
+            # ((王强,李梅,spouse) and (李梅,王强,spouse) are different column
+            # values, so the old constraint stayed quiet).
+            #
+            # No condition on it: once the mirror *type* is impossible (gap 1,
+            # RelationshipType.clean()), one pair holding one type in two
+            # directions is wrong for every type, not just symmetric ones —
+            # (小明, 王强, parent of) says 小明 is the parent, and the two cannot
+            # both be true.
+            #
+            # Coalesce rather than nulls_distinct=False: whether an expression
+            # UniqueConstraint can carry nulls_distinct is untested, and
+            # date.min is exactly equivalent — two rows with no start date still
+            # collide — without depending on that unknown.
             models.UniqueConstraint(
-                fields=["contact_a", "contact_b", "relationship_type", "start_date"],
-                name="relationship_unique_per_type_and_start",
-                # Without this, Postgres treats NULL != NULL and the same
-                # relationship with no start date could be stored any number of
-                # times — which is the most likely duplicate, not the rarest.
-                # Needs PG 15+; we are on 18.
-                nulls_distinct=False,
+                Least("contact_a", "contact_b"),
+                Greatest("contact_a", "contact_b"),
+                "relationship_type",
+                Coalesce("start_date", Value(datetime.date.min)),
+                name="relationship_unique_unordered_pair",
                 violation_error_message="This relationship has already been recorded.",
                 violation_error_code="relationship_already_recorded",
             ),
@@ -395,6 +417,30 @@ class Relationship(ConstraintErrorFieldMixin, TimeStampedModel):
                 violation_error_code="relationship_end_before_start",
             ),
         ]
+
+    def save(self, *args, **kwargs):
+        # Symmetric types (spouse, sibling) always store the lower id as
+        # contact_a, so the row has one settled reading.
+        #
+        # ⚠️ Cosmetic only — duplicates are refused by
+        #    relationship_unique_unordered_pair above, which bulk_create cannot
+        #    dodge. And asymmetric types must never be swapped: their direction
+        #    carries the meaning, so swapping reverses the sentence.
+        if self.relationship_type_id and self.relationship_type.is_symmetric:
+            if (self.contact_a_id and self.contact_b_id
+                    and self.contact_a_id > self.contact_b_id):
+                self.contact_a_id, self.contact_b_id = self.contact_b_id, self.contact_a_id
+        super().save(*args, **kwargs)
+
+    def label_from(self, side):
+        """How this relationship reads from one side: 'parent of' / 'child of'.
+
+        Symmetric types fall back to the forward label, because their reverse
+        one is empty by design — 'spouse of' backwards is still 'spouse of'.
+        """
+        if side == "contact_a" or self.relationship_type.is_symmetric:
+            return self.relationship_type.name_a_to_b
+        return self.relationship_type.name_b_to_a or self.relationship_type.name_a_to_b
 
     def __str__(self):
         return f"{self.contact_a} — {self.relationship_type} → {self.contact_b}"

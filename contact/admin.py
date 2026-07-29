@@ -1,4 +1,4 @@
-from django.contrib import admin
+from django.contrib import admin, messages
 from django.urls import reverse
 from django.utils.html import format_html
 from simple_history.admin import SimpleHistoryAdmin
@@ -101,9 +101,40 @@ class ContactAdmin(SimpleHistoryAdmin):
                 "address_state", "address_postal_code",
             ],
         }),
-        ("Status", {"fields": ["is_active", "notes"]}),
+        ("Status", {"fields": ["is_active", "notes", "force_save"]}),
         ("Relationships", {"fields": ["add_relationship"]}),
     ]
+
+    def response_add(self, request, obj, post_url_continue=None):
+        self._warn_about_namesakes(request, obj)
+        return super().response_add(request, obj, post_url_continue)
+
+    def response_change(self, request, obj):
+        self._warn_about_namesakes(request, obj)
+        return super().response_change(request, obj)
+
+    def _warn_about_namesakes(self, request, obj):
+        """Mention other contacts with this name. Never blocks — see D18.
+
+        Rendering a message is presentation and belongs here; deciding who
+        counts as a namesake is a model classmethod, so Phase C's page shows the
+        same warning without recomputing anything. Only the stronger signal
+        (same name AND phone) blocks, and that happens in the form.
+        """
+        if obj.contact_type != Contact.ContactType.INDIVIDUAL:
+            return
+        namesakes = Contact.find_same_name(
+            last_name=obj.legal_last_name,
+            first_name=obj.legal_first_name,
+            exclude_pk=obj.pk,
+        )
+        if namesakes.exists():
+            self.message_user(
+                request,
+                f"系统里还有 {namesakes.count()} 位同名的联系人（号码不同）。"
+                "重名是合法的，这里只是提醒。",
+                messages.WARNING,
+            )
 
     @admin.display(description="")
     def add_relationship(self, obj):

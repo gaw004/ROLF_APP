@@ -1,5 +1,6 @@
 import datetime
 
+from django import forms
 from django.conf import settings
 from django.contrib import admin
 from django.contrib.auth import get_user_model
@@ -764,6 +765,123 @@ class EmergencyContactTests(TestCase):
         field_names = {f.name for f in Contact._meta.get_fields()}
         self.assertNotIn("is_reference_only", field_names)
         self.assertNotIn("emergency_contact", field_names)
+
+
+class DuplicateDetectionTests(TestCase):
+    """B4.3: the rule is same normalised name AND same phone. Three boundaries."""
+
+    def make(self, last_name="王强", first_name="", phone="+14085550101", **kw):
+        return Contact.objects.create(
+            contact_type=Contact.ContactType.INDIVIDUAL,
+            legal_last_name=last_name, legal_first_name=first_name,
+            phone=phone, **kw)
+
+    def find(self, last_name="王强", first_name="", phone="+14085550101", **kw):
+        return Contact.find_exact_duplicates(
+            last_name=last_name, first_name=first_name, phone=phone, **kw)
+
+    def test_same_name_same_phone_is_a_match(self):
+        existing = self.make()
+        self.assertIn(existing, self.find())
+
+    def test_same_name_different_phone_is_not_a_match(self):
+        # A genuine namesake. Missing this one is correct behaviour.
+        self.make()
+        self.assertFalse(self.find(phone="+14085550999").exists())
+
+    def test_same_phone_different_name_is_not_a_match(self):
+        # A family sharing one line. Also correct to miss.
+        self.make()
+        self.assertFalse(self.find(last_name="李明").exists())
+
+    def test_name_comparison_ignores_case_and_extra_spaces(self):
+        self.make(last_name="Wang", first_name="Qiang")
+        self.assertTrue(self.find(last_name=" wang ", first_name="QIANG").exists())
+
+    def test_a_contact_is_never_its_own_duplicate(self):
+        existing = self.make()
+        self.assertFalse(self.find(exclude_pk=existing.pk).exists())
+
+    def test_no_phone_means_no_match(self):
+        # Without a phone there is no second half to the rule, so nothing can
+        # match — and the hint never discloses a name the user has not typed.
+        self.make(phone="")
+        self.assertFalse(self.find(phone="").exists())
+
+    def test_find_same_name_ignores_the_phone_entirely(self):
+        self.make()
+        namesakes = Contact.find_same_name(last_name="王强", first_name="")
+        self.assertEqual(namesakes.count(), 1)
+
+
+class DuplicateInterceptionTests(TestCase):
+    """B4.3b: same name warns, same name AND phone blocks until force_save."""
+
+    def setUp(self):
+        self.existing = Contact.objects.create(
+            contact_type=Contact.ContactType.INDIVIDUAL,
+            legal_last_name="王强", phone="+14085550101")
+
+    def form_data(self, **overrides):
+        data = {
+            "contact_type": Contact.ContactType.INDIVIDUAL,
+            "legal_last_name": "王强",
+            "phone": "+14085550101",
+            "address_country": "US",
+        }
+        data.update(overrides)
+        return data
+
+    def test_same_name_same_phone_blocks_saving_until_force_save(self):
+        blocked = ContactAdminForm(data=self.form_data())
+        self.assertFalse(blocked.is_valid())
+        self.assertIn("force_save", blocked.errors)
+
+        forced = ContactAdminForm(data=self.form_data(force_save="on"))
+        self.assertTrue(forced.is_valid(), forced.errors)
+        self.assertIsNotNone(forced.save().pk)
+
+    def test_same_name_different_phone_only_warns(self):
+        # The hard block must never hang off the name alone: 王强 / 李明 / 陈伟
+        # repeat constantly here, and a box that pops up twenty times a day gets
+        # ticked reflexively — the block stops working and costs two clicks.
+        form = ContactAdminForm(data=self.form_data(phone="+14085550999"))
+        self.assertTrue(form.is_valid(), form.errors)
+
+    def test_the_checkbox_stays_hidden_until_there_is_something_to_confirm(self):
+        clean_form = ContactAdminForm(data=self.form_data(phone="+14085550999"))
+        self.assertIsInstance(
+            clean_form.fields["force_save"].widget, forms.HiddenInput)
+
+        hit_form = ContactAdminForm(data=self.form_data())
+        self.assertNotIsInstance(
+            hit_form.fields["force_save"].widget, forms.HiddenInput)
+
+    def test_the_checkbox_stays_visible_when_another_field_is_also_wrong(self):
+        # The reason widget visibility is decided in __init__ from the submitted
+        # data instead of inside clean(): on a second submission carrying some
+        # other error, the checkbox would revert to hidden and the user would be
+        # left thinking they had never ticked it.
+        form = ContactAdminForm(data=self.form_data(email="not-an-email"))
+        self.assertFalse(form.is_valid())
+        self.assertIn("email", form.errors)
+        self.assertNotIsInstance(
+            form.fields["force_save"].widget, forms.HiddenInput)
+
+    def test_editing_the_existing_contact_is_not_blocked_by_itself(self):
+        form = ContactAdminForm(data=self.form_data(), instance=self.existing)
+        self.assertTrue(form.is_valid(), form.errors)
+
+    def test_a_locally_formatted_phone_is_matched_after_normalisation(self):
+        # (408) 555-0101 and +14085550101 are the same number; phonenumber_field
+        # normalises on the way in, which is why no similarity scoring is needed.
+        form = ContactAdminForm(data=self.form_data(phone="(408) 555-0101"))
+        self.assertFalse(form.is_valid())
+        self.assertIn("force_save", form.errors)
+
+    def test_force_save_is_not_a_database_column(self):
+        field_names = {f.name for f in Contact._meta.get_fields()}
+        self.assertNotIn("force_save", field_names)
 
 
 class ContactHistoryTests(TestCase):

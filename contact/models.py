@@ -195,6 +195,65 @@ class Contact(ConstraintErrorFieldMixin, TimeStampedModel):
             ),
         ]
 
+    @staticmethod
+    def normalise_name(value):
+        """Collapse whitespace and case, so " Wang  Qiang " == "wang qiang"."""
+        return " ".join((value or "").split()).casefold()
+
+    @classmethod
+    def find_exact_duplicates(cls, *, last_name, first_name, phone, exclude_pk=None):
+        """Contacts with the same normalised name AND the same phone number.
+
+        One rule, one implementation — the form hint, the admin filter and the
+        management command all call this.
+
+        Phone first, because it is stored in E.164 (already normalised) and
+        indexed; the handful of rows left are then compared on name in Python,
+        which is cheaper than carrying a redundant normalised-name column.
+
+        ⚠️ No phone similarity, ever. These are E.164 strings: +14085550102 and
+           +14085550103 are 92% alike and belong to two unrelated people. A
+           number has no notion of "close". The formatting differences that do
+           matter ((408) 555-0102) were normalised away on the way in.
+
+        The two cases it misses are exactly the two it should: same number,
+        different name (a family sharing a line) and same name, different number
+        (a genuine namesake).
+
+        Requiring both halves also means the hint never reveals anything the
+        person has not already typed — which is why there is no name-only
+        autocomplete anywhere near this.
+        """
+        if not phone:
+            return cls.objects.none()
+        candidates = cls.objects.filter(phone=phone)
+        if exclude_pk:
+            candidates = candidates.exclude(pk=exclude_pk)
+        target = (cls.normalise_name(last_name), cls.normalise_name(first_name))
+        matching = [
+            contact.pk for contact in candidates
+            if (cls.normalise_name(contact.legal_last_name),
+                cls.normalise_name(contact.legal_first_name)) == target
+        ]
+        return cls.objects.filter(pk__in=matching)
+
+    @classmethod
+    def find_same_name(cls, *, last_name, first_name, exclude_pk=None):
+        """Contacts with the same name, whatever their phone number.
+
+        A weaker signal on purpose: this one only ever produces a warning. 王强
+        / 李明 / 陈伟 sharing a name is routine in the population this foundation
+        serves, and a hard block firing twenty times a day trains people to tick
+        the box on sight — the block stops working and costs two extra clicks.
+        """
+        last_name = " ".join((last_name or "").split())
+        first_name = " ".join((first_name or "").split())
+        if not last_name and not first_name:
+            return cls.objects.none()
+        found = cls.objects.filter(
+            legal_last_name__iexact=last_name, legal_first_name__iexact=first_name)
+        return found.exclude(pk=exclude_pk) if exclude_pk else found
+
     def save(self, *args, **kwargs):
         """Blank out the name fields that don't apply to this contact type.
 

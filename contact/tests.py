@@ -204,6 +204,85 @@ class RelationshipConstraintTests(TestCase):
         self.assertIsNone(relationship.end_date)
 
 
+class ConstraintFieldErrorTests(TestCase):
+    """Every constraint, submitted violated, lands on its mapped field (goal.md D14).
+
+    This is the second half of the D14 machinery. The core guard checks that
+    each constraint *has* a code and a mapping; this one checks the mapping
+    actually fires, because CheckConstraint.validate() skips silently when the
+    expression raises FieldError — and a constraint that never validates at form
+    time surfaces as an IntegrityError 500 rather than a red box on a field.
+
+    It lives in contact/tests.py rather than core/tests.py because only the app
+    knows what violating data looks like; core would have to import every model
+    to build it, which is the import direction D17 forbids.
+    """
+
+    def setUp(self):
+        self.alice = Contact.objects.create(
+            contact_type=Contact.ContactType.INDIVIDUAL, legal_last_name="Alice")
+        self.bob = Contact.objects.create(
+            contact_type=Contact.ContactType.INDIVIDUAL, legal_last_name="Bob")
+        self.parent_of = RelationshipType.objects.create(
+            name_a_to_b="parent of", name_b_to_a="child of")
+
+    def assertFieldError(self, instance, field):
+        with self.assertRaises(ValidationError) as caught:
+            instance.full_clean()
+        self.assertIn(field, caught.exception.message_dict)
+        return caught.exception.message_dict[field]
+
+    def test_individual_without_a_last_name_points_at_legal_last_name(self):
+        messages = self.assertFieldError(
+            Contact(contact_type=Contact.ContactType.INDIVIDUAL), "legal_last_name")
+        # The sentence comes from violation_error_message, not from a second
+        # copy of the rule written out in clean().
+        self.assertIn("An individual needs a legal last name.", messages)
+
+    def test_organization_without_a_name_points_at_organization_name(self):
+        messages = self.assertFieldError(
+            Contact(contact_type=Contact.ContactType.ORGANIZATION), "organization_name")
+        self.assertIn("An organization needs an organization name.", messages)
+
+    def test_an_unknown_contact_type_is_rejected_by_the_database(self):
+        # This one cannot be checked at form level: the choices validation in
+        # clean_fields() already flags contact_type, so full_clean() excludes
+        # the field and skips the constraint. The constraint still matters —
+        # it is what stops bulk_create and psql from writing a third type.
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            Contact.objects.bulk_create([
+                Contact(contact_type="household", legal_last_name="Nguyen"),
+            ])
+
+    def test_a_self_relationship_points_at_contact_b(self):
+        messages = self.assertFieldError(
+            Relationship(contact_a=self.alice, contact_b=self.alice,
+                         relationship_type=self.parent_of),
+            "contact_b",
+        )
+        self.assertIn("A contact cannot be related to themselves.", messages)
+
+    def test_a_duplicate_relationship_points_at_contact_b(self):
+        Relationship.objects.create(
+            contact_a=self.alice, contact_b=self.bob, relationship_type=self.parent_of)
+        messages = self.assertFieldError(
+            Relationship(contact_a=self.alice, contact_b=self.bob,
+                         relationship_type=self.parent_of),
+            "contact_b",
+        )
+        self.assertIn("This relationship has already been recorded.", messages)
+
+    def test_an_end_date_before_the_start_date_points_at_end_date(self):
+        messages = self.assertFieldError(
+            Relationship(contact_a=self.alice, contact_b=self.bob,
+                         relationship_type=self.parent_of,
+                         start_date=datetime.date(2023, 1, 1),
+                         end_date=datetime.date(2020, 1, 1)),
+            "end_date",
+        )
+        self.assertIn("The end date cannot be before the start date.", messages)
+
+
 class ContactHistoryTests(TestCase):
     """Audit trail: what changed, and who changed it (goal.md Phase A)."""
 

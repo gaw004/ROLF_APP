@@ -1,9 +1,9 @@
-from django.core.exceptions import ValidationError
 from django.db import models
 from phonenumber_field.modelfields import PhoneNumberField
 from django_countries.fields import CountryField
 from simple_history.models import HistoricalRecords
 
+from core.constraints import ConstraintErrorFieldMixin
 from core.models import TimeStampedModel
 
 
@@ -52,7 +52,7 @@ class Language(models.Model):
         return self.display_name
 
 
-class Contact(TimeStampedModel):
+class Contact(ConstraintErrorFieldMixin, TimeStampedModel):
     """A person OR an organization. contact_type distinguishes them."""
 
     # --- Type: individual vs organization (the CiviCRM approach) ---
@@ -146,46 +146,47 @@ class Contact(TimeStampedModel):
     class Meta:
         ordering = ["legal_last_name", "legal_first_name"]
         constraints = [
-            # ⚠️ PAIRED WITH Contact.clean() — see goal.md D14.
-            # This constraint is what actually enforces the rule: it holds for
-            # every write path, including objects.create(), bulk_create() and
-            # psql. clean() states the same rule again purely so the admin can
-            # attach the error to the offending field. CHANGE ONE, CHANGE BOTH.
+            # The one and only statement of these rules (goal.md D9 / D14). They
+            # hold for every write path — objects.create(), bulk_create(),
+            # queryset.update(), psql. Do NOT restate them in clean(): the admin
+            # gets field-level errors from violation_error_code below, via
+            # core.constraints.CONSTRAINT_FIELD.
+            #
+            # ⚠️ THREE constraints, not the one this used to be. A single
+            # constraint said "an individual needs a last name OR an organization
+            # needs a name", which is two rules with two different offending
+            # fields — and a code maps to exactly one field, so the organization
+            # case landed on legal_last_name. One constraint per rule is what
+            # makes the mapping possible at all. The third one preserves what the
+            # old OR-form enforced by accident: an unknown contact_type failed it
+            # too, and splitting would have silently dropped that.
             #
             # The values have to be written out as literals: a nested class body
             # cannot see the enclosing class's namespace, so ContactType.INDIVIDUAL
             # here would raise NameError. Keep them in step with ContactType above.
             models.CheckConstraint(
                 condition=(
-                    (models.Q(contact_type="individual") & ~models.Q(legal_last_name=""))
-                    | (models.Q(contact_type="organization") & ~models.Q(organization_name=""))
+                    ~models.Q(contact_type="individual") | ~models.Q(legal_last_name="")
                 ),
-                name="contact_name_matches_type",
-                violation_error_message=(
-                    "An individual needs a legal last name; "
-                    "an organization needs an organization name."
+                name="contact_individual_has_a_last_name",
+                violation_error_message="An individual needs a legal last name.",
+                violation_error_code="individual_needs_last_name",
+            ),
+            models.CheckConstraint(
+                condition=(
+                    ~models.Q(contact_type="organization") | ~models.Q(organization_name="")
                 ),
+                name="contact_organization_has_a_name",
+                violation_error_message="An organization needs an organization name.",
+                violation_error_code="organization_needs_name",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(contact_type__in=["individual", "organization"]),
+                name="contact_type_is_known",
+                violation_error_message="Unknown contact type.",
+                violation_error_code="contact_type_unknown",
             ),
         ]
-
-    def clean(self):
-        """Require the name that matches the contact type.
-
-        ⚠️ PAIRED WITH the `contact_name_matches_type` constraint in Meta above
-        — see goal.md D14. The constraint is the enforcement; this method only
-        exists to point at the field that is wrong. CHANGE ONE, CHANGE BOTH.
-        """
-        super().clean()
-        if self.contact_type == self.ContactType.ORGANIZATION:
-            if not self.organization_name:
-                raise ValidationError({
-                    "organization_name": "An organization needs an organization name.",
-                })
-        elif self.contact_type == self.ContactType.INDIVIDUAL:
-            if not self.legal_last_name:
-                raise ValidationError({
-                    "legal_last_name": "An individual needs a legal last name.",
-                })
 
     def save(self, *args, **kwargs):
         """Blank out the name fields that don't apply to this contact type.
@@ -219,7 +220,7 @@ class RelationshipType(models.Model):
         return self.name_a_to_b
 
 
-class Relationship(TimeStampedModel):
+class Relationship(ConstraintErrorFieldMixin, TimeStampedModel):
     """Connects two contacts with a typed, dated relationship.
 
     Example rows:
@@ -254,14 +255,16 @@ class Relationship(TimeStampedModel):
             models.Index(fields=["contact_a", "relationship_type"]),
             models.Index(fields=["contact_b", "relationship_type"]),
         ]
-        # ⚠️ ALL THREE ARE PAIRED WITH Relationship.clean() — see goal.md D14.
-        # These constraints are the enforcement; clean() restates them only to
-        # attach errors to the right field in the admin. CHANGE ONE, CHANGE BOTH.
+        # These three constraints are the only statement of their rules
+        # (goal.md D14). Nothing restates them in clean(); the admin gets
+        # field-level errors from violation_error_code, via
+        # core.constraints.CONSTRAINT_FIELD.
         constraints = [
             models.CheckConstraint(
                 condition=~models.Q(contact_a=models.F("contact_b")),
                 name="relationship_no_self_reference",
                 violation_error_message="A contact cannot be related to themselves.",
+                violation_error_code="relationship_self_reference",
             ),
             models.UniqueConstraint(
                 fields=["contact_a", "contact_b", "relationship_type", "start_date"],
@@ -272,6 +275,7 @@ class Relationship(TimeStampedModel):
                 # Needs PG 15+; we are on 18.
                 nulls_distinct=False,
                 violation_error_message="This relationship has already been recorded.",
+                violation_error_code="relationship_already_recorded",
             ),
             models.CheckConstraint(
                 condition=(
@@ -281,32 +285,9 @@ class Relationship(TimeStampedModel):
                 ),
                 name="relationship_end_date_not_before_start_date",
                 violation_error_message="The end date cannot be before the start date.",
+                violation_error_code="relationship_end_before_start",
             ),
         ]
-
-    def clean(self):
-        """Restate the Meta constraints as field-level errors for the admin.
-
-        ⚠️ PAIRED WITH the constraints in Meta above — see goal.md D14. The
-        database is what enforces these; this method only decides which field
-        turns red. CHANGE ONE, CHANGE BOTH.
-
-        The duplicate rule is deliberately not repeated here: it has no single
-        offending field to point at, and Django's own constraint validation
-        already reports it. See the constraint named
-        `relationship_unique_per_type_and_start`.
-        """
-        super().clean()
-        # relationship_no_self_reference
-        if self.contact_a_id and self.contact_a_id == self.contact_b_id:
-            raise ValidationError({
-                "contact_b": "A contact cannot be related to themselves.",
-            })
-        # relationship_end_date_not_before_start_date
-        if self.start_date and self.end_date and self.end_date < self.start_date:
-            raise ValidationError({
-                "end_date": "The end date cannot be before the start date.",
-            })
 
     def __str__(self):
         return f"{self.contact_a} — {self.relationship_type} → {self.contact_b}"

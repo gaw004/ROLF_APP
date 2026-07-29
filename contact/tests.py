@@ -65,6 +65,51 @@ class ContactNameByTypeTests(TestCase):
         self.assertIn("legal_last_name", caught.exception.message_dict)
 
 
+class ContactStringTests(TestCase):
+    """B4.1: two people with the same name must not stringify identically.
+
+    Every autocomplete built in B5/B6 is made of these strings, which is why
+    this had to land before them: two identical options in a dropdown produce a
+    silent data error, never an exception.
+    """
+
+    def make(self, **kw):
+        data = {"contact_type": Contact.ContactType.INDIVIDUAL, "legal_last_name": "王强"}
+        data.update(kw)
+        return Contact.objects.create(**data)
+
+    def test_two_contacts_with_the_same_name_stringify_differently(self):
+        first = self.make(email="qiang1@example.com")
+        second = self.make(email="qiang2@example.com")
+        self.assertNotEqual(str(first), str(second))
+
+    def test_the_phone_is_used_when_there_is_no_email(self):
+        contact = self.make(phone="+14085550101")
+        self.assertIn("4085550101", str(contact))
+
+    def test_the_pk_is_the_last_resort(self):
+        contact = self.make()
+        self.assertEqual(str(contact), f"王强 #{contact.pk}")
+
+    def test_two_organizations_with_the_same_name_stringify_differently(self):
+        # The organization branch needs this as much as the person one: two
+        # chapters of the same charity are just as easy to confuse.
+        first = Contact.objects.create(
+            contact_type=Contact.ContactType.ORGANIZATION,
+            organization_name="Red Cross", email="north@example.com")
+        second = Contact.objects.create(
+            contact_type=Contact.ContactType.ORGANIZATION,
+            organization_name="Red Cross", email="south@example.com")
+        self.assertNotEqual(str(first), str(second))
+
+    def test_duplicate_names_are_allowed(self):
+        # Deliberately not a unique constraint: same-name people are a fact, and
+        # this domain has no reliable natural key to key off instead.
+        self.make()
+        self.make()
+        self.assertEqual(Contact.objects.filter(legal_last_name="王强").count(), 2)
+
+
 class ContactAddressStateTests(TestCase):
     """State is free text, so non-US addresses keep their province/region."""
 

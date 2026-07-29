@@ -91,7 +91,8 @@ class Contact(ConstraintErrorFieldMixin, TimeStampedModel):
     # --- Contact info ---
     email = models.EmailField(blank=True, db_index=True)
     # Stores in E.164 international format (+1..., +44...); region lets users type local US numbers.
-    phone = PhoneNumberField(blank=True, region="US")
+    # Indexed because find_exact_duplicates() filters on it first (B4.3).
+    phone = PhoneNumberField(blank=True, region="US", db_index=True)
 
     # --- Demographics ---
     class Gender(models.TextChoices):
@@ -207,10 +208,33 @@ class Contact(ConstraintErrorFieldMixin, TimeStampedModel):
         super().save(*args, **kwargs)
 
     def __str__(self):
+        """Name plus something that tells two people of the same name apart.
+
+        Two contacts both called 王强 used to stringify identically, and every
+        autocomplete in the project is built out of this string: two identical
+        options in a dropdown, picking the wrong one raises nothing. That is a
+        silent data error — the relationship lands on the wrong person.
+
+        Duplicate names are NOT forbidden by a constraint: they are a legitimate
+        fact and this domain has no reliable natural key (an email cannot be
+        unique — a family shares one). Disambiguate in the display instead.
+
+        ⚠️ Cost, stated rather than hidden: emails and phone numbers now appear
+           in dropdowns and log entries. Acceptable for a small foundation, but
+           it is a real disclosure, not a free win.
+        """
         if self.contact_type == self.ContactType.ORGANIZATION:
-            return self.organization_name or "(unnamed organization)"
-        full = f"{self.legal_first_name} {self.legal_last_name}".strip()
-        return self.preferred_name or full or self.email or f"Contact #{self.pk}"
+            base = self.organization_name or "(unnamed organization)"
+        else:
+            full = f"{self.legal_first_name} {self.legal_last_name}".strip()
+            base = self.preferred_name or full or "(unnamed contact)"
+        # The organization branch gets the same treatment: two chapters of one
+        # charity are as easy to confuse as two people.
+        if self.email:
+            return f"{base} ({self.email})"
+        if self.phone:
+            return f"{base} ({self.phone})"
+        return f"{base} #{self.pk}" if self.pk else base
 
 
 class RelationshipType(ConstraintErrorFieldMixin, models.Model):

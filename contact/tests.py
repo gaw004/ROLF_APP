@@ -1,4 +1,5 @@
 import datetime
+import inspect
 from pathlib import Path
 
 from django import forms
@@ -11,9 +12,13 @@ from django.http import HttpResponse
 from django.test import TestCase, override_settings
 from django.urls import path, reverse
 
+from core.timeutils import local_today
+
+from .admin import MinorFilter
 from .forms import ContactAdminForm, RelationshipForm
 from .models import (
-    Contact, EmergencyContact, Language, Relationship, RelationshipType,
+    Contact, ContactQuerySet, EmergencyContact, Language, Relationship,
+    RelationshipType,
 )
 from .services import MergeConflict, direction_choices, merge_contacts
 
@@ -1052,6 +1057,74 @@ class MergePageTests(TestCase):
         template = (Path(settings.BASE_DIR)
                     / "contact/templates/contact/merge_confirm.html").read_text()
         self.assertNotIn("admin/base_site.html", template)
+
+
+class MinorTests(TestCase):
+    """B4.5: three states, one threshold, and a clock you can inject."""
+
+    def make(self, birth_date, last_name="小明"):
+        return Contact.objects.create(
+            contact_type=Contact.ContactType.INDIVIDUAL,
+            legal_last_name=last_name, birth_date=birth_date)
+
+    def test_is_minor_returns_none_when_the_birth_date_is_unknown(self):
+        # Not False. Folding unknown into "adult" is how a minor disappears from
+        # the parent-notification list without anything going wrong visibly.
+        self.assertIsNone(self.make(None).is_minor)
+
+    def test_is_minor_on_the_eighteenth_birthday(self):
+        today = local_today()
+        eighteen_today = self.make(ContactQuerySet.majority_threshold(today))
+        day_short = self.make(
+            ContactQuerySet.majority_threshold(today) + datetime.timedelta(days=1))
+        self.assertFalse(eighteen_today.is_minor)   # 18 today counts as an adult
+        self.assertTrue(day_short.is_minor)
+
+    def test_the_threshold_handles_the_29th_of_february(self):
+        # 2028-02-29 minus 18 years is 2010-02-29, which does not exist. Falling
+        # back to the 28th keeps somebody born on 1 March 2010 a minor, which
+        # they are — 17, by a day.
+        leap_day = datetime.date(2028, 2, 29)
+        self.assertEqual(
+            ContactQuerySet.majority_threshold(leap_day), datetime.date(2010, 2, 28))
+
+    def test_minors_adults_and_unknown_partition_the_whole_table(self):
+        today = local_today()
+        self.make(today - datetime.timedelta(days=365 * 10), "小孩")
+        self.make(today - datetime.timedelta(days=365 * 40), "大人")
+        self.make(None, "未知")
+        minors = set(Contact.objects.minors())
+        adults = set(Contact.objects.adults())
+        unknown = set(Contact.objects.birth_date_unknown())
+        # No overlap, and between them they account for every row: nobody with a
+        # missing birth date can fall through all three.
+        self.assertEqual(minors & adults, set())
+        self.assertEqual(minors & unknown, set())
+        self.assertEqual(adults & unknown, set())
+        self.assertEqual(minors | adults | unknown, set(Contact.objects.all()))
+
+    def test_minors_accepts_an_explicit_date(self):
+        # Same injectable clock as .active() and .vacant() (D16), which buys
+        # "who was still a minor last March" for nothing.
+        born = datetime.date(2010, 6, 1)
+        contact = self.make(born)
+        self.assertIn(contact, Contact.objects.minors(on=datetime.date(2020, 1, 1)))
+        self.assertNotIn(contact, Contact.objects.minors(on=datetime.date(2030, 1, 1)))
+
+    def test_the_admin_filter_does_no_date_arithmetic_of_its_own(self):
+        # D18: the threshold, the leap year and the timezone rule are written
+        # once on the QuerySet, so Phase C reuses them rather than recomputing.
+        source = inspect.getsource(MinorFilter.queryset)
+        for spelling in ["timedelta", "AGE_OF_MAJORITY", "replace(year"]:
+            self.assertNotIn(spelling, source)
+
+    def test_the_filter_offers_an_unknown_option(self):
+        options = [value for value, _ in MinorFilter(None, {}, Contact, None).lookups(None, None)]
+        self.assertIn("unknown", options)
+
+    def test_contact_has_no_age_field(self):
+        # An age goes stale, and nothing tells you it has.
+        self.assertNotIn("age", {f.name for f in Contact._meta.get_fields()})
 
 
 class ContactHistoryTests(TestCase):

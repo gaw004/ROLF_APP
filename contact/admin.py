@@ -80,6 +80,40 @@ class PossibleDuplicateFilter(admin.SimpleListFilter):
         return queryset
 
 
+class MinorFilter(admin.SimpleListFilter):
+    """Minor / adult / birth date unknown.
+
+    Three options, and the third is not optional: unknown has to be visible
+    rather than swallowed into "adult", or a minor with no date on file drops
+    silently off the list of people whose parents need calling.
+
+    ⚠️ Every option calls exactly one QuerySet method. No date arithmetic here
+       — the 18-year threshold, the leap-year case and the D16 timezone rule are
+       written once, on ContactQuerySet, so Phase C's "notify every minor's
+       parents" reuses them instead of recomputing them (D18).
+
+    list_filter = ["is_minor"] is not an option: is_minor is a property and
+    cannot be resolved by the ORM. Nor can an annotation replace this filter —
+    list_filter resolves names against model fields and raises admin.E116 for an
+    annotation, in every Django version.
+    """
+
+    title = "未成年"
+    parameter_name = "minor"
+
+    def lookups(self, request, model_admin):
+        return [("yes", "未成年"), ("no", "成年"), ("unknown", "生日未知")]
+
+    def queryset(self, request, queryset):
+        if self.value() == "yes":
+            return queryset.minors()
+        if self.value() == "no":
+            return queryset.adults()
+        if self.value() == "unknown":
+            return queryset.birth_date_unknown()
+        return queryset
+
+
 @admin.register(Contact)
 class ContactAdmin(SimpleHistoryAdmin):
     """SimpleHistoryAdmin rather than ModelAdmin: adds the History button."""
@@ -90,7 +124,7 @@ class ContactAdmin(SimpleHistoryAdmin):
     ]
     list_filter = [
         "contact_type", "is_active", "gender", "address_country",
-        PossibleDuplicateFilter,
+        PossibleDuplicateFilter, MinorFilter,
     ]
     search_fields = [
         "legal_first_name", "legal_last_name", "preferred_name",

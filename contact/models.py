@@ -11,6 +11,7 @@ from simple_history.models import HistoricalRecords
 from core.constraints import ConstraintErrorFieldMixin
 from core.models import TimeStampedModel
 from core.querysets import DateRangeMixin, DateRangeQuerySet
+from core.timeutils import local_today
 
 
 class Language(models.Model):
@@ -64,6 +65,47 @@ class ContactQuerySet(models.QuerySet):
     Every admin filter on Contact calls one of these and does no work of its
     own — that is what keeps the logic alive when admin.py is eventually deleted.
     """
+
+    # The age of majority, in one place. Changing it to 16 is a one-line edit
+    # here and nowhere else — which is the reason the filter is not allowed to
+    # do this arithmetic itself.
+    AGE_OF_MAJORITY = 18
+
+    @classmethod
+    def majority_threshold(cls, on=None):
+        """Born on or before this date ⇒ already an adult on `on`.
+
+        Subtracting years, not counting days — 18 × 365 is wrong four or five
+        times over that span, and wrong by a day never raises anything.
+
+        `on` is a parameter rather than an implicit call to local_today() for the
+        same reason .active() takes one (D16): it makes "who was still a minor
+        last March" free, and testing the boundary free with it.
+        """
+        on = on or local_today()
+        year = on.year - cls.AGE_OF_MAJORITY
+        try:
+            return on.replace(year=year)
+        except ValueError:
+            # 29 February, and the year we land in is not a leap year. Step back
+            # to the 28th: somebody born on 1 March that year is still 17 today
+            # and must stay on the minor side of the line.
+            return on.replace(year=year, day=28)
+
+    def minors(self, on=None):
+        return self.filter(birth_date__gt=self.majority_threshold(on))
+
+    def adults(self, on=None):
+        return self.filter(birth_date__lte=self.majority_threshold(on))
+
+    def birth_date_unknown(self):
+        """Unknown is its own answer, never folded into "adult".
+
+        A minor with no birth date on file would otherwise disappear silently
+        from the list of people whose parents need calling — the one mistake
+        this feature cannot afford.
+        """
+        return self.filter(birth_date__isnull=True)
 
     def possible_duplicates(self):
         """Contacts sharing a normalised name AND a phone number with another row.
@@ -229,6 +271,19 @@ class Contact(ConstraintErrorFieldMixin, TimeStampedModel):
                 violation_error_code="contact_type_unknown",
             ),
         ]
+
+    @property
+    def is_minor(self):
+        """True / False / None (birth date unknown) — three states, not two.
+
+        birth_date is nullable, and folding unknown into False would quietly
+        drop minors with no date on file from the parent-notification list.
+
+        Never store an age: it goes stale, and nothing tells you it has.
+        """
+        if self.birth_date is None:
+            return None
+        return self.birth_date > ContactQuerySet.majority_threshold()
 
     @staticmethod
     def normalise_name(value):

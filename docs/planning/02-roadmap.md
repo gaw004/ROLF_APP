@@ -494,7 +494,8 @@ def get_readonly_fields(self, request, obj=None):
 
 `goal.md` 写的是三步迁移（加可空 → 回填 → 改 unique/non-null）。
 **那是表里有数据时的必要手续，而本机 `RelationshipType` 是 0 行**（B0 实测），
-所以一步加 `SlugField(unique=True)` 即可。
+所以一个迁移就够：加 `SlugField(max_length=50)`（**字段上不写 `unique=True`**）
+＋上面那条 `UniqueConstraint(Lower("code"))`。
 
 ```bash
 python manage.py makemigrations contact
@@ -678,6 +679,7 @@ models.UniqueConstraint(
     Coalesce("start_date", Value(date.min)),
     name="relationship_unique_unordered_pair",
     violation_error_message="这两个人之间已经有一条同类型的关系了。",
+    violation_error_code="relationship_pair_taken",   # → CONSTRAINT_FIELD 映射到 contact_b
 )
 ```
 
@@ -1122,7 +1124,9 @@ class Position(TimeStampedModel):
        跨行环路数据库拦不住，环的兜底和 N+1 的规避都在那个函数里，
        全项目只有它一处遍历汇报链（core/tests.py 有 grep 守卫盯着）。
     """
-    code       = SlugField(unique=True)                # 代码只认它，不认 name
+    code       = SlugField()                           # 代码只认它，不认 name
+                                                       # ⚠️ 不写 unique=True —— 唯一性走下面的
+                                                       #    UniqueConstraint(Lower("code"))
     name       = CharField()                           # "项目总监"，save() 归一化空白
     kind       = CharField(choices=Kind)               # employee / volunteer / board
     ministry   = FK(Ministry, PROTECT, null=True, blank=True, related_name="positions")
@@ -1607,8 +1611,12 @@ volunteer/management/commands/seed_demo.py   （或放 core，随意，但只此
 - [ ] `python manage.py check` **零警告**
 - [ ] `python manage.py makemigrations --check --dry-run` 报 "No changes detected"
 - [ ] `ruff check .` 干净
-- [ ] 两条守卫测试真的会红：临时写一句 `date.today()` 和一句
-      `Contact.objects.all()` 当人员列表，跑测试确认变红，再删掉
+- [ ] **时间口径守卫真的会红**：临时写一句 `date.today()`、再临时写一句
+      `timezone.now().date()`，分别跑测试确认变红，再删掉。
+      **两句都要试** —— `ruff` 的 `DTZ` 只抓得到前者（后者是 tz-aware 的，linter 认为合法），
+      后者全靠这条 grep 守卫。
+      ⚠️ 原来这里写的是「`Contact.objects.all()` 当人员列表」——
+      那是第六轮作废的 `Contact.objects.people()` 守卫，**已经没有这条测试了**
 - [ ] **分层守卫真的会红**：临时在 `contact/forms.py` 里写一句
       `from django.contrib import admin`，跑测试确认变红，再删掉
 - [ ] **汇报链遍历守卫真的会红**：临时在 `org/admin.py` 里写一个

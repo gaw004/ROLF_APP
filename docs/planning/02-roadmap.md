@@ -54,6 +54,9 @@
 | 逐字段合并的交互界面 | 推迟清单 —— 合并功能本身要做，界面从简 |
 | 自己写的页面 / HTMX | Phase C（D2：前端推迟）。本阶段全部在 admin 里完成 |
 | 薪酬 | 推迟清单 + `payroll` app 的位置已在 D17 预留 |
+| **在 `clean()` 里重写一遍约束的规则** | 2026-07-28 D14 重写：规则只在约束里，字段级提示走 `CONSTRAINT_FIELD` 映射。`clean()` 只写约束表达不了的（跨表、跨行） |
+| **`Contact.is_reference_only` / `Contact.emergency_contact` / `Contact.objects.people()`** | **2026-07-28 第六轮整体作废**，紧急联系人改用 `EmergencyContact` 专用表（B4.2）。一个字段都不要加 |
+| **把 `EmergencyContact.name` / `.phone` 升级成 FK → `Contact`** | 推迟清单 —— **且这是「痛」的迁移方向**。重复存储是主动接受的代价，别在实施时顺手优化掉 |
 | **带日期的编制层级**（组织架构的历史） | 推迟清单 —— 本阶段解决的是"**换人**"，不是"**重组**"。`Position.reports_to` 改了，旧架构只剩 simple-history |
 | **`Position.headcount`**（编制人数） | 推迟清单 —— `vacant()` 只认"一个人都没有"，表达不了"3 个坑填了 2 个" |
 
@@ -67,7 +70,7 @@
 2. **`contact` 的收口必须排在所有新表之前** ——
    - `RelationshipType.code` 要赶在**任何按类型查询的代码**写出来之前（晚了字符串匹配就扩散了）；
    - `Contact.__str__` 消歧要赶在 **B5/B6 那三个新 autocomplete** 之前（晚了下拉框里全是一模一样的选项）；
-   - `Contact.emergency_contact_relationship` 依赖 `RelationshipType.usable_as_emergency_contact`。
+   - `EmergencyContact.relationship_type` 依赖 `RelationshipType.usable_as_emergency_contact`。
 3. **关系的双向显示必须先于对称归一化** —— 顺序反了，用户刚录的关系会从他的页面上消失
    （`goal.md` Phase B「对称关系」那一条）。
 
@@ -76,7 +79,7 @@ B0 基线与准备（分支 / ruff / 确认不阻塞项）
  └→ B1 core：local_today() + DateRangeQuerySet + 两条守卫测试
      └→ B2 contact①：RelationshipType 收口（code / is_symmetric / 唯一约束）
          └→ B3 contact②：Relationship 收口（双向显示 → 归一化 → 删 is_active）
-             └→ B4 contact③：Contact 收口（__str__ / 紧急联系人 / 查重 / 合并 / is_minor）
+             └→ B4 contact③：Contact 收口（__str__ / EmergencyContact / 查重 / 合并 / is_minor）
                  ├→ B5 org：Ministry + EmploymentType + Position + Assignment
                  │   └→ B6 events：EventType + Event + ParticipationRole + Participation
                  └→ B7 volunteer：VolunteerProfile
@@ -147,10 +150,62 @@ select = ["E", "F", "DTZ"]
 
 ---
 
-## B1 · `core`：时间口径与共享 `.active()`
+## B1 · `core`：时间口径、共享 `.active()`、约束错误映射
 
 **为什么最先做**：后面每一张带起止日期的表都要用 `.active()`，而它的定义里有一个
 会静默出错的坑（时区）。定义只留一处，且在第一个使用者出现之前就位。
+**约束错误映射（D14）同理** —— B2 起每张新表都要往里登记，机制必须先就位。
+
+### `core/constraints.py`（新建，2026-07-28 D14 重写后新增）
+
+规则**只写在约束里**，`clean()` 不再重写一遍。剩下的只是把约束错误从
+`NON_FIELD_ERRORS` 挪到正确的字段上：
+
+```python
+"""约束名 → 字段名的映射，以及把约束错误挂到字段上的 mixin。见 goal.md D14。
+
+这张表是纯呈现元数据，不含任何业务逻辑 —— 规则改了（比如年龄 18 改 16），
+只改约束一处，这里一个字都不用动。
+"""
+
+CONSTRAINT_FIELD = {
+    # violation_error_code: 该错误应该显示在哪个字段上
+    "name_type_mismatch":  "legal_last_name",
+    "reltype_name_taken":  "name_a_to_b",
+    ...
+}
+
+
+class ConstraintErrorFieldMixin:
+    """把 validate_constraints() 抛到 NON_FIELD_ERRORS 的错误改挂到具体字段。
+
+    Django 没有内置办法让 CheckConstraint / UniqueConstraint 的错误落到字段上，
+    而 admin 里的人需要看到「是姓氏这一栏错了」。按 error.code 查 CONSTRAINT_FIELD。
+    """
+```
+
+每条业务约束都要带两样（Django 4.1+ / 5.0+，本项目 5.2 都有）：
+
+```python
+violation_error_message="个人必须填姓氏，机构必须填机构名。",   # 人话
+violation_error_code="name_type_mismatch",                  # 编程锚点 → 映射表的键
+```
+
+⚠️ **`CheckConstraint.validate()` 遇到 `FieldError` 会静默跳过** ——
+某些约束在 `full_clean()` 阶段根本不会被校验，只在真写库时由数据库拦下
+（表现为 `IntegrityError`，不是友好的表单错误）。
+**B2 起每加一条约束，都要在 admin 里实测一次提交违规数据看到什么**，
+尤其是表达式约束（`Lower(Trim())` / `Least`/`Greatest`/`Coalesce`）。
+测不通的，`clean()` 才真的写一份，并在 docstring 里注明
+**"它是表单层唯一的拦截，不是提示层"**。
+
+⚠️ **顺带要改存量代码**：Phase A 按**旧** D14（两层 + 注释纪律）写过
+`contact_name_matches_type` 约束和配套的 `Contact.clean()`
+（`01-roadmap.md` A7/A8 —— 那份手册已完成留档，不改，但它描述的代码要改）。
+本步一并收编：约束加上 `violation_error_message` / `violation_error_code`、
+往 `CONSTRAINT_FIELD` 登记、**删掉 `Contact.clean()` 里重写规则的那一段**，
+只保留约束表达不了的部分（如果有的话）。
+不收编的话守卫测试第一次跑就会红 —— 这正是它该做的事。
 
 ### `core/timeutils.py`（新建）
 
@@ -247,6 +302,22 @@ def test_active_uses_the_foundation_timezone_not_utc(self)
 def test_nobody_computes_today_outside_core_timeutils(self)
 ```
 
+**外加两条 D14 的守卫测试**（用测试当 lint，同迁移守卫 / D16 时间守卫）：
+
+```python
+def test_every_business_constraint_has_a_code_and_a_field_mapping(self):
+    """遍历所有 model 的 Meta.constraints，断言每条都有 violation_error_code
+    且在 CONSTRAINT_FIELD 里有映射。漏登记一条当场变红 ——
+    这条测试就是 D14 原方案里「改一处必须改另一处」那条注释纪律的替代品。"""
+
+def test_constraint_violations_surface_as_field_errors_not_integrity_errors(self):
+    """每条约束提交违规数据，断言拿到的是 ValidationError 且挂在预期字段上。
+
+    钉住 D14 那个坑：CheckConstraint.validate() 遇 FieldError 会静默跳过，
+    那样的约束只会在写库时炸成 IntegrityError。这条测试让它当场暴露。"""
+```
+
+
 最后一条 grep 守卫的写法：遍历项目下的 `*.py`（跳过 `.venv`、`*/migrations/*`
 和 `core/timeutils.py` 自己），正则找 `date.today()` 和 `timezone.now().date()`，
 命中就 fail 并打印文件和行号。**`ruff` 的 `DTZ` 抓不到第二种**（那是 tz-aware 的，
@@ -262,7 +333,7 @@ linter 认为合法），所以这条测试不能省。
 ## B2 · `contact` ①：`RelationshipType` 收口
 
 **为什么在这个位置**：`code` 必须赶在任何按类型查询的代码之前落地；
-`usable_as_emergency_contact` 是 B4 紧急联系人字段的前置。
+`usable_as_emergency_contact` 是 B4.2 `EmergencyContact` 表的前置。
 
 > ⚠️ **2026-07-28 第三轮修订**：已确认 **`bulk_create` 会成为常态写入路径**
 > （批量导入基金会现有数据）。所有"`save()` 归一化 + 唯一约束"的组合因此都是漏的 ——
@@ -291,15 +362,15 @@ class RelationshipType(models.Model):
 ```python
 class Meta:
     constraints = [
-        # ⚠️ PAIRED WITH RelationshipType.clean() —— 见 goal.md D14。
-        # Lower：普通 UniqueConstraint 挡不住 "Parent of" vs "parent of"，
-        #        那和 clean() 里「忽略大小写」的口径也对不上。
+        # 规则只在这里 —— 不要在 clean() 里再写一遍（goal.md D14）。
+        # Lower：普通 UniqueConstraint 挡不住 "Parent of" vs "parent of"。
         # Trim ：只靠 save() strip 的话 " parent of" 会被 bulk_create 塞进来。
         #        见 goal.md D9「归一化通则」。
         models.UniqueConstraint(
             Lower(Trim("name_a_to_b")),
             name="relationshiptype_name_a_to_b_ci_unique",
             violation_error_message="已经有一个同名的关系类型了。",
+            violation_error_code="reltype_name_taken",   # → CONSTRAINT_FIELD 映射到 name_a_to_b
         ),
         # code 用 Lower() 版而不是字段上的 unique=True —— 同一条通则：
         # save() 转小写只保证「存进去的值好看」，bulk_create 能插 Food_Pantry + food_pantry。
@@ -332,18 +403,25 @@ def save(self, *args, **kwargs):
 > 而 `bulk_create` 已确认会成为常态写入路径（批量导入基金会现有数据）。
 > 判定方法见 `goal.md` D9 通则：**不经过 `save()` 直接写这两行，数据库会不会拒？**
 
-### `clean()` 提示层 + 反向类型拦截（缺口 1）
+### `clean()` 只做约束表达不了的那件事（缺口 1）
 
 ```python
 def clean(self):
-    """⚠️ PAIRED WITH relationshiptype_name_a_to_b_ci_unique —— 见 goal.md D14。"""
-    # 1. 唯一约束的人话版本（把错误挂到 name_a_to_b 字段上）
-    # 2. 缺口 1：新类型的 name_a_to_b 撞上任何已有类型的 name_b_to_a 就报错，
-    #    并指出撞的是哪一行。
-    #    根因：反向类型行本来就不该存在 —— "child of" 已经是 "parent of" 的
-    #    name_b_to_a 了。类型行不存在，反向关系行就根本录不出来。
-    #    所以防线加在类型层，不是关系层。
+    """缺口 1：新类型的 name_a_to_b 撞上任何已有类型的 name_b_to_a 就报错。
+
+    ⚠️ 这是「表单层唯一的拦截」，不是提示层 —— 它跨行查询，CheckConstraint
+    表达不了，所以 bulk_create 绕得过去。这是一个已知的不完美，见 goal.md D14。
+
+    根因：反向类型行本来就不该存在 —— "child of" 已经是 "parent of" 的
+    name_b_to_a 了。类型行不存在，反向关系行就根本录不出来。
+    所以防线加在类型层，不是关系层。
+    """
 ```
+
+⚠️ **不要在这里重写唯一约束的人话版本**（2026-07-28 D14 重写后的规矩）。
+那条规则只属于 `relationshiptype_name_a_to_b_ci_unique`，
+人话来自它的 `violation_error_message`，挂到哪个字段来自 `CONSTRAINT_FIELD` 映射。
+**`clean()` 里只写约束表达不了的东西**，这里就是缺口 1 那条跨行检查。
 
 比较一律 strip + casefold。
 
@@ -582,65 +660,74 @@ def __str__(self):
 
 同时加：`phone` 字段 `db_index=True`（B4.3 的查重要按它查）。
 
-### B4.2 紧急联系人三个字段
+### B4.2 `EmergencyContact` 专用表
+
+> ⚠️ **2026-07-28 第六轮修订，本步整段重写。** 原方案是在 `Contact` 上加三个字段
+> （`emergency_contact` 自引用 FK / `emergency_contact_relationship` / `is_reference_only`），
+> 并配一整套 `people()` 过滤纪律。**全部作废，一个字段都不要加。**
+>
+> 理由（`goal.md` D15「载体的第四条判据」）：紧急联系人可能是邻居、室友，
+> **不是与基金会交互的主体，不该占一行 `Contact`**。留在 `Contact` 里的话，
+> 任何一处 `Contact.objects.filter(...)` 忘了排除就是把志愿者通讯发给几百个第三方 ——
+> **那是隐私事故，不是数字不准**。而靠"所有人每次都记得调用 `people()`"来防，
+> 是纪律性保障，弱于结构性保障。
 
 ```python
-emergency_contact = models.ForeignKey(
-    "self", on_delete=models.PROTECT, null=True, blank=True,
-    related_name="listed_as_emergency_contact_by",
-)
-emergency_contact_relationship = models.ForeignKey(
-    RelationshipType, on_delete=models.PROTECT, null=True, blank=True,
-    related_name="+", limit_choices_to={"usable_as_emergency_contact": True},
-)
-is_reference_only = models.BooleanField(default=False, db_index=True)
+class EmergencyContact(TimeStampedModel):
+    """某个联系人的紧急联系人。姓名电话存文本，刻意不指向 Contact。
+
+    ⚠️ 不要"顺手"把 name/phone 优化成 FK → Contact。那会把幽灵记录请回
+    Contact 表，正是本次修订要根除的东西。重复存储是已知且主动接受的代价，
+    见 goal.md D15「为什么最终选了文本方案」。
+    """
+    person = models.ForeignKey(
+        Contact, on_delete=models.CASCADE, related_name="emergency_contacts",
+    )
+    name  = models.CharField(max_length=200)          # 必填
+    phone = PhoneNumberField()                        # 必填，E.164（D7）
+    relationship_type = models.ForeignKey(
+        RelationshipType, on_delete=models.PROTECT, related_name="+",
+        limit_choices_to={"usable_as_emergency_contact": True},
+    )                                                 # 非空 —— 关系必填
 ```
 
-`PROTECT` 而不是 `SET_NULL`：**紧急电话静默变空比"删不掉这个人"危险得多。**
+**三个字段全部必填**：没有电话的紧急联系人没有意义；没有关系的说不清是谁。
 
-两条约束（按 D14 各配 `clean()` 提示层，两处互相注释）：
+**`person` 用 `CASCADE`**：紧急联系人是附属数据，没有独立生命周期，
+档案删了它就该跟着走。（`relationship_type` 是字典表，照例 `PROTECT`。）
+
+**「关系必填」现在只是一个 `null=False`** —— 原方案要写一条
+`contact_emergency_contact_has_a_relationship` 的 `CheckConstraint`。
+**这是拆表白捡的简化**，别再去写那条约束。
+
+一条约束：
 
 ```python
-models.CheckConstraint(
-    condition=~models.Q(emergency_contact=models.F("id")),
-    name="contact_emergency_contact_is_not_self",
-),
-models.CheckConstraint(
-    condition=(models.Q(emergency_contact__isnull=True)
-               | models.Q(emergency_contact_relationship__isnull=False)),
-    name="contact_emergency_contact_has_a_relationship",
-    violation_error_message="记了紧急联系人就必须写清关系。",
-),
+models.UniqueConstraint(
+    Lower(Trim("name")), "phone", "person",
+    name="emergencycontact_unique_per_person",
+)
 ```
 
-**方向约定**（不写死一定会录反）：`emergency_contact_relationship` 一律读作
+防的是"同一个人身上把同一个紧急联系人录两遍"。
+**归一化写进表达式，不靠 `save()`** —— D9 归一化通则（`bulk_create` 绕得过 `save()`）。
+
+**不加任何"每人最多一个"的限制** —— 表天然支持多个，基金会目前只需要一个，
+但这是数据自然形状，不是要强制的规则。原方案"每人 ≤1"是自引用 FK 的**硬限制**，
+不是需求。
+
+**方向约定**（不写死一定会录反）：`relationship_type` 一律读作
 **「紧急联系人 是 本人 的 ___」**，即 `name_a_to_b`，a = 紧急联系人、b = 本人。
-小明的记录上填 `emergency_contact=王秀英` + `parent of` = "王秀英是小明的母亲"。
+小明名下那一行填 `name=王秀英` + `parent of` = "王秀英是小明的母亲"。
 **这句话要原样写进 admin 的 `help_text`。**
 
-### `is_reference_only` 的纪律
+**admin**：`EmergencyContactInline`（`TabularInline`）挂在 `ContactAdmin` 上，`extra=0`。
 
-```python
-class ContactQuerySet(models.QuerySet):
-    def people(self):
-        """排除只作为参照存在的记录（自动建出来的紧急联系人）。
-
-        所有面向人的列表 / 统计 / 导出一律走它。默认 manager 必须保持全集 ——
-        把 Contact.objects 改成默认过滤会让 admin、外键校验、get() 的行为
-        变得诡异，是个比原问题更大的坑。见 goal.md D15 / Phase B。
-        """
-        return self.exclude(is_reference_only=True)
-```
-
-配一条 grep 守卫测试（同 D16 的套路）。admin 的 Contact 列表加一个
-**默认预选**"仅真实联系人"的 `SimpleListFilter`，需要时能切到全部。
-
-两条相关小规则：
-
-- reference-only 记录仍要满足 `contact_name_matches_type` ——
-  **所以只有电话没有姓氏时建不出来**，要在录入界面上拦，不要等数据库报错。
-- "某个 reference-only 记录已经有了 `Assignment` 或 `Participation`"说明它早该被提升了，
-  做成一条数据质量提示（跨表，`CheckConstraint` 表达不了，不做约束）。
+> **不做查重、不做关联、不做预选。** 原方案那五大段（自动建 reference-only、
+> 命中唯一时预选、命中多条时提示、安全阀、同名同号父子的残留风险）**整体消失** ——
+> 没有身份要认，就没有认错的可能。**这是文本方案唯一比 FK 版简单的地方，享受它。**
+> `find_exact_duplicates()` 仍然要写，但那是给 `Contact` 本身用的（B4.3），
+> 和紧急联系人无关。
 
 ### B4.3 录入与查重
 
@@ -667,29 +754,15 @@ def find_exact_duplicates(cls, *, last_name, first_name, phone, exclude_pk=None)
 > 才可能命中。所以**不做按姓名的 autocomplete 下拉**（那是唯一会泄露"系统里有个同名的人"
 > 的路径），改成两个字段都填完后再检查。提示里**只显示姓名**。
 
-**表单形态**（`ContactAdminForm` 上加三个非模型字段：`ec_last_name` / `ec_first_name` / `ec_phone`）：
-
-| 情形 | 行为 |
-|---|---|
-| 没命中 | 保存时自动建一条 `is_reference_only=True` 的 Contact 并关联 |
-| **命中唯一一条** | **表单里预先关联好**（可见的默认值），旁边一个"不是同一个人，改为新建"的纯文字链接 |
-| 命中 2 条以上 | **不预选**，`messages.warning` 列出候选（只显示姓名 + 链接），仍然放行；这条记录会进"疑似重复"筛选器 |
-
-**"命中时预选"是"用户懒得关联"唯一有效的解法** —— 懒惰的用户什么都不点、
-直接保存，做的恰好是对的事。
-
-这和"不能自动关联"不矛盾，界线是**「静默替换」vs「可见的默认值」**：
-保存前就写在表单上、指名道姓、一次点击可撤销、且 `Contact` 已挂 simple-history 全程留痕。
-
-> ⚠️ **残留风险：同名同号的父子 / 母女会被默认关联错。** 在服务对象里
-> "父子同名 + 共用手机号"不是不可能。接受它 —— 错了是可见的、可一键撤销、有审计。
-> 真出过一次事，就把"命中时预选"降级成"只提示不预选"，一行开关。
-
-**紧急联系人这一支不要阻塞保存，也不要弹窗强制选择。** 漏网的进合并队列。
+> ⚠️ **这个判定函数只服务 `Contact` 本身的查重（下面 B4.3b），与紧急联系人无关。**
+> 第六轮修订之前它还兼管"紧急联系人该关联到哪条 Contact"，
+> **那一整套（自动建 reference-only、命中唯一时预选、命中多条时提示、
+> 安全阀、同名同号父子会关联错的残留风险）已随专用表方案整体作废**，
+> 见 B4.2 结尾。**不要实现其中任何一条。**
 
 ### B4.3b 联系人本身的重名：分级拦截（2026-07-28 新增）
 
-上面那张表管的是**紧急联系人**的关联。**联系人本人的重名是另一件事**，规则也不同：
+`Contact` 的重名是**唯一还需要查重的地方**（紧急联系人已经不需要了）：
 
 | 信号 | 频率 | 处理 |
 |---|---|---|
@@ -784,20 +857,20 @@ def is_minor(self):
 ```python
 # B4.1
 def test_two_contacts_with_the_same_name_stringify_differently(self)
-# B4.2
-def test_a_contact_cannot_be_their_own_emergency_contact(self)
-def test_an_emergency_contact_without_a_relationship_is_rejected(self)
-def test_people_excludes_reference_only_contacts(self)
-def test_nobody_lists_contacts_without_going_through_people(self)      # grep 守卫
-# B4.3
+# B4.2 —— EmergencyContact 专用表
+def test_an_emergency_contact_without_a_relationship_type_is_rejected(self)   # FK 非空
+def test_duplicate_emergency_contact_for_the_same_person_is_rejected(self)    # 唯一约束
+def test_bulk_create_cannot_insert_an_emergency_contact_differing_only_in_name_whitespace(self)
+def test_one_person_can_have_two_different_emergency_contacts(self)           # 没有人为的基数限制
+def test_deleting_a_contact_deletes_their_emergency_contacts(self)            # CASCADE
+def test_contact_has_no_is_reference_only_field_and_no_emergency_contact_fk(self)
+#   ↑ 钉住第六轮的结果：Contact 里不许有幽灵记录，也不许有那个自引用 FK
+# B4.3b —— Contact 本身的查重
 def test_same_name_same_phone_is_a_match(self)
 def test_same_name_different_phone_is_not_a_match(self)
 def test_same_phone_different_name_is_not_a_match(self)
-def test_a_unique_match_is_preselected_on_the_form(self)
-def test_multiple_matches_are_not_preselected(self)
-def test_the_duplicate_hint_does_not_block_saving(self)
-def test_the_hint_reappears_on_every_save(self)                        # 不是一次性
-def test_an_unknown_emergency_contact_is_created_as_reference_only(self)
+def test_same_name_same_phone_blocks_saving_until_force_save(self)            # 硬拦截
+def test_same_name_different_phone_only_warns(self)                           # 不绑错信号
 # B4.4
 def test_merge_moves_every_reverse_relation(self)                      # 见下
 def test_merge_refuses_when_both_contacts_have_a_user(self)
@@ -812,8 +885,8 @@ def test_is_minor_on_the_eighteenth_birthday(self)
 > **断言每一项要么被搬走了、要么在显式的跳过名单里**（跳过名单只有 `Historical*`）。
 > 这样以后任何人给 Contact 加了新外键却没决定合并时怎么处理，这条测试会当场变红。
 
-**验证**：`test` 全绿；肉眼验 —— 录一个志愿者填一个系统里没有的紧急联系人，
-再录第二个志愿者填同名同号的，第二次应该自动关联到第一次建出来的那条。
+**验证**：`test` 全绿；肉眼验 —— 给一个志愿者在 inline 里填一个紧急联系人
+（姓名 + 电话 + 关系，三样都必填），保存后**确认 `Contact` 列表里没有多出任何记录**。
 
 ---
 
@@ -1216,7 +1289,7 @@ BACKGROUND_CHECK_VALID_DAYS = 730
 政策改了（比如从 2 年缩到 1 年）不用洗数据。
 
 **不含** title / 上级 / 任职起始日（那些是岗位，归 `Assignment`）；
-**不含**紧急联系人（在 `Contact` 上）；**`skills` 跟着 `Skill` 一起推迟。**
+**不含**紧急联系人（在 `EmergencyContact` 表上，见 B4.2）；**`skills` 跟着 `Skill` 一起推迟。**
 
 **敏感度**：背景审查结果是本系统里仅次于薪酬的敏感数据。
 Phase D 的权限方案里要和未成年人信息一起单独处理 —— 这条现在只是记着，本阶段不实现权限。
@@ -1261,7 +1334,7 @@ volunteer/management/commands/seed_demo.py   （或放 core，随意，但只此
 - 一个人占两个不同 ministry 的两个 `Position`，两个编制各有不同上级
 - **一个请假中的志愿者**（`status=on_leave`，起止日期完好）—— 验收要用
 - 一条跨 kind 的汇报线：执行总监编制（employee）→ 理事长编制（board）
-- 一个未成年志愿者（有生日）+ 一个只作参照的紧急联系人
+- 一个未成年志愿者（有生日）+ 他名下的一条 `EmergencyContact`（姓名/电话/关系）
 - 一场活动，同一个人两个角色、各自工时
 - 一对同名同号的重复 Contact（专门留给验收时试合并）
 
@@ -1274,6 +1347,8 @@ volunteer/management/commands/seed_demo.py   （或放 core，随意，但只此
 ### 自动化
 
 - [ ] `python manage.py test` 全绿，测试数 **≥ 27**（B0 实测基线），且一个都没被删
+- [ ] D14 的两条守卫测试真的会红：临时给某条约束去掉 `violation_error_code`，
+      以及临时从 `CONSTRAINT_FIELD` 里删一行，分别确认变红，再改回来
 - [ ] **那 8 条 `bulk_create` 测试真的用了 `bulk_create`** —— 逐条扫一眼，
       任何一条改成走 `save()` 都会变成"全绿但什么也没验证"。
       快速自检：把某条约束从 `Lower("code")` 改回 `unique=True`，对应测试必须变红
@@ -1303,7 +1378,9 @@ python manage.py dbshell
       （`\d` 里看到 `UNIQUE (code)` 而不是 `UNIQUE (lower(code))` 就是漏了）
 - [ ] `assignment_unique_tenure` 显示 `UNIQUE NULLS NOT DISTINCT`
 - [ ] `participation_unique_per_role` 同上
-- [ ] `contact_emergency_contact_is_not_self` / `..._has_a_relationship` 在
+- [ ] `emergencycontact_unique_per_person` 在 `contact_emergencycontact` 上，
+      定义里能看到 `lower(btrim(name))`
+- [ ] `contact_contact` **没有** `is_reference_only` 列、**没有** `emergency_contact_id` 列
 - [ ] `position_reports_to_is_not_self` 在
 - [ ] `org_position.reports_to_id` 的外键是 **`ON DELETE NO ACTION`**（Django 的 `PROTECT`
       在应用层实现，`\d` 里看不到 `SET NULL` 就对了 —— 确认没写成 `CASCADE`）
@@ -1325,11 +1402,10 @@ python manage.py dbshell
       当值名单（`.serving()`）里没有他、花名册（`.active()`）里**仍然有他**，
       且 `start_date` / `end_date` **一个字节没改**。
       再改回 `active` → 立刻回到当值名单，**全程没有新建过第二行 `Assignment`**
-- [ ] 录一个志愿者，填一个**系统里没有**的紧急联系人 → 自动建出 reference-only 记录并关联，
-      关系必填
-- [ ] 再录第二个志愿者，填**同名同号**的紧急联系人 → 表单**自动关联**到刚才那一条，
-      不产生第二条 reference-only 记录
-- [ ] 联系人列表默认**看不到** reference-only 记录，切换筛选器能看到
+- [ ] 给一个志愿者在 inline 里填紧急联系人（姓名 + 电话 + 关系）→ 三样都必填，
+      少填关系存不下去
+- [ ] **`Contact` 列表里没有因此多出任何记录** —— 这是第六轮修订的验收点
+- [ ] 同一个志愿者能再加**第二个**紧急联系人（表天然支持多个）
 - [ ] 用 `seed_demo` 造的那对重复记录试一次合并，验证引用全部改指过去、`notes` 里有记录
 - [ ] 同一个人建两个 `Assignment`、指向两个不同 `Position`、各有不同上级，
       其中一条汇报线跨 kind（employee 编制 → board 编制）
@@ -1356,7 +1432,7 @@ python manage.py dbshell
 过夜容易忘记做到哪，建议一口气做完 B0–B3，再单独做 B4（它自己就有四个独立小块）。
 **B5 / B6 / B7 / B8 彼此独立**，可以分开做、分开提交。
 
-每个 B 步至少一个 commit；B4 建议四个（消歧 / 紧急联系人 / 查重合并 / 未成年人）。
+每个 B 步至少一个 commit；B4 建议四个（消歧 / `EmergencyContact` / 查重合并 / 未成年人）。
 **B5 二次修订后变大了，建议拆两个 commit**：`Ministry` + `EmploymentType` + `Position`（含
 `vacant()` 和环的防线）一个，`Assignment` 一个 —— 前者是组织架构的骨架，
 自己就能跑测试、自己就能在 admin 里看，不必等任职表。

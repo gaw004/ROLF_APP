@@ -1906,3 +1906,180 @@ Django 没有比"注销 + 注册一个子类"更窄的钩子。看着别扭，�
 **一般化**：
 > **加完一个 inline，先跑一遍 admin 的 POST 测试。** 收到 200 就直接去
 > `context_data["errors"]` 里看，不要从表单字段开始找。
+
+### ⚠️ 计划外（B0–B5 复盘）：`list_display` 里的方法，是每行调一次的
+
+> 下面三条是 B5 做完之后回头验收 B0–B5 时发现的，不是某一步实施当场撞上的。
+> 记在这里理由相同：**三条里有两条是「防线看着在，其实没在」**，
+> 而那正是这个项目反复判过刑的那类东西。
+
+**症状**：`Contact` changelist 的查询数随行数线性增长 ——
+5 行 10 次、40 行 45 次、100 行约 105 次。页面能用，只是越用越慢，不报错。
+
+**根因**：`merge_link` 是 `list_display` 里的一个方法，**Django 每渲染一行就调一次**，
+而它里面调 `find_exact_duplicates()`，每次一到两次查询。
+讽刺的是集合级的判定 `possible_duplicates()` 早就写好了（「疑似重复」筛选器在用），
+只是那个列没走它。**`list_select_related` 救得了外键列，救不了自定义方法列。**
+
+**修法**：判定和配对都下沉到 QuerySet（D18 —— admin 只渲染，不判断）：
+
+```python
+# contact/models.py
+def duplicate_partners(self):
+    """{pk: 另一条同名同号记录的 pk}，一次查完整页。"""
+
+# contact/admin.py —— 每请求算一次，缓存在 request 上
+def get_list_display(self, request):        # ⚠️ 不是 get_queryset，见下
+    if not hasattr(request, "_contact_duplicate_partners"):
+        request._contact_duplicate_partners = Contact.objects.duplicate_partners()
+    ...                                     # 列做成闭包，闭在这张表上
+```
+
+**为什么是 `get_list_display` 而不是 `get_queryset`**：B9 的清单里有一条
+「`admin.py` 搜不到 `save_model` / `save_related` / `get_queryset` 重写」——
+那条判据就是「把 `admin.py` 删掉还剩全部业务逻辑」的可执行版本，不能为了顺手破掉它。
+
+**连带的好处**：这一列和「疑似重复」筛选器现在同一个定义。
+以前两边各算各的（`find_exact_duplicates()` 用 `casefold()` + 压空白，
+`possible_duplicates()` 用 `Lower(Trim())`），完全可能出现
+「筛选器说它是重复、行里却没有合并链接」。
+
+**测试**：`ChangelistCostTests` 比较 5 行和 25 行的查询数**是否相等**，
+不钉死具体数字 —— Django 自己的基线查询数以后会变，而"每行一次"这件事不该变。
+
+**一般化**：
+> **凡是写进 `list_display` 的方法，先问一句「它查库吗」。**
+> 判定方法：造 N 行数一次查询数，造 2N 行再数一次，**两个数不一样就是 N+1**。
+> 这条对 B6 的 `Event` 参与人数、工时合计一样成立 —— 那两个尤其像会写成 property。
+
+### ⚠️ 计划外（B0–B5 复盘）：`full_clean()` 会把「已经有错的字段」的约束整条跳过
+
+**症状**：给 `position_reports_to_self` 补字段级错误测试时，走 `full_clean()`
+永远拿不到约束自己的 `violation_error_message`，拿到的是 `Position.clean()` 的措辞。
+
+**根因**：`Model.full_clean()` 收完 `clean_fields()` / `clean()` 的错误之后，
+会**把已经出错的字段名加进 `exclude`** 再传给 `validate_constraints()`，
+而后者跳过任何提到被排除字段的约束。`clean()` 的环检查已经在 `reports_to` 上挂了错，
+所以那条约束在这条路径上**根本没跑**。
+
+> **这是 B3.1b 那条坑的第三个变体。** 三个变体的症状一模一样 ——「约束没跑」：
+>
+> | 变体 | 约束为什么没跑 |
+> |---|---|
+> | D14 原文提醒的 | 表达式约束在 `validate()` 里抛 `FieldError`，被静默吞掉 |
+> | B3.1b 撞上的 | 字段不在表单上 → `_post_clean` 把它 `exclude` 了 |
+> | **本条** | 字段上**已经有别的错误** → `full_clean` 把它 `exclude` 了 |
+
+**结论（不粉饰）**：**同一个字段上，`clean()` 和 `CheckConstraint` 都说话时，
+表单层永远只会看到 `clean()` 的那句话**，约束的 `violation_error_message`
+在这条路径上是死代码。它仍然有价值 —— 那是 `bulk_create` / psql 的兜底 ——
+但别以为界面上出现的是它。
+
+**修法**：该测哪一层就从哪个门进。`position_reports_to_self` 的测试直接调
+`self.position.validate_constraints()`，绕开 `clean()`。
+**这个门不是为测试造的** —— B3.1b 的 `RelationshipForm._check_constraints()`
+走的就是它，那里前面没有 `clean()`。
+
+**一般化**：
+> **一条规则不要在 `clean()` 和约束里各说一遍**（这本来就是 D14 重写的初衷）。
+> 真要两边都有（跨行环路这种约束表达不了、又想在表单上提示的），
+> 就明确知道：**界面上出现的是 `clean()` 的话，约束只是 bulk 路径的兜底。**
+
+### ⚠️ 计划外（B0–B5 复盘）：守卫「验过会红」不等于「该红的都红」
+
+**症状**：汇报链 grep 守卫（B1 写的，B5 按清单确认过"真的会变红"）
+对最自然的那种写法视而不见：
+
+```python
+for _ in range(20):
+    nxt = p.reports_to      # 漏 —— for 和 reports_to 不在同一行
+```
+
+**根因两个，都是判据本身太窄**：
+
+1. 判据是「**同一行**里既有 `reports_to` 又有 `for`/`while`」。
+   而 roadmap 原话是「找 **循环体里** 出现 `reports_to` 的行」——
+   实现取了字面上更省事的那一种读法，正好把多行写法全放过了。
+2. `\breports_to\b` **匹配不上 `reports_to_id`** —— `_` 是 word 字符，
+   两者之间没有词边界。而 `build_org_tree()` 自己用的就是 `.reports_to_id`
+   （为了不 N+1，函数里有注释专门说明），**抄它的人多半连这个一起抄**。
+3. roadmap 还写了第二个信号 ——「`.reports_to` 与**函数自身名字**同时出现的行」，
+   也就是递归 —— **实现里根本没有这一条**。递归是遍历汇报链的第三种写法，
+   而且是最容易挂死的那种。
+
+**B5 验收时只试了「同一行 `while`」那一种就签收了 —— 而那恰好是唯一能被抓到的那种。**
+
+**修法**：`core/tests.py::repeated_uses()` 改成按缩进跟踪 `for`/`while` 块，
+三个信号任一命中即算：**循环体内 / 单行推导式 / 递归**（行里调了所在函数自己的名字）。
+模式放宽成 `reports_to(_id)?`。`def` 会切断外层循环的作用范围（函数体自成一个 scope）。
+
+**代价**：一处误报 —— `org/tests.py` 里一个集合推导式读了两个编制各自的上级
+（读一层，不是走链）。用 `loop-guard-ok` 注释豁免，标记**写在本行或上一行都认**，
+这样理由有地方写得下。宁可宽、误报了加注释，也别漏 —— roadmap 原文就是这么要求的。
+
+**一般化（这条是三条里最值钱的）**：
+> **守卫写完必须反向验：造几个它「该抓」的例子，确认真的红；
+> 再造几个「不该抓」的，确认没红。** 只验一个例子等于只验了自己想到的那种写法。
+> **一条只在自己的示例上会红的守卫，比没有守卫更糟 —— 它让人以为有防线。**
+> B6 之后每加一条 grep 守卫，都照这个双向清单走一遍。
+
+### ⚠️ 计划外（B5 复盘）：用补集定义状态，等于赌只有两种状态
+
+**症状**：`Position` 列表页的「空缺」筛选器，**已撤销的编制显示在「有人在任」那一档里** ——
+一个去年撤掉、现在一个人都没有的编制，界面上说它有人。
+
+**根因**：`Position` 有**三种**状态，筛选器只给了两个选项，第二个用补集实现：
+
+```python
+lookups = [("yes", "空缺"), ("no", "有人在任")]
+...
+if self.value() == "no":
+    return queryset.exclude(pk__in=queryset.model.objects.vacant())   # ← 这里
+```
+
+`vacant()` 自己**从来是对的**（第一步就 `filter(is_active=True)`，而且有测试钉着）。
+错的是"不是空缺的都算有人在任"这个推论 —— **补集只在状态恰好两种时才等价**。
+撤销的编制既不空缺、也没人在任，于是被补集捞了进去。
+
+> **补集写法最坏的地方不是算错，是它让你不必给状态命名。**
+> 三个分支都写成 QuerySet 方法的话，你得给第三种状态起个名字（`retired()`）——
+> **而起名字的那一刻就会发现自己漏了它**。写成 `exclude(...)` 就永远不会碰到这一步。
+
+**连带**：这个 `exclude(pk__in=...)` 是筛选器**自己在做集合运算**，
+和它自己 docstring 里写的「每个分支都是一次 QuerySet 方法调用」对不上（D18）。
+**判断跑进 admin 的那一处，正好就是出错的那一处** —— 这不是巧合。
+
+**修法**：三种状态三个方法，各自独立定义，谁也不靠否定谁：
+
+```python
+def vacant(self, on=None):      # 还设着 且 没人
+def occupied(self, on=None):    # 还设着 且 有人   ← 不再是 "not vacant"
+def retired(self):              # 已撤销 —— 第三种状态，必须看得见
+```
+
+顺带做掉的三件（都在这一步免费）：
+
+- `NOT IN (子查询)` → `NOT EXISTS` 相关子查询：能在第一条匹配就停、走
+  `Assignment.position` 的索引、也没有 `NOT IN` 遇 NULL 的坑。两种都在数据库里跑，
+  这个执行计划更好。
+- 日期谓词抽成 `core/querysets.py::in_effect_on(on, prefix)`，`active()` 自己也改成调它。
+  **不抽的话，聚合里就得把那个表达式再抄一遍** —— 而抄的那份迟早和原版不一致。
+- `with_headcounts()`：`COUNT(...) FILTER (WHERE ...)` 条件聚合，
+  一次查询给出每个编制的在任 / 在岗人数。**做成 annotation 而不是 property**，
+  因为前端要能排序、过滤、分页、直接序列化，而 property 四样都做不到、还是 N+1。
+
+**验收抄的是 `MinorFilter` 的先例**：三个选项各调一个方法，
+外加一条 **partition 测试** —— 三者两两不重叠、并集是全表。
+这条测试的价值在于：**以后再多出第四种状态，它会当场变红**，
+而不是等到某一档默默多算了几行。
+
+**一般化**：
+> **不要用补集定义状态。** 判定方法：**把所有状态列出来数一数 —— 超过两种，补集就是错的。**
+> 项目里三态的先例早就有了（`MinorFilter` 的 未成年 / 成年 / **生日未知**），
+> 当时 roadmap 专门强调过「第三个选项不能省 —— 未知必须看得见」，
+> **同一条道理这里没执行**。
+>
+> **B6 直接受影响**：`Event.status` 四种（planned / confirmed / completed / cancelled）、
+> `Participation.status` 四种（registered / attended / absent / cancelled）。
+> 任何「已完成 = 不是已取消」「缺席 = 没签到」这类写法都是同一个病，
+> 而且状态越多，补集捞进来的越多。**一律列全 + partition 测试。**

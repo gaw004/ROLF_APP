@@ -11,9 +11,9 @@
 > | 步骤 | 状态 | 是什么 |
 > |---|---|---|
 > | B0–B5 | ✅ **已完成** | `core` 时间口径 + `contact` 三处收口 + `org` 四张表。下面 B0–B5 那几节原样保留，现在只在维护时才翻 |
-> | **B6–B12** | ⬜ **当前在做** | **按基金会 2026-07-29 给出的 12 条需求重写过。** 跳到 [B6 起的那一段](#-b6-起按-2026-07-29-的优先级重写) |
+> | **B6–B13** | ⬜ **当前在做** | **按基金会 2026-07-29 给出的 14 条需求重写过。** 跳到 [B6 起的那一段](#-b6-起按-2026-07-29-的优先级重写) |
 >
-> **原来的 B6–B9（`events` 四张表 / `volunteer` / `seed_demo` / 验收）已被 B6–B12 取代。**
+> **原来的 B6–B9（`events` 四张表 / `volunteer` / `seed_demo` / 验收）已被 B6–B13 取代。**
 > 主要差别：多了 `EventRole` 和 `MinistryRole` 两张表、多了一组自助页面、
 > `VolunteerProfile` 和 `BackgroundCheck` 移出本阶段。
 > 完整改动清单见 `goal.md`[七、2026-07-29 修订记录](goal.md#七2026-07-29-修订记录了什么)。
@@ -1412,8 +1412,8 @@ def test_assignment_status_has_no_ended_value(self)                 # 结束只�
 
 > **B0–B5 已完成，上面那部分原样保留。**
 >
-> 2026-07-29 基金会给出了一套完整需求（12 条，`goal.md`[零、当前优先级](goal.md#零当前优先级2026-07-29-定)），
-> 它成为唯一优先级。**原来的 B6–B9 已被下面的 B6–B12 取代**，改动清单见
+> 2026-07-29 基金会给出了一套完整需求（14 条，`goal.md`[零、当前优先级](goal.md#零当前优先级2026-07-29-定)），
+> 它成为唯一优先级。**原来的 B6–B9 已被下面的 B6–B13 取代**，改动清单见
 > `goal.md`[七、2026-07-29 修订记录](goal.md#七2026-07-29-修订记录了什么)。
 >
 > **本阶段完成的定义**：R1–R8 + P1–P6 全部跑通，扮三个角色各走一遍
@@ -1444,7 +1444,7 @@ P1–P6  流程：注册建 Contact / ministry admin 发活动 / 普通用户报
 
 | 不做 | 去哪了 |
 |---|---|
-| `VolunteerProfile` / `BackgroundCheck`（原 B7） | 推迟清单 —— 12 条需求一条都没碰技能 / 背景审查。⚠️ **但"背景审查必须独立成 model"这条决定不撤销** |
+| `VolunteerProfile` / `BackgroundCheck`（原 B7） | 推迟清单 —— 14 条需求一条都没碰技能 / 背景审查。⚠️ **但"背景审查必须独立成 model"这条决定不撤销** |
 | `Guardianship` 法定监护表 | 推迟清单 —— P3 要的是"这次活动的同意记录"，落在 `Participation` 的四个字段上 |
 | 匿名（不登录）报名页 | 推迟清单 —— 需求原话是"每个普通 **account** 可以看到" |
 | 等候名单 / 报名审批 | 推迟清单 —— `needed_count` 只提醒不阻止 |
@@ -1520,8 +1520,19 @@ class Event(ConstraintErrorFieldMixin, TimeStampedModel):
 
 1. **`ministry` 非空** —— R2 / R8 / P2 全部以它为轴。可空 = 一场无主、无人有权管的活动。
 2. **`status` 加 `draft` / `open`** —— P3「看到**发布的** event」需要一个明确的可见性闸门。
-   志愿者侧的查询一律 `filter(status=Status.OPEN)`，**不是**"不等于 draft"
-   （用补集定义状态的坑，B5 复盘那条已经踩过一次）。
+   ⚠️ **2026-07-29 晚更正：可见性 ≠ `status == OPEN`。** 原文这一条（和 B9 那条）
+   把"志愿者能看到"直接写成了 `filter(status=OPEN)`，**后果是活动一被标 `confirmed`
+   （"人齐了，不再收报名"），已经报名的人就打不开它的详情页了** —— 而 P6 通知里
+   那句"新时间来不了请点这里取消"的链接正好会 404，且专门发生在招满的活动上。
+   **两个状态集合，各自显式列全**（不许用补集，同 B5 复盘）：
+
+   ```python
+   VISIBLE_TO_VOLUNTEERS = {OPEN, CONFIRMED, COMPLETED, CANCELLED}   # 详情页 / 我的报名 / 通知链接
+   OPEN_FOR_SIGNUP       = {OPEN}                                    # 活动列表页 / 报名
+   ```
+
+   见 `goal.md`[可见性与生命周期](goal.md#可见性与生命周期两个谓词不是一个-status2026-07-29-晚新增)。
+   **`draft` 仍然只有本 ministry 有权限的人看得到，这一条没变。**
 3. **没有 `capacity`** —— 被 `EventRole.needed_count` 取代。"搬运要 5 个、翻译要 2 个"
    整场一个数说不出来。
 
@@ -1616,7 +1627,20 @@ class Participation(ConstraintErrorFieldMixin, TimeStampedModel):
     consent_relationship = FK(RelationshipType, PROTECT, null=True, blank=True, related_name="+")
     consent_at           = DateTimeField(null=True, blank=True)
     consent_method       = CharField(choices=ConsentMethod.choices, blank=True)   # verbal/paper/online
+    consent_email        = EmailField(blank=True)             # ⚠️ 见下
+    consent_phone        = PhoneNumberField(blank=True)       # ⚠️ 见下
+
+    history = HistoricalRecords()      # ⚠️ 见下
 ```
+
+⚠️ **`consent_email` / `consent_phone` 是 2026-07-29 晚补的，而且是 P6 的硬前提**：
+D22 说"未成年人通知家长"，可 `consent_given_by` **只是一个姓名**，解析不出任何地址。
+`sign_up()` 里要求未成年人**至少填一个**（提示层，同同意本身那条）。
+
+⚠️ **`history` 也是同日补的** —— `goal.md` 的模型表里每张表都表过态，
+唯独 `Participation` 空着。它上面有**全系统唯一一个可以手工改写的权威值**（`hours`，
+纸质补录场景），而工时将来可能连到奖励：**谁把 3 小时改成 8 小时必须查得出来。**
+同一条口径下 `EventRole` 也挂上（`needed_count` 是对外发布出去的承诺）。
 
 ⚠️ **没有 `event` 字段，也没有 `role` 字段** —— 都在 `event_role` 里。
 保留 `event` 的话 `participation.event` 和 `participation.event_role.event` 能指向两场
@@ -1734,7 +1758,7 @@ class MinistryRole(ConstraintErrorFieldMixin, DateRangeMixin, TimeStampedModel):
         COORDINATOR = "coordinator", "Coordinator"      # 预留，本阶段只用 admin
 
     contact    = FK(Contact,  PROTECT, related_name="ministry_roles")
-    ministry   = FK(Ministry, CASCADE, related_name="roles")
+    ministry   = FK(Ministry, PROTECT, related_name="roles")     # 2026-07-29 晚从 CASCADE 改
     role       = CharField(choices=Role.choices, default=Role.ADMIN)
     start_date = DateField(null=True, blank=True)
     end_date   = DateField(null=True, blank=True)
@@ -1744,11 +1768,18 @@ class MinistryRole(ConstraintErrorFieldMixin, DateRangeMixin, TimeStampedModel):
     objects = models.Manager.from_queryset(DateRangeQuerySet)()      # 白捡 .active()
 ```
 
-**三个 `on_delete` 各不相同，都是刻意的：**
+**三个 `on_delete`：**
 
 - `contact` → `PROTECT`：删一个人不该静默撤掉授权记录；
-- `ministry` → **`CASCADE`**（⚠️ 和 `Position.ministry` 的 `PROTECT` 不同）：
-  "食物银行的 admin 权限"在食物银行不存在之后没有任何意义，留着是一条悬空的授权；
+- `ministry` → **`PROTECT`**（2026-07-29 晚从 `CASCADE` 改）：和上一条一致。
+  > ⚠️ **原来的理由不成立，值得记一笔**：当时写的是"食物银行的 admin 权限在食物银行
+  > 不存在之后没有意义"。**把这句话原样搬到 `contact` 上也同样通顺**（人删了授权也没意义），
+  > 而 `contact` 那一格选的恰恰是 `PROTECT`，理由是"**授权是要留痕的事**"。
+  > **同一张表上两个外键用互相矛盾的理由，说明其中一个是事后合理化的。**
+  > 另外两条：`Ministry` 有 `is_active`（撤销走停用、几乎不删，同 `Position` 那条论证），
+  > 而这张表**挂着 simple-history 声称"授权变更必须留痕"**，却允许删一个 ministry
+  > 静默带走一批授权行 —— 自相矛盾。代价是真要删 ministry 得先把授权行填 `end_date`，
+  > 一年遇不上一次，而那正是应该被迫看见的事。
 - `granted_by` → **`SET_NULL`**：授权人的账号被删，**授权本身必须还在**。
   `CASCADE` 会连锁撤销一批人的权限，是灾难级。
 
@@ -1873,10 +1904,15 @@ def test_registration_does_not_hard_block_on_a_duplicate_name_and_phone(self)
 
 ### 三条硬要求
 
-1. **可见性在查询层，不在模板层。** 列表页 `filter(status=OPEN)`，
+1. **可见性在查询层，不在模板层。** 列表页 `open_for_signup()`，
    **不是**在模板里 `{% if %}` 掉草稿。模板里不显示 ≠ 数据没发出去。
-   ⚠️ 用 `status == OPEN`，**不要**写 `exclude(status=DRAFT)` —— 用补集定义状态，
-   B5 复盘那条已经踩过一次（`cancelled` 的活动会漏出去）。
+   ⚠️ **两个谓词分开用**（2026-07-29 晚更正，原文只有一个）：
+   **列表页 / 报名**用 `open_for_signup()`（`{OPEN}`）；
+   **详情页 / `/me/participations/` / 通知里的链接**用 `visible_to_volunteers()`
+   （`{OPEN, CONFIRMED, COMPLETED, CANCELLED}`）——
+   否则活动一 `confirmed`，**已报名的人就打不开它了**，见 B6 那一条。
+   ⚠️ 两个集合都**显式列全**，**不要**写 `exclude(status=DRAFT)` —— 用补集定义状态，
+   B5 复盘那条已经踩过一次（加第六档时它会默默变成可见的）。
 2. **"我的"就是我的。** `/me/participations/` 一律
    `filter(contact=request.user.contact)`，别人的 id 打进来只能是 404。
 3. **逻辑不进视图。** 报名走 `events/services.py::sign_up(contact, event_role, consent=...)`，
@@ -1896,14 +1932,24 @@ def sign_up(*, contact, event_role, consent=None):
     """
 ```
 
-同意表单收四样：同意人姓名 / 关系（`RelationshipType`，复用 `usable_as_emergency_contact`
-那个过滤）/ 方式（口头·纸质·线上）/ 时间（自动填 `now`）。
+同意表单收**六**样：同意人姓名 / 关系（`RelationshipType`，复用 `usable_as_emergency_contact`
+那个过滤）/ 方式（口头·纸质·线上）/ 时间（自动填 `now`）/
+**email** / **电话**（后两个**至少填一个**，`consent_email` / `consent_phone`）。
+
+> ⚠️ **后两样 2026-07-29 晚补，原文只收四样。** 少了它们，P6 那条"未成年人通知家长"
+> 就只有一个**姓名**可用 —— **解析不出任何投递地址**，最需要被通知的那群人会全部落进
+> `unreachable`（B11 的规则 2 原文还写着"找 `consent_given_by` 对应的联系方式"，
+> 而那个东西不存在）。`sign_up()` 里一并校验，同上面那条同意规则，按 D14 记为提示层。
 
 ### 测试（直接打 URL，不看页面）
 
 ```python
 def test_the_event_list_shows_only_open_events(self)
 def test_a_cancelled_event_does_not_appear_in_the_list(self)      # 补集定义的坑
+def test_a_signed_up_volunteer_can_still_open_a_confirmed_event(self)   # ⭐ 可见性 ≠ 可报名
+def test_a_draft_event_detail_page_is_404_for_volunteers(self)
+def test_every_event_status_is_in_exactly_one_of_the_two_sets_or_neither(self)
+    # partition 测试：五档逐一过一遍，别漏、别两边都在（同 .minors()/.adults() 那条）
 def test_a_volunteer_cannot_open_another_persons_participation(self)
 def test_a_minor_cannot_sign_up_without_consent(self)             # ⭐ P3
 def test_a_volunteer_with_unknown_birth_date_also_needs_consent(self)  # ⭐ 三态
@@ -2016,9 +2062,13 @@ def resolve_recipients(event) -> tuple[list[Recipient], list[Unreachable]]:
     三条规则：
     1. 成年人 → 他自己，按 Contact.preferred_contact_method 选渠道，
        该渠道为空就回落到另一个；
-    2. 未成年人 → 【家长】。依次找：这条 Participation 的 consent_given_by
-       对应的联系方式 → contact.emergency_contacts 的第一条。
+    2. 未成年人 → 【家长】。依次找：这条 Participation 的 consent_email /
+       consent_phone（B9 报名时收的）→ contact.emergency_contacts 的第一条（只有电话 ⇒ sms）。
        ⚠️ 15 岁的志愿者可能根本没有自己的手机，发给他等于没发；
+       ⚠️ 原文写的是"consent_given_by 对应的联系方式"——【那个东西不存在】，
+          consent_given_by 只是一个姓名文本。2026-07-29 晚给同意字段补了
+          consent_email / consent_phone，见 B9 和 goal.md 的模型表。
+          不补的话这一整条规则解析不出任何地址，未成年人会全部落进 unreachable。
     3. birth_date 为空 → 【按未成年处理】。B4.5 的三态口径，保守侧 ——
        折叠成"成年"会让没填生日的未成年人静默漏掉。
 
@@ -2034,7 +2084,7 @@ def resolve_recipients(event) -> tuple[list[Recipient], list[Unreachable]]:
 def notify_event_change(event, *, reason, message, sent_by) -> EventNotification:
     """解析收件人 → 投递 → 落一条 EventNotification。
 
-    ⚠️ unreachable_count 存下来，不要做成 property 事后重算 ——
+    ⚠️ recipients 和 unreachable 两个 M2M 都是【快照】，不要做成 property 事后重算 ——
        当时联系不上不等于今天联系不上，重算会把这条历史记录改成
        "当时全都通知到了"，那是假的。同 hours 是权威值那条。
     ⚠️ message 是快照。之后再改活动，这条记录说过的话不能跟着变。
@@ -2057,8 +2107,13 @@ class EventNotification(ConstraintErrorFieldMixin, TimeStampedModel):
     sent_at           = DateTimeField()
     sent_by           = FK(settings.AUTH_USER_MODEL, SET_NULL, null=True, related_name="+")
     recipients        = M2M(Participation, related_name="notifications", blank=True)
-    unreachable_count = PositiveIntegerField(default=0)
+    unreachable       = M2M(Participation, related_name="notifications_unreachable", blank=True)
     provider_ref      = CharField(max_length=200, blank=True)
+
+    # ⚠️ 2026-07-29 晚：unreachable 从 PositiveIntegerField(default=0) 改成 M2M。
+    #    只存一个计数的话，事后答不出"上次是哪 3 个人没通知到"—— 想知道就得重算，
+    #    而重算正是上面那条注禁止的事。D22 ② 要的就是"这几个人别静默消失"。
+    #    逐人的原因（Unreachable.why）只在预览页出现，不入库；要存就得上 through 表。
 
     # 不挂 simple-history —— 它本身就是一条不可变的事件记录，改它就是伪造
 
@@ -2092,10 +2147,13 @@ class EventNotification(ConstraintErrorFieldMixin, TimeStampedModel):
 ```python
 def test_an_adult_is_notified_at_their_own_address(self)
 def test_a_minor_is_notified_through_their_guardian(self)              # ⭐ D22 ①
+def test_a_minor_with_only_consent_phone_is_notified_by_sms(self)      # ⭐ 家长地址真的解析得出来
+def test_a_minor_with_no_guardian_contact_lands_in_unreachable(self)
 def test_a_participant_with_unknown_birth_date_is_treated_as_a_minor(self)
 def test_a_participant_with_no_email_and_no_phone_lands_in_unreachable(self)   # ⭐ D22 ②
 def test_unreachable_rows_are_not_counted_as_recipients(self)
-def test_unreachable_count_does_not_change_after_the_phone_is_filled_in(self)  # ⭐ 快照
+def test_who_was_unreachable_is_still_queryable_afterwards(self)       # ⭐ M2M 而不是计数
+def test_unreachable_rows_do_not_change_after_the_phone_is_filled_in(self)     # ⭐ 快照
 def test_the_message_snapshot_survives_editing_the_event(self)
 def test_cancelled_participations_are_not_notified(self)
 def test_deleting_the_sending_user_keeps_the_notification(self)        # SET_NULL
@@ -2173,14 +2231,21 @@ Participation.objects.filter(
 - **一个活动当天在职、之后离职的 employee** —— ⭐ 验收 R8 的时间口径要用
 - **一个既没有 email 也没有电话的报名者** —— ⭐ 验收 P6 的「联系不上」那一组要用。
   **这个人必须有**，否则那一组永远是空的，看上去"通过了"其实什么也没验证
-- **一个未成年报名者，家长联系方式挂在 `EmergencyContact` 上**（不是 `consent_given_by`）
-  —— 验收收件人解析的第二条回落路径
+- **一个未成年报名者，家长联系方式挂在 `EmergencyContact` 上**（只有电话 ⇒ 走 sms）
+  —— 验收收件人解析的**第二条**回落路径
+- **一个未成年报名者，带 `consent_email` / `consent_phone`** —— **第一条**路径
+  （2026-07-29 晚补：这两个字段是同日才加的，见 B6 / B9）
+- **一个生日为空的报名者** —— `is_minor` 三态的保守侧：按未成年处理、通知家长
+- **一个 `hours` 手工填、没有签到时间戳的 `Participation`** —— 纸质补录照样算数
+  （`hours` 是权威值），验收 ② 有一条勾在打它
+- **一场 `status=confirmed` 的活动，且里面有报名者** —— 验收"招满之后已报名的人
+  **仍然打得开**"（[可见性 ≠ 可报名](goal.md#可见性与生命周期两个谓词不是一个-status2026-07-29-晚新增)，同日新增）
 
 三条安全要求不变：幂等（`get_or_create`）、非 DEBUG 拒绝运行（除非 `--force`）、只造假数据。
 
 ### 验收
 
-**完整清单在 `goal.md`[验收](goal.md#验收2026-07-29-重写改成按-12-条需求逐条验收)** ——
+**完整清单在 `goal.md`[验收](goal.md#验收2026-07-29-重写改成按-14-条需求逐条验收)** ——
 扮三个角色各走一遍，加上分层 grep。这里只列自动化部分：
 
 - [ ] `python manage.py test` 全绿，**测试数只增不减**

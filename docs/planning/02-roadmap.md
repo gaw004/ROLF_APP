@@ -1416,8 +1416,8 @@ def test_assignment_status_has_no_ended_value(self)                 # 结束只�
 > 它成为唯一优先级。**原来的 B6–B9 已被下面的 B6–B12 取代**，改动清单见
 > `goal.md`[七、2026-07-29 修订记录](goal.md#七2026-07-29-修订记录了什么)。
 >
-> **本阶段完成的定义**：R1–R8 + P1–P5 全部跑通，扮三个角色各走一遍
-> （验收清单在 B12）。
+> **本阶段完成的定义**：R1–R8 + P1–P6 全部跑通，扮三个角色各走一遍
+> （验收清单在 B13）。
 
 ## 这半程要达成什么
 
@@ -1426,8 +1426,9 @@ def test_assignment_status_has_no_ended_value(self)                 # 结束只�
 ```
 R1–R8  报表：多少场活动 / 属于哪个 ministry / 多久 / 几个工种 /
              每个工种几人 / 总工时 / 分工种工时 / 本 ministry 的 employee 参与情况
-P1–P5  流程：注册建 Contact / ministry admin 发活动 / 普通用户报名（未成年要同意）/
-             看报名数 + 签到 + 统计 / 上一级指定 ministry admin
+P1–P6  流程：注册建 Contact / ministry admin 发活动 / 普通用户报名（未成年要同意）/
+             看报名数 + 签到 + 统计 / 上一级指定 ministry admin /
+             ⭐ 活动改时间时通知所有报名者（未成年人通知家长）
 ```
 
 ### 三个不能松的判断（松了就白做）
@@ -1437,6 +1438,7 @@ P1–P5  流程：注册建 Contact / ministry admin 发活动 / 普通用户报
 | **工种是一张表，不是 `Participation` 上的一个字段** | `goal.md` D19 | 零报名的工种在系统里不存在，R4 静默答错，而 P2 最想看的就是"哪个工种还缺人" |
 | **权限要带 ministry 作用域，Django Group 顶不上** | `goal.md` D20 | 授出 `events.add_event` = 能给任何 ministry 发活动，P2 / P4 直接不成立 |
 | **权限必须先于自助页面** | `goal.md` D21 | 中间有一段时间任何登录用户能看到所有人的资料，而库里有未成年人的地址和电话 |
+| **通知的收件人解析绝不进适配器** | `goal.md` D22 | 「未成年人通知家长」是本基金会特有的规则，写进 backend 就等于换一次 provider 重写一遍 |
 
 ### 明确不做的（免得中途手痒）
 
@@ -1449,6 +1451,9 @@ P1–P5  流程：注册建 Contact / ministry admin 发活动 / 普通用户报
 | 资金 / `Contribution` | Phase D（2026-07-29 从 Phase C 后移） |
 | 活动班次 `Shift` | 推迟清单 —— `EventRole` 的维度是工种不是时间，两回事 |
 | React / Vue / 前后端分离 | 永远不做（D2 仍然成立的那一半）。自助页面就是 Django 模板 + 视图 |
+| **邮件群发 / 简报 / 募捐信** | 推迟清单。⚠️ **和 P6 不是一回事** —— P6 是事务性通知（这场活动改时间了，通知这场活动的报名者），范围由 `Participation` 天然界定；群发没有边界 |
+| **逐个收件人的送达状态 / 退信 / 重试队列** | 推迟清单 —— 要接 provider 的 webhook，是一整套东西。⚠️ **但「联系不上」那一组现在就要做**，那是本系统自己算得出来的，和送达状态是两回事（D22 ②） |
+| **真的接通 Novu** | B11 只写一个做 HTTP 调用的薄壳 + mock 测试。本机没有域名，发不出去也验不了 —— **接通放 Phase C** |
 | **CSS / 好看** | 本阶段一律不管。能点、能用、权限对，就算过 |
 
 ## 为什么按这个顺序
@@ -1660,7 +1665,7 @@ def check_out(participation, *, at=None):
 | `Event.event_type` / `.ministry` / `.owner` | `PROTECT` | `CASCADE` 会让删一个人带走整场活动 |
 | `EventRole.event` | `CASCADE` | 活动没了，它开的工种没有意义 |
 | `EventRole.role` | `PROTECT` | 字典表 |
-| `Participation.event_role` | `CASCADE` | ⚠️ **两级级联**：删 `Event` → 删 `EventRole` → 删 `Participation`。风险和原来"删 Event 直接带走 Participation"等价，但**更不显眼** —— 所以 `delete_event` 权限不给普通 Group（B12 验收要查） |
+| `Participation.event_role` | `CASCADE` | ⚠️ **两级级联**：删 `Event` → 删 `EventRole` → 删 `Participation`。风险和原来"删 Event 直接带走 Participation"等价，但**更不显眼** —— 所以 `delete_event` 权限不给普通 Group（B13 验收要查） |
 | `Participation.contact` | `PROTECT` | `CASCADE` 会抹掉全部工时历史，那是 R6 / R7 的基础 |
 | `Participation.consent_relationship` | `PROTECT` | 字典表 |
 
@@ -1778,7 +1783,7 @@ def can_grant_ministry_admin(user) -> bool:      ...   # P5：查全局 Group，
 "谁能指定 ministry admin"是真·全局的，所以是一个 `foundation_admin` Group。
 
 > ⚠️ **ministry admin 不能自己给自己发展下线** —— `can_grant_ministry_admin()`
-> 只看 Group，一个字都不看 `MinistryRole`。B12 验收要专门试这一条。
+> 只看 Group，一个字都不看 `MinistryRole`。B13 验收要专门试这一条。
 
 **默认拒绝**：所有函数在 `user` 未登录、无 `contact`、无匹配授权时一律返回 `False`，
 不要写成"没有明确禁止就允许"。
@@ -1944,7 +1949,169 @@ def test_the_attendance_page_shows_minors_emergency_phone(self)
 
 ---
 
-## B11 · 统计：R1–R8
+## B11 · 活动变更通知（P6）
+
+> **需求方 2026-07-29 当日追加。** 设计见 `goal.md`
+> [D22](goal.md#d22--活动变更通知收件人解析是业务逻辑投递是可替换的适配器2026-07-29)。
+> **"快速找到报名者"这半句 B10 的报名名单页已经做完了**，这一步做的是另外三件：
+> 未成年人通知家长、联系不上的人要看得见、通知要留痕。
+
+### 先建适配器（`core/notifications/`）
+
+```
+core/notifications/
+  base.py        Message / DeliveryResult / NotificationBackend(Protocol) / get_backend()
+  console.py     ConsoleBackend      —— 开发默认，print 出来
+  locmem.py      LocmemBackend       —— 测试用，收进一个 list
+  django_email.py DjangoEmailBackend —— 不依赖任何外部服务的兜底
+  novu.py        NovuBackend         —— 统一通知平台
+```
+
+```python
+@dataclass(frozen=True)
+class Message:
+    to: str          # 一个邮箱 / 一个电话号 / 一个 provider subscriber id
+    channel: str     # "email" | "sms"
+    subject: str
+    body: str
+
+class NotificationBackend(Protocol):
+    def send(self, messages: Sequence[Message]) -> list[DeliveryResult]: ...
+```
+
+⚠️ **后端只认这三样，不认 `Contact`、不认 `Participation`、不认「未成年人」。**
+一旦让它知道什么是未成年人，换 provider 就要把那条规则重写一遍。
+配一条 grep 守卫（第八次「测试当 lint」）：
+`core/notifications/` 下面出现 `Contact` / `Participation` / `is_minor` 就变红。
+
+```python
+# settings/base.py
+NOTIFICATION_BACKEND = "core.notifications.console.ConsoleBackend"
+# settings/prod.py 换成 novu.NovuBackend；测试 override 成 locmem
+```
+
+> **Novu 的凭据走环境变量**（同 `SECRET_KEY`，Phase A 已经拆好了配置）。
+> ⚠️ **别在这一步接真实的 Novu** —— 本机没有域名，发不出去也验不了。
+> 先把 `NovuBackend` 写成一个只做 HTTP 调用的薄壳 + 一条 mock 测试，
+> **真的接通放 Phase C**（有域名和 sender identity 之后）。
+
+### 收件人解析（`events/services.py`）—— 这是业务逻辑，永久资产
+
+```python
+@dataclass(frozen=True)
+class Recipient:
+    participation: Participation
+    to: str
+    channel: str
+    is_guardian: bool          # 界面上要标出来"这是发给家长的"
+
+@dataclass(frozen=True)
+class Unreachable:
+    participation: Participation
+    why: str                   # "没有邮箱也没有电话" / "未成年且没有家长联系方式"
+
+def resolve_recipients(event) -> tuple[list[Recipient], list[Unreachable]]:
+    """谁该收到通知、用什么地址。换 provider 时这个函数一个字不改。
+
+    三条规则：
+    1. 成年人 → 他自己，按 Contact.preferred_contact_method 选渠道，
+       该渠道为空就回落到另一个；
+    2. 未成年人 → 【家长】。依次找：这条 Participation 的 consent_given_by
+       对应的联系方式 → contact.emergency_contacts 的第一条。
+       ⚠️ 15 岁的志愿者可能根本没有自己的手机，发给他等于没发；
+    3. birth_date 为空 → 【按未成年处理】。B4.5 的三态口径，保守侧 ——
+       折叠成"成年"会让没填生日的未成年人静默漏掉。
+
+    ⚠️ 两个都不能省：unreachable 这一组必须自己算出来。通知平台答得了
+       "这封信送到了吗"，答不了"这个人根本没有地址"——它连这个人存在都不知道。
+    """
+```
+
+### 编排 + 留痕
+
+```python
+@transaction.atomic
+def notify_event_change(event, *, reason, message, sent_by) -> EventNotification:
+    """解析收件人 → 投递 → 落一条 EventNotification。
+
+    ⚠️ unreachable_count 存下来，不要做成 property 事后重算 ——
+       当时联系不上不等于今天联系不上，重算会把这条历史记录改成
+       "当时全都通知到了"，那是假的。同 hours 是权威值那条。
+    ⚠️ message 是快照。之后再改活动，这条记录说过的话不能跟着变。
+    """
+```
+
+### `EventNotification`
+
+```python
+class EventNotification(ConstraintErrorFieldMixin, TimeStampedModel):
+    class Reason(models.TextChoices):
+        TIME_CHANGED     = "time_changed",     "Time changed"
+        LOCATION_CHANGED = "location_changed", "Location changed"
+        CANCELLED        = "cancelled",        "Event cancelled"
+        OTHER            = "other",            "Other"
+
+    event             = FK(Event, CASCADE, related_name="notifications")
+    reason            = CharField(choices=Reason.choices)
+    message           = TextField()                      # 快照
+    sent_at           = DateTimeField()
+    sent_by           = FK(settings.AUTH_USER_MODEL, SET_NULL, null=True, related_name="+")
+    recipients        = M2M(Participation, related_name="notifications", blank=True)
+    unreachable_count = PositiveIntegerField(default=0)
+    provider_ref      = CharField(max_length=200, blank=True)
+
+    # 不挂 simple-history —— 它本身就是一条不可变的事件记录，改它就是伪造
+
+    class Meta:
+        indexes = [Index(fields=["event", "-sent_at"])]   # 二次确认页要显示"上次什么时候发的"
+```
+
+`sent_by` 用 `SET_NULL`：发通知的人离职、账号删了，**这条记录必须还在**。
+同 `MinistryRole.granted_by` —— **留痕类字段一律不 `CASCADE`**。
+
+### 页面：`/events/<pk>/notify/`
+
+权限走 `can_manage_event()`（**和签到页同一条**，不新造一个）。
+
+- **GET** = 预览页：正文输入框（带一个按 `reason` 生成的默认文案）+
+  **三组名单**：本人收（N）/ **家长代收（N，标出来）** / **联系不上（N）**
+- 页面顶部显示"这场活动上次通知是 X 分钟前，通知了 N 人" ——
+  **这是防重复发送的唯一缓解**（不建队列、不做幂等键，见 D22 代价 3）
+- **POST** = 确认发送 → 调 `notify_event_change()`
+
+⚠️ **默认文案里不写未成年人姓名**，只写活动信息 + "您的孩子报名的活动"
+（D22 代价 2 的缓解：即使走第三方平台，泄露面也只有一个邮箱地址加一段活动公告）。
+文案末尾带一句"新时间来不了请点这里取消报名"，链到 `/me/participations/`。
+
+> **报名照旧，`Participation` 一个字段不加**（2026-07-29 定）。
+> 别顺手加 `needs_reconfirmation` —— 那是把"这个人和某次改动的关系"塞进
+> "这个人怎么样了"那个字段，两个维度。见 `goal.md` D22 末尾。
+
+### 测试
+
+```python
+def test_an_adult_is_notified_at_their_own_address(self)
+def test_a_minor_is_notified_through_their_guardian(self)              # ⭐ D22 ①
+def test_a_participant_with_unknown_birth_date_is_treated_as_a_minor(self)
+def test_a_participant_with_no_email_and_no_phone_lands_in_unreachable(self)   # ⭐ D22 ②
+def test_unreachable_rows_are_not_counted_as_recipients(self)
+def test_unreachable_count_does_not_change_after_the_phone_is_filled_in(self)  # ⭐ 快照
+def test_the_message_snapshot_survives_editing_the_event(self)
+def test_cancelled_participations_are_not_notified(self)
+def test_deleting_the_sending_user_keeps_the_notification(self)        # SET_NULL
+def test_notifying_another_ministrys_event_returns_403(self)
+def test_resolve_recipients_makes_no_network_calls(self)               # locmem 后端
+def test_the_backend_never_imports_contact_or_participation(self)      # grep 守卫
+def test_the_default_message_does_not_contain_a_minors_name(self)      # PII
+```
+
+**验证**：`test` 全绿；把一场活动的时间改掉 → 打开通知页 →
+**三组名单都在，"联系不上"那组里确实有 `seed_demo` 造的那个没邮箱没电话的人** →
+确认发送 → 控制台打出消息 → 回到活动页看到"刚刚通知过 N 人"。
+
+---
+
+## B12 · 统计：R1–R8
 
 **全部落在 QuerySet 方法 / `services.py`，不落在视图。**
 理由：换个界面这些要跟着搬 —— 而这次"换界面"是必然会发生的（D18 的判据）。
@@ -1992,7 +2159,7 @@ Participation.objects.filter(
 
 ---
 
-## B12 · `seed_demo` 补充 + 验收
+## B13 · `seed_demo` 补充 + 验收
 
 ### `seed_demo` 要补的（原有的 B0–B5 场景保留）
 
@@ -2004,6 +2171,10 @@ Participation.objects.filter(
 - 一场 `status=draft` 的活动（验收"志愿者看不见"要用）
 - 一场已结束的活动，参与者有签到签退和工时（验收 R6 / R7 要用）
 - **一个活动当天在职、之后离职的 employee** —— ⭐ 验收 R8 的时间口径要用
+- **一个既没有 email 也没有电话的报名者** —— ⭐ 验收 P6 的「联系不上」那一组要用。
+  **这个人必须有**，否则那一组永远是空的，看上去"通过了"其实什么也没验证
+- **一个未成年报名者，家长联系方式挂在 `EmergencyContact` 上**（不是 `consent_given_by`）
+  —— 验收收件人解析的第二条回落路径
 
 三条安全要求不变：幂等（`get_or_create`）、非 DEBUG 拒绝运行（除非 `--force`）、只造假数据。
 

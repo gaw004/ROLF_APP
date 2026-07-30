@@ -55,6 +55,7 @@
 | **这件事该不该做？** | 判据：**它是不是那 12 条的前置条件**。不是就不做，见[零](#零当前优先级2026-07-29-定) |
 | 「食物银行的 admin」在数据库里怎么表达？ | [D20](#d20--范围化权限-ministryrole不走-django-group2026-07-29) —— Django Group 顶不上，为什么 |
 | 「这场活动开了几个工种」为什么不能数报名？ | [D19](#d19--活动的工种编制-eventrole2026-07-29) —— 和 D11 的「空缺编制」是同一个病 |
+| 活动改时间了，通知谁？ | [D22](#d22--活动变更通知收件人解析是业务逻辑投递是可替换的适配器2026-07-29) —— **未成年人通知家长**；联系不上的人必须自己算 |
 | 新加一个分类字段，做成 `TextChoices` 还是字典表？ | [D5 判定规则](#判定规则什么时候用字典表什么时候用-textchoices2026-07-28-补) |
 | 这条信息该放 `Contact` / 角色表 / `Position` / `Assignment`？ | [D10 四层判断标准](#d10--人只有一份档案角色编制任职是不同层次) |
 | 一种新关系该用字段、自引用 FK、通用表还是专用表？ | [D15 四条判据 + 升级触发条件](#d15--关系用什么载体承载四条判据--选择规则) |
@@ -108,6 +109,7 @@
 | [**D19**](#d19--活动的工种编制-eventrole2026-07-29) | **活动的工种编制 `EventRole`** | **「这场活动开了几个工种、每个要几人」**；以及为什么不能靠 `Participation` 反推 |
 | [**D20**](#d20--范围化权限-ministryrole不走-django-group2026-07-29) | **范围化权限 `MinistryRole`** | **「食物银行的 admin」这句话在数据库里长什么样**；为什么 Django Group 顶不上；为什么不复用 `Position.is_leader` |
 | [**D21**](#d21--对外账号志愿者自助页面提前权限成为它的前置条件2026-07-29) | **对外账号 + 自助页面提前** | 志愿者能登录之后，Phase D 的权限为什么不能再排最后 |
+| [**D22**](#d22--活动变更通知收件人解析是业务逻辑投递是可替换的适配器2026-07-29) | **活动变更通知** | **通知名单 ≠ 报名名单**（未成年人通知家长）；换通知服务商为什么不该动模型 |
 
 **[四、当前进度](#四当前进度)**
 - [✅ 数据核心设计](#-已完成--数据核心设计这是目前最有价值的部分) — 已建好并有测试覆盖的部分
@@ -166,6 +168,7 @@
 - [R8 长什么样：跨三张表的那条查询](#r8-长什么样跨三张表的那条查询) ⓝ —— 三个坑，时间口径是第一个
 - [`EventRole.needed_count` 是参考值](#eventroleneeded_count-是参考值不是硬上限2026-07-29-从-eventcapacity-改写) ⓝ
 - [签到签退与 `hours`：谁是权威](#签到签退与-hours谁是权威2026-07-29-新增) ⓝ
+- [活动变更通知：分层与三条代价](#d22--活动变更通知收件人解析是业务逻辑投递是可替换的适配器2026-07-29) ⓝ —— 哪一半绝不能外包
 - ~~背景审查~~ —— 随 `BackgroundCheck` 移出本阶段，见推迟清单
 
 **关系类的收口**
@@ -227,6 +230,12 @@
 | P3 | 普通 account 能看到已发布的 event，能报名；**未成年人涉及 guardian consent** |
 | P4 | 该 ministry 有权限的人能看到报名人数；活动期间有**是否来过**的记录；结束后能统计**来了几个人、每人做了多久** |
 | P5 | **更高一级的权限**可以指定谁成为某个 ministry 的 admin |
+| **P6** | **活动改时间时，该 ministry 有权限的人能快速找到所有已报名的 volunteer 并给他们发通知**（2026-07-29 追加） |
+
+> **P6 是需求方后来追加的一条**（原话：「如果一个 event 突然改时间了，开设这个 event 的
+> ministry 下面有权限的人可以快速找到所有已经报名这个 event 的 volunteers，给他们发通知」）。
+> **"快速找到"这半句现有结构已经免费提供**（`Participation` 一个 filter），
+> 真正的新东西是另外三件，见 [D22](#d22--活动变更通知收件人解析是业务逻辑投递是可替换的适配器2026-07-29)。
 
 ### 逐条对账：现在的表答不答得出来
 
@@ -247,9 +256,11 @@
 | **P3** | 自助页面 + `Participation` 的同意字段 | ❌ 页面从零；同意记录见下面模型表 |
 | P4 | `Participation` 的 `status` + 签到签退 + `hours` | ⚠️ 形状要补，见模型表 |
 | **P5** | `MinistryRole` + 一个全局 Group | ❌ 随 P2 |
+| **P6** | 找人：`Participation` 一个 filter（**免费**）<br>发通知：`EventNotification` + 收件人解析 + 投递适配器 | ⚠️ **一半免费，一半是新的** —— 见 [D22](#d22--活动变更通知收件人解析是业务逻辑投递是可替换的适配器2026-07-29) |
 
-**一句话总结差距：报表侧结构缺一张表（`EventRole`），流程侧缺一张表（`MinistryRole`）、
-一层权限服务、和一整套面向志愿者的自建页面。**
+**一句话总结差距：报表侧结构缺一张表（`EventRole`），流程侧缺两张表
+（`MinistryRole`、`EventNotification`）、一层权限服务、一层投递适配器、
+和一整套面向志愿者的自建页面。**
 
 ### 排除了什么（以及它们去哪了）
 
@@ -1572,6 +1583,146 @@ def can_grant_ministry_admin(user) -> bool: ...        # P5，查 Group
 > 就是为了"在风险最低的事情上先把视图 + 模板 + URL + 权限跑一遍"而提前做的
 > （见 [D18 的形状触发](#什么时候-admin-整体不够用了)）。当时写的理由现在兑现了。
 
+### D22 · 活动变更通知：收件人解析是业务逻辑，投递是可替换的适配器（2026-07-29）
+
+**结论：新建 `EventNotification` 留痕；「该通知谁、用什么地址」全部留在自己的
+`services.py`；「把消息发出去」抽成一个只认（地址, 渠道, 内容）的后端接口，
+默认实现是 Django 自带的邮件后端，可换成统一通知平台（Novu / Courier / SuprSend）。**
+
+> **需求方 2026-07-29 选定：接入统一通知基础设施。**
+> 本决策把这个选择做成**可逆**的 —— 换 provider 不动模型、不动业务规则、不动测试。
+
+#### 「快速找到」是免费的，新东西是另外三件
+
+```python
+Participation.objects.filter(event_role__event=event).exclude(
+    status=Participation.Status.CANCELLED
+).select_related("contact", "event_role__role")
+```
+
+P6 的前半句到此为止。**真正要新建的是下面三件，一件都不能省：**
+
+**① 通知名单 ≠ 报名名单 —— 未成年人要通知家长**
+
+一个 15 岁的志愿者可能根本没有自己的手机。系统里已经有两条线通向家长：
+`Participation` 的 `consent_given_by`（P3 收的）和 `EmergencyContact`（B4.2 建的）。
+
+> **这是「活动前该拨谁的电话」这条需求第二次出现。** 第一次促成了
+> `is_minor` 三态 + `EmergencyContact`（见[未成年人要能查出来](#未成年人要能查出来)），
+> 当时写的是"家长通知的完整闭环"—— 现在这个闭环被真的用上了。
+> **生日未知的按未成年处理**，沿用 B4.5 已经定下的保守侧口径。
+
+**② 联系不上的人必须显式列出来，而且必须自己算**
+
+有些 `Contact` 是员工代录的，没有 email、只有电话，甚至两样都没有。
+
+> ⚠️ **通知平台答得了「这封信送到了吗」，答不了「这个人根本没有地址」。**
+> 前者是投递问题（provider 知道），后者是**本系统的数据质量问题**（provider 连这个人存在都不知道）。
+> 一个「已通知 27 人」的绿色提示掩盖 3 个联系不上的人，**和把 `is_minor` 的「未知」
+> 折叠成「否」是同一种病** —— 静默消失，不报错。
+>
+> **所以 `unreachable` 这一组必须由 `resolve_recipients()` 自己算出来、自己存下来，
+> 不能指望 provider 的回执。**
+
+**③ 「通知过了吗」现在答不出来**
+
+`Event` 已挂 simple-history，"什么时候从周六改到周日"有据可查。缺的是通知本身。
+按 [D15 三条件](#d15--关系用什么载体承载四条判据--选择规则)检验：一场 event 可以有多次通知（**基数破**）、
+通知有自己的属性（时间、原因、正文、发给了谁）（**属性破**）→ **必须是表，不能是
+`Event` 上的一个 `notified_at` 字段。**
+
+```python
+EventNotification(
+    event             → Event (CASCADE),
+    reason            = time_changed | location_changed | cancelled | other,   # TextChoices
+    message           = TextField,          # ⚠️ 快照 —— 之后再改活动，这条记录说过的话不变
+    sent_at, sent_by  → User (SET_NULL),
+    recipients        = M2M → Participation,   # 覆盖到了谁
+    unreachable_count = PositiveIntegerField,  # ⚠️ 存下来，不要事后重算
+    provider_ref      = CharField(blank=True), # provider 那边的批次 id，用来对账
+)
+```
+
+**`unreachable_count` 存下来而不是事后重算**，理由和 [`hours` 是权威值](#签到签退与-hours谁是权威2026-07-29-新增)同一条：
+**当时联系不上，不等于今天联系不上。** 事后给那个人补了电话再去重算，
+这条历史记录会变成"当时全都通知到了"—— **那是假的**。
+
+#### 分层：哪一半绝不能外包
+
+> **判据是 [D18](#逻辑落点的硬规矩成本为零现在就要守) 那句话换个对象：
+> 换一个通知服务商，这段代码要不要跟着搬？要搬，就不该在适配器里。**
+
+```python
+# events/services.py —— 业务规则，永久资产，换 provider 一个字不改
+def resolve_recipients(event) -> tuple[list[Recipient], list[Unreachable]]:
+    """谁该收到通知、用什么地址。
+
+    ⚠️ 这里的规则是本基金会特有的（未成年人通知家长、生日未知按未成年处理、
+       优先渠道看 Contact.preferred_contact_method），任何通知平台都不知道它们。
+    """
+
+def notify_event_change(event, *, reason, message, sent_by) -> EventNotification:
+    """编排：解析收件人 → 交给后端投递 → 落一条 EventNotification。"""
+
+
+# core/notifications/ —— 适配器，可替换，唯一和外部服务打交道的地方
+class NotificationBackend(Protocol):
+    def send(self, messages: Sequence[Message]) -> list[DeliveryResult]: ...
+
+@dataclass(frozen=True)
+class Message:
+    to: str          # 一个邮箱 / 一个电话号 / 一个 provider subscriber id
+    channel: str     # email | sms
+    subject: str
+    body: str
+```
+
+> **后端只认（地址, 渠道, 内容）三样，不认 `Contact`、不认 `Participation`、
+> 不认「未成年人」这个概念。** 这一条是整个设计的关键 ——
+> 一旦让后端知道什么是未成年人，换 provider 就要把这条规则重写一遍。
+
+```python
+# settings/base.py
+NOTIFICATION_BACKEND = "core.notifications.console.ConsoleBackend"     # 开发默认
+# 可选：core.notifications.django_email.DjangoEmailBackend            （不依赖任何外部服务）
+#      core.notifications.novu.NovuBackend                            （统一通知平台）
+```
+
+**测试一律跑 `ConsoleBackend` 或一个 `LocmemBackend`** —— 业务规则的测试
+（谁该收到、谁联系不上）**不许**依赖任何网络，也不许因为换 provider 而变红。
+
+#### 要如实说的三条代价
+
+1. **和「便宜：无付费 SaaS」这条核心诉求冲突。** Courier / SuprSend 是纯 SaaS；
+   Novu 有自托管开源版，能保住这条，但要跑 Redis + MongoDB + 几个服务，
+   撞上另一条核心诉求「好维护：一个人能读完全部代码」。**两条里必然要让一条**，
+   记在这里免得以后当成疏忽。
+2. **PII 出境，和 [D3](#d3--数据永远是一个标准-pg_dump-能带走的-postgres-库) 有张力。**
+   通知内容会带未成年人姓名、家长电话、活动地址 —— 走第三方就有一份副本在别人服务器上。
+   **缓解（要做，不是可选）：通知正文里不写未成年人姓名，
+   只写活动信息 + "您的孩子报名的活动"**，收件地址仍然只在自己库里。
+   这样即使换到最激进的 SaaS，泄露面也只有一个邮箱地址加一段活动公告。
+3. **重复发送挡不住。** 网络失败重试可能发两遍。MVP 阶段**不建队列、不做幂等键** ——
+   记为一个已知的不完美（同 `clean()` 挡不住 `bulk_create` 的口径），
+   缓解是发送前二次确认页 + `EventNotification` 列表里能看到"5 分钟前刚发过一次"。
+
+#### 报名有效性：改了时间，报名照旧
+
+**2026-07-29 定：`Participation` 一个字段不加**，通知正文里写"新时间来不了请点这里取消报名"，
+链到 `/me/participations/`。
+
+**为什么不加 `needs_reconfirmation` 这一档**：现有四档
+（registered / attended / absent / cancelled）回答的是"**这个人怎么样了**"，
+而 `needs_reconfirmation` 回答的是"**这个人和某次改动的关系**" —— 两个维度。
+本项目已经为"两个维度挤进一个字段"付过两次代价
+（[`Relationship.is_active`](#单一真相删掉-relationshipis_activeassignment-用-status不用-is_active)、
+[`Assignment.status`](#assignmentstatus状态和任期是正交的两个维度2026-07-28-修订)），不付第三次。
+
+**代价（如实说）**：改完时间到大家陆续取消之间，报名数是虚高的，
+`understaffed()` 会短暂说"人齐了"。可接受 —— 那个数本来就是参考值不是硬上限。
+**真需要时的正确形状不是加一档 status，是一张 `ParticipationConfirmation` 表**
+（一次改动一行），见推迟清单。
+
 ---
 
 ## 四、当前进度
@@ -1674,6 +1825,8 @@ def can_grant_ministry_admin(user) -> bool: ...        # P5，查 Group
 | `ParticipationRole` | `events` | 字典表：`code`（唯一·不可改）/ `name` / `is_active`。装的是**一次活动之内**的工种（签到台、搬运、翻译），**≠ `Position.name`**，见下面那条一句话定义。<br>**必须 seed 一行 `code=general`**（"通用志愿者"）—— `Participation.event_role` 非空之后，"没有具体分工"要有地方落 |
 | `Participation` | `events` | **报名 / 出勤 / 工时，三件事一行。** `event_role`(FK → `EventRole`，`CASCADE`) / `contact`(FK，`PROTECT`) / `status`（`TextChoices`：registered·attended·absent·cancelled）/ `registered_at` / **`checked_in_at`** / **`checked_out_at`**（都可空 datetime）/ **`hours`**（`Decimal(6,2)`，可空）/ 三个同意字段（见下一行）。<br>⚠️ **改动（2026-07-29）**：**`event` 和 `role` 两个字段没了**，合并成 `event_role` —— 理由（跨表一致性 `CheckConstraint` 管不了）见 D19。唯一约束因此简化成 `(event_role, contact)`，**不再需要 `nulls_distinct=False`**。<br>签到签退是 P4 的"是否来过"。**`hours` 仍然是唯一权威值**，签退时由 `services.check_out()` 写入它 —— 见下面「签到签退与 `hours`」 |
 | ↳ `Participation` 的同意字段 | `events` | **P3 的未成年人同意，不建 `Guardianship`。** `consent_given_by`（文本，姓名）/ `consent_relationship`(FK → `RelationshipType`，可空) / `consent_at`（可空 datetime）/ `consent_method`（`TextChoices`：口头·纸质·线上）。<br>**为什么不是 `Guardianship` 表**：需求要的是"**这一次活动**家长同意了"，那是一条**事件记录**；`Guardianship` 是"谁是小明的法定监护人"，那是一段**长期关系**。两者形状不同，先做需求要的那个。`Guardianship` 继续留在推迟清单。<br>规则：**未成年人的 `Participation` 没有 `consent_at` 就不能进 `confirmed`/`attended`** —— 跨表判断（年龄在 `Contact` 上），`CheckConstraint` 表达不了，落在 `services.py` 的报名函数里，按 D14 记为提示层，不假装它是强制的 |
+| **`EventNotification`** | `events` | **⭐ 新表（D22）—— 活动变更通知的留痕。** `event`(FK，`CASCADE`) / `reason`（`TextChoices`：time_changed·location_changed·cancelled·other）/ `message`（正文**快照**）/ `sent_at` / `sent_by`(FK → `User`，`SET_NULL`) / `recipients`(M2M → `Participation`) / **`unreachable_count`**（整数）/ `provider_ref`（可空文本，对账用）。<br>**`unreachable_count` 必须存，不能事后重算** —— 当时联系不上不等于今天联系不上，重算会把历史记录改成"当时全通知到了"。同 `hours` 是权威值那条。<br>**不挂 simple-history** —— 它本身就是一条不可变的事件记录，改它就是伪造 |
+| **投递适配器** | `core/notifications/` | **不是表** —— 一个 `NotificationBackend` 协议 + 三个实现（console / django_email / novu），走 `settings.NOTIFICATION_BACKEND`。<br>⚠️ **后端只认（地址, 渠道, 内容），不认 `Contact` / `Participation` / "未成年人"** —— 一旦让它知道这些，换 provider 就要把业务规则重写一遍。见 D22 |
 | **`MinistryRole`** | `org` | **⭐ 新表（D20）—— "某人在某 ministry 有 admin 权限"。** `contact`(FK，`PROTECT`) / `ministry`(FK，`CASCADE`) / `role`（`TextChoices`：admin·coordinator）/ `start_date` / `end_date` / `granted_by`(FK → `User`，可空，`SET_NULL`)。**挂 simple-history**（授权变更必须留痕）。<br>复用 `core` 的 `DateRangeMixin.active()` —— 授权也有起止，同 `Assignment`。<br>**放 `org` 不放 `accounts`**：它的主语是 ministry（D17：一个 app 一个业务领域），且 `accounts` 只该装"能不能登录"这一层 |
 | `accounts` 的注册流程 | `accounts` | **不是新表** —— `User.contact` 已经有了，**保持可空**（superuser 没有对应真人，D12）。P1 落在 `accounts/services.py::register_account()`：一次事务里建 `User` + 建 `Contact` + 挂上。<br>**流程约束，不是字段约束** —— 理由见 D21 第 3 条（它是 D9 的一个反例，因为这条规则有合法例外） |
 | ~~`VolunteerProfile`~~ / ~~`BackgroundCheck`~~ | — | **移出本阶段（2026-07-29）**，见推迟清单。12 条需求一条都没碰技能、可服务时段、背景审查。<br>⚠️ **但 D18 那条"背景审查必须独立成模型"的决定不撤销** —— 将来建的时候仍然是两个模型，不是一个 |
@@ -1788,6 +1941,8 @@ A7 的原话是"等表里有了真数据再加，就得先清洗存量数据"。
 | **`EventRole`** | `needed_count IS NULL OR needed_count > 0` | 需要 0 人的工种没有意义。同原 `Event.capacity` 那条 |
 | **`MinistryRole`** | `UniqueConstraint(contact, ministry, role, start_date)`，**带 `nulls_distinct=False`** | 同一个人在同一个 ministry 的同一角色授两遍。`start_date` 可空且留空常见 —— 同 `Assignment` 的教训 |
 | **`MinistryRole`** | `end_date >= start_date` | 同 `Assignment` / `Relationship`。新表漏掉就不一致了 |
+| **`EventNotification`** | `unreachable_count >= 0` | 便宜，且"联系不上 -1 个人"是无意义状态 |
+| **`EventNotification`** | `Index(fields=["event", "-sent_at"])` | "这场活动通知过几次、最近一次什么时候" —— 发送前的二次确认页要显示它（防重复发送的唯一缓解） |
 | `Assignment` | `end_date >= start_date` | `Relationship` 在 A7 加了这条，`Assignment` 是新表却漏掉就不一致了 |
 | `Assignment` | `UniqueConstraint(contact, position, start_date)`，**带 `nulls_distinct=False`** | 见下面「`Assignment` 的唯一约束」 |
 | `Position` | `reports_to` 不能指向自己那一行（`CheckConstraint`） | 见下面「汇报线的环」 |
@@ -1937,6 +2092,9 @@ Phase B 一次加十几个外键，其中一个选错是灾难级的：
 | **`Participation.event_role`** | **`CASCADE`** | 工种删了，报它的记录没有意义。<br>⚠️ **这条链要看清楚：删 `Event` → 级联删 `EventRole` → 级联删 `Participation`，工时历史一起没。** 和原来"删 `Event` 直接带走 `Participation`"的风险等价，不是新增的 —— 但两级级联更不显眼，所以**删活动这个动作在 admin 里不给普通 Group**（见 D21） |
 | `Participation.contact` | `PROTECT` | `CASCADE` 会让删一个联系人抹掉全部工时历史 —— R6 / R7 统计的基础 |
 | `Participation.consent_relationship` | `PROTECT` | 字典表 |
+| **`EventNotification.event`** | **`CASCADE`** | 活动删了，"通知过这场活动的人"没有意义 |
+| **`EventNotification.sent_by`** | **`SET_NULL`** | 发通知的人离职、账号删了，**这条通知记录必须还在**。同 `MinistryRole.granted_by` 的理由 —— 留痕类的字段一律不能 `CASCADE` |
+| **`EventNotification.recipients`（M2M）** | — | M2M 中间表默认随任一端删除而清理。⚠️ **这意味着删一个 `Participation` 会把它从历史通知记录里抹掉** —— 可接受，因为 `Participation.contact` 是 `PROTECT`，有活动记录的人本来就删不掉 |
 | **`MinistryRole.contact`** | **`PROTECT`** | 删一个人不该静默撤掉他的授权记录 —— 授权是要留痕的事（同 `granted_by`） |
 | **`MinistryRole.ministry`** | **`CASCADE`** | ⚠️ **这里和 `Position.ministry` 的 `PROTECT` 不同，是刻意的**：编制是组织资产，ministry 撤销时要人工处置；而"食物银行的 admin 权限"在食物银行不存在之后**没有任何意义**，留着反而是一条悬空的授权。<br>**同一个 `on_delete` 在不同的表上是不同的选择** —— 同 `reports_to` 那条注 |
 | **`MinistryRole.granted_by`** | **`SET_NULL`** | 授权人的账号被删，**授权本身必须还在**（`CASCADE` 会连锁撤销一批人的权限，是灾难级）。留 `NULL` 读作"授权人已注销"，比整行消失强 |
@@ -2783,6 +2941,15 @@ Phase A 的 A10 用了"每条钉住什么"的清单，本阶段沿用。下面�
 | **志愿者账号访问别人的报名记录得到 404/403；活动列表里看不到 `status=draft` 的活动** | D21 第 2 条 —— **查询层的隔离，不是模板层的**。测试直接打 URL，不看页面 |
 | **`register_account()` 建 account 的同时建了 `Contact` 并挂上；中途失败时两个都不留下** | P1 + 事务性。半个账号比没有账号更难查 |
 | **`User.contact` 仍然允许为空**（建一个 superuser 不报错） | D21 第 3 条 —— P1 是流程约束不是字段约束，别顺手改成 `null=False` |
+| **⭐ 未成年报名者的通知收件人是家长，不是他本人** | D22 ① —— 15 岁的志愿者可能没有自己的手机。这条不过，P6 对最需要被通知的那群人就是失效的 |
+| **生日未知的报名者也按未成年处理（通知家长）** | 保守侧，同 B4.5 的三态口径。折叠成"成年"会让人静默漏掉 |
+| **⭐ 一个没有 email 也没有电话的报名者出现在 `unreachable` 里，且不计入 `recipients`** | D22 ② —— "已通知 27 人"掩盖 3 个联系不上的人，是本文档反复判过刑的那种静默失败 |
+| **`unreachable_count` 在事后给那个人补了电话之后**不**改变** | 它是快照不是派生值。同 `hours` 是权威值 |
+| **`resolve_recipients()` 的测试不发生任何网络调用**（用 locmem / console 后端） | 业务规则的测试不许依赖 provider —— 换 provider 时这批测试一条都不该变红 |
+| **`NotificationBackend` 的实现里搜不到 `Contact` / `Participation` / `is_minor`**（grep 守卫） | D22 的分层 —— 后端只认（地址, 渠道, 内容）。**第八次「测试当 lint」** |
+| **通知正文里不出现未成年人姓名** | D22 代价 2 的缓解措施，PII 出境面收窄到"一个邮箱 + 一段活动公告" |
+| **`EventNotification.message` 在活动之后再改时**不**跟着变 | 快照 —— 这条记录说过的话不能被后来的编辑改写 |
+| **删掉发通知的那个 `User` 之后，`EventNotification` 还在**（`sent_by` 变 `NULL`） | 留痕类字段一律不 `CASCADE` |
 | 两个都叫"王强"的联系人 `__str__` 不同 | 所有 autocomplete 的正确性 |
 | **同名同号**第二条被表单**拒绝保存**；勾上 `force_save` 后能存 | 硬拦截真的拦得住，且没有否认重名合法 |
 | **仅同名**（号码不同）**不**拦截，只出警告 | 拦截没有绑错信号 —— 绑到同名上就会被点习惯 |
@@ -2845,6 +3012,12 @@ Phase A 的 A10 用了"每条钉住什么"的清单，本阶段沿用。下面�
 - [ ] **R8**：同一页面上列出"本 ministry 的 employee 参与情况" ——
       谁参加了、分别在哪个工种。**把其中一个人的任职 `end_date` 改到活动之前，
       他应该从这个名单里消失**（时间口径是活动当天，不是今天）
+- [ ] **P6**：把活动时间从周六改到周日 → 点「通知报名者」→ 预览页上
+      **成年人显示自己的邮箱、未成年人显示家长的联系方式**、
+      **一个没填邮箱也没填电话的人出现在「联系不上（1 人）」那一组里**；
+      确认发送后回到活动页，能看到"5 分钟前通知过 N 人"。
+      **⭐ 那个「联系不上」的分组不出现，这一条就算没过** —— 它是 P6 里唯一会静默失败的地方
+- [ ] **P6 越权**：拿另一个 ministry 的 admin 账号打同一个通知 URL，**得到 403**
 
 **③ 扮演普通志愿者（李四，`is_staff=False`）**
 
@@ -2990,7 +3163,9 @@ Phase A 的 A10 用了"每条钉住什么"的清单，本阶段沿用。下面�
 | **活动的班次（`Shift`）** | 2026-07-28 决定：多班次一律拆成多个 `Event`。行业标准结构确实是三层（Salesforce V4S 的 Job → Shift → Hours），但拆 Event 之后时段差异由 Event 表达、做的事差异由 `Participation.role` 表达、时长差异由各行 `hours` 表达，三个维度一个不少，而少一张表少一层 admin 嵌套 | 一场活动的班次多到"拆成十个 Event"开始碍事时 |
 | **活动的分组 / 系列（`Event.parent`）** | 拆成多个 Event 的代价是"上午场 / 下午场"在统计里算两场。按 D15 三条件检验：最多一个父、无独立属性、只有一种类型 → **自引用 FK 正是对的载体**，和 Ministry 层级同理 | 真的需要"这一整天总共来了多少人次"时 |
 | **一个人一次活动的奖励规则** | 规则还不明确（按班次算？按角色算？按工时算？）。猜错就是白写字段。关键是**区分它所需的三个维度已经全部存下来了**（哪个 Event、什么 role、多少 hours），结构撑得住 | 基金会说清楚奖励怎么算时 —— 那时只是加字段，不用改结构 |
-| 邮件群发 | 属于对外系统，和内部管理是两回事 | 上线之后 |
+| 邮件**群发 / 营销**（简报、募捐信、全员公告） | 和内部管理是两回事，且要处理退订、名单管理、合规。<br>⚠️ **注意它和 P6 不是一回事**：P6 是**事务性**通知（这场活动改时间了，通知**这场活动的报名者**），范围由 `Participation` 天然界定，触发条件明确。群发是"给所有人发点什么"，没有边界 | 基金会真的要做简报时 |
+| **`ParticipationConfirmation`（改动后重新确认报名）** | 2026-07-29 定：改时间后**报名照旧**，通知里请人自行取消（D22 末尾）。加一档 `needs_reconfirmation` 是把"这个人和某次改动的关系"塞进"这个人怎么样了"那个字段，两个维度 —— 本项目已经为这种事付过两次代价 | 真出现"改完时间之后没人取消也没人来"的实际问题时。**形状不是加一档 status，是一张表**：`ParticipationConfirmation(participation, notification, confirmed_at)`，一次改动一行 |
+| **通知的送达状态 / 退信处理 / 重试队列** | MVP 阶段 `EventNotification` 只记"发出去了、覆盖到谁、几个联系不上"。逐个收件人的送达/退信要接 provider 的 webhook，是一整套东西 | 真的出现"他说他没收到"且查不清时。⚠️ **`unreachable` 那一组现在就要做**，那是本系统自己算得出来的，和送达状态是两回事（D22 ②） |
 | **匿名（无账号）活动报名页** | ⚠️ **2026-07-29 拆开说清楚，这一行原来和"邮件群发"写在一起，会被误读成"P3 也推迟了"。**<br>**P3 要的是「登录用户」能报名，那个进当前阶段。** 推迟的是**不登录**就能报名的公开页面 —— 它需要另一套东西（防刷、验证码、匿名记录事后认领），而需求原话是"每个普通 **account** 可以看到发布的 event" | 基金会真的要做面向公众的活动招募时 |
 | 一个 Contact 多个 account / 一个 account 多个 Contact | `User.contact` 是 OneToOne，够用（D12）。开放注册之后可能出现"同一个人注册了两次" —— 那是**重复 `Contact`**，`merge_contacts()` 已经能处理，不是基数问题 | 出现"一家人共用一个邮箱、想各自登录"的真实需求时 |
 | **报名的等候名单 / 审批** | `EventRole.needed_count` 只提醒不阻止（同 `Contact` 重名的口径），所以报满了照样能报，不需要排队机制 | 基金会说"超了的人要排队 / 要审批"时 —— 那时 `Participation.status` 加一档 `waitlisted`，不改结构 |
@@ -3056,6 +3231,9 @@ Phase A 的 A10 用了"每条钉住什么"的清单，本阶段沿用。下面�
 | Phase C ↔ Phase D | C=资金，D=上线 | **C=上线，D=资金** | 12 条需求没有一条碰钱，而它们全都需要真人用起来才有意义 |
 | `VolunteerProfile` / `BackgroundCheck` | Phase B B7 | 推迟清单 | 12 条需求一条都没碰技能 / 可服务时段 / 背景审查。⚠️ **D18 那条"背景审查必须独立成 model"不撤销** |
 | 验收标准 | 7 条"能演示一遍日常" | **按 12 条需求逐条勾，扮三个角色走一遍** | 原标准答不出"做完了没有" |
+| **新增 [D22](#d22--活动变更通知收件人解析是业务逻辑投递是可替换的适配器2026-07-29)**（当日追加 P6） | — | `EventNotification` + `resolve_recipients()` + 可替换的投递后端 | 活动改时间要通知报名者。**"找人"免费**，新东西是：未成年人通知家长、联系不上的人要自己算、通知要留痕 |
+| 需求条数 | 12（R1–R8 + P1–P5） | **13**（+ P6） | 需求方当日追加 |
+| 通知服务商 | — | **需求方选定：统一通知平台**（Novu / Courier / SuprSend） | ⚠️ 与"便宜：无付费 SaaS"和 D3 有冲突，**已在 D22 如实记下**；设计上做成可替换的适配器，所以这个选择是可逆的 |
 
 ### 没改的（记下来免得以后以为漏了）
 
@@ -3064,6 +3242,10 @@ Phase A 的 A10 用了"每条钉住什么"的清单，本阶段沿用。下面�
   见[零的「已实现但暂时用不上的」](#已实现但暂时用不上的留着不删)；
 - **不建 `Shift`** —— `EventRole` 的维度是工种不是时间，两条决定不冲突；
 - **`Guardianship` 继续推迟** —— P3 要的是"这次活动的同意记录"，不是"长期监护关系"。
+  **P6 也没有把它拉回来** —— 通知家长用的是 `consent_given_by` + `EmergencyContact`，
+  两条现成的线；
+- **`Participation` 不加 `needs_reconfirmation`** —— 改时间后报名照旧，
+  理由见 [D22 末尾](#报名有效性改了时间报名照旧)。
 
 ### 这一轮最值得记住的一条
 

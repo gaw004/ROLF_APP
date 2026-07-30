@@ -10,7 +10,24 @@
 > 约定：每个 Phase 一份 `0N-roadmap.md`，编号递增，**旧的不覆盖、不删除** ——
 > 里面的「计划外」记录（踩过的坑）是这个项目最贵的资产之一。
 >
-> 最后更新：2026-07-28
+> 最后更新：2026-07-29
+
+> # ⭐ 先读这个：当前唯一优先级（2026-07-29 定）
+>
+> **基金会给出了一套完整的、具体的需求 —— 见[零、当前优先级](#零当前优先级2026-07-29-定)。
+> 它现在是本项目唯一的优先级。**
+>
+> 判定规则，从今天起对每一件事都适用：
+>
+> > **这件事是不是[零](#零当前优先级2026-07-29-定)里那 12 条需求的前置条件？
+> > 不是 → 它不进本阶段，不管它以前排在哪。**
+>
+> 已经因此改动的决策：[D2](#d2--前端推迟到后端与数据模型完善之后)（前端不再整体推迟）、
+> [Phase B 的模型表](#phase-b--活动闭环--当前优先级)（`Event` 一族重画）、
+> [Phase C / D 的排序](#-未开始--后续阶段)（资金追踪整体后移，权限提前）。
+> 新增 [D19](#d19--活动的工种编制-eventrole2026-07-29) / [D20](#d20--范围化权限-ministryrole不走-django-group2026-07-29) /
+> [D21](#d21--对外账号志愿者自助页面提前权限成为它的前置条件2026-07-29) 三条决策。
+> **已经写好的代码一行不删** —— 见[零](#零当前优先级2026-07-29-定)末尾「已实现但暂时用不上的」。
 
 ---
 
@@ -21,7 +38,7 @@
 > [D11](#d11--编制-position-与任职-assignment-分开汇报线挂在编制上) / [D15](#d15--关系用什么载体承载四条判据--选择规则)
 > 这四条 —— 它们决定了"一条信息该放进哪张表"。
 > 已经在写代码的人，日常查的是[三的决策清单](#三重大决策记录)和
-> [Phase B 实现要点](#phase-b--人与活动-mvp--做完就能完整演示一遍)。
+> [Phase B 实现要点](#phase-b--活动闭环--当前优先级)。
 
 > **排版约定（2026-07-29）**：已经拍板的历史决策 —— [三](#三重大决策记录) 的 D1–D18
 > 和 [七](#七2026-07-28-修订记录了什么) 的各轮修订 —— **正文一律折叠并置灰**，
@@ -34,6 +51,10 @@
 
 | 我想知道… | 去看 |
 |---|---|
+| **现在到底该做什么？** | [零、当前优先级](#零当前优先级2026-07-29-定) —— 12 条需求 + 逐条覆盖对账 |
+| **这件事该不该做？** | 判据：**它是不是那 12 条的前置条件**。不是就不做，见[零](#零当前优先级2026-07-29-定) |
+| 「食物银行的 admin」在数据库里怎么表达？ | [D20](#d20--范围化权限-ministryrole不走-django-group2026-07-29) —— Django Group 顶不上，为什么 |
+| 「这场活动开了几个工种」为什么不能数报名？ | [D19](#d19--活动的工种编制-eventrole2026-07-29) —— 和 D11 的「空缺编制」是同一个病 |
 | 新加一个分类字段，做成 `TextChoices` 还是字典表？ | [D5 判定规则](#判定规则什么时候用字典表什么时候用-textchoices2026-07-28-补) |
 | 这条信息该放 `Contact` / 角色表 / `Position` / `Assignment`？ | [D10 四层判断标准](#d10--人只有一份档案角色编制任职是不同层次) |
 | 一种新关系该用字段、自引用 FK、通用表还是专用表？ | [D15 四条判据 + 升级触发条件](#d15--关系用什么载体承载四条判据--选择规则) |
@@ -44,11 +65,13 @@
 | 代码里要取"今天"？ | [D16](#d16--时间与日期的唯一口径2026-07-28) |
 | 某个决定当初为什么改口？ | [D9](#d9--业务规则落到数据库约束) / [D11](#d11--编制-position-与任职-assignment-分开汇报线挂在编制上) / [D15](#d15--关系用什么载体承载四条判据--选择规则) 各自的修订说明 + [七](#七2026-07-28-修订记录了什么) |
 | 一个编制没人在任（空缺）怎么表示？ | [D11 第二次修订](#第二次修订为什么-reports_to-不能指向-assignment) + [空缺编制](#空缺编制这次修订的验收点) |
-| Phase B 要建哪些表、必须带哪些约束？ | [Phase B 模型表](#phase-b--人与活动-mvp--做完就能完整演示一遍) + [约束清单](#新表的约束必须和表同期落地延续-a7-的教训) |
+| Phase B 要建哪些表、必须带哪些约束？ | [Phase B 模型表](#phase-b--活动闭环--当前优先级) + [约束清单](#新表的约束必须和表同期落地延续-a7-的教训) |
 | 某件事为什么现在不做？ | [五、明确推迟的事](#五明确推迟的事) |
 | 还有什么没拍板？ | [六 · 还没定的](#还没定的都不阻塞-phase-b-开工) |
 
 ### 全文结构
+
+**[零、当前优先级](#零当前优先级2026-07-29-定)** ← **先读这个。** 12 条需求原文 + 逐条覆盖对账 + 排除了什么
 
 **[一、终极目标](#一终极目标)** — 要做什么、为谁做、按什么原则取舍
 - [五个核心诉求，以及分别靠什么落实](#五个核心诉求以及分别靠什么落实) · [方法论：抄结构，不抄代码](#方法论抄结构不抄代码) · [交付策略](#交付策略)
@@ -82,27 +105,40 @@
 | [D17](#d17--app-划分一个-app-一个业务领域敏感数据单独成-app2026-07-28) | app 划分 | 新模型放哪，以及 `payroll` 为什么必须独立 |
 | [D18](#d18--admin-的边界以及业务逻辑的落点2026-07-28) | Admin 的边界 | **这段逻辑该不该写在 admin 里**；以及权限粒度为什么倒推出一张新表 |
 | ↳ | [**代码落点与文件分层**](#代码落点与文件分层什么会随升级坏什么换界面还用得上2026-07-28-补) —— **哪一层会随 Django 升级坏、哪一层前端上来还能用** · [两条出栏触发](#什么时候-admin-整体不够用了) | |
+| [**D19**](#d19--活动的工种编制-eventrole2026-07-29) | **活动的工种编制 `EventRole`** | **「这场活动开了几个工种、每个要几人」**；以及为什么不能靠 `Participation` 反推 |
+| [**D20**](#d20--范围化权限-ministryrole不走-django-group2026-07-29) | **范围化权限 `MinistryRole`** | **「食物银行的 admin」这句话在数据库里长什么样**；为什么 Django Group 顶不上；为什么不复用 `Position.is_leader` |
+| [**D21**](#d21--对外账号志愿者自助页面提前权限成为它的前置条件2026-07-29) | **对外账号 + 自助页面提前** | 志愿者能登录之后，Phase D 的权限为什么不能再排最后 |
 
 **[四、当前进度](#四当前进度)**
 - [✅ 数据核心设计](#-已完成--数据核心设计这是目前最有价值的部分) — 已建好并有测试覆盖的部分
 - [✅ Phase A 地基加固](#-已完成--phase-a-地基加固) — A1–A10 逐项状态
 - [⬜ 后续阶段](#-未开始--后续阶段)
-  - **[Phase B · 人与活动 MVP](#phase-b--人与活动-mvp--做完就能完整演示一遍)** ← 下一步，模型表 + 实现要点
-  - [Phase C · 资金追踪](#phase-c--资金追踪) · [Phase D · 上线与真实运营](#phase-d--上线与真实运营)
+  - **[Phase B · 活动闭环](#phase-b--活动闭环--当前优先级)** ← **当前在做**，模型表 + 实现要点
+  - [Phase C · 上线与真实运营](#phase-c--上线与真实运营) · [Phase D · 资金追踪](#phase-d--资金追踪)（2026-07-29 两者对调）
 
 **[五、明确推迟的事](#五明确推迟的事)** — 记下来是为了不反复纠结（含各自的重启条件）
 
-**[六、下一步](#六下一步)** — 开工前要做什么 · [还没定的三件事](#还没定的都不阻塞-phase-b-开工)
+**[六、下一步](#六下一步)** — 开工前要做什么 · [还没定的](#还没定的哪些阻塞哪些不阻塞)
 
-**[七、2026-07-28 修订记录](#七2026-07-28-修订记录了什么)** — 这一轮改了什么、为什么
+**[七、2026-07-29 修订记录](#七2026-07-29-修订记录了什么)** — **按基金会需求重排**，改了什么、没改什么
+（上一轮的记录折到[附](#附2026-07-28-修订记录了什么)）
 
 ### Phase B 实现要点索引
 
 开工期间日常翻的就是这一段。按文档顺序排，分组只是为了好找。
 
-**开工顺序与范围**
+> **2026-07-29**：B0–B5（`core` / `contact` / `org`）已完成，下面标 ⓐ 的条目是它们的实现要点，
+> 现在只在维护时才翻。**当前在做的是 B6 起的活动闭环**，标 ⓝ 的是它的要点。
+
+**当前优先级的要点** ⓝ
+- [`EventRole`：活动的工种编制](#d19--活动的工种编制-eventrole2026-07-29) — 以及为什么 `Participation` 改挂它
+- [`MinistryRole`：范围化权限](#d20--范围化权限-ministryrole不走-django-group2026-07-29) — 「食物银行的 admin」怎么表达
+- [对外账号与自助页面](#d21--对外账号志愿者自助页面提前权限成为它的前置条件2026-07-29) — 权限从 Phase D 提前
+- [12 条需求的覆盖对账](#逐条对账现在的表答不答得出来) — 每条需求靠哪张表回答
+
+**开工顺序与范围** ⓐ
 - [本阶段内部的硬性顺序](#本阶段内部的硬性顺序) — 三件事必须排在最前
-- [一人一活动多角色](#一人一活动多角色2026-07-28-决定) — 以及为什么不建 `Shift`
+- [一人一活动多角色](#一人一活动多角色2026-07-29-改挂-eventrole) — 以及为什么不建 `Shift`
 
 **约束、索引与完整性**
 - [`.active()` 与时间口径](#active-与时间口径) — 全系统复用最多的谓词
@@ -126,9 +162,11 @@
 **各表的实现要点**
 - [Ministry 视图：为什么 `Ministry` 不能推迟](#ministry-视图为什么-ministry-表不能推迟)
 - [未成年人要能查出来](#未成年人要能查出来) — `is_minor` 三态
-- [`Participation.role` 和 `Position` 不是一回事](#participationrole-和-position-不是一回事)
-- [`Event.capacity` 是参考值](#eventcapacity-是参考值不是硬上限)
-- [背景审查：独立成表，存完成日不存到期日](#背景审查独立成表存完成日不存到期日)
+- [`EventRole` 和 `Position` 不是一回事](#eventrole-和-position-不是一回事) ⓝ
+- [R8 长什么样：跨三张表的那条查询](#r8-长什么样跨三张表的那条查询) ⓝ —— 三个坑，时间口径是第一个
+- [`EventRole.needed_count` 是参考值](#eventroleneeded_count-是参考值不是硬上限2026-07-29-从-eventcapacity-改写) ⓝ
+- [签到签退与 `hours`：谁是权威](#签到签退与-hours谁是权威2026-07-29-新增) ⓝ
+- ~~背景审查~~ —— 随 `BackgroundCheck` 移出本阶段，见推迟清单
 
 **关系类的收口**
 - [关系类的收口](#关系类的收口见-d6--d15) — 反向显示（两个**只读** inline）、`is_symmetric`、
@@ -140,6 +178,110 @@
 - [演示数据 `seed_demo`](#演示数据seed_demo-management-command)
 - [必须写的测试](#必须写的测试) — 每条钉住什么
 - [验收](#验收2026-07-28-修正)
+
+---
+
+## 零、当前优先级（2026-07-29 定）
+
+> 这一节压过本文档除[一、终极目标](#一终极目标)之外的一切。
+> 和它冲突的决策已经在原地改掉或删掉了，**改动都留了修订说明，没有一条是悄悄改的**。
+
+### 需求原文（不要转述，转述会丢东西）
+
+> 在特定时间有多少 events 开展，每个 event 分别来自哪个 ministry，每个 event 创办了多久时长，
+> 每个 event 有多少工种，每个工种 volunteers 有多少人，volunteers 一共做了多少工时，
+> 分别在各个工种做了多少工时。在某 event 里，开设这个 event 的 ministry 下面的 employee
+> 有谁参与了这个 event，分别负责什么。
+>
+> 我还需要 accounts，每个新建的 account 都会 create 一个 contact。在每个 ministry 下面有
+> admin 权限的人可以发布 event（征集 volunteers，event 会说明需要多少 volunteers），
+> 每个普通 account 可以看到发布的 event，选择注册参加 event（如果是 minor，可能涉及
+> guardian consent 之类的）。每个 ministry 的权限的人都可以看到有多少人报名 event。
+> 在 event 活动期间，也要有每个 volunteer 是否来过的记录。event 结束后，跟 event 同个
+> ministry 的权限的人可以统计出有多少 volunteers 来，每个人做了多久。
+>
+> Account 除了每个 ministry 下面有 admin 权限的人，还有更高一级的权限可以指定谁可以成为
+> 每个 ministry 下面有 admin 权限的人。
+
+### 拆成 12 条可验收的需求
+
+**报表侧（活动办完之后要答得出的问题）**
+
+| # | 需求 |
+|---|---|
+| R1 | 某个时间段里有多少场 event |
+| R2 | 每场 event 属于哪个 ministry |
+| R3 | 每场 event 持续多久 |
+| R4 | 每场 event 开了多少个工种 |
+| R5 | 每个工种有多少 volunteer |
+| R6 | 一场 event 的总工时 |
+| R7 | 按工种分的工时 |
+| R8 | 某场 event 里，**开设它的那个 ministry 下面的 employee** 谁参与了、分别负责什么 |
+
+**流程侧（活动办起来的过程）**
+
+| # | 需求 |
+|---|---|
+| P1 | 有 account 体系；**每建一个 account 就建一个 `Contact`** |
+| P2 | **某个 ministry 下有 admin 权限的人**可以发布 event，发布时说明**每个工种要几个 volunteer** |
+| P3 | 普通 account 能看到已发布的 event，能报名；**未成年人涉及 guardian consent** |
+| P4 | 该 ministry 有权限的人能看到报名人数；活动期间有**是否来过**的记录；结束后能统计**来了几个人、每人做了多久** |
+| P5 | **更高一级的权限**可以指定谁成为某个 ministry 的 admin |
+
+### 逐条对账：现在的表答不答得出来
+
+`core` / `contact` / `org` 三个 app 已建成（B0–B5），`events` / `accounts` 的业务部分还没写。
+
+| # | 靠什么回答 | 状态 |
+|---|---|---|
+| R1 | `Event.start_time` + `Index(start_time)` | ✅ 设计已就位，B6 建表 |
+| R2 | `Event.ministry` | ⚠️ **原设计可空 → 改非空**，见下面模型表 |
+| R3 | `end_time - start_time`，派生不存 | ✅ |
+| **R4** | **`EventRole` 一行一个工种** | ❌ **原设计没有这张表**，见 [D19](#d19--活动的工种编制-eventrole2026-07-29) |
+| R5 | `Count(Participation)` group by `event_role` | ⚠️ 随 R4 |
+| R6 | `Sum(Participation.hours)` | ✅ |
+| R7 | `Sum(hours)` group by `event_role` | ⚠️ 随 R4 |
+| **R8** | `Participation` × `Assignment.active(on=活动日)` × `Position(kind=employee, ministry=活动的 ministry)` | ✅ **三张表 join 就答得出，这正是 B5 那套结构存在的理由** |
+| P1 | `User.contact` 已有；缺注册流程 | ⚠️ 字段不用改，缺 `accounts/services.py` |
+| **P2** | **`MinistryRole`** + `Event.status` 的发布档 + `EventRole.needed_count` | ❌ **最大的结构缺口**，见 [D20](#d20--范围化权限-ministryrole不走-django-group2026-07-29) |
+| **P3** | 自助页面 + `Participation` 的同意字段 | ❌ 页面从零；同意记录见下面模型表 |
+| P4 | `Participation` 的 `status` + 签到签退 + `hours` | ⚠️ 形状要补，见模型表 |
+| **P5** | `MinistryRole` + 一个全局 Group | ❌ 随 P2 |
+
+**一句话总结差距：报表侧结构缺一张表（`EventRole`），流程侧缺一张表（`MinistryRole`）、
+一层权限服务、和一整套面向志愿者的自建页面。**
+
+### 排除了什么（以及它们去哪了）
+
+按上面那条判定规则（"是不是这 12 条的前置条件"）被移出当前阶段的：
+
+| 原本排在 Phase B / C 的 | 处置 | 为什么 |
+|---|---|---|
+| `VolunteerProfile`（原 B7） | → [推迟清单](#五明确推迟的事) | 12 条需求一条都没提到技能和可服务时段 |
+| `BackgroundCheck`（原 B7） | → [推迟清单](#五明确推迟的事) | 同上。**但拆表的决定不撤销**（[D18](#d18--admin-的边界以及业务逻辑的落点2026-07-28)），建的时候仍然是独立模型 |
+| `Skill` | 继续推迟 | 本来就在推迟清单 |
+| Phase C 资金追踪（`Contribution`） | → 整体后移，改叫 Phase D | 钱和这 12 条完全无关 |
+| Phase D 的权限方案 | → **提前**，进当前阶段 | 志愿者一旦能登录，它就从"上线前置"变成"这个功能自己的前置"，见 [D21](#d21--对外账号志愿者自助页面提前权限成为它的前置条件2026-07-29) |
+
+### 已实现但暂时用不上的：留着，不删
+
+`Relationship` 的双向显示 / 无序对唯一约束 / 对称归一化（B2、B3）、
+`Contact` 的分级查重与 `merge_contacts()`（B4.3、B4.4）——
+**这几块对上面 12 条需求的贡献接近零。**
+
+**但一行都不删**，三个理由：
+
+1. 它们是**正确的**、有测试的、且不挡任何人的路 —— 删掉是纯粹的净损失；
+2. `merge_contacts()` 会遍历 `Contact._meta.related_objects`，**新加的 `Participation` /
+   `MinistryRole` 自动被它覆盖**，还有一条测试盯着"有没有漏表"。开放注册一上线，
+   跨渠道重复只会更多，它反而变得更有用；
+3. `EmergencyContact`（B4.2）和 `is_minor` 三态（B4.5）**直接落在 P3 上** ——
+   同一批工作里这两块本来就是命中的。
+
+> **值得记下来的判断**：偏离的判据不是"做了组织架构"——
+> R8 只有 `Ministry` + `Position` + `Assignment` 才答得出来，B5 是必要投资。
+> 偏离的是**为一条查询都不会碰的数据做了一整套完整性工程**。
+> 下次的自查问题：**「这张表 / 这条约束，会出现在哪条需求的查询里？」答不上来就先别做。**
 
 ---
 
@@ -203,8 +345,18 @@
 
 ### D2 · 前端推迟到后端与数据模型完善之后
 
+> ⚠️ **2026-07-29 部分作废。** 原文的重启条件是"**需要做志愿者自助登录、
+> 或需要给外部用户看的页面时**" —— [零](#零当前优先级2026-07-29-定)的 P3 恰好就是这句话，
+> **条件已经满足，不是"要不要提前"的问题**。
+>
+> **仍然成立的那一半**：不上 React / Vue，不做前后端分离。自助页面就是
+> **Django 模板 + 视图**，需要局部刷新的地方用 HTMX，和[二、技术选型](#二技术选型)一致。
+> **作废的那一半**："等模型完善了再写界面"—— 志愿者不可能用 Django Admin（[D1](#d1--django--postgresql--admin-起步) 自己写了
+> "不能给外部用户用"），所以这几个页面是 P3 的**唯一**实现方式，不能等。
+> 详见 [D21](#d21--对外账号志愿者自助页面提前权限成为它的前置条件2026-07-29)。
+
 <details>
-<summary>展开决策记录</summary>
+<summary>展开原始决策记录</summary>
 
 > 一开始就上 React/Vue 会让工作量翻倍，而且模型还在变的时候写界面等于白写。
 > **何时重新考虑**：需要做志愿者自助登录、或需要给外部用户看的页面时。
@@ -1217,6 +1369,209 @@
 
 </details>
 
+### D19 · 活动的工种编制 `EventRole`（2026-07-29）
+
+**结论：新建 `EventRole(event, role, needed_count)`，`Participation` 改为指向它，
+不再直接指向 `Event` 和 `ParticipationRole`。**
+
+```python
+EventRole(                              # 这场活动开了哪些工种、各要几人
+    event         → Event,              # CASCADE
+    role          → ParticipationRole,  # PROTECT，字典表
+    needed_count  = PositiveIntegerField(null=True, blank=True),
+    notes,
+)
+Participation(                          # 谁报了哪场活动的哪个工种
+    event_role    → EventRole,          # CASCADE —— 没有 event 字段了
+    contact       → Contact,            # PROTECT
+    status, hours, 签到签退, 同意记录…
+)
+```
+
+#### 为什么不能靠 `Participation` 反推工种（这一条是本决策的全部理由）
+
+原设计里没有这张表，R4「每场 event 有多少工种」只能写成
+`COUNT(DISTINCT participation.role)`。**这等于说：一个工种如果没人报名，它就不存在。**
+
+一场开了 5 个工种、只招到 3 个工种的人的活动，系统会报告「这场活动有 3 个工种」，
+**而且不报错**。同理 R5 会漏掉所有零报名的工种 —— 而"哪个工种没人报"恰恰是
+P2（征集志愿者）最想看的那个数。
+
+> **这和 [D11 第二次修订](#第二次修订为什么-reports_to-不能指向-assignment)判死刑的是同一个病，
+> 一字不改**：*「张三走了、李四还没到位，这个编制客观存在，但系统里没有任何一行代表它。」*
+> 那里的解法是把编制（`Position`）从任职（`Assignment`）里拆出来。这里是同一个动作：
+> **把「活动开了什么工种」从「谁报了名」里拆出来。**
+
+**`EventRole` 之于 `Participation`，就是 `Position` 之于 `Assignment`。**
+这个类比是严格的，不是修辞：
+
+| 编制侧 | 活动侧 | 共同点 |
+|---|---|---|
+| `Position` 与人无关，空着也存在 | `EventRole` 与报名无关，没人报也存在 | **缺人是一等状态，不是"碰巧查不到"** |
+| `Position.objects.vacant()` | `EventRole.objects.understaffed()` | 同一套查询形状，`with_headcounts()` 直接照搬 |
+| `Assignment(contact, position)` | `Participation(contact, event_role)` | 唯一约束都是 `(格子, 人)` |
+| ~~`Position.headcount`~~ 已推迟 | **`EventRole.needed_count` 必须有** | 见下 |
+
+**`needed_count` 就是被推迟过的 `Position.headcount`，但这次不能推迟** ——
+P2 的原话是"event 会说明需要多少 volunteers"，它是需求本身，不是优化。
+（同一个字段在两张表上的优先级不同，因为需求不同；这不矛盾。）
+
+#### 为什么 `Participation` 不保留 `event` 字段
+
+保留的话 `participation.event` 和 `participation.event_role.event` 可以指向两场不同的活动，
+**而这是跨表条件，`CheckConstraint` 表达不了**（同 [`Assignment.employment_type`](#d11--编制-position-与任职-assignment-分开汇报线挂在编制上) 那条）。
+按 D11 那句"不是两处都能记，是只有一处能记"，删掉。查询走 `event_role__event`。
+
+**唯一约束因此从 `(event, contact, role)` 简化成 `(event_role, contact)`** ——
+`event_role` 已经蕴含了 event 和 role 两个维度，而且**不再需要 `nulls_distinct=False`**
+（两列都非空）。同 `Assignment` 那条"约束越加越长往往是模型没拆干净"，这次又验证了一遍。
+
+#### 代价（三条，如实说）
+
+1. **录入多一步** —— 发活动时必须先开工种，才能登记人。这正是 P2 要求的顺序
+   （发布时说明每个工种要几人），所以在当前需求下它不是摩擦，是流程。
+2. **"没有具体分工"的场景要一行 `code=general` 的工种承载** ——
+   `Participation.role` 原本可空，现在不可空了。可接受：多一行字典表数据，
+   换掉一个 `nulls_distinct=False`。
+3. **从人那头查"参加过哪些活动"多一跳 join**（`participations__event_role__event`）。
+   数据量级下无所谓，`select_related("event_role__event", "event_role__role")` 一次带回。
+
+#### 这不是被否决过的 `Shift`
+
+`Shift` 的维度是**时间**（上午场 / 下午场），已按"多班次拆成多个 `Event`"否决，
+[那条决定不变](#五明确推迟的事)。`EventRole` 的维度是**工种**，两者正交。
+行业里 Salesforce V4S 的 Job → Shift → Hours 三层，我们取的是 Job（工种）这一层、
+跳过 Shift（班次）这一层 —— **不是少做了一层，是选了需求指向的那一层。**
+
+### D20 · 范围化权限 `MinistryRole`，不走 Django Group（2026-07-29）
+
+**结论：新建 `MinistryRole(contact, ministry, role, 起止, granted_by)`，
+"某人在某 ministry 有 admin 权限"由它表达。全局的那一级仍然走 Django Group。**
+
+```python
+MinistryRole(
+    contact     → Contact,      # PROTECT
+    ministry    → Ministry,     # CASCADE —— ministry 没了，它下面的授权也没有意义
+    role        = admin | coordinator,      # TextChoices：代码要按它分支（D5）
+    start_date, end_date,                   # 复用 core 的 .active()
+    granted_by  → User (可空, SET_NULL),     # P5：谁授的权
+)
+history = HistoricalRecords()               # 授权变更必须留痕
+```
+
+#### 为什么 Django Group 顶不上（这是硬事实，不是偏好）
+
+Django 的权限是 **`app_label.codename`**，**全局生效，没有对象级作用域**。
+授出 `events.add_event` 就是"能给**任何** ministry 发活动"。
+而 P2 / P4 要求的是"食物银行的 admin **只**能给食物银行发活动、**只**能看食物银行的报名"。
+
+> Phase D 原来写的是"用 Django Group 划分角色（管理员 / 项目协调员 / 只读）"。
+> **那句话在当前需求下是不成立的** —— 它描述的是"能做什么"，而需求问的是
+> "能对**哪个 ministry** 做"。已在原地改掉。
+
+**这也是 [D18](#-权限的形状会倒推模型敏感字段必须独立成模型) 那条「权限的形状会倒推模型」的第二个实例。**
+第一个实例是背景审查（没有字段级权限 → 独立成 model），这一个是范围化权限
+（没有对象级权限 → 独立成表）。**同一条规律：Django 权限系统表达不了的粒度，
+必须用一张表把它表达出来。**
+
+#### 为什么不复用 `Position(is_leader=True)`
+
+诱惑很大 —— "ministry 的 leader 不就是它的 admin 吗"。**不行，理由是 [D12](#d12--登录账号user挂在-contact-上与任职状态解耦) 已经写过的那一条：
+在组织里担任什么职务，和在系统里能操作什么，是两个问题。**
+`accounts/models.py` 的 docstring 里就写着 *"employment and access are different questions"*。
+
+混起来的三个具体后果：
+
+1. **授权得先造编制** —— 想让财务的人临时帮食物银行看报名，得在食物银行给他建一个 `Position`
+   + 一行 `Assignment`，**污染组织架构图**；
+2. **撤权得动组织架构** —— 收回权限 = 改 `is_leader` 或结束任职，而那个人可能还在岗；
+3. **有权限但没编制的人无处安放** —— 外部审计、临时代管、系统管理员本人。
+
+**代价（如实说）**：多一张表、两处维护，且会出现"他是 leader 但没有系统权限"的困惑。
+**缓解：`PositionAdmin` 上显示这个人有没有对应的 `MinistryRole`，
+但绝不让任何一边自动推导另一边** —— 自动推导就等于把两个概念又焊回去了。
+
+#### P5：更高一级的权限，用 Group 就对了
+
+"谁能指定某个 ministry 的 admin"是**真·全局**的权限，没有 scope ——
+这正是 Django Group 适用的形状。一个 `foundation_admin` Group，授
+`org.add_ministryrole` / `change` / `delete`。
+
+> **判据（值得记住）：这个权限句子里有没有"某个 ministry 的"这个定语？
+> 有 → 进 `MinistryRole`；没有 → Django Group。**
+
+#### 判断只写一处
+
+```python
+# org/permissions.py —— 全项目唯一一处回答"他能不能对这个 ministry 做这件事"
+def ministry_ids_administered_by(user, on=None) -> set[int]: ...
+def can_publish_event(user, ministry) -> bool: ...
+def can_view_registrations(user, event) -> bool: ...
+def can_grant_ministry_admin(user) -> bool: ...        # P5，查 Group
+```
+
+按 [D18 的落点规矩](#逻辑落点的硬规矩成本为零现在就要守)，**一个字都不许写进 `admin.py` 或视图**。
+视图里只能出现 `if not can_publish_event(...): raise PermissionDenied`。
+配一条 grep 守卫测试（第七次「测试当 lint」）：`views.py` / `admin.py` 里
+不许出现 `MinistryRole.objects` 的直接查询 —— 要问就调 `permissions.py`。
+
+理由和 `build_org_tree()` 完全一样：**权限判断散在各处 = 迟早有一处漏了 `.active()`
+或漏了 `is_active`，而漏权限检查的症状是静默越权，不报错。**
+
+### D21 · 对外账号：志愿者自助页面提前，权限成为它的前置条件（2026-07-29）
+
+**结论：P1 / P3 要求志愿者本人能登录并报名。Django Admin 给不了他们
+（[D1](#d1--django--postgresql--admin-起步) 自己写的"不能给外部用户用"），
+所以自助页面进当前阶段；而权限和数据隔离必须和它同期落地，不能再排在最后。**
+
+#### 三件事的先后不能颠倒
+
+原来的排期是「Phase B 建模 → Phase C 做页面 → Phase D 做权限和部署」，
+其中 Phase D 那两条被明确写成**交付前置条件**，理由是
+*"账号能删库 × 删了找不回，两个风险是乘法关系"*。
+
+**开放注册把这个乘法搬到了前面**：库里有未成年人的姓名、生日、地址、
+紧急联系电话，一旦有非 staff 账号能登录，"谁能看到什么"就不再是上线时的收尾工作，
+而是**这个功能自己的一部分**。
+
+**因此当前阶段的硬性顺序：`MinistryRole` + `permissions.py` 必须先于任何自助页面。**
+先写页面后加权限，等于中间有一段时间任何登录用户都能看到所有人的资料。
+
+#### 三条最低要求（一条都不能省）
+
+1. **志愿者账号 `is_staff=False`，`/admin/` 对他们返回 403** —— 不是"没链接给他们"，
+   是真的进不去。配一条测试。
+2. **自助页面只能看到"自己的"和"已发布的"** —— 自己的 `Contact`、自己的报名、
+   `status=open` 的活动。别人的联系方式、别人的报名记录、草稿活动一律看不到。
+   **这是查询层的事，不是模板层的事** —— 模板里不显示 ≠ 数据没发出去。
+3. **注册流程建 `Contact`，但 `User.contact` 字段保持可空** ——
+   superuser 是技术账号、不对应真人，[D12](#d12--登录账号user挂在-contact-上与任职状态解耦) 论证过，**不要因为 P1 就把它改成非空**。
+   P1 是**流程约束**，落在 `accounts/services.py::register_account()` 里，不是字段约束。
+
+   > 判定方法同 [D9](#d9--业务规则落到数据库约束)：这条规则该不该进数据库？
+   > 不该 —— 因为它有一类合法的例外（技术账号），而约束不认例外。
+   > **这是 D9 的反例，值得记一笔：D9 说"能用约束表达的就用约束"，
+   > 前提是那条规则真的没有例外。**
+
+#### 页面清单（最小集，不做多余的）
+
+| 页面 | 给谁 | 说明 |
+|---|---|---|
+| 注册 / 登录 / 登出 | 所有人 | 注册走 `register_account()`，同时建 `Contact` |
+| 已发布活动列表 + 详情 | 登录用户 | 详情里按工种显示"需要 N 人 / 已报 M 人" |
+| 报名 / 取消报名 | 登录用户 | 未成年人走同意流程 |
+| 我的报名 | 登录用户 | 自己的记录，含工时 |
+| 发布活动 + 开工种 | ministry admin | 走 `can_publish_event()` |
+| 某活动的报名名单 + 签到 | ministry admin | 走 `can_view_registrations()` |
+| 某活动的统计 | ministry admin | R4–R8 那几个数 |
+
+**其余一律留在 Admin**（字典表维护、`Contact` / `Position` / `Assignment` 的 CRUD）——
+那些是内部人员用的，Admin 够用，[D18](#admin-允许承载什么) 的表没有变。
+
+> **好消息：这条路已经跑通过两次。** `/contacts/merge/` 和 `/relationships/add/`
+> 就是为了"在风险最低的事情上先把视图 + 模板 + URL + 权限跑一遍"而提前做的
+> （见 [D18 的形状触发](#什么时候-admin-整体不够用了)）。当时写的理由现在兑现了。
+
 ---
 
 ## 四、当前进度
@@ -1288,31 +1643,40 @@
 
 > 这里记"要建什么、为什么"，不记具体步骤。每个 Phase 开工前，把当时的实施细节写进
 > 一份新的 `0N-roadmap.md`（一份只服务一个 Phase，旧的留作记录）。
-> **Phase B 的实施手册是 `02-roadmap.md`，已经写好。**
+> **Phase B 的实施手册是 `02-roadmap.md`；B0–B5 已完成，B6–B12 按 2026-07-29 的优先级重写过。**
 
-#### Phase B · 人与活动 MVP —— 做完就能完整演示一遍
+#### Phase B · 活动闭环 —— 当前优先级
 
-`Position` + `Assignment` 是这一阶段的核心 —— 前者是编制（组织架构的骨架，与人无关），
-后者是任职（谁在什么时候占着它）。员工 / 志愿者 / 理事的编制共用一张 `Position`（`kind` 区分），
-**不建 `EmployeeProfile`**（见 D11）。**新模型落在哪个 app 见 D17。**
+> ⚠️ **2026-07-29 重新划定范围。** 本阶段原名"人与活动 MVP"，B0–B5（`core` / `contact` /
+> `org`）**已完成**；B6 起的部分按[零、当前优先级](#零当前优先级2026-07-29-定)整个重画了。
+>
+> **完成的定义现在是：[零](#零当前优先级2026-07-29-定)里 R1–R8 + P1–P5 全部跑通。**
+> 原来的验收标准（"能演示一遍基金会的日常"）太模糊，答不出"做完了没有"。
+>
+> **移出本阶段的**：`VolunteerProfile` / `BackgroundCheck`（原 B7）→ 推迟清单。
+> 理由和排除标准见[零的「排除了什么」](#排除了什么以及它们去哪了)。
 
-> ⚠️ **2026-07-28 二次修订**：`Position` 是这一轮新拆出来的表。
-> 如果你读过本文档更早的版本，那里的 `Assignment` 身上还挂着
-> `kind` / `title` / `ministry` / `is_leader` / `reports_to` —— **全部搬走了**，
-> 理由（尤其是"空缺编制表达不了"）见 D11 的「第二次修订」。
+已完成部分（B0–B5）：`Ministry` / `EmploymentType` / `Position` / `Assignment` 四张表 +
+`core` 的时间口径与 `.active()` + `contact` 三处收口。
+**`Position` + `Assignment` 这套结构是 R8 的唯一支撑**，别因为"当前优先级是活动"就以为它跑题了。
+
+剩下要建的表如下。**新模型落在哪个 app 见 D17。**
 
 | 模型 | app | 字段要点 |
 |------|-----|---------|
-| `Ministry` | `org` | **不是纯字典表** —— 基金会的服务单元（食物银行、报税志愿、ESL…）。字段：`code`（唯一·不可改，见 D5）/ `name` / `description` / `is_active` / 成立日期（可空）。行政职能（财务、行政）也是这张表里的行，不另建 `Department` —— 一个组织没必要拆两套单元。**不挂 simple-history**（已确认：改动频率极低，不值得一张历史表）。<br>**这张表不能推迟**，理由见下面「Ministry 视图」 |
-| `Position` | `org` | **编制表 —— 组织架构的骨架，与人无关**（见 D11 第二次修订）。`code`（唯一·不可改，见 D5）/ `name`（职务名，给人看）/ `kind`（`TextChoices`：employee·volunteer·board）/ `ministry`(FK，**可空** —— 理事席位没有)/ `reports_to`(自引用 FK → `Position`，可空)/ `is_leader`（布尔，**给代码查**）/ `is_active` / `description`。**挂 simple-history**（组织架构变更必须留痕）。**一个 `Position` 可以有多个在职 `Assignment`** —— 它是编制类型不是座位，所以这张表是几十行量级 |
-| `Assignment` | `org` | **任职表 —— 谁在什么时候占了哪个编制。** `contact`(FK) / `position`(FK → `Position`) / `employment_type`(FK，**可空**) / **`status`（`TextChoices`：active·on_leave·suspended，默认 active）** / `start_date` / `end_date`。**没有 `kind` / `title` / `ministry` / `is_leader` / `reports_to`** —— 全部搬去 `Position` 了。**不加 `is_active`**，但**有 `status`** —— 状态和任期是正交的两个维度，见下面「`Assignment.status`」。**挂 simple-history** |
-| `EmploymentType` | `org` | 字典表：`code`（唯一·不可改）/ `name` / `is_active`。**取值基金会还没定**（全职 / 兼职 / 合同 / 实习只是我们猜的），所以做成字典表而不是 `TextChoices` —— 以后加一行就行，不改代码不写迁移。符合 D5 的判定规则：目前没有任何代码按它分支 |
+| ✅ `Ministry` | `org` | **不是纯字典表** —— 基金会的服务单元（食物银行、报税志愿、ESL…）。字段：`code`（唯一·不可改，见 D5）/ `name` / `description` / `is_active` / 成立日期（可空）。行政职能（财务、行政）也是这张表里的行，不另建 `Department` —— 一个组织没必要拆两套单元。**不挂 simple-history**（已确认：改动频率极低，不值得一张历史表）。<br>**这张表不能推迟**，理由见下面「Ministry 视图」 |
+| ✅ `Position` | `org` | **编制表 —— 组织架构的骨架，与人无关**（见 D11 第二次修订）。`code`（唯一·不可改，见 D5）/ `name`（职务名，给人看）/ `kind`（`TextChoices`：employee·volunteer·board）/ `ministry`(FK，**可空** —— 理事席位没有)/ `reports_to`(自引用 FK → `Position`，可空)/ `is_leader`（布尔，**给代码查**）/ `is_active` / `description`。**挂 simple-history**（组织架构变更必须留痕）。**一个 `Position` 可以有多个在职 `Assignment`** —— 它是编制类型不是座位，所以这张表是几十行量级 |
+| ✅ `Assignment` | `org` | **任职表 —— 谁在什么时候占了哪个编制。** `contact`(FK) / `position`(FK → `Position`) / `employment_type`(FK，**可空**) / **`status`（`TextChoices`：active·on_leave·suspended，默认 active）** / `start_date` / `end_date`。**没有 `kind` / `title` / `ministry` / `is_leader` / `reports_to`** —— 全部搬去 `Position` 了。**不加 `is_active`**，但**有 `status`** —— 状态和任期是正交的两个维度，见下面「`Assignment.status`」。**挂 simple-history** |
+| ✅ `EmploymentType` | `org` | 字典表：`code`（唯一·不可改）/ `name` / `is_active`。**取值基金会还没定**（全职 / 兼职 / 合同 / 实习只是我们猜的），所以做成字典表而不是 `TextChoices` —— 以后加一行就行，不改代码不写迁移。符合 D5 的判定规则：目前没有任何代码按它分支 |
 | `EventType` | `events` | 字典表：`code`（唯一·不可改）/ `name` / `is_active` |
-| `Event` | `events` | `name` / `event_type`(FK) / **`ministry`(FK，可空)** / `start_time` / `end_time` / `location` / `owner`(FK → `Contact`) / `status`（`TextChoices`：planned·confirmed·completed·cancelled）/ `capacity`（可空，**参考值，不强制**，见下） |
-| `ParticipationRole` | `events` | 字典表：`code`（唯一·不可改）/ `name` / `is_active`。装的是**一次活动之内**的角色（签到台、搬运、翻译），**≠ `Position.name`**，见下面那条一句话定义 |
-| `Participation` | `events` | `event`(FK) / `contact`(FK) / `role`(FK，可空) / `status`（`TextChoices`：registered·attended·absent·cancelled）/ **`hours`**（`DecimalField(max_digits=6, decimal_places=2)`，可空）。**同一个人在同一次活动里可以有多行**，靠 `role` 区分 —— 见下面「一人一活动多角色」。这张中间表是整个系统的价值所在 —— 工时统计、志愿者活跃度、活动回顾全靠它 |
-| `VolunteerProfile` | `volunteer` | OneToOne → `Contact`。`availability_notes`。**`skills` 这个 M2M 跟着 `Skill` 一起推迟**。**不含** 职务名 / 上级（那些是编制，归 `Position`）/ 任职起始日（归 `Assignment`）；**不含**紧急联系人（在 `EmergencyContact` 专用表上，见 D15 第三次修订 / `02-roadmap.md` B4.2）；**不含背景审查** —— 见下一行 |
-| `BackgroundCheck` | `volunteer` | **2026-07-28 从 `VolunteerProfile` 拆出来的独立模型**（见 D18）。OneToOne → `Contact`，`CASCADE`。`status`（`TextChoices`）/ `completed_on`（可空）/ `notes`。**挂 simple-history**。<br>**为什么必须是独立模型**：Django 权限粒度是 `app_label.model`，**没有字段级权限**。留在 `VolunteerProfile` 里的话，Phase D 只有两个选择 —— 整张表不给看（连技能和可服务时段一起锁掉，过度）或者全给看（泄露本系统里仅次于薪酬的敏感数据）。拆开之后一个 Group 不授 `volunteer.view_backgroundcheck` 即可。**同 D17 让 `payroll` 独立成 app 的逻辑**，区别只是薪酬是一整块业务领域（用 app），背景审查是一张附属表（用 model）。<br>**现在拆成本≈0**（`volunteer` app 一行代码还没写），以后拆要建表 + 搬字段 + 改引用，而那时表里是真人的审查结果 |
+| `Event` | `events` | `name` / `event_type`(FK) / **`ministry`(FK，⚠️ 非空)** / `start_time` / `end_time` / `location` / `owner`(FK → `Contact`) / `status`（`TextChoices`：**draft·open**·confirmed·completed·cancelled）/ `description`。**挂 simple-history**。<br>⚠️ **三处改动（2026-07-29）**：① **`ministry` 从可空改成非空** —— R2 和 R8 都以它为轴，P2 的权限判断也以它为轴，为空就是一场无主、无人有权管的活动；② **`status` 加 `draft` 和 `open`** —— P3 要"看到**发布的** event"，可见性必须有一个明确的闸门，不能靠推断（`open` = 已发布且开放报名）；③ **删掉 `capacity`** —— 被 `EventRole.needed_count` 取代，见 D19 |
+| **`EventRole`** | `events` | **⭐ 新表（D19）—— 这场活动开了哪些工种、各要几人。** `event`(FK，`CASCADE`) / `role`(FK → `ParticipationRole`，`PROTECT`) / **`needed_count`**（`PositiveIntegerField`，可空 = 不限人数）/ `notes`。<br>**它之于 `Participation` 就是 `Position` 之于 `Assignment`** —— 没人报名的工种照样存在，这正是 R4 / R5 需要它的原因。`needed_count` 就是被推迟过的 `Position.headcount`，但**这次不能推迟**，它是 P2 的原话。<br>约束 `UniqueConstraint(event, role)`、`needed_count IS NULL OR needed_count > 0` |
+| `ParticipationRole` | `events` | 字典表：`code`（唯一·不可改）/ `name` / `is_active`。装的是**一次活动之内**的工种（签到台、搬运、翻译），**≠ `Position.name`**，见下面那条一句话定义。<br>**必须 seed 一行 `code=general`**（"通用志愿者"）—— `Participation.event_role` 非空之后，"没有具体分工"要有地方落 |
+| `Participation` | `events` | **报名 / 出勤 / 工时，三件事一行。** `event_role`(FK → `EventRole`，`CASCADE`) / `contact`(FK，`PROTECT`) / `status`（`TextChoices`：registered·attended·absent·cancelled）/ `registered_at` / **`checked_in_at`** / **`checked_out_at`**（都可空 datetime）/ **`hours`**（`Decimal(6,2)`，可空）/ 三个同意字段（见下一行）。<br>⚠️ **改动（2026-07-29）**：**`event` 和 `role` 两个字段没了**，合并成 `event_role` —— 理由（跨表一致性 `CheckConstraint` 管不了）见 D19。唯一约束因此简化成 `(event_role, contact)`，**不再需要 `nulls_distinct=False`**。<br>签到签退是 P4 的"是否来过"。**`hours` 仍然是唯一权威值**，签退时由 `services.check_out()` 写入它 —— 见下面「签到签退与 `hours`」 |
+| ↳ `Participation` 的同意字段 | `events` | **P3 的未成年人同意，不建 `Guardianship`。** `consent_given_by`（文本，姓名）/ `consent_relationship`(FK → `RelationshipType`，可空) / `consent_at`（可空 datetime）/ `consent_method`（`TextChoices`：口头·纸质·线上）。<br>**为什么不是 `Guardianship` 表**：需求要的是"**这一次活动**家长同意了"，那是一条**事件记录**；`Guardianship` 是"谁是小明的法定监护人"，那是一段**长期关系**。两者形状不同，先做需求要的那个。`Guardianship` 继续留在推迟清单。<br>规则：**未成年人的 `Participation` 没有 `consent_at` 就不能进 `confirmed`/`attended`** —— 跨表判断（年龄在 `Contact` 上），`CheckConstraint` 表达不了，落在 `services.py` 的报名函数里，按 D14 记为提示层，不假装它是强制的 |
+| **`MinistryRole`** | `org` | **⭐ 新表（D20）—— "某人在某 ministry 有 admin 权限"。** `contact`(FK，`PROTECT`) / `ministry`(FK，`CASCADE`) / `role`（`TextChoices`：admin·coordinator）/ `start_date` / `end_date` / `granted_by`(FK → `User`，可空，`SET_NULL`)。**挂 simple-history**（授权变更必须留痕）。<br>复用 `core` 的 `DateRangeMixin.active()` —— 授权也有起止，同 `Assignment`。<br>**放 `org` 不放 `accounts`**：它的主语是 ministry（D17：一个 app 一个业务领域），且 `accounts` 只该装"能不能登录"这一层 |
+| `accounts` 的注册流程 | `accounts` | **不是新表** —— `User.contact` 已经有了，**保持可空**（superuser 没有对应真人，D12）。P1 落在 `accounts/services.py::register_account()`：一次事务里建 `User` + 建 `Contact` + 挂上。<br>**流程约束，不是字段约束** —— 理由见 D21 第 3 条（它是 D9 的一个反例，因为这条规则有合法例外） |
+| ~~`VolunteerProfile`~~ / ~~`BackgroundCheck`~~ | — | **移出本阶段（2026-07-29）**，见推迟清单。12 条需求一条都没碰技能、可服务时段、背景审查。<br>⚠️ **但 D18 那条"背景审查必须独立成模型"的决定不撤销** —— 将来建的时候仍然是两个模型，不是一个 |
 | `EmergencyContact` | `contact` | **专用表**（2026-07-28 定案，取代早先的 `Contact.emergency_contact` 自引用 FK + `is_reference_only`）。`person`(FK → `Contact`，`CASCADE`，`related_name="emergency_contacts"`) / `name`（文本，必填）/ `phone`（`PhoneNumberField`，必填）/ `relationship_type`(FK → `RelationshipType`，**非空**，`limit_choices_to={"usable_as_emergency_contact": True}`)。<br>**姓名电话存文本，不指向 `Contact`** —— 紧急联系人可能是邻居、室友，不是与基金会交互的主体，不该占一行 `Contact`（D15 第四条判据）。<br>**表天然支持一人多个紧急联系人**，不加人为的唯一限制（基金会目前只需要一个）。见 D15、下面「紧急联系人的录入」 |
 | 合并重复 `Contact`（`contact/services.py::merge_contacts()`） | `contact` | **不是新表，是一个功能**：把重复的两条 Contact 合并成一条。**落在 `services.py` 不落在 model 上** —— 跨表写入按 D18 落点表归 `services.py`。范围和实现见下面「合并重复记录」。<br>⚠️ **它进 Phase B 的原始理由已经失效** —— 当时是"reference-only 记录会持续制造重复"，而 reference-only 已经不存在了。**保留在本阶段的新理由**：跨渠道录入（活动签到、志愿者自荐、员工代录）仍然会产生重复，而同名同号硬拦截只挡得住同一表单里的手滑。**如果要削减 Phase B 范围，这是第一个候选** |
 | `RelationshipType` 加三个字段 | `contact` | `code`（唯一·不可改，见 D5 / D6）+ `is_symmetric`（布尔，见 D15）+ `usable_as_emergency_contact`（布尔，默认 `False`，见 D6 补强 —— 它是 `EmergencyContact` 的前置）。加到**有数据**的表要三步迁移，见下面「`code` 的三步迁移」；**本机这张表实测 0 行，所以 `02-roadmap.md` B2 一步到位** |
@@ -1321,29 +1685,49 @@
 
 ##### 本阶段内部的硬性顺序
 
-三件事必须排在最前面，因为后面所有东西都压在它们上面：
+> ⚠️ **2026-07-29 重排。** 原来的三条（`RelationshipType.code` / `Contact.__str__` 消歧 /
+> 关系双向显示）**已经在 B2–B4 做完了**，留在这里作记录。当前的顺序是下面这条。
 
-1. **`RelationshipType.code`** —— 赶在写任何按类型查询的代码之前。晚了字符串匹配就扩散出去了，之后再收要改一片。
-2. **`Contact.__str__` 消歧** —— 赶在建那几个 autocomplete 之前。理由见下面「`Contact` 重名」。
-3. **关系的双向显示** —— 必须**先于**对称关系的 a/b 归一化落地。理由见下面「对称关系」。
+**`MinistryRole` + `org/permissions.py` 必须先于任何自助页面。**
 
-其余的表（`Ministry` → **`Position`** → `Assignment` → `Event` 一族 → `VolunteerProfile`）
-按依赖顺序建即可。**`Position` 必须先于 `Assignment`** —— `Assignment` 只有 `position` 一个
-业务外键，没有它就是一张空壳。
-具体步骤见 **`02-roadmap.md`**（B0–B9 十步，含代码骨架、坑、每步的测试与验证命令）。
+理由见 [D21](#d21--对外账号志愿者自助页面提前权限成为它的前置条件2026-07-29)：先写页面后加权限，
+等于中间有一段时间任何登录用户都能看到所有人的资料 —— 而库里有未成年人的
+姓名、生日、地址和紧急联系电话。**这不是排期偏好，是同一个功能的两个必需零件。**
 
-##### 一人一活动多角色（2026-07-28 决定）
+其余按依赖排：
 
-原计划是 `UniqueConstraint(event, contact)` —— 一个人在一次活动里只能有一行。
-**这个假设不成立**：同一场活动里，一个人可能上午搬运、下午在签到台，
-两段做的事不同、时长不同、以后要算的奖励也可能不同。合并成一行会把
-"区分它们所需的维度"永久丢掉（只剩一个总工时和一个角色，事后拆不回来）。
+```
+EventType / ParticipationRole（字典表）
+  └→ Event → EventRole → Participation        （R1–R7 的数据基础）
+MinistryRole → permissions.py                  （P2 / P4 / P5 的判断）
+  └→ accounts 注册流程                          （P1）
+      └→ 自助页面（列表 / 报名 / 签到 / 统计）    （P3 / P4）
+```
 
-**决定：唯一约束放宽成 `UniqueConstraint(event, contact, role)`，带 `nulls_distinct=False`。**
+**`EventRole` 必须先于 `Participation`** —— 后者只有 `event_role` 一个业务外键，
+没有它就是一张空壳。**同 `Position` 必须先于 `Assignment`，是同一个形状**（见 D19）。
 
-- 同一人 + 同一活动 + **同一角色** 的第二行 → 拒绝（防手滑重复录入的目的没丢）
-- 同一人 + 同一活动 + **不同角色** → 放行（正是要支持的场景）
-- `role` 可空，`nulls_distinct=False` 保证两行都不填角色时仍然算重复 —— 理由同 A7
+具体步骤见 **`02-roadmap.md`**（B6–B12）。
+
+##### 一人一活动多角色（2026-07-29 改挂 `EventRole`）
+
+同一场活动里，一个人可能上午搬运、下午在签到台，两段做的事不同、时长不同。
+合并成一行会把"区分它们所需的维度"永久丢掉（只剩一个总工时和一个角色，事后拆不回来）。
+所以**一人一活动可以有多行 `Participation`，靠工种区分** —— 这条决定不变。
+
+**变的是唯一约束的形状：`UniqueConstraint(event_role, contact)`。**
+
+> **2026-07-28 原方案是 `UniqueConstraint(event, contact, role)` + `nulls_distinct=False`。**
+> D19 把 `event` 和 `role` 合并成 `event_role` 之后，这条约束**自动**变成两列且两列都非空 ——
+> `nulls_distinct=False` 不再需要，因为没有 null 了。
+>
+> **又一次印证了 `Assignment` 那条**："约束越加越长往往是模型没拆干净的症状"。
+> 这是本项目第二次靠拆表把约束缩短，第一次是拆 `Position`
+> （`(contact, ministry, kind, title, start_date)` → `(contact, position, start_date)`）。
+
+- 同一人 + 同一活动 + **同一工种** 的第二行 → 拒绝（防手滑重复录入）
+- 同一人 + 同一活动 + **不同工种** → 放行（两行 `Participation` 指向两行 `EventRole`）
+- **"没有具体分工"落在 `code=general` 那行 `EventRole` 上**，不再靠 `role=NULL` 表达
 
 **不建 `Shift` 表**（考虑过，否决）。行业里的标准结构确实是三层
 （Salesforce V4S 的 Job → Shift → Hours、VolunteerHub 的 Event → Opportunity → Signup），
@@ -1395,18 +1779,24 @@ A7 的原话是"等表里有了真数据再加，就得先清洗存量数据"。
 
 | 表 | 约束 | 不加会怎样 |
 |---|---|---|
-| `Participation` | `UniqueConstraint(event, contact, role)`，**带 `nulls_distinct=False`** | 同一人同一活动同一角色能登记 10 次，**工时统计直接错** —— 而工时是这张表的全部价值。`role` 可空且留空常见，`nulls_distinct=False` 不能省 |
-| `Participation.hours` | `DecimalField`（**不是 `Float`**）+ `hours IS NULL OR hours >= 0` | Phase C 对钱写了"永远不用 `FloatField`"，工时同理（浮点累加会飘）；还能存出负工时。**`null=True`**：报名了还没发生 ≠ 干了 0 小时 |
+| `Participation` | `UniqueConstraint(event_role, contact)` | 同一人同一活动同一工种能登记 10 次，**工时统计直接错** —— 而工时是这张表的全部价值。<br>⚠️ **2026-07-29：不再需要 `nulls_distinct=False`** —— 两列都非空了（D19 把 `event` + `role` 合并成 `event_role`） |
+| `Participation.hours` | `DecimalField`（**不是 `Float`**）+ `hours IS NULL OR hours >= 0` | 对钱写过"永远不用 `FloatField`"，工时同理（浮点累加会飘）；还能存出负工时。**`null=True`**：报名了还没发生 ≠ 干了 0 小时 |
 | `Participation` | `status = 'attended' OR hours IS NULL OR hours = 0` | 否则能存出 `status=缺席` + `hours=5`。这和 `Relationship` 的 `is_active=True` + `end_date=2020` 是**同一种病**，见下面「单一真相」 |
+| `Participation` | `checked_out_at IS NULL OR checked_in_at IS NULL OR checked_out_at >= checked_in_at` | 签退早于签到。同 `end_date >= start_date`，新表重钉一遍 |
+| `Participation` | `checked_in_at IS NULL OR status <> 'absent'` | 签到了又标记缺席。**单一真相** —— "是否来过"（P4）只能有一个答案 |
+| **`EventRole`** | `UniqueConstraint(event, role)` | 同一场活动把同一个工种开两遍，`needed_count` 从此有两个答案，R4 直接翻倍 |
+| **`EventRole`** | `needed_count IS NULL OR needed_count > 0` | 需要 0 人的工种没有意义。同原 `Event.capacity` 那条 |
+| **`MinistryRole`** | `UniqueConstraint(contact, ministry, role, start_date)`，**带 `nulls_distinct=False`** | 同一个人在同一个 ministry 的同一角色授两遍。`start_date` 可空且留空常见 —— 同 `Assignment` 的教训 |
+| **`MinistryRole`** | `end_date >= start_date` | 同 `Assignment` / `Relationship`。新表漏掉就不一致了 |
 | `Assignment` | `end_date >= start_date` | `Relationship` 在 A7 加了这条，`Assignment` 是新表却漏掉就不一致了 |
 | `Assignment` | `UniqueConstraint(contact, position, start_date)`，**带 `nulls_distinct=False`** | 见下面「`Assignment` 的唯一约束」 |
 | `Position` | `reports_to` 不能指向自己那一行（`CheckConstraint`） | 见下面「汇报线的环」 |
 | `Position` | `UniqueConstraint(Lower("code"))`（**不是**字段上的 `unique=True`） | 同下面字典表那条。`Position` 不是字典表，但 `code` 的作用一样：代码只认 `code`，不认 `name` |
 | `Event` | `end_time >= start_time` | 同上 |
-| `Event` | `capacity IS NULL OR capacity > 0` | 容量 0 或负数没有意义 |
+| ~~`Event`~~ | ~~`capacity IS NULL OR capacity > 0`~~ | **2026-07-29 删除** —— `capacity` 字段本身没了，被 `EventRole.needed_count` 取代（D19） |
 | `EmergencyContact` | `UniqueConstraint(person, Lower(Trim(name)), phone)` | 同一个人身上把同一个紧急联系人录两遍。归一化写进表达式，不靠 `save()` —— D9 归一化通则 |
 | `EmergencyContact` | `relationship_type` **FK 非空** | **记了联系人就必须写清关系。** 拆成专用表之后这条从 `CheckConstraint` 降级成一个 `null=False`，是拆表白捡的简化 |
-| `Ministry` / `Position` / `EmploymentType` / `EventType` / `ParticipationRole` | **`UniqueConstraint(Lower("code"))`**（不是 `unique=True`） | 见 D5：不唯一的 `code` 不是锚点，`get(code=...)` 会抛 `MultipleObjectsReturned`。**必须是 `Lower()` 版**，否则 `bulk_create` 能塞进 `Food_Pantry` + `food_pantry` 两行 —— D9 归一化通则 |
+| `Ministry` / `Position` / `EmploymentType` / `EventType` / `ParticipationRole` | **`UniqueConstraint(Lower("code"))`**（不是 `unique=True`）<br>⚠️ `EventRole` / `Participation` / `MinistryRole` **没有 `code`** —— 它们不是字典表，是业务记录，锚点是外键组合 | 见 D5：不唯一的 `code` 不是锚点，`get(code=...)` 会抛 `MultipleObjectsReturned`。**必须是 `Lower()` 版**，否则 `bulk_create` 能塞进 `Food_Pantry` + `food_pantry` 两行 —— D9 归一化通则 |
 | `RelationshipType` | `UniqueConstraint(Lower(Trim("name_a_to_b")))` | 缺口 2。`Trim` 不能省，理由同上 |
 | `Relationship` | **`UniqueConstraint(Least(a,b), Greatest(a,b), type, Coalesce(start_date, date.min))`** —— **替换** A7 那条，不是并存 | 缺口 3 升级成强制层。镜像重复 `bulk_create` 塞得进来，而 `save()` 的归一化拦不住它 |
 
@@ -1542,10 +1932,15 @@ Phase B 一次加十几个外键，其中一个选错是灾难级的：
 | `Position.ministry` | `PROTECT` | 删 ministry 不该静默带走编制 |
 | **`Position.reports_to`** | **`PROTECT`** | ⚠️ `CASCADE` 是灾难（删一个编制带走整棵下属子树）；但这里**也不用 `SET_NULL`** —— 那会把一整棵子树**静默地**变成组织架构图的根，看不出出过事。`PROTECT` 强迫你先把下属改挂到别处，是唯一会让你注意到的选项 |
 | `Event.event_type` / `Event.ministry` / `Event.owner` | `PROTECT` | `CASCADE` 会让删一个人带走整场活动 |
-| `Participation.event` | `CASCADE` | 活动删了，参与记录没有意义 |
-| `Participation.contact` | `PROTECT` | `CASCADE` 会让删一个联系人抹掉全部工时历史 —— Phase C 统计的基础 |
-| `Participation.role` | `PROTECT` | 字典表 |
-| `VolunteerProfile.contact` | `CASCADE` | 1:1 附属档案 |
+| **`EventRole.event`** | **`CASCADE`** | 活动删了，它开的工种没有意义（同 `Participation.event` 原来那条） |
+| **`EventRole.role`** | **`PROTECT`** | 字典表，同 `Contact.preferred_language` |
+| **`Participation.event_role`** | **`CASCADE`** | 工种删了，报它的记录没有意义。<br>⚠️ **这条链要看清楚：删 `Event` → 级联删 `EventRole` → 级联删 `Participation`，工时历史一起没。** 和原来"删 `Event` 直接带走 `Participation`"的风险等价，不是新增的 —— 但两级级联更不显眼，所以**删活动这个动作在 admin 里不给普通 Group**（见 D21） |
+| `Participation.contact` | `PROTECT` | `CASCADE` 会让删一个联系人抹掉全部工时历史 —— R6 / R7 统计的基础 |
+| `Participation.consent_relationship` | `PROTECT` | 字典表 |
+| **`MinistryRole.contact`** | **`PROTECT`** | 删一个人不该静默撤掉他的授权记录 —— 授权是要留痕的事（同 `granted_by`） |
+| **`MinistryRole.ministry`** | **`CASCADE`** | ⚠️ **这里和 `Position.ministry` 的 `PROTECT` 不同，是刻意的**：编制是组织资产，ministry 撤销时要人工处置；而"食物银行的 admin 权限"在食物银行不存在之后**没有任何意义**，留着反而是一条悬空的授权。<br>**同一个 `on_delete` 在不同的表上是不同的选择** —— 同 `reports_to` 那条注 |
+| **`MinistryRole.granted_by`** | **`SET_NULL`** | 授权人的账号被删，**授权本身必须还在**（`CASCADE` 会连锁撤销一批人的权限，是灾难级）。留 `NULL` 读作"授权人已注销"，比整行消失强 |
+| ~~`VolunteerProfile.contact`~~ | — | 随 `VolunteerProfile` 一起移出本阶段 |
 
 > **`reports_to` 从 `SET_NULL` 改成 `PROTECT`（2026-07-28）。** 修订前它挂在 `Assignment` 上，
 > 而任职记录是**会被删的**（录错了就删重录），`PROTECT` 会天天挡路，所以选了 `SET_NULL`。
@@ -1563,9 +1958,12 @@ Phase B 一次加十几个外键，其中一个选错是灾难级的：
 |---|---|
 | `Assignment`：`Index(fields=["position", "status", "end_date"])` | ministry 页面的第二段："这些编制上现在谁在当值"。`.serving()` 三个条件（编制 + 状态 + 日期）一次覆盖；`.active()` 走最左两列里的 `position` 也够用 |
 | `Position`：`Index(fields=["ministry", "kind", "is_active"])` | ministry 页面的第一段："这个 ministry 有哪些编制、分别是什么 kind"。**这张表只有几十行，索引基本是象征性的** —— 建它是为了 Phase C 组织架构图和以后规模变大，现在别指望它带来可测的差别 |
-| `Event`：`Index(fields=["start_time"])` | 近期活动、admin 的 `date_hierarchy`、Phase C 的"本月活动" |
-| `Event`：`Index(fields=["ministry", "start_time"])` | "食物银行这个月办了几场" —— ministry 视图的第二个数字 |
-| `Participation` | `(event, contact, role)` 的唯一约束自带索引，覆盖活动侧；联系人侧走 FK 自动索引 |
+| `Event`：`Index(fields=["start_time"])` | **R1**「某段时间有多少场活动」、admin 的 `date_hierarchy` |
+| `Event`：`Index(fields=["ministry", "start_time"])` | **R2**「食物银行这个月办了几场」 |
+| **`Event`：`Index(fields=["status", "start_time"])`** | **P3** 志愿者看到的活动列表 = `status=open` + 未开始，按时间排。**这是全系统被匿名/普通用户打得最多的一个查询**，唯一一个真的需要索引的 |
+| **`EventRole`** | `(event, role)` 的唯一约束自带索引，覆盖 R4 / R5 / R7 的 group by |
+| `Participation` | `(event_role, contact)` 的唯一约束自带索引，覆盖活动侧；联系人侧（"我的报名"）走 `contact` 的 FK 自动索引 |
+| **`MinistryRole`：`Index(fields=["contact", "end_date"])`** | **每一次权限判断都走这个查询**（"这个人管哪几个 ministry"），是全系统调用频率最高的一条 —— 每个受保护的视图每次请求至少一次 |
 | 各字典表的 `code` | `UniqueConstraint(Lower("code"))` 自带的表达式唯一索引（**不是** `unique=True`，见 D9 归一化通则） |
 
 小提醒：Django 给 FK 自动建单列索引，所以 `Position` 上 `(ministry, kind, is_active)` 建好之后
@@ -1958,36 +2356,117 @@ contact.assignments.all()          # 从人那头看服务哪几个 ministry（D
 > ⚠️ 若要加，阈值必须在 `get_queryset()` 里按请求求值 —— 写成模块级常量就是 D16 那个
 > "进程启动时冻结时钟"的 bug 换了个地方。
 
-##### `Participation.role` 和 `Position` 不是一回事
+##### `EventRole` 和 `Position` 不是一回事
 
-一句话定义，防止以后混淆：
+一句话定义，防止以后混淆（2026-07-29 更新主语，`Participation.role` 已并入 `EventRole`）：
 
-- **`Participation.role`** = "在**这一次活动**里做什么"（临时、一次性：签到台、搬运、翻译）
+- **`EventRole`** = "**这一次活动**里开的一个工种"（临时、一次性：签到台、搬运、翻译）
 - **`Position`** = "组织里的一个编制"（长期：项目协调员），`Assignment` 是谁在什么时候占着它
 
-不写下来，以后一定有人想把活动角色塞进 `Position`。
-**判据还是 D10 那句口诀**：换个人来做还成立的 → 编制；只属于这一场活动的 → `Participation.role`。
+不写下来，以后一定有人想把活动工种塞进 `Position`。
+**判据还是 D10 那句口诀**：换个人来做还成立的 → 编制；只属于这一场活动的 → `EventRole`。
 
-##### `Event.capacity` 是参考值，不是硬上限
+> ⚠️ **它们形状相同不代表是同一个东西。** D19 论证的是
+> `EventRole : Participation = Position : Assignment` 这个**结构类比**（都是"格子 + 占格子的人"），
+> **不是**说可以合并成一张表。合并的话，一场活动的临时工种会污染组织架构图，
+> 而 `Position.reports_to` 对活动工种毫无意义。
+> **抄结构，不抄行 —— 同 D4 那句"抄结构不抄代码"的道理，只是换了一层。**
 
-超过容量只**提醒**，**不做约束、不阻止**（2026-07-28 确认）。
-口径同 `Contact` 重名：现实里超员登记是常事，系统的职责是提醒而不是拦路。
-数据库层只保证 `capacity IS NULL OR capacity > 0`。
+##### R8 长什么样：跨三张表的那条查询
 
-**判断和提醒要分开**（2026-07-28 收口）：
+这是 12 条需求里最难的一条，也是 `org` 那套表存在的理由。写在这里免得实施时重新推：
 
 ```python
-# events/models.py
-@property
-def is_over_capacity(self) -> bool:      # capacity 为空时恒 False
+# "某场活动里，开设它的 ministry 下面的 employee 谁参与了、分别负责什么"
+on = event.start_time.date()          # ⚠️ 活动当天，不是今天 —— 见下
+
+staff = Participation.objects.filter(
+    event_role__event=event,
+    contact__assignments__in=Assignment.objects.active(on=on).filter(
+        position__kind=Position.Kind.EMPLOYEE,
+        position__ministry=event.ministry,
+        position__is_active=True,
+    ),
+).select_related("contact", "event_role__role").distinct()
 ```
 
-admin 只负责把它渲染成一条 `messages.warning`。
-**`count > capacity` 这个比较绝不能写在 `ModelAdmin` 里** —— 它是业务判断，
-写在 admin 里的话 Phase C 的活动页要重算一遍。
-> 这条顺带把口径说清楚：**`messages.warning` 本身留在 admin 是对的**，
-> 那是界面。前端上来这些提示全部重写，而它们背后调的 property / QuerySet 方法一个都不用改 ——
-> **这正是"界面归界面、数据归数据"的样子，不是没收干净。**
+三个坑，一个都不能踩：
+
+1. **时间口径是活动当天，不是今天。** 用 `.active()` 的默认值（今天）去查一场去年的活动，
+   会漏掉所有之后离职的人，**而且不报错**。`.active(on=...)` 那个参数就是为这种查询准备的
+   （见 [D16 第 2 层](#d16--时间与日期的唯一口径2026-07-28) 和 `.active()` 那一节）。
+2. **用 `.active()` 不是 `.serving()`。** 问的是"他当时是不是这个 ministry 的员工"，
+   不是"他今天能不能当值" —— 请假中的人参加了活动，照样要算进去。
+   见「[两个谓词](#两个谓词active-和-serving)」。
+3. **`.distinct()` 不能省。** 一个人在同一个 ministry 可能有两个 employee 编制（一人多岗，
+   D11 的核心场景），join 之后他的 `Participation` 会出现两遍，**人数直接多一个**。
+
+##### `EventRole.needed_count` 是参考值，不是硬上限（2026-07-29 从 `Event.capacity` 改写）
+
+> **原来这一节讲的是 `Event.capacity`（整场活动一个数）。字段已被 `EventRole.needed_count`
+> （每个工种一个数）取代**，理由见 [D19](#d19--活动的工种编制-eventrole2026-07-29)：
+> P2 要求"说明需要多少 volunteers"，而"搬运要 5 个、翻译要 2 个"整场一个数说不出来。
+> **下面这条"只提醒不阻止"的口径原样保留**，只是主语换了。
+
+超过需求人数只**提醒**，**不做约束、不阻止**。
+口径同 `Contact` 重名：现实里超员报名是常事，系统的职责是提醒而不是拦路。
+数据库层只保证 `needed_count IS NULL OR needed_count > 0`。
+
+**判断和提醒要分开**，而且这次判断本身就是 R5 要的那个数：
+
+```python
+# events/models.py —— 一次查询算完一场活动所有工种的缺口
+class EventRoleQuerySet(models.QuerySet):
+    def with_signup_counts(self):
+        """加两列真实 SQL 列：registered_count / attended_count。
+
+        annotation 不是 property —— 一次查询算完任意多行，能排序能筛选能直接
+        序列化进 API。同 PositionQuerySet.with_headcounts()，一模一样的理由。
+        """
+
+    def understaffed(self):
+        """报名人数 < needed_count 的工种。needed_count 为空的一律不算缺人。
+
+        这是 P2「征集 volunteers」最想看的那个列表，也是 D19 要拆出这张表的
+        全部意义 —— 零报名的工种必须出现在这里，而它在 Participation 里没有行。
+        """
+```
+
+**`count > needed_count` 这个比较绝不能写在 `ModelAdmin` 里** —— 它是业务判断，
+写在 admin 里的话自助页面的活动详情要重算一遍。
+> **`messages.warning` 本身留在 admin 是对的**，那是界面。
+> 自助页面上同一个数字渲染成"还差 2 人"，背后调的是同一个 annotation，一个字不用改 ——
+> **这正是"界面归界面、数据归数据"的样子。**
+
+##### 签到签退与 `hours`：谁是权威（2026-07-29 新增）
+
+P4 要两样东西：**"是否来过"**（`checked_in_at`）和**"做了多久"**（`hours`）。
+它们看上去可以互相推导，而这正是危险的地方。
+
+> **规矩一句话：`hours` 是唯一权威值。签到签退是采集手段，不是第二个口径。**
+
+```python
+# events/services.py —— 唯一一处写 hours 的地方
+def check_out(participation, *, at=None):
+    """签退：记 checked_out_at，并把时长写进 hours。
+
+    ⚠️ hours 是权威值，这里是「写入」不是「派生」—— 之后有人手工改了 hours，
+       以它为准，不要再从时间戳重算覆盖回去。
+    """
+```
+
+**为什么 `hours` 不做成派生 property**（想过，否决）：
+
+- 有人**忘记签退** —— 那样他的工时会永远是 0 或 null，而他确实干了 4 小时；
+- 有人是**纸质签到表事后补录** —— 根本没有时间戳，只有一个"他干了 3 小时"；
+- 有人**中途离开又回来** —— 一对时间戳表达不了，但工时是清楚的。
+
+**为什么不让两者各算各的**：那就是 `Relationship.is_active` + `end_date` 那个病 ——
+两个字段回答同一个问题，可以互相矛盾，而且没有任何机制会告诉你。
+所以**签退时写入一次，之后 `hours` 说了算**，时间戳只回答"他来了没有、几点来的"。
+
+> 顺带：`status=attended` 的判定也走签到 —— `check_in()` 把 status 改成 `attended`。
+> 约束 `checked_in_at IS NULL OR status <> 'absent'` 挡住"签到了又标缺席"这种自相矛盾。
 
 ##### 背景审查：独立成表，存完成日不存到期日
 
@@ -2229,8 +2708,14 @@ UniqueConstraint(
 
 ##### 演示数据：`seed_demo` management command
 
-本阶段要反复验证一人多岗、跨 kind 汇报线、一人一活动多角色这些场景，手点 admin 太慢。
-`python manage.py seed_demo` 一条命令造出一组互相关联的假数据，B / C / D 都受益。
+本阶段要反复验证一人多岗、跨 kind 汇报线、一人一活动多工种、以及**三种权限角色**
+这些场景，手点 admin 太慢。`python manage.py seed_demo` 一条命令造出一组互相关联的假数据。
+
+> **2026-07-29 补：它现在还要造出账号和授权。** 验收要扮演三个角色
+> （总管 / ministry admin / 普通志愿者），每次手建三个账号 + 授权太慢，而且容易建错
+> 一个"其实什么权限都没有"的账号，然后误以为越权检查生效了。
+> **必造：一个 `foundation_admin`、两个不同 ministry 的 admin（用来试越权）、
+> 两个普通志愿者（其中一个未成年）。**
 
 **三条安全要求，一条都不能省**：
 
@@ -2274,17 +2759,37 @@ Phase A 的 A10 用了"每条钉住什么"的清单，本阶段沿用。下面�
 | 删一个有下属的 `Position` 被 `PROTECT` 挡住 | 子树不会被静默重挂成根 |
 | 删一个有任职记录的 `Position` 被 `PROTECT` 挡住 | 任职历史不会跟着编制消失 |
 | `Position.code` 唯一，且 change 页只读 | 代码锚点真的稳定（D5） |
-| `Participation` 同活动同人**同角色**第二行失败；**不同角色**能存两行 | 一人一活动多角色 |
+| `Participation` 同活动同人**同工种**第二行失败；**不同工种**能存两行 | 一人一活动多工种 |
 | `Participation.hours` 负数失败 | |
 | `status != attended` 时 `hours` 非零失败 | 单一真相，不许自相矛盾 |
 | `Event` `end_time < start_time` 失败 | |
+| **⭐ 一场活动开了 5 个工种、只有 3 个有人报，R4 仍然答"5"** | **D19 的全部意义就在这一条。** 其余活动侧的测试都可以没有，这条不能没有 —— 它就是「空缺编制」那条测试换了张表 |
+| **`EventRole.understaffed()` 里出现零报名的工种** | 同上的正面版：缺人的工种必须**看得见**，看不见就等于没建这张表 |
+| **`EventRole` 同一场活动同一工种开两遍失败** | 否则 `needed_count` 有两个答案，R4 直接翻倍 |
+| **`with_signup_counts()` 算 N 个工种只用 1 次查询**（`assertNumQueries`） | annotation 不是 property —— 同 `with_headcounts()` 那条，防止有人改回每行一查 |
+| **R6 / R7：总工时 = 各工种工时之和**，且 `hours=None` 的行不被当成 0 | `null=True` 的意义：报名了还没发生 ≠ 干了 0 小时 |
+| **⭐ R8：活动当天在职的 employee 查得到；活动之后才入职、以及活动之前已离职的**不**出现** | **`.active(on=活动当天)` 那个参数的全部意义。** 用默认值（今天）写这条查询会静默漏人 |
+| **R8：一人在同 ministry 占两个 employee 编制时，只算一个人** | `.distinct()` 不能省 —— 漏了就是人数悄悄多一个 |
+| **R8：请假中（`status=on_leave`）的 employee 参加了活动，**仍然**算进去** | 用 `.active()` 不是 `.serving()` —— 问的是"当时是不是员工"，不是"今天能不能当值" |
+| **签退写入 `hours` 之后手工改 `hours`，再签退一次不会覆盖掉手工值** | `hours` 是权威值，时间戳只是采集手段 |
+| **`checked_out_at < checked_in_at` 失败；签到了又标 `absent` 失败** | 「是否来过」只能有一个答案 |
+| **未成年人没有 `consent_at` 时报名不能进 `confirmed`** | P3。跨表判断（年龄在 `Contact` 上），按 D14 记为提示层 —— **测试要断言它是 `ValidationError` 而不是数据库拒绝**，不许假装它是强制的 |
+| **`MinistryRole`：A ministry 的 admin 对 B ministry 的 `can_publish_event()` 返回 `False`** | **D20 的全部意义。** 这条不过，等于范围化权限没做成 |
+| **`MinistryRole` 过期（`end_date` 在昨天）后权限立即失效** | 授权复用 `.active()`，不是一个永久布尔 |
+| **没有任何 `MinistryRole` 的普通账号，`can_view_registrations()` 一律 `False`** | 默认拒绝，不是默认允许 |
+| **`can_grant_ministry_admin()` 只认全局 Group，不认 `MinistryRole`** | P5 是真·全局权限 —— ministry admin **不能自己给自己发展下线** |
+| **全项目除 `org/permissions.py` 外没有 `MinistryRole.objects` 的直接查询**（grep 守卫） | 权限判断只写一处。**第七次「测试当 lint」** —— 漏一处权限检查的症状是静默越权，不报错 |
+| **志愿者账号（`is_staff=False`）访问 `/admin/` 得到 403** | D21 第 1 条。不是"没给链接"，是真的进不去 |
+| **志愿者账号访问别人的报名记录得到 404/403；活动列表里看不到 `status=draft` 的活动** | D21 第 2 条 —— **查询层的隔离，不是模板层的**。测试直接打 URL，不看页面 |
+| **`register_account()` 建 account 的同时建了 `Contact` 并挂上；中途失败时两个都不留下** | P1 + 事务性。半个账号比没有账号更难查 |
+| **`User.contact` 仍然允许为空**（建一个 superuser 不报错） | D21 第 3 条 —— P1 是流程约束不是字段约束，别顺手改成 `null=False` |
 | 两个都叫"王强"的联系人 `__str__` 不同 | 所有 autocomplete 的正确性 |
 | **同名同号**第二条被表单**拒绝保存**；勾上 `force_save` 后能存 | 硬拦截真的拦得住，且没有否认重名合法 |
 | **仅同名**（号码不同）**不**拦截，只出警告 | 拦截没有绑错信号 —— 绑到同名上就会被点习惯 |
 | `RelationshipForm(subject=小明)` 选「小明 是 ___ 的儿子」，存出 `(王强, 小明, parent of)` | 方向感知表单：两侧都能录，且方向不会反。**测试直接构造表单，不经过任何界面** —— 这本身就证明了它前端上来能复用 |
 | `/relationships/add/` 未登录被挡；`?subject=` 缺失或非法时返回 404 | 第二个自己写的视图 |
 | 录「王强 parent of 小明」后，小明侧读到 "child of" | 反向显示的缺口 |
-| `BackgroundCheck` 是独立模型，`volunteer.view_backgroundcheck` 权限可单独收回 | D18：没有字段级权限，所以敏感数据必须独立成模型 |
+| ~~`BackgroundCheck` 是独立模型~~ | **随 `BackgroundCheck` 一起移出本阶段**（2026-07-29）。建表时这条测试要一起写 |
 | `is_symmetric=True` 的类型显示时两侧都用 `name_a_to_b` | 对称回落 |
 | `is_symmetric=True` 存入时归一化成 id 小的在前 | 缺口 3 的规范化那一半（显示，不是正确性） |
 | **`bulk_create` 直插 `(王强,李梅,spouse)` + `(李梅,王强,spouse)` 被数据库拒绝** | 缺口 3 的**强制**那一半 —— 绕过 `save()` 才是这条约束存在的理由，测试必须绕过它 |
@@ -2299,7 +2804,7 @@ Phase A 的 A10 用了"每条钉住什么"的清单，本阶段沿用。下面�
 | `is_minor` 边界：18 岁生日当天 | |
 | `.minors()` / `.adults()` / `.birth_date_unknown()` 三者**互不重叠、并集是全表** | 阈值只算一处；`birth_date` 为空的人不会两边都不落 |
 | `.minors(on=某日)` 能改变结果 | 时钟可注入，同 `.active()` / `.vacant()` |
-| `Event.is_over_capacity` 在 `capacity` 为空时是 `False`，不是报错 | 判断在 model，admin 只负责显示成黄条 |
+| `EventRole.understaffed()` 在 `needed_count` 为空时**不**把该行算成缺人 | 不限人数 ≠ 缺人。判断在 QuerySet，admin 只负责显示成黄条 |
 | `EmergencyContact` 不填 `relationship_type` 被拒 | 「关系必填」= FK 非空，拆表白捡的简化 |
 | 同一个人身上录两条同名同号的紧急联系人被拒 | `UniqueConstraint(person, Lower(Trim(name)), phone)` |
 | 一个人可以有**两个不同**的紧急联系人 | 表天然支持多个，没有人为的基数限制 |
@@ -2310,48 +2815,99 @@ Phase A 的 A10 用了"每条钉住什么"的清单，本阶段沿用。下面�
 | 合并：一对一冲突（两条都有 `User`）时**拒绝**并说明原因 | 不自作主张删一边 |
 | 合并：唯一约束冲突（同活动同角色都有 `Participation`）时**拒绝** | 同上 |
 
-##### 验收（2026-07-28 修正）
+##### 验收（2026-07-29 重写：改成按 12 条需求逐条验收）
 
-**你自己能在本机浏览器里完整跑通一遍**，数据全部来自 `seed_demo`：
+> **原验收清单（7 条"能演示一遍日常"）已被替换。** 它的问题是**答不出"做完了没有"** ——
+> "能演示一遍"没有边界。现在的标准是[零](#零当前优先级2026-07-29-定)那 12 条，
+> 一条一条勾。B0–B5 覆盖的部分（编制 / 任职 / 紧急联系人 / 合并）已经验收过，不重复。
 
-1. 建一个 ministry，在它下面建几个 `Position`（一个 leader 位、若干 employee / volunteer 位），
-   给其中一部分挂上在职的人，页面上分组正确，**且没人在任的那个编制显示在「空缺」组里**；
-   把 leader 位上的人换一个（旧的填 `end_date`、新建一行 `Assignment`），
-   **确认下属编制的汇报线一个字没改**；
-2. 录一个志愿者（`Contact` + `VolunteerProfile`），在 inline 里填一个紧急联系人
-   （姓名 + 电话 + 关系，三样都必填，不填关系存不下去）；
-   **确认 `Contact` 列表里没有多出任何一条只有姓名电话的记录**；
-   故意制造一条重复的 `Contact`，从 admin 的「疑似重复」筛选器跳到 `/contacts/merge/`
-   这个**自己写的页面**，二次确认后并掉，验证引用全部改指过去
-   （**这是本项目第一个非 admin 页面**，见 D18 的形状触发）；
-3. 同一个人建两个 `Assignment`、指向两个不同 `Position`、各有不同上级，
-   其中一条汇报线跨 kind（employee 编制 → board 编制）；
-4. 开一个活动，给**同一个人登记两个不同角色**、分别记工时，总工时对得上；
-5. 一个有生日的未成年人参加活动，能在活动页筛出未成年参与者并看到他的紧急联系电话。
-6. 从小明页面点「添加关系」→ 落到 `/relationships/add/?subject=<小明>` →
-   选「小明 是 ___ 的儿子」+ 王强 → 存出 `(王强, 小明, parent of)`，
-   两侧页面的只读 inline 都显示正确的方向标签。
-7. **分层验收（不用点浏览器，grep 一遍就行）**：所有 `admin.py` 里搜不到
-   `save_model` / `save_related` / `get_queryset` / `get_formset` 这四个钩子的重写，
-   `forms.py` / `services.py` / `models.py` 里搜不到 `django.contrib.admin`
-   （后者已有守卫测试）。**这两条一起，就是"把 `admin.py` 删掉还剩全部业务逻辑"的可执行版本**，
-   见 D18「代码落点与文件分层」。
+**扮演三个角色，在本机浏览器里各走一遍。数据来自 `seed_demo`，不进任何真实的人。**
 
-> **交付给基金会真用属于 Phase D，不是 Phase B。**
-> 部署、备份、权限都在 Phase D，基金会的人没法用你笔记本上的 `runserver`。
-> 所以 Phase B 的验收只到"我自己跑通"，用演示数据，**不进任何真实的人**。
->
-> 相应地，Phase D 里那两件事是**交付的前置条件，不是可选项**：
+**① 扮演基金会总管（全局 Group `foundation_admin`）**
+
+- [ ] **P5**：指定张三为「食物银行」的 admin —— 建一行 `MinistryRole`，
+      `granted_by` 自动记成当前登录的自己
+- [ ] 撤销时填 `end_date`，**不删行** —— 授权历史留着（同"结束只由日期表达"）
+
+**② 扮演食物银行的 admin（张三）**
+
+- [ ] **P2**：发布一场活动，ministry 只能选食物银行（选不了报税志愿）；
+      开三个工种，分别写"搬运 5 人 / 签到 2 人 / 翻译 1 人"；
+      从 `draft` 改成 `open` 之后志愿者才看得见
+- [ ] **越权检查**：把 URL 里的活动 id 换成报税志愿那场，**得到 403** ——
+      **这一条不过，D20 就是白做的**
+- [ ] **P4 上半**：看到每个工种"需要 N 人 / 已报 M 人"，翻译那个工种 0 人报名
+      **照样显示在列表里**（⭐ 这就是 D19 的验收点）
+- [ ] **P4 下半**：活动当天给到场的人签到，签退时工时自动填上；
+      给一个纸质补录的人**手工填工时**（他没有签到时间戳），照样算数
+- [ ] **R4–R7**：活动结束后看统计 —— 工种数是 **3**（不是 2，虽然翻译没人来）、
+      各工种人数、总工时、按工种分的工时
+- [ ] **R8**：同一页面上列出"本 ministry 的 employee 参与情况" ——
+      谁参加了、分别在哪个工种。**把其中一个人的任职 `end_date` 改到活动之前，
+      他应该从这个名单里消失**（时间口径是活动当天，不是今天）
+
+**③ 扮演普通志愿者（李四，`is_staff=False`）**
+
+- [ ] **P1**：从注册页新建账号 → 数据库里同时多了一个 `User` 和一个 `Contact`，已挂好
+- [ ] **访问 `/admin/` 得到 403** —— 不是跳登录页，是真的进不去
+- [ ] **P3**：活动列表里**只**看得到 `status=open` 的活动；点进去按工种报名
+- [ ] **P3 未成年人**：用一个有生日的未成年账号报名 → 被要求填家长同意
+      （姓名 / 关系 / 方式），不填**报不成**
+- [ ] **越权检查**：直接打别人报名记录的 URL，**得到 404 或 403**
+- [ ] **R1–R3**（在 admin 侧看）：按时间段筛活动，每场显示 ministry 和时长
+
+**④ 分层验收（不用点浏览器，grep 一遍就行）**
+
+- [ ] 所有 `admin.py` 里搜不到 `save_model` / `save_related` / `get_queryset` /
+      `get_formset` 这四个钩子的重写
+- [ ] `forms.py` / `services.py` / `models.py` / `views.py` 里搜不到 `django.contrib.admin`
+- [ ] **`views.py` / `admin.py` 里搜不到 `MinistryRole.objects`** —— 权限只问 `permissions.py`
+- [ ] **`views.py` 里搜不到任何日期计算或 `Sum` / `Count`** —— 视图是薄壳，
+      统计在 QuerySet 方法里（否则 R4–R8 会跟着模板一起被重写一遍）
+
+> **这四条一起，就是 D18 那句判据的可执行版本：把 `admin.py` 和 `templates/` 都删掉，
+> 剩下的必须是全部业务逻辑。**
+
+> **交付给基金会真用属于 Phase C，不是本阶段。**
+> 本阶段的验收只到"我自己扮三个角色跑通"，用演示数据。
+> Phase C 那两件事是**交付的前置条件，不是可选项**：
 > 1. **备份 + 真的演练一次恢复** —— 真实数据进来之前必须就位；
-> 2. **非 superuser 的 staff 账号** —— 否则等于把未成年人的姓名、生日、地址、
->    紧急联系人和背景审查状态连同删库能力一起交出去，而一次误点就没了。
+> 2. **权限复核** —— 权限本身已经在本阶段建好（D20 / D21），Phase C 要做的是拿真账号
+>    再验一遍越权，以及确认没人用 superuser 登录。
 >
-> 这两条叠加起来风险是乘法关系（能删 × 删了找不回），所以在 Phase D 里它们必须
-> 排在"让基金会开始录真数据"之前，而不是同期。
+> 这两条叠加起来风险是乘法关系（能删 × 删了找不回）。
 
-#### Phase C · 资金追踪
+#### Phase C · 上线与真实运营
 
-建在新的 `finance` app 里（见 D17）。
+> ⚠️ **2026-07-29 重排。** 原来的 Phase C 是「资金追踪」、Phase D 是「上线与权限」。
+> **两者对调了**，理由是[零](#零当前优先级2026-07-29-定)：12 条需求里没有一条碰钱，
+> 而它们全都需要基金会的人**真的用起来**才有意义（发活动、报名、签到都是真人的动作）。
+> **对着假数据做资金模块，是这次要纠正的那类偏离的翻版。**
+
+> **本阶段内部有硬性顺序**：备份**必须做完并验证过**，才能让基金会开始录真实数据。
+> 这不是排期偏好 —— 两个风险是乘法关系（账号能删库 × 删了找不回）。
+>
+> **权限不在这一阶段了** —— 它随 D21 提前进了 Phase B。这里只剩"检查它真的到位"。
+
+- 部署：Render 或 Fly.io + 托管 Postgres（保持 D3：一个 `pg_dump` 就能带走）
+- **备份（交付前置条件）**：定时 `pg_dump` 到对象存储，并且**真的演练一次恢复**。
+  没验证过的备份等于没有备份。
+  顺带一提：D3"数据一个 `pg_dump` 就能带走"目前**还只是纸上承诺**，没有任何脚本落地 ——
+  这一步才算真正兑现它。
+- **权限复核（交付前置条件）**：Phase B 已经建好 `MinistryRole` + `permissions.py`（D20）
+  和志愿者账号的隔离（D21）。这里要做的是**验证**，不是设计：
+  - 基金会的人**不用 superuser 登录**，且默认**不给 delete 权限**
+    （尤其是 `delete_event` —— 它两级级联到 `Participation`，见 `on_delete` 表）
+  - 志愿者账号 `is_staff=False`，`/admin/` 返回 403
+  - 拿一个 A ministry 的 admin 账号，**试着去看 B ministry 的报名名单**，确认被挡
+  - 系统里有**未成年人的姓名、生日、地址、紧急联系人**和**同意记录** —— 谁能看要过一遍
+- CSV 导出、简单报表
+- 安全：`SECURE_SSL_REDIRECT`、HSTS、`SESSION_COOKIE_SECURE`，
+  跑 `manage.py check --deploy` 到没有警告
+
+#### Phase D · 资金追踪
+
+建在新的 `finance` app 里（见 D17）。**整体后移**（2026-07-29），理由见上。
 
 - `Contribution`：FK Contact（捐款人） / `amount` + `currency` / `received_date` /
   `financial_type`（字典表，带 `code`：一般捐赠·指定用途·实物） / `payment_method`（字典表，带 `code`） /
@@ -2407,8 +2963,14 @@ Phase A 的 A10 用了"每条钉住什么"的清单，本阶段沿用。下面�
 
 记下来是为了不反复纠结。
 
+> **2026-07-29 新增三行（列在最前）** —— 它们是按[零的判定规则](#零当前优先级2026-07-29-定)
+> （"是不是那 12 条需求的前置条件"）从 Phase B 移出来的，不是新想出来的推迟项。
+
 | 事情 | 为什么现在不做 | 什么时候再看 |
 |------|--------------|------------|
+| **`VolunteerProfile`**（原 Phase B B7） | **12 条需求一条都没提到技能、可服务时段。** 表的形状早就想清楚了（OneToOne → `Contact` + `availability_notes`），建它是十分钟的事，但它不在任何一条需求的查询路径上 | 真的要按"谁星期六有空"排班时。⚠️ **注意它不是 `Participation` 的前置条件** —— 志愿者报名只需要 `Contact` 和一个 account，不需要志愿者档案 |
+| **`BackgroundCheck`**（原 Phase B B7） | 同上。⚠️ **但 [D18](#-权限的形状会倒推模型敏感字段必须独立成模型) 那条"必须独立成 model、不能是 `VolunteerProfile` 上的字段"的决定不撤销** —— 建的时候仍然是两个模型。**推迟的是建表，不是推翻拆表** | 基金会答复审查有效期、且真的开始做审查时。形状已定：OneToOne → `Contact`（不是挂 `VolunteerProfile`）/ `status` / `completed_on` / simple-history / `BACKGROUND_CHECK_VALID_DAYS` 放 settings |
+| **`Event.parent`（活动系列）/ 奖励规则** | 都要等基金会说清楚，且都是"加字段不改结构"。**关键是区分它们所需的维度已经全部存下来了**（哪场 `Event`、哪个 `EventRole`、多少 `hours`） | 见下面各自那一行 |
 | 一个 Contact 多个 email / 电话 / 地址 | 见 D13，单字段够用且可逆 | 出现"两个邮箱分别用"的真实需求时 |
 | 薪酬 / 工资数据 | 见 D11，敏感度最高且 MVP 无功能需要 | 要算人力成本或做预算报表时，连同权限方案一起设计 |
 | 一个编制多个上级（矩阵式实线/虚线汇报） | 见 D11，小基金会极少有；`Position.reports_to` 现在是单个外键 | 真的出现双线汇报时，把 `reports_to` 改成多对多 |
@@ -2418,7 +2980,7 @@ Phase A 的 A10 用了"每条钉住什么"的清单，本阶段沿用。下面�
 | Membership / 会员制 | 基金会未必有会员概念 | 需求出现时 |
 | REST API、前后端分离 | Admin + HTMX 能撑很久 | 要做志愿者自助登录的手机端时 |
 | 软删除 | 现有 `is_active` 已覆盖"停用"语义，不同时上两套 | 出现"误删要恢复"的真实事故时 |
-| **`Guardianship` 法定监护专用表** | 2026-07-28 整体移出 Phase B。基金会有没有同意书流程还没答复，而"活动前通知未成年人家长"这条需求已由 `is_minor` + `EmergencyContact` 闭环，它不再是任何功能的前置条件（见 D15） | 基金会答复"有同意书流程"时。形状：`minor` / `guardian` → Contact（都 `PROTECT`，不同 `related_name`）/ 监护类型 / 同意书签署日期 / 能否代签 / 起止日期；建的时候**必须**同期带上 `UniqueConstraint(minor, guardian, start_date, nulls_distinct=False)`、`end_date >= start_date`、"监护人不能是自己"、simple-history，以及**两侧的 admin inline**（否则会重犯 `Relationship` 的反向显示缺口）。放 `contact` app（D17） |
+| **`Guardianship` 法定监护专用表** | 2026-07-28 移出 Phase B，**2026-07-29 确认继续推迟**。P3 说的是"注册参加 event 时的 guardian consent" —— 那是**一次活动的一条同意记录**（已落在 `Participation` 的同意字段上），不是"谁是小明的法定监护人"这段**长期关系**。**需求要的是前者，先做前者。**<br>⚠️ 判据是 [D15](#d15--关系用什么载体承载四条判据--选择规则) 的老问题换了个场合：**同一个词（"监护"）指向两个不同形状的东西时，先看需求里的那个句子在问什么** —— "这次活动家长同意了吗"和"谁是他的监护人"是两个问题 | 出现"每次活动都要重填一遍家长信息、烦"的真实抱怨时 —— 那时 `Guardianship` 变成同意字段的**默认值来源**，而不是取代它。形状：`minor` / `guardian` → Contact（都 `PROTECT`，不同 `related_name`）/ 监护类型 / 同意书签署日期 / 能否代签 / 起止日期；建的时候**必须**同期带上 `UniqueConstraint(minor, guardian, start_date, nulls_distinct=False)`、`end_date >= start_date`、"监护人不能是自己"、simple-history，以及**两侧的 admin inline**（否则会重犯 `Relationship` 的反向显示缺口）。放 `contact` app（D17） |
 | **把 `EmergencyContact.name` / `.phone` 升级成 FK → `Contact`** | 现在存文本（D15 第三次修订，为了不让第三方进 `Contact`）。代价是重复存储、无反查、且当紧急联系人本来就是系统里的人时数据会分裂 —— **这些是主动接受的，不是遗漏**。⚠️ **这是文档里标注为「痛」的那个迁移方向**：要去重、判断同一人、建 `Contact`、连关系，且不可逆 | 重复存储真的造成过一次事故时（打了过期的号码）。**升级前必须先想清楚 D15 第四条判据怎么办** —— 那正是当初选文本的唯一理由，不能因为嫌重复就把它推翻。折中方案是加一个**可空**的 `contact` FK：能关联的关联，关联不上的留文本 |
 | 逐字段合并的交互界面（"保留哪个邮箱、哪个地址"） | 合并功能本身**暂列 Phase B**（理由换过一次，见那一节）。MVP 阶段规则简单够用：保留方字段优先，被合并方只在保留方为空时补进来 | 真出现"两条都有值且都不想丢"的实际争议时 |
 | `Skill` 字典表 + `VolunteerProfile.skills` | 需求不紧急，且**没有任何东西依赖它**（ministry 视图不需要技能）。设计已想清楚：字典表带 `code`（D5 通则）+ M2M 挂 `VolunteerProfile`，要加时照 D5 直接建，无需重新设计 | 真的要按技能找志愿者时（"谁会西班牙语翻译"）。注意语言偏好已有 `Contact.preferred_language`，别和技能混为一谈 |
@@ -2428,49 +2990,91 @@ Phase A 的 A10 用了"每条钉住什么"的清单，本阶段沿用。下面�
 | **活动的班次（`Shift`）** | 2026-07-28 决定：多班次一律拆成多个 `Event`。行业标准结构确实是三层（Salesforce V4S 的 Job → Shift → Hours），但拆 Event 之后时段差异由 Event 表达、做的事差异由 `Participation.role` 表达、时长差异由各行 `hours` 表达，三个维度一个不少，而少一张表少一层 admin 嵌套 | 一场活动的班次多到"拆成十个 Event"开始碍事时 |
 | **活动的分组 / 系列（`Event.parent`）** | 拆成多个 Event 的代价是"上午场 / 下午场"在统计里算两场。按 D15 三条件检验：最多一个父、无独立属性、只有一种类型 → **自引用 FK 正是对的载体**，和 Ministry 层级同理 | 真的需要"这一整天总共来了多少人次"时 |
 | **一个人一次活动的奖励规则** | 规则还不明确（按班次算？按角色算？按工时算？）。猜错就是白写字段。关键是**区分它所需的三个维度已经全部存下来了**（哪个 Event、什么 role、多少 hours），结构撑得住 | 基金会说清楚奖励怎么算时 —— 那时只是加字段，不用改结构 |
-| 邮件群发 / 对外活动报名页 | 属于对外系统，和内部管理是两回事 | Phase D 之后 |
+| 邮件群发 | 属于对外系统，和内部管理是两回事 | 上线之后 |
+| **匿名（无账号）活动报名页** | ⚠️ **2026-07-29 拆开说清楚，这一行原来和"邮件群发"写在一起，会被误读成"P3 也推迟了"。**<br>**P3 要的是「登录用户」能报名，那个进当前阶段。** 推迟的是**不登录**就能报名的公开页面 —— 它需要另一套东西（防刷、验证码、匿名记录事后认领），而需求原话是"每个普通 **account** 可以看到发布的 event" | 基金会真的要做面向公众的活动招募时 |
+| 一个 Contact 多个 account / 一个 account 多个 Contact | `User.contact` 是 OneToOne，够用（D12）。开放注册之后可能出现"同一个人注册了两次" —— 那是**重复 `Contact`**，`merge_contacts()` 已经能处理，不是基数问题 | 出现"一家人共用一个邮箱、想各自登录"的真实需求时 |
+| **报名的等候名单 / 审批** | `EventRole.needed_count` 只提醒不阻止（同 `Contact` 重名的口径），所以报满了照样能报，不需要排队机制 | 基金会说"超了的人要排队 / 要审批"时 —— 那时 `Participation.status` 加一档 `waitlisted`，不改结构 |
 
 ---
 
 ## 六、下一步
 
-**Phase A 已完成**（2026-07-27，分支 `phase-a`，A1–A10 全部验收通过，27 个测试全绿）。
+**Phase A 已完成**（2026-07-27，分支 `phase-a`，A1–A10 全部验收通过）。
+**Phase B 的 B0–B5 已完成**（2026-07-28～29，分支 `phase-b`：`core` 时间口径 +
+`contact` 三处收口 + `org` 四张表）。
 
-**本文档于 2026-07-28 按一轮 Phase B 评审全面修订**（新增 D16 / D17，重写 D5 / D15，
-Phase B 整节重排）。改动清单见文末「2026-07-28 修订记录了什么」。
+**本文档于 2026-07-29 按基金会给出的一套完整需求重新划定了优先级** ——
+见[零、当前优先级](#零当前优先级2026-07-29-定)，以及新增的
+[D19](#d19--活动的工种编制-eventrole2026-07-29) / [D20](#d20--范围化权限-ministryrole不走-django-group2026-07-29) /
+[D21](#d21--对外账号志愿者自助页面提前权限成为它的前置条件2026-07-29)。改动清单见文末
+[「2026-07-29 修订记录了什么」](#七2026-07-29-修订记录了什么)。
 
-下一步是 **Phase B · 人与活动 MVP**，要建的表和实现要点见上面那一节。开工前先做两件事：
+**下一步是 `02-roadmap.md` 的 B6**（`events` 一族：`EventType` / `Event` / `EventRole` /
+`ParticipationRole` / `Participation`）。开工前先做两件事：
 
-1. ✅ **已完成**：Phase B 的实施步骤已写进 `02-roadmap.md`（B0–B9）。开工照着它做；
-2. 重读 D10 / D11 / D15 / D16 —— `Position` + `Assignment` 是 Phase B 的核心，而 D11
-   **修订过两次**、D15 也是经过多轮否决才定下的，**修订的理由比结论更重要**，
-   照着旧直觉写会重新掉进同一个坑。D16 是新的，且它管的那类错误不报错。
-   D11 那两次修订都栽在同一件事上 —— **一张表承担了两个层次**，
-   所以 D10 新加的那句口诀（"换个人来做还成立的，就属于编制"）值得单独记住。
+1. **读[零](#零当前优先级2026-07-29-定)那 12 条需求原文**，而不是读转述。
+   转述会丢东西 —— 这一轮最贵的那个发现（R4 靠 `Participation` 反推工种是错的）
+   就藏在"每个 event 有多少工种"和"每个工种 volunteers 有多少人"这两句的**并列**里；
+2. **重读 D11 的「第二次修订」，再读 D19。** 它们是同一个错误的两次出现 ——
+   *「格子」和「占格子的人」混在一张表里，于是空着的格子表达不了*。
+   第一次代价是重写 `Assignment`，这一次因为 `events` 还没写，代价是零。
+   **能第二次认出同一个形状，比第一次解决它更有价值。**
 
-**`Guardianship` 不再阻塞开工**（2026-07-28）：整张表已移出 Phase B，
-等基金会答复同意书流程再说，见 D15 的「待确认」和推迟清单。
+### 还没定的（哪些阻塞、哪些不阻塞）
 
-Phase B 的验收是：**你自己能在本机跑通一遍完整流程** —— 建 ministry 并挂上 leader 和成员、
-录志愿者、一人多岗 + 跨 kind 汇报线、开活动并给同一个人登记两个角色和各自工时、
-筛出未成年参与者并看到紧急联系电话。数据全部来自 `seed_demo` 造的假数据。
-
-**交付给基金会真用属于 Phase D**，前置条件是备份演练过、且他们不用 superuser 登录。
-理由记在 Phase B 的验收注和 Phase D 的开头。
-
-### 还没定的（都不阻塞 Phase B 开工）
-
-| # | 待定的事 | 等谁 | 不定会怎样 |
+| # | 待定的事 | 等谁 | 阻塞吗 |
 |---|---------|------|-----------|
-| 1 | 未成年志愿者有没有同意书 / 家长授权流程 | 基金会 | 只决定 `Guardianship` 什么时候建，Phase B 已绕开 |
-| 2 | 背景审查有效期多长 | 基金会 | 先用 730 天占位，`base.py` 里注明是未确认默认值 |
-| 3 | `EmploymentType` 的实际取值 | 基金会 | 不影响建模 —— 正因为不知道才做成字典表，到时候 admin 里加行 |
-| ~~4~~ | ~~跟不跟踪请假 / 停职~~ | ✅ **已答复（2026-07-28）：跟踪。** 因此 `Assignment.status` 进 Phase B，见「`Assignment.status`」 | — |
-| 5 | `status` 除 `on_leave` / `suspended` 外还需要哪几种 | 基金会 | 不阻塞 —— 它是 `TextChoices`（`serving()` 要按它分支，符合 D5 判定规则），加值就是改代码，接受 |
+| 1 | 未成年志愿者的同意流程具体长什么样（口头 / 纸质 / 线上签） | 基金会 | **不阻塞** —— `consent_method` 是 `TextChoices`，先放三档，改就是改代码。但 **P3 本身要做**，不能因为流程没定就跳过 |
+| 2 | `EmploymentType` 的实际取值 | 基金会 | 不阻塞 —— 正因为不知道才做成字典表，admin 里加行 |
+| 3 | `status` 除 `on_leave` / `suspended` 外还需要哪几种 | 基金会 | 不阻塞 —— `TextChoices`，加值就是改代码 |
+| **4** | **`MinistryRole` 除 admin 之外还需要哪几档**（协调员？只读？） | 基金会 | **不阻塞，但要早问** —— 它是 `TextChoices`，加一档就是改代码 + 改 `permissions.py` 的判断。**先只做 `admin` 一档**，需求原文只要求了这一档 |
+| **5** | **工时是志愿者自己填还是 admin 填** | 基金会 | **不阻塞** —— 两条路径都走 `services.check_out()` 那一个函数，区别只在哪个页面上有那个按钮。先做 admin 侧（需求原话是"跟 event 同个 ministry 的权限的人可以统计"） |
+| ~~6~~ | ~~背景审查有效期多长~~ | — | **随 `BackgroundCheck` 一起移出本阶段**，不再需要答复 |
+| ~~7~~ | ~~跟不跟踪请假 / 停职~~ | ✅ **已答复（2026-07-28）：跟踪** | 已做进 `Assignment.status` |
 
 ---
 
-## 七、2026-07-28 修订记录了什么
+## 七、2026-07-29 修订记录了什么
+
+> 起因：基金会给出了一套**完整、具体**的需求（12 条，见[零](#零当前优先级2026-07-29-定)）。
+> 它成为唯一优先级，本文档按它重排。**这一轮和之前八轮的性质不同** ——
+> 之前是"我们想清楚了一个更好的设计"，这一轮是"真实需求到了，按它取舍"。
+
+### 改了什么（一张表）
+
+| 改动 | 从 | 到 | 为什么 |
+|---|---|---|---|
+| **新增 [D19](#d19--活动的工种编制-eventrole2026-07-29)** | `Participation(event, contact, role)` | `EventRole(event, role, needed_count)` + `Participation(event_role, contact)` | R4 靠 `COUNT(DISTINCT role)` 反推 = 零报名的工种不存在。**和 D11 判死刑的"空缺编制表达不了"是同一个病** |
+| **新增 [D20](#d20--范围化权限-ministryrole不走-django-group2026-07-29)** | Django Group 三个角色（原 Phase D） | `MinistryRole` + `org/permissions.py`，Group 只留全局那一级 | Django 权限**没有对象级作用域**，表达不了"食物银行的 admin"。**D18「权限的形状会倒推模型」的第二个实例** |
+| **新增 [D21](#d21--对外账号志愿者自助页面提前权限成为它的前置条件2026-07-29)** | 前端整体推迟到模型稳定 | 自助页面进本阶段，**权限必须先于它** | D2 的重启条件（"需要志愿者自助登录时"）已经满足。志愿者能登录之后，权限从"上线前置"变成"这个功能自己的一部分" |
+| **[D2](#d2--前端推迟到后端与数据模型完善之后) 部分作废** | "等模型完善再写界面" | 自助页面现在就写；但**仍然不上 React/Vue** | 作废的是时机，不是技术选型 |
+| `Event.ministry` | 可空 | **非空** | R2 / R8 / P2 全部以它为轴 |
+| `Event.status` | planned·confirmed·completed·cancelled | **draft·open**·confirmed·completed·cancelled | P3「看到**发布的** event」需要一个明确的可见性闸门 |
+| `Event.capacity` | 整场一个数 | **删掉**，换成 `EventRole.needed_count` | "搬运要 5 个、翻译要 2 个"整场一个数说不出来 |
+| `Participation` | 只有 `status` 一个覆盖式单值 | 加 `registered_at` / `checked_in_at` / `checked_out_at` + 同意字段 | P4「是否来过」；P3 未成年人同意 |
+| `Participation` 唯一约束 | `(event, contact, role)` + `nulls_distinct=False` | `(event_role, contact)` | 拆表把约束缩短了 —— **本项目第二次**，第一次是拆 `Position` |
+| Phase C ↔ Phase D | C=资金，D=上线 | **C=上线，D=资金** | 12 条需求没有一条碰钱，而它们全都需要真人用起来才有意义 |
+| `VolunteerProfile` / `BackgroundCheck` | Phase B B7 | 推迟清单 | 12 条需求一条都没碰技能 / 可服务时段 / 背景审查。⚠️ **D18 那条"背景审查必须独立成 model"不撤销** |
+| 验收标准 | 7 条"能演示一遍日常" | **按 12 条需求逐条勾，扮三个角色走一遍** | 原标准答不出"做完了没有" |
+
+### 没改的（记下来免得以后以为漏了）
+
+- **`Position` / `Assignment` 那套结构一个字没动** —— R8 只有它答得出来，B5 是必要投资；
+- **`Relationship` / `merge_contacts()` / `EmergencyContact` 全部保留** ——
+  见[零的「已实现但暂时用不上的」](#已实现但暂时用不上的留着不删)；
+- **不建 `Shift`** —— `EventRole` 的维度是工种不是时间，两条决定不冲突；
+- **`Guardianship` 继续推迟** —— P3 要的是"这次活动的同意记录"，不是"长期监护关系"。
+
+### 这一轮最值得记住的一条
+
+> **偏离的判据不是"做了不相干的模块"，而是"为一条查询都不会碰的东西做了完整工程"。**
+>
+> 自查问题：**这张表 / 这条约束 / 这个功能，会出现在哪条需求的查询里？**
+> 答不上来就先别做。—— 详见[零的末尾](#已实现但暂时用不上的留着不删)。
+
+---
+
+## 附：2026-07-28 修订记录了什么
 
 ### 第九轮 · 汇报线遍历：从"每处都带 `visited`"改成"只有一处遍历"
 

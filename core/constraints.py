@@ -46,6 +46,20 @@ CONSTRAINT_FIELD = {
     # org.Assignment
     "assignment_end_before_start": "end_date",
     "assignment_duplicate_tenure": "start_date",
+    # events.EventType / events.ParticipationRole
+    "eventtype_code_taken": "code",
+    "participationrole_code_taken": "code",
+    # events.Event
+    "event_end_before_start": "end_time",
+    # events.EventRole
+    "eventrole_duplicate": "role",
+    "eventrole_needed_count_not_positive": "needed_count",
+    # events.Participation
+    "participation_duplicate": "contact",
+    "participation_hours_negative": "hours",
+    "participation_hours_without_attendance": "hours",
+    "participation_checkout_before_checkin": "checked_out_at",
+    "participation_absent_after_checkin": "status",
 }
 
 

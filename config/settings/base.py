@@ -63,6 +63,8 @@ INSTALLED_APPS = [
     'contact',
     # org depends on contact (Assignment -> Contact), contact depends on core.
     'org',
+    # events depends on both: Event -> Ministry, Participation -> Contact.
+    'events',
 ]
 
 # Set before the first migrate, while no user table exists yet — swapping this

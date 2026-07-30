@@ -1613,6 +1613,8 @@ class EventRole(ConstraintErrorFieldMixin, TimeStampedModel):
                        help_text="Leave empty for no limit. Advisory only — signups are never blocked.")
     notes        = TextField(blank=True)
 
+    history = HistoricalRecords()      # needed_count 是对外发布出去的承诺，见下面 Participation 那条
+
     objects = models.Manager.from_queryset(EventRoleQuerySet)()
 
     class Meta:
@@ -2091,8 +2093,12 @@ def resolve_recipients(event) -> tuple[list[Recipient], list[Unreachable]]:
     """谁该收到通知、用什么地址。换 provider 时这个函数一个字不改。
 
     三条规则：
-    1. 成年人 → 他自己，按 Contact.preferred_contact_method 选渠道，
+    1. 成年人 → 他自己，按 Contact.preferred_communication_method 选渠道，
        该渠道为空就回落到另一个；
+       ⚠️ 字段名 2026-07-30 更正：本文档和 D22 原来写的是 preferred_contact_method，
+          而 contact/models.py 里那个字段叫 preferred_communication_method ——
+          照原文写会 FieldError。同 consent_given_by 那次，是"引用了一个不存在的东西"。
+          顺带：它的四档里 mail 不是可投递渠道，phone 归到 sms，见实现；
     2. 未成年人 → 【家长】。依次找：这条 Participation 的 consent_email /
        consent_phone（B9 报名时收的）→ contact.emergency_contacts 的第一条（只有电话 ⇒ sms）。
        ⚠️ 15 岁的志愿者可能根本没有自己的手机，发给他等于没发；

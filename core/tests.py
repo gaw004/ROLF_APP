@@ -309,6 +309,75 @@ class OrgTreeGuardTests(TestCase):
         )
 
 
+class PermissionGuardTests(TestCase):
+    """Lint-as-test: ministry-scoped authority is judged in exactly one place."""
+
+    # Written escaped and only here, so this file never contains the literal
+    # text it hunts for and the guard can scan itself.
+    DIRECT_QUERY = r"MinistryRole\.objects"
+
+    def test_only_permissions_py_queries_ministryrole(self):
+        # Same argument as the org-tree guard, one notch more serious. Checks
+        # scattered across views and admin means one of them eventually forgets
+        # .active() or ministry__is_active — and where a missed traversal hangs
+        # the page (loud), a missed permission check is silent: nothing raises,
+        # somebody just sees what they should not. Ask permissions.py.
+        hits = offending_lines(self.DIRECT_QUERY, skip=["org/permissions.py"])
+        # Tests are allowed to set grants up directly; they are not the ones
+        # making the judgement.
+        hits = [hit for hit in hits if not hit.split(":")[0].endswith("tests.py")]
+        self.assertEqual(
+            hits,
+            [],
+            "Ask org.permissions, do not query grants directly:\n" + "\n".join(hits),
+        )
+
+
+class ViewsAreThinGuardTests(TestCase):
+    """Lint-as-test: statistics live in QuerySets and services, not in views.
+
+    R4–R8 are the answers this whole phase exists to produce. Computed in a
+    view, they get rewritten along with the templates the first time the
+    interface changes — which is scheduled, not hypothetical (D18).
+    """
+
+    # Aggregates, capitalised: the ORM functions, not queryset.count().
+    AGGREGATES = r"\b(Sum|Count|Avg|Max|Min)\("
+    # Date arithmetic of any kind belongs to core.timeutils or a QuerySet.
+    DATE_MATHS = r"\btimedelta\(|\bmonth_bounds\(|\blocal_today\(|\blocal_now\("
+
+    def test_views_contain_no_statistics_or_date_arithmetic(self):
+        hits = offending_lines(
+            f"{self.AGGREGATES}|{self.DATE_MATHS}", only_filenames={"views.py"})
+        self.assertEqual(
+            hits,
+            [],
+            "Views are thin shells — put this on a QuerySet or in services.py:\n"
+            + "\n".join(hits),
+        )
+
+
+class AdminHasNoLogicGuardTests(TestCase):
+    """Lint-as-test: the four admin hooks that would hide business logic (D18).
+
+    The executable form of "delete admin.py and every business rule is still
+    there". get_queryset in particular is the tempting one — it is where an
+    annotation would go, and an annotation there is a rule the front end cannot
+    reach.
+    """
+
+    HOOKS = r"def (save_model|save_related|get_queryset|get_formset)\b"
+
+    def test_admin_does_not_override_the_four_hooks(self):
+        hits = offending_lines(self.HOOKS, only_filenames={"admin.py"})
+        self.assertEqual(
+            hits,
+            [],
+            "Move this to models.py / services.py — admin.py renders, it does "
+            "not decide:\n" + "\n".join(hits),
+        )
+
+
 class MarkdownLinkGuardTests(TestCase):
     """Lint-as-test: every link in every .md file resolves — file and anchor.
 

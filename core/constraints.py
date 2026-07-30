@@ -46,6 +46,9 @@ CONSTRAINT_FIELD = {
     # org.Assignment
     "assignment_end_before_start": "end_date",
     "assignment_duplicate_tenure": "start_date",
+    # org.MinistryRole
+    "ministryrole_duplicate_grant": "start_date",
+    "ministryrole_end_before_start": "end_date",
     # events.EventType / events.ParticipationRole
     "eventtype_code_taken": "code",
     "participationrole_code_taken": "code",

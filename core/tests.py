@@ -406,7 +406,7 @@ class MarkdownLinkGuardTests(TestCase):
 class EmphasisGuardTests(TestCase):
     """Lint-as-test: emphasis is a budget, not a tone of voice (goal.md 约定 6).
 
-    These documents had drifted to 35% of lines carrying bold, 47 ⭐ and 206 ⚠️,
+    These documents had drifted to 35% of lines carrying bold, 46 ⭐ and 206 ⚠️,
     with each symbol standing for three or four different things. Emphasis
     everywhere is emphasis nowhere: the reader cannot tell which line is the one
     that matters. This guard does not police taste — it polices the three misuses

@@ -42,7 +42,7 @@ P2（征集志愿者）最想看的那个数。
 |---|---|---|
 | `Position` 与人无关，空着也存在 | `EventRole` 与报名无关，没人报也存在 | 缺人是一等状态，不是"碰巧查不到" |
 | `Position.objects.vacant()` | `EventRole.objects.understaffed()` | 同一套查询形状，[`with_headcounts()`](../phase-b.md#空缺编制这次修订的验收点) 直接照搬 |
-| `Assignment(contact, position)` | `Participation(contact, event_role)` | 唯一约束都是 `(格子, 人)` |
+| `Assignment(contact, position)` | `Participation(contact, event_role)` | 唯一约束都以 `(格子, 人)` 为轴 —— `Assignment` 还多一列 `start_date`（离开又回来是两段任职），活动侧没有这回事 |
 | ~~`Position.headcount`~~ 已推迟 | `EventRole.needed_count` 必须有 | 见下 |
 
 `needed_count` 就是被推迟过的 `Position.headcount`，但这次不能推迟 ——

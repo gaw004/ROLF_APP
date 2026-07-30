@@ -9,6 +9,14 @@
 > **三个例子里只有第一个支持它的归因**，但它戳中了一个真实空缺：
 > 文档从没写下 Admin 能承载什么、什么时候必须写真表单。 D2 只说"前端推迟"，没有判据。
 
+> **怎么读本文里的"Phase C"**（2026-07-30 加的一句总注，本条写于 2026-07-28）：
+> 那时的排期是"Phase C 才开始写自己的页面"。**这件事已经提前发生了** ——
+> D18 自己的形状触发当天就赶出了 `/contacts/merge/` 和 `/relationships/add/`，
+> [D21](D21-self-service-and-permissions.md#d21--对外账号志愿者自助页面提前权限成为它的前置条件2026-07-29) 又把整套志愿者自助页面提进了 Phase B。
+> 所以下文凡是"Phase C 的视图 / 前端上来"，**读作"我们自己写的页面"**，
+> 它已经是现在进行时；真正留在 Phase C 的只剩 Ministry 视图和组织架构图那一批
+> （见 [Phase C](../progress.md#phase-c--上线与真实运营)）。**论证一个字没变，只是时间到了。**
+
 先划清一件事：Admin 不是问题，"业务逻辑长在 Admin 里"才是。
 
 前端推迟（D2）现在依然成立 —— 光是 2026-07-28 这一天，模型就改了两轮
@@ -75,7 +83,9 @@ contact/
   admin.py      form = ContactForm、inlines、list_display、SimpleListFilter
                 → 纯配置，前端上来直接删
   static/*.js   ⚠️ 唯一会随 Django 升级坏、也是唯一换界面会丢的东西
-  views.py      Phase C 才写，到时候 import forms.py + services.py
+  views.py      ✅ 本阶段就写了（/contacts/merge/、/relationships/add/），
+                import forms.py + services.py。原文写的是"Phase C 才写"——
+                D18 自己的形状触发当天就把这两个页面赶出了 admin
 
 org/
   models.py     Position / Assignment 的约束、PositionQuerySet.vacant()、.serving()
@@ -119,12 +129,18 @@ org/
 
 ## 什么时候 Admin 整体不够用了
 
-两条触发条件，满足任一条就出栏，不必等到 Phase D。
+两条触发条件，满足任一条就出栏。
 
-触发一（事件）：非开发者拿到账号。 按现在的排期是 Phase D。那时必须同时到位的是：
+> 2026-07-29 更新：触发一已经发生了，**比本条原文预计的早了两个阶段**。
+> 原文写的是"非开发者拿到账号，按现在的排期是 Phase D，不必等到那时候" ——
+> 而 [D21](D21-self-service-and-permissions.md#d21--对外账号志愿者自助页面提前权限成为它的前置条件2026-07-29) 把志愿者自助页面提到了 Phase B，
+> 志愿者**就是**非开发者、**现在**就要拿到账号。所以下面两条不再是"那时必须到位"，
+> 是**本阶段必须到位**，而且权限要先于页面。
+
+触发一（事件）：非开发者拿到账号。 **已触发（Phase B，D21）**。同时必须到位的是：
 
 1. 上面「❌」那一栏的页面；
-2. **权限**（Phase D 已列为交付前置条件）——
+2. **权限**（原来列在上线阶段的交付前置条件，D21 之后提前成了自助页面自己的前置）——
    而权限有一个**现在就要付、拖了要做数据迁移**的代价，见下。
 
 触发二（形状）：这段功能需要跨请求保持状态，或需要动 admin 模板 / `AdminSite` / admin 首页。
@@ -153,11 +169,21 @@ D17 让 `payroll` 独立成 app 正是这个道理（"一个 Group 直接不给 
 而文档自己说它"敏感度仅次于薪酬"。**你没法只禁掉一个字段** ——
 要么整张 `VolunteerProfile` 不给看（连技能和可服务时段一起锁掉，过度），要么全给看（泄露）。
 
-**所以背景审查在 Phase B 就拆成独立模型**（`volunteer.BackgroundCheck`，OneToOne → `Contact`），
-不留在 `VolunteerProfile` 里。这样 Phase D 一个 Group 不授 `volunteer.view_backgroundcheck` 即可。
+**所以背景审查必须是独立模型**（`volunteer.BackgroundCheck`，OneToOne → `Contact`），
+不留在 `VolunteerProfile` 里。这样上线时一个 Group 不授 `volunteer.view_backgroundcheck` 即可。
 
-- **现在拆成本≈0** —— `volunteer` app 一行代码还没写；
-- **以后拆要做数据迁移** —— 建表、搬两个字段、改所有引用，而且那时表里是真实的人的审查结果。
+- **拆开的成本≈0** —— `volunteer` app 一行代码还没写；
+- **合着建、以后再拆要做数据迁移** —— 建表、搬两个字段、改所有引用，
+  而且那时表里是真实的人的审查结果。
 
-按 Phase A 的准入标准，这条属于必须现在做。 注意 `payroll` 用了整个 app、
-背景审查只用一个 model，区别在于薪酬是一整块业务领域，背景审查只是一张附属表。
+注意 `payroll` 用了整个 app、背景审查只用一个 model，
+区别在于薪酬是一整块业务领域，背景审查只是一张附属表。
+
+> 2026-07-29 修订：这一条的**时机**变了，**结论没变**。
+> 原文写的是"**所以背景审查在 Phase B 就拆成独立模型**……**按 Phase A 的准入标准，
+> 这条属于必须现在做**"。而 `VolunteerProfile` / `BackgroundCheck` **两张表整体移出了
+> Phase B**（[零的「排除了什么」](../goal.md#排除了什么以及它们去哪了)：14 条需求一条都没碰背景审查）。
+>
+> **推迟的是建表，不是推翻拆表** —— 两张表将来建的时候仍然是两个 model，
+> 因为上面那个理由（没有字段级权限）跟哪个阶段建它无关。
+> 本条现在读作：**建它的那一天，它必须是独立的 model**。见[推迟清单](../deferred.md#五明确推迟的事)。

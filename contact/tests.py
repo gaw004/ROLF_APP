@@ -3,13 +3,15 @@ import inspect
 from pathlib import Path
 
 from django import forms
+from django.apps import apps
 from django.conf import settings
 from django.contrib import admin
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
-from django.db import IntegrityError, transaction
+from django.db import IntegrityError, connection, transaction
 from django.http import HttpResponse
 from django.test import TestCase, override_settings
+from django.test.utils import CaptureQueriesContext
 from django.urls import path, reverse
 
 from core.timeutils import local_today
@@ -358,8 +360,41 @@ class ConstraintFieldErrorTests(TestCase):
 
     It lives in contact/tests.py rather than core/tests.py because only the app
     knows what violating data looks like; core would have to import every model
-    to build it, which is the import direction D17 forbids.
+    to build it, which is the import direction D17 forbids. org/tests.py has
+    the matching class for its own four models.
     """
+
+    # Every code this class exercises. Kept as a literal so that
+    # test_this_class_covers_every_constraint_in_the_app below can name the one
+    # you forgot, rather than just failing a count.
+    COVERED = {
+        "individual_needs_last_name",
+        "organization_needs_name",
+        "contact_type_unknown",
+        "reltype_name_taken",
+        "reltype_code_taken",
+        "relationship_self_reference",
+        "relationship_already_recorded",
+        "relationship_end_before_start",
+        "emergency_contact_duplicate",
+    }
+
+    def test_this_class_covers_every_constraint_in_the_app(self):
+        """Adding a constraint without a case here goes red.
+
+        core/tests.py checks that a mapping exists; nothing but a case in this
+        class checks that it fires, so "somebody will remember to add one" is
+        exactly the discipline this project keeps replacing with a test.
+        """
+        live = {
+            constraint.violation_error_code
+            for model in apps.get_app_config("contact").get_models()
+            for constraint in model._meta.constraints
+            if getattr(constraint, "violation_error_code", None)
+        }
+        missing = sorted(live - self.COVERED)
+        self.assertEqual(
+            missing, [], f"No field-error case for: {missing}")
 
     def setUp(self):
         self.alice = Contact.objects.create(
@@ -424,6 +459,33 @@ class ConstraintFieldErrorTests(TestCase):
             "end_date",
         )
         self.assertIn("The end date cannot be before the start date.", messages)
+
+    def test_a_duplicate_type_name_points_at_name_a_to_b(self):
+        # An expression constraint — Lower(Trim(...)). Those are the ones B1
+        # warned could be skipped at form time and only bite as an
+        # IntegrityError, so they are the ones most worth a case here.
+        messages = self.assertFieldError(
+            RelationshipType(code="parent_two", name_a_to_b="  Parent Of  "),
+            "name_a_to_b",
+        )
+        self.assertIn("A relationship type with this name already exists.", messages)
+
+    def test_a_duplicate_type_code_points_at_code(self):
+        messages = self.assertFieldError(
+            RelationshipType(code="PARENT_OF", name_a_to_b="guardian of"), "code")
+        self.assertIn("A relationship type with this code already exists.", messages)
+
+    def test_a_duplicate_emergency_contact_points_at_name(self):
+        kin = RelationshipType.objects.create(
+            code="mother_of", name_a_to_b="mother of", usable_as_emergency_contact=True)
+        EmergencyContact.objects.create(
+            person=self.alice, name="王秀英", phone="+14085550101", relationship_type=kin)
+        messages = self.assertFieldError(
+            EmergencyContact(person=self.alice, name="  王秀英  ",
+                             phone="+14085550101", relationship_type=kin),
+            "name",
+        )
+        self.assertIn("This emergency contact is already recorded for them.", messages)
 
 
 class RelationshipDirectionTests(TestCase):
@@ -1057,6 +1119,49 @@ class MergePageTests(TestCase):
         template = (Path(settings.BASE_DIR)
                     / "contact/templates/contact/merge_confirm.html").read_text()
         self.assertNotIn("admin/base_site.html", template)
+
+
+class ChangelistCostTests(TestCase):
+    """The merge column must not cost a query per row.
+
+    It did: merge_link called find_exact_duplicates() for every row rendered,
+    so the most-visited page in the admin ran one extra query per contact —
+    a hundred of them on a default page. The count is compared at two sizes
+    rather than pinned to a number, so the test survives Django changing its
+    own baseline but still fails the moment the cost goes per-row again.
+    """
+
+    def setUp(self):
+        self.client.force_login(
+            get_user_model().objects.create_superuser(username="staff", password="x"))
+        self.url = reverse("admin:contact_contact_changelist")
+
+    def populate(self, count):
+        Contact.objects.all().delete()
+        Contact.objects.bulk_create([
+            Contact(contact_type=Contact.ContactType.INDIVIDUAL,
+                    legal_last_name=f"Name{number}", phone=f"+1408555{number:04d}")
+            for number in range(count)
+        ])
+
+    def queries_to_render(self, count):
+        self.populate(count)
+        with CaptureQueriesContext(connection) as captured:
+            self.assertEqual(self.client.get(self.url).status_code, 200)
+        return len(captured)
+
+    def test_the_changelist_cost_does_not_grow_with_the_number_of_rows(self):
+        self.assertEqual(self.queries_to_render(5), self.queries_to_render(25))
+
+    def test_both_sides_of_a_duplicate_pair_offer_a_merge(self):
+        # The pairing is cyclic within a group, so nobody is left without a
+        # partner — a row with no link would be a duplicate you cannot merge.
+        self.populate(3)
+        Contact.objects.create(
+            contact_type=Contact.ContactType.INDIVIDUAL,
+            legal_last_name="Name0", phone="+14085550000")
+        page = self.client.get(self.url).content.decode()
+        self.assertEqual(page.count("合并掉"), 2)
 
 
 class MinorTests(TestCase):

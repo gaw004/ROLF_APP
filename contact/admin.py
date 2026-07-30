@@ -121,9 +121,9 @@ class ContactAdmin(SimpleHistoryAdmin):
     """SimpleHistoryAdmin rather than ModelAdmin: adds the History button."""
 
     form = ContactAdminForm
-    list_display = [
-        "__str__", "contact_type", "email", "phone", "is_active", "merge_link",
-    ]
+    # merge_link is not here — get_list_display() appends it, because it needs
+    # the whole page's duplicate pairs looked up once. See there.
+    list_display = ["__str__", "contact_type", "email", "phone", "is_active"]
     list_filter = [
         "contact_type", "is_active", "gender", "address_country",
         PossibleDuplicateFilter, MinorFilter,
@@ -197,24 +197,34 @@ class ContactAdmin(SimpleHistoryAdmin):
                 messages.WARNING,
             )
 
-    @admin.display(description="合并")
-    def merge_link(self, obj):
-        """Link to the merge page, with this row as the one to keep.
+    def get_list_display(self, request):
+        """Appends the merge column, with the page's duplicate pairs read once.
 
-        Which duplicate it is paired with is decided by the model, not here.
+        merge_link used to be an ordinary list_display entry that called
+        find_exact_duplicates() for every row — one query per row, on every
+        changelist, whether or not the duplicates filter was on. At Django's
+        default hundred rows a page that is a hundred queries to render a
+        column that is almost always blank.
+
+        Which contact pairs with which is a QuerySet method (D18); this only
+        renders it. The result is cached on the request because Django asks for
+        list_display more than once while building a changelist.
         """
-        duplicates = Contact.find_exact_duplicates(
-            last_name=obj.legal_last_name,
-            first_name=obj.legal_first_name,
-            phone=obj.phone,
-            exclude_pk=obj.pk,
-        )
-        other = duplicates.first()
-        if other is None:
-            return ""
-        url = reverse("contact:contact_merge")
-        return format_html(
-            '<a href="{}?keep={}&drop={}">合并掉 #{}</a>', url, obj.pk, other.pk, other.pk)
+        if not hasattr(request, "_contact_duplicate_partners"):
+            request._contact_duplicate_partners = Contact.objects.duplicate_partners()
+        partners = request._contact_duplicate_partners
+
+        @admin.display(description="合并")
+        def merge_link(obj):
+            other_pk = partners.get(obj.pk)
+            if other_pk is None:
+                return ""
+            return format_html(
+                '<a href="{}?keep={}&drop={}">合并掉 #{}</a>',
+                reverse("contact:contact_merge"), obj.pk, other_pk, other_pk,
+            )
+
+        return [*super().get_list_display(request), merge_link]
 
     @admin.display(description="")
     def add_relationship(self, obj):

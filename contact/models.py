@@ -1,4 +1,5 @@
 import datetime
+from collections import defaultdict
 
 from django.core.exceptions import ValidationError
 from django.db import models
@@ -131,6 +132,33 @@ class ContactQuerySet(models.QuerySet):
                 phone=key["phone"],
             )
         return keyed.filter(matches)
+
+    def duplicate_partners(self):
+        """{pk: the pk of another contact sharing this one's name and phone}.
+
+        One lookup for a whole page. The admin's merge column used to call
+        find_exact_duplicates() per row, which is a query per row on the most
+        visited page in the project — the same N+1 that list_select_related is
+        spelled out to avoid two files away.
+
+        Pairing lives on the queryset for the reason the judgement does (D18):
+        admin.py renders this, it does not work it out. It also means the merge
+        column and the "疑似重复" filter now answer from one definition instead
+        of two that could disagree.
+        """
+        grouped = defaultdict(list)
+        for row in self.possible_duplicates().values(
+                "pk", "key_last", "key_first", "phone"):
+            grouped[(row["key_last"], row["key_first"], row["phone"])].append(row["pk"])
+
+        partners = {}
+        for pks in grouped.values():
+            # Each row points at the next in its group and the last back at the
+            # first, so every side of a duplicate offers a merge and none is
+            # left without a partner.
+            for index, pk in enumerate(pks):
+                partners[pk] = pks[(index + 1) % len(pks)]
+        return partners
 
 
 class Contact(ConstraintErrorFieldMixin, TimeStampedModel):

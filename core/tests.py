@@ -44,6 +44,80 @@ def project_python_files(skip=()):
         yield relative, path.read_text(encoding="utf-8")
 
 
+LOOP_OPENER = re.compile(r"^\s*(async\s+for|for|while)\b")
+SCOPE_OPENER = re.compile(r"^\s*(async\s+def|def|class)\s+(\w+)")
+# A loop keyword anywhere on the line, which is how a comprehension iterates.
+INLINE_LOOP = re.compile(r"\b(for|while)\b")
+
+
+def _innermost_block_is_a_loop(stack):
+    """Walking outwards, is a loop reached before a function or class body?
+
+    A def inside a loop is its own scope: its lines run once per call, not once
+    per iteration, so the loop's reach stops there.
+    """
+    for _, kind, _name in reversed(stack):
+        if kind == "loop":
+            return True
+        if kind == "scope":
+            return False
+    return False
+
+
+def _calls_its_own_scope(stack, line):
+    """Does this line call the function it is written inside? I.e. recursion."""
+    return any(
+        kind == "scope" and name and f"{name}(" in line
+        for _, kind, name in stack
+    )
+
+
+def repeated_uses(pattern, skip=(), exempt="loop-guard-ok"):
+    """Lines matching `pattern` that could run more than once: loops, recursion.
+
+    Three signals, because walking a chain can be spelled three ways:
+
+      1. inside a for/while body — indentation-based, and that part matters.
+         The first version of this guard wanted the loop keyword and the
+         pattern on the *same* line, and the ordinary spelling walks past it:
+
+             for _ in range(20):
+                 nxt = node.<the field>      # never matched, never caught
+
+      2. on a line that iterates by itself — a comprehension;
+      3. on a line that calls the function it sits in — recursion.
+
+    Broad on purpose: a false positive costs one `loop-guard-ok` comment — on
+    the line or just above it, so the reason has room to be written out — and a
+    miss costs a hung page in Phase C.
+    """
+    regex = re.compile(pattern)
+    hits = []
+    for relative, source in project_python_files(skip=skip):
+        lines = source.splitlines()
+        stack = []  # (indent, "loop" | "scope", name), innermost last
+        for number, line in enumerate(lines, start=1):
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            indent = len(line) - len(line.lstrip())
+            while stack and stack[-1][0] >= indent:
+                stack.pop()
+            scope = SCOPE_OPENER.match(line)
+            opens_a_loop = bool(LOOP_OPENER.match(line))
+            exempted = exempt in line or (number > 1 and exempt in lines[number - 2])
+            if regex.search(line) and not exempted:
+                if (INLINE_LOOP.search(line)
+                        or _innermost_block_is_a_loop(stack)
+                        or _calls_its_own_scope(stack, line)):
+                    hits.append(f"{relative}:{number}: {stripped}")
+            if opens_a_loop:
+                stack.append((indent, "loop", None))
+            elif scope:
+                stack.append((indent, "scope", scope.group(2)))
+    return hits
+
+
 def offending_lines(pattern, skip=(), only_filenames=None):
     """Lines matching `pattern`, as 'path:line: text' strings ready to print.
 
@@ -194,11 +268,13 @@ class LayeringGuardTests(TestCase):
 class OrgTreeGuardTests(TestCase):
     """Lint-as-test: the reporting chain is walked in exactly one place."""
 
-    # Split across three lines on purpose: any single line holding both the
-    # chain field and a loop keyword would match this guard itself.
-    CHAIN_FIELD = r"\breports_to\b"
-    FIELD_DEFINITION = r"reports_to\s*="
-    LOOP = r"\b(for|while)\b"
+    # Both spellings: build_org_tree() itself reads .reports_to_id (the
+    # attribute version costs a query per row), so anybody copying it would
+    # copy that too, and \b does not treat the _id suffix as a new word.
+    CHAIN_FIELD = r"\breports_to(_id)?\b"
+    # An assignment is not a traversal — that covers the field declaration on
+    # the model and reports_to=<something> passed as a keyword argument.
+    FIELD_DEFINITION = r"reports_to(_id)?\s*="
 
     def test_nobody_traverses_reports_to_outside_org_services(self):
         # build_org_tree() is the only code that walks reports_to. The cycle
@@ -207,15 +283,10 @@ class OrgTreeGuardTests(TestCase):
         # earlier plan — "every traversal carries its own visited set" — was
         # discipline, the kind this project has already convicted twice.
         # See goal.md「汇报线的环」.
-        #
-        # ⚠️ No-op until B5 creates the org app. B9 has a checklist item to
-        #    confirm it really does go red once Position exists.
-        # A field definition (a plain assignment) is not a traversal, and
-        # neither is a filter() on it. Only loops walk the chain.
         hits = [
             hit
-            for hit in offending_lines(self.CHAIN_FIELD, skip=["org/services.py"])
-            if re.search(self.LOOP, hit) and not re.search(self.FIELD_DEFINITION, hit)
+            for hit in repeated_uses(self.CHAIN_FIELD, skip=["org/services.py"])
+            if not re.search(self.FIELD_DEFINITION, hit)
         ]
         self.assertEqual(
             hits,

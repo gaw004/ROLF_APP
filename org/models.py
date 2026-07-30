@@ -358,7 +358,17 @@ class Assignment(ConstraintErrorFieldMixin, DateRangeMixin, TimeStampedModel):
         # ⚠️ Never add "ended". Ending is what end_date says; a second place to
         #    say it means two answers to the same question, one of them stale.
 
-    contact = models.ForeignKey(Contact, on_delete=models.CASCADE, related_name="assignments")
+    contact = models.ForeignKey(
+        Contact,
+        # PROTECT. Assignment carries simple-history and is the only support for
+        # R8 ("which employees of the running ministry took part") — deleting a
+        # person must not silently take their whole service history with it.
+        # Same reason as MinistryRole.contact: a record that has to leave a
+        # trace cannot hang off a CASCADE. Retire the person with is_active
+        # instead; that is what it is for (goal.md D18, no soft deletes).
+        on_delete=models.PROTECT,
+        related_name="assignments",
+    )
     position = models.ForeignKey(
         Position,
         # PROTECT. With CASCADE, deleting one box would take the service

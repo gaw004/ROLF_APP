@@ -8,11 +8,22 @@ A single Django application with the Django admin as its interface — no separa
 frontend, no paid SaaS, no microservices. Everything lives in one ordinary
 Postgres database that a `pg_dump` can carry away whole.
 
-**Start here:** [`docs/planning/goal.md`](docs/planning/goal.md) is the single
-source of truth — what we are building, every significant decision and why it was
-made, and where the work currently stands.
-[`docs/planning/01-roadmap.md`](docs/planning/01-roadmap.md) holds the
-implementation steps for the phase in progress.
+**Start here:** [`docs/planning/goal.md`](docs/planning/goal.md) — the entry point
+and the index: what we are building, the current priority, and where everything
+else lives. From there:
+
+- [`docs/planning/decisions/`](docs/planning/decisions/README.md) — every
+  significant decision and why it was made, one file per decision (D1–D22).
+  **Code comments that say "see goal.md D9" mean D9 in there** — the numbers are
+  the stable reference.
+- [`docs/planning/phase-b.md`](docs/planning/phase-b.md) — the models and
+  implementation notes for the phase in progress, and
+  [`docs/planning/02-roadmap.md`](docs/planning/02-roadmap.md) — its step-by-step
+  plan.
+- [`docs/planning/progress.md`](docs/planning/progress.md),
+  [`deferred.md`](docs/planning/deferred.md),
+  [`revisions.md`](docs/planning/revisions.md) — what is done, what is
+  deliberately postponed, and why decisions changed.
 
 ## Requirements
 
@@ -96,7 +107,8 @@ config/settings/     base.py + dev.py + prod.py; secrets come from the environme
 core/                what every app shares (TimeStampedModel)
 accounts/            the custom User model, optionally linked to a Contact
 contact/             people and organizations in one table, plus their relationships
-docs/planning/       goal.md (authoritative) and the current phase's roadmap
+docs/planning/       goal.md (entry point), decisions/ (D1-D22), phase-b.md,
+                     0N-roadmap.md (per-phase steps), progress/deferred/revisions
 ```
 
 `DJANGO_SETTINGS_MODULE` defaults to `config.settings.dev`. Production sets it to

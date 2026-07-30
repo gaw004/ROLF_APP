@@ -305,7 +305,7 @@ Phase B 一次加十几个外键，其中一个选错是灾难级的：
 
 | 外键 | `on_delete` | 理由 |
 |---|---|---|
-| `Assignment.contact` | `CASCADE` | 人的档案删了，任职记录没有意义 |
+| `Assignment.contact` | **`PROTECT`**（2026-07-30 从 `CASCADE` 改） | 删一个人不该静默带走他的全部任职历史。<br>原方案是 `CASCADE`，理由写的是"人的档案删了，任职记录没有意义"。**那句话对调到 `MinistryRole.contact` 上同样通顺**（人删了授权也没意义），而那一格选的是 `PROTECT`、理由是"要留痕的事不能挂 `CASCADE`"—— 同一条判据这里没执行过，正是 `MinistryRole.ministry` 那次翻案用的那条。<br>另外两条：① `Assignment` **挂着 simple-history**，声称"组织架构变更必须留痕"；② 它是 **R8 的唯一支撑**。<br>**暴露面**：有 `Participation` 的人本来就被 `PROTECT` 挡着，所以漏的是**只做过员工、没做过志愿者的人** —— 那恰恰是任职历史最长的那批。<br>**代价**：真要删档案得先处理任职行，一年遇不上一次，而那正是应该被迫看见的事（同 `MinistryRole.ministry`）。停用走 `is_active`，不做软删除 |
 | `Assignment.position` | `PROTECT` | ⚠️ 写成 `CASCADE` 的话，删一个编制 → **占过它的所有人的任职历史一起消失**。同 `Participation.contact` 的道理 |
 | `Assignment.employment_type` | `PROTECT` | 字典表，同 `Contact.preferred_language` |
 | `Position.ministry` | `PROTECT` | 删 ministry 不该静默带走编制 |
@@ -330,9 +330,13 @@ Phase B 一次加十几个外键，其中一个选错是灾难级的：
 > `PROTECT` 的摩擦一年遇不上一次，换来的是子树不会被静默重挂 —— 现在这笔账划得来。
 > **同一个 `on_delete` 在不同的表上是不同的选择**，这就是例子。
 
-**连带效果（是特性不是 bug）**：`Participation.contact` 用 `PROTECT` 之后，
-有过活动记录的联系人就删不掉了，只能 `is_active=False` 停用。
+**连带效果（是特性不是 bug）**：`Participation.contact` 和 `Assignment.contact`
+都用 `PROTECT` 之后，**有过活动记录或任职记录的联系人就删不掉了**，只能 `is_active=False` 停用。
 这与推迟清单里"不做软删除、`is_active` 已覆盖停用语义"是一致的。
+
+> 2026-07-30 补：`Assignment.contact` 原来是 `CASCADE`，所以这条"连带效果"当时是**半条** ——
+> 只做过员工、没做过志愿者的人不在保护范围里。现在三张挂在 `Contact` 上的业务表
+> （`Participation` / `Assignment` / `MinistryRole`）口径统一了。
 
 ##### 索引
 
@@ -1239,6 +1243,7 @@ Phase A 的 A10 用了"每条钉住什么"的清单，本阶段沿用。下面�
 | 全项目除 `org/services.py` 外没有别处递归 `reports_to`（grep 守卫，放 `core/tests.py`） | 把"遍历要带 `visited`"从纪律换成结构。**第六次「测试当 lint」** |
 | 删一个有下属的 `Position` 被 `PROTECT` 挡住 | 子树不会被静默重挂成根 |
 | 删一个有任职记录的 `Position` 被 `PROTECT` 挡住 | 任职历史不会跟着编制消失 |
+| 删一个有任职记录的 `Contact` 被 `PROTECT` 挡住 | 另一头同理（2026-07-30 从 `CASCADE` 改）—— 漏的那批恰恰是**只做过员工、没做过志愿者**、任职历史最长的人 |
 | `Position.code` 唯一，且 change 页只读 | 代码锚点真的稳定（D5） |
 | `Participation` 同活动同人**同工种**第二行失败；**不同工种**能存两行 | 一人一活动多工种 |
 | `Participation.hours` 负数失败 | |

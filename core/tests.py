@@ -419,7 +419,9 @@ class EmphasisGuardTests(TestCase):
     # A whole line in bold. If the line is the point, it is a heading.
     BOLD_LINE = re.compile(r"^(?:\s*(?:[-*]\s+|>\s+|\d+\.\s+)?)\*\*[^*\n]{15,}\*\*[ \t]*$")
     # ⚠️ on a revision note. A changelog entry is history, not a trap.
-    WARN_ON_NOTE = re.compile(r"⚠️[ \t]*(?=\*\*(?:20\d\d-\d\d-\d\d|原文|原方案|原来|本条|本节|整节))")
+    WARN_ON_NOTE = re.compile(
+        r"⚠️[ \t]*(?=\*\*(?:20\d\d-\d\d-\d\d|原文|原方案|原来|本条|本节|整节))"
+    )
     # ⭐ means "the single acceptance point": roughly one per decision or per
     # step, so even a long document holds a handful.
     STARS_PER_FILE = 4
@@ -442,7 +444,9 @@ class EmphasisGuardTests(TestCase):
                 if self.BOLD_LINE.match(line):
                     problems.append(f"{path}:{number}  whole line in bold — make it a heading")
                 if self.WARN_ON_NOTE.search(line):
-                    problems.append(f"{path}:{number}  ⚠️ on a revision note — it is history, not a trap")
+                    problems.append(
+                        f"{path}:{number}  ⚠️ on a revision note — it is history, not a trap"
+                    )
         self.assertEqual(
             problems,
             [],

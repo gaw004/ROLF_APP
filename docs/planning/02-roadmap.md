@@ -1298,7 +1298,7 @@ class Assignment(TimeStampedModel):
         SUSPENDED = "suspended", "停职"
         # ⚠️ 绝不加 "ended" —— 结束只由 end_date 表达，加了就是记两处。
 
-    contact         = FK(Contact, CASCADE, related_name="assignments")
+    contact         = FK(Contact, PROTECT, related_name="assignments")   # 2026-07-30 从 CASCADE 改
     position        = FK(Position, PROTECT, related_name="assignments")
     employment_type = FK(EmploymentType, PROTECT, null=True, blank=True)
     status          = CharField(choices=Status, default=Status.ACTIVE)
@@ -1326,6 +1326,15 @@ class Assignment(TimeStampedModel):
 
 ⚠️ `position` 用 `PROTECT`。 写成 `CASCADE` 的话，删一个编制
 → **占过它的所有人的任职历史一起消失**。同 `Participation.contact` 的道理。
+
+⚠️ **`contact` 也用 `PROTECT`**（2026-07-30 从 `CASCADE` 改，代码和迁移已落地：
+`org/migrations/0003_alter_assignment_contact.py`）。
+原理由"人的档案删了，任职记录没有意义"**对调到 `MinistryRole.contact` 上同样通顺**，
+而那一格选的是 `PROTECT`。同一张表两个外键用互相矛盾的理由，说明其中一个是事后合理化的 ——
+这条判据当初翻的是 `MinistryRole.ministry`，这一格漏掉了。
+`Assignment` 挂着 simple-history、又是 R8 的唯一支撑，**只做过员工、没做过志愿者的人
+原来是删得掉的**（有 `Participation` 的人本来就被挡着），删掉就静默带走全部任职历史。
+停用走 `Contact.is_active`，不做软删除。
 
 ```python
 constraints = [
@@ -1377,6 +1386,7 @@ def test_position_cannot_report_to_itself(self)                  # CheckConstrai
 def test_a_reporting_cycle_is_rejected_by_clean(self)            # A→B→A，提示层
 def test_deleting_a_position_with_reports_is_blocked(self)       # PROTECT，不是 SET_NULL
 def test_deleting_a_position_with_assignments_is_blocked(self)   # 任职历史不跟着消失
+def test_deleting_a_contact_with_assignments_is_blocked(self)    # 另一头同理（2026-07-30 补）
 def test_a_reporting_line_can_cross_kinds(self)                  # 执行总监(employee) → 理事长(board)
 
 # —— build_org_tree()：第九轮修订的验收点 ——

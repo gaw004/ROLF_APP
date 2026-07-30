@@ -530,6 +530,18 @@ class AssignmentTests(TestCase):
         with self.assertRaises(ProtectedError), transaction.atomic():
             self.cook.delete()
 
+    def test_deleting_a_contact_with_assignments_is_blocked(self):
+        # PROTECT on the other end too. This one used to be CASCADE, on the
+        # reasoning "the file is gone, the tenure means nothing" — but that
+        # sentence reads just as well on MinistryRole.contact, and there we
+        # chose PROTECT because a grant has to leave a trace. Assignment
+        # carries simple-history and is the only support for R8, so the same
+        # answer holds: a person who only ever worked (never volunteered) was
+        # deletable, and deleting them took the employment history silently.
+        Assignment.objects.create(contact=self.person, position=self.cook)
+        with self.assertRaises(ProtectedError), transaction.atomic():
+            self.person.delete()
+
     def test_employment_type_on_a_volunteer_position_is_refused_by_clean(self):
         # Spans two tables (kind is on Position), so no CheckConstraint can see
         # it — a hint layer, and recorded as one. See goal.md D14.

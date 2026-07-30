@@ -44,6 +44,20 @@ def project_python_files(skip=()):
         yield relative, path.read_text(encoding="utf-8")
 
 
+def project_markdown_files():
+    """Every .md file we wrote, as (relative path, text) pairs.
+
+    Discovered by walking, not listed — a new document is covered the moment it
+    exists, which is the whole point of a guard.
+    """
+    root = Path(settings.BASE_DIR)
+    for path in sorted(root.rglob("*.md")):
+        relative = path.relative_to(root)
+        if SKIPPED_DIRS & set(relative.parts) or ".git" in relative.parts:
+            continue
+        yield relative, path.read_text(encoding="utf-8")
+
+
 LOOP_OPENER = re.compile(r"^\s*(async\s+for|for|while)\b")
 SCOPE_OPENER = re.compile(r"^\s*(async\s+def|def|class)\s+(\w+)")
 # A loop keyword anywhere on the line, which is how a comprehension iterates.
@@ -292,6 +306,100 @@ class OrgTreeGuardTests(TestCase):
             hits,
             [],
             "Walk the reporting chain via org.services.build_org_tree():\n" + "\n".join(hits),
+        )
+
+
+class MarkdownLinkGuardTests(TestCase):
+    """Lint-as-test: every link in every .md file resolves — file and anchor.
+
+    The planning documents are the memory of this project, and they are dense
+    with cross-references: a few hundred of them across goal.md, decisions/,
+    phase-b.md and the roadmaps. A broken one fails the way this project keeps
+    convicting: silently. Nothing errors, the reader just lands nowhere — and the
+    2026-07-30 split of goal.md into a hub plus one file per decision moved every
+    single target, so "check it by hand" stopped being an option.
+
+    Found four real breaks the day it was written, one of them minutes old.
+    """
+
+    # ``` or ~~~, possibly inside a blockquote. Headings inside a fence are code
+    # comments (`# settings/base.py`), not headings, and GitHub gives them no
+    # anchor — counting them would make this guard accept links that 404.
+    FENCE = re.compile(r"^\s*(?:>\s*)*(?:```|~~~)")
+    HEADING = re.compile(r"^(?:>\s*)*(#{1,6})\s+(.*?)\s*$")
+    # [text](target) and [text](target#anchor). Bare #anchor means this file.
+    LINK = re.compile(r"\]\(([^)\s]*?)(#[^)\s]*)?\)")
+    EXTERNAL = re.compile(r"^(https?:|mailto:|tel:|//)")
+
+    @staticmethod
+    def slug(heading):
+        """GitHub's anchor for a heading: strip markup, drop punctuation, hyphenate.
+
+        CJK survives because \\w is unicode-aware, which is what makes this work
+        on documents written in Chinese.
+        """
+        text = re.sub(r"[`*~]", "", heading)
+        text = re.sub(r"[^\w\s-]", "", text, flags=re.UNICODE)
+        return text.lower().replace(" ", "-")
+
+    @classmethod
+    def anchors(cls, text):
+        """Every anchor a document offers, duplicates suffixed the way GitHub does."""
+        found, seen = set(), {}
+        in_fence = False
+        for line in text.split("\n"):
+            if cls.FENCE.match(line):
+                in_fence = not in_fence
+                continue
+            if in_fence:
+                continue
+            match = cls.HEADING.match(line)
+            if not match:
+                continue
+            base = cls.slug(match.group(2))
+            count = seen.get(base, 0)
+            seen[base] = count + 1
+            found.add(base if count == 0 else f"{base}-{count}")
+        return found
+
+    def test_every_markdown_link_resolves(self):
+        root = Path(settings.BASE_DIR)
+        documents = dict(project_markdown_files())
+        anchors = {path: self.anchors(text) for path, text in documents.items()}
+
+        broken = []
+        for path, text in documents.items():
+            in_fence = False
+            for number, line in enumerate(text.split("\n"), 1):
+                if self.FENCE.match(line):
+                    in_fence = not in_fence
+                    continue
+                if in_fence:  # links inside code samples are illustrations
+                    continue
+                for target, anchor in self.LINK.findall(line):
+                    anchor = anchor.lstrip("#")
+                    if self.EXTERNAL.match(target):
+                        continue
+                    where = path
+                    if target:
+                        resolved = (root / path).parent / target
+                        if not resolved.exists():
+                            broken.append(f"{path}:{number}  no such file: {target}")
+                            continue
+                        where = resolved.resolve().relative_to(root.resolve())
+                    if not anchor:
+                        continue
+                    if where not in anchors:  # a real file, but not markdown
+                        continue
+                    if anchor not in anchors[where]:
+                        broken.append(f"{path}:{number}  no such heading: {target}#{anchor}")
+
+        self.assertEqual(
+            broken,
+            [],
+            f"{len(broken)} markdown link(s) point nowhere. Anchors follow the "
+            "heading text, so renaming a heading breaks every link to it:\n"
+            + "\n".join(broken),
         )
 
 

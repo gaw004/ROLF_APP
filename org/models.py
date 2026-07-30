@@ -15,8 +15,7 @@ from simple_history.models import HistoricalRecords
 from contact.models import Contact
 from core.constraints import ConstraintErrorFieldMixin
 from core.models import ImmutableCodeMixin, TimeStampedModel
-from core.querysets import DateRangeMixin, DateRangeQuerySet
-from core.timeutils import local_today
+from core.querysets import DateRangeMixin, DateRangeQuerySet, in_effect_on
 
 
 class Ministry(ImmutableCodeMixin, ConstraintErrorFieldMixin, TimeStampedModel):
@@ -106,26 +105,81 @@ class EmploymentType(ImmutableCodeMixin, ConstraintErrorFieldMixin, models.Model
         return self.name
 
 
+def _has_a_holder(on=None):
+    """EXISTS(somebody holds this post on `on`), correlated to the outer row.
+
+    EXISTS rather than the pk__in subquery this started as: Postgres can stop
+    at the first matching tenure instead of materialising every held position
+    id, it uses the index on Assignment.position, and it has none of NOT IN's
+    behaviour around nulls. Both are database-side; this one is the better plan.
+
+    active(), not serving() — somebody on leave still holds the post, so the
+    box is not open for applications.
+    """
+    return models.Exists(
+        Assignment.objects.active(on=on).filter(position=models.OuterRef("pk"))
+    )
+
+
 class PositionQuerySet(models.QuerySet):
-    def vacant(self, on=None):
-        """Posts that still exist but have nobody serving in them on `on`.
+    """Staffing questions, all of them answered by the database.
 
-        This query is the first reason the table was split out at all, so it
-        ships with it rather than "later".
+    The three states below partition the table — a post is vacant, occupied or
+    retired, never two of them and never none. That is the fix for a filter
+    that used to define "occupied" as "not vacant" and therefore swept every
+    retired post into it.
+    """
 
-        Three parts, none of them optional:
+    def with_headcounts(self, on=None):
+        """Adds holder_count / serving_count as real SQL columns.
 
-        1. is_active=True — a post that was abolished is not a vacancy, and
-           mixing the two turns the hiring list into fiction.
-        2. `on` is a parameter, like .active() — D16's second layer, and it
-           throws in "which posts were empty last June" for free.
-        3. active(), not serving(): somebody on leave still holds the post, so
-           the box is not open for applications.
+        An annotation, not a property, and the difference is the whole point:
+        a column can be sorted on, filtered on, paginated and serialised
+        straight into an API response, and it costs one query for any number
+        of rows. A property can do none of that and costs a query per row.
+        The front end that replaces the admin gets the count as an ordinary
+        field — nothing extra to write.
+
+        Two counts, because the project already distinguishes them:
+          holder_count  — who occupies the post (the roster; on leave counts)
+          serving_count — who is actually available today (the duty roster)
         """
-        on = on or local_today()
-        return self.filter(is_active=True).exclude(
-            pk__in=Assignment.objects.active(on=on).values("position_id")
+        held = in_effect_on(on, prefix="assignments__")
+        return self.annotate(
+            holder_count=models.Count("assignments", filter=held, distinct=True),
+            serving_count=models.Count(
+                "assignments",
+                filter=held & models.Q(assignments__status=Assignment.Status.ACTIVE),
+                distinct=True,
+            ),
         )
+
+    def vacant(self, on=None):
+        """Posts that still exist and have nobody in them on `on`.
+
+        The first reason this table was split out of Assignment, so it ships
+        with the table rather than "later": a vacancy is the absence of a row,
+        and absence is not something the Assignment table can be asked about.
+
+        is_active=True is not optional — an abolished post is not a vacancy,
+        and mixing the two turns the hiring list into fiction.
+        """
+        return self.filter(is_active=True).filter(~_has_a_holder(on))
+
+    def occupied(self, on=None):
+        """Posts that still exist and have somebody in them on `on`.
+
+        Deliberately NOT "everything that is not vacant". Defined that way, a
+        retired post — which is not a vacancy either — silently reports itself
+        as staffed, and the org chart claims people who left years ago.
+        """
+        return self.filter(is_active=True).filter(_has_a_holder(on))
+
+    def retired(self):
+        """Posts that have been abolished. The third state, and it has to be
+        visible: folded into either of the others it becomes a lie about the
+        organisation's shape."""
+        return self.filter(is_active=False)
 
 
 class Position(ImmutableCodeMixin, ConstraintErrorFieldMixin, TimeStampedModel):

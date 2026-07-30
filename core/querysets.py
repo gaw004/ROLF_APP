@@ -6,6 +6,28 @@ from django.db.models import Q
 from core.timeutils import local_today
 
 
+def in_effect_on(on=None, prefix=""):
+    """The "covers this day" predicate as a Q, so related tables can reuse it.
+
+    `prefix` walks a relation: in_effect_on(prefix="assignments__") is what
+    Position uses to count the people currently in a post, and what its
+    vacancy query is defined against. Without the prefix the expression would
+    have to be spelled out a second time inside the aggregate — and the second
+    copy is the one that quietly disagrees with the first.
+
+    `on` is resolved here, at call time. A default argument holding a date
+    would freeze at import and drift further off every day a worker stays up.
+    """
+    on = on or local_today()
+    start, end = f"{prefix}start_date", f"{prefix}end_date"
+    return (
+        # The start half is not optional: with only the end test, a row
+        # starting 2027-01-01 with no end date counts as in effect today.
+        (Q(**{f"{start}__isnull": True}) | Q(**{f"{start}__lte": on}))
+        & (Q(**{f"{end}__isnull": True}) | Q(**{f"{end}__gte": on}))
+    )
+
+
 class DateRangeQuerySet(models.QuerySet):
     """The "in effect on a given day" predicate, defined exactly once.
 
@@ -22,16 +44,10 @@ class DateRangeQuerySet(models.QuerySet):
 
     def active(self, on=None):
         """Rows whose date range covers `on` (default: today, foundation time)."""
-        # `on` has to be resolved at call time. Writing this as
-        # `def active(self, on=local_today())` freezes the date at import, which
-        # on a long-lived gunicorn worker drifts further off every day.
-        on = on or local_today()
-        return self.filter(
-            # The start_date half is not optional: with only the end_date test,
-            # a row starting 2027-01-01 with no end date counts as active today.
-            (Q(start_date__isnull=True) | Q(start_date__lte=on))
-            & (Q(end_date__isnull=True) | Q(end_date__gte=on))
-        )
+        # The predicate itself lives in in_effect_on() above, because Position
+        # needs the same one applied across a relation. One definition, two
+        # callers — not two definitions that agree today.
+        return self.filter(in_effect_on(on))
 
 
 class DateRangeMixin:

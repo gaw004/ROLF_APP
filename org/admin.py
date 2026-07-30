@@ -46,26 +46,35 @@ class EmploymentTypeAdmin(admin.ModelAdmin):
         return ["code"] if obj else []
 
 
-class VacantFilter(admin.SimpleListFilter):
-    """Posts that still exist and have nobody in them today.
+class StaffingFilter(admin.SimpleListFilter):
+    """Vacant / occupied / retired — three states, and the third is not optional.
 
-    A vacancy that nobody can see is the same as not having built this table,
-    which is why the filter ships alongside the query. Both branches are one
-    call to a QuerySet method — the 3 rules that make up "vacant" are written
-    once, on PositionQuerySet (D18).
+    A vacancy nobody can see is the same as not having built this table, which
+    is why the filter ships alongside the query.
+
+    ⚠️ "Occupied" used to be implemented as "everything that is not vacant",
+       which quietly swept up every retired post: an abolished post is not a
+       vacancy either, so the complement collected it and the list claimed the
+       post was staffed. Three states need three queries, not two and a
+       negation. Same shape as MinorFilter, for the same reason.
+
+    Every branch is one call to a QuerySet method — the rules live on
+    PositionQuerySet so the front end reuses them (D18).
     """
 
-    title = "空缺"
-    parameter_name = "vacant"
+    title = "在任情况"
+    parameter_name = "staffing"
 
     def lookups(self, request, model_admin):
-        return [("yes", "空缺"), ("no", "有人在任")]
+        return [("vacant", "空缺"), ("occupied", "有人在任"), ("retired", "已撤销")]
 
     def queryset(self, request, queryset):
-        if self.value() == "yes":
+        if self.value() == "vacant":
             return queryset.vacant()
-        if self.value() == "no":
-            return queryset.exclude(pk__in=queryset.model.objects.vacant())
+        if self.value() == "occupied":
+            return queryset.occupied()
+        if self.value() == "retired":
+            return queryset.retired()
         return queryset
 
 
@@ -82,7 +91,7 @@ class PositionAdmin(SimpleHistoryAdmin):
         "is_active",
         "reports_to",
     ]
-    list_filter = ["ministry", "kind", "is_leader", "is_active", VacantFilter]
+    list_filter = ["ministry", "kind", "is_leader", "is_active", StaffingFilter]
     # Needed by the autocomplete on Position.reports_to, and by the one on
     # Assignment.position.
     search_fields = ["name", "code"]
@@ -93,6 +102,40 @@ class PositionAdmin(SimpleHistoryAdmin):
 
     def get_readonly_fields(self, request, obj=None):
         return ["code"] if obj else []
+
+    def get_list_display(self, request):
+        """Appends the headcount column, counted by the database in one query.
+
+        Not a per-row obj.assignments.count(): that is a query per row, the
+        same N+1 the merge column on Contact had to be rescued from.
+
+        The counts arrive as a {pk: counts} map rather than as an annotation on
+        the changelist queryset, because annotating it would mean overriding
+        get_queryset, which B9 forbids and a grep guard enforces. The cost is
+        that this column cannot be sorted on in the admin — accepted knowingly:
+        the admin is scaffolding, and with_headcounts() hands the front end a
+        real sortable, filterable column.
+
+        Position is a table of a few dozen rows by design (it holds kinds of
+        post, not seats), so fetching all of it per page is not the problem it
+        would be on Contact.
+        """
+        if not hasattr(request, "_position_headcounts"):
+            request._position_headcounts = {
+                position.pk: (position.holder_count, position.serving_count)
+                for position in Position.objects.with_headcounts()
+            }
+        counts = request._position_headcounts
+
+        @admin.display(description="在任人数")
+        def headcount(obj):
+            holders, serving = counts.get(obj.pk, (0, 0))
+            if holders == 0:
+                return "—"
+            # Only worth splitting out when somebody is on leave or suspended.
+            return holders if holders == serving else f"{holders}（在岗 {serving}）"
+
+        return [*super().get_list_display(request), headcount]
 
 
 @admin.register(Assignment)

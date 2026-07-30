@@ -1,10 +1,18 @@
+import datetime
+from collections import defaultdict
+
 from django.core.exceptions import ValidationError
 from django.db import models
+from django.db.models import Value
+from django.db.models.functions import Coalesce, Greatest, Least, Lower, Trim
 from phonenumber_field.modelfields import PhoneNumberField
 from django_countries.fields import CountryField
 from simple_history.models import HistoricalRecords
 
-from core.models import TimeStampedModel
+from core.constraints import ConstraintErrorFieldMixin
+from core.models import ImmutableCodeMixin, TimeStampedModel
+from core.querysets import DateRangeMixin, DateRangeQuerySet
+from core.timeutils import local_today
 
 
 class Language(models.Model):
@@ -52,8 +60,111 @@ class Language(models.Model):
         return self.display_name
 
 
-class Contact(TimeStampedModel):
+class ContactQuerySet(models.QuerySet):
+    """Derived judgements about contacts, defined once (goal.md D18).
+
+    Every admin filter on Contact calls one of these and does no work of its
+    own — that is what keeps the logic alive when admin.py is eventually deleted.
+    """
+
+    # The age of majority, in one place. Changing it to 16 is a one-line edit
+    # here and nowhere else — which is the reason the filter is not allowed to
+    # do this arithmetic itself.
+    AGE_OF_MAJORITY = 18
+
+    @classmethod
+    def majority_threshold(cls, on=None):
+        """Born on or before this date ⇒ already an adult on `on`.
+
+        Subtracting years, not counting days — 18 × 365 is wrong four or five
+        times over that span, and wrong by a day never raises anything.
+
+        `on` is a parameter rather than an implicit call to local_today() for the
+        same reason .active() takes one (D16): it makes "who was still a minor
+        last March" free, and testing the boundary free with it.
+        """
+        on = on or local_today()
+        year = on.year - cls.AGE_OF_MAJORITY
+        try:
+            return on.replace(year=year)
+        except ValueError:
+            # 29 February, and the year we land in is not a leap year. Step back
+            # to the 28th: somebody born on 1 March that year is still 17 today
+            # and must stay on the minor side of the line.
+            return on.replace(year=year, day=28)
+
+    def minors(self, on=None):
+        return self.filter(birth_date__gt=self.majority_threshold(on))
+
+    def adults(self, on=None):
+        return self.filter(birth_date__lte=self.majority_threshold(on))
+
+    def birth_date_unknown(self):
+        """Unknown is its own answer, never folded into "adult".
+
+        A minor with no birth date on file would otherwise disappear silently
+        from the list of people whose parents need calling — the one mistake
+        this feature cannot afford.
+        """
+        return self.filter(birth_date__isnull=True)
+
+    def possible_duplicates(self):
+        """Contacts sharing a normalised name AND a phone number with another row.
+
+        The same rule as Contact.find_exact_duplicates(), asked of the whole
+        table at once: that one answers "is this new person already here?", this
+        one answers "what is already sitting in here twice?".
+        """
+        keyed = self.exclude(phone="").annotate(
+            key_last=Lower(Trim("legal_last_name")),
+            key_first=Lower(Trim("legal_first_name")),
+        )
+        duplicated_keys = (
+            keyed.values("key_last", "key_first", "phone")
+            .annotate(row_count=models.Count("id"))
+            .filter(row_count__gt=1)
+        )
+        matches = models.Q(pk__in=[])
+        for key in duplicated_keys:
+            matches |= models.Q(
+                key_last=key["key_last"],
+                key_first=key["key_first"],
+                phone=key["phone"],
+            )
+        return keyed.filter(matches)
+
+    def duplicate_partners(self):
+        """{pk: the pk of another contact sharing this one's name and phone}.
+
+        One lookup for a whole page. The admin's merge column used to call
+        find_exact_duplicates() per row, which is a query per row on the most
+        visited page in the project — the same N+1 that list_select_related is
+        spelled out to avoid two files away.
+
+        Pairing lives on the queryset for the reason the judgement does (D18):
+        admin.py renders this, it does not work it out. It also means the merge
+        column and the "疑似重复" filter now answer from one definition instead
+        of two that could disagree.
+        """
+        grouped = defaultdict(list)
+        for row in self.possible_duplicates().values(
+                "pk", "key_last", "key_first", "phone"):
+            grouped[(row["key_last"], row["key_first"], row["phone"])].append(row["pk"])
+
+        partners = {}
+        for pks in grouped.values():
+            # Each row points at the next in its group and the last back at the
+            # first, so every side of a duplicate offers a merge and none is
+            # left without a partner.
+            for index, pk in enumerate(pks):
+                partners[pk] = pks[(index + 1) % len(pks)]
+        return partners
+
+
+class Contact(ConstraintErrorFieldMixin, TimeStampedModel):
     """A person OR an organization. contact_type distinguishes them."""
+
+    objects = models.Manager.from_queryset(ContactQuerySet)()
 
     # --- Type: individual vs organization (the CiviCRM approach) ---
     class ContactType(models.TextChoices):
@@ -85,7 +196,8 @@ class Contact(TimeStampedModel):
     # --- Contact info ---
     email = models.EmailField(blank=True, db_index=True)
     # Stores in E.164 international format (+1..., +44...); region lets users type local US numbers.
-    phone = PhoneNumberField(blank=True, region="US")
+    # Indexed because find_exact_duplicates() filters on it first (B4.3).
+    phone = PhoneNumberField(blank=True, region="US", db_index=True)
 
     # --- Demographics ---
     class Gender(models.TextChoices):
@@ -146,46 +258,119 @@ class Contact(TimeStampedModel):
     class Meta:
         ordering = ["legal_last_name", "legal_first_name"]
         constraints = [
-            # ⚠️ PAIRED WITH Contact.clean() — see goal.md D14.
-            # This constraint is what actually enforces the rule: it holds for
-            # every write path, including objects.create(), bulk_create() and
-            # psql. clean() states the same rule again purely so the admin can
-            # attach the error to the offending field. CHANGE ONE, CHANGE BOTH.
+            # The one and only statement of these rules (goal.md D9 / D14). They
+            # hold for every write path — objects.create(), bulk_create(),
+            # queryset.update(), psql. Do NOT restate them in clean(): the admin
+            # gets field-level errors from violation_error_code below, via
+            # core.constraints.CONSTRAINT_FIELD.
+            #
+            # ⚠️ THREE constraints, not the one this used to be. A single
+            # constraint said "an individual needs a last name OR an organization
+            # needs a name", which is two rules with two different offending
+            # fields — and a code maps to exactly one field, so the organization
+            # case landed on legal_last_name. One constraint per rule is what
+            # makes the mapping possible at all. The third one preserves what the
+            # old OR-form enforced by accident: an unknown contact_type failed it
+            # too, and splitting would have silently dropped that.
             #
             # The values have to be written out as literals: a nested class body
             # cannot see the enclosing class's namespace, so ContactType.INDIVIDUAL
             # here would raise NameError. Keep them in step with ContactType above.
             models.CheckConstraint(
                 condition=(
-                    (models.Q(contact_type="individual") & ~models.Q(legal_last_name=""))
-                    | (models.Q(contact_type="organization") & ~models.Q(organization_name=""))
+                    ~models.Q(contact_type="individual") | ~models.Q(legal_last_name="")
                 ),
-                name="contact_name_matches_type",
-                violation_error_message=(
-                    "An individual needs a legal last name; "
-                    "an organization needs an organization name."
+                name="contact_individual_has_a_last_name",
+                violation_error_message="An individual needs a legal last name.",
+                violation_error_code="individual_needs_last_name",
+            ),
+            models.CheckConstraint(
+                condition=(
+                    ~models.Q(contact_type="organization") | ~models.Q(organization_name="")
                 ),
+                name="contact_organization_has_a_name",
+                violation_error_message="An organization needs an organization name.",
+                violation_error_code="organization_needs_name",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(contact_type__in=["individual", "organization"]),
+                name="contact_type_is_known",
+                violation_error_message="Unknown contact type.",
+                violation_error_code="contact_type_unknown",
             ),
         ]
 
-    def clean(self):
-        """Require the name that matches the contact type.
+    @property
+    def is_minor(self):
+        """True / False / None (birth date unknown) — three states, not two.
 
-        ⚠️ PAIRED WITH the `contact_name_matches_type` constraint in Meta above
-        — see goal.md D14. The constraint is the enforcement; this method only
-        exists to point at the field that is wrong. CHANGE ONE, CHANGE BOTH.
+        birth_date is nullable, and folding unknown into False would quietly
+        drop minors with no date on file from the parent-notification list.
+
+        Never store an age: it goes stale, and nothing tells you it has.
         """
-        super().clean()
-        if self.contact_type == self.ContactType.ORGANIZATION:
-            if not self.organization_name:
-                raise ValidationError({
-                    "organization_name": "An organization needs an organization name.",
-                })
-        elif self.contact_type == self.ContactType.INDIVIDUAL:
-            if not self.legal_last_name:
-                raise ValidationError({
-                    "legal_last_name": "An individual needs a legal last name.",
-                })
+        if self.birth_date is None:
+            return None
+        return self.birth_date > ContactQuerySet.majority_threshold()
+
+    @staticmethod
+    def normalise_name(value):
+        """Collapse whitespace and case, so " Wang  Qiang " == "wang qiang"."""
+        return " ".join((value or "").split()).casefold()
+
+    @classmethod
+    def find_exact_duplicates(cls, *, last_name, first_name, phone, exclude_pk=None):
+        """Contacts with the same normalised name AND the same phone number.
+
+        One rule, one implementation — the form hint, the admin filter and the
+        management command all call this.
+
+        Phone first, because it is stored in E.164 (already normalised) and
+        indexed; the handful of rows left are then compared on name in Python,
+        which is cheaper than carrying a redundant normalised-name column.
+
+        ⚠️ No phone similarity, ever. These are E.164 strings: +14085550102 and
+           +14085550103 are 92% alike and belong to two unrelated people. A
+           number has no notion of "close". The formatting differences that do
+           matter ((408) 555-0102) were normalised away on the way in.
+
+        The two cases it misses are exactly the two it should: same number,
+        different name (a family sharing a line) and same name, different number
+        (a genuine namesake).
+
+        Requiring both halves also means the hint never reveals anything the
+        person has not already typed — which is why there is no name-only
+        autocomplete anywhere near this.
+        """
+        if not phone:
+            return cls.objects.none()
+        candidates = cls.objects.filter(phone=phone)
+        if exclude_pk:
+            candidates = candidates.exclude(pk=exclude_pk)
+        target = (cls.normalise_name(last_name), cls.normalise_name(first_name))
+        matching = [
+            contact.pk for contact in candidates
+            if (cls.normalise_name(contact.legal_last_name),
+                cls.normalise_name(contact.legal_first_name)) == target
+        ]
+        return cls.objects.filter(pk__in=matching)
+
+    @classmethod
+    def find_same_name(cls, *, last_name, first_name, exclude_pk=None):
+        """Contacts with the same name, whatever their phone number.
+
+        A weaker signal on purpose: this one only ever produces a warning. 王强
+        / 李明 / 陈伟 sharing a name is routine in the population this foundation
+        serves, and a hard block firing twenty times a day trains people to tick
+        the box on sight — the block stops working and costs two extra clicks.
+        """
+        last_name = " ".join((last_name or "").split())
+        first_name = " ".join((first_name or "").split())
+        if not last_name and not first_name:
+            return cls.objects.none()
+        found = cls.objects.filter(
+            legal_last_name__iexact=last_name, legal_first_name__iexact=first_name)
+        return found.exclude(pk=exclude_pk) if exclude_pk else found
 
     def save(self, *args, **kwargs):
         """Blank out the name fields that don't apply to this contact type.
@@ -200,26 +385,150 @@ class Contact(TimeStampedModel):
         super().save(*args, **kwargs)
 
     def __str__(self):
+        """Name plus something that tells two people of the same name apart.
+
+        Two contacts both called 王强 used to stringify identically, and every
+        autocomplete in the project is built out of this string: two identical
+        options in a dropdown, picking the wrong one raises nothing. That is a
+        silent data error — the relationship lands on the wrong person.
+
+        Duplicate names are NOT forbidden by a constraint: they are a legitimate
+        fact and this domain has no reliable natural key (an email cannot be
+        unique — a family shares one). Disambiguate in the display instead.
+
+        ⚠️ Cost, stated rather than hidden: emails and phone numbers now appear
+           in dropdowns and log entries. Acceptable for a small foundation, but
+           it is a real disclosure, not a free win.
+        """
         if self.contact_type == self.ContactType.ORGANIZATION:
-            return self.organization_name or "(unnamed organization)"
-        full = f"{self.legal_first_name} {self.legal_last_name}".strip()
-        return self.preferred_name or full or self.email or f"Contact #{self.pk}"
+            base = self.organization_name or "(unnamed organization)"
+        else:
+            full = f"{self.legal_first_name} {self.legal_last_name}".strip()
+            base = self.preferred_name or full or "(unnamed contact)"
+        # The organization branch gets the same treatment: two chapters of one
+        # charity are as easy to confuse as two people.
+        if self.email:
+            return f"{base} ({self.email})"
+        if self.phone:
+            return f"{base} ({self.phone})"
+        return f"{base} #{self.pk}" if self.pk else base
 
 
-class RelationshipType(models.Model):
-    """A dictionary of relationship kinds: 'volunteer at', 'manages', 'parent of'."""
+class RelationshipType(ImmutableCodeMixin, ConstraintErrorFieldMixin, models.Model):
+    """A dictionary of relationship kinds: 'volunteer at', 'parent of', 'spouse of'.
 
-    # Label as seen from A -> B, e.g. "manages"
+    Note 'manages' / 'managed by' are no longer used for the org chart — reporting
+    lines hang off Position.reports_to (goal.md D6 / D11).
+    """
+
+    # Code is what the code matches on, forever. Display names are editable in the
+    # admin, which means filter(name_a_to_b="parent of") stops finding anything the
+    # day somebody renames one — silently, with no error. See goal.md D5 / D6.
+    code = models.SlugField(
+        max_length=50,
+        help_text="Stable identifier used by code. Lowercase, cannot be changed later.",
+    )
+
+    # Label as seen from A -> B, e.g. "parent of"
     name_a_to_b = models.CharField(max_length=100)
-    # Reverse label B -> A, e.g. "managed by". Optional but useful for display.
+    # Reverse label B -> A, e.g. "child of". Empty for symmetric types.
     name_b_to_a = models.CharField(max_length=100, blank=True)
     description = models.CharField(max_length=255, blank=True)
+
+    # Marks 'spouse of' / 'sibling of' explicitly rather than inferring symmetry
+    # from an empty name_b_to_a: whoever enters the type may well type "spouse of"
+    # into both boxes, and then the inference is simply wrong. See goal.md D15.
+    is_symmetric = models.BooleanField(
+        default=False,
+        help_text="The relationship reads the same in both directions (spouse, sibling).",
+    )
+
+    # Emergency contacts reuse this vocabulary (goal.md D6). This boolean keeps
+    # 'employee of' and friends out of that dropdown via limit_choices_to — the
+    # same trick Contact.preferred_language already uses for living languages.
+    usable_as_emergency_contact = models.BooleanField(
+        default=False,
+        help_text="Offer this type when recording an emergency contact.",
+    )
+
+    class Meta:
+        ordering = ["name_a_to_b"]
+        constraints = [
+            # Lower(): a plain UniqueConstraint would happily take "Parent of"
+            # alongside "parent of", which also contradicts the case-insensitive
+            # comparison clean() does below.
+            # Trim() : relying on save() to strip means bulk_create can still
+            #          insert " parent of". See goal.md D9「归一化通则」.
+            models.UniqueConstraint(
+                Lower(Trim("name_a_to_b")),
+                name="relationshiptype_name_a_to_b_ci_unique",
+                violation_error_message="A relationship type with this name already exists.",
+                violation_error_code="reltype_name_taken",
+            ),
+            # Lower("code") rather than unique=True on the field, for the same
+            # reason: save() lowercases, and bulk_create does not call save(), so
+            # Food_Pantry and food_pantry would both go in.
+            models.UniqueConstraint(
+                Lower("code"),
+                name="relationshiptype_code_ci_unique",
+                violation_error_message="A relationship type with this code already exists.",
+                violation_error_code="reltype_code_taken",
+            ),
+        ]
+
+    def save(self, *args, **kwargs):
+        # None of this carries correctness any more — the expression constraints
+        # above do. It is here so the stored values are clean and the admin
+        # behaves consistently. See goal.md D9「归一化通则」.
+        # (`code` itself is lowercased by ImmutableCodeMixin.save().)
+        self.name_a_to_b = " ".join(self.name_a_to_b.split())
+        self.name_b_to_a = " ".join(self.name_b_to_a.split())
+        super().save(*args, **kwargs)
+
+    def clean(self):
+        """The two rules no constraint can express, because both look at other rows.
+
+        ⚠️ This is the form layer's only interception for these two, not a
+        presentation hint — bulk_create walks straight past it. A known and
+        stated imperfection, see goal.md D14.
+
+        1. Gap 1: a new type's forward name collides with an existing type's
+           reverse name. The root cause is that the reverse type row should never
+           exist at all — "child of" is already the name_b_to_a of "parent of".
+           No reverse type, no reverse relationship rows: the defence belongs at
+           the type level, not on every relationship.
+        2. code is immutable once created — the shared rule, borrowed from
+           ImmutableCodeMixin so Ministry / EmploymentType / Position say it
+           the same way.
+        """
+        super().clean()
+        errors = {}
+
+        forward = " ".join((self.name_a_to_b or "").split()).casefold()
+        if forward:
+            clash = (
+                RelationshipType.objects.exclude(pk=self.pk)
+                .filter(name_b_to_a__iexact=forward)
+                .first()
+            )
+            if clash:
+                errors["name_a_to_b"] = (
+                    f'"{self.name_a_to_b}" is already the reverse label of '
+                    f'"{clash.name_a_to_b}". Use that type instead of adding its mirror.'
+                )
+
+        code_error = self.code_change_error()
+        if code_error:
+            errors["code"] = code_error
+
+        if errors:
+            raise ValidationError(errors)
 
     def __str__(self):
         return self.name_a_to_b
 
 
-class Relationship(TimeStampedModel):
+class Relationship(ConstraintErrorFieldMixin, DateRangeMixin, TimeStampedModel):
     """Connects two contacts with a typed, dated relationship.
 
     Example rows:
@@ -246,32 +555,53 @@ class Relationship(TimeStampedModel):
 
     start_date = models.DateField(null=True, blank=True)
     end_date = models.DateField(null=True, blank=True)
-    is_active = models.BooleanField(default=True, db_index=True)
+    # No is_active: it and end_date were the same fact recorded twice, and the
+    # pair could contradict each other (is_active=True with end_date in 2020).
+    # Whether a relationship is in effect is derived — see .active() below.
     # created_at / updated_at come from TimeStampedModel
+
+    objects = models.Manager.from_queryset(DateRangeQuerySet)()
 
     class Meta:
         indexes = [
             models.Index(fields=["contact_a", "relationship_type"]),
             models.Index(fields=["contact_b", "relationship_type"]),
         ]
-        # ⚠️ ALL THREE ARE PAIRED WITH Relationship.clean() — see goal.md D14.
-        # These constraints are the enforcement; clean() restates them only to
-        # attach errors to the right field in the admin. CHANGE ONE, CHANGE BOTH.
+        # These three constraints are the only statement of their rules
+        # (goal.md D14). Nothing restates them in clean(); the admin gets
+        # field-level errors from violation_error_code, via
+        # core.constraints.CONSTRAINT_FIELD.
         constraints = [
             models.CheckConstraint(
                 condition=~models.Q(contact_a=models.F("contact_b")),
                 name="relationship_no_self_reference",
                 violation_error_message="A contact cannot be related to themselves.",
+                violation_error_code="relationship_self_reference",
             ),
+            # Replaces A7's (contact_a, contact_b, type, start_date) — not
+            # alongside it. The unordered version is strictly stronger: it covers
+            # every case the old one did, plus the mirrored row A7 could not see
+            # ((王强,李梅,spouse) and (李梅,王强,spouse) are different column
+            # values, so the old constraint stayed quiet).
+            #
+            # No condition on it: once the mirror *type* is impossible (gap 1,
+            # RelationshipType.clean()), one pair holding one type in two
+            # directions is wrong for every type, not just symmetric ones —
+            # (小明, 王强, parent of) says 小明 is the parent, and the two cannot
+            # both be true.
+            #
+            # Coalesce rather than nulls_distinct=False: whether an expression
+            # UniqueConstraint can carry nulls_distinct is untested, and
+            # date.min is exactly equivalent — two rows with no start date still
+            # collide — without depending on that unknown.
             models.UniqueConstraint(
-                fields=["contact_a", "contact_b", "relationship_type", "start_date"],
-                name="relationship_unique_per_type_and_start",
-                # Without this, Postgres treats NULL != NULL and the same
-                # relationship with no start date could be stored any number of
-                # times — which is the most likely duplicate, not the rarest.
-                # Needs PG 15+; we are on 18.
-                nulls_distinct=False,
+                Least("contact_a", "contact_b"),
+                Greatest("contact_a", "contact_b"),
+                "relationship_type",
+                Coalesce("start_date", Value(datetime.date.min)),
+                name="relationship_unique_unordered_pair",
                 violation_error_message="This relationship has already been recorded.",
+                violation_error_code="relationship_already_recorded",
             ),
             models.CheckConstraint(
                 condition=(
@@ -281,32 +611,100 @@ class Relationship(TimeStampedModel):
                 ),
                 name="relationship_end_date_not_before_start_date",
                 violation_error_message="The end date cannot be before the start date.",
+                violation_error_code="relationship_end_before_start",
             ),
         ]
 
-    def clean(self):
-        """Restate the Meta constraints as field-level errors for the admin.
+    def save(self, *args, **kwargs):
+        # Symmetric types (spouse, sibling) always store the lower id as
+        # contact_a, so the row has one settled reading.
+        #
+        # ⚠️ Cosmetic only — duplicates are refused by
+        #    relationship_unique_unordered_pair above, which bulk_create cannot
+        #    dodge. And asymmetric types must never be swapped: their direction
+        #    carries the meaning, so swapping reverses the sentence.
+        if self.relationship_type_id and self.relationship_type.is_symmetric:
+            if (self.contact_a_id and self.contact_b_id
+                    and self.contact_a_id > self.contact_b_id):
+                self.contact_a_id, self.contact_b_id = self.contact_b_id, self.contact_a_id
+        super().save(*args, **kwargs)
 
-        ⚠️ PAIRED WITH the constraints in Meta above — see goal.md D14. The
-        database is what enforces these; this method only decides which field
-        turns red. CHANGE ONE, CHANGE BOTH.
+    def label_from(self, side):
+        """How this relationship reads from one side: 'parent of' / 'child of'.
 
-        The duplicate rule is deliberately not repeated here: it has no single
-        offending field to point at, and Django's own constraint validation
-        already reports it. See the constraint named
-        `relationship_unique_per_type_and_start`.
+        Symmetric types fall back to the forward label, because their reverse
+        one is empty by design — 'spouse of' backwards is still 'spouse of'.
         """
-        super().clean()
-        # relationship_no_self_reference
-        if self.contact_a_id and self.contact_a_id == self.contact_b_id:
-            raise ValidationError({
-                "contact_b": "A contact cannot be related to themselves.",
-            })
-        # relationship_end_date_not_before_start_date
-        if self.start_date and self.end_date and self.end_date < self.start_date:
-            raise ValidationError({
-                "end_date": "The end date cannot be before the start date.",
-            })
+        if side == "contact_a" or self.relationship_type.is_symmetric:
+            return self.relationship_type.name_a_to_b
+        return self.relationship_type.name_b_to_a or self.relationship_type.name_a_to_b
 
     def __str__(self):
         return f"{self.contact_a} — {self.relationship_type} → {self.contact_b}"
+
+
+class EmergencyContact(ConstraintErrorFieldMixin, TimeStampedModel):
+    """Somebody to call about `person`. Name and phone are text, deliberately.
+
+    An emergency contact may be a neighbour or a flatmate — somebody who never
+    interacts with the foundation at all. Giving them a Contact row would put
+    them in the table every list, export, mailing and statistic starts from, and
+    then a single Contact.objects.filter(...) that forgets to exclude them mails
+    the volunteer newsletter to a few hundred third parties. That is a privacy
+    incident, not a wrong number. See goal.md D15「载体的第四条判据」.
+
+    The costs are known and accepted, not overlooked:
+      · 王秀英 with three children volunteering is three rows, three copies of
+        her phone number, and nothing linking them;
+      · a fourth copy appears if she volunteers herself;
+      · "who lists 王秀英 as their emergency contact" cannot be answered.
+
+    ⚠️ Do NOT "tidy" name/phone into a FK to Contact. That is the migration this
+       project marked as the painful direction, and it walks the ghost records
+       straight back into Contact. See goal.md D15 and the deferral list.
+    """
+
+    person = models.ForeignKey(
+        Contact, on_delete=models.CASCADE, related_name="emergency_contacts",
+    )
+    # All three are required. An emergency contact with no phone number is
+    # pointless, and one with no relationship does not say who they are.
+    name = models.CharField(max_length=200)
+    phone = PhoneNumberField(region="US")
+    relationship_type = models.ForeignKey(
+        RelationshipType,
+        on_delete=models.PROTECT,
+        related_name="+",
+        limit_choices_to={"usable_as_emergency_contact": True},
+        # Spelling the direction out is not optional: leave it implicit and it
+        # gets entered backwards. a = the emergency contact, b = this person.
+        help_text="读作「紧急联系人 是 本人 的 ___」。"
+                  "例：小明名下填「王秀英」+「母亲」= 王秀英是小明的母亲。",
+    )
+
+    class Meta:
+        # No "one per person" rule. The table supports several by nature; the
+        # foundation happens to need one today. The old self-FK design capped it
+        # at one as a side effect of its shape, which was never the requirement.
+        ordering = ["person", "name"]
+        constraints = [
+            # Stops the same emergency contact being entered twice on one person.
+            # Normalisation goes in the expression, not save() — bulk_create
+            # walks past save() (goal.md D9「归一化通则」).
+            models.UniqueConstraint(
+                "person",
+                Lower(Trim("name")),
+                "phone",
+                name="emergencycontact_unique_per_person",
+                violation_error_message="This emergency contact is already recorded for them.",
+                violation_error_code="emergency_contact_duplicate",
+            ),
+        ]
+
+    def save(self, *args, **kwargs):
+        # Cosmetic, as everywhere else: the constraint above owns uniqueness.
+        self.name = " ".join(self.name.split())
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"{self.name}（{self.relationship_type.name_a_to_b}）"

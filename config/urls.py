@@ -15,8 +15,11 @@ Including another URLconf
     2. Add a URL to urlpatterns:  path('blog/', include('blog.urls'))
 """
 from django.contrib import admin
-from django.urls import path
+from django.urls import include, path
 
 urlpatterns = [
     path('admin/', admin.site.urls),
+    # Our own pages. Two of them in Phase B (relationship entry, contact merge),
+    # both staff-only, both pushed out of the admin by D18's shape trigger.
+    path('', include('contact.urls')),
 ]

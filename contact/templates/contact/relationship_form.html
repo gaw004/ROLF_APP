@@ -1,0 +1,31 @@
+{% comment %}
+Deliberately plain, and deliberately NOT extending any admin template.
+
+Kept in the app's own templates/ directory: settings has DIRS=[] with
+APP_DIRS=True, so app templates are found with no configuration change at all.
+
+Phase C replaces this file with an HTMX fragment; the view, the form and
+services.orient() carry over untouched.
+{% endcomment %}
+<!doctype html>
+<html lang="zh">
+<head>
+  <meta charset="utf-8">
+  <title>为 {{ subject }} 添加关系</title>
+</head>
+<body>
+  <h1>为 {{ subject }} 添加关系</h1>
+
+  <p>
+    选一句读得通的话。填的人不需要知道数据库里谁是 A 谁是 B ——
+    两边的页面都能录，方向不会反。
+  </p>
+
+  <form method="post">
+    {% csrf_token %}
+    {{ form.as_p }}
+    <button type="submit">保存</button>
+    <a href="{% url 'admin:contact_contact_change' subject.pk %}">取消</a>
+  </form>
+</body>
+</html>

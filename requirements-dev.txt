@@ -1,0 +1,6 @@
+-r requirements.txt
+
+# 开发依赖，不进生产。
+# ruff 的 DTZ 规则组（flake8-datetimez）就是为「时区错一天」这类问题存在的，
+# 见 goal.md D16 第三层。配置在 pyproject.toml。
+ruff==0.16.0

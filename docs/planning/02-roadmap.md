@@ -494,7 +494,8 @@ def get_readonly_fields(self, request, obj=None):
 
 `goal.md` 写的是三步迁移（加可空 → 回填 → 改 unique/non-null）。
 **那是表里有数据时的必要手续，而本机 `RelationshipType` 是 0 行**（B0 实测），
-所以一步加 `SlugField(unique=True)` 即可。
+所以一个迁移就够：加 `SlugField(max_length=50)`（**字段上不写 `unique=True`**）
+＋上面那条 `UniqueConstraint(Lower("code"))`。
 
 ```bash
 python manage.py makemigrations contact
@@ -678,6 +679,7 @@ models.UniqueConstraint(
     Coalesce("start_date", Value(date.min)),
     name="relationship_unique_unordered_pair",
     violation_error_message="这两个人之间已经有一条同类型的关系了。",
+    violation_error_code="relationship_pair_taken",   # → CONSTRAINT_FIELD 映射到 contact_b
 )
 ```
 
@@ -1122,7 +1124,9 @@ class Position(TimeStampedModel):
        跨行环路数据库拦不住，环的兜底和 N+1 的规避都在那个函数里，
        全项目只有它一处遍历汇报链（core/tests.py 有 grep 守卫盯着）。
     """
-    code       = SlugField(unique=True)                # 代码只认它，不认 name
+    code       = SlugField()                           # 代码只认它，不认 name
+                                                       # ⚠️ 不写 unique=True —— 唯一性走下面的
+                                                       #    UniqueConstraint(Lower("code"))
     name       = CharField()                           # "项目总监"，save() 归一化空白
     kind       = CharField(choices=Kind)               # employee / volunteer / board
     ministry   = FK(Ministry, PROTECT, null=True, blank=True, related_name="positions")
@@ -1607,8 +1611,12 @@ volunteer/management/commands/seed_demo.py   （或放 core，随意，但只此
 - [ ] `python manage.py check` **零警告**
 - [ ] `python manage.py makemigrations --check --dry-run` 报 "No changes detected"
 - [ ] `ruff check .` 干净
-- [ ] 两条守卫测试真的会红：临时写一句 `date.today()` 和一句
-      `Contact.objects.all()` 当人员列表，跑测试确认变红，再删掉
+- [ ] **时间口径守卫真的会红**：临时写一句 `date.today()`、再临时写一句
+      `timezone.now().date()`，分别跑测试确认变红，再删掉。
+      **两句都要试** —— `ruff` 的 `DTZ` 只抓得到前者（后者是 tz-aware 的，linter 认为合法），
+      后者全靠这条 grep 守卫。
+      ⚠️ 原来这里写的是「`Contact.objects.all()` 当人员列表」——
+      那是第六轮作废的 `Contact.objects.people()` 守卫，**已经没有这条测试了**
 - [ ] **分层守卫真的会红**：临时在 `contact/forms.py` 里写一句
       `from django.contrib import admin`，跑测试确认变红，再删掉
 - [ ] **汇报链遍历守卫真的会红**：临时在 `org/admin.py` 里写一个
@@ -1744,4 +1752,334 @@ URL、第一个视图和第一个模板，出问题时好回退。
 "⚠️ 计划外：admin 路径根本不经过 middleware" —— **写下来的坑比顺利完成的步骤值钱。**
 这一段留白，遇到就往下写：
 
-- （待填）
+### ⚠️ 计划外（B1）：一条约束只能说一件事，否则映射不出去
+
+**症状**：B1 按 D14 收编 Phase A 的代码 —— 约束加 `violation_error_code`、
+删掉 `Contact.clean()` 里重写规则的那段 —— 之后
+`test_organization_requires_organization_name` 变红：机构漏填机构名时，
+错误挂到了 **`legal_last_name`** 上。
+
+**根因**：`contact_name_matches_type` 一条约束表达了**两条规则**
+（个人要姓氏 **或** 机构要机构名），而 `CONSTRAINT_FIELD` 是
+「一个 `code` → 一个字段」。两条规则的出错字段不同，一个映射写不出来。
+旧 D14 的两层写法察觉不到这件事 —— `clean()` 里是两个 `if`，各挂各的字段，
+一条约束配两个分支从来没人觉得别扭。
+
+**修法**：拆成两条约束，各说一件事、各有自己的 `code` 和字段。
+**外加第三条 `contact_type_is_known`** —— 原来那条 OR 形式**顺带**还管住了
+`contact_type` 的取值（第三种类型也不满足它），不显式写出来，拆完就静默丢了。
+`Contact` 0 行，迁移免费。
+
+**一般化的判据（新的，记进这里）**：
+> **一条约束只能说一件事。** 判定方法：这条约束被违反时，
+> 你能不能说出**唯一一个**该变红的字段？说不出来，就是两条规则挤在一条里，
+> 拆开 —— 不是给映射表加特例。
+
+**连带**：`goal.md` D4 那句"真要加 Household 的话，除了 `TextChoices`
+还要改 D9 那条 `CheckConstraint` —— **只有这一处**"现在要读成**两处**
+（`contact_type_is_known` 的白名单 + 新类型自己的姓名规则约束）。
+
+### ⚠️ 计划外（B3.1b）：`ModelForm` 会把不在表单上的字段的约束**整条跳过**
+
+**症状**：`RelationshipForm` 按方案 b 写完，`contact_a` / `contact_b` 刻意不放在表单上
+（那正是这个设计的全部意义 —— 录入的人不该看见 A/B）。结果是：
+录一条重复关系，表单**校验通过**，然后在 `save()` 时炸成 `IntegrityError` 500。
+
+**根因**：`ModelForm._post_clean()` 会把「不在表单上的字段」放进 `exclude`，
+而 `Model.validate_constraints(exclude=...)` **跳过任何提到被排除字段的约束**。
+于是 `relationship_no_self_reference` 和 `relationship_unique_unordered_pair`
+在表单层根本没跑过。
+
+> 这就是 D14 那个「`CheckConstraint.validate()` 会静默跳过」的坑，
+> **只不过是从另一头撞上的** —— D14 提醒的是表达式约束在 `validate()` 里出错被吞掉，
+> 这里是约束压根没被调用。**症状一模一样：表单绿灯，写库时 500。**
+
+**修法**：`RelationshipForm._check_constraints()` 里显式调一次
+`self.instance.validate_constraints()`，把错误 `add_error()` 到表单字段上。
+另外 `CONSTRAINT_FIELD` 把这两条约束映射到 `contact_b`，
+而表单上没有 `contact_b` —— 直接 `add_error("contact_b", ...)` 会抛 `ValueError`
+（`ModelForm._update_errors` 不认识的字段就报错，`core/constraints.py` 的
+docstring 已经预警过）。所以表单里加一张 `FIELD_ALIASES`
+把 `contact_a` / `contact_b` 都落到用户看得见的 `other` 上。
+
+**一般化（新的，记进这里）**：
+> **凡是「表单字段 ≠ 模型字段」的表单，都要问一句：
+> 这条约束在表单层真的跑了吗？** 判定方法和 D9 那句同构 ——
+> **提交一条违规数据，看到的是表单错误还是 500？**
+> B4.3b 的 `ContactForm`、B4.4 的合并页、以后每一个自定义表单都要过这一问。
+
+### ⚠️ 计划外（B4.4）：捕获 `IntegrityError` 之后，手写 savepoint 回滚是不行的
+
+**症状**：`merge_contacts()` 按 roadmap 写成「每次 `update()` 放进一个 savepoint，
+捕获 `IntegrityError` 就回滚」，唯一约束冲突那条测试报的却不是 `MergeConflict`，
+而是 `TransactionManagementError: An error occurred in the current transaction.`
+
+**根因**：Postgres 一旦报错，整个事务进入 **aborted** 状态 ——
+在回滚到 savepoint 之前，**任何**语句都会被拒。而
+`transaction.savepoint_rollback(sid)` 自己就是一句语句，
+于是它在执行自己的那一刻就先撞上了这道墙。手写 savepoint 这条路是死的。
+
+**修法**（Django 文档的写法）：用内层 `with transaction.atomic():` 包住每次
+`update()`。内层 `atomic` 本身就是一个 savepoint，而且它在异常退出时会
+**顺带把连接状态恢复好**，外面才能继续捕获、继续查询。
+
+```python
+try:
+    with transaction.atomic():          # 这个 atomic 就是 savepoint，不是多余的
+        rows.update(**{field_name: keep})
+except IntegrityError as error:
+    raise MergeConflict(...) from error  # 外层 @transaction.atomic 负责整体回滚
+```
+
+**一般化**：
+> **在 `atomic` 块里捕获数据库异常，必须用内层 `atomic` 包住可能出错的那一句。**
+> 光 `try/except` 不够 —— 它捕到了异常，但连接已经不能再用了。
+> B6 的 `Participation` 批量登记、以后任何「试着写，撞了就换个说法」的代码同理。
+
+### ⚠️ 计划外（B4.5）：`python-dateutil` 没装，也不该为这个装
+
+roadmap 写「算年龄用 `dateutil.relativedelta`」，但项目依赖里没有它。
+为一次「减 18 年」引入一个生产依赖不划算 —— 和 D8 拒绝 `languages-plus`
+是同一把尺子（**包比需求大**）。改用 stdlib：
+
+```python
+try:
+    return on.replace(year=on.year - AGE_OF_MAJORITY)
+except ValueError:                      # 2/29，且落到的那年不是闰年
+    return on.replace(year=..., day=28)
+```
+
+闰日那一支必须往**前**退到 28 号（不是进到 3/1）：
+2028-02-29 减 18 年取 2010-02-28，这样 2010-03-01 出生的人今天仍算未成年 ——
+他确实还差一天满 18。**这一支有专门的测试**，因为它错了不报错，只是差一天。
+
+### ⚠️ 计划外（B1）：grep 守卫第一次跑，抓到的是它自己
+
+三条 grep 守卫写完第一次跑，两条红了 —— 命中的是**守卫自己**：
+时间守卫的注释里原样写了要禁的那两种写法；汇报链守卫的过滤行上
+同时出现了 `reports_to` 和 `for`（在 `\b(for|while)\b` 这个正则里）。
+
+**修法**：正则一律写成**转义形式**并抽成模块级常量，让文件里永远不出现
+它要找的那串字面量（`date\.today\(\)` 这串文本 ≠ `date.today()`）；
+一行里不许同时出现两个模式。**注释里也不许把被禁的写法拼出来。**
+
+> 这不是麻烦，是守卫真的在扫全项目的证据 —— 它连自己都不放过。
+> 换成"跳过 `core/tests.py`"就等于给守卫开了个后门。
+
+### ⚠️ 计划外（B5）：往别的 app 的 admin 上挂 inline，方向是反的
+
+roadmap 写「`ContactAdmin` 加一个 `Assignment` 的 inline」。照字面做，
+就是 `contact/admin.py` 去 `import org.models` —— **依赖方向被倒过来了**
+（D17 定的是 `org` → `contact` → `core`），`contact` 从此装不上除非 `org` 也在。
+
+**修法**：装配写在**下游那个 app** 里。`org/admin.py`：
+
+```python
+admin.site.unregister(Contact)          # contact 在 INSTALLED_APPS 里排在前面，
+                                        # 它的 admin.py 已经跑过了
+@admin.register(Contact)
+class ContactWithAssignmentsAdmin(ContactAdmin):
+    inlines = [*ContactAdmin.inlines, AssignmentInline]
+```
+
+Django 没有比"注销 + 注册一个子类"更窄的钩子。看着别扭，但它是唯一
+不把依赖方向弄反的写法，而且两个 `admin.py` 本来就是一次性配置（D18）。
+
+**一般化**：
+> **跨 app 的 admin 装配一律写在下游 app 里，别让上游去 import 下游。**
+> B6 的 `Participation` 要挂到 `Contact` 页上时，同一套写法再用一次。
+
+### ⚠️ 计划外（B5）：每加一个 inline，所有 admin POST 测试都会变绿灯下的红灯
+
+**第三次踩了**（B3.1 的 `relationships_as_b`、B4.2 的 `emergency_contacts`、
+这次的 `assignments`）。症状每次一模一样：admin 的 POST 测试收到 **200 而不是 302**，
+表单看着没错，`context_data["errors"]` 里写的是
+`ManagementForm data is missing or has been tampered with.`
+
+原因：`ModelAdmin` 会为每个 inline 要一份管理表单，少一份就整页不提交，
+而**它不是字段错误**，所以 200 里看不到任何一个红框。
+
+**修法**：测试的 `_admin_form_data()` 里补上那个 inline 的四个键
+（`TOTAL_FORMS` / `INITIAL_FORMS` / `MIN_NUM_FORMS` / `MAX_NUM_FORMS`）。
+已经在 helper 上写了注释，免得第四次再查一遍。
+
+**一般化**：
+> **加完一个 inline，先跑一遍 admin 的 POST 测试。** 收到 200 就直接去
+> `context_data["errors"]` 里看，不要从表单字段开始找。
+
+### ⚠️ 计划外（B0–B5 复盘）：`list_display` 里的方法，是每行调一次的
+
+> 下面三条是 B5 做完之后回头验收 B0–B5 时发现的，不是某一步实施当场撞上的。
+> 记在这里理由相同：**三条里有两条是「防线看着在，其实没在」**，
+> 而那正是这个项目反复判过刑的那类东西。
+
+**症状**：`Contact` changelist 的查询数随行数线性增长 ——
+5 行 10 次、40 行 45 次、100 行约 105 次。页面能用，只是越用越慢，不报错。
+
+**根因**：`merge_link` 是 `list_display` 里的一个方法，**Django 每渲染一行就调一次**，
+而它里面调 `find_exact_duplicates()`，每次一到两次查询。
+讽刺的是集合级的判定 `possible_duplicates()` 早就写好了（「疑似重复」筛选器在用），
+只是那个列没走它。**`list_select_related` 救得了外键列，救不了自定义方法列。**
+
+**修法**：判定和配对都下沉到 QuerySet（D18 —— admin 只渲染，不判断）：
+
+```python
+# contact/models.py
+def duplicate_partners(self):
+    """{pk: 另一条同名同号记录的 pk}，一次查完整页。"""
+
+# contact/admin.py —— 每请求算一次，缓存在 request 上
+def get_list_display(self, request):        # ⚠️ 不是 get_queryset，见下
+    if not hasattr(request, "_contact_duplicate_partners"):
+        request._contact_duplicate_partners = Contact.objects.duplicate_partners()
+    ...                                     # 列做成闭包，闭在这张表上
+```
+
+**为什么是 `get_list_display` 而不是 `get_queryset`**：B9 的清单里有一条
+「`admin.py` 搜不到 `save_model` / `save_related` / `get_queryset` 重写」——
+那条判据就是「把 `admin.py` 删掉还剩全部业务逻辑」的可执行版本，不能为了顺手破掉它。
+
+**连带的好处**：这一列和「疑似重复」筛选器现在同一个定义。
+以前两边各算各的（`find_exact_duplicates()` 用 `casefold()` + 压空白，
+`possible_duplicates()` 用 `Lower(Trim())`），完全可能出现
+「筛选器说它是重复、行里却没有合并链接」。
+
+**测试**：`ChangelistCostTests` 比较 5 行和 25 行的查询数**是否相等**，
+不钉死具体数字 —— Django 自己的基线查询数以后会变，而"每行一次"这件事不该变。
+
+**一般化**：
+> **凡是写进 `list_display` 的方法，先问一句「它查库吗」。**
+> 判定方法：造 N 行数一次查询数，造 2N 行再数一次，**两个数不一样就是 N+1**。
+> 这条对 B6 的 `Event` 参与人数、工时合计一样成立 —— 那两个尤其像会写成 property。
+
+### ⚠️ 计划外（B0–B5 复盘）：`full_clean()` 会把「已经有错的字段」的约束整条跳过
+
+**症状**：给 `position_reports_to_self` 补字段级错误测试时，走 `full_clean()`
+永远拿不到约束自己的 `violation_error_message`，拿到的是 `Position.clean()` 的措辞。
+
+**根因**：`Model.full_clean()` 收完 `clean_fields()` / `clean()` 的错误之后，
+会**把已经出错的字段名加进 `exclude`** 再传给 `validate_constraints()`，
+而后者跳过任何提到被排除字段的约束。`clean()` 的环检查已经在 `reports_to` 上挂了错，
+所以那条约束在这条路径上**根本没跑**。
+
+> **这是 B3.1b 那条坑的第三个变体。** 三个变体的症状一模一样 ——「约束没跑」：
+>
+> | 变体 | 约束为什么没跑 |
+> |---|---|
+> | D14 原文提醒的 | 表达式约束在 `validate()` 里抛 `FieldError`，被静默吞掉 |
+> | B3.1b 撞上的 | 字段不在表单上 → `_post_clean` 把它 `exclude` 了 |
+> | **本条** | 字段上**已经有别的错误** → `full_clean` 把它 `exclude` 了 |
+
+**结论（不粉饰）**：**同一个字段上，`clean()` 和 `CheckConstraint` 都说话时，
+表单层永远只会看到 `clean()` 的那句话**，约束的 `violation_error_message`
+在这条路径上是死代码。它仍然有价值 —— 那是 `bulk_create` / psql 的兜底 ——
+但别以为界面上出现的是它。
+
+**修法**：该测哪一层就从哪个门进。`position_reports_to_self` 的测试直接调
+`self.position.validate_constraints()`，绕开 `clean()`。
+**这个门不是为测试造的** —— B3.1b 的 `RelationshipForm._check_constraints()`
+走的就是它，那里前面没有 `clean()`。
+
+**一般化**：
+> **一条规则不要在 `clean()` 和约束里各说一遍**（这本来就是 D14 重写的初衷）。
+> 真要两边都有（跨行环路这种约束表达不了、又想在表单上提示的），
+> 就明确知道：**界面上出现的是 `clean()` 的话，约束只是 bulk 路径的兜底。**
+
+### ⚠️ 计划外（B0–B5 复盘）：守卫「验过会红」不等于「该红的都红」
+
+**症状**：汇报链 grep 守卫（B1 写的，B5 按清单确认过"真的会变红"）
+对最自然的那种写法视而不见：
+
+```python
+for _ in range(20):
+    nxt = p.reports_to      # 漏 —— for 和 reports_to 不在同一行
+```
+
+**根因两个，都是判据本身太窄**：
+
+1. 判据是「**同一行**里既有 `reports_to` 又有 `for`/`while`」。
+   而 roadmap 原话是「找 **循环体里** 出现 `reports_to` 的行」——
+   实现取了字面上更省事的那一种读法，正好把多行写法全放过了。
+2. `\breports_to\b` **匹配不上 `reports_to_id`** —— `_` 是 word 字符，
+   两者之间没有词边界。而 `build_org_tree()` 自己用的就是 `.reports_to_id`
+   （为了不 N+1，函数里有注释专门说明），**抄它的人多半连这个一起抄**。
+3. roadmap 还写了第二个信号 ——「`.reports_to` 与**函数自身名字**同时出现的行」，
+   也就是递归 —— **实现里根本没有这一条**。递归是遍历汇报链的第三种写法，
+   而且是最容易挂死的那种。
+
+**B5 验收时只试了「同一行 `while`」那一种就签收了 —— 而那恰好是唯一能被抓到的那种。**
+
+**修法**：`core/tests.py::repeated_uses()` 改成按缩进跟踪 `for`/`while` 块，
+三个信号任一命中即算：**循环体内 / 单行推导式 / 递归**（行里调了所在函数自己的名字）。
+模式放宽成 `reports_to(_id)?`。`def` 会切断外层循环的作用范围（函数体自成一个 scope）。
+
+**代价**：一处误报 —— `org/tests.py` 里一个集合推导式读了两个编制各自的上级
+（读一层，不是走链）。用 `loop-guard-ok` 注释豁免，标记**写在本行或上一行都认**，
+这样理由有地方写得下。宁可宽、误报了加注释，也别漏 —— roadmap 原文就是这么要求的。
+
+**一般化（这条是三条里最值钱的）**：
+> **守卫写完必须反向验：造几个它「该抓」的例子，确认真的红；
+> 再造几个「不该抓」的，确认没红。** 只验一个例子等于只验了自己想到的那种写法。
+> **一条只在自己的示例上会红的守卫，比没有守卫更糟 —— 它让人以为有防线。**
+> B6 之后每加一条 grep 守卫，都照这个双向清单走一遍。
+
+### ⚠️ 计划外（B5 复盘）：用补集定义状态，等于赌只有两种状态
+
+**症状**：`Position` 列表页的「空缺」筛选器，**已撤销的编制显示在「有人在任」那一档里** ——
+一个去年撤掉、现在一个人都没有的编制，界面上说它有人。
+
+**根因**：`Position` 有**三种**状态，筛选器只给了两个选项，第二个用补集实现：
+
+```python
+lookups = [("yes", "空缺"), ("no", "有人在任")]
+...
+if self.value() == "no":
+    return queryset.exclude(pk__in=queryset.model.objects.vacant())   # ← 这里
+```
+
+`vacant()` 自己**从来是对的**（第一步就 `filter(is_active=True)`，而且有测试钉着）。
+错的是"不是空缺的都算有人在任"这个推论 —— **补集只在状态恰好两种时才等价**。
+撤销的编制既不空缺、也没人在任，于是被补集捞了进去。
+
+> **补集写法最坏的地方不是算错，是它让你不必给状态命名。**
+> 三个分支都写成 QuerySet 方法的话，你得给第三种状态起个名字（`retired()`）——
+> **而起名字的那一刻就会发现自己漏了它**。写成 `exclude(...)` 就永远不会碰到这一步。
+
+**连带**：这个 `exclude(pk__in=...)` 是筛选器**自己在做集合运算**，
+和它自己 docstring 里写的「每个分支都是一次 QuerySet 方法调用」对不上（D18）。
+**判断跑进 admin 的那一处，正好就是出错的那一处** —— 这不是巧合。
+
+**修法**：三种状态三个方法，各自独立定义，谁也不靠否定谁：
+
+```python
+def vacant(self, on=None):      # 还设着 且 没人
+def occupied(self, on=None):    # 还设着 且 有人   ← 不再是 "not vacant"
+def retired(self):              # 已撤销 —— 第三种状态，必须看得见
+```
+
+顺带做掉的三件（都在这一步免费）：
+
+- `NOT IN (子查询)` → `NOT EXISTS` 相关子查询：能在第一条匹配就停、走
+  `Assignment.position` 的索引、也没有 `NOT IN` 遇 NULL 的坑。两种都在数据库里跑，
+  这个执行计划更好。
+- 日期谓词抽成 `core/querysets.py::in_effect_on(on, prefix)`，`active()` 自己也改成调它。
+  **不抽的话，聚合里就得把那个表达式再抄一遍** —— 而抄的那份迟早和原版不一致。
+- `with_headcounts()`：`COUNT(...) FILTER (WHERE ...)` 条件聚合，
+  一次查询给出每个编制的在任 / 在岗人数。**做成 annotation 而不是 property**，
+  因为前端要能排序、过滤、分页、直接序列化，而 property 四样都做不到、还是 N+1。
+
+**验收抄的是 `MinorFilter` 的先例**：三个选项各调一个方法，
+外加一条 **partition 测试** —— 三者两两不重叠、并集是全表。
+这条测试的价值在于：**以后再多出第四种状态，它会当场变红**，
+而不是等到某一档默默多算了几行。
+
+**一般化**：
+> **不要用补集定义状态。** 判定方法：**把所有状态列出来数一数 —— 超过两种，补集就是错的。**
+> 项目里三态的先例早就有了（`MinorFilter` 的 未成年 / 成年 / **生日未知**），
+> 当时 roadmap 专门强调过「第三个选项不能省 —— 未知必须看得见」，
+> **同一条道理这里没执行**。
+>
+> **B6 直接受影响**：`Event.status` 四种（planned / confirmed / completed / cancelled）、
+> `Participation.status` 四种（registered / attended / absent / cancelled）。
+> 任何「已完成 = 不是已取消」「缺席 = 没签到」这类写法都是同一个病，
+> 而且状态越多，补集捞进来的越多。**一律列全 + partition 测试。**

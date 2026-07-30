@@ -208,7 +208,11 @@ Django Admin 本身就能当半个 MVP，几乎不写前端就能增删改查。
 
 > CiviCRM 本身有**三种**：Individual / Household / Organization。我们只取两种 ——
 > "家庭"这个概念对本基金会是否有用还不知道，等真实使用暴露需求再说。
-> 真要加的话，除了 `TextChoices` 还要改 D9 那条 `CheckConstraint` —— **只有这一处**（见 D14）。
+> 真要加的话，除了 `TextChoices` 还要改约束 —— **两处**：
+> `contact_type_is_known` 那条白名单，加上新类型自己的姓名规则约束。
+> （**2026-07-28 B1 实施时修正**，原文写的是"只有这一处"。当时姓名规则是**一条**
+> OR 形式的约束，D14 落地后发现它一条说了两件事、字段映射不出去，拆成了三条 ——
+> 见 `02-roadmap.md`「计划外（B1）：一条约束只能说一件事」。）
 
 ### D5 · 会变的分类做成字典表，不做 Python 枚举
 `RelationshipType` 是数据库表。基金会以后想加"推荐人"、"校友"这类关系，
@@ -944,13 +948,13 @@ payroll     （Phase D 之后预留）薪酬
 | 逻辑 | 放哪 | 不许放哪 |
 |---|---|---|
 | 跨表写入（合并 Contact、关系方向路由） | `services.py` 或 model 方法 | ❌ `ModelAdmin.save_model()` / `save_related()` |
-| 派生判定（`.active()`、`vacant()`、`is_minor`、`find_exact_duplicate()`） | QuerySet 方法 / model property | ❌ admin 的 `get_queryset()` 里就地算 |
+| 派生判定（`.active()`、`vacant()`、`is_minor`、`find_exact_duplicates()`） | QuerySet 方法 / model property | ❌ admin 的 `get_queryset()` 里就地算 |
 | 校验 | 数据库约束（唯一规则）+ 约束名→字段的映射表，见 D14 | ❌ `ModelForm.clean()` 里写唯一真相；❌ 把规则在 `clean()` 里重写一遍 |
 | 纯呈现（列怎么排、筛选器长什么样、字段显不显示） | ✅ **admin，本来就该在这** | |
 
 判据一句话：**换一个界面，这段代码要不要跟着搬？要搬，就不该在 admin 里。**
 
-文档里已有的东西大都合规（`Contact.merge()` 是 model 方法、`.active()` 是 QuerySet），
+文档里已有的东西大都合规（合并走 `contact/services.py` 的 `merge_contacts()`、`.active()` 是 QuerySet），
 **这条规矩主要是防止 Phase B 新写的东西跑偏** —— 尤其是紧急联系人的
 "就地自动创建 + 命中预选"，那是最容易顺手写进 `ModelAdmin` 的一块。
 
@@ -966,7 +970,7 @@ payroll     （Phase D 之后预留）薪酬
 
 | 写的东西 | 属于哪一层 | 升级会坏吗 | 换界面要搬吗 |
 |---|---|---|---|
-| `models.py`：字段、约束、QuerySet 方法、`merge()` | ORM，公开 API | 不会 | ❌ 不用搬 |
+| `models.py`：字段、约束、QuerySet 方法、`find_exact_duplicates()` | ORM，公开 API | 不会 | ❌ 不用搬 |
 | `services.py`：普通 Python 函数 | 自己的代码 | 不会 | ❌ 不用搬 |
 | `forms.py`：`ModelForm` 子类、`clean()`、加非模型字段、改 `choices` | **`django.forms`，与 admin 无关** | 不会 | ❌ **不用搬，原样复用** |
 | `admin.py`：`list_display` / `inlines` / `form = XxxForm` | 公开 API，只是啰嗦 | 基本不会 | ✅ 搬不了，但**本来就是一次性的**，直接删 |
@@ -987,9 +991,9 @@ payroll     （Phase D 之后预留）薪酬
 
 ```
 contact/
-  models.py     约束、Contact.merge()、find_exact_duplicate()、.active() / .serving()
+  models.py     约束、find_exact_duplicates()、.active() / .serving() / .minors()
                 → 永久资产
-  services.py   跨表写入：关系方向路由、合并流程的编排
+  services.py   跨表写入：orient() / direction_choices() / merge_contacts()
                 → 永久资产
   forms.py      ContactForm（含 force_save）、RelationshipForm（方向感知下拉）
                 → 永久资产，Phase C 的视图 import 同一个类
@@ -1177,11 +1181,11 @@ D17 让 `payroll` 独立成 app 正是这个道理（"一个 Group 直接不给 
 | `Event` | `events` | `name` / `event_type`(FK) / **`ministry`(FK，可空)** / `start_time` / `end_time` / `location` / `owner`(FK → `Contact`) / `status`（`TextChoices`：planned·confirmed·completed·cancelled）/ `capacity`（可空，**参考值，不强制**，见下） |
 | `ParticipationRole` | `events` | 字典表：`code`（唯一·不可改）/ `name` / `is_active`。装的是**一次活动之内**的角色（签到台、搬运、翻译），**≠ `Position.name`**，见下面那条一句话定义 |
 | `Participation` | `events` | `event`(FK) / `contact`(FK) / `role`(FK，可空) / `status`（`TextChoices`：registered·attended·absent·cancelled）/ **`hours`**（`DecimalField(max_digits=6, decimal_places=2)`，可空）。**同一个人在同一次活动里可以有多行**，靠 `role` 区分 —— 见下面「一人一活动多角色」。这张中间表是整个系统的价值所在 —— 工时统计、志愿者活跃度、活动回顾全靠它 |
-| `VolunteerProfile` | `volunteer` | OneToOne → `Contact`。`availability_notes`。**`skills` 这个 M2M 跟着 `Skill` 一起推迟**。**不含** 职务名 / 上级（那些是编制，归 `Position`）/ 任职起始日（归 `Assignment`）；**不含**紧急联系人（已改成 `Contact` 字段，见 D15）；**不含背景审查** —— 见下一行 |
+| `VolunteerProfile` | `volunteer` | OneToOne → `Contact`。`availability_notes`。**`skills` 这个 M2M 跟着 `Skill` 一起推迟**。**不含** 职务名 / 上级（那些是编制，归 `Position`）/ 任职起始日（归 `Assignment`）；**不含**紧急联系人（在 `EmergencyContact` 专用表上，见 D15 第三次修订 / `02-roadmap.md` B4.2）；**不含背景审查** —— 见下一行 |
 | `BackgroundCheck` | `volunteer` | **2026-07-28 从 `VolunteerProfile` 拆出来的独立模型**（见 D18）。OneToOne → `Contact`，`CASCADE`。`status`（`TextChoices`）/ `completed_on`（可空）/ `notes`。**挂 simple-history**。<br>**为什么必须是独立模型**：Django 权限粒度是 `app_label.model`，**没有字段级权限**。留在 `VolunteerProfile` 里的话，Phase D 只有两个选择 —— 整张表不给看（连技能和可服务时段一起锁掉，过度）或者全给看（泄露本系统里仅次于薪酬的敏感数据）。拆开之后一个 Group 不授 `volunteer.view_backgroundcheck` 即可。**同 D17 让 `payroll` 独立成 app 的逻辑**，区别只是薪酬是一整块业务领域（用 app），背景审查是一张附属表（用 model）。<br>**现在拆成本≈0**（`volunteer` app 一行代码还没写），以后拆要建表 + 搬字段 + 改引用，而那时表里是真人的审查结果 |
 | `EmergencyContact` | `contact` | **专用表**（2026-07-28 定案，取代早先的 `Contact.emergency_contact` 自引用 FK + `is_reference_only`）。`person`(FK → `Contact`，`CASCADE`，`related_name="emergency_contacts"`) / `name`（文本，必填）/ `phone`（`PhoneNumberField`，必填）/ `relationship_type`(FK → `RelationshipType`，**非空**，`limit_choices_to={"usable_as_emergency_contact": True}`)。<br>**姓名电话存文本，不指向 `Contact`** —— 紧急联系人可能是邻居、室友，不是与基金会交互的主体，不该占一行 `Contact`（D15 第四条判据）。<br>**表天然支持一人多个紧急联系人**，不加人为的唯一限制（基金会目前只需要一个）。见 D15、下面「紧急联系人的录入」 |
-| `Contact.merge()` | `contact` | **不是新表，是一个功能**：把重复的两条 Contact 合并成一条。范围和实现见下面「合并重复记录」。<br>⚠️ **它进 Phase B 的原始理由已经失效** —— 当时是"reference-only 记录会持续制造重复"，而 reference-only 已经不存在了。**保留在本阶段的新理由**：跨渠道录入（活动签到、志愿者自荐、员工代录）仍然会产生重复，而同名同号硬拦截只挡得住同一表单里的手滑。**如果要削减 Phase B 范围，这是第一个候选** |
-| `RelationshipType` 加两个字段 | `contact` | `code`（唯一·不可改，见 D5 / D6）+ `is_symmetric`（布尔，见 D15）。加到已有表要三步迁移，见下面「`code` 的三步迁移」 |
+| 合并重复 `Contact`（`contact/services.py::merge_contacts()`） | `contact` | **不是新表，是一个功能**：把重复的两条 Contact 合并成一条。**落在 `services.py` 不落在 model 上** —— 跨表写入按 D18 落点表归 `services.py`。范围和实现见下面「合并重复记录」。<br>⚠️ **它进 Phase B 的原始理由已经失效** —— 当时是"reference-only 记录会持续制造重复"，而 reference-only 已经不存在了。**保留在本阶段的新理由**：跨渠道录入（活动签到、志愿者自荐、员工代录）仍然会产生重复，而同名同号硬拦截只挡得住同一表单里的手滑。**如果要削减 Phase B 范围，这是第一个候选** |
+| `RelationshipType` 加三个字段 | `contact` | `code`（唯一·不可改，见 D5 / D6）+ `is_symmetric`（布尔，见 D15）+ `usable_as_emergency_contact`（布尔，默认 `False`，见 D6 补强 —— 它是 `EmergencyContact` 的前置）。加到**有数据**的表要三步迁移，见下面「`code` 的三步迁移」；**本机这张表实测 0 行，所以 `02-roadmap.md` B2 一步到位** |
 | ~~`Guardianship`~~ | — | **移出 Phase B**（2026-07-28 决定）。等基金会答复同意书流程再说 —— 家长通知这条真实需求在本阶段已经靠 `is_minor` + `EmergencyContact` 闭环了。见推迟清单 |
 | ~~`Skill`~~ | — | **推迟**（见推迟清单）—— 没有任何东西依赖它，ministry 视图不需要它 |
 
@@ -1267,7 +1271,7 @@ A7 的原话是"等表里有了真数据再加，就得先清洗存量数据"。
 | `Assignment` | `end_date >= start_date` | `Relationship` 在 A7 加了这条，`Assignment` 是新表却漏掉就不一致了 |
 | `Assignment` | `UniqueConstraint(contact, position, start_date)`，**带 `nulls_distinct=False`** | 见下面「`Assignment` 的唯一约束」 |
 | `Position` | `reports_to` 不能指向自己那一行（`CheckConstraint`） | 见下面「汇报线的环」 |
-| `Position` | `code` `unique=True` | 同下面字典表那条。`Position` 不是字典表，但 `code` 的作用一样：代码只认 `code`，不认 `name` |
+| `Position` | `UniqueConstraint(Lower("code"))`（**不是**字段上的 `unique=True`） | 同下面字典表那条。`Position` 不是字典表，但 `code` 的作用一样：代码只认 `code`，不认 `name` |
 | `Event` | `end_time >= start_time` | 同上 |
 | `Event` | `capacity IS NULL OR capacity > 0` | 容量 0 或负数没有意义 |
 | `EmergencyContact` | `UniqueConstraint(person, Lower(Trim(name)), phone)` | 同一个人身上把同一个紧急联系人录两遍。归一化写进表达式，不靠 `save()` —— D9 归一化通则 |
@@ -1432,7 +1436,7 @@ Phase B 一次加十几个外键，其中一个选错是灾难级的：
 | `Event`：`Index(fields=["start_time"])` | 近期活动、admin 的 `date_hierarchy`、Phase C 的"本月活动" |
 | `Event`：`Index(fields=["ministry", "start_time"])` | "食物银行这个月办了几场" —— ministry 视图的第二个数字 |
 | `Participation` | `(event, contact, role)` 的唯一约束自带索引，覆盖活动侧；联系人侧走 FK 自动索引 |
-| 各字典表的 `code` | `unique=True` 自带 |
+| 各字典表的 `code` | `UniqueConstraint(Lower("code"))` 自带的表达式唯一索引（**不是** `unique=True`，见 D9 归一化通则） |
 
 小提醒：Django 给 FK 自动建单列索引，所以 `Position` 上 `(ministry, kind, is_active)` 建好之后
 `ministry` 单列索引就冗余了（最左前缀覆盖）；`Assignment` 上 `(position, status, end_date)` 之于
@@ -1573,7 +1577,7 @@ email 不能设 unique（一家人共用一个邮箱很常见）、电话同理�
    | 信号 | 频率 | 处理 |
    |---|---|---|
    | 仅**同名**（姓名归一化后比较：去空格、忽略大小写） | 高 | `messages.warning`，**不阻断** |
-   | **同名 AND 同号**（`Contact.find_exact_duplicate()`） | 低 | ✅ **硬拦截 + `force_save` 复选框** |
+   | **同名 AND 同号**（`Contact.find_exact_duplicates()`） | 低 | ✅ **硬拦截 + `force_save` 复选框** |
 
    **硬拦截只能绑在同名同号上，绝不能绑在同名上。** 在这个基金会的服务人群里，
    王强 / 李明 / 陈伟同名是常态 —— 每天弹 20 次硬拦截，操作员会训练出"看到框就打勾"的
@@ -1588,7 +1592,7 @@ email 不能设 unique（一家人共用一个邮箱很常见）、电话同理�
    **不要在 `clean()` 里改 `self.fields[...].widget` 之后抛异常** ——
    第二次提交若还有别的校验错误，复选框会退回隐藏态，用户会以为自己没勾。
 
-   判定函数仍然只有 `find_exact_duplicate()` 一个（见下面第 6 条），
+   判定函数仍然只有 `find_exact_duplicates()` 一个（见下面第 6 条），
    拦截逻辑本身按 D18 放在 model / services 层，`ContactForm` 只调用。
 3. **合并两条重复记录** —— **本阶段必做**（2026-07-28 从推迟改过来），见下面「合并重复记录」。
    ⚠️ 改口的**原始**理由（`is_reference_only` 会持续制造重复）已经失效，
@@ -1626,7 +1630,7 @@ email 不能设 unique（一家人共用一个邮箱很常见）、电话同理�
 存 E.164（D7）。**一个没有电话的紧急联系人是没有意义的**，所以 `blank=False`。
 姓名同理。
 
-> **不做同名同号查重。** 那套判定（`find_exact_duplicate()`）留给 `Contact` 本身
+> **不做同名同号查重。** 那套判定（`find_exact_duplicates()`）留给 `Contact` 本身
 > （见上面「`Contact` 重名的处理」），**紧急联系人这一支不需要它** ——
 > 文本行之间没有"是不是同一个人"这个问题要回答，只有"同一个人身上录了两遍"，
 > 那由 `UniqueConstraint(person, Lower(Trim(name)), phone)` 挡住。
@@ -1667,7 +1671,8 @@ email 不能设 unique（一家人共用一个邮箱很常见）、电话同理�
 
 **改成**：`contact/views.py` 里一个 `/contacts/merge/` 页面
 （`keep` 和 `drop` 两个 id 作为参数），staff-only，GET 显示差异对比 + 确认按钮，POST 调
-`Contact.merge()`。**逻辑一个字不动**（`merge()` 本来就是 model 方法，符合 D18），视图是薄壳。
+`contact/services.py` 的 `merge_contacts(keep, drop)`。**逻辑一个字不进视图**
+（跨表写入按 D18 落点表归 `services.py`），视图是薄壳。
 
 **为什么这样反而更便宜：**
 
@@ -1971,9 +1976,13 @@ Phase C 的视图直接 `RelationshipForm(subject=contact)`，一个字不用改
 
 ```python
 # contact/services.py —— 唯一的一份方向路由
-def orient(subject, other, relationship_type, subject_is_a: bool):
+def orient(*, subject, other, subject_is_a: bool) -> tuple[Contact, Contact]:
     """返回 (contact_a, contact_b)。表单和以后的视图都调它。"""
 ```
+
+> 三个参数全是**关键字参数**，且**不含 `relationship_type`** —— 方向只由
+> `subject_is_a` 决定，类型是关系行自己的字段，路由不需要看它。
+> 同一份签名写在 `02-roadmap.md` B3.1b。
 
 `RelationshipForm.save()` **只调用它**，不自己判断。原因是 D18 的落点表把
 「关系方向路由」明确划给了 `services.py` —— 写在 `Form.save()` 里字面上不算违规
@@ -2069,11 +2078,16 @@ UniqueConstraint(
 
 ##### `code` 的三步迁移（给已有的 `RelationshipType` 加字段）
 
-`unique=True, null=False` 的字段不能一步加到有数据的表上。必须三个迁移：
+唯一且非空的 `code` 不能一步加到**有数据**的表上。必须三个迁移：
 
 1. 加可空的 `code` 字段；
 2. 数据迁移回填（从 `name_a_to_b` slugify，撞车的手工处理）；
-3. 改成 `unique=True, null=False`。
+3. 改成 `null=False`，并加上 `UniqueConstraint(Lower("code"))`
+   （**不是**字段上的 `unique=True` —— 见 D9 归一化通则）。
+
+> ⚠️ **本机 `RelationshipType` 实测 0 行**（`02-roadmap.md` B0），所以这一次一步到位即可，
+> B2 里写了简化和它的适用条件。**上面这三步规则不删** —— 它对以后任何"给有数据的表加唯一字段"
+> 仍然成立，只是这一次前置条件不满足。
 
 **不要图省事用 `default=""` 一步到位** —— 那样所有行的 code 都是空字符串，
 唯一约束当场炸。新建的字典表（`Ministry` / `EmploymentType` / `EventType` /
@@ -2162,7 +2176,7 @@ Phase A 的 A10 用了"每条钉住什么"的清单，本阶段沿用。下面�
 | 删掉一条 `Contact`，他名下的 `EmergencyContact` 跟着删（`CASCADE`） | 紧急联系人是附属数据，没有独立生命周期 |
 | **`Contact` 里没有 `is_reference_only` 字段，也没有 `emergency_contact` 外键** | 幽灵记录不该存在 —— 钉住这次修订的结果 |
 | 同名同号命中 / 同名不同号**不**命中 / 同号不同名**不**命中 | `Contact` 查重规则的三条边界，一条都不能松 |
-| 合并：所有指向被合并方的外键都改指到保留方（含**测试里新造的一张表**，验证是通用遍历而非手写清单） | 漏一张表的症状是记录静默消失 |
+| 合并：遍历 `Contact._meta.related_objects`，**断言每一项要么被搬走了、要么在显式的跳过名单里**（名单只有 `Historical*`） | 漏一张表的症状是记录静默消失。**这个写法比"测试里新造一张表"更强**：以后任何人给 `Contact` 加了新外键却没决定合并时怎么处理，这条测试当场变红（见 `02-roadmap.md` B4 测试注） |
 | 合并：一对一冲突（两条都有 `User`）时**拒绝**并说明原因 | 不自作主张删一边 |
 | 合并：唯一约束冲突（同活动同角色都有 `Participation`）时**拒绝** | 同上 |
 
@@ -2385,7 +2399,7 @@ Django 的向后兼容承诺**覆盖文档化的 API，不覆盖 admin 生成的
 | d | **修正 D18 与 Phase B 的口径冲突**：关系方向路由抽成 `services.orient()`，`RelationshipForm.save()` 只调用 | D18 落点表把方向路由划给 `services.py`，Phase B 却写"表单的 `save()` 只做方向路由"。字面不违规（`Form` 不是 `ModelAdmin` 钩子），但**Phase C 若不复用同一个表单就得抄一遍** |
 | e | **D18 补第二条出栏触发（形状）**：需要跨请求保持状态、或要动 admin 模板 / `AdminSite` / 首页 → 立刻写朴素视图 | 原来只有事件触发（"非开发者拿到账号"），那是**日期不是信号**。而"⚠️ 要写自定义 Form"那一栏没有上限，每个新流程都能论证自己属于它 —— D18 是为防滑坡才写的，它自己必须带出栏条件 |
 | f | **写死「多步流程」的含义 = 跨请求保持状态**，一次表单重提交不算，`force_save` 明确划在栏内 | 否则中间那一栏是个什么都能塞的口袋。Django 自己的删除确认就是"同一表单交两次"的形状 |
-| g | **合并重复记录从 admin 动作改成 `/contacts/merge/` 朴素视图** | 被 (e) 触发的第一个：二次确认页要吃 `admin/base_site.html`、"待处理 N 条"要覆盖 `admin/index.html`。**逻辑一个字不动**（`merge()` 本来就是 model 方法）。连带好处：在风险最低的功能上先跑通"视图 + 模板 + 权限"，比 Phase C 直接上 Ministry 视图安全。削减范围时也更好砍 |
+| g | **合并重复记录从 admin 动作改成 `/contacts/merge/` 朴素视图** | 被 (e) 触发的第一个：二次确认页要吃 `admin/base_site.html`、"待处理 N 条"要覆盖 `admin/index.html`。**逻辑一个字不动**（合并本来就在 admin 之外，第九轮后统一叫 `services.merge_contacts()`）。连带好处：在风险最低的功能上先跑通"视图 + 模板 + 权限"，比 Phase C 直接上 Ministry 视图安全。削减范围时也更好砍 |
 | h | **关系录入从 inline 改成 `/relationships/add/?subject=<id>` 独立页面**，`Contact` 页面上两个 inline 全部改**只读** | 被 (e) 触发的第二个，理由排序：① **Phase C 用 HTMX 根本不会用 formset**，那时的写法就是"subject + 表单片段"，正好是独立页面的形状 —— 挂 inline 等于写一套管道扔掉再把独立页面写一遍；② inline 表单**默认拿不到父对象**，而 `subject` 是这个表单的全部前提，拿到它要覆盖 `get_formset()` / `BaseInlineFormSet._construct_form`，**是全项目最深的一处 admin 管道**；③ 和合并页同形状，两处一个模式 |
 | i | `RelationshipForm.__init__` 的 `subject` 定为**显式关键字参数** | 不从 `request` 或父对象里摸。Phase C 的视图直接 `RelationshipForm(subject=contact)`，一个字不改 |
 | j | **收干净两处派生判定**：新增 `ContactQuerySet.minors()` / `.adults()` / `.birth_date_unknown()`；新增 `Event.is_over_capacity` property | D18 落点表点名把 `is_minor` 划给 QuerySet，但 Phase B 原文让 `SimpleListFilter` 自己算 18 岁阈值 —— **四个筛选器里三个都在调 QuerySet 方法，只有它自己动手**。`capacity` 同理，`count > capacity` 是业务判断不是呈现 |
@@ -2446,7 +2460,7 @@ Django 的向后兼容承诺**覆盖文档化的 API，不覆盖 admin 生成的
 | d | 「紧急联系人的录入与去重」从五大段简化成三条要求 | 没有身份要认，就没有认错的可能。自动建、命中预选、去重判定、安全阀、残留风险**整体消失** —— 这是文本方案唯一比 FK 版简单的地方 |
 | e | 「关系必填」从 `CheckConstraint` 降级成 FK `null=False` | 拆表白捡的简化 |
 | f | 推迟清单里那条「升级成 `EmergencyContact` 专用表」改写成「把文本升级成 FK」 | 方向反过来了，而且**这次是「痛」的那个方向** |
-| g | `Contact.merge()` 的 Phase B 理由**换过一次**，并标注为削减范围时的第一候选 | 原理由（"reference-only 会持续制造重复"）已经失效，新理由（跨渠道录入）比它弱，如实说 |
+| g | 合并重复 `Contact` 的 Phase B 理由**换过一次**，并标注为削减范围时的第一候选 | 原理由（"reference-only 会持续制造重复"）已经失效，新理由（跨渠道录入）比它弱，如实说 |
 
 **如实记下的四条代价**（D15 里详列）：王秀英有三个孩子做志愿者 = 电话存三份且会漂移；
 她自己来做志愿者时出现第四份；没有反查；将来要升级成 FK 是痛的迁移。

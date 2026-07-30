@@ -61,6 +61,8 @@ INSTALLED_APPS = [
     # is obvious from reading this list: core holds what everything shares.
     'core',
     'contact',
+    # org depends on contact (Assignment -> Contact), contact depends on core.
+    'org',
 ]
 
 # Set before the first migrate, while no user table exists yet — swapping this

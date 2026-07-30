@@ -32,11 +32,11 @@ payroll     （更靠后，薪酬真要入库时）薪酬
   是因为这个 app 的主题是**组织结构本身**，`Position` 只是它的骨架。
 - **`Guardianship` 将来放 `contact`** —— 它是 Contact ↔ Contact 的关系，
   和 `Relationship` 同层，且未来非志愿者场景也会用到。
-- **`payroll` 必须是独立 app，不能塞进 `org` 或 `finance`。**
+- `payroll` 必须是独立 app，不能塞进 `org` 或 `finance`。
   薪酬是本系统里敏感度最高的数据（D11 把它排除在 MVP 之外就是这个原因）。
   独立成 app，将来可以整个 app 级别地做权限隔离 ——
   Django 的权限是按 `app_label.model` 授予的，一个 Group 直接不给 `payroll.*`，
-  比逐个字段配权限简单得多，也更不容易配漏。**这是现在就要占的位，不是以后再拆。**
+  比逐个字段配权限简单得多，也更不容易配漏。这是现在就要占的位，不是以后再拆。
 - **依赖方向**：`INSTALLED_APPS` 按
   `core` → `contact` → **`accounts`** → `org` → `events` → `volunteer` → `finance`
   的顺序列，读的时候依赖方向一目了然。谁也不许反向 import。

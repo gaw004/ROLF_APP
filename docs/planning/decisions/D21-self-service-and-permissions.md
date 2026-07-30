@@ -18,7 +18,7 @@
 紧急联系电话，一旦有非 staff 账号能登录，"谁能看到什么"就不再是上线时的收尾工作，
 而是**这个功能自己的一部分**。
 
-**因此当前阶段的硬性顺序：`MinistryRole` + `permissions.py` 必须先于任何自助页面。**
+因此当前阶段的硬性顺序：`MinistryRole` + `permissions.py` 必须先于任何自助页面。
 先写页面后加权限，等于中间有一段时间任何登录用户都能看到所有人的资料。
 
 ## 三条最低要求（一条都不能省）
@@ -50,7 +50,7 @@
 | 发布活动 + 开工种 | ministry admin | 走 `can_publish_event()` |
 | 某活动的报名名单 + 签到 | ministry admin | 走 `can_view_registrations()` |
 | 某活动的统计 | ministry admin | R4–R8 那几个数 |
-| **通知报名者：预览 → 二次确认 → 发送记录** | ministry admin | **P6。**预览页要分三组显示：成年人自己的地址 / 未成年人**家长**的地址 / **联系不上的人**。二次确认页是 [D22 代价 3](D22-event-notifications.md#要如实说的三条代价)（重复发送）的唯一缓解，不是可选装饰。走 `can_view_registrations()` 同一个判断 |
+| 通知报名者：预览 → 二次确认 → 发送记录 | ministry admin | P6。预览页要分三组显示：成年人自己的地址 / 未成年人**家长**的地址 / **联系不上的人**。二次确认页是 [D22 代价 3](D22-event-notifications.md#要如实说的三条代价)（重复发送）的唯一缓解，不是可选装饰。走 `can_view_registrations()` 同一个判断 |
 
 > ⚠️ **通知那一行 2026-07-29 晚补** —— 本清单原来只有 7 行、自称"最小集"，
 > 却漏掉了 P6 的页面，而验收里有 4 个勾在打它。
@@ -58,6 +58,6 @@
 **其余一律留在 Admin**（字典表维护、`Contact` / `Position` / `Assignment` 的 CRUD）——
 那些是内部人员用的，Admin 够用，[D18](D18-admin-boundary.md#admin-允许承载什么) 的表没有变。
 
-> **好消息：这条路已经跑通过两次。** `/contacts/merge/` 和 `/relationships/add/`
+> 好消息：这条路已经跑通过两次。 `/contacts/merge/` 和 `/relationships/add/`
 > 就是为了"在风险最低的事情上先把视图 + 模板 + URL + 权限跑一遍"而提前做的
 > （见 [D18 的形状触发](D18-admin-boundary.md#什么时候-admin-整体不够用了)）。当时写的理由现在兑现了。

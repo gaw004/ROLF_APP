@@ -17,7 +17,7 @@
 `Assignment` 上的原因。
 **影响**：这条决定了 Phase A 里自定义 User model 怎么建，所以要在动手前定下来。
 
-> ⚠️ **2026-07-29 晚更正。** 原文最后一句是"权限一律用 Django Group
+> 2026-07-29 晚更正。 原文最后一句是"权限一律用 Django Group
 > （管理员 / 项目协调员 / 只读）"。**这句话已被
 > [D20](D20-ministry-role.md#d20--范围化权限-ministryrole不走-django-group2026-07-29) 推翻** ——
 > Django 权限没有对象级作用域，表达不了"食物银行的 admin"。

@@ -5,9 +5,9 @@
 > 代码注释里写的 `goal.md D6` 指的就是本文件。
 
 `Relationship(contact_a, contact_b, relationship_type, start_date, end_date)`
-**适用于只需要记录「A 和 B 有某种联系 + 起止日期」、没有专有字段的关系。**
+适用于只需要记录「A 和 B 有某种联系 + 起止日期」、没有专有字段的关系。
 
-**剩余适用范围（2026-07-27 两次收窄后）：**
+剩余适用范围（2026-07-27 两次收窄后）：
 
 1. 外部组织归属 —— "张三是 XX 公司员工"（企业配捐、企业志愿者团队）、"李四是 XX 中学学生"
 2. 家庭 / 配偶 —— 家庭作为一个捐赠单元
@@ -15,7 +15,7 @@
 4. 亲属关系中不涉及法律责任的部分
 5. 以后冒出来的、暂时说不清要什么字段的新关系（先记下来，够格了再升级成专用表）
 
-**被拿走的两块（记录在此以免重复讨论）：**
+被拿走的两块（记录在此以免重复讨论）：
 
 - ❌ **基金会内部编制与汇报线** → 走 `Position` + `Assignment`（见 D11）。
   原因：Relationship 说不清"这条汇报线属于这个人的哪个身份"，
@@ -55,7 +55,7 @@
 外部归属留在 `Relationship`，见适用范围第 1 条）；反过来，为紧急联系人加的
 "邻居 / 朋友 / 同事"也会出现在 `Relationship` 的类型下拉里。两个方向加起来四五行。
 
-**处理：加一个 `usable_as_emergency_contact` 布尔，用 `limit_choices_to` 过滤下拉。**
+处理：加一个 `usable_as_emergency_contact` 布尔，用 `limit_choices_to` 过滤下拉。
 代码里已有同款先例 —— `Contact.preferred_language` 就是用
 `limit_choices_to={"language_type": LIVING}` 从 7900 行里筛出活语言的。一个布尔解决两个方向的噪音。
 

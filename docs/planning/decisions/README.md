@@ -22,20 +22,20 @@
 | [D6](D06-generic-relationship.md) | Relationship 的适用范围 | 哪些关系留在通用表，哪些被拿走了<br>↳ [为什么紧急联系人复用本表的词表](D06-generic-relationship.md#为什么紧急联系人的关系标签复用本表而不是另建一张词表2026-07-28-确认) |
 | [D7](D07-standard-field-libraries.md) | 电话 / 国家 / 州用成熟库 | 为什么不自己列 |
 | [D8](D08-language-iso-639-3.md) | Language 自建 ISO 639-3 | 为什么现成的包不能用 |
-| [D9](D09-rules-in-db-constraints.md) | 规则落数据库约束 | **`clean()` 不是强制层**（这条修订过）<br>↳ [归一化通则](D09-rules-in-db-constraints.md#通则归一化如果被约束依赖就必须写进约束的表达式里2026-07-28-补) —— `bulk_create` 会绕过 `save()` |
-| [D10](D10-person-role-position-assignment.md) | 人 / 角色 / 编制 / 任职四层 | **一条信息该放哪张表** |
+| [D9](D09-rules-in-db-constraints.md) | 规则落数据库约束 | `clean()` 不是强制层（这条修订过）<br>↳ [归一化通则](D09-rules-in-db-constraints.md#通则归一化如果被约束依赖就必须写进约束的表达式里2026-07-28-补) —— `bulk_create` 会绕过 `save()` |
+| [D10](D10-person-role-position-assignment.md) | 人 / 角色 / 编制 / 任职四层 | 一条信息该放哪张表 |
 | [D11](D11-position-and-assignment.md) | `Position` + `Assignment` | 一人多岗、空缺编制、汇报线挂在哪（这条**修订过两次**） |
 | [D12](D12-user-on-contact.md) | User 挂在 Contact 上 | 登录账号和岗位为什么解耦 |
 | [D13](D13-single-email-phone-address.md) | 单个 email / 电话 / 地址 | 什么时候才拆成一对多 |
 | [D14](D14-constraint-is-the-only-rule.md) | 约束是唯一的规则 | 字段级提示靠**映射表 + 守卫测试**，不靠把规则写两遍 |
-| [D15](D15-relationship-carriers.md) | 关系的载体 + 四条判据 | **新关系用字段 / 自引用 FK / 通用表 / 专用表**；**第四条判据「主体性」决定它该不该进 `Contact`**（紧急联系人这一支同日改过**三次**）<br>↳ [第四条判据：主体性](D15-relationship-carriers.md#载体的第四条判据主体性--这个实体该不该进-contact2026-07-28-新增) · [`EmergencyContact` 的形状与代价](D15-relationship-carriers.md#emergencycontact-的形状以及为什么最终选了文本方案) · [监护人 ≠ 紧急联系人](D15-relationship-carriers.md#监护人--紧急联系人重要区分) |
+| [D15](D15-relationship-carriers.md) | 关系的载体 + 四条判据 | 新关系用字段 / 自引用 FK / 通用表 / 专用表；**第四条判据「主体性」决定它该不该进 `Contact`**（紧急联系人这一支同日改过**三次**）<br>↳ [第四条判据：主体性](D15-relationship-carriers.md#载体的第四条判据主体性--这个实体该不该进-contact2026-07-28-新增) · [`EmergencyContact` 的形状与代价](D15-relationship-carriers.md#emergencycontact-的形状以及为什么最终选了文本方案) · [监护人 ≠ 紧急联系人](D15-relationship-carriers.md#监护人--紧急联系人重要区分) |
 | [D16](D16-time-and-dates.md) | 时间与日期的唯一口径 | **"今天"只有一种写法**，另两种会静默错一天 |
 | [D17](D17-app-layout.md) | app 划分 | 新模型放哪，以及 `payroll` 为什么必须独立 |
-| [D18](D18-admin-boundary.md) | Admin 的边界 | **这段逻辑该不该写在 admin 里**；以及权限粒度为什么倒推出一张新表<br>↳ [**代码落点与文件分层**](D18-admin-boundary.md#代码落点与文件分层什么会随升级坏什么换界面还用得上2026-07-28-补) —— 哪一层会随 Django 升级坏 · [两条出栏触发](D18-admin-boundary.md#什么时候-admin-整体不够用了) |
-| [**D19**](D19-event-role.md) | **活动的工种编制 `EventRole`** | **「这场活动开了几个工种、每个要几人」**；以及为什么不能靠 `Participation` 反推 |
-| [**D20**](D20-ministry-role.md) | **范围化权限 `MinistryRole`** | **「食物银行的 admin」这句话在数据库里长什么样**；为什么 Django Group 顶不上 |
-| [**D21**](D21-self-service-and-permissions.md) | **对外账号 + 自助页面提前** | 志愿者能登录之后，权限为什么不能再排最后 |
-| [**D22**](D22-event-notifications.md) | **活动变更通知** | **通知名单 ≠ 报名名单**（未成年人通知家长）；换通知服务商为什么不该动模型 |
+| [D18](D18-admin-boundary.md) | Admin 的边界 | 这段逻辑该不该写在 admin 里；以及权限粒度为什么倒推出一张新表<br>↳ [**代码落点与文件分层**](D18-admin-boundary.md#代码落点与文件分层什么会随升级坏什么换界面还用得上2026-07-28-补) —— 哪一层会随 Django 升级坏 · [两条出栏触发](D18-admin-boundary.md#什么时候-admin-整体不够用了) |
+| [**D19**](D19-event-role.md) | 活动的工种编制 `EventRole` | 「这场活动开了几个工种、每个要几人」；以及为什么不能靠 `Participation` 反推 |
+| [**D20**](D20-ministry-role.md) | 范围化权限 `MinistryRole` | 「食物银行的 admin」这句话在数据库里长什么样；为什么 Django Group 顶不上 |
+| [**D21**](D21-self-service-and-permissions.md) | 对外账号 + 自助页面提前 | 志愿者能登录之后，权限为什么不能再排最后 |
+| [**D22**](D22-event-notifications.md) | 活动变更通知 | **通知名单 ≠ 报名名单**（未成年人通知家长）；换通知服务商为什么不该动模型 |
 
 ## 加一条新决策时
 

@@ -24,7 +24,7 @@ Participation(                          # 谁报了哪场活动的哪个工种
 ## 为什么不能靠 `Participation` 反推工种（这一条是本决策的全部理由）
 
 原设计里没有这张表，R4「每场 event 有多少工种」只能写成
-`COUNT(DISTINCT participation.role)`。**这等于说：一个工种如果没人报名，它就不存在。**
+`COUNT(DISTINCT participation.role)`。这等于说：一个工种如果没人报名，它就不存在。
 
 一场开了 5 个工种、只招到 3 个工种的人的活动，系统会报告「这场活动有 3 个工种」，
 **而且不报错**。同理 R5 会漏掉所有零报名的工种 —— 而"哪个工种没人报"恰恰是
@@ -33,19 +33,19 @@ P2（征集志愿者）最想看的那个数。
 > **这和 [D11 第二次修订](D11-position-and-assignment.md#第二次修订为什么-reports_to-不能指向-assignment)判死刑的是同一个病，
 > 一字不改**：*「张三走了、李四还没到位，这个编制客观存在，但系统里没有任何一行代表它。」*
 > 那里的解法是把编制（`Position`）从任职（`Assignment`）里拆出来。这里是同一个动作：
-> **把「活动开了什么工种」从「谁报了名」里拆出来。**
+> 把「活动开了什么工种」从「谁报了名」里拆出来。
 
-**`EventRole` 之于 `Participation`，就是 `Position` 之于 `Assignment`。**
+`EventRole` 之于 `Participation`，就是 `Position` 之于 `Assignment`。
 这个类比是严格的，不是修辞：
 
 | 编制侧 | 活动侧 | 共同点 |
 |---|---|---|
-| `Position` 与人无关，空着也存在 | `EventRole` 与报名无关，没人报也存在 | **缺人是一等状态，不是"碰巧查不到"** |
+| `Position` 与人无关，空着也存在 | `EventRole` 与报名无关，没人报也存在 | 缺人是一等状态，不是"碰巧查不到" |
 | `Position.objects.vacant()` | `EventRole.objects.understaffed()` | 同一套查询形状，[`with_headcounts()`](../phase-b.md#空缺编制这次修订的验收点) 直接照搬 |
 | `Assignment(contact, position)` | `Participation(contact, event_role)` | 唯一约束都是 `(格子, 人)` |
-| ~~`Position.headcount`~~ 已推迟 | **`EventRole.needed_count` 必须有** | 见下 |
+| ~~`Position.headcount`~~ 已推迟 | `EventRole.needed_count` 必须有 | 见下 |
 
-**`needed_count` 就是被推迟过的 `Position.headcount`，但这次不能推迟** ——
+`needed_count` 就是被推迟过的 `Position.headcount`，但这次不能推迟 ——
 P2 的原话是"event 会说明需要多少 volunteers"，它是需求本身，不是优化。
 （同一个字段在两张表上的优先级不同，因为需求不同；这不矛盾。）
 
@@ -74,4 +74,4 @@ P2 的原话是"event 会说明需要多少 volunteers"，它是需求本身，�
 `Shift` 的维度是**时间**（上午场 / 下午场），已按"多班次拆成多个 `Event`"否决，
 [那条决定不变](../deferred.md#五明确推迟的事)。`EventRole` 的维度是**工种**，两者正交。
 行业里 Salesforce V4S 的 Job → Shift → Hours 三层，我们取的是 Job（工种）这一层、
-跳过 Shift（班次）这一层 —— **不是少做了一层，是选了需求指向的那一层。**
+跳过 Shift（班次）这一层 —— 不是少做了一层，是选了需求指向的那一层。

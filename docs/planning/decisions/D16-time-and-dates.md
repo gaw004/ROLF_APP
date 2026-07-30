@@ -16,18 +16,18 @@
 
 **三层落地，缺一层就守不住：**
 
-1. **唯一入口。** `core/timeutils.py` 里一个 `local_today()`，全项目只有这里碰"现在"。
+1. 唯一入口。 `core/timeutils.py` 里一个 `local_today()`，全项目只有这里碰"现在"。
    Phase C 的报表还会往里加 `month_bounds()` 之类，同一个道理。
-2. **把时钟注入 API，不要在函数体里隐式取。** 所有跟日期有关的 queryset 方法都写成
+2. 把时钟注入 API，不要在函数体里隐式取。 所有跟日期有关的 queryset 方法都写成
    `def active(self, on=None): on = on or local_today()`。
    默认值必须在**调用时**求值 —— 写成 `def active(self, on=local_today())` 是经典的
    进程启动时冻结 bug，长驻的 gunicorn worker 上会越跑越错。
    参数化顺带让"查某一天的名单"和测试边界都变成免费的。
-3. **用 linter 钉死，不靠自觉。** 加 `ruff`，开 `DTZ` 规则组
+3. 用 linter 钉死，不靠自觉。 加 `ruff`，开 `DTZ` 规则组
    （`flake8-datetimez`，就是为这个问题存在的：`DTZ011` 禁 `date.today()`、
    `DTZ005` 禁裸 `datetime.now()`）。`DTZ` 抓不到 `timezone.now().date()`
    （那是 tz-aware 的，linter 认为合法），所以再补一条 grep 守卫测试放 `core/tests.py` ——
-   **和 `test_no_model_changes_are_missing_a_migration` 是同一个套路：用测试当 lint。**
+   和 `test_no_model_changes_are_missing_a_migration` 是同一个套路：用测试当 lint。
 
 **代价**：多一个开发依赖（`ruff`，不进生产）、多一条守卫测试。
 换来的是新人（含半年后的你）写错会当场变红，而不是等某个 11 月的傍晚发现在职人数不对。

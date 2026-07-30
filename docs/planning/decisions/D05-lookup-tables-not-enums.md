@@ -10,7 +10,7 @@
 付款方式一律照此办理。
 
 > 注意"理事会成员"**不是**关系类型 —— 理事走 `kind=board` 的 `Position` + 一行 `Assignment`（见 D11）。
-> 判断方法：**这个人在基金会担任的职务 → `Position` / `Assignment`；这个人和另一个人/组织之间的联系 → `Relationship`。**
+> 判断方法：这个人在基金会担任的职务 → `Position` / `Assignment`；这个人和另一个人/组织之间的联系 → `Relationship`。
 
 ## 判定规则：什么时候用字典表，什么时候用 `TextChoices`（2026-07-28 补）
 
@@ -38,7 +38,7 @@
 
 ## 通则：每张字典表都带一个唯一且不可改的 `code`
 
-**代码只认 `code`，永远不认显示名。**
+代码只认 `code`，永远不认显示名。
 
 字典表的全部价值是"显示名可以在 admin 里随时改" —— 那么代码里凡是引用显示名的地方
 都会在某人改名之后**静默失效**（`filter(name="parent of")` 不报错，只是查不到东西了）。
@@ -46,7 +46,7 @@
 
 三个要求缺一不可（2026-07-28 补齐后两条）：
 
-1. **唯一，而且是 `UniqueConstraint(Lower("code"))`，不是 `unique=True`**
+1. 唯一，而且是 `UniqueConstraint(Lower("code"))`，不是 `unique=True`
    （2026-07-28 二次修正，原文写的是 `unique=True`）。不唯一的 `code` 根本不是锚点，
    `get(code="food_pantry")` 会抛 `MultipleObjectsReturned`，而且是在有人手滑建了第二行之后才炸。
    **为什么必须是 `Lower()` 版**：光有 `unique=True` 的话，`bulk_create` 能把

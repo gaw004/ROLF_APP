@@ -1,12 +1,12 @@
 # Phase A 实施手册 —— 地基加固
 
-> **这份文档只讲 Phase A 怎么做。** 要做什么、为什么这么定，全在 `goal.md` ——
+> 这份文档只讲 Phase A 怎么做。 要做什么、为什么这么定，全在 `goal.md` ——
 > 那是唯一权威来源，本文与它冲突时以它为准。
 >
 > ✅ **Phase A 已于 2026-07-27 完成，本文不再更新，留作记录** ——
 > 尤其是文末那两段「⚠️ 计划外」（迁移图会断、admin 路径不经过 middleware），
 > 那是踩出来的，比顺利完成的步骤值钱。
-> **Phase B 的实施手册是 `02-roadmap.md`。**
+> Phase B 的实施手册是 `02-roadmap.md`。
 >
 > 写于 2026-07-27，同日按 12 项决策修订过（见文末「本次修订记录了什么」）。
 >
@@ -24,7 +24,7 @@
 
 跑在 Postgres 上、有自定义 User、配置可安全部署、共享代码归位、脏数据进不来、改动有据可查。
 
-**验收标准：不新增任何功能，原本合法的数据仍然全部能存得下，测试全绿。**
+验收标准：不新增任何功能，原本合法的数据仍然全部能存得下，测试全绿。
 
 > 注意这跟原来写的"功能上什么都没变"不是一回事 —— 那个说法和本阶段要做的事自相矛盾。
 > 加数据库约束的全部意义就是让系统不再接受某些输入，所以 admin 里能做的事**必然**
@@ -63,7 +63,7 @@ git status                     # 应干净；不干净就先提交
 git switch -c phase-a          # 在分支上做，随时能回退
 ```
 
-**基线数字：11 个测试。** A10 验收时对比。
+基线数字：11 个测试。 A10 验收时对比。
 
 留个念想就 `cp db.sqlite3 db.sqlite3.bak`。`.gitignore` 只忽略了 `db.sqlite3`，
 不忽略 `.bak` —— **顺手把 `*.bak` 加进 `.gitignore`**，别指望自己记得。
@@ -211,7 +211,7 @@ nonexistent parent node ('languages_plus', '0004_auto_20171214_0004')
 `0001` 的 `preferred_language` 原本指向 `languages_plus.Language`，
 `0002` 才建自己的 `Language`、`0004` 再把外键改指过来。删掉那个 app，`0001` 的依赖就悬空了。
 
-**处理（2026-07-27 决策）：重建迁移历史。** 库反正要丢，零风险：
+处理（2026-07-27 决策）：重建迁移历史。 库反正要丢，零风险：
 
 ```bash
 cp contact/migrations/0003_seed_languages.py <安全的地方>   # 手写的，必须保住
@@ -249,7 +249,7 @@ python manage.py startapp core
 - `INSTALLED_APPS` 加 `'core'`，**放在 `'contact'` 前面**（读的时候依赖方向一目了然）。
 - `core/views.py` 用不上，可以留空。
 
-> **不会产生迁移。** `TimeStampedModel` 是抽象基类，换个地方定义不改变 `Contact` /
+> 不会产生迁移。 `TimeStampedModel` 是抽象基类，换个地方定义不改变 `Contact` /
 > `Relationship` 的任何字段。此时 `makemigrations` 应该只有 A2 那个主键迁移，不该多出新的。
 > 如果它检测到字段改动，说明搬的时候定义被改了 —— 回去核对。
 
@@ -388,7 +388,7 @@ python manage.py createsuperuser
 python manage.py test
 ```
 
-**这一步必须全绿才能继续。** SQLite 和 Postgres 在约束、大小写敏感、并发上行为不同，
+这一步必须全绿才能继续。 SQLite 和 Postgres 在约束、大小写敏感、并发上行为不同，
 测试在 Postgres 下跑通才算数 —— 这正是现在切而不是三个月后切的原因。
 
 > ⏱ 从这里开始每次跑测试都会重灌那 7900 行语言（数据迁移 `0003`），比 SQLite 上慢得多。
@@ -405,7 +405,7 @@ python manage.py runserver
 
 ## A7 · 数据库约束（按 D9 + D14）
 
-**这一步是 D9 修订的兑现。** D9 原以为"名字必须匹配 contact_type"的规则已经生效，
+这一步是 D9 修订的兑现。 D9 原以为"名字必须匹配 contact_type"的规则已经生效，
 其实 `save()` 不调 `clean()` —— 脚本、`bulk_create`、`queryset.update()` 一直能绕过去。
 约束落到数据库层，所有写入路径就都绕不过了。
 
@@ -431,7 +431,7 @@ class Meta:
     ]
 ```
 
-> **坑：Meta 里不能写 `ContactType.INDIVIDUAL`。** 嵌套类的类体拿不到外层类的命名空间，
+> 坑：Meta 里不能写 `ContactType.INDIVIDUAL`。 嵌套类的类体拿不到外层类的命名空间，
 > 会直接 `NameError`。只能写字面量 `"individual"` / `"organization"` ——
 > 这意味着取值字符串又多了一处副本，**注释里要说明**，跟 `TextChoices` 的定义对上。
 
@@ -468,7 +468,7 @@ class Meta:
 
 三个细节：
 
-- **`nulls_distinct=False` 不能省。** Postgres 默认认为 `NULL != NULL`，而 `start_date`
+- `nulls_distinct=False` 不能省。 Postgres 默认认为 `NULL != NULL`，而 `start_date`
   是可空的 —— 不加这个参数，两条起始日期都为空的相同关系照样能重复插入，约束等于白加。
   PG 15+ 支持，我们是 18，没问题。**这也是 A7 必须排在切库之后的原因**：
   SQLite 上这个参数会被静默忽略。
@@ -478,7 +478,7 @@ class Meta:
 
 **明确不做的**：镜像重复 —— `(Alice, Bob, 'parent of')` 和 `(Bob, Alice, 'child of')`
 是同一件事存两遍，唯一约束挡不住（决策 #2 选择不处理）。
-数据库表达不了这个，真要管只能写在 `clean()` 里。**记在这里是为了以后别以为已经解决了。**
+数据库表达不了这个，真要管只能写在 `clean()` 里。记在这里是为了以后别以为已经解决了。
 
 ### `clean()` 提示层
 
@@ -594,7 +594,7 @@ def test_the_middleware_is_installed(self):
    慢到你开始不想跑测试）
 7. 一段话说明项目是什么，并指向 `docs/planning/goal.md`
 
-标准是：**照着做能从零跑起来，不用问任何人。**
+标准是：照着做能从零跑起来，不用问任何人。
 
 ---
 
@@ -616,10 +616,10 @@ def test_the_middleware_is_installed(self):
 | `test_superuser_can_be_created_without_a_contact` | D12 要求的 `contact` 可空 | A5 |
 | `test_user_can_be_linked_to_a_contact` | `related_name` 反查通 | A5 |
 | `test_no_model_changes_are_missing_a_migration` | 忘了 `makemigrations` 会当场红 | A4 |
-| `test_create_bypassing_full_clean_still_cannot_break_the_name_rule` | **D9 原来漏掉的那条路** | A7 |
+| `test_create_bypassing_full_clean_still_cannot_break_the_name_rule` | D9 原来漏掉的那条路 | A7 |
 | `test_organization_without_a_name_is_rejected_at_the_database` | 同上，机构侧 | A7 |
 | `test_cannot_relate_a_contact_to_itself` | 自我关系挡得住 | A7 |
-| `test_cannot_store_the_same_relationship_twice` | **`nulls_distinct=False` 真的生效** | A7 |
+| `test_cannot_store_the_same_relationship_twice` | `nulls_distinct=False` 真的生效 | A7 |
 | `test_end_date_cannot_be_before_start_date` | 日期倒挂挡得住 | A7 |
 | `test_editing_a_contact_records_who_changed_it` | middleware 顺序对，记得到"谁" | A8 |
 
@@ -654,7 +654,7 @@ def test_the_middleware_is_installed(self):
 
 ## 分工与提交节奏（决策 #12）
 
-**A1–A6 由 Claude 做完，停下来交给你验收，通过后再继续 A7–A9。**
+A1–A6 由 Claude 做完，停下来交给你验收，通过后再继续 A7–A9。
 
 A1–A6 是一串咬合的动作（配置 → 依赖 → 结构 → 切库），中间状态（比如改了
 `AUTH_USER_MODEL` 但还没建库）留在磁盘上过夜容易忘记做到哪，所以一口气做完。
@@ -680,7 +680,7 @@ A7 / A8 / A9 彼此独立，可以分开做、分开提交。
 | 6 | A6 拍板换 psycopg 3 | 原文"嫌麻烦就留着"没拍板 |
 | 7 | A6 拍板用 `dj-database-url` | 同上；且 Phase D 部署时零改动 |
 | 8 | A2 明确开发 key 与生产 key 是两把 | 原文没区分 |
-| 9 | A4/A5/A7/A8 全部补测试 | **原 A5 建了 User 模型却零测试，是 roadmap 违反 goal.md** |
+| 9 | A4/A5/A7/A8 全部补测试 | 原 A5 建了 User 模型却零测试，是 roadmap 违反 goal.md |
 | 10 | A10 验收从"精确数字"改成"只增不减 + 清单" | 精确数字会卡住自己，且信息量更低 |
 | 11 | 基线数字从"106 行测试"改成实测的"11 个测试" | 行数不是可验收的量 |
 | 12 | 验收口径从"功能上什么都没变"改成允许脏数据被挡 | 原口径与"加约束"这件事**自相矛盾** |

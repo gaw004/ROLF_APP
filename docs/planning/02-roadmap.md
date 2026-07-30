@@ -1,19 +1,19 @@
 # Phase B 实施手册 —— 人与活动，以及活动闭环
 
-> **这份文档只讲 Phase B 怎么做。** 要做什么、为什么这么定，全在 `goal.md` ——
+> 这份文档只讲 Phase B 怎么做。 要做什么、为什么这么定，全在 `goal.md` ——
 > 那是唯一权威来源，本文与它冲突时以它为准。
 > `01-roadmap.md` 是 Phase A 的实施手册，已完成，留作记录，不再更新。
 >
 > 写于 2026-07-28，**2026-07-29 从 B6 起整段重写**。
 
-> ## ⭐ 当前进度与去哪读（2026-07-29）
+> ## 当前进度与去哪读（2026-07-29）
 >
 > | 步骤 | 状态 | 是什么 |
 > |---|---|---|
 > | B0–B5 | ✅ **已完成** | `core` 时间口径 + `contact` 三处收口 + `org` 四张表。下面 B0–B5 那几节原样保留，现在只在维护时才翻 |
-> | **B6–B13** | ⬜ **当前在做** | **按基金会 2026-07-29 给出的 14 条需求重写过。** 跳到 [B6 起的那一段](#-b6-起按-2026-07-29-的优先级重写) |
+> | B6–B13 | ⬜ **当前在做** | 按基金会 2026-07-29 给出的 14 条需求重写过。 跳到 [B6 起的那一段](#b6-起按-2026-07-29-的优先级重写) |
 >
-> **原来的 B6–B9（`events` 四张表 / `volunteer` / `seed_demo` / 验收）已被 B6–B13 取代。**
+> 原来的 B6–B9（`events` 四张表 / `volunteer` / `seed_demo` / 验收）已被 B6–B13 取代。
 > 主要差别：多了 `EventRole` 和 `MinistryRole` 两张表、多了一组自助页面、
 > `VolunteerProfile` 和 `BackgroundCheck` 移出本阶段。
 > 完整改动清单见 `goal.md`[七、2026-07-29 修订记录](revisions.md#七2026-07-29-修订记录了什么)。
@@ -26,13 +26,13 @@
 > | 项 | 实测值 |
 > |---|---|
 > | `python manage.py test` | **27 个，全绿**（0.63s） |
-> | `python manage.py check` | **0 issues, 0 silenced** |
+> | `python manage.py check` | 0 issues, 0 silenced |
 > | 已有 app | `core` / `contact` / `accounts` |
 > | 已有模型 | `Contact` / `RelationshipType` / `Relationship` / `Language` / `User` |
 > | `contact` 迁移 | 到 `0004_historicalcontact` |
 > | 数据库 | Postgres 18 在跑，psycopg 3 |
 > | Django / Python | 5.2.16 / 3.14.6 |
-> | **开发库里的业务数据** | `Contact` 0 行、`Relationship` 0 行、`RelationshipType` 0 行、`Language` 7923 行、`User` 1 个 |
+> | 开发库里的业务数据 | `Contact` 0 行、`Relationship` 0 行、`RelationshipType` 0 行、`Language` 7923 行、`User` 1 个 |
 >
 > ⚠️ **最后一行很重要，直接改变了两处做法**，见 B0 的「实测发现」。
 
@@ -74,12 +74,12 @@
 | HTMX / 样式 / 任何面向外部用户的页面 | Phase C（D2：前端推迟） |
 | ~~自己写的页面~~ | **两个例外**（都被 `goal.md` D18 的形状触发赶出 admin）：`/relationships/add/`（B3.1b，inline 拿不到 subject，且 Phase C 的 HTMX 不用 formset）和 `/contacts/merge/`（B4.4，二次确认页要吃 `admin/base_site.html`、"待处理 N 条"要覆盖 `admin/index.html`）。**都是单页面、无 HTMX、无样式、逻辑全在 `services.py` 里，Phase C 原样接管** |
 | 薪酬 | 推迟清单 + `payroll` app 的位置已在 D17 预留 |
-| **在 `clean()` 里重写一遍约束的规则** | 2026-07-28 D14 重写：规则只在约束里，字段级提示走 `CONSTRAINT_FIELD` 映射。`clean()` 只写约束表达不了的（跨表、跨行） |
-| **`Contact.is_reference_only` / `Contact.emergency_contact` / `Contact.objects.people()`** | **2026-07-28 第六轮整体作废**，紧急联系人改用 `EmergencyContact` 专用表（B4.2）。一个字段都不要加 |
-| **把 `EmergencyContact.name` / `.phone` 升级成 FK → `Contact`** | 推迟清单 —— **且这是「痛」的迁移方向**。重复存储是主动接受的代价，别在实施时顺手优化掉 |
+| 在 `clean()` 里重写一遍约束的规则 | 2026-07-28 D14 重写：规则只在约束里，字段级提示走 `CONSTRAINT_FIELD` 映射。`clean()` 只写约束表达不了的（跨表、跨行） |
+| `Contact.is_reference_only` / `Contact.emergency_contact` / `Contact.objects.people()` | 2026-07-28 第六轮整体作废，紧急联系人改用 `EmergencyContact` 专用表（B4.2）。一个字段都不要加 |
+| 把 `EmergencyContact.name` / `.phone` 升级成 FK → `Contact` | 推迟清单 —— **且这是「痛」的迁移方向**。重复存储是主动接受的代价，别在实施时顺手优化掉 |
 | **带日期的编制层级**（组织架构的历史） | 推迟清单 —— 本阶段解决的是"**换人**"，不是"**重组**"。`Position.reports_to` 改了，旧架构只剩 simple-history |
-| **`Position.headcount`**（编制人数） | 推迟清单 —— `vacant()` 只认"一个人都没有"，表达不了"3 个坑填了 2 个" |
-| **把邻接表换成 `LTREE` / 递归 CTE** | 推迟清单 —— 2026-07-28 评审建议过，未采纳。几十行的表，`build_org_tree()` 一次查询取全表就是最优解。**中途手痒时先读 `goal.md`「为什么不上 Postgres 的 LTREE 扩展」那张表** |
+| `Position.headcount`（编制人数） | 推迟清单 —— `vacant()` 只认"一个人都没有"，表达不了"3 个坑填了 2 个" |
+| 把邻接表换成 `LTREE` / 递归 CTE | 推迟清单 —— 2026-07-28 评审建议过，未采纳。几十行的表，`build_org_tree()` 一次查询取全表就是最优解。**中途手痒时先读 `goal.md`「为什么不上 Postgres 的 LTREE 扩展」那张表** |
 
 ---
 
@@ -102,7 +102,7 @@ B0 基线与准备（分支 / ruff / 确认不阻塞项）                      
          └→ B3 contact②：Relationship 收口（双向显示 → 归一化 → 删 is_active）  ✅
              └→ B4 contact③：Contact 收口（__str__ / 紧急联系人 / 查重 / 合并）  ✅
                  └→ B5 org：Ministry + EmploymentType + Position + Assignment  ✅
-                     └→ ⭐ B6 起见下面那一段（2026-07-29 重写）
+                     └→ B6 起见下面那一段（2026-07-29 重写）
 ```
 
 **B5 内部还有一条硬顺序**：`Ministry` → `Position` → `Assignment` ——
@@ -120,7 +120,7 @@ python manage.py test          # 应该是 27 个，全绿
 python manage.py check         # 应该 0 issues
 ```
 
-**基线数字：27 个测试。** B9 验收时对比，只增不减。
+基线数字：27 个测试。 B9 验收时对比，只增不减。
 
 ### 装 ruff（`goal.md` D16 第三层）
 
@@ -156,12 +156,12 @@ select = ["E", "F", "DTZ"]
 
 `Contact` / `Relationship` / `RelationshipType` 都是 **0 行**。这改变两处做法：
 
-1. **`RelationshipType.code` 不需要 `goal.md` 写的三步迁移。**
+1. `RelationshipType.code` 不需要 `goal.md` 写的三步迁移。
    三步法（加可空 → 数据迁移回填 → 改 unique/non-null）是**表里有数据时**的必要手续；
    0 行时一步加 `SlugField(unique=True)` 就行。
    **但 `goal.md` 里那条三步规则不要删** —— 它对以后任何"给有数据的表加唯一字段"仍然成立，
    只是这一次的前置条件不满足。B2 里会写清楚这个简化和它的适用条件。
-2. **本阶段全程不需要写数据迁移。** 所有新约束都加在空表上，不存在"先清洗存量数据"的问题 ——
+2. 本阶段全程不需要写数据迁移。 所有新约束都加在空表上，不存在"先清洗存量数据"的问题 ——
    这正是 A7 说的"现在加是免费的"。
 
 > 顺带记一笔：`Language` 有 7923 行，所以每次跑测试都会重灌一遍。
@@ -273,7 +273,7 @@ class DateRangeQuerySet(models.QuerySet):
 **`start_date` 那一半不能漏**：只看 `end_date` 的话，一个 `start_date=2027-01-01`、
 没有结束日期的岗位**今天就算在职**，而且不报错。
 
-> ⚠️ **`active()` 只管日期，`core` 这一层不认识 `status`。**
+> ⚠️ `active()` 只管日期，`core` 这一层不认识 `status`。
 > `Assignment` 在 B5 会自己加一个 `serving()`（= `active()` AND `status=active`），
 > **不要把 `status` 塞进这个共享 mixin** —— `Relationship` 没有状态这回事，
 > 关系不会被"停职"。见 `goal.md`「`Assignment.status`」。
@@ -300,7 +300,7 @@ def is_currently_active(self):
 > ⚠️ 这个 property 和 `.active()` 是**同一条规则的两处实现**，按 D14 的纪律
 > **两处都要写注释指认对方**。真想彻底避免，可以让 property 走
 > `type(self).objects.filter(pk=self.pk).active().exists()`，但那是每行一次查询 ——
-> admin 列表里就是 N+1。**选了重复实现，就必须靠注释和测试兜住。**
+> admin 列表里就是 N+1。选了重复实现，就必须靠注释和测试兜住。
 
 ### 测试（`core/tests.py`）
 
@@ -380,7 +380,7 @@ B9 的清单里有这一项。
 **顺带在 B1 就把 `contact/services.py` 建出来**（空文件 + 一行 docstring）。
 B3.1b 的 `orient()` / `direction_choices()` 和 B4.4 的 `merge_contacts()` 都往这里放。
 现在建成本为零，等到用时再建就会有人顺手写进 `models.py` 或 `Form` 里。
-**`org/services.py` 同理 —— B5 一 `startapp` 就建，`build_org_tree()` 是它的第一个住户。**
+`org/services.py` 同理 —— B5 一 `startapp` 就建，`build_org_tree()` 是它的第一个住户。
 
 三条 grep 守卫的写法：遍历项目下的 `*.py`（跳过 `.venv`、`*/migrations/*`
 和 `core/timeutils.py` / `org/services.py` 各自），正则找 `date.today()` / `timezone.now().date()`，
@@ -401,7 +401,7 @@ linter 认为合法），所以这条测试不能省。
 **为什么在这个位置**：`code` 必须赶在任何按类型查询的代码之前落地；
 `usable_as_emergency_contact` 是 B4.2 `EmergencyContact` 表的前置。
 
-> ⚠️ **2026-07-28 第三轮修订**：已确认 **`bulk_create` 会成为常态写入路径**
+> **2026-07-28 第三轮修订**：已确认 **`bulk_create` 会成为常态写入路径**
 > （批量导入基金会现有数据）。所有"`save()` 归一化 + 唯一约束"的组合因此都是漏的 ——
 > 唯一性一律改用 `Lower()` / `Trim()` / `Least()` 的**表达式约束**。
 > 通则和判定方法见 `goal.md` D9「归一化通则」。本步和 B3.2、B5 都受影响。
@@ -464,7 +464,7 @@ def save(self, *args, **kwargs):
     super().save(*args, **kwargs)
 ```
 
-> **这是 2026-07-28 第三轮修订的核心改动。** 原来的写法是"`save()` 归一化 + `unique=True`"，
+> 这是 2026-07-28 第三轮修订的核心改动。 原来的写法是"`save()` 归一化 + `unique=True`"，
 > 看上去像数据库在把关，其实**只要不经过 `save()` 就全漏**。
 > 而 `bulk_create` 已确认会成为常态写入路径（批量导入基金会现有数据）。
 > 判定方法见 `goal.md` D9 通则：**不经过 `save()` 直接写这两行，数据库会不会拒？**
@@ -484,7 +484,7 @@ def clean(self):
     """
 ```
 
-⚠️ **不要在这里重写唯一约束的人话版本**（2026-07-28 D14 重写后的规矩）。
+**不要在这里重写唯一约束的人话版本**（2026-07-28 D14 重写后的规矩）。
 那条规则只属于 `relationshiptype_name_a_to_b_ci_unique`，
 人话来自它的 `violation_error_message`，挂到哪个字段来自 `CONSTRAINT_FIELD` 映射。
 **`clean()` 里只写约束表达不了的东西**，这里就是缺口 1 那条跨行检查。
@@ -518,7 +518,7 @@ python manage.py makemigrations contact
 给 `""` 即可 —— 0 行时不会应用到任何行；生成后**把迁移文件里那个 `default=""` 删掉**、
 `preserve_default=False`，免得它留在文件里误导以后的人。
 
-> **这条简化只在"表是空的"这个前提下成立。** 以后给任何有数据的表加唯一字段，
+> 这条简化只在"表是空的"这个前提下成立。 以后给任何有数据的表加唯一字段，
 > 回去照 `goal.md` 的三步走。
 
 ### admin
@@ -630,19 +630,19 @@ class RelationshipForm(forms.ModelForm):
 
 三条理由，按分量排：
 
-1. **Phase C 用 HTMX 写这个功能，根本不会用 Django formset。** 那时的写法就是
+1. Phase C 用 HTMX 写这个功能，根本不会用 Django formset。 那时的写法就是
    "一个 subject + 一个表单片段，POST 回来插一行" —— **正好就是这个独立页面的形状**。
    挂 inline 等于 Phase B 写一套 formset 管道扔掉、Phase C 再把独立页面写一遍。
-   **同一件事写两遍，正是这一整轮要消除的东西。**
+   同一件事写两遍，正是这一整轮要消除的东西。
 2. **inline 表单默认拿不到父对象**，而 `subject` 是这个表单的**全部前提**。
    要拿到得覆盖 `InlineModelAdmin.get_formset()` 或自定义
    `BaseInlineFormSet._construct_form` —— **那是全项目最深的一处 admin 管道**，
    而它买到的东西前端上来一点都留不住。
    > 上一版这里写的 `self.instance_owner` **是个不存在的属性**，
    > 正是因为"从 inline 里拿父对象"这件事没有干净写法。留这句话在这儿当提醒。
-3. **形状触发本来就指向它。** `goal.md` D18 第二条出栏触发（需要跨请求状态 /
+3. 形状触发本来就指向它。 `goal.md` D18 第二条出栏触发（需要跨请求状态 /
    需要动 admin 管道）已经把合并页赶出去了，关系录入是同一个形状 ——
-   **两处用同一个模式，比一处 inline 一处页面好维护。**
+   两处用同一个模式，比一处 inline 一处页面好维护。
 
 **代价（如实记）**：多一次跳页。可接受 —— 那一跳 Phase C 也要有（HTMX 里是弹一个片段），
 而且录关系不是高频操作。
@@ -664,7 +664,7 @@ def orient(*, subject, other, subject_is_a: bool) -> tuple[Contact, Contact]:
 **为什么必须抽出来**：`goal.md` D18 的落点表把「关系方向路由」明确划给 `services.py`。
 写在 `Form.save()` 里字面上不违规（`Form` 不是 `ModelAdmin` 钩子），
 但 Phase C 若把这个页面改成"此人的所有关系"合并视图（形状变了、表单复用不了），
-路由就得抄一遍。**抽成函数之后，抄不抄表单都无所谓。**
+路由就得抄一遍。抽成函数之后，抄不抄表单都无所谓。
 这和 B4.3b 的"拦截逻辑放 model / services，`Form` 只调用"是同一条规矩。
 
 ⚠️ **对称类型的 id 排序不要写在这里，也不要写进 `orient()`** —— 它留在
@@ -696,19 +696,19 @@ models.UniqueConstraint(
 )
 ```
 
-**不带条件，对所有类型一律生效。** 缺口 1 修好之后（反向类型行根本不该存在），
+不带条件，对所有类型一律生效。 缺口 1 修好之后（反向类型行根本不该存在），
 同一对人 + 同一类型出现两个方向对**任何**类型都是错的：`spouse` 本就只该一行；
 `(小明, 王强, parent of)` 意思是小明是王强的父亲，同一对人不可能双向成立。
 
 **用 `Coalesce` 而不是 `nulls_distinct=False`**：表达式 `UniqueConstraint` 与 `nulls_distinct`
 能否共存尚未实测（`Assignment` 那条正因此放弃了 `Lower("title")`）。
 `Coalesce("start_date", Value(date.min))` 语义等价 —— 两行都为空时仍算重复 ——
-且不依赖那个不确定的组合。**这是主方案，不是退路。**
+且不依赖那个不确定的组合。这是主方案，不是退路。
 
 ⚠️ **实施时先跑一次确认表达式约束真的建出来了**（B9 的 `\d contact_relationship` 会验），
 Django 生成的是 `CREATE UNIQUE INDEX ... ON (LEAST(...), GREATEST(...), ...)`。
 
-**② `save()` 归一化（只对对称类型，只管显示）：**
+② `save()` 归一化（只对对称类型，只管显示）：
 
 ```python
 def save(self, *args, **kwargs):
@@ -775,7 +775,7 @@ def test_the_same_pair_and_type_with_both_start_dates_null_is_rejected(self)  # 
 
 **验证**：`test` 全绿；肉眼验一次 —— 从小明页面点「添加关系」→
 选「小明 是 ___ 的儿子」+ 王强 → 小明页面看到「child of 王强」、
-王强页面看到「parent of 小明」。**两侧都能录，且方向不会反。**
+王强页面看到「parent of 小明」。两侧都能录，且方向不会反。
 
 ---
 
@@ -809,9 +809,9 @@ def __str__(self):
 
 ### B4.2 `EmergencyContact` 专用表
 
-> ⚠️ **2026-07-28 第六轮修订，本步整段重写。** 原方案是在 `Contact` 上加三个字段
+> 2026-07-28 第六轮修订，本步整段重写。 原方案是在 `Contact` 上加三个字段
 > （`emergency_contact` 自引用 FK / `emergency_contact_relationship` / `is_reference_only`），
-> 并配一整套 `people()` 过滤纪律。**全部作废，一个字段都不要加。**
+> 并配一整套 `people()` 过滤纪律。全部作废，一个字段都不要加。
 >
 > 理由（`goal.md` D15「载体的第四条判据」）：紧急联系人可能是邻居、室友，
 > **不是与基金会交互的主体，不该占一行 `Contact`**。留在 `Contact` 里的话，
@@ -866,13 +866,13 @@ models.UniqueConstraint(
 **方向约定**（不写死一定会录反）：`relationship_type` 一律读作
 **「紧急联系人 是 本人 的 ___」**，即 `name_a_to_b`，a = 紧急联系人、b = 本人。
 小明名下那一行填 `name=王秀英` + `parent of` = "王秀英是小明的母亲"。
-**这句话要原样写进 admin 的 `help_text`。**
+这句话要原样写进 admin 的 `help_text`。
 
 **admin**：`EmergencyContactInline`（`TabularInline`）挂在 `ContactAdmin` 上，`extra=0`。
 
-> **不做查重、不做关联、不做预选。** 原方案那五大段（自动建 reference-only、
+> 不做查重、不做关联、不做预选。 原方案那五大段（自动建 reference-only、
 > 命中唯一时预选、命中多条时提示、安全阀、同名同号父子的残留风险）**整体消失** ——
-> 没有身份要认，就没有认错的可能。**这是文本方案唯一比 FK 版简单的地方，享受它。**
+> 没有身份要认，就没有认错的可能。这是文本方案唯一比 FK 版简单的地方，享受它。
 > `find_exact_duplicates()` 仍然要写，但那是给 `Contact` 本身用的（B4.3），
 > 和紧急联系人无关。
 
@@ -890,7 +890,7 @@ def find_exact_duplicates(cls, *, last_name, first_name, phone, exclude_pk=None)
     """
 ```
 
-**不要用电话相似度。** 号码存的是 E.164：`+14085550102` 和 `+14085550103`
+不要用电话相似度。 号码存的是 E.164：`+14085550102` 和 `+14085550103`
 字符相似度 92%，却是完全不同的两个人 —— 号码没有"接近"这个语义。
 而真正需要吸收的格式差异（`(408) 555-0102`）`phonenumber_field` 入库时已经归一化掉了。
 
@@ -901,11 +901,11 @@ def find_exact_duplicates(cls, *, last_name, first_name, phone, exclude_pk=None)
 > 才可能命中。所以**不做按姓名的 autocomplete 下拉**（那是唯一会泄露"系统里有个同名的人"
 > 的路径），改成两个字段都填完后再检查。提示里**只显示姓名**。
 
-> ⚠️ **这个判定函数只服务 `Contact` 本身的查重（下面 B4.3b），与紧急联系人无关。**
+> ⚠️ 这个判定函数只服务 `Contact` 本身的查重（下面 B4.3b），与紧急联系人无关。
 > 第六轮修订之前它还兼管"紧急联系人该关联到哪条 Contact"，
 > **那一整套（自动建 reference-only、命中唯一时预选、命中多条时提示、
 > 安全阀、同名同号父子会关联错的残留风险）已随专用表方案整体作废**，
-> 见 B4.2 结尾。**不要实现其中任何一条。**
+> 见 B4.2 结尾。不要实现其中任何一条。
 
 ### B4.3b 联系人本身的重名：分级拦截（2026-07-28 新增）
 
@@ -916,7 +916,7 @@ def find_exact_duplicates(cls, *, last_name, first_name, phone, exclude_pk=None)
 | 仅**同名**（姓名归一化后比较） | 高 | `messages.warning`，**不阻断** |
 | **同名 AND 同号**（`find_exact_duplicates()`） | 低 | ✅ **硬拦截**：`ValidationError` + `force_save` 复选框 |
 
-> **原方案是"一律只警告不阻止"。** "重名合法"这个判断没错，但 `messages.warning`
+> 原方案是"一律只警告不阻止"。 "重名合法"这个判断没错，但 `messages.warning`
 > **是保存之后才出现的** —— 那时重复记录已经进库，操作员还得回头删。
 
 ```python
@@ -932,16 +932,16 @@ class ContactAdminForm(forms.ModelForm):
             self.fields["force_save"].widget = forms.HiddenInput()
 ```
 
-⚠️ **硬拦截只能绑同名同号，绝不能绑同名。** 王强 / 李明 / 陈伟同名是常态 ——
+⚠️ 硬拦截只能绑同名同号，绝不能绑同名。 王强 / 李明 / 陈伟同名是常态 ——
 每天弹 20 次，操作员会训练出"看到框就打勾"的条件反射，**拦截失效还多两次点击**。
 这正是本节上面写过的"阻塞保存会让人学会绕过系统"。
 
-⚠️ **按 D18，判定和拦截逻辑放 model / services 层，`Form` 只调用。**
+⚠️ 按 D18，判定和拦截逻辑放 model / services 层，`Form` 只调用。
 Phase C 的 HTMX 录入页要复用同一套。
 
 ### B4.4 合并重复记录
 
-**范围：最小可用。** 逐字段合并界面推迟（推迟清单）。
+范围：最小可用。 逐字段合并界面推迟（推迟清单）。
 
 ```python
 @transaction.atomic
@@ -965,7 +965,7 @@ def merge_contacts(keep, drop, *, actor=None):
    是哪个模型撞了 —— 比反射所有唯一约束简单得多，效果一样。
 4. **留痕**：`Contact` 已挂 simple-history；另外在 keep 的 `notes` 里追加
    "已合并 #42（2026-08-01）"，让人肉眼也能看出来。字段合并规则从简：
-   **keep 的字段优先，drop 只在 keep 为空时补进来。**
+   keep 的字段优先，drop 只在 keep 为空时补进来。
 
 #### 界面：一个朴素的 Django 视图，**不做成 admin action**（2026-07-28 修订）
 
@@ -990,12 +990,12 @@ contact/templates/contact/merge_confirm.html
 **入口仍然在 admin**（那是纯呈现，按 D18 本来就该在 admin）：
 `Contact` changelist 加一个「疑似重复（同名同号）」`SimpleListFilter`，
 每行给一个链接跳到 `/contacts/merge/?keep=…&drop=…`。
-再加一个只列清单的 management command。**"待处理 N 条"就显示在合并页面顶部，不碰 admin 首页。**
+再加一个只列清单的 management command。"待处理 N 条"就显示在合并页面顶部，不碰 admin 首页。
 
 **为什么这样反而更便宜**：不用继承 admin 模板、不受升级影响、前端上来只换模板
 （视图和 `merge_contacts()` 照旧）、削减 Phase B 范围时一个文件直接不写。
 
-> **连带的好处：这是本项目第一个自己写的页面。** 正好在模型已经稳定、
+> 连带的好处：这是本项目第一个自己写的页面。 正好在模型已经稳定、
 > 逻辑已经写好（`merge_contacts()`）、风险最低的一件事上，
 > 把「视图 + 模板 + URL + staff-only 权限」这条路先跑通 ——
 > 免得 Phase C 第一次写页面时同时踩四种坑。见 `goal.md` Phase C 的那条注。
@@ -1095,7 +1095,7 @@ def test_minors_accepts_an_explicit_date(self)                       # 时钟可
 
 ## B5 · `org`：`Ministry` + `EmploymentType` + `Position` + `Assignment`
 
-> ⚠️ **本步在 2026-07-28 二次修订后重写。** `Position`（编制）是新拆出来的表，
+> ⚠️ 本步在 2026-07-28 二次修订后重写。 `Position`（编制）是新拆出来的表，
 > `Assignment` 身上原本的 `kind` / `title` / `ministry` / `is_leader` / `reports_to`
 > **全部搬到了 `Position`**。理由见 `goal.md` D11「第二次修订」——
 > 一句话：**自引用到任职行，就没有任何一行代表"空缺的编制"**。
@@ -1157,12 +1157,12 @@ class Position(TimeStampedModel):
 挂在 `Assignment` 上的话空缺**这些全都没有**。
 连带收益：**只查 `Position` 一张表就能画出完整组织架构图**，不 join 任何任职数据。
 
-**`Position` 是编制类型，不是座位。** 三个食物银行志愿者 = **一个** `Position` +
+`Position` 是编制类型，不是座位。 三个食物银行志愿者 = **一个** `Position` +
 三行 `Assignment`。这是这张表能保持在几十行、不膨胀成几百行的原因。
 **因此不加"一个编制同时只能有一个在职任职"的约束** —— 它既挡不住合法的多人共岗，
 也挡不住合法的交接期重叠。
 
-⚠️ **`reports_to` 用 `PROTECT`，不是 `SET_NULL`。**
+⚠️ `reports_to` 用 `PROTECT`，不是 `SET_NULL`。
 `CASCADE` 是灾难（删一个编制带走整棵下属子树）；但 `SET_NULL` 也不行 ——
 它会把一整棵子树**静默地**变成架构图的根，事后看不出出过事。
 `PROTECT` 强迫你先把下属改挂到别处，是唯一会让你注意到的选项。
@@ -1179,7 +1179,7 @@ constraints = [
 indexes = [models.Index(fields=["ministry", "kind", "is_active"])]
 ```
 
-⚠️ **`code` 用 `UniqueConstraint(Lower("code"))`，字段上不写 `unique=True`。**
+⚠️ `code` 用 `UniqueConstraint(Lower("code"))`，字段上不写 `unique=True`。
 `save()` 转小写只保证"存进去的值好看"，`bulk_create` 能插 `Food_Pantry` + `food_pantry` 两行。
 **`Ministry` / `EmploymentType` 以及 B6 的 `EventType` / `ParticipationRole` 一律照此办理** ——
 见 `goal.md` D9「归一化通则」。
@@ -1192,7 +1192,7 @@ indexes = [models.Index(fields=["ministry", "kind", "is_active"])]
 **`code` 的不可改**照 B2 的 `RelationshipType` 同一套做法（admin `get_readonly_fields`
 在 change 页只读 + `clean()` 比对数据库旧值）。
 
-**空缺查询 —— 这是拆出这张表的首要理由，必须一起落地：**
+空缺查询 —— 这是拆出这张表的首要理由，必须一起落地：
 
 ```python
 class PositionQuerySet(models.QuerySet):
@@ -1255,18 +1255,18 @@ def build_org_tree(positions=None):
 
 **三个要点，一个都不能省：**
 
-1. **`visited` 在函数里，不在调用方。** 这就是它和原方案的全部区别。
-2. **一次查询。** 测试用 `assertNumQueries(1)` 钉住 —— 防止以后有人改回逐级取。
-3. **喂进一个环不许挂死。** 测试必须用 `bulk_create` 直接插环（`clean()` 绕过去），
+1. `visited` 在函数里，不在调用方。 这就是它和原方案的全部区别。
+2. 一次查询。 测试用 `assertNumQueries(1)` 钉住 —— 防止以后有人改回逐级取。
+3. 喂进一个环不许挂死。 测试必须用 `bulk_create` 直接插环（`clean()` 绕过去），
    断言 `build_org_tree()` 正常返回并记了 warning。
 
 > 好消息：环现在只可能出现在几十行的编制表里，而不是每次招人都新增一行的任职表里。
 > 防线照做，但风险等级从"迟早会踩"降到"基本不会踩"。
 
-> **⚠️ 不要换成 LTREE / 递归 CTE。** 2026-07-28 有过一轮这个建议，未采纳 ——
+> ⚠️ 不要换成 LTREE / 递归 CTE。 2026-07-28 有过一轮这个建议，未采纳 ——
 > 量级不对（几十行）、LTREE 的 path 维护依赖 `save()`（违反 D9，`bulk_create` 绕得过）、
 > 丢掉 `reports_to` 的 `PROTECT`、或者 FK + path 并存违反 D11。
-> **完整论证和重启条件见 `goal.md`「为什么不上 Postgres 的 LTREE 扩展」+ 推迟清单。**
+> 完整论证和重启条件见 `goal.md`「为什么不上 Postgres 的 LTREE 扩展」+ 推迟清单。
 
 ### `Assignment`（任职 —— 谁在什么时候占了哪个编制）
 
@@ -1300,7 +1300,7 @@ class Assignment(TimeStampedModel):
     objects = Manager.from_queryset(AssignmentQuerySet)()
 ```
 
-**六个字段。** 没有 `kind` / `title` / `ministry` / `is_leader` / `reports_to`，
+六个字段。 没有 `kind` / `title` / `ministry` / `is_leader` / `reports_to`，
 它们全在 `Position` 上。
 
 **`status` 和任期是正交的两个维度，不是 `is_active` 的马甲**（2026-07-28 新增，
@@ -1315,7 +1315,7 @@ class Assignment(TimeStampedModel):
 不是不可变表达式，数据库会拒绝。而且没必要：`status=on_leave` + 已过期的 `end_date`
 是**惰性的**，`serving()` 先 AND 了日期，已离任的人不会被放回来。
 
-⚠️ **`position` 用 `PROTECT`。** 写成 `CASCADE` 的话，删一个编制
+⚠️ `position` 用 `PROTECT`。 写成 `CASCADE` 的话，删一个编制
 → **占过它的所有人的任职历史一起消失**。同 `Participation.contact` 的道理。
 
 ```python
@@ -1332,10 +1332,10 @@ indexes = [models.Index(fields=["position", "status", "end_date"])]
 
 三列一次覆盖 `serving()`（编制 + 状态 + 日期）；`active()` 走最左的 `position` 也够用。
 
-**唯一约束简化了。** 旧版是 `(contact, ministry, kind, title, start_date)`，
+唯一约束简化了。 旧版是 `(contact, ministry, kind, title, start_date)`，
 还专门论证过"为什么必须带 `title`"（否则张三在食物银行同时当两个职务时第二行被误杀）——
 **拆出 `Position` 之后那整段论证作废**：两个职务本来就是两个 `Position`，天然放行。
-> **记一笔：约束越加越长往往是模型没拆干净的症状。** 这次就是。
+> 记一笔：约束越加越长往往是模型没拆干净的症状。 这次就是。
 
 **`nulls_distinct=False` 不能省**：`start_date` 可空且留空常见，
 Postgres 默认 `NULL != NULL`，不加就形同虚设 —— A7 的教训。
@@ -1408,9 +1408,9 @@ def test_assignment_status_has_no_ended_value(self)                 # 结束只�
 
 ---
 
-# ⭐ B6 起：按 2026-07-29 的优先级重写
+# B6 起：按 2026-07-29 的优先级重写
 
-> **B0–B5 已完成，上面那部分原样保留。**
+> B0–B5 已完成，上面那部分原样保留。
 >
 > 2026-07-29 基金会给出了一套完整需求（14 条，`goal.md`[零、当前优先级](goal.md#零当前优先级2026-07-29-定)），
 > 它成为唯一优先级。**原来的 B6–B9 已被下面的 B6–B13 取代**，改动清单见
@@ -1421,24 +1421,24 @@ def test_assignment_status_has_no_ended_value(self)                 # 结束只�
 
 ## 这半程要达成什么
 
-一句话：**ministry 的 admin 能发活动征人，志愿者能自己注册报名，活动办完能出统计。**
+一句话：ministry 的 admin 能发活动征人，志愿者能自己注册报名，活动办完能出统计。
 
 ```
 R1–R8  报表：多少场活动 / 属于哪个 ministry / 多久 / 几个工种 /
              每个工种几人 / 总工时 / 分工种工时 / 本 ministry 的 employee 参与情况
 P1–P6  流程：注册建 Contact / ministry admin 发活动 / 普通用户报名（未成年要同意）/
              看报名数 + 签到 + 统计 / 上一级指定 ministry admin /
-             ⭐ 活动改时间时通知所有报名者（未成年人通知家长）
+             活动改时间时通知所有报名者（未成年人通知家长）
 ```
 
 ### 三个不能松的判断（松了就白做）
 
 | 判断 | 出处 | 松了会怎样 |
 |---|---|---|
-| **工种是一张表，不是 `Participation` 上的一个字段** | `goal.md` D19 | 零报名的工种在系统里不存在，R4 静默答错，而 P2 最想看的就是"哪个工种还缺人" |
-| **权限要带 ministry 作用域，Django Group 顶不上** | `goal.md` D20 | 授出 `events.add_event` = 能给任何 ministry 发活动，P2 / P4 直接不成立 |
-| **权限必须先于自助页面** | `goal.md` D21 | 中间有一段时间任何登录用户能看到所有人的资料，而库里有未成年人的地址和电话 |
-| **通知的收件人解析绝不进适配器** | `goal.md` D22 | 「未成年人通知家长」是本基金会特有的规则，写进 backend 就等于换一次 provider 重写一遍 |
+| 工种是一张表，不是 `Participation` 上的一个字段 | `goal.md` D19 | 零报名的工种在系统里不存在，R4 静默答错，而 P2 最想看的就是"哪个工种还缺人" |
+| 权限要带 ministry 作用域，Django Group 顶不上 | `goal.md` D20 | 授出 `events.add_event` = 能给任何 ministry 发活动，P2 / P4 直接不成立 |
+| 权限必须先于自助页面 | `goal.md` D21 | 中间有一段时间任何登录用户能看到所有人的资料，而库里有未成年人的地址和电话 |
+| 通知的收件人解析绝不进适配器 | `goal.md` D22 | 「未成年人通知家长」是本基金会特有的规则，写进 backend 就等于换一次 provider 重写一遍 |
 
 ### 明确不做的（免得中途手痒）
 
@@ -1451,10 +1451,10 @@ P1–P6  流程：注册建 Contact / ministry admin 发活动 / 普通用户报
 | 资金 / `Contribution` | Phase D（2026-07-29 从 Phase C 后移） |
 | 活动班次 `Shift` | 推迟清单 —— `EventRole` 的维度是工种不是时间，两回事 |
 | React / Vue / 前后端分离 | 永远不做（D2 仍然成立的那一半）。自助页面就是 Django 模板 + 视图 |
-| **邮件群发 / 简报 / 募捐信** | 推迟清单。⚠️ **和 P6 不是一回事** —— P6 是事务性通知（这场活动改时间了，通知这场活动的报名者），范围由 `Participation` 天然界定；群发没有边界 |
-| **逐个收件人的送达状态 / 退信 / 重试队列** | 推迟清单 —— 要接 provider 的 webhook，是一整套东西。⚠️ **但「联系不上」那一组现在就要做**，那是本系统自己算得出来的，和送达状态是两回事（D22 ②） |
-| **真的接通 Novu** | B11 只写一个做 HTTP 调用的薄壳 + mock 测试。本机没有域名，发不出去也验不了 —— **接通放 Phase C** |
-| **CSS / 好看** | 本阶段一律不管。能点、能用、权限对，就算过 |
+| 邮件群发 / 简报 / 募捐信 | 推迟清单。⚠️ **和 P6 不是一回事** —— P6 是事务性通知（这场活动改时间了，通知这场活动的报名者），范围由 `Participation` 天然界定；群发没有边界 |
+| 逐个收件人的送达状态 / 退信 / 重试队列 | 推迟清单 —— 要接 provider 的 webhook，是一整套东西。⚠️ **但「联系不上」那一组现在就要做**，那是本系统自己算得出来的，和送达状态是两回事（D22 ②） |
+| 真的接通 Novu | B11 只写一个做 HTTP 调用的薄壳 + mock 测试。本机没有域名，发不出去也验不了 —— **接通放 Phase C** |
+| CSS / 好看 | 本阶段一律不管。能点、能用、权限对，就算过 |
 
 ## 为什么按这个顺序
 
@@ -1480,7 +1480,7 @@ python manage.py startapp events
 ```
 
 > ⚠️ **和 2026-07-28 版的差别**：多了 `EventRole`，`Participation` 改挂它，
-> `Event` 改了三处。**照下面写，不要照记忆写。**
+> `Event` 改了三处。照下面写，不要照记忆写。
 
 ### 五张表
 
@@ -1489,7 +1489,7 @@ python manage.py startapp events
 | `EventType` | 字典表：`code`（唯一·不可改）/ `name` / `is_active`。照 `Ministry` 抄，`ImmutableCodeMixin` + `UniqueConstraint(Lower("code"))` |
 | `ParticipationRole` | 字典表，同上。**必须 seed 一行 `code=general`**（"通用志愿者"）—— `Participation.event_role` 非空之后，"没有具体分工"要有地方落 |
 | `Event` | 见下 |
-| **`EventRole`** | **本步的核心新表** —— 见下 |
+| `EventRole` | **本步的核心新表** —— 见下 |
 | `Participation` | 见下 |
 
 ### `Event`
@@ -1498,7 +1498,7 @@ python manage.py startapp events
 class Event(ConstraintErrorFieldMixin, TimeStampedModel):
     class Status(models.TextChoices):
         DRAFT     = "draft",     "Draft"          # 还没发布，只有本 ministry 的人看得到
-        OPEN      = "open",      "Open for signup"  # ⭐ 已发布，志愿者看得到、能报名
+        OPEN      = "open",      "Open for signup"  # 已发布，志愿者看得到、能报名
         CONFIRMED = "confirmed", "Confirmed"      # 人齐了，不再收报名
         COMPLETED = "completed", "Completed"
         CANCELLED = "cancelled", "Cancelled"
@@ -1516,11 +1516,11 @@ class Event(ConstraintErrorFieldMixin, TimeStampedModel):
     history = HistoricalRecords()                # ⚠️ 对外发布的东西，改时间地点必须留痕
 ```
 
-**三处 2026-07-29 的改动，每一处都有理由，别改回去：**
+三处 2026-07-29 的改动，每一处都有理由，别改回去：
 
 1. **`ministry` 非空** —— R2 / R8 / P2 全部以它为轴。可空 = 一场无主、无人有权管的活动。
 2. **`status` 加 `draft` / `open`** —— P3「看到**发布的** event」需要一个明确的可见性闸门。
-   ⚠️ **2026-07-29 晚更正：可见性 ≠ `status == OPEN`。** 原文这一条（和 B9 那条）
+   2026-07-29 晚更正：可见性 ≠ `status == OPEN`。 原文这一条（和 B9 那条）
    把"志愿者能看到"直接写成了 `filter(status=OPEN)`，**后果是活动一被标 `confirmed`
    （"人齐了，不再收报名"），已经报名的人就打不开它的详情页了** —— 而 P6 通知里
    那句"新时间来不了请点这里取消"的链接正好会 404，且专门发生在招满的活动上。
@@ -1532,7 +1532,7 @@ class Event(ConstraintErrorFieldMixin, TimeStampedModel):
    ```
 
    见 `goal.md`[可见性与生命周期](phase-b.md#可见性与生命周期两个谓词不是一个-status2026-07-29-晚新增)。
-   **`draft` 仍然只有本 ministry 有权限的人看得到，这一条没变。**
+   `draft` 仍然只有本 ministry 有权限的人看得到，这一条没变。
 3. **没有 `capacity`** —— 被 `EventRole.needed_count` 取代。"搬运要 5 个、翻译要 2 个"
    整场一个数说不出来。
 
@@ -1543,7 +1543,7 @@ constraints = [
 indexes = [
     Index(fields=["start_time"]),                  # R1
     Index(fields=["ministry", "start_time"]),      # R2
-    Index(fields=["status", "start_time"]),        # ⭐ P3 —— 志愿者列表页，被打得最多
+    Index(fields=["status", "start_time"]),        # P3 —— 志愿者列表页，被打得最多
 ]
 ```
 
@@ -1639,7 +1639,7 @@ D22 说"未成年人通知家长"，可 `consent_given_by` **只是一个姓名*
 
 ⚠️ **`history` 也是同日补的** —— `goal.md` 的模型表里每张表都表过态，
 唯独 `Participation` 空着。它上面有**全系统唯一一个可以手工改写的权威值**（`hours`，
-纸质补录场景），而工时将来可能连到奖励：**谁把 3 小时改成 8 小时必须查得出来。**
+纸质补录场景），而工时将来可能连到奖励：谁把 3 小时改成 8 小时必须查得出来。
 同一条口径下 `EventRole` 也挂上（`needed_count` 是对外发布出去的承诺）。
 
 ⚠️ **没有 `event` 字段，也没有 `role` 字段** —— 都在 `event_role` 里。
@@ -1662,7 +1662,7 @@ constraints = [
 ]
 ```
 
-`hours` 必须 `null=True`：**报名了还没发生 ≠ 干了 0 小时。**
+`hours` 必须 `null=True`：报名了还没发生 ≠ 干了 0 小时。
 
 ### 签到签退：`hours` 是权威值
 
@@ -1697,7 +1697,7 @@ def check_out(participation, *, at=None):
 
 `EventAdmin` 挂两个 inline：`EventRoleInline`（开工种）和…… **不挂 `ParticipationInline`**。
 
-> ⚠️ **原计划是"`EventAdmin` 用 inline 直接登记参与者"。改掉了** ——
+> ⚠️ 原计划是"`EventAdmin` 用 inline 直接登记参与者"。改掉了 ——
 > `Participation` 现在挂 `EventRole` 不挂 `Event`，做成嵌套 inline 需要第三方包
 > （admin 不支持两层嵌套），正好撞上 D18 的形状触发。
 > **登记参与者走 B10 那个自己写的页面**，那里本来就要做签到。
@@ -1710,7 +1710,7 @@ def check_out(participation, *, at=None):
 
 ```python
 def test_an_event_role_with_no_signups_still_counts_as_a_role(self)   # ⭐ D19 的核心
-def test_understaffed_lists_a_role_that_nobody_signed_up_for(self)    # ⭐ 同上，正面版
+def test_understaffed_lists_a_role_that_nobody_signed_up_for(self)    # 同上，正面版
 def test_understaffed_ignores_roles_with_no_needed_count(self)        # 不限人数 ≠ 缺人
 def test_the_same_role_cannot_be_opened_twice_on_one_event(self)
 def test_one_person_can_take_two_roles_in_one_event(self)
@@ -1721,7 +1721,7 @@ def test_hours_on_a_non_attended_row_are_rejected(self)
 def test_checkout_before_checkin_is_rejected(self)
 def test_a_checked_in_participant_cannot_be_marked_absent(self)
 def test_check_out_writes_hours(self)
-def test_check_out_does_not_overwrite_a_manually_entered_hours(self)  # ⭐ hours 是权威值
+def test_check_out_does_not_overwrite_a_manually_entered_hours(self)  # hours 是权威值
 def test_event_end_time_cannot_precede_start_time(self)
 def test_deleting_a_contact_with_participation_is_blocked(self)       # PROTECT
 def test_total_hours_equals_the_sum_of_per_role_hours(self)           # R6 = ΣR7
@@ -1768,14 +1768,14 @@ class MinistryRole(ConstraintErrorFieldMixin, DateRangeMixin, TimeStampedModel):
     objects = models.Manager.from_queryset(DateRangeQuerySet)()      # 白捡 .active()
 ```
 
-**三个 `on_delete`：**
+三个 `on_delete`：
 
 - `contact` → `PROTECT`：删一个人不该静默撤掉授权记录；
 - `ministry` → **`PROTECT`**（2026-07-29 晚从 `CASCADE` 改）：和上一条一致。
-  > ⚠️ **原来的理由不成立，值得记一笔**：当时写的是"食物银行的 admin 权限在食物银行
+  > **原来的理由不成立，值得记一笔**：当时写的是"食物银行的 admin 权限在食物银行
   > 不存在之后没有意义"。**把这句话原样搬到 `contact` 上也同样通顺**（人删了授权也没意义），
   > 而 `contact` 那一格选的恰恰是 `PROTECT`，理由是"**授权是要留痕的事**"。
-  > **同一张表上两个外键用互相矛盾的理由，说明其中一个是事后合理化的。**
+  > 同一张表上两个外键用互相矛盾的理由，说明其中一个是事后合理化的。
   > 另外两条：`Ministry` 有 `is_active`（撤销走停用、几乎不删，同 `Position` 那条论证），
   > 而这张表**挂着 simple-history 声称"授权变更必须留痕"**，却允许删一个 ministry
   > 静默带走一批授权行 —— 自相矛盾。代价是真要删 ministry 得先把授权行填 `end_date`，
@@ -1809,8 +1809,8 @@ def can_view_registrations(user, event) -> bool: ...
 def can_grant_ministry_admin(user) -> bool:      ...   # P5：查全局 Group，不查 MinistryRole
 ```
 
-**P5 用 Django Group，不用 `MinistryRole`。** 判据（`goal.md` D20）：
-**这个权限句子里有没有"某个 ministry 的"这个定语？有 → `MinistryRole`；没有 → Group。**
+P5 用 Django Group，不用 `MinistryRole`。 判据（`goal.md` D20）：
+这个权限句子里有没有"某个 ministry 的"这个定语？有 → `MinistryRole`；没有 → Group。
 "谁能指定 ministry admin"是真·全局的，所以是一个 `foundation_admin` Group。
 
 > ⚠️ **ministry admin 不能自己给自己发展下线** —— `can_grant_ministry_admin()`
@@ -1840,9 +1840,9 @@ def test_a_future_grant_does_not_confer_permission_yet(self)             # .acti
 def test_a_user_with_no_grants_is_denied_everything(self)                # 默认拒绝
 def test_a_user_with_no_contact_is_denied_everything(self)               # superuser 也走这条
 def test_a_grant_on_an_inactive_ministry_confers_nothing(self)
-def test_ministry_admins_cannot_grant_ministry_admin(self)               # ⭐ P5 只认 Group
+def test_ministry_admins_cannot_grant_ministry_admin(self)               # P5 只认 Group
 def test_deleting_a_ministry_removes_its_grants(self)                    # CASCADE
-def test_deleting_the_granting_user_keeps_the_grant(self)                # ⭐ SET_NULL
+def test_deleting_the_granting_user_keeps_the_grant(self)                # SET_NULL
 def test_duplicate_grant_with_no_start_date_is_rejected(self)            # nulls_distinct
 ```
 
@@ -1873,7 +1873,7 @@ def register_account(*, username, email, password, legal_first_name, legal_last_
 （姓、名、email、电话、生日）。**生日要收** —— P3 的未成年人判定靠它，
 而 `is_minor` 对 `birth_date=None` 返回"未知"（B4.5），未知也要走同意流程（保守侧）。
 
-> ⚠️ **`ContactForm` 的同名同号硬拦截（B4.3b）不要套在注册上。**
+> ⚠️ `ContactForm` 的同名同号硬拦截（B4.3b）不要套在注册上。
 > 那是给操作员用的（"你是不是录重了"），套到自助注册上会变成"系统说你已经存在，
 > 但你又登不进去"。**注册照建，重复留给 `merge_contacts()` 事后处理** ——
 > 那个函数会遍历 `related_objects`，`Participation` / `MinistryRole` 自动被覆盖。
@@ -1884,8 +1884,8 @@ def register_account(*, username, email, password, legal_first_name, legal_last_
 def test_registering_creates_both_a_user_and_a_contact(self)
 def test_a_failed_registration_leaves_neither(self)                  # 事务性
 def test_a_new_account_is_not_staff(self)
-def test_a_volunteer_account_gets_403_on_admin(self)                 # ⭐ D21 第 1 条
-def test_user_contact_may_still_be_null(self)                        # ⭐ 别顺手改成非空
+def test_a_volunteer_account_gets_403_on_admin(self)                 # D21 第 1 条
+def test_user_contact_may_still_be_null(self)                        # 别顺手改成非空
 def test_registration_does_not_hard_block_on_a_duplicate_name_and_phone(self)
 ```
 
@@ -1893,7 +1893,7 @@ def test_registration_does_not_hard_block_on_a_duplicate_name_and_phone(self)
 
 ## B9 · 自助页面 ①：看活动 + 报名（P3）
 
-**四个页面，全部 `LoginRequiredMixin`。模板放 `events/templates/events/`。**
+四个页面，全部 `LoginRequiredMixin`。模板放 `events/templates/events/`。
 
 | URL | 做什么 |
 |---|---|
@@ -1904,7 +1904,7 @@ def test_registration_does_not_hard_block_on_a_duplicate_name_and_phone(self)
 
 ### 三条硬要求
 
-1. **可见性在查询层，不在模板层。** 列表页 `open_for_signup()`，
+1. 可见性在查询层，不在模板层。 列表页 `open_for_signup()`，
    **不是**在模板里 `{% if %}` 掉草稿。模板里不显示 ≠ 数据没发出去。
    ⚠️ **两个谓词分开用**（2026-07-29 晚更正，原文只有一个）：
    **列表页 / 报名**用 `open_for_signup()`（`{OPEN}`）；
@@ -1913,9 +1913,9 @@ def test_registration_does_not_hard_block_on_a_duplicate_name_and_phone(self)
    否则活动一 `confirmed`，**已报名的人就打不开它了**，见 B6 那一条。
    ⚠️ 两个集合都**显式列全**，**不要**写 `exclude(status=DRAFT)` —— 用补集定义状态，
    B5 复盘那条已经踩过一次（加第六档时它会默默变成可见的）。
-2. **"我的"就是我的。** `/me/participations/` 一律
+2. "我的"就是我的。 `/me/participations/` 一律
    `filter(contact=request.user.contact)`，别人的 id 打进来只能是 404。
-3. **逻辑不进视图。** 报名走 `events/services.py::sign_up(contact, event_role, consent=...)`，
+3. 逻辑不进视图。 报名走 `events/services.py::sign_up(contact, event_role, consent=...)`，
    视图只负责取参数、调函数、渲染。**统计不许写在视图里**（B12 验收要 grep）。
 
 ### 未成年人的同意（P3）
@@ -1936,7 +1936,7 @@ def sign_up(*, contact, event_role, consent=None):
 那个过滤）/ 方式（口头·纸质·线上）/ 时间（自动填 `now`）/
 **email** / **电话**（后两个**至少填一个**，`consent_email` / `consent_phone`）。
 
-> ⚠️ **后两样 2026-07-29 晚补，原文只收四样。** 少了它们，P6 那条"未成年人通知家长"
+> ⚠️ 后两样 2026-07-29 晚补，原文只收四样。 少了它们，P6 那条"未成年人通知家长"
 > 就只有一个**姓名**可用 —— **解析不出任何投递地址**，最需要被通知的那群人会全部落进
 > `unreachable`（B11 的规则 2 原文还写着"找 `consent_given_by` 对应的联系方式"，
 > 而那个东西不存在）。`sign_up()` 里一并校验，同上面那条同意规则，按 D14 记为提示层。
@@ -1946,13 +1946,13 @@ def sign_up(*, contact, event_role, consent=None):
 ```python
 def test_the_event_list_shows_only_open_events(self)
 def test_a_cancelled_event_does_not_appear_in_the_list(self)      # 补集定义的坑
-def test_a_signed_up_volunteer_can_still_open_a_confirmed_event(self)   # ⭐ 可见性 ≠ 可报名
+def test_a_signed_up_volunteer_can_still_open_a_confirmed_event(self)   # 可见性 ≠ 可报名
 def test_a_draft_event_detail_page_is_404_for_volunteers(self)
 def test_every_event_status_is_in_exactly_one_of_the_two_sets_or_neither(self)
     # partition 测试：五档逐一过一遍，别漏、别两边都在（同 .minors()/.adults() 那条）
 def test_a_volunteer_cannot_open_another_persons_participation(self)
 def test_a_minor_cannot_sign_up_without_consent(self)             # ⭐ P3
-def test_a_volunteer_with_unknown_birth_date_also_needs_consent(self)  # ⭐ 三态
+def test_a_volunteer_with_unknown_birth_date_also_needs_consent(self)  # 三态
 def test_an_adult_can_sign_up_without_consent(self)
 def test_signing_up_twice_for_the_same_role_is_rejected(self)
 def test_signing_up_over_needed_count_is_allowed_but_flagged(self)  # 只提醒不阻止
@@ -1975,20 +1975,20 @@ def test_anonymous_users_are_redirected_to_login(self)
 
 1. **每个视图第一件事是权限判断**，`if not can_xxx(...): raise PermissionDenied`。
    **判断本身一个字都不写在视图里** —— 只调 `org/permissions.py`（守卫测试盯着）。
-2. **下拉也要过滤。** 发活动页的 ministry 下拉只列
+2. 下拉也要过滤。 发活动页的 ministry 下拉只列
    `ministries_administered_by(request.user)`。
    ⚠️ **但服务端仍然要再判一次** —— 下拉是防手滑，POST 里换个 id 是防越权，两件事。
-3. **签到页要显示未成年参与者和他们的紧急联系电话**
+3. 签到页要显示未成年参与者和他们的紧急联系电话
    （`is_minor` + `EmergencyContact`，B4.2 + B4.5 合起来就是家长通知的完整闭环）。
 
 ### 测试
 
 ```python
-def test_publishing_for_another_ministry_returns_403(self)          # ⭐ 越权，POST 侧
+def test_publishing_for_another_ministry_returns_403(self)          # 越权，POST 侧
 def test_the_ministry_dropdown_lists_only_administered_ministries(self)
-def test_viewing_another_ministrys_registrations_returns_403(self)  # ⭐ 越权，GET 侧
+def test_viewing_another_ministrys_registrations_returns_403(self)  # 越权，GET 侧
 def test_a_plain_volunteer_gets_403_on_every_admin_url(self)
-def test_a_ministry_admin_cannot_open_the_grant_page(self)          # ⭐ P5 只认 Group
+def test_a_ministry_admin_cannot_open_the_grant_page(self)          # P5 只认 Group
 def test_checking_in_sets_status_to_attended(self)
 def test_the_attendance_page_shows_minors_emergency_phone(self)
 ```
@@ -1997,7 +1997,7 @@ def test_the_attendance_page_shows_minors_emergency_phone(self)
 
 ## B11 · 活动变更通知（P6）
 
-> **需求方 2026-07-29 当日追加。** 设计见 `goal.md`
+> 需求方 2026-07-29 当日追加。 设计见 `goal.md`
 > [D22](decisions/D22-event-notifications.md#d22--活动变更通知收件人解析是业务逻辑投递是可替换的适配器2026-07-29)。
 > **"快速找到报名者"这半句 B10 的报名名单页已经做完了**，这一步做的是另外三件：
 > 未成年人通知家长、联系不上的人要看得见、通知要留痕。
@@ -2025,7 +2025,7 @@ class NotificationBackend(Protocol):
     def send(self, messages: Sequence[Message]) -> list[DeliveryResult]: ...
 ```
 
-⚠️ **后端只认这三样，不认 `Contact`、不认 `Participation`、不认「未成年人」。**
+⚠️ 后端只认这三样，不认 `Contact`、不认 `Participation`、不认「未成年人」。
 一旦让它知道什么是未成年人，换 provider 就要把那条规则重写一遍。
 配一条 grep 守卫（第八次「测试当 lint」）：
 `core/notifications/` 下面出现 `Contact` / `Participation` / `is_minor` 就变红。
@@ -2037,7 +2037,7 @@ NOTIFICATION_BACKEND = "core.notifications.console.ConsoleBackend"
 ```
 
 > **Novu 的凭据走环境变量**（同 `SECRET_KEY`，Phase A 已经拆好了配置）。
-> ⚠️ **别在这一步接真实的 Novu** —— 本机没有域名，发不出去也验不了。
+> **别在这一步接真实的 Novu** —— 本机没有域名，发不出去也验不了。
 > 先把 `NovuBackend` 写成一个只做 HTTP 调用的薄壳 + 一条 mock 测试，
 > **真的接通放 Phase C**（有域名和 sender identity 之后）。
 
@@ -2147,13 +2147,13 @@ class EventNotification(ConstraintErrorFieldMixin, TimeStampedModel):
 ```python
 def test_an_adult_is_notified_at_their_own_address(self)
 def test_a_minor_is_notified_through_their_guardian(self)              # ⭐ D22 ①
-def test_a_minor_with_only_consent_phone_is_notified_by_sms(self)      # ⭐ 家长地址真的解析得出来
+def test_a_minor_with_only_consent_phone_is_notified_by_sms(self)      # 家长地址真的解析得出来
 def test_a_minor_with_no_guardian_contact_lands_in_unreachable(self)
 def test_a_participant_with_unknown_birth_date_is_treated_as_a_minor(self)
-def test_a_participant_with_no_email_and_no_phone_lands_in_unreachable(self)   # ⭐ D22 ②
+def test_a_participant_with_no_email_and_no_phone_lands_in_unreachable(self)   # D22 ②
 def test_unreachable_rows_are_not_counted_as_recipients(self)
-def test_who_was_unreachable_is_still_queryable_afterwards(self)       # ⭐ M2M 而不是计数
-def test_unreachable_rows_do_not_change_after_the_phone_is_filled_in(self)     # ⭐ 快照
+def test_who_was_unreachable_is_still_queryable_afterwards(self)       # M2M 而不是计数
+def test_unreachable_rows_do_not_change_after_the_phone_is_filled_in(self)     # 快照
 def test_the_message_snapshot_survives_editing_the_event(self)
 def test_cancelled_participations_are_not_notified(self)
 def test_deleting_the_sending_user_keeps_the_notification(self)        # SET_NULL
@@ -2171,7 +2171,7 @@ def test_the_default_message_does_not_contain_a_minors_name(self)      # PII
 
 ## B12 · 统计：R1–R8
 
-**全部落在 QuerySet 方法 / `services.py`，不落在视图。**
+全部落在 QuerySet 方法 / `services.py`，不落在视图。
 理由：换个界面这些要跟着搬 —— 而这次"换界面"是必然会发生的（D18 的判据）。
 
 ```python
@@ -2198,11 +2198,11 @@ Participation.objects.filter(
 ).select_related("contact", "event_role__role").distinct()              # ⚠️ 坑 3：distinct
 ```
 
-1. **时间口径是活动当天。** 用默认值（今天）查一场去年的活动，会漏掉之后离职的人，
+1. 时间口径是活动当天。 用默认值（今天）查一场去年的活动，会漏掉之后离职的人，
    **而且不报错**。`.active(on=...)` 那个参数就是为这种查询准备的（D16 第 2 层）。
-2. **`.active()` 不是 `.serving()`。** 问的是"他当时是不是这个 ministry 的员工"，
+2. `.active()` 不是 `.serving()`。 问的是"他当时是不是这个 ministry 的员工"，
    不是"他今天能不能当值"。请假中的人参加了活动照样算。
-3. **`.distinct()` 不能省。** 一人在同 ministry 占两个 employee 编制（一人多岗，
+3. `.distinct()` 不能省。 一人在同 ministry 占两个 employee 编制（一人多岗，
    D11 的核心场景）时，join 之后他会出现两遍，**人数悄悄多一个**。
 
 ### R1 / R2 的时间边界
@@ -2225,11 +2225,11 @@ Participation.objects.filter(
 - **两个不同 ministry 的 admin 账号** —— 用来试越权，**必须是两个**，一个试不出来
 - **两个普通志愿者账号**，其中一个未成年（有生日）
 - **一场 `status=open` 的活动**，开三个工种：一个报满、一个报了一半、
-  **一个零报名**（⭐ 验收 R4 要用）
+  **一个零报名**（验收 R4 要用）
 - 一场 `status=draft` 的活动（验收"志愿者看不见"要用）
 - 一场已结束的活动，参与者有签到签退和工时（验收 R6 / R7 要用）
-- **一个活动当天在职、之后离职的 employee** —— ⭐ 验收 R8 的时间口径要用
-- **一个既没有 email 也没有电话的报名者** —— ⭐ 验收 P6 的「联系不上」那一组要用。
+- **一个活动当天在职、之后离职的 employee** —— 验收 R8 的时间口径要用
+- **一个既没有 email 也没有电话的报名者** —— 验收 P6 的「联系不上」那一组要用。
   **这个人必须有**，否则那一组永远是空的，看上去"通过了"其实什么也没验证
 - **一个未成年报名者，家长联系方式挂在 `EmergencyContact` 上**（只有电话 ⇒ 走 sms）
   —— 验收收件人解析的**第二条**回落路径
@@ -2280,7 +2280,7 @@ Participation.objects.filter(
 > 要 include 进 `config/urls.py`，模板放 **app 内** `contact/templates/contact/`
 > —— settings 里 `DIRS=[]` + `APP_DIRS=True`，放 app 内不用改配置）。
 > **单独一个 commit**，出问题好回退。B4.4 的合并页是第二次用同一套，那时就轻车熟路了。
-> **2026-07-29 补：B6 起的提交节奏。** B6 建议**两个 commit**
+> 2026-07-29 补：B6 起的提交节奏。 B6 建议**两个 commit**
 > （`Event` + 两张字典表一个，`EventRole` + `Participation` 一个 —— 后者是这半程的核心，
 > 单独一个好回退）；B7 单独一个（表 + `permissions.py` + 守卫测试一起，
 > **权限判断和它的守卫不要分两次提交**）；B9 / B10 各一个，
@@ -2306,9 +2306,9 @@ URL、第一个视图和第一个模板，出问题时好回退。
 | 1 | 同意流程具体长什么样（口头 / 纸质 / 线上签） | `consent_method` 的取值 | 先放三档。⚠️ **P3 本身要做**，不能因为流程没定就跳过 |
 | 2 | `EmploymentType` 的实际取值 | 字典表里 seed 哪几行 | 正因为不知道才做成字典表；先只 seed 两行 |
 | 3 | `status` 除 `on_leave` / `suspended` 外还要哪几种 | `Assignment.Status` | 不阻塞 —— `TextChoices`，加值就是改代码 |
-| **4** | **`MinistryRole` 除 admin 外还要哪几档** | `MinistryRole.Role` + `permissions.py` | **先只做 `admin` 一档** —— 需求原文只要求了这一档。`coordinator` 已在枚举里占位，但没有任何代码按它分支 |
-| **5** | **工时是志愿者自己填还是 admin 填** | 哪个页面上有那个按钮 | 两条路径都走 `check_out()` 那一个函数。**先做 admin 侧** —— 需求原话是"跟 event 同个 ministry 的权限的人可以统计" |
-| ~~6~~ | ~~背景审查有效期多长~~ | — | **随 `BackgroundCheck` 移出本阶段**，不再需要答复 |
+| 4 | `MinistryRole` 除 admin 外还要哪几档 | `MinistryRole.Role` + `permissions.py` | **先只做 `admin` 一档** —— 需求原文只要求了这一档。`coordinator` 已在枚举里占位，但没有任何代码按它分支 |
+| 5 | 工时是志愿者自己填还是 admin 填 | 哪个页面上有那个按钮 | 两条路径都走 `check_out()` 那一个函数。**先做 admin 侧** —— 需求原话是"跟 event 同个 ministry 的权限的人可以统计" |
+| ~~6~~ | ~~背景审查有效期多长~~ | — | 随 `BackgroundCheck` 移出本阶段，不再需要答复 |
 | ~~7~~ | ~~跟不跟踪请假 / 停职~~ | ✅ **已答复：跟踪** | `Assignment.status` 已进 B5 |
 | ~~8~~ | ~~未成年志愿者有没有同意书流程~~ | ✅ **需求原文已答复：有**（"如果是 minor，可能涉及 guardian consent"） | 落在 `Participation` 的四个同意字段上，见 B9 |
 
@@ -2317,7 +2317,7 @@ URL、第一个视图和第一个模板，出问题时好回退。
 ## 计划外记录（实施时回来填）
 
 `01-roadmap.md` 里最有价值的两段就是"⚠️ 计划外：迁移图会断"和
-"⚠️ 计划外：admin 路径根本不经过 middleware" —— **写下来的坑比顺利完成的步骤值钱。**
+"⚠️ 计划外：admin 路径根本不经过 middleware" —— 写下来的坑比顺利完成的步骤值钱。
 这一段留白，遇到就往下写：
 
 ### ⚠️ 计划外（B1）：一条约束只能说一件事，否则映射不出去
@@ -2339,7 +2339,7 @@ URL、第一个视图和第一个模板，出问题时好回退。
 `Contact` 0 行，迁移免费。
 
 **一般化的判据（新的，记进这里）**：
-> **一条约束只能说一件事。** 判定方法：这条约束被违反时，
+> 一条约束只能说一件事。 判定方法：这条约束被违反时，
 > 你能不能说出**唯一一个**该变红的字段？说不出来，就是两条规则挤在一条里，
 > 拆开 —— 不是给映射表加特例。
 
@@ -2360,7 +2360,7 @@ URL、第一个视图和第一个模板，出问题时好回退。
 
 > 这就是 D14 那个「`CheckConstraint.validate()` 会静默跳过」的坑，
 > **只不过是从另一头撞上的** —— D14 提醒的是表达式约束在 `validate()` 里出错被吞掉，
-> 这里是约束压根没被调用。**症状一模一样：表单绿灯，写库时 500。**
+> 这里是约束压根没被调用。症状一模一样：表单绿灯，写库时 500。
 
 **修法**：`RelationshipForm._check_constraints()` 里显式调一次
 `self.instance.validate_constraints()`，把错误 `add_error()` 到表单字段上。
@@ -2373,7 +2373,7 @@ docstring 已经预警过）。所以表单里加一张 `FIELD_ALIASES`
 **一般化（新的，记进这里）**：
 > **凡是「表单字段 ≠ 模型字段」的表单，都要问一句：
 > 这条约束在表单层真的跑了吗？** 判定方法和 D9 那句同构 ——
-> **提交一条违规数据，看到的是表单错误还是 500？**
+> 提交一条违规数据，看到的是表单错误还是 500？
 > B4.3b 的 `ContactForm`、B4.4 的合并页、以后每一个自定义表单都要过这一问。
 
 ### ⚠️ 计划外（B4.4）：捕获 `IntegrityError` 之后，手写 savepoint 回滚是不行的
@@ -2400,7 +2400,7 @@ except IntegrityError as error:
 ```
 
 **一般化**：
-> **在 `atomic` 块里捕获数据库异常，必须用内层 `atomic` 包住可能出错的那一句。**
+> 在 `atomic` 块里捕获数据库异常，必须用内层 `atomic` 包住可能出错的那一句。
 > 光 `try/except` 不够 —— 它捕到了异常，但连接已经不能再用了。
 > B6 的 `Participation` 批量登记、以后任何「试着写，撞了就换个说法」的代码同理。
 
@@ -2429,7 +2429,7 @@ except ValueError:                      # 2/29，且落到的那年不是闰年
 
 **修法**：正则一律写成**转义形式**并抽成模块级常量，让文件里永远不出现
 它要找的那串字面量（`date\.today\(\)` 这串文本 ≠ `date.today()`）；
-一行里不许同时出现两个模式。**注释里也不许把被禁的写法拼出来。**
+一行里不许同时出现两个模式。注释里也不许把被禁的写法拼出来。
 
 > 这不是麻烦，是守卫真的在扫全项目的证据 —— 它连自己都不放过。
 > 换成"跳过 `core/tests.py`"就等于给守卫开了个后门。
@@ -2454,7 +2454,7 @@ Django 没有比"注销 + 注册一个子类"更窄的钩子。看着别扭，�
 不把依赖方向弄反的写法，而且两个 `admin.py` 本来就是一次性配置（D18）。
 
 **一般化**：
-> **跨 app 的 admin 装配一律写在下游 app 里，别让上游去 import 下游。**
+> 跨 app 的 admin 装配一律写在下游 app 里，别让上游去 import 下游。
 > B6 的 `Participation` 要挂到 `Contact` 页上时，同一套写法再用一次。
 
 ### ⚠️ 计划外（B5）：每加一个 inline，所有 admin POST 测试都会变绿灯下的红灯
@@ -2472,7 +2472,7 @@ Django 没有比"注销 + 注册一个子类"更窄的钩子。看着别扭，�
 已经在 helper 上写了注释，免得第四次再查一遍。
 
 **一般化**：
-> **加完一个 inline，先跑一遍 admin 的 POST 测试。** 收到 200 就直接去
+> 加完一个 inline，先跑一遍 admin 的 POST 测试。 收到 200 就直接去
 > `context_data["errors"]` 里看，不要从表单字段开始找。
 
 ### ⚠️ 计划外（B0–B5 复盘）：`list_display` 里的方法，是每行调一次的
@@ -2487,7 +2487,7 @@ Django 没有比"注销 + 注册一个子类"更窄的钩子。看着别扭，�
 **根因**：`merge_link` 是 `list_display` 里的一个方法，**Django 每渲染一行就调一次**，
 而它里面调 `find_exact_duplicates()`，每次一到两次查询。
 讽刺的是集合级的判定 `possible_duplicates()` 早就写好了（「疑似重复」筛选器在用），
-只是那个列没走它。**`list_select_related` 救得了外键列，救不了自定义方法列。**
+只是那个列没走它。`list_select_related` 救得了外键列，救不了自定义方法列。
 
 **修法**：判定和配对都下沉到 QuerySet（D18 —— admin 只渲染，不判断）：
 
@@ -2516,7 +2516,7 @@ def get_list_display(self, request):        # ⚠️ 不是 get_queryset，见�
 不钉死具体数字 —— Django 自己的基线查询数以后会变，而"每行一次"这件事不该变。
 
 **一般化**：
-> **凡是写进 `list_display` 的方法，先问一句「它查库吗」。**
+> 凡是写进 `list_display` 的方法，先问一句「它查库吗」。
 > 判定方法：造 N 行数一次查询数，造 2N 行再数一次，**两个数不一样就是 N+1**。
 > 这条对 B6 的 `Event` 参与人数、工时合计一样成立 —— 那两个尤其像会写成 property。
 
@@ -2530,13 +2530,13 @@ def get_list_display(self, request):        # ⚠️ 不是 get_queryset，见�
 而后者跳过任何提到被排除字段的约束。`clean()` 的环检查已经在 `reports_to` 上挂了错，
 所以那条约束在这条路径上**根本没跑**。
 
-> **这是 B3.1b 那条坑的第三个变体。** 三个变体的症状一模一样 ——「约束没跑」：
+> 这是 B3.1b 那条坑的第三个变体。 三个变体的症状一模一样 ——「约束没跑」：
 >
 > | 变体 | 约束为什么没跑 |
 > |---|---|
 > | D14 原文提醒的 | 表达式约束在 `validate()` 里抛 `FieldError`，被静默吞掉 |
 > | B3.1b 撞上的 | 字段不在表单上 → `_post_clean` 把它 `exclude` 了 |
-> | **本条** | 字段上**已经有别的错误** → `full_clean` 把它 `exclude` 了 |
+> | 本条 | 字段上**已经有别的错误** → `full_clean` 把它 `exclude` 了 |
 
 **结论（不粉饰）**：**同一个字段上，`clean()` 和 `CheckConstraint` 都说话时，
 表单层永远只会看到 `clean()` 的那句话**，约束的 `violation_error_message`
@@ -2551,7 +2551,7 @@ def get_list_display(self, request):        # ⚠️ 不是 get_queryset，见�
 **一般化**：
 > **一条规则不要在 `clean()` 和约束里各说一遍**（这本来就是 D14 重写的初衷）。
 > 真要两边都有（跨行环路这种约束表达不了、又想在表单上提示的），
-> 就明确知道：**界面上出现的是 `clean()` 的话，约束只是 bulk 路径的兜底。**
+> 就明确知道：界面上出现的是 `clean()` 的话，约束只是 bulk 路径的兜底。
 
 ### ⚠️ 计划外（B0–B5 复盘）：守卫「验过会红」不等于「该红的都红」
 
@@ -2575,7 +2575,7 @@ for _ in range(20):
    也就是递归 —— **实现里根本没有这一条**。递归是遍历汇报链的第三种写法，
    而且是最容易挂死的那种。
 
-**B5 验收时只试了「同一行 `while`」那一种就签收了 —— 而那恰好是唯一能被抓到的那种。**
+B5 验收时只试了「同一行 `while`」那一种就签收了 —— 而那恰好是唯一能被抓到的那种。
 
 **修法**：`core/tests.py::repeated_uses()` 改成按缩进跟踪 `for`/`while` 块，
 三个信号任一命中即算：**循环体内 / 单行推导式 / 递归**（行里调了所在函数自己的名字）。
@@ -2588,7 +2588,7 @@ for _ in range(20):
 **一般化（这条是三条里最值钱的）**：
 > **守卫写完必须反向验：造几个它「该抓」的例子，确认真的红；
 > 再造几个「不该抓」的，确认没红。** 只验一个例子等于只验了自己想到的那种写法。
-> **一条只在自己的示例上会红的守卫，比没有守卫更糟 —— 它让人以为有防线。**
+> 一条只在自己的示例上会红的守卫，比没有守卫更糟 —— 它让人以为有防线。
 > B6 之后每加一条 grep 守卫，都照这个双向清单走一遍。
 
 ### ⚠️ 计划外（B5 复盘）：用补集定义状态，等于赌只有两种状态
@@ -2609,7 +2609,7 @@ if self.value() == "no":
 错的是"不是空缺的都算有人在任"这个推论 —— **补集只在状态恰好两种时才等价**。
 撤销的编制既不空缺、也没人在任，于是被补集捞了进去。
 
-> **补集写法最坏的地方不是算错，是它让你不必给状态命名。**
+> 补集写法最坏的地方不是算错，是它让你不必给状态命名。
 > 三个分支都写成 QuerySet 方法的话，你得给第三种状态起个名字（`retired()`）——
 > **而起名字的那一刻就会发现自己漏了它**。写成 `exclude(...)` 就永远不会碰到这一步。
 
@@ -2642,7 +2642,7 @@ def retired(self):              # 已撤销 —— 第三种状态，必须看�
 而不是等到某一档默默多算了几行。
 
 **一般化**：
-> **不要用补集定义状态。** 判定方法：**把所有状态列出来数一数 —— 超过两种，补集就是错的。**
+> 不要用补集定义状态。 判定方法：把所有状态列出来数一数 —— 超过两种，补集就是错的。
 > 项目里三态的先例早就有了（`MinorFilter` 的 未成年 / 成年 / **生日未知**），
 > 当时 roadmap 专门强调过「第三个选项不能省 —— 未知必须看得见」，
 > **同一条道理这里没执行**。
@@ -2650,4 +2650,4 @@ def retired(self):              # 已撤销 —— 第三种状态，必须看�
 > **B6 直接受影响**：`Event.status` 四种（planned / confirmed / completed / cancelled）、
 > `Participation.status` 四种（registered / attended / absent / cancelled）。
 > 任何「已完成 = 不是已取消」「缺席 = 没签到」这类写法都是同一个病，
-> 而且状态越多，补集捞进来的越多。**一律列全 + partition 测试。**
+> 而且状态越多，补集捞进来的越多。一律列全 + partition 测试。

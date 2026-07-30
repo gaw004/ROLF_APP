@@ -403,6 +403,69 @@ class MarkdownLinkGuardTests(TestCase):
         )
 
 
+class EmphasisGuardTests(TestCase):
+    """Lint-as-test: emphasis is a budget, not a tone of voice (goal.md 约定 6).
+
+    These documents had drifted to 35% of lines carrying bold, 47 ⭐ and 206 ⚠️,
+    with each symbol standing for three or four different things. Emphasis
+    everywhere is emphasis nowhere: the reader cannot tell which line is the one
+    that matters. This guard does not police taste — it polices the three misuses
+    that are wrong by definition, so the cleanup cannot quietly undo itself.
+    """
+
+    FENCE = re.compile(r"^\s*(?:>\s*)*(?:```|~~~)")
+    # A whole table cell in bold: | **...** |. A bold column says nothing.
+    BOLD_CELL = re.compile(r"\|\s*\*\*[^*|\n]+\*\*\s*(?=\|)")
+    # A whole line in bold. If the line is the point, it is a heading.
+    BOLD_LINE = re.compile(r"^(?:\s*(?:[-*]\s+|>\s+|\d+\.\s+)?)\*\*[^*\n]{15,}\*\*[ \t]*$")
+    # ⚠️ on a revision note. A changelog entry is history, not a trap.
+    WARN_ON_NOTE = re.compile(r"⚠️[ \t]*(?=\*\*(?:20\d\d-\d\d-\d\d|原文|原方案|原来|本条|本节|整节))")
+    # ⭐ means "the single acceptance point": roughly one per decision or per
+    # step, so even a long document holds a handful.
+    STARS_PER_FILE = 4
+    # `⭐` in backticks is the symbol being *named* — as the convention table in
+    # goal.md has to do — rather than used. Mention is not use.
+    CODE_SPAN = re.compile(r"`[^`\n]*`")
+
+    def test_no_bold_cells_bold_lines_or_warnings_on_changelog_entries(self):
+        problems = []
+        for path, text in project_markdown_files():
+            in_fence = False
+            for number, line in enumerate(text.split("\n"), 1):
+                if self.FENCE.match(line):
+                    in_fence = not in_fence
+                    continue
+                if in_fence:
+                    continue
+                if self.BOLD_CELL.search(line):
+                    problems.append(f"{path}:{number}  whole table cell in bold")
+                if self.BOLD_LINE.match(line):
+                    problems.append(f"{path}:{number}  whole line in bold — make it a heading")
+                if self.WARN_ON_NOTE.search(line):
+                    problems.append(f"{path}:{number}  ⚠️ on a revision note — it is history, not a trap")
+        self.assertEqual(
+            problems,
+            [],
+            "goal.md「强调的用法」: bold marks the load-bearing half of a sentence, "
+            "never a whole cell, line or sentence:\n" + "\n".join(problems),
+        )
+
+    def test_stars_stay_scarce(self):
+        # ⭐ is the acceptance point: if this one fails, that whole piece of design
+        # was pointless. Roughly one per decision — a file full of them has none.
+        heavy = []
+        for path, text in project_markdown_files():
+            used = self.CODE_SPAN.sub("", text).count("⭐")
+            if used > self.STARS_PER_FILE:
+                heavy.append(f"{path}: {used} ⭐")
+        self.assertEqual(
+            heavy,
+            [],
+            f"⭐ marks the one test that must pass; at most {self.STARS_PER_FILE} "
+            "per file:\n" + "\n".join(heavy),
+        )
+
+
 class ConstraintMappingGuardTests(TestCase):
     """Lint-as-test: every business constraint is wired for field-level errors (D14).
 

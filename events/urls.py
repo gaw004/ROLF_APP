@@ -27,4 +27,6 @@ urlpatterns = [
     ),
     path("events/<int:pk>/attendance/", views.event_attendance, name="event_attendance"),
     path("events/<int:pk>/report/", views.event_report, name="event_report"),
+    # B11 — P6. Same permission as attendance: sending is a write.
+    path("events/<int:pk>/notify/", views.event_notify, name="event_notify"),
 ]

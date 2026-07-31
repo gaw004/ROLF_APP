@@ -7,7 +7,8 @@
     {{ event.ministry.name }} · {{ event.get_status_display }} ·
     <a href="{% url 'events:event_registrations' event.pk %}">报名名单</a> ·
     <a href="{% url 'events:event_attendance' event.pk %}">签到</a> ·
-    <a href="{% url 'events:event_report' event.pk %}">统计</a>
+    <a href="{% url 'events:event_report' event.pk %}">统计</a> ·
+    <a href="{% url 'events:event_notify' event.pk %}">通知报名者</a>
   </p>
   <p>状态还是 <code>draft</code> 的话志愿者看不到；改成 <code>open</code> 才发布出去。</p>
 

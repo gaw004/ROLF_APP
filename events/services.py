@@ -6,16 +6,19 @@ imports the same functions unchanged.
 """
 
 import datetime
+from dataclasses import dataclass
 from decimal import Decimal
 
 from django.core.exceptions import ValidationError
 from django.db import transaction
 from django.db.models import Count, Sum
 
+from contact.models import Contact
+from core.notifications.base import EMAIL, SMS, Message, get_backend
 from core.timeutils import local_date_of, local_now
 from org.models import Assignment, Position
 
-from .models import Participation
+from .models import EventNotification, Participation
 
 
 class ConsentRequired(ValidationError):
@@ -244,3 +247,191 @@ def reschedule(event, *, start_time, end_time):
 def duration_hours(delta: datetime.timedelta) -> Decimal:
     """A timedelta as hours, two decimal places — for display only."""
     return (Decimal(delta.total_seconds()) / Decimal(3600)).quantize(Decimal("0.01"))
+
+
+# --- P6: telling people the event changed --------------------------------
+# Who to tell and at what address is business logic and stays here. Putting a
+# message on the wire is an adapter (core/notifications). The dividing question
+# is D18's, aimed at a different target: change notification provider — does
+# this code have to move? If yes, it does not belong in the adapter.
+
+
+@dataclass(frozen=True)
+class Recipient:
+    """One address a notice is going to, and on whose behalf."""
+
+    participation: Participation
+    to: str
+    channel: str
+    # Shown on the preview page: whoever is confirming the send should be able
+    # to see that four of these are going to parents rather than volunteers.
+    is_guardian: bool = False
+
+
+@dataclass(frozen=True)
+class Unreachable:
+    """Somebody who should have been told and for whom we have no address.
+
+    ⚠️ This group has to be worked out here and stored. A notification platform
+       can answer "did this letter arrive"; it cannot answer "this person has no
+       address at all", because it has never heard of them. A green "27 people
+       notified" covering three people nobody could reach is the same failure
+       this project keeps convicting: silent, and pointing the wrong way.
+    """
+
+    participation: Participation
+    why: str
+
+
+def _preferred_channels(contact):
+    """The channels to try for an adult, best first.
+
+    Reads Contact.preferred_communication_method and falls back to the other
+    channel when the preferred one is empty. Two of the four choices are not
+    deliverable by this system at all: `mail` is a postal address and `phone`
+    means "ring them", neither of which a backend can do, so both fall through
+    to whatever address exists.
+    """
+    preference = contact.preferred_communication_method
+    order = [EMAIL, SMS]
+    if preference == Contact.CommunicationMethod.SMS:
+        order = [SMS, EMAIL]
+    elif preference == Contact.CommunicationMethod.PHONE:
+        # A phone preference means they would rather be reached on the phone;
+        # SMS is the closest thing that can actually be sent.
+        order = [SMS, EMAIL]
+    return order
+
+
+def _address_for(contact, channel):
+    if channel == EMAIL:
+        return contact.email or ""
+    return str(contact.phone) if contact.phone else ""
+
+
+def resolve_recipients(event):
+    """Who should be told about a change to this event, and at what address.
+
+    Returns (recipients, unreachable). Changing notification provider does not
+    change a word of this function — that is the claim the split is making.
+
+    Three rules:
+
+    1. An adult is told directly, on their preferred channel, falling back to
+       the other one when the preferred address is empty.
+    2. A minor is told through their guardian. A fifteen-year-old may well have
+       no phone of their own, so notifying them is the same as notifying
+       nobody. Two paths, in order: the consent record taken at signup
+       (consent_email / consent_phone), then their emergency contact — which
+       carries a phone and no email, so that path is SMS-only, and with an
+       email-only backend configured it is a real gap. A visible one: it shows
+       up in this list rather than failing quietly.
+    3. An unknown birth date is treated as a minor. is_minor is three-state,
+       and folding "unknown" into "adult" is exactly how a minor with no date
+       on file stops having anybody notified on their behalf.
+
+    Cancelled signups are not notified: that person already said they are not
+    coming.
+    """
+    recipients, unreachable = [], []
+    rows = (
+        Participation.objects.filter(event_role__event=event)
+        .notifiable()
+        .select_related("contact")
+        .prefetch_related("contact__emergency_contacts")
+    )
+
+    for participation in rows:
+        contact = participation.contact
+        if contact.is_minor in (True, None):
+            guardian = participation.guardian_address
+            if guardian is None:
+                # The emergency contact is the fallback, and it is phone-only
+                # because that table has no email column at all.
+                emergency = next(iter(contact.emergency_contacts.all()), None)
+                guardian = (str(emergency.phone), SMS) if emergency else None
+            if guardian is None:
+                unreachable.append(Unreachable(
+                    participation=participation,
+                    why="未成年（或生日未知），但没有任何家长联系方式",
+                ))
+                continue
+            address, channel = guardian
+            recipients.append(Recipient(
+                participation=participation, to=address, channel=channel,
+                is_guardian=True,
+            ))
+            continue
+
+        for channel in _preferred_channels(contact):
+            address = _address_for(contact, channel)
+            if address:
+                recipients.append(Recipient(
+                    participation=participation, to=address, channel=channel))
+                break
+        else:
+            unreachable.append(Unreachable(
+                participation=participation, why="既没有邮箱也没有电话",
+            ))
+
+    return recipients, unreachable
+
+
+def default_message(event, reason):
+    """The body offered on the preview page, editable before it goes.
+
+    ⚠️ No minor's name in it. D22's second cost is that notification content
+       leaves our database; the mitigation is that what leaves is an address
+       plus an announcement, and never "your child 小明". That holds however
+       aggressive the provider turns out to be.
+    """
+    lines = [
+        f"关于「{event.name}」（{event.ministry.name}）：",
+        "",
+        {
+            EventNotification.Reason.TIME_CHANGED: "活动时间有变动。",
+            EventNotification.Reason.LOCATION_CHANGED: "活动地点有变动。",
+            EventNotification.Reason.CANCELLED: "这场活动取消了。",
+        }.get(reason, "这场活动有变动。"),
+        "",
+        f"现在的时间：{event.start_time:%Y-%m-%d %H:%M} — {event.end_time:%H:%M}",
+    ]
+    if event.location:
+        lines.append(f"地点：{event.location}")
+    lines += [
+        "",
+        "（如果这封信是发给家长的：您的孩子报名了这场活动。）",
+        "新时间来不了的话，请到「我的报名」里取消。",
+    ]
+    return "\n".join(lines)
+
+
+@transaction.atomic
+def notify_event_change(event, *, reason, message, sent_by, backend=None):
+    """Resolve, deliver, and leave a record. Returns the EventNotification.
+
+    ⚠️ Both M2Ms are written once, from what was true at this moment. Never
+       turn either into a property that recalculates: somebody unreachable in
+       March may have a number today, and recomputing would rewrite this record
+       into "everybody was told", which is a lie. Same rule as hours.
+    """
+    recipients, unreachable = resolve_recipients(event)
+    backend = backend or get_backend()
+
+    subject = f"[{event.ministry.name}] {event.name}"
+    results = backend.send([
+        Message(to=r.to, channel=r.channel, subject=subject, body=message)
+        for r in recipients
+    ])
+
+    notification = EventNotification.objects.create(
+        event=event,
+        reason=reason,
+        message=message,          # a snapshot: editing the event never changes it
+        sent_at=local_now(),
+        sent_by=sent_by,
+        provider_ref=next((r.provider_ref for r in results if r.provider_ref), ""),
+    )
+    notification.recipients.set([r.participation for r in recipients])
+    notification.unreachable.set([u.participation for u in unreachable])
+    return notification

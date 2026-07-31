@@ -360,6 +360,31 @@ class PermissionGuardTests(TestCase):
         )
 
 
+class NotificationBackendGuardTests(TestCase):
+    """Lint-as-test: a delivery backend knows an address, a channel and words.
+
+    Nothing else. The moment one of them knows that minors are notified through
+    a guardian, changing provider means rewriting that rule — and it is a rule
+    about this foundation, which no notification platform has ever heard of.
+    Who to tell lives in events/services.py::resolve_recipients(); this package
+    only puts bytes on a wire. See goal.md D22.
+    """
+
+    BUSINESS_NAMES = r"\b(Contact|Participation|is_minor|EventRole|guardian)\b"
+
+    def test_the_backend_never_imports_contact_or_participation(self):
+        hits = [
+            hit for hit in offending_lines(self.BUSINESS_NAMES)
+            if hit.startswith("core/notifications/")
+        ]
+        self.assertEqual(
+            hits,
+            [],
+            "Delivery adapters take (address, channel, content) and nothing "
+            "else:\n" + "\n".join(hits),
+        )
+
+
 class ViewsAreThinGuardTests(TestCase):
     """Lint-as-test: statistics live in QuerySets and services, not in views.
 
@@ -403,6 +428,74 @@ class AdminHasNoLogicGuardTests(TestCase):
             "Move this to models.py / services.py — admin.py renders, it does "
             "not decide:\n" + "\n".join(hits),
         )
+
+
+class NotificationBackendTests(TestCase):
+    """The adapters themselves. No network is touched anywhere in here."""
+
+    def message(self, channel="email", to="lisi@example.com"):
+        from core.notifications.base import Message
+
+        return Message(to=to, channel=channel, subject="Subject", body="Body")
+
+    def test_the_configured_backend_is_the_one_that_gets_used(self):
+        from core.notifications.base import get_backend
+        from core.notifications.locmem import LocmemBackend
+
+        with self.settings(NOTIFICATION_BACKEND="core.notifications.locmem.LocmemBackend"):
+            self.assertIsInstance(get_backend(), LocmemBackend)
+
+    def test_the_email_backend_reports_an_sms_as_not_accepted(self):
+        # Rather than dropping it. With this backend configured, an SMS-only
+        # recipient is a real gap — and D22's whole complaint is about gaps
+        # that nobody can see.
+        from core.notifications.django_email import DjangoEmailBackend
+
+        results = DjangoEmailBackend().send([self.message(channel="sms", to="+14085550100")])
+        self.assertFalse(results[0].accepted)
+
+    def test_the_email_backend_sends_email(self):
+        from django.core import mail
+
+        from core.notifications.django_email import DjangoEmailBackend
+
+        with self.settings(EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend"):
+            results = DjangoEmailBackend().send([self.message()])
+        self.assertTrue(results[0].accepted)
+        self.assertEqual(len(mail.outbox), 1)
+
+    def test_the_novu_backend_posts_to_the_api(self):
+        # Mocked on purpose: there is no domain and no sender identity on a
+        # laptop, so a live integration could be neither sent nor verified.
+        # Connecting it for real belongs to Phase C; what is being pinned here
+        # is that the seam is in the right place and the call has the shape.
+        import io
+        import json
+        from unittest import mock
+
+        from core.notifications.novu import NovuBackend
+
+        response = io.BytesIO(json.dumps({"data": {"transactionId": "abc"}}).encode())
+        response.__enter__ = lambda self=response: self
+        response.__exit__ = lambda *args: False
+        with mock.patch("urllib.request.urlopen", return_value=response) as opened:
+            results = NovuBackend(api_key="k").send([self.message()])
+        self.assertTrue(results[0].accepted)
+        self.assertEqual(results[0].provider_ref, "abc")
+        self.assertTrue(opened.called)
+
+    def test_a_novu_failure_is_reported_rather_than_raised(self):
+        # One bad address must not stop the rest of the batch; the caller
+        # records what happened instead.
+        import urllib.error
+        from unittest import mock
+
+        from core.notifications.novu import NovuBackend
+
+        with mock.patch("urllib.request.urlopen",
+                        side_effect=urllib.error.URLError("nope")):
+            results = NovuBackend(api_key="k").send([self.message()])
+        self.assertFalse(results[0].accepted)
 
 
 class MarkdownLinkGuardTests(TestCase):

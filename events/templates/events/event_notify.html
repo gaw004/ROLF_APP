@@ -1,0 +1,60 @@
+{% extends "core/base.html" %}
+{% block title %}通知 {{ event.name }} 的报名者{% endblock %}
+
+{% block content %}
+  <h1>{{ event.name }} —— 通知报名者</h1>
+
+  {% if previous %}
+    <p>
+      这场活动通知过 {{ previous|length }} 次，最近一次：{{ previous.0.sent_at }}
+      （{{ previous.0.get_reason_display }}，通知到 {{ previous.0.recipients.count }} 人）。
+    </p>
+    <p><small>这是防重复发送的唯一缓解 —— 没有队列、没有幂等键，发之前自己看一眼。</small></p>
+  {% endif %}
+
+  <h2>本人收（{{ recipients|length }}）</h2>
+  <ul>
+    {% for row in recipients %}
+      <li>{{ row.participation.contact }} —— {{ row.to }}（{{ row.channel }}）</li>
+    {% empty %}
+      <li>没有。</li>
+    {% endfor %}
+  </ul>
+
+  <h2>家长代收（{{ guardian_recipients|length }}）</h2>
+  {% comment %}
+  未成年人（以及生日未知的人）通知家长，不通知本人 —— 15 岁的志愿者可能根本
+  没有自己的手机，发给他等于没发。
+  {% endcomment %}
+  <ul>
+    {% for row in guardian_recipients %}
+      <li>{{ row.participation.contact }} 的家长 —— {{ row.to }}（{{ row.channel }}）</li>
+    {% empty %}
+      <li>没有。</li>
+    {% endfor %}
+  </ul>
+
+  <h2>联系不上（{{ unreachable|length }}）</h2>
+  {% comment %}
+  这一组即使是空的也要显示。一个绿色的「已通知 27 人」盖住 3 个联系不上的人，
+  正是本项目反复判过刑的那种静默失败 —— 通知平台答得了「这封信送到了吗」，
+  答不了「这个人根本没有地址」。
+  {% endcomment %}
+  <ul>
+    {% for row in unreachable %}
+      <li>{{ row.participation.contact }} —— {{ row.why }}</li>
+    {% empty %}
+      <li>没有 —— 每个报名的人都有地址。</li>
+    {% endfor %}
+  </ul>
+
+  <h2>正文</h2>
+  <p><small>正文按原样存进记录，之后再改活动也不会跟着变。默认文案里不写未成年人的姓名。</small></p>
+  <form method="post">
+    {% csrf_token %}
+    {{ form.as_p }}
+    <button type="submit">确认发送</button>
+  </form>
+
+  <p><a href="{% url 'events:event_roles' event.pk %}">返回活动</a></p>
+{% endblock %}

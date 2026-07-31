@@ -12,6 +12,7 @@ people in it. The analogy is exact, and this is the second time in this project
 that one had to be split out of the other.
 """
 
+from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.db import models
 from django.db.models import Count, F, Q
@@ -470,3 +471,61 @@ class Participation(ConstraintErrorFieldMixin, TimeStampedModel):
 
     def __str__(self):
         return f"{self.contact} — {self.event_role}"
+
+
+class EventNotification(ConstraintErrorFieldMixin, TimeStampedModel):
+    """One notice sent about one event: what was said, to whom, and who missed it.
+
+    An event can be notified about more than once, and each notice has
+    properties of its own (when, why, what it said, who received it). By D15's
+    three tests that is a table, not a notified_at column on Event.
+
+    ⚠️ Both M2Ms are snapshots and must never be recomputed. Somebody who could
+       not be reached in March may have a phone number today, and recalculating
+       would quietly rewrite this record into "everyone was told" — which is
+       false. Same rule that makes hours authoritative rather than derived.
+
+    No simple-history on this one: it is already an immutable record of
+    something that happened. Editing it would not be a correction, it would be
+    a forgery.
+    """
+
+    class Reason(models.TextChoices):
+        TIME_CHANGED = "time_changed", "Time changed"
+        LOCATION_CHANGED = "location_changed", "Location changed"
+        CANCELLED = "cancelled", "Event cancelled"
+        OTHER = "other", "Other"
+
+    event = models.ForeignKey(Event, on_delete=models.CASCADE, related_name="notifications")
+    reason = models.CharField(max_length=30, choices=Reason.choices)
+    # A snapshot of the words. Editing the event afterwards must not rewrite
+    # what this notice said.
+    message = models.TextField()
+    sent_at = models.DateTimeField()
+    sent_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        # SET_NULL: whoever sent this may leave and have their account closed,
+        # and the record still has to exist. Anything kept for the record is
+        # never hung off a CASCADE.
+        on_delete=models.SET_NULL,
+        null=True, blank=True, related_name="+",
+    )
+    recipients = models.ManyToManyField(
+        Participation, related_name="notifications", blank=True)
+    # ⚠️ Who could not be reached, by name — not a count. A number answers
+    #    "how many" once and can never answer "which three", and the only way
+    #    back to the names would be to recompute, which the note above forbids.
+    #    That is what D22 ② is asking for.
+    unreachable = models.ManyToManyField(
+        Participation, related_name="notifications_unreachable", blank=True)
+    provider_ref = models.CharField(max_length=200, blank=True)
+
+    class Meta:
+        ordering = ["-sent_at"]
+        # "How many times has this event been notified about, and when was the
+        # last one" — shown on the confirmation page, which is the only thing
+        # standing between a shaky connection and two identical notices.
+        indexes = [models.Index(fields=["event", "-sent_at"])]
+
+    def __str__(self):
+        return f"{self.event.name} — {self.get_reason_display()} @ {self.sent_at:%Y-%m-%d %H:%M}"

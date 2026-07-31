@@ -117,6 +117,22 @@ WSGI_APPLICATION = 'config.wsgi.application'
 DATABASES = {"default": dj_database_url.parse(env("DATABASE_URL", required=True))}
 
 
+# --- Notifications ----------------------------------------------------------
+# Which adapter puts a message on the wire. Who should be told, and at what
+# address, is never decided here — that is events/services.py, because "a minor
+# is notified through their guardian" is a rule about this foundation and no
+# provider has heard of it. See goal.md D22.
+#
+# Console in development: the whole flow can be walked on a laptop with no
+# domain and no provider account. prod.py points at Novu; the tests override
+# this to the locmem backend, so business-rule tests never touch a network and
+# never go red because somebody changed provider.
+NOTIFICATION_BACKEND = env(
+    "NOTIFICATION_BACKEND", "core.notifications.console.ConsoleBackend")
+NOVU_API_KEY = env("NOVU_API_KEY", "")
+NOVU_WORKFLOW = env("NOVU_WORKFLOW", "event-change")
+
+
 # --- Authentication ---------------------------------------------------------
 
 AUTH_PASSWORD_VALIDATORS = [

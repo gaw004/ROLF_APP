@@ -28,16 +28,19 @@ from org.permissions import (
     ministry_ids_administered_by,
 )
 
-from .forms import EventForm, EventRoleForm, HoursForm, SignUpForm
-from .models import Event, EventRole, Participation
+from .forms import EventForm, EventRoleForm, HoursForm, NotifyForm, SignUpForm
+from .models import Event, EventNotification, EventRole, Participation
 from .services import (
     ConsentRequired,
     cancel,
     check_in,
     check_out,
+    default_message,
     event_summary,
     ministry_staff_participation,
+    notify_event_change,
     record_hours,
+    resolve_recipients,
     sign_up,
 )
 
@@ -298,4 +301,52 @@ def event_report(request, pk):
         "event": event,
         "summary": event_summary(event),
         "staff": ministry_staff_participation(event),
+    })
+
+
+@login_required
+def event_notify(request, pk):
+    """P6: tell everybody signed up that the event changed.
+
+    can_manage_event(), the same check as the attendance page — putting a
+    message in front of everybody who signed up is a write, not a read.
+
+    GET is the preview, and the three groups on it are the point: who is being
+    told directly, whose *guardian* is being told instead, and who cannot be
+    reached at all. That third group is the one thing about this page that
+    could fail silently, so it is shown even when it is empty.
+    """
+    event = _managed_event(request, pk)
+    recipients, unreachable = resolve_recipients(event)
+
+    if request.method == "POST":
+        form = NotifyForm(request.POST)
+        if form.is_valid():
+            notify_event_change(
+                event,
+                reason=form.cleaned_data["reason"],
+                message=form.cleaned_data["message"],
+                sent_by=request.user,
+            )
+            messages.success(
+                request,
+                f"已通知 {len(recipients)} 人，另有 {len(unreachable)} 人联系不上。",
+            )
+            return redirect("events:event_notify", pk=event.pk)
+    else:
+        reason = request.GET.get("reason") or EventNotification.Reason.TIME_CHANGED
+        form = NotifyForm(initial={
+            "reason": reason,
+            "message": default_message(event, reason),
+        })
+
+    return render(request, "events/event_notify.html", {
+        "event": event,
+        "form": form,
+        "recipients": [r for r in recipients if not r.is_guardian],
+        "guardian_recipients": [r for r in recipients if r.is_guardian],
+        "unreachable": unreachable,
+        # "Last notified 5 minutes ago" is the only thing standing between a
+        # shaky connection and two identical notices (D22, cost 3).
+        "previous": event.notifications.all()[:5],
     })

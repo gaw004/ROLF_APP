@@ -12,12 +12,13 @@ from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
 from django.db import IntegrityError, connection, transaction
 from django.db.models import ProtectedError
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
 
 from accounts.services import register_account
 from contact.models import Contact, EmergencyContact, RelationshipType
+from core.notifications.locmem import LocmemBackend
 from core.timeutils import (
     local_date_of,
     local_month_of,
@@ -33,9 +34,12 @@ from .services import (
     ConsentRequired,
     check_in,
     check_out,
+    default_message,
     event_summary,
     ministry_staff_participation,
+    notify_event_change,
     record_hours,
+    resolve_recipients,
     sign_up,
 )
 
@@ -581,6 +585,10 @@ class PageTestCase(TestCase):
         self.role = make_role(self.event, "lifting", needed_count=2)
 
     def account(self, username, last_name, **contact_fields):
+        # An email by default: without one the person is legitimately
+        # unreachable, which is a real state but not the one most of these
+        # tests are about.
+        contact_fields.setdefault("email", f"{username}@example.com")
         return register_account(
             username=username, password="a-good-long-password",
             legal_last_name=last_name, **contact_fields,
@@ -838,3 +846,236 @@ class ReportPageTests(PageTestCase):
         self.login(self.other_admin)
         response = self.client.get(reverse("events:event_report", args=[self.event.pk]))
         self.assertEqual(response.status_code, 403)
+
+
+@override_settings(NOTIFICATION_BACKEND="core.notifications.locmem.LocmemBackend")
+class NotificationTests(TestCase):
+    """P6. The three things that were not free: guardians, the unreachable, the record."""
+
+    def setUp(self):
+        LocmemBackend.outbox = []
+        self.pantry = Ministry.objects.create(code="food_pantry", name="Food Pantry")
+        self.event = make_event(ministry=self.pantry)
+        self.role = make_role(self.event, "lifting")
+        self.sender = get_user_model().objects.create_user(username="zhang", password="x")
+        self.parent_of = RelationshipType.objects.create(
+            code="parent_of", name_a_to_b="parent of", name_b_to_a="child of",
+            usable_as_emergency_contact=True)
+
+    def minor(self, last_name="小明", **fields):
+        return make_person(
+            last_name,
+            birth_date=local_today() - datetime.timedelta(days=365 * 15),
+            **fields,
+        )
+
+    def signup(self, contact, **fields):
+        return Participation.objects.create(
+            contact=contact, event_role=self.role, **fields)
+
+    def notify(self, reason=None):
+        from .models import EventNotification
+
+        return notify_event_change(
+            self.event,
+            reason=reason or EventNotification.Reason.TIME_CHANGED,
+            message=default_message(self.event, EventNotification.Reason.TIME_CHANGED),
+            sent_by=self.sender,
+        )
+
+    # --- who gets told ---------------------------------------------------
+
+    def test_an_adult_is_notified_at_their_own_address(self):
+        adult = make_person("李", birth_date=datetime.date(1980, 1, 1),
+                            email="lisi@example.com")
+        self.signup(adult)
+        recipients, unreachable = resolve_recipients(self.event)
+        self.assertEqual([(r.to, r.channel) for r in recipients],
+                         [("lisi@example.com", "email")])
+        self.assertEqual(unreachable, [])
+
+    def test_an_adult_preferring_sms_is_notified_by_sms(self):
+        adult = make_person(
+            "李", birth_date=datetime.date(1980, 1, 1), email="lisi@example.com",
+            phone="+14085550111",
+            preferred_communication_method=Contact.CommunicationMethod.SMS)
+        self.signup(adult)
+        recipients, _ = resolve_recipients(self.event)
+        self.assertEqual(recipients[0].channel, "sms")
+
+    def test_a_preference_falls_back_when_that_address_is_missing(self):
+        adult = make_person(
+            "李", birth_date=datetime.date(1980, 1, 1), email="lisi@example.com",
+            preferred_communication_method=Contact.CommunicationMethod.SMS)
+        self.signup(adult)
+        recipients, _ = resolve_recipients(self.event)
+        self.assertEqual(recipients[0].channel, "email")
+
+    def test_a_minor_is_notified_through_their_guardian(self):
+        # ⭐ D22 ①. A fifteen-year-old may have no phone at all, so notifying
+        # them is notifying nobody. Fail this and P6 is broken for exactly the
+        # group that most needs telling.
+        child = self.minor(email="xiaoming@example.com")
+        self.signup(child, consent_given_by="王秀英",
+                    consent_email="parent@example.com",
+                    consent_method=Participation.ConsentMethod.VERBAL)
+        recipients, _ = resolve_recipients(self.event)
+        self.assertEqual([(r.to, r.is_guardian) for r in recipients],
+                         [("parent@example.com", True)])
+        # And explicitly not the child's own address, which is on file.
+        self.assertNotIn("xiaoming@example.com", [r.to for r in recipients])
+
+    def test_a_minor_with_only_consent_phone_is_notified_by_sms(self):
+        child = self.minor()
+        self.signup(child, consent_given_by="王秀英", consent_phone="+14085550123",
+                    consent_method=Participation.ConsentMethod.VERBAL)
+        recipients, _ = resolve_recipients(self.event)
+        self.assertEqual([(r.to, r.channel) for r in recipients],
+                         [("+14085550123", "sms")])
+
+    def test_a_minor_falls_back_to_the_emergency_contact(self):
+        # The second path, and it is SMS-only because EmergencyContact has a
+        # phone column and no email one. With an email-only backend that is a
+        # real gap — a visible one, which is the requirement.
+        child = self.minor()
+        EmergencyContact.objects.create(
+            person=child, name="王秀英", phone="+14085550199",
+            relationship_type=self.parent_of)
+        self.signup(child)
+        recipients, _ = resolve_recipients(self.event)
+        self.assertEqual([(r.to, r.channel, r.is_guardian) for r in recipients],
+                         [("+14085550199", "sms", True)])
+
+    def test_a_minor_with_no_guardian_contact_lands_in_unreachable(self):
+        self.signup(self.minor(email="xiaoming@example.com"))
+        recipients, unreachable = resolve_recipients(self.event)
+        self.assertEqual(recipients, [])
+        self.assertEqual(len(unreachable), 1)
+
+    def test_a_participant_with_unknown_birth_date_is_treated_as_a_minor(self):
+        # The cautious side of the three-state. Folded into "adult", a minor
+        # with no date on file would be mailed directly and their parents never
+        # told — silently.
+        unknown = make_person("未知", birth_date=None, email="unknown@example.com")
+        self.signup(unknown)
+        recipients, unreachable = resolve_recipients(self.event)
+        self.assertEqual(recipients, [])
+        self.assertEqual(len(unreachable), 1)
+
+    def test_a_participant_with_no_email_and_no_phone_lands_in_unreachable(self):
+        # D22 ②. Staff-entered contacts often have neither.
+        self.signup(make_person("无", birth_date=datetime.date(1980, 1, 1)))
+        _, unreachable = resolve_recipients(self.event)
+        self.assertEqual(len(unreachable), 1)
+
+    def test_cancelled_participations_are_not_notified(self):
+        adult = make_person("李", birth_date=datetime.date(1980, 1, 1),
+                            email="lisi@example.com")
+        self.signup(adult, status=Participation.Status.CANCELLED)
+        recipients, unreachable = resolve_recipients(self.event)
+        self.assertEqual((recipients, unreachable), ([], []))
+
+    # --- the record ------------------------------------------------------
+
+    def test_unreachable_rows_are_not_counted_as_recipients(self):
+        told = make_person("李", birth_date=datetime.date(1980, 1, 1),
+                           email="lisi@example.com")
+        missed = make_person("无", birth_date=datetime.date(1980, 1, 1))
+        self.signup(told)
+        Participation.objects.create(
+            contact=missed, event_role=make_role(self.event, "welcome"))
+        notification = self.notify()
+        self.assertEqual(notification.recipients.count(), 1)
+        self.assertEqual(notification.unreachable.count(), 1)
+
+    def test_who_was_unreachable_is_still_queryable_afterwards(self):
+        # The reason unreachable is an M2M and not a count: a number answers
+        # "how many" once and can never answer "which three".
+        missed = make_person("无", birth_date=datetime.date(1980, 1, 1))
+        self.signup(missed)
+        notification = self.notify()
+        self.assertEqual(
+            [row.contact for row in notification.unreachable.all()], [missed])
+
+    def test_unreachable_rows_do_not_change_after_the_phone_is_filled_in(self):
+        # A snapshot, never recomputed. Somebody unreachable in March may have
+        # a number today, and recalculating would rewrite this record into
+        # "everybody was told", which is false.
+        missed = make_person("无", birth_date=datetime.date(1980, 1, 1))
+        self.signup(missed)
+        notification = self.notify()
+        missed.email = "found@example.com"
+        missed.save()
+        self.assertEqual(notification.unreachable.count(), 1)
+
+    def test_the_message_snapshot_survives_editing_the_event(self):
+        self.signup(make_person("李", birth_date=datetime.date(1980, 1, 1),
+                                email="lisi@example.com"))
+        notification = self.notify()
+        original = notification.message
+        self.event.name = "Renamed entirely"
+        self.event.save()
+        notification.refresh_from_db()
+        self.assertEqual(notification.message, original)
+
+    def test_deleting_the_sending_user_keeps_the_notification(self):
+        notification = self.notify()
+        self.sender.delete()
+        notification.refresh_from_db()
+        self.assertIsNone(notification.sent_by)
+
+    def test_the_default_message_does_not_contain_a_minors_name(self):
+        # D22's second cost is that content leaves our database. What leaves is
+        # an address plus an announcement, never "your child 小明".
+        child = self.minor()
+        self.signup(child, consent_given_by="王秀英",
+                    consent_email="parent@example.com",
+                    consent_method=Participation.ConsentMethod.VERBAL)
+        from .models import EventNotification
+
+        body = default_message(self.event, EventNotification.Reason.TIME_CHANGED)
+        self.assertNotIn("小明", body)
+        self.assertIn("您的孩子", body)
+
+    # --- the seam --------------------------------------------------------
+
+    def test_resolve_recipients_makes_no_network_calls(self):
+        # Business-rule tests must not depend on a provider, and must not go
+        # red when one is swapped. Nothing here even reaches a backend.
+        self.signup(make_person("李", birth_date=datetime.date(1980, 1, 1),
+                                email="lisi@example.com"))
+        resolve_recipients(self.event)
+        self.assertEqual(LocmemBackend.outbox, [])
+
+    def test_delivery_goes_through_the_configured_backend(self):
+        self.signup(make_person("李", birth_date=datetime.date(1980, 1, 1),
+                                email="lisi@example.com"))
+        self.notify()
+        self.assertEqual([m.to for m in LocmemBackend.outbox], ["lisi@example.com"])
+
+
+class NotificationPageTests(PageTestCase):
+    def test_notifying_another_ministrys_event_returns_403(self):
+        self.login(self.other_admin)
+        response = self.client.get(reverse("events:event_notify", args=[self.event.pk]))
+        self.assertEqual(response.status_code, 403)
+
+    def test_a_plain_volunteer_cannot_open_the_notify_page(self):
+        self.login(self.lisi)
+        response = self.client.get(reverse("events:event_notify", args=[self.event.pk]))
+        self.assertEqual(response.status_code, 403)
+
+    @override_settings(NOTIFICATION_BACKEND="core.notifications.locmem.LocmemBackend")
+    def test_the_preview_shows_all_three_groups(self):
+        LocmemBackend.outbox = []
+        Participation.objects.create(
+            contact=self.lisi.contact, event_role=self.role)
+        nobody = make_person("无", birth_date=datetime.date(1980, 1, 1))
+        Participation.objects.create(
+            contact=nobody, event_role=make_role(self.event, "welcome"))
+        self.login(self.zhang)
+        response = self.client.get(reverse("events:event_notify", args=[self.event.pk]))
+        self.assertEqual(len(response.context["unreachable"]), 1)
+        # The group is rendered even when empty — it is the one part of this
+        # page that could fail without anybody noticing.
+        self.assertContains(response, "联系不上")

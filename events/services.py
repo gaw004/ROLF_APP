@@ -145,7 +145,7 @@ def check_out(participation, *, at=None):
        back (one pair of timestamps cannot say it, but the hours can).
 
     ⚠️ Nor is hours a property over the timestamps. Two fields answering one
-       question independently is Relationship.is_active next to end_date: two
+       question independently is is_active sitting next to end_date: two
        answers, free to disagree, and nothing to tell you they have.
     """
     at = at or local_now()

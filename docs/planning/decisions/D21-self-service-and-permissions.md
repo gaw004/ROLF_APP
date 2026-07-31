@@ -65,6 +65,6 @@
 **其余一律留在 Admin**（字典表维护、`Contact` / `Position` / `Assignment` 的 CRUD）——
 那些是内部人员用的，Admin 够用，[D18](D18-admin-boundary.md#admin-允许承载什么) 的表没有变。
 
-> 好消息：这条路已经跑通过两次。 `/contacts/merge/` 和 `/relationships/add/`
+> 好消息：这条路已经跑通过一次。 `/contacts/merge/`
 > 就是为了"在风险最低的事情上先把视图 + 模板 + URL + 权限跑一遍"而提前做的
 > （见 [D18 的形状触发](D18-admin-boundary.md#什么时候-admin-整体不够用了)）。当时写的理由现在兑现了。

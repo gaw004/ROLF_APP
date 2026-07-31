@@ -19,7 +19,6 @@
 | [D3](D03-portable-postgres.md) | 数据一个 `pg_dump` 能带走 | "数据自主"的具体定义 |
 | [D4](D04-contact-one-table.md) | Contact 统一人和组织 | 人和机构为什么共用一张表 |
 | [D5](D05-lookup-tables-not-enums.md) | 字典表 vs 枚举 | 分类字段怎么选，`code` 为什么必须唯一且不可改<br>↳ [判定规则](D05-lookup-tables-not-enums.md#判定规则什么时候用字典表什么时候用-textchoices2026-07-28-补) · [`code` 通则](D05-lookup-tables-not-enums.md#通则每张字典表都带一个唯一且不可改的-code) |
-| [D6](D06-generic-relationship.md) | Relationship 的适用范围 | 哪些关系留在通用表，哪些被拿走了<br>↳ [为什么紧急联系人复用本表的词表](D06-generic-relationship.md#为什么紧急联系人的关系标签复用本表而不是另建一张词表2026-07-28-确认) |
 | [D7](D07-standard-field-libraries.md) | 电话 / 国家 / 州用成熟库 | 为什么不自己列 |
 | [D8](D08-language-iso-639-3.md) | Language 自建 ISO 639-3 | 为什么现成的包不能用 |
 | [D9](D09-rules-in-db-constraints.md) | 规则落数据库约束 | `clean()` 不是强制层（这条修订过）<br>↳ [归一化通则](D09-rules-in-db-constraints.md#通则归一化如果被约束依赖就必须写进约束的表达式里2026-07-28-补) —— `bulk_create` 会绕过 `save()` |
@@ -28,7 +27,7 @@
 | [D12](D12-user-on-contact.md) | User 挂在 Contact 上 | 登录账号和岗位为什么解耦 |
 | [D13](D13-single-email-phone-address.md) | 单个 email / 电话 / 地址 | 什么时候才拆成一对多 |
 | [D14](D14-constraint-is-the-only-rule.md) | 约束是唯一的规则 | 字段级提示靠**映射表 + 守卫测试**，不靠把规则写两遍 |
-| [D15](D15-relationship-carriers.md) | 关系的载体 + 四条判据 | 新关系用字段 / 自引用 FK / 通用表 / 专用表；**第四条判据「主体性」决定它该不该进 `Contact`**（紧急联系人这一支同日改过**三次**）<br>↳ [第四条判据：主体性](D15-relationship-carriers.md#载体的第四条判据主体性--这个实体该不该进-contact2026-07-28-新增) · [`EmergencyContact` 的形状与代价](D15-relationship-carriers.md#emergencycontact-的形状以及为什么最终选了文本方案) · [监护人 ≠ 紧急联系人](D15-relationship-carriers.md#监护人--紧急联系人重要区分) |
+| [D15](D15-relationship-carriers.md) | 关系的载体 + 四条判据 | 新关系用字段 / 自引用 FK / 专用表；**第四条判据「主体性」决定它该不该进 `Contact`**（紧急联系人这一支同日改过**两次**）<br>↳ [第四条判据：主体性](D15-relationship-carriers.md#载体的第四条判据主体性--这个实体该不该进-contact2026-07-28-新增) · [`EmergencyContact` 的形状与代价](D15-relationship-carriers.md#emergencycontact-的形状以及为什么最终选了文本方案) · [监护人 ≠ 紧急联系人](D15-relationship-carriers.md#监护人--紧急联系人重要区分) |
 | [D16](D16-time-and-dates.md) | 时间与日期的唯一口径 | **"今天"只有一种写法**，另两种会静默错一天 |
 | [D17](D17-app-layout.md) | app 划分 | 新模型放哪，以及 `payroll` 为什么必须独立 |
 | [D18](D18-admin-boundary.md) | Admin 的边界 | 这段逻辑该不该写在 admin 里；以及权限粒度为什么倒推出一张新表<br>↳ [**代码落点与文件分层**](D18-admin-boundary.md#代码落点与文件分层什么会随升级坏什么换界面还用得上2026-07-28-补) —— 哪一层会随 Django 升级坏 · [两条出栏触发](D18-admin-boundary.md#什么时候-admin-整体不够用了) |

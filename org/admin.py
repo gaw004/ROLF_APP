@@ -31,7 +31,7 @@ class MinistryAdmin(admin.ModelAdmin):
     inlines = [PositionInline]
 
     def get_readonly_fields(self, request, obj=None):
-        # Same split as RelationshipType: editable while adding, frozen after.
+        # Same split as every other code column: editable while adding, frozen after.
         # The admin covers the admin; Ministry.clean() covers everything else.
         return ["code"] if obj else []
 

@@ -19,11 +19,12 @@ from core.constraints import CONSTRAINT_FIELD
 from core.querysets import DateRangeQuerySet
 from core.timeutils import local_today
 
-# core/tests.py borrowing a contact model is the one direction D17 forbids in
+# core/tests.py borrowing an app's models is the one direction D17 forbids in
 # production code. It is deliberate and test-only: .active() needs a model with
-# start_date/end_date, Relationship is the only one that has them until B5, and
-# the alternative (a test-only model) would need a migration of its own.
-from contact.models import Contact, Relationship, RelationshipType
+# start_date/end_date, and the alternative (a test-only model) would need a
+# migration of its own.
+from contact.models import Contact
+from org.models import Assignment, Position
 
 # Apps we wrote, as opposed to Django's and the third-party ones.
 OUR_APPS = {"core", "contact", "accounts", "org", "events", "volunteer", "finance", "payroll"}
@@ -163,53 +164,48 @@ class NoMissingMigrationsTests(TestCase):
 class ActiveQuerySetTests(TestCase):
     """The four date boundaries of .active() — the most reused predicate we have.
 
-    Exercised against Relationship, the only model with start/end dates until
-    B5. The queryset is built directly rather than through a manager: B3.3 is
-    where Relationship.objects gets it, and these boundaries have to hold from
-    the moment the predicate exists.
+    Exercised against Assignment. The queryset is built directly rather than
+    through Assignment.objects, so these boundaries are pinned to the shared
+    predicate itself and not to whichever manager happens to expose it.
     """
 
     def setUp(self):
         self.alice = Contact.objects.create(
             contact_type=Contact.ContactType.INDIVIDUAL, legal_last_name="Alice")
-        self.bob = Contact.objects.create(
-            contact_type=Contact.ContactType.INDIVIDUAL, legal_last_name="Bob")
-        self.parent_of = RelationshipType.objects.create(
-            code="parent_of", name_a_to_b="parent of", name_b_to_a="child of")
+        self.post = Position.objects.create(code="greeter", name="Greeter")
 
-    def relationships(self):
-        return DateRangeQuerySet(model=Relationship)
+    def tenures(self):
+        return DateRangeQuerySet(model=Assignment)
 
     def make(self, start_date=None, end_date=None):
-        return Relationship.objects.create(
-            contact_a=self.alice, contact_b=self.bob,
-            relationship_type=self.parent_of,
+        return Assignment.objects.create(
+            contact=self.alice, position=self.post,
             start_date=start_date, end_date=end_date,
         )
 
     def test_active_includes_a_row_ending_today(self):
         row = self.make(end_date=local_today())
-        self.assertIn(row, self.relationships().active())
+        self.assertIn(row, self.tenures().active())
 
     def test_active_excludes_a_row_that_ended_yesterday(self):
         row = self.make(end_date=local_today() - datetime.timedelta(days=1))
-        self.assertNotIn(row, self.relationships().active())
+        self.assertNotIn(row, self.tenures().active())
 
     def test_active_excludes_a_row_that_starts_in_the_future(self):
         # The half of the definition that is easiest to leave out, and leaving
         # it out does not raise — it just counts people who have not started yet.
         row = self.make(start_date=local_today() + datetime.timedelta(days=1))
-        self.assertNotIn(row, self.relationships().active())
+        self.assertNotIn(row, self.tenures().active())
 
     def test_active_includes_a_row_with_no_dates_at_all(self):
         row = self.make()
-        self.assertIn(row, self.relationships().active())
+        self.assertIn(row, self.tenures().active())
 
     def test_active_accepts_an_explicit_date(self):
         row = self.make(
             start_date=datetime.date(2020, 1, 1), end_date=datetime.date(2020, 12, 31))
-        self.assertNotIn(row, self.relationships().active())
-        self.assertIn(row, self.relationships().active(on=datetime.date(2020, 6, 1)))
+        self.assertNotIn(row, self.tenures().active())
+        self.assertIn(row, self.tenures().active(on=datetime.date(2020, 6, 1)))
 
     def test_active_is_not_frozen_at_import_time(self):
         # `def active(self, on=local_today())` would evaluate once, at import,

@@ -51,7 +51,6 @@ D9 允许 `save()` 做**整理**（清空不适用字段、`code` 转小写、�
 |---|---|---|
 | `code` 转小写 | `unique=True` | `UniqueConstraint(Lower("code"))` |
 | 显示名 strip 空白 | `UniqueConstraint(Lower("name_a_to_b"))` | `UniqueConstraint(Lower(Trim("name_a_to_b")))` |
-| 对称关系交换 a/b | A7 的 `(contact_a, contact_b, type, start_date)` | `UniqueConstraint(Least(a,b), Greatest(a,b), type, …)` —— 见缺口 3 |
 
 **不受影响的**（判定方法过一遍就知道）：`Assignment` 的唯一约束走的是外键 id，
 没有文本归一化这回事；`Position.name` 本来就没有唯一约束；

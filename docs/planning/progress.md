@@ -14,16 +14,13 @@
   联系方式、人口统计（性别、生日、偏好语言、偏好联系方式）、结构化地址、
   `is_active` 状态、备注。带 `contact_name_matches_type` 约束 + 修改历史。
 - **`RelationshipType`** —— 关系类型字典表（见 D5），带正反双向标签（如 `parent of` / `child of`）。
-  注意：`manages` / `managed by` 已不用于组织架构，汇报线走 `Position.reports_to`（见 D6 适用范围、D11）。
-- **`Relationship`** —— 连接两个 Contact，带类型和起止日期（见 D6）。
-  Phase A 建了三条约束：禁自我关系、禁完全相同的重复行（`NULLS NOT DISTINCT`）、`end_date >= start_date`。
-  ✅ **第二条已在 B3.2 被"无序对唯一约束"替换** —— A7 当时判定"镜像重复数据库表达不了"，
-  **那个判断是错的**（用 `Least`/`Greatest` 表达得了，只是当时以为需要按类型条件生效）。见缺口 3。
-  ✅ **`is_active` 字段已在 B3.3 删掉** —— 它和 `end_date` 是同一件事记两处，见 Phase B 的「单一真相」。
-  ✅ **反向显示已在 B3.1 补上**（两个只读 inline），录入移到 `/relationships/add/`。
+  两个使用方：`EmergencyContact.relationship_type` 和 `Participation.consent_relationship`。
+  带 `code`（唯一·不可改）、`is_symmetric`、`usable_as_emergency_contact` 三个字段，
+  以及两条大小写不敏感的唯一约束。汇报线不在这里，走 `Position.reports_to`（见 D11）。
+- **`EmergencyContact`** —— 专用表，姓名电话存文本（见 D15 第四条判据）。
 - **`Language`** —— 自建 ISO 639-3 表（见 D8），数据迁移已灌入 7923 行，
   English / Mandarin / Cantonese 已 pin 到最前。
-- **Admin** —— 完整配置：搜索、筛选、autocomplete、Relationship inline、History 按钮，
+- **Admin** —— 完整配置：搜索、筛选、autocomplete、紧急联系人 inline、History 按钮，
   以及两段 JS（按 contact_type 隐藏无关名字字段、按国家切换州的下拉/文本框）。
 
 **`core` app：** `TimeStampedModel` 抽象基类（给所有表加 created_at / updated_at），
@@ -57,7 +54,6 @@
 | `SECRET_KEY` / `DEBUG` / `ALLOWED_HOSTS` / `STATIC_ROOT` 进环境变量 | 现 key 已进 git 历史，**已泄露的 key 不能再用**，上线前必须换新的；配置越早拆干净，上线时越不手忙脚乱 | ✅ 完成 |
 | 建 `core` app，`TimeStampedModel` 从 `contact` 迁出 | 下一个 app（volunteer / event）要用它就得 `from contact.models import ...`，依赖方向反了，以后想单独理解或替换 `contact` 会被缠住 | ✅ 完成 |
 | 移除装了没用的 `countries_plus` / `languages_plus` | 它们各自在库里建了几千行的表。既然已按 D8 自建 `Language`，删掉减少依赖和迁移噪音 | ✅ 完成 |
-| `Relationship` 加数据库约束（禁自我关系、禁**完全相同**的重复行、`end_date >= start_date`） | 现在可以存"Alice 是 Alice 的母亲"，也可以把同一段关系重复存 10 遍，还能存"2020 年结束、2023 年开始"。约束加在数据库层，脏数据永远进不来；等表里有了真数据再加，就得先清洗存量数据 | ✅ 完成 |
 | `Contact` 姓名规则加 `CheckConstraint`（见 D9 修订） | D9 原以为规则已经生效，其实 `save()` 不调 `clean()` —— 脚本和 `bulk_create` 一直能绕过去。这是"规则形同虚设"，不是"规则不够严" | ✅ 完成 |
 | `DEFAULT_AUTO_FIELD` 设成 `BigAutoField` | 现在库要重建，改是免费的；有数据之后要 ALTER 每张表的主键**和所有指向它的外键列**。顺带消掉 `manage.py check` 现有的 3 条 W042 警告 | ✅ 完成 |
 | `TIME_ZONE` 从 `UTC` 改成 `America/Los_Angeles` | ⚠️ **严格说它不满足上面的准入标准** —— `USE_TZ=True`，库里存的是 UTC，以后改也是一行的事、不痛。它是靠"顺手"进来的，不是靠规则进来的。做它是因为确实一行；记在这里是为了提醒：下一个"顺手"的东西要挡回去 | ✅ 完成 |
@@ -109,7 +105,7 @@
      而捐款总额是一个月看一次的东西。先做天天用的。
   2. 志愿者活跃排行、跨活动的总工时（靠 `Participation`；单场活动的 R4–R8 Phase B 已有）
   > 这里**不是**"第一批自己写的页面"了 —— Phase B 已经出了
-  > `/contacts/merge/`、`/relationships/add/` 和一整套自助页面（D21）。
+  > `/contacts/merge/` 和一整套自助页面（D21）。
   > 到这一步"视图 + 模板 + URL + 权限"这条路已经跑通过多次，可以直接上 HTMX。
 - CSV 导出、简单报表
 - 安全：`SECURE_SSL_REDIRECT`、HSTS、`SESSION_COOKIE_SECURE`，

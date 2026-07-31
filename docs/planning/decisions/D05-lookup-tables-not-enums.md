@@ -10,7 +10,7 @@
 付款方式一律照此办理。
 
 > 注意"理事会成员"**不是**关系类型 —— 理事走 `kind=board` 的 `Position` + 一行 `Assignment`（见 D11）。
-> 判断方法：这个人在基金会担任的职务 → `Position` / `Assignment`；这个人和另一个人/组织之间的联系 → `Relationship`。
+> 判断方法：这个人在基金会担任的职务 → `Position` / `Assignment`；出事时该打谁的电话 → `EmergencyContact`。
 
 ## 判定规则：什么时候用字典表，什么时候用 `TextChoices`（2026-07-28 补）
 

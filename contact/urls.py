@@ -7,6 +7,5 @@ from . import views
 app_name = "contact"
 
 urlpatterns = [
-    path("relationships/add/", views.relationship_create, name="relationship_add"),
     path("contacts/merge/", views.contact_merge, name="contact_merge"),
 ]

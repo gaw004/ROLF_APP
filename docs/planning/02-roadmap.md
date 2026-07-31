@@ -28,11 +28,11 @@
 > | `python manage.py test` | **27 个，全绿**（0.63s） |
 > | `python manage.py check` | 0 issues, 0 silenced |
 > | 已有 app | `core` / `contact` / `accounts` |
-> | 已有模型 | `Contact` / `RelationshipType` / `Relationship` / `Language` / `User` |
+> | 已有模型 | `Contact` / `RelationshipType` / `Language` / `User` |
 > | `contact` 迁移 | 到 `0004_historicalcontact` |
 > | 数据库 | Postgres 18 在跑，psycopg 3 |
 > | Django / Python | 5.2.16 / 3.14.6 |
-> | 开发库里的业务数据 | `Contact` 0 行、`Relationship` 0 行、`RelationshipType` 0 行、`Language` 7923 行、`User` 1 个 |
+> | 开发库里的业务数据 | `Contact` 0 行、`RelationshipType` 0 行、`Language` 7923 行、`User` 1 个 |
 >
 > ⚠️ **最后一行很重要，直接改变了两处做法**，见 B0 的「实测发现」。
 
@@ -51,7 +51,7 @@
 > 配 grep 守卫（B1）。原来那条"所有遍历都带 `visited` 兜底"是纪律，现在是结构。
 > 同轮否决了"改用 Postgres `LTREE`"的评审建议 —— 见 `goal.md`「汇报线的环」。
 
-**同时把 `contact` 现有的三个欠账收掉**（关系的反向显示、类型表的 `code`、
+**同时把 `contact` 现有的两个欠账收掉**（类型表的 `code`、
 `Contact.__str__` 的重名消歧）—— 它们不收，后面新建的每一个 autocomplete
 和每一处按类型的查询都会踩在流沙上。
 
@@ -74,7 +74,7 @@
 | 活动班次 `Shift` | 推迟清单 —— 多班次一律拆成多个 `Event` |
 | 逐字段合并的交互界面 | 推迟清单 —— 合并功能本身要做，界面从简 |
 | HTMX / 样式 / 任何面向外部用户的页面 | Phase C（D2：前端推迟） |
-| ~~自己写的页面~~ | **两个例外**（都被 `goal.md` D18 的形状触发赶出 admin）：`/relationships/add/`（B3.1b，inline 拿不到 subject，且 Phase C 的 HTMX 不用 formset）和 `/contacts/merge/`（B4.4，二次确认页要吃 `admin/base_site.html`、"待处理 N 条"要覆盖 `admin/index.html`）。**都是单页面、无 HTMX、无样式、逻辑全在 `services.py` 里，Phase C 原样接管** |
+| ~~自己写的页面~~ | **一个例外**（被 `goal.md` D18 的形状触发赶出 admin）：`/contacts/merge/`（B4.4，二次确认页要吃 `admin/base_site.html`、"待处理 N 条"要覆盖 `admin/index.html`）。**单页面、无 HTMX、无样式、逻辑全在 `services.py` 里，Phase C 原样接管** |
 | 薪酬 | 推迟清单 + `payroll` app 的位置已在 D17 预留 |
 | 在 `clean()` 里重写一遍约束的规则 | 2026-07-28 D14 重写：规则只在约束里，字段级提示走 `CONSTRAINT_FIELD` 映射。`clean()` 只写约束表达不了的（跨表、跨行） |
 | `Contact.is_reference_only` / `Contact.emergency_contact` / `Contact.objects.people()` | 2026-07-28 第六轮整体作废，紧急联系人改用 `EmergencyContact` 专用表（B4.2）。一个字段都不要加 |
@@ -94,17 +94,14 @@
    - `RelationshipType.code` 要赶在**任何按类型查询的代码**写出来之前（晚了字符串匹配就扩散了）；
    - `Contact.__str__` 消歧要赶在 **B5/B6 那三个新 autocomplete** 之前（晚了下拉框里全是一模一样的选项）；
    - `EmergencyContact.relationship_type` 依赖 `RelationshipType.usable_as_emergency_contact`。
-3. **关系的双向显示必须先于对称归一化** —— 顺序反了，用户刚录的关系会从他的页面上消失
-   （`goal.md` Phase B「对称关系」那一条）。
 
 ```
 B0 基线与准备（分支 / ruff / 确认不阻塞项）                                    ✅
  └→ B1 core：local_today() + DateRangeQuerySet + 守卫测试 + 建空的 services.py  ✅
      └→ B2 contact①：RelationshipType 收口（code / is_symmetric / 唯一约束）    ✅
-         └→ B3 contact②：Relationship 收口（双向显示 → 归一化 → 删 is_active）  ✅
-             └→ B4 contact③：Contact 收口（__str__ / 紧急联系人 / 查重 / 合并）  ✅
-                 └→ B5 org：Ministry + EmploymentType + Position + Assignment  ✅
-                     └→ B6 起见下面那一段（2026-07-29 重写）
+         └→ B4 contact③：Contact 收口（__str__ / 紧急联系人 / 查重 / 合并）      ✅
+             └→ B5 org：Ministry + EmploymentType + Position + Assignment      ✅
+                 └→ B6 起见下面那一段（2026-07-29 重写）
 ```
 
 **B5 内部还有一条硬顺序**：`Ministry` → `Position` → `Assignment` ——
@@ -156,7 +153,7 @@ select = ["E", "F", "DTZ"]
 
 ### ⚠️ 实测发现：开发库里业务表全是空的
 
-`Contact` / `Relationship` / `RelationshipType` 都是 **0 行**。这改变两处做法：
+`Contact` 和 `RelationshipType` 都是 **0 行**。这改变两处做法：
 
 1. `RelationshipType.code` 不需要 `goal.md` 写的三步迁移。
    三步法（加可空 → 数据迁移回填 → 改 unique/non-null）是**表里有数据时**的必要手续；
@@ -257,7 +254,7 @@ from core.timeutils import local_today
 class DateRangeQuerySet(models.QuerySet):
     """给所有「带 start_date / end_date 的表」共用的生效期判定。
 
-    Assignment 和 Relationship 都用它 —— 定义只写一处。那个 Q 表达式会出现在
+    Assignment 和 MinistryRole 都用它 —— 定义只写一处。那个 Q 表达式会出现在
     ministry 页面、活跃统计、admin 筛选器等十来个地方，抄十遍就一定有一处抄错，
     而且错了不报错，只是数字悄悄不对。
     """
@@ -277,10 +274,10 @@ class DateRangeQuerySet(models.QuerySet):
 
 > ⚠️ `active()` 只管日期，`core` 这一层不认识 `status`。
 > `Assignment` 在 B5 会自己加一个 `serving()`（= `active()` AND `status=active`），
-> **不要把 `status` 塞进这个共享 mixin** —— `Relationship` 没有状态这回事，
-> 关系不会被"停职"。见 `goal.md`「`Assignment.status`」。
+> **不要把 `status` 塞进这个共享 mixin** —— `MinistryRole` 没有状态这回事，
+> 一次授权不会被"停职"。见 `goal.md`「`Assignment.status`」。
 
-用法（B3 / B5 都这么接）：
+用法（B5 / B7 都这么接）：
 
 ```python
 objects = models.Manager.from_queryset(DateRangeQuerySet)()
@@ -385,7 +382,7 @@ def test_nobody_traverses_reports_to_outside_org_services(self):
 B13 的清单里有这一项。
 
 **顺带在 B1 就把 `contact/services.py` 建出来**（空文件 + 一行 docstring）。
-B3.1b 的 `orient()` / `direction_choices()` 和 B4.4 的 `merge_contacts()` 都往这里放。
+B4.4 的 `merge_contacts()` 往这里放。
 现在建成本为零，等到用时再建就会有人顺手写进 `models.py` 或 `Form` 里。
 `org/services.py` 同理 —— B5 一 `startapp` 就建，`build_org_tree()` 是它的第一个住户。
 
@@ -397,7 +394,7 @@ B3.1b 的 `orient()` / `direction_choices()` 和 B4.4 的 `merge_contacts()` 都
 linter 认为合法），所以这条测试不能省。
 
 前六条测试需要一个带 `start_date` / `end_date` 的模型。B1 时还没有 ——
-**先用 `Relationship` 测**（它已经有这两个字段），B3 接上 `.active()` 之后自然成立。
+**B5 建出 `Assignment` 之后回来补上**，六条边界正式挂在它上面。
 
 **验证**：`python manage.py test core` 全绿；`ruff check .` 干净。
 
@@ -411,14 +408,14 @@ linter 认为合法），所以这条测试不能省。
 > **2026-07-28 第三轮修订**：已确认 **`bulk_create` 会成为常态写入路径**
 > （批量导入基金会现有数据）。所有"`save()` 归一化 + 唯一约束"的组合因此都是漏的 ——
 > 唯一性一律改用 `Lower()` / `Trim()` / `Least()` 的**表达式约束**。
-> 通则和判定方法见 `goal.md` D9「归一化通则」。本步和 B3.2、B5 都受影响。
+> 通则和判定方法见 `goal.md` D9「归一化通则」。本步和 B5 都受影响。
 
 ### 三个新字段
 
 ```python
 class RelationshipType(models.Model):
     # 代码只认 code，永远不认显示名。显示名可以在 admin 里随时改，
-    # 而 filter(name_a_to_b="parent of") 会在改名之后静默失效。见 goal.md D5 / D6。
+    # 而 filter(name_a_to_b="parent of") 会在改名之后静默失效。见 goal.md D5。
     # ⚠️ 字段上不写 unique=True —— 唯一性走下面的 UniqueConstraint(Lower("code"))，
     #    否则 bulk_create 能把 Food_Pantry 和 food_pantry 当两行插进来（D9 归一化通则）。
     code = models.SlugField(max_length=50)
@@ -427,8 +424,8 @@ class RelationshipType(models.Model):
     # 录入的人完全可能把 "spouse of" 同时填进正反两栏，推断就失效了。见 goal.md D15。
     is_symmetric = models.BooleanField(default=False)
 
-    # 紧急联系人的关系标签复用本表；这个布尔把「employee of」这类外部组织归属
-    # 从紧急联系人下拉里挡掉。同 Contact.preferred_language 的 limit_choices_to 写法。
+    # 这个布尔把「同事」「员工」这类不适合当紧急联系人的类型从下拉里挡掉。
+    # 同 Contact.preferred_language 的 limit_choices_to 写法。
     usable_as_emergency_contact = models.BooleanField(default=False)
 ```
 
@@ -551,240 +548,6 @@ def test_bulk_create_cannot_insert_a_name_differing_only_in_whitespace(self)  # 
 ```
 
 **验证**：`test` 全绿；`makemigrations --check` 报 "No changes detected"。
-
----
-
-## B3 · `contact` ②：`Relationship` 收口
-
-**内部顺序不能反**：先双向显示，再归一化，最后删 `is_active`。
-
-### B3.1 双向显示（必须最先）
-
-现在 `ContactAdmin` 只挂了一个 `fk_name="contact_a"` 的 inline（`contact/admin.py:12`），
-`Relationship.__str__` 也只用 `name_a_to_b`。结果是：录了「王强 parent of 小明」之后，
-**小明的页面上看不到王强**。设计省下的那行数据已经省了，另一头的显示还欠着。
-
-**两个 inline，都是只读**（2026-07-28 定：录入移出 inline，见 B3.1b）：
-
-```python
-class RelationshipAsAInline(admin.TabularInline):
-    model = Relationship
-    fk_name = "contact_a"
-    verbose_name_plural = "关系"
-    extra = 0                      # 不在这里新增
-    readonly_fields = [...]        # 全只读
-    can_delete = True              # 删可以留在这儿，删不需要方向感
-
-class RelationshipAsBInline(RelationshipAsAInline):
-    fk_name = "contact_b"
-    verbose_name_plural = "关系（对方那一侧）"
-```
-
-标签用 `name_b_to_a`；**`is_symmetric=True` 时回落到 `name_a_to_b`**
-（配偶、兄弟姐妹的反向标签是空的）。
-
-上方放一个「添加关系」按钮，链到 `/relationships/add/?subject=<当前 contact id>`。
-
-> **只读换来的**：`extra=0` + 无表单 = **不需要往 inline 表单里塞父对象**，
-> 那套 formset 管道整个不存在（B3.1b 说明为什么这很重要）。
-> 顺带把原来"对称关系保存后从 inline A 跳到 inline B"那笔欠账也消解了 ——
-> 用户本来就不是在这儿填的，一行显示在哪个盒子里只是排版。
-
-### B3.1b 方向感知的录入表单 + 独立页面（2026-07-28，方案 b）
-
-> **两个原方案都废弃了**：
-> 1. 最早：靠 `help_text` 要求"总是从 A 那一方的页面录入" —— **把外键方向翻译成人工纪律**
->    （`goal.md` D18 的典型反例），且站在小明页面根本录不了"王强是我爸爸"。
-> 2. 同日一度定为**挂在 inline 上的方向感知表单** —— 当天推翻，见下面「为什么不挂 inline」。
-
-**录入走独立页面 `/relationships/add/?subject=<id>`**，形状同 B4.4 的合并页：
-
-```
-contact/forms.py       RelationshipForm(subject=...)   ← 纯 django.forms，永久资产
-contact/services.py    direction_choices() / orient()  ← 永久资产
-contact/views.py       RelationshipCreateView          ← staff_member_required
-contact/urls.py        /relationships/add/
-contact/templates/contact/relationship_form.html
-```
-
-```python
-class RelationshipForm(forms.ModelForm):
-    """类型下拉列出正反两个方向；contact_a/contact_b 由 save() 路由，用户看不到 A/B。"""
-
-    # 选项形如 (f"{type_id}:fwd", "小明 是 ___ 的父亲")
-    #          (f"{type_id}:rev", "小明 是 ___ 的儿子")
-    # is_symmetric=True 的类型只生成一条（用 name_a_to_b）。
-    direction_choice = forms.ChoiceField(label="关系")
-    other = forms.ModelChoiceField(queryset=..., label="对方")
-
-    def __init__(self, *args, subject: Contact, **kwargs):
-        # ⚠️ subject 是显式关键字参数,不从 request / 父对象里摸。
-        #    Phase C 的视图直接 RelationshipForm(subject=contact),一个字不改。
-        super().__init__(*args, **kwargs)
-        self.subject = subject
-        self.fields["direction_choice"].choices = direction_choices(subject)
-
-    def save(self, commit=True):
-        _, direction = self.cleaned_data["direction_choice"].split(":")
-        # ⚠️ 路由本身不写在这里 —— 见下面 services.orient()
-        self.instance.contact_a, self.instance.contact_b = orient(
-            subject=self.subject,
-            other=self.cleaned_data["other"],
-            subject_is_a=(direction == "fwd"),
-        )
-        ...
-```
-
-#### 为什么不挂 inline（这一条是这轮最值钱的判断）
-
-三条理由，按分量排：
-
-1. Phase C 用 HTMX 写这个功能，根本不会用 Django formset。 那时的写法就是
-   "一个 subject + 一个表单片段，POST 回来插一行" —— **正好就是这个独立页面的形状**。
-   挂 inline 等于 Phase B 写一套 formset 管道扔掉、Phase C 再把独立页面写一遍。
-   同一件事写两遍，正是这一整轮要消除的东西。
-2. **inline 表单默认拿不到父对象**，而 `subject` 是这个表单的**全部前提**。
-   要拿到得覆盖 `InlineModelAdmin.get_formset()` 或自定义
-   `BaseInlineFormSet._construct_form` —— **那是全项目最深的一处 admin 管道**，
-   而它买到的东西前端上来一点都留不住。
-   > 上一版这里写的 `self.instance_owner` **是个不存在的属性**，
-   > 正是因为"从 inline 里拿父对象"这件事没有干净写法。留这句话在这儿当提醒。
-3. 形状触发本来就指向它。 `goal.md` D18 第二条出栏触发（需要跨请求状态 /
-   需要动 admin 管道）已经把合并页赶出去了，关系录入是同一个形状 ——
-   两处用同一个模式，比一处 inline 一处页面好维护。
-
-**代价（如实记）**：多一次跳页。可接受 —— 那一跳 Phase C 也要有（HTMX 里是弹一个片段），
-而且录关系不是高频操作。
-
-> **判据一句话（新增，记进 `goal.md` D18）：这段代码买到的东西，前端上来还留得住吗？
-> 留不住就别买。** 两个方案代码量差不多，差别全在残值。
-
-**方向路由和选项生成都放 `contact/services.py`，`Form` 只调用**（2026-07-28 D18 分层）：
-
-```python
-# contact/services.py
-def direction_choices(subject) -> list[tuple[str, str]]:
-    """(f"{type_id}:fwd", "小明 是 ___ 的父亲") … is_symmetric 的类型只出一条。"""
-
-def orient(*, subject, other, subject_is_a: bool) -> tuple[Contact, Contact]:
-    """返回 (contact_a, contact_b)。表单和以后的视图都调它。"""
-```
-
-**为什么必须抽出来**：`goal.md` D18 的落点表把「关系方向路由」明确划给 `services.py`。
-写在 `Form.save()` 里字面上不违规（`Form` 不是 `ModelAdmin` 钩子），
-但 Phase C 若把这个页面改成"此人的所有关系"合并视图（形状变了、表单复用不了），
-路由就得抄一遍。抽成函数之后，抄不抄表单都无所谓。
-这和 B4.3b 的"拦截逻辑放 model / services，`Form` 只调用"是同一条规矩。
-
-⚠️ **对称类型的 id 排序不要写在这里，也不要写进 `orient()`** —— 它留在
-`Relationship.save()`（B3.2）。规范化只有一处，理由见 `goal.md` D9 归一化通则
-（导入路径根本不经过表单，也不经过 `orient()`）。
-
-⚠️ **`contact/forms.py` 不许 import `django.contrib.admin`** —— B1 有守卫测试盯着。
-这条表单是永久资产（`django.forms`，前端上来原样复用），不是给 admin 写的一次性代码。
-
-### B3.2 无序对唯一约束（强制层）+ 对称关系归一化（显示层）
-
-**两件事，先做约束再做归一化** —— 约束是正确性，归一化只是好看。
-
-**① 替换掉 A7 那条唯一约束**（是替换，不是并存 —— 新的严格更强，旧的每种情形它都覆盖）：
-
-```python
-from datetime import date
-from django.db.models import Value
-from django.db.models.functions import Coalesce, Greatest, Least
-
-models.UniqueConstraint(
-    Least("contact_a", "contact_b"),
-    Greatest("contact_a", "contact_b"),
-    "relationship_type",
-    Coalesce("start_date", Value(date.min)),
-    name="relationship_unique_unordered_pair",
-    violation_error_message="这两个人之间已经有一条同类型的关系了。",
-    violation_error_code="relationship_pair_taken",   # → CONSTRAINT_FIELD 映射到 contact_b
-)
-```
-
-不带条件，对所有类型一律生效。 缺口 1 修好之后（反向类型行根本不该存在），
-同一对人 + 同一类型出现两个方向对**任何**类型都是错的：`spouse` 本就只该一行；
-`(小明, 王强, parent of)` 意思是小明是王强的父亲，同一对人不可能双向成立。
-
-**用 `Coalesce` 而不是 `nulls_distinct=False`**：表达式 `UniqueConstraint` 与 `nulls_distinct`
-能否共存尚未实测（`Assignment` 那条正因此放弃了 `Lower("title")`）。
-`Coalesce("start_date", Value(date.min))` 语义等价 —— 两行都为空时仍算重复 ——
-且不依赖那个不确定的组合。这是主方案，不是退路。
-
-⚠️ **实施时先跑一次确认表达式约束真的建出来了**（B13 的 `\d` 那一组会验），
-Django 生成的是 `CREATE UNIQUE INDEX ... ON (LEAST(...), GREATEST(...), ...)`。
-
-② `save()` 归一化（只对对称类型，只管显示）：
-
-```python
-def save(self, *args, **kwargs):
-    # 对称类型（配偶、兄弟姐妹）一律把 id 小的放 contact_a，让存储和读法有个确定方向。
-    # ⚠️ 这一步不承担正确性 —— 重复由 relationship_unique_unordered_pair 拒绝。
-    # ⚠️ 非对称类型绝不能交换：方向带语义，换了意思就反了。
-    if self.relationship_type_id and self.relationship_type.is_symmetric:
-        if self.contact_a_id and self.contact_b_id and self.contact_a_id > self.contact_b_id:
-            self.contact_a_id, self.contact_b_id = self.contact_b_id, self.contact_a_id
-    super().save(*args, **kwargs)
-```
-
-> **为什么必须排在 B3.1 之后**：归一化会交换 a/b。用户在王强页面录了"配偶：李梅"，
-> 保存后这条关系跑到李梅那一侧，而王强页面（只有 `fk_name="contact_a"` 的 inline）
-> 反而看不见了。双向显示先做好，交换就无所谓了。
->
-> **理由降级了但没消失**：从"数据会查不到"变成"用户会看不见自己刚录的东西"。
-> 后者一样不可接受，所以顺序照旧不能反。
->
-> **原来记在这里的那笔欠账已经消解**（2026-07-28，方案 b）：
-> "两个 inline 下对称关系会从 inline A 跳到 inline B、用户困惑'我明明填在上面'" ——
-> **录入移出 inline 之后，两个 inline 都是只读的**，用户本来就不是在那儿填的，
-> 一行显示在哪个盒子里只是排版问题。见 B3.1b。
-
-### B3.3 删掉 `is_active`，接上 `.active()`
-
-```python
-objects = models.Manager.from_queryset(DateRangeQuerySet)()
-```
-
-删字段 + 改 `contact/admin.py:85-86` 两行（`list_display` / `list_filter`）。
-全项目对 `Relationship.is_active` 的引用只有这两处，**零业务逻辑**（已 grep 确认）。
-
-`list_filter` 里换成一个基于日期的 `SimpleListFilter`（"生效中 / 已结束"），
-translate 成 `.active()` / `.exclude(pk__in=active)`。
-
-### 测试
-
-```python
-def test_the_reverse_label_is_shown_on_the_other_contact(self)
-def test_a_symmetric_type_falls_back_to_the_forward_label(self)
-def test_a_symmetric_relationship_is_normalised_to_lowest_id_first(self)
-def test_relationship_active_uses_the_shared_queryset(self)
-
-# B3.1b —— 方向感知表单：直接构造表单，不经过任何界面。
-# 能这样测本身就证明了它前端上来可以复用。
-def test_choosing_the_reverse_reading_puts_the_other_party_in_contact_a(self)
-def test_choosing_the_forward_reading_puts_the_subject_in_contact_a(self)
-def test_a_symmetric_type_appears_only_once_in_the_direction_choices(self)
-def test_the_relationship_page_requires_a_staff_login(self)
-def test_the_relationship_page_404s_without_a_valid_subject(self)
-
-# —— 强制层：全部用 bulk_create，绝不能走 save() ——
-def test_bulk_create_cannot_insert_a_mirrored_symmetric_pair(self)    # (王强,李梅) + (李梅,王强) spouse
-def test_bulk_create_cannot_insert_a_mirrored_asymmetric_pair(self)   # parent of 也一样被拒 —— 约束不带条件
-def test_the_same_pair_and_type_can_repeat_with_different_start_dates(self)
-def test_the_same_pair_and_type_with_both_start_dates_null_is_rejected(self)  # Coalesce ≡ nulls_distinct=False
-```
-
-> **中间三条如果写成走 `save()` 的版本，会全绿而且什么也没验证** ——
-> 绕过 `save()` 正是这条约束存在的全部理由。
-
-外加 B1 那六条 `.active()` 边界测试现在正式挂在 `Relationship` 上。
-
-**验证**：`test` 全绿；肉眼验一次 —— 从小明页面点「添加关系」→
-选「小明 是 ___ 的儿子」+ 王强 → 小明页面看到「child of 王强」、
-王强页面看到「parent of 小明」。两侧都能录，且方向不会反。
 
 ---
 
@@ -1285,7 +1048,7 @@ class AssignmentQuerySet(DateRangeQuerySet):
         """在任期内 AND 当前可服务。ministry 的「当值名单」用它。
 
         ⚠️ status 只能和日期做 AND，永远不能单独用 —— 单独用就退回了
-        Relationship.is_active 那个「两个维度被当成二选一」的老病。
+        「两个维度被当成二选一」的老病。
         花名册（谁属于这个团队）用 active()，请假的人仍然是成员。
         """
         return self.active(on).filter(status=Assignment.Status.ACTIVE)
@@ -1702,7 +1465,7 @@ def check_out(participation, *, at=None):
     ⚠️ 写入，不是派生。之后有人手工改了 hours 就以手工值为准，不要再从时间戳重算覆盖。
        理由：有人忘记签退、有人是纸质表事后补录、有人中途离开又回来 ——
        这三种情况下时间戳都答不出工时，而 hours 答得出。
-    ⚠️ 也不要把 hours 做成 property。两个字段各算各的 = Relationship.is_active + end_date
+    ⚠️ 也不要把 hours 做成 property。两个字段各算各的 = is_active + end_date
        那个病：两个答案，可以互相矛盾，没有任何机制会告诉你。
     """
 ```
@@ -2351,12 +2114,12 @@ Participation.objects.filter(
 ## 分工与提交节奏
 
 **B0–B4 是一串咬合的动作**（准备 → core → contact 三步收口），中间状态留在磁盘上
-过夜容易忘记做到哪，建议一口气做完 B0–B3，再单独做 B4（它自己就有四个独立小块）。
+过夜容易忘记做到哪，建议一口气做完 B0–B2，再单独做 B4（它自己就有四个独立小块）。
 
-> ⚠️ **B3.1b 带进本项目的第一条 URL、第一个视图、第一个模板**（`contact/urls.py`
+> ⚠️ **B4.4 的合并页带进本项目的第一条 URL、第一个视图、第一个模板**（`contact/urls.py`
 > 要 include 进 `config/urls.py`，模板放 **app 内** `contact/templates/contact/`
 > —— settings 里 `DIRS=[]` + `APP_DIRS=True`，放 app 内不用改配置）。
-> **单独一个 commit**，出问题好回退。B4.4 的合并页是第二次用同一套，那时就轻车熟路了。
+> **单独一个 commit**，出问题好回退。
 > 2026-07-29 补：B6 起的提交节奏。 B6 建议**两个 commit**
 > （`Event` + 两张字典表一个，`EventRole` + `Participation` 一个 —— 后者是这半程的核心，
 > 单独一个好回退）；B7 单独一个（表 + `permissions.py` + 守卫测试一起，
@@ -2424,28 +2187,26 @@ URL、第一个视图和第一个模板，出问题时好回退。
 还要改 D9 那条 `CheckConstraint` —— **只有这一处**"现在要读成**两处**
 （`contact_type_is_known` 的白名单 + 新类型自己的姓名规则约束）。
 
-### ⚠️ 计划外（B3.1b）：`ModelForm` 会把不在表单上的字段的约束**整条跳过**
+### ⚠️ 计划外：`ModelForm` 会把不在表单上的字段的约束**整条跳过**
 
-**症状**：`RelationshipForm` 按方案 b 写完，`contact_a` / `contact_b` 刻意不放在表单上
-（那正是这个设计的全部意义 —— 录入的人不该看见 A/B）。结果是：
-录一条重复关系，表单**校验通过**，然后在 `save()` 时炸成 `IntegrityError` 500。
+**症状**：一个刻意不把某些模型字段放上表单的 `ModelForm`（那往往正是这类表单的意义 ——
+录入的人不该看见内部字段），提交一条违反约束的数据，表单**校验通过**，
+然后在 `save()` 时炸成 `IntegrityError` 500。
 
 **根因**：`ModelForm._post_clean()` 会把「不在表单上的字段」放进 `exclude`，
 而 `Model.validate_constraints(exclude=...)` **跳过任何提到被排除字段的约束**。
-于是 `relationship_no_self_reference` 和 `relationship_unique_unordered_pair`
-在表单层根本没跑过。
+于是那条约束在表单层根本没跑过。
 
 > 这就是 D14 那个「`CheckConstraint.validate()` 会静默跳过」的坑，
 > **只不过是从另一头撞上的** —— D14 提醒的是表达式约束在 `validate()` 里出错被吞掉，
 > 这里是约束压根没被调用。症状一模一样：表单绿灯，写库时 500。
 
-**修法**：`RelationshipForm._check_constraints()` 里显式调一次
-`self.instance.validate_constraints()`，把错误 `add_error()` 到表单字段上。
-另外 `CONSTRAINT_FIELD` 把这两条约束映射到 `contact_b`，
-而表单上没有 `contact_b` —— 直接 `add_error("contact_b", ...)` 会抛 `ValueError`
+**修法**：表单里显式调一次 `self.instance.validate_constraints()`，
+把错误 `add_error()` 到表单字段上。⚠️ 但 `CONSTRAINT_FIELD` 可能把约束映射到
+一个**表单上没有**的字段 —— 直接 `add_error(那个字段, ...)` 会抛 `ValueError`
 （`ModelForm._update_errors` 不认识的字段就报错，`core/constraints.py` 的
-docstring 已经预警过）。所以表单里加一张 `FIELD_ALIASES`
-把 `contact_a` / `contact_b` 都落到用户看得见的 `other` 上。
+docstring 已经预警过）。所以这类表单要带一张别名表，
+把模型字段落到用户看得见的那个字段上。
 
 **一般化（新的，记进这里）**：
 > **凡是「表单字段 ≠ 模型字段」的表单，都要问一句：
@@ -2536,8 +2297,8 @@ Django 没有比"注销 + 注册一个子类"更窄的钩子。看着别扭，�
 
 ### ⚠️ 计划外（B5）：每加一个 inline，所有 admin POST 测试都会变绿灯下的红灯
 
-**第三次踩了**（B3.1 的 `relationships_as_b`、B4.2 的 `emergency_contacts`、
-这次的 `assignments`）。症状每次一模一样：admin 的 POST 测试收到 **200 而不是 302**，
+**第二次踩了**（B4.2 的 `emergency_contacts`、这次的 `assignments`）。
+症状每次一模一样：admin 的 POST 测试收到 **200 而不是 302**，
 表单看着没错，`context_data["errors"]` 里写的是
 `ManagementForm data is missing or has been tampered with.`
 
@@ -2607,12 +2368,12 @@ def get_list_display(self, request):        # ⚠️ 不是 get_queryset，见�
 而后者跳过任何提到被排除字段的约束。`clean()` 的环检查已经在 `reports_to` 上挂了错，
 所以那条约束在这条路径上**根本没跑**。
 
-> 这是 B3.1b 那条坑的第三个变体。 三个变体的症状一模一样 ——「约束没跑」：
+> 这是「约束没跑」的第三个变体，三个的症状一模一样：
 >
 > | 变体 | 约束为什么没跑 |
 > |---|---|
 > | D14 原文提醒的 | 表达式约束在 `validate()` 里抛 `FieldError`，被静默吞掉 |
-> | B3.1b 撞上的 | 字段不在表单上 → `_post_clean` 把它 `exclude` 了 |
+> | `ModelForm` 那条 | 字段不在表单上 → `_post_clean` 把它 `exclude` 了 |
 > | 本条 | 字段上**已经有别的错误** → `full_clean` 把它 `exclude` 了 |
 
 **结论（不粉饰）**：**同一个字段上，`clean()` 和 `CheckConstraint` 都说话时，
@@ -2622,8 +2383,8 @@ def get_list_display(self, request):        # ⚠️ 不是 get_queryset，见�
 
 **修法**：该测哪一层就从哪个门进。`position_reports_to_self` 的测试直接调
 `self.position.validate_constraints()`，绕开 `clean()`。
-**这个门不是为测试造的** —— B3.1b 的 `RelationshipForm._check_constraints()`
-走的就是它，那里前面没有 `clean()`。
+**这个门不是为测试造的** —— 任何「字段不在表单上、于是自己显式调一次
+`validate_constraints()`」的表单走的都是它，那里前面没有 `clean()`。
 
 **一般化**：
 > **一条规则不要在 `clean()` 和约束里各说一遍**（这本来就是 D14 重写的初衷）。

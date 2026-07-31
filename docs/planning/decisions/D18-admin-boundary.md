@@ -5,13 +5,13 @@
 > 代码注释里写的 `goal.md D18` 指的就是本文件。
 
 > 起因：一轮外部评审指出文档"把 Django Admin 当业务系统"，并举了三个例子
-> （关系的 A/B 侧录入、重名只警告不拦截、`is_minor` 要写 `SimpleListFilter`）。
-> **三个例子里只有第一个支持它的归因**，但它戳中了一个真实空缺：
+> （重名只警告不拦截、`is_minor` 要写 `SimpleListFilter`、字典表全在 admin 里维护）。
+> **三个例子没有一个支持它的归因**，但它戳中了一个真实空缺：
 > 文档从没写下 Admin 能承载什么、什么时候必须写真表单。 D2 只说"前端推迟"，没有判据。
 
 > **怎么读本文里的"Phase C"**（2026-07-30 加的一句总注，本条写于 2026-07-28）：
 > 那时的排期是"Phase C 才开始写自己的页面"。**这件事已经提前发生了** ——
-> D18 自己的形状触发当天就赶出了 `/contacts/merge/` 和 `/relationships/add/`，
+> D18 自己的形状触发当天就赶出了 `/contacts/merge/`，
 > [D21](D21-self-service-and-permissions.md#d21--对外账号志愿者自助页面提前权限成为它的前置条件2026-07-29) 又把整套志愿者自助页面提进了 Phase B。
 > 所以下文凡是"Phase C 的视图 / 前端上来"，**读作"我们自己写的页面"**，
 > 它已经是现在进行时；真正留在 Phase C 的只剩 Ministry 视图和组织架构图那一批
@@ -30,7 +30,7 @@
 
 | 逻辑 | 放哪 | 不许放哪 |
 |---|---|---|
-| 跨表写入（合并 Contact、关系方向路由） | `services.py` 或 model 方法 | ❌ `ModelAdmin.save_model()` / `save_related()` |
+| 跨表写入（合并 Contact） | `services.py` 或 model 方法 | ❌ `ModelAdmin.save_model()` / `save_related()` |
 | 派生判定（`.active()`、`vacant()`、`is_minor`、`find_exact_duplicates()`） | QuerySet 方法 / model property | ❌ admin 的 `get_queryset()` 里就地算 |
 | 校验 | 数据库约束（唯一规则）+ 约束名→字段的映射表，见 D14 | ❌ `ModelForm.clean()` 里写唯一真相；❌ 把规则在 `clean()` 里重写一遍 |
 | 纯呈现（列怎么排、筛选器长什么样、字段显不显示） | ✅ **admin，本来就该在这** | |
@@ -62,8 +62,8 @@
 结论：全项目只有最后一行是赌注。 现在的两处是
 `contact/static/contact/admin/contact_type_toggle.js` 和 `address_state_toggle.js`
 （前者第 21 行 `field.closest(".form-row")`）。
-`force_save` 虚拟字段（`forms.BooleanField(required=False)`）和方向感知下拉（重写 `choices`）
-**都在第三行，不在第五行** —— 它们是 `django.forms`，跟 admin 一点关系没有，只是暂时借 admin 显示。
+`force_save` 虚拟字段（`forms.BooleanField(required=False)`）**在第三行，不在第五行** ——
+它是 `django.forms`，跟 admin 一点关系没有，只是暂时借 admin 显示。
 
 ### 判据的等价说法（比"要不要搬"更好操作）
 
@@ -76,16 +76,16 @@
 contact/
   models.py     约束、find_exact_duplicates()、.active() / .serving() / .minors()
                 → 永久资产
-  services.py   跨表写入：orient() / direction_choices() / merge_contacts()
+  services.py   跨表写入：merge_contacts()
                 → 永久资产
-  forms.py      ContactForm（含 force_save）、RelationshipForm（方向感知下拉）
+  forms.py      ContactForm（含 force_save）
                 → 永久资产，Phase C 的视图 import 同一个类
   admin.py      form = ContactForm、inlines、list_display、SimpleListFilter
                 → 纯配置，前端上来直接删
   static/*.js   ⚠️ 唯一会随 Django 升级坏、也是唯一换界面会丢的东西
-  views.py      ✅ 本阶段就写了（/contacts/merge/、/relationships/add/），
+  views.py      ✅ 本阶段就写了（/contacts/merge/），
                 import forms.py + services.py。原文写的是"Phase C 才写"——
-                D18 自己的形状触发当天就把这两个页面赶出了 admin
+                D18 自己的形状触发当天就把这个页面赶出了 admin
 
 org/
   models.py     Position / Assignment 的约束、PositionQuerySet.vacant()、.serving()
@@ -115,10 +115,10 @@ org/
 
 | ✅ Admin 够用 | ⚠️ 要写自定义 `Form`（仍在 admin 里） | ❌ 要等自己写的页面（Phase C+） |
 |---|---|---|
-| 单表 CRUD、字典表维护、只读查看（含只读 inline）、列表筛选导出 | **需要拦截确认的流程**（重名硬拦截 `force_save`）、**一个表单写多张表**（联系人 + 紧急联系人 inline） | 多步流程、跨记录批量操作、**表单需要"当前是谁的页面"这类上下文**（关系录入）、面向外部用户的任何东西、Ministry 视图这类聚合页 |
+| 单表 CRUD、字典表维护、只读查看（含只读 inline）、列表筛选导出 | **需要拦截确认的流程**（重名硬拦截 `force_save`）、**一个表单写多张表**（联系人 + 紧急联系人 inline） | 多步流程、跨记录批量操作、面向外部用户的任何东西、Ministry 视图这类聚合页 |
 
 **中间那一栏是关键**：它不需要放弃 Admin，只需要放弃"默认表单 = 表结构"。
-一个 `ModelForm` 子类就能把 A/B 这种物理细节封在里面 —— **这是 Admin 的正常用法，不是绕过它**。
+一个 `ModelForm` 子类就能把外键、虚拟字段这些物理细节封在里面 —— **这是 Admin 的正常用法，不是绕过它**。
 而且按上一节的分层，`ModelForm` 是 `django.forms`，**前端上来原样复用，一行不改**。
 
 > **"多步流程"在这张表里的准确含义：需要跨请求保持状态**（第一步存了东西、第二步才提交，
@@ -151,11 +151,12 @@ org/
 > **为什么要加这条形状触发**：原来只有事件触发，那是一个**日期**，不是一个**信号** ——
 > 而"⚠️ 要写自定义 `Form`"那一栏没有上限，每个新流程都能论证自己属于它。
 > D18 本来就是为了防这种滑坡才写的，所以它自己必须带一个出栏条件。
-> **本阶段被这条触发的有两处**：「合并重复记录」和「关系录入」，见 Phase B 各自那一节。
+> **本阶段被这条触发的是「合并重复记录」**：二次确认页要吃 `admin/base_site.html`、
+> "待处理 N 条"要覆盖 `admin/index.html`。见 Phase B 那一节。
 
-"需要上下文"也算形状触发。 关系录入是这么出栏的：那个表单的全部前提是
-"当前站在谁的页面上"（`subject`），而 **admin 的 inline 表单默认拿不到父对象** ——
-要拿到得覆盖 `InlineModelAdmin.get_formset()` 或自定义 `BaseInlineFormSet._construct_form`，
+"需要上下文"也算形状触发。 一个表单的全部前提如果是"当前站在谁的页面上"，
+admin 就已经不够了 —— **inline 表单默认拿不到父对象**，要拿到得覆盖
+`InlineModelAdmin.get_formset()` 或自定义 `BaseInlineFormSet._construct_form`，
 **那是 admin 最深的一处管道，而且 Phase C 用 HTMX 时根本不会用 formset**。
 判据可以直接问：这段代码买到的东西，前端上来还留得住吗？留不住就别买。
 

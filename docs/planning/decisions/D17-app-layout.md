@@ -30,8 +30,8 @@ payroll     （更靠后，薪酬真要入库时）薪酬
 - **`org` 而不是 `hr` / `staff`** —— 它装的是 ministry + **所有** kind 的编制与任职
   （员工、志愿者、理事），不只是员工。名字取 `org` 而不是 `positions`，
   是因为这个 app 的主题是**组织结构本身**，`Position` 只是它的骨架。
-- **`Guardianship` 将来放 `contact`** —— 它是 Contact ↔ Contact 的关系，
-  和 `Relationship` 同层，且未来非志愿者场景也会用到。
+- **`Guardianship` 将来放 `contact`** —— 它挂在 `Contact` 上，
+  和 `EmergencyContact` 同层，且未来非志愿者场景也会用到。
 - `payroll` 必须是独立 app，不能塞进 `org` 或 `finance`。
   薪酬是本系统里敏感度最高的数据（D11 把它排除在 MVP 之外就是这个原因）。
   独立成 app，将来可以整个 app 级别地做权限隔离 ——

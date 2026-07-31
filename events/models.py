@@ -418,8 +418,8 @@ class Participation(ConstraintErrorFieldMixin, TimeStampedModel):
                 violation_error_message="Hours cannot be negative.",
                 violation_error_code="participation_hours_negative",
             ),
-            # Without this, "no-show, 5 hours" is storable — the same disease as
-            # is_active=True sitting next to end_date=2020 on Relationship.
+            # Without this, "no-show, 5 hours" is storable — the same disease
+            # as is_active=True sitting next to end_date=2020.
             models.CheckConstraint(
                 condition=(
                     models.Q(status="attended")

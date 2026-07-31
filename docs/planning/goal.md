@@ -102,7 +102,7 @@
 | 志愿者能看到哪些活动？ | [phase-b.md「可见性与生命周期」](phase-b.md#可见性与生命周期两个谓词不是一个-status2026-07-29-晚新增) —— **`draft` 是唯一的不可见档**，别把可见性写成 `status=open` |
 | 新加一个分类字段，做成 `TextChoices` 还是字典表？ | [D5 判定规则](decisions/D05-lookup-tables-not-enums.md#判定规则什么时候用字典表什么时候用-textchoices2026-07-28-补) |
 | 这条信息该放 `Contact` / 角色表 / `Position` / `Assignment`？ | [D10 四层判断标准](decisions/D10-person-role-position-assignment.md) |
-| 一种新关系该用字段、自引用 FK、通用表还是专用表？ | [D15 四条判据 + 升级触发条件](decisions/D15-relationship-carriers.md) |
+| 一种新关系该用字段、自引用 FK 还是专用表？ | [D15 四条判据 + 选择规则](decisions/D15-relationship-carriers.md) |
 | 新模型放哪个 app？ | [D17](decisions/D17-app-layout.md) |
 | 这段代码写在 admin 里行不行？ | [D18 的落点规矩](decisions/D18-admin-boundary.md#逻辑落点的硬规矩成本为零现在就要守) —— 判据：换个界面要不要跟着搬 |
 | 这段代码该写进哪个文件？升级 / 换前端之后还用得上吗？ | [D18 代码落点与文件分层](decisions/D18-admin-boundary.md#代码落点与文件分层什么会随升级坏什么换界面还用得上2026-07-28-补) —— 判据：**把 `admin.py` 删掉还剩什么** |
@@ -224,18 +224,16 @@
 
 ### 已实现但暂时用不上的：留着，不删
 
-`Relationship` 的双向显示 / 无序对唯一约束 / 对称归一化（B2、B3）、
-`Contact` 的分级查重与 `merge_contacts()`（B4.3、B4.4）——
-这几块对上面 14 条需求的贡献接近零。
+`Contact` 的分级查重与 `merge_contacts()`（B4.3、B4.4）对上面 14 条需求的
+贡献接近零。**但一行都不删**，两个理由：
 
-**但一行都不删**，三个理由：
-
-1. 它们是**正确的**、有测试的、且不挡任何人的路 —— 删掉是纯粹的净损失；
+1. 它是**正确的**、有测试的、且不挡任何人的路 —— 删掉是纯粹的净损失；
 2. `merge_contacts()` 会遍历 `Contact._meta.related_objects`，**新加的 `Participation` /
    `MinistryRole` 自动被它覆盖**，还有一条测试盯着"有没有漏表"。开放注册一上线，
-   跨渠道重复只会更多，它反而变得更有用；
-3. `EmergencyContact`（B4.2）和 `is_minor` 三态（B4.5）**直接落在 P3 上** ——
-   同一批工作里这两块本来就是命中的。
+   跨渠道重复只会更多，它反而变得更有用。
+
+`EmergencyContact`（B4.2）和 `is_minor` 三态（B4.5）则**直接落在 P3 上** ——
+同一批工作里这两块本来就是命中的。
 
 > **值得记下来的判断**：偏离的判据不是"做了组织架构"——
 > R8 只有 `Ministry` + `Position` + `Assignment` 才答得出来，B5 是必要投资。
@@ -254,7 +252,7 @@
 |------|---------|
 | 便宜 | 单体 Django 应用 + 托管平台，无付费 SaaS、无微服务、无独立前端；起步阶段月成本控制在几十美元内 |
 | 好维护 | 一个人能读完全部代码；标准 Django 写法，不自造框架；有测试所以敢改 |
-| 可扩展 | 数据模型抄成熟系统的抽象层次（见 D4–D6），加功能是加表，不是改表 |
+| 可扩展 | 数据模型抄成熟系统的抽象层次（见 D4 / D5 / D10），加功能是加表，不是改表 |
 | 需求变了还能用 | 会变的东西做成**数据**而不是**代码**（关系类型、技能、活动类型都是字典表，在 admin 里加，不用改代码不用迁移） |
 | 数据自主且安全 | 标准 Postgres 库，一个 `pg_dump` 就能整体带走；不锁定在任何厂商的专有格式里 |
 
@@ -306,7 +304,7 @@ D1–D22 **一条一个文件**，索引见 [`decisions/README.md`](decisions/RE
 
 | 阶段 | 状态 | 详情 |
 |---|---|---|
-| 数据核心设计（`Contact` / `Relationship` / `Language`） | ✅ 已完成，有测试 | [`progress.md`](progress.md#-已完成--数据核心设计这是目前最有价值的部分) |
+| 数据核心设计（`Contact` / `Language` / `EmergencyContact`） | ✅ 已完成，有测试 | [`progress.md`](progress.md#-已完成--数据核心设计这是目前最有价值的部分) |
 | **Phase A · 地基加固**（A1–A10） | ✅ 已完成（2026-07-27，分支 `phase-a`） | [`progress.md`](progress.md#-已完成--phase-a-地基加固) · [`01-roadmap.md`](01-roadmap.md) |
 | Phase B · 活动闭环 | 🔄 当前在做。 B0–B13 的代码已全部落地、353 个测试全绿；**只差浏览器里那一遍三角色验收** | [`phase-b.md`](phase-b.md)（要点） · [`02-roadmap.md`](02-roadmap.md)（步骤） |
 | Phase C · 上线与真实运营 | ⬜ 未开始 | [`progress.md`](progress.md#phase-c--上线与真实运营) |

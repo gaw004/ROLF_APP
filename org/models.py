@@ -316,8 +316,8 @@ class AssignmentQuerySet(DateRangeQuerySet):
         """In their term AND able to serve today. The duty roster.
 
         ⚠️ status may only ever be ANDed with the dates, never used on its own.
-           On its own it is exactly the disease Relationship.is_active had:
-           two independent dimensions collapsed into one, so status=active on a
+           On its own it is the is_active-beside-the-dates disease: two
+           independent dimensions collapsed into one, so status=active on a
            tenure that ended in 2020 reads as "currently serving".
 
         The roster of who belongs to a team is active(), not this — somebody on

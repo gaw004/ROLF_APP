@@ -76,10 +76,9 @@ CONSTRAINT_FIELD = {
 
 - `employment_type` 只对 `kind=employee` 的编制有意义（跨 `Assignment` / `Position`）
 - 汇报线成环（跨行，见 Phase B「汇报线的环」）
-- `Relationship` 缺口 3 的对称归一化（跨表，见那一节）
 
 **这类本来就没有重复问题** —— `clean()` 就是它们的唯一真相。
 但按文档一贯的口径要**如实标注它只是提示层**，`bulk_create` 绕得过去，不粉饰。
 
-**适用范围**：`Contact` 的姓名规则、`Relationship` 的约束（见 `01-roadmap.md` A7），
+**适用范围**：`Contact` 的姓名规则（见 `01-roadmap.md` A7），
 以及 Phase B 之后所有新增的业务约束。字典表、`is_active` 这类不涉及业务规则的字段不适用。

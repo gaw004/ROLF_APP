@@ -31,15 +31,15 @@ def in_effect_on(on=None, prefix=""):
 class DateRangeQuerySet(models.QuerySet):
     """The "in effect on a given day" predicate, defined exactly once.
 
-    Assignment and Relationship both use it. That Q expression ends up behind
+    Assignment and MinistryRole both use it. That Q expression ends up behind
     the ministry page, the active-headcount numbers and several admin filters —
     written out ten times, one of them would be wrong, and a wrong one does not
     raise, it just reports a number that is quietly off.
 
     ⚠️ This layer knows about dates only, never about status. Assignment adds
        its own serving() (= active() AND status=active) on top; do not push
-       status down into here — Relationship has no status, a relationship is
-       never "suspended". See goal.md「Assignment.status」.
+       status down into here — MinistryRole has no status, a grant of authority
+       is never "suspended". See goal.md「Assignment.status」.
     """
 
     def active(self, on=None):

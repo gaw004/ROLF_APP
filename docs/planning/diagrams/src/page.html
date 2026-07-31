@@ -246,7 +246,7 @@
 
   <div class="hero">
     <div class="eyebrow">数据与流程全景</div>
-    <h1 class="serif">十七张表，五个 app，十四条需求</h1>
+    <h1 class="serif">十六张表，五个 app，十四条需求</h1>
     <p class="lede">
       这三张图把 <code>docs/planning/</code> 里已经拍板的东西——D1–D22 二十二条决策、
       <code>phase-b.md</code> 的模型表与约束清单、<code>02-roadmap.md</code> 的 B0–B13——
@@ -255,10 +255,10 @@
     </p>
     <div class="stats">
       <div class="stat"><span class="n num">5</span><span class="l">已建 app（+3 预留）</span></div>
-      <div class="stat"><span class="n num">17</span><span class="l">业务表</span></div>
+      <div class="stat"><span class="n num">16</span><span class="l">业务表</span></div>
       <div class="stat"><span class="n num">7</span><span class="l">simple-history 表</span></div>
       <div class="stat"><span class="n num">2</span><span class="l">M2M 中间表</span></div>
-      <div class="stat"><span class="n num">26</span><span class="l">实际建出的表</span></div>
+      <div class="stat"><span class="n num">25</span><span class="l">实际建出的表</span></div>
       <div class="stat"><span class="n num">14</span><span class="l">需求 R1–R8 · P1–P6</span></div>
     </div>
   </div>
@@ -268,19 +268,19 @@
     <div class="sec-head">
       <span class="idx serif">一</span>
       <h2 class="serif">实体关系图</h2>
-      <span class="tag mono">17 entities · 全字段</span>
+      <span class="tag mono">16 entities · 全字段</span>
     </div>
 
     <div class="prose">
       <p>
-        一张图放全部 17 张业务表和它们的每一个字段。关系线上标的是 <code>on_delete</code>——
+        一张图放全部 16 张业务表和它们的每一个字段。关系线上标的是 <code>on_delete</code>——
         那不是实现细节，<code>phase-b.md</code> 用了整整一节论证「一次加十几个外键，其中一个选错是灾难级的」。
         <strong>四条 <code>CASCADE</code> 之外全是 <code>PROTECT</code> 或 <code>SET_NULL</code></strong>，
         凡是要留痕的东西（任职、授权、工时、通知）一律不许被静默带走。
       </p>
     </div>
 
-    <p class="scrollhint">图幅约 4700 × 3100 —— 点右上角「全屏」放大看，或在图版内横竖拖动</p>
+    <p class="scrollhint">图幅约 4850 × 3070 —— 点右上角「全屏」放大看，或在图版内横竖拖动</p>
     <div class="plate plate--tall">
 <pre class="mermaid">
 %%{init: {"theme":"base","themeVariables":{"background":"#F7F8F5","primaryColor":"#FFFFFF","primaryTextColor":"#171B19","primaryBorderColor":"#495049","lineColor":"#5A6560","tertiaryColor":"#ECEFEA","fontSize":"12px"}}}%%
@@ -323,20 +323,10 @@ erDiagram
     bigint id PK
     slug code UK "唯一·不可改 D5"
     str name_a_to_b UK "Lower Trim 唯一"
-    str name_b_to_a "反向标签 一段关系只存一行"
+    str name_b_to_a "反向标签 从另一头读"
     str description
     bool is_symmetric "显式 不靠推断"
     bool usable_as_emergency_contact "紧急联系人下拉的过滤器"
-  }
-  Relationship {
-    bigint id PK
-    ref contact_a FK "→ Contact · CASCADE"
-    ref contact_b FK "→ Contact · CASCADE"
-    ref relationship_type FK "→ RelationshipType · PROTECT"
-    date start_date
-    date end_date
-    uniq unordered_pair UK "Least Greatest type Coalesce start"
-    note no_is_active "is_active 已删 单一真相"
   }
   EmergencyContact {
     bigint id PK
@@ -481,9 +471,6 @@ erDiagram
 
   %% ========== 关系 ==========
   Language           ||--o{ Contact            : "preferred_language PROTECT"
-  Contact            ||--o{ Relationship       : "contact_a CASCADE"
-  Contact            ||--o{ Relationship       : "contact_b CASCADE"
-  RelationshipType   ||--o{ Relationship       : "type PROTECT"
   Contact            ||--o{ EmergencyContact   : "person CASCADE"
   RelationshipType   ||--o{ EmergencyContact   : "relationship_type PROTECT"
   Contact            ||--o| User               : "O2O SET_NULL 可空"
@@ -518,9 +505,9 @@ erDiagram
 
     <div class="callout">
       <p><strong>整张图只有四条 <code>CASCADE</code>：</strong>
-        <code>Relationship→Contact</code>、<code>EmergencyContact→Contact</code>、
-        <code>EventRole→Event</code>、<code>Participation→EventRole</code>、
-        以及 <code>EventNotification→Event</code>。最后两条串起来是一条两级链——
+        <code>EmergencyContact→Contact</code>、<code>EventRole→Event</code>、
+        <code>Participation→EventRole</code>、以及 <code>EventNotification→Event</code>。
+        中间两条串起来是一条两级链——
         <b>删一个 Event 会级联删掉 EventRole，再级联删掉 Participation，工时历史一起没</b>。
         这就是 D21 规定「删活动这个动作在 admin 里不给普通 Group」的原因。</p>
     </div>
@@ -596,7 +583,7 @@ flowchart LR
   MA["Ministry Admin<br/>某个 ministry 的 admin"]
   FA["Foundation Admin<br/>全局 Group"]
   ST["内部录入员<br/>staff · /admin/"]
-  SYS(("ROLF_APP<br/>5 个 app · 17 张表"))
+  SYS(("ROLF_APP<br/>5 个 app · 16 张表"))
   PROV["通知服务商<br/>Console · Email · SMS · Novu"]
   GD["家长 / 紧急联系人<br/>不是系统用户"]
 
@@ -650,15 +637,15 @@ flowchart TB
     R18["events_in_period → R1 R2 R3<br/>event_summary → R4 R5 R6 R7<br/>ministry_staff_participation → R8"]:::rep
   end
 
-  subgraph STAFF ["staff 侧 · 被 D18 形状触发赶出 admin 的两个页面"]
-    SM["merge_contacts · relationship_create<br/>+ /admin/ 里的字典表与编制维护"]:::proc
+  subgraph STAFF ["staff 侧 · 被 D18 形状触发赶出 admin 的那个页面"]
+    SM["merge_contacts<br/>+ /admin/ 里的字典表与编制维护"]:::proc
   end
 
   subgraph ADAPT ["适配器 · core/notifications/ —— 唯一和外部服务打交道的地方"]
     BK["NotificationBackend<br/>只认（地址 · 渠道 · 内容）"]:::adapt
   end
 
-  D1[("D1 · Contact<br/>Relationship · EmergencyContact · Language")]:::store
+  D1[("D1 · Contact · EmergencyContact<br/>RelationshipType · Language")]:::store
   D2[("D2 · User")]:::store
   D3[("D3 · Ministry · Position<br/>Assignment · EmploymentType")]:::store
   D4[("D4 · MinistryRole")]:::store
@@ -746,7 +733,7 @@ flowchart TB
     <div class="prose">
       <p>
         为什么还要第三张：<b>ERD 的实体框里没有 app 这个维度</b>——mermaid 的
-        <code>erDiagram</code> 不支持分组，17 张表在里面是平的。而 D17 恰恰规定了
+        <code>erDiagram</code> 不支持分组，16 张表在里面是平的。而 D17 恰恰规定了
         「一个 app 一个业务领域」和一条<b>单向</b>依赖链，谁也不许反向 import。
         这张图把表按 app 收拢，只画跨 app 的外键。
       </p>
@@ -761,11 +748,10 @@ flowchart TB
     C1["TimeStampedModel（抽象）<br/>DateRangeMixin + .active()<br/>timeutils.local_today()<br/>constraints.CONSTRAINT_FIELD<br/>notifications/ 四个后端"]:::core
   end
 
-  subgraph CONTACT ["contact · 5 张表"]
+  subgraph CONTACT ["contact · 4 张表"]
     direction LR
     T1["Contact"]:::contact
     T2["RelationshipType"]:::contact
-    T3["Relationship"]:::contact
     T4["Language"]:::contact
     T5["EmergencyContact"]:::contact
   end
@@ -868,7 +854,7 @@ flowchart LR
   <section id="inventory">
     <div class="sec-head">
       <span class="idx serif">四</span>
-      <h2 class="serif">十七张表分别记什么</h2>
+      <h2 class="serif">十六张表分别记什么</h2>
       <span class="tag mono">逐表对照 R1–R8 · P1–P6</span>
     </div>
 
@@ -881,7 +867,7 @@ flowchart LR
           <tr>
             <td class="mono tname">Contact</td><td><span class="pill a-contact">contact</span></td>
             <td>这个人（或外部机构）<b>是谁</b>：姓名、联系方式、生日、语言、地址、启用状态。一张表管人和组织（D4）</td>
-            <td>→ Language；被 Relationship / EmergencyContact / User / Assignment / MinistryRole / Event.owner / Participation 指</td>
+            <td>→ Language；被 EmergencyContact / User / Assignment / MinistryRole / Event.owner / Participation 指</td>
             <td class="yes">✓</td><td>P1 P3 P6 R8</td>
           </tr>
           <tr>
@@ -892,15 +878,9 @@ flowchart LR
           </tr>
           <tr>
             <td class="mono tname">RelationshipType</td><td><span class="pill a-contact">contact</span></td>
-            <td>关系类型字典：正反两个标签 + 是否对称 + 能否当紧急联系人关系。<b>一段关系只存一行</b>，靠两个标签从两头读</td>
-            <td>被 Relationship / EmergencyContact / Participation.consent_relationship 指</td>
+            <td>关系类型字典：正反两个标签 + 是否对称 + 能否当紧急联系人关系。<b>一个意思只存一行</b>，靠两个标签从两头读</td>
+            <td>被 EmergencyContact / Participation.consent_relationship 指</td>
             <td class="no">—</td><td>P3（同意关系）</td>
-          </tr>
-          <tr>
-            <td class="mono tname">Relationship</td><td><span class="pill a-contact">contact</span></td>
-            <td>两个 Contact 之间的一段关系 + 起止日期。<b>没有 <code>is_active</code></b>——它和 <code>end_date</code> 是同一件事记两处</td>
-            <td>→ Contact ×2 · RelationshipType</td>
-            <td class="no">—</td><td>（当前 14 条用不上，但不删）</td>
           </tr>
           <tr>
             <td class="mono tname">EmergencyContact</td><td><span class="pill a-contact">contact</span></td>
@@ -1022,7 +1002,7 @@ flowchart LR
 
 <script>
   /* 两件事，都只用得上这一段内联脚本 —— 没有依赖、没有外部请求：
-     1. mermaid 给 svg 的是 width:100%，4700px 的 ER 图会被压进栏宽里，
+     1. mermaid 给 svg 的是 width:100%，近 5000px 的 ER 图会被压进栏宽里，
         字缩成一团。按各自的 viewBox 钉死真实尺寸，让图版自己滚。
         （生成版里 svg 已经带着写死的尺寸，这一步自动跳过。）
      2. 每张图配一个「全屏」：真全屏 + 缩放 + 拖动平移。 */

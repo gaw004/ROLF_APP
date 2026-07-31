@@ -12,7 +12,7 @@ from django.core.exceptions import ValidationError
 from django.db import transaction
 from django.db.models import Count, Sum
 
-from core.timeutils import local_now
+from core.timeutils import local_date_of, local_now
 from org.models import Assignment, Position
 
 from .models import Participation
@@ -191,8 +191,14 @@ def ministry_staff_participation(event):
     3. .distinct() is not optional. One person may hold two employee posts in
        one ministry (D11's central case), and the join would list their
        participation twice — the headcount quietly gains a person.
+
+    ⚠️ And the day itself comes from local_date_of(), never from asking the
+       stored instant for its own day. That value comes back in UTC, so an
+       event running at 6pm Pacific reports the following day and trap 1 then
+       fires against a date that is off by one. This function shipped that way
+       for about an hour; see 02-roadmap.md「计划外（B12）」.
     """
-    on = event.start_time.date()
+    on = local_date_of(event.start_time)
     employed_here = Assignment.objects.active(on=on).filter(
         position__kind=Position.Kind.EMPLOYEE,
         position__ministry=event.ministry,

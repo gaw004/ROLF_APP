@@ -34,6 +34,25 @@ def local_today():
     return timezone.localdate()
 
 
+def local_date_of(moment):
+    """Which day, in the foundation's timezone, a stored instant fell on.
+
+    ⚠️ Never ask the instant itself. A DateTimeField comes back from the
+       database in UTC, so an event that ran at 6pm Pacific on 31 July reports
+       1 August. Anything that then asks "who was employed that day" asks about
+       the wrong day, is off by one, and raises nothing — which is D16's whole
+       subject. Not hypothetical: R8 shipped that way and a month-boundary test
+       caught it (see 02-roadmap.md「计划外（B12）」).
+    """
+    return timezone.localtime(moment).date()
+
+
+def local_month_of(moment):
+    """(year, month) of an instant, in the foundation's timezone. Same trap."""
+    local = timezone.localtime(moment)
+    return local.year, local.month
+
+
 def day_start(day):
     """Midnight at the start of `day`, in the foundation's timezone.
 

@@ -1,0 +1,46 @@
+{% extends "core/base.html" %}
+{% block title %}{{ event.name }}{% endblock %}
+
+{% block content %}
+  <h1>{{ event.name }}</h1>
+  <p>
+    {{ event.ministry.name }} · {{ event.get_status_display }}<br>
+    {{ event.start_time }} 至 {{ event.end_time }}
+    {% if event.location %}· {{ event.location }}{% endif %}
+  </p>
+  {% if event.description %}<p>{{ event.description }}</p>{% endif %}
+
+  <h2>工种</h2>
+  {% comment %}
+  零报名的工种照样出现在这张表里 —— 那正是 EventRole 这张表存在的理由。
+  数字来自 with_signup_counts()，不是每行查一次。
+  {% endcomment %}
+  <table border="1" cellpadding="4">
+    <tr><th>工种</th><th>需要</th><th>已报</th></tr>
+    {% for role in roles %}
+      <tr>
+        <td>{{ role.role.name }}</td>
+        <td>{{ role.needed_count|default:"不限" }}</td>
+        <td>{{ role.registered_count }}</td>
+      </tr>
+    {% empty %}
+      <tr><td colspan="3">还没开工种。</td></tr>
+    {% endfor %}
+  </table>
+
+  {% if mine %}
+    <h2>我的报名</h2>
+    <ul>
+      {% for row in mine %}
+        <li>{{ row.event_role.role.name }} —— {{ row.get_status_display }}</li>
+      {% endfor %}
+    </ul>
+  {% endif %}
+
+  {% if can_sign_up %}
+    <p><a href="{% url 'events:event_signup' event.pk %}">报名</a></p>
+  {% else %}
+    <p>这场活动不再收报名（{{ event.get_status_display }}）。已经报过名的记录仍然在
+       <a href="{% url 'events:my_participations' %}">我的报名</a> 里，可以取消。</p>
+  {% endif %}
+{% endblock %}

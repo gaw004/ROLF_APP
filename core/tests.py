@@ -247,16 +247,33 @@ class TimeSourceGuardTests(TestCase):
     # in a comment; the first version of this test failed on its own docstring.
     NAIVE_TODAY = r"\bdate\.today\(\)"          # follows the server's timezone
     UTC_DATE = r"\btimezone\.now\(\)\.date\(\)"  # the UTC date, a day early after 5pm PT
+    # The third spelling, added after it was found in shipped code: taking the
+    # day off a stored DateTimeField. Every datetime column in this project is
+    # named *_time or *_at, so that is what it looks for.
+    STORED_INSTANT_DATE = r"\b\w+_(time|at)\.date\(\)"
 
     def test_nobody_computes_today_outside_core_timeutils(self):
-        # ruff's DTZ catches the first pattern but not the second: that one is
-        # tz-aware and looks perfectly legitimate to a linter. Hence this guard.
+        # ruff's DTZ catches the first pattern but not the others: those are
+        # tz-aware and look perfectly legitimate to a linter. Hence this guard.
         hits = offending_lines(
             f"{self.NAIVE_TODAY}|{self.UTC_DATE}",
             skip=["core/timeutils.py"],
         )
         self.assertEqual(
             hits, [], "Use core.timeutils.local_today() instead:\n" + "\n".join(hits))
+
+    def test_nobody_takes_the_day_off_a_stored_instant_directly(self):
+        # A DateTimeField comes back in UTC, so an event at 6pm Pacific on the
+        # 31st has .date() == the 1st. R8 asks "who was employed on the day of
+        # the event" with that value — off by one, and silent. R8 shipped with
+        # exactly this bug and a month-boundary test caught it; the guard is
+        # here so the next one is caught at the point of writing.
+        hits = offending_lines(self.STORED_INSTANT_DATE, skip=["core/timeutils.py"])
+        self.assertEqual(
+            hits,
+            [],
+            "That is the UTC day. Use core.timeutils.local_date_of():\n" + "\n".join(hits),
+        )
 
 
 class LayeringGuardTests(TestCase):
@@ -317,19 +334,29 @@ class PermissionGuardTests(TestCase):
     DIRECT_QUERY = r"MinistryRole\.objects"
 
     def test_only_permissions_py_queries_ministryrole(self):
-        # Same argument as the org-tree guard, one notch more serious. Checks
-        # scattered across views and admin means one of them eventually forgets
-        # .active() or ministry__is_active — and where a missed traversal hangs
-        # the page (loud), a missed permission check is silent: nothing raises,
-        # somebody just sees what they should not. Ask permissions.py.
-        hits = offending_lines(self.DIRECT_QUERY, skip=["org/permissions.py"])
-        # Tests are allowed to set grants up directly; they are not the ones
-        # making the judgement.
-        hits = [hit for hit in hits if not hit.split(":")[0].endswith("tests.py")]
+        """views.py / admin.py / forms.py never touch the grant table themselves.
+
+        Same argument as the org-tree guard, one notch more serious. Checks
+        scattered across views and admin means one of them eventually forgets
+        .active() or ministry__is_active — and where a missed traversal hangs
+        the page (loud), a missed permission check is silent: nothing raises,
+        somebody merely sees what they should not.
+
+        Two places may touch the table, and the split is worth stating:
+        permissions.py *judges* ("may they?"), services.py *writes* (P5's page
+        grants and revokes, which by its nature edits grants). A view does
+        neither — it calls one of them. This guard was first written to skip
+        only permissions.py and immediately went red on P5's own page; the
+        answer was not to widen the exemption but to move the writes into
+        org/services.py, which is where the roadmap's version of this guard
+        pointed all along.
+        """
+        hits = offending_lines(
+            self.DIRECT_QUERY, only_filenames={"views.py", "admin.py", "forms.py"})
         self.assertEqual(
             hits,
             [],
-            "Ask org.permissions, do not query grants directly:\n" + "\n".join(hits),
+            "Ask org.permissions to judge, org.services to write:\n" + "\n".join(hits),
         )
 
 

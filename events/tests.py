@@ -8,16 +8,25 @@ could not, because it is「空缺编制」moved to a different table (goal.md D1
 import datetime
 from decimal import Decimal
 
+from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
-from django.db import IntegrityError, transaction
+from django.db import IntegrityError, connection, transaction
 from django.db.models import ProtectedError
 from django.test import TestCase
 from django.test.utils import CaptureQueriesContext
-from django.db import connection
+from django.urls import reverse
 
-from contact.models import Contact
-from core.timeutils import local_now, local_today, month_bounds
-from org.models import Assignment, Ministry, Position
+from accounts.services import register_account
+from contact.models import Contact, EmergencyContact, RelationshipType
+from core.timeutils import (
+    local_date_of,
+    local_month_of,
+    local_now,
+    local_today,
+    month_bounds,
+)
+from org.models import Assignment, Ministry, MinistryRole, Position
+from org.permissions import foundation_admin_group
 
 from .models import Event, EventRole, EventType, Participation, ParticipationRole
 from .services import (
@@ -412,7 +421,10 @@ class ReportingTests(TestCase):
         self.assertNotIn("duration", {f.name for f in Event._meta.fields})
 
     def test_events_in_a_period_use_foundation_month_boundaries(self):
-        start, end = month_bounds(self.event.start_time.year, self.event.start_time.month)
+        # local_month_of(), not .year/.month on the stored value: that comes
+        # back in UTC, so an event at 6pm Pacific on the 31st reports the next
+        # month and falls outside its own month's window.
+        start, end = month_bounds(*local_month_of(self.event.start_time))
         self.assertIn(self.event, Event.objects.in_period(start, end))
 
 
@@ -453,7 +465,7 @@ class R8Tests(TestCase):
         Assignment.objects.create(
             contact=person, position=self.post,
             start_date=local_today() - datetime.timedelta(days=365),
-            end_date=self.event.start_time.date() - datetime.timedelta(days=1),
+            end_date=local_date_of(self.event.start_time) - datetime.timedelta(days=1),
         )
         self.took_part(person)
         self.assertEqual(list(ministry_staff_participation(self.event)), [])
@@ -462,7 +474,7 @@ class R8Tests(TestCase):
         person = make_person("Newcomer")
         Assignment.objects.create(
             contact=person, position=self.post,
-            start_date=self.event.start_time.date() + datetime.timedelta(days=1),
+            start_date=local_date_of(self.event.start_time) + datetime.timedelta(days=1),
         )
         self.took_part(person)
         self.assertEqual(list(ministry_staff_participation(self.event)), [])
@@ -545,3 +557,284 @@ class DictionaryTableTests(TestCase):
         second = ParticipationRole.seed_general()
         self.assertEqual(first.pk, second.pk)
         self.assertEqual(first.code, "general")
+
+
+class PageTestCase(TestCase):
+    """Shared cast: two ministries, one admin of each, one plain volunteer.
+
+    Two ministries and two admins, because a single one cannot demonstrate
+    scoping — "he can see his own" passes just as well when there is no scope
+    at all.
+    """
+
+    def setUp(self):
+        self.pantry = Ministry.objects.create(code="food_pantry", name="Food Pantry")
+        self.tax = Ministry.objects.create(code="tax_help", name="Tax Help")
+
+        self.zhang = self.account("zhang", "张", birth_date=datetime.date(1980, 1, 1))
+        MinistryRole.objects.create(contact=self.zhang.contact, ministry=self.pantry)
+        self.other_admin = self.account("chen", "陈", birth_date=datetime.date(1980, 1, 1))
+        MinistryRole.objects.create(contact=self.other_admin.contact, ministry=self.tax)
+        self.lisi = self.account("lisi", "李", birth_date=datetime.date(1990, 1, 1))
+
+        self.event = make_event(ministry=self.pantry, owner=self.zhang.contact)
+        self.role = make_role(self.event, "lifting", needed_count=2)
+
+    def account(self, username, last_name, **contact_fields):
+        return register_account(
+            username=username, password="a-good-long-password",
+            legal_last_name=last_name, **contact_fields,
+        )
+
+    def login(self, user):
+        self.client.force_login(user)
+        return user
+
+
+class VolunteerPageTests(PageTestCase):
+    """P3, tested by hitting URLs — the isolation is in the query, not the page."""
+
+    def test_anonymous_visitors_are_redirected_to_login(self):
+        response = self.client.get(reverse("events:event_list"))
+        self.assertEqual(response.status_code, 302)
+        self.assertIn(reverse("accounts:login"), response.url)
+
+    def test_the_event_list_shows_only_open_events(self):
+        self.login(self.lisi)
+        draft = make_event(ministry=self.pantry, name="Draft one",
+                           owner=self.zhang.contact, status=Event.Status.DRAFT)
+        response = self.client.get(reverse("events:event_list"))
+        self.assertContains(response, self.event.name)
+        self.assertNotContains(response, draft.name)
+
+    def test_a_confirmed_event_is_absent_from_the_list_but_still_opens(self):
+        # ⭐ Visibility and signability are two questions. Answer them with one
+        # status test and P6's "can't make it? cancel here" link 404s, on
+        # exactly the events that filled up.
+        self.login(self.lisi)
+        self.event.status = Event.Status.CONFIRMED
+        self.event.save()
+        listing = self.client.get(reverse("events:event_list"))
+        self.assertNotContains(listing, self.event.name)
+        detail = self.client.get(reverse("events:event_detail", args=[self.event.pk]))
+        self.assertEqual(detail.status_code, 200)
+
+    def test_a_cancelled_event_does_not_appear_in_the_list(self):
+        self.login(self.lisi)
+        self.event.status = Event.Status.CANCELLED
+        self.event.save()
+        response = self.client.get(reverse("events:event_list"))
+        self.assertNotContains(response, self.event.name)
+
+    def test_a_draft_event_detail_page_is_404_for_volunteers(self):
+        self.login(self.lisi)
+        self.event.status = Event.Status.DRAFT
+        self.event.save()
+        response = self.client.get(reverse("events:event_detail", args=[self.event.pk]))
+        self.assertEqual(response.status_code, 404)
+
+    def test_an_adult_can_sign_up_from_the_page(self):
+        self.login(self.lisi)
+        response = self.client.post(
+            reverse("events:event_signup", args=[self.event.pk]),
+            {"event_role": self.role.pk},
+        )
+        self.assertRedirects(
+            response, reverse("events:event_detail", args=[self.event.pk]))
+        self.assertTrue(
+            Participation.objects.filter(contact=self.lisi.contact).exists())
+
+    def test_a_minor_signing_up_without_consent_is_refused_by_the_page(self):
+        minor = self.account(
+            "xiaoming", "小明",
+            birth_date=local_today() - datetime.timedelta(days=365 * 15))
+        self.login(minor)
+        response = self.client.post(
+            reverse("events:event_signup", args=[self.event.pk]),
+            {"event_role": self.role.pk},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(Participation.objects.count(), 0)
+
+    def test_a_minor_with_consent_but_no_address_is_still_refused(self):
+        minor = self.account(
+            "xiaoming", "小明",
+            birth_date=local_today() - datetime.timedelta(days=365 * 15))
+        self.login(minor)
+        response = self.client.post(
+            reverse("events:event_signup", args=[self.event.pk]),
+            {
+                "event_role": self.role.pk,
+                "consent_given_by": "王秀英",
+                "consent_method": Participation.ConsentMethod.VERBAL,
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(Participation.objects.count(), 0)
+
+    def test_a_volunteer_cannot_open_another_persons_participation(self):
+        mine = Participation.objects.create(
+            contact=self.zhang.contact, event_role=self.role)
+        self.login(self.lisi)
+        response = self.client.get(
+            reverse("events:participation_cancel", args=[mine.pk]))
+        self.assertEqual(response.status_code, 404)
+
+    def test_my_participations_lists_only_my_own(self):
+        mine = Participation.objects.create(
+            contact=self.lisi.contact, event_role=self.role)
+        Participation.objects.create(contact=self.zhang.contact, event_role=self.role)
+        self.login(self.lisi)
+        response = self.client.get(reverse("events:my_participations"))
+        self.assertEqual(list(response.context["participations"]), [mine])
+
+    def test_cancelling_keeps_the_row_and_changes_the_status(self):
+        mine = Participation.objects.create(
+            contact=self.lisi.contact, event_role=self.role)
+        self.login(self.lisi)
+        self.client.post(reverse("events:participation_cancel", args=[mine.pk]))
+        mine.refresh_from_db()
+        self.assertEqual(mine.status, Participation.Status.CANCELLED)
+
+
+class MinistryAdminPageTests(PageTestCase):
+    """P2 / P4, and the over-reach checks that give D20 its point."""
+
+    def test_publishing_for_another_ministry_returns_403(self):
+        # The POST side. The narrowed dropdown stops a slip; this stops a
+        # forged id, and only one of the two is a security check.
+        self.login(self.zhang)
+        event_type = EventType.objects.first()
+        response = self.client.post(reverse("events:event_create"), {
+            "name": "Sneaky", "event_type": event_type.pk, "ministry": self.tax.pk,
+            "start_time": "2026-09-01T09:00", "end_time": "2026-09-01T12:00",
+            "status": Event.Status.DRAFT,
+        })
+        self.assertIn(response.status_code, (403, 200))
+        self.assertFalse(Event.objects.filter(name="Sneaky").exists())
+
+    def test_the_ministry_dropdown_lists_only_administered_ministries(self):
+        self.login(self.zhang)
+        response = self.client.get(reverse("events:event_create"))
+        choices = list(response.context["form"].fields["ministry"].queryset)
+        self.assertEqual(choices, [self.pantry])
+
+    def test_publishing_for_their_own_ministry_works(self):
+        self.login(self.zhang)
+        event_type = EventType.objects.first()
+        response = self.client.post(reverse("events:event_create"), {
+            "name": "Saturday pantry", "event_type": event_type.pk,
+            "ministry": self.pantry.pk,
+            "start_time": "2026-09-01T09:00", "end_time": "2026-09-01T12:00",
+            "status": Event.Status.OPEN,
+        })
+        self.assertEqual(response.status_code, 302)
+        self.assertTrue(Event.objects.filter(name="Saturday pantry").exists())
+
+    def test_viewing_another_ministrys_registrations_returns_403(self):
+        # The GET side of the same rule.
+        self.login(self.other_admin)
+        response = self.client.get(
+            reverse("events:event_registrations", args=[self.event.pk]))
+        self.assertEqual(response.status_code, 403)
+
+    def test_a_plain_volunteer_gets_403_on_every_admin_url(self):
+        self.login(self.lisi)
+        for name in ["event_roles", "event_registrations", "event_attendance",
+                     "event_report"]:
+            with self.subTest(url=name):
+                response = self.client.get(reverse(f"events:{name}", args=[self.event.pk]))
+                self.assertEqual(response.status_code, 403)
+        self.assertEqual(
+            self.client.get(reverse("events:event_create")).status_code, 403)
+
+    def test_a_superuser_has_no_ministry_scope_either(self):
+        # No back door. A superuser has the admin; these pages are scoped, and
+        # exempting them here would be a hole straight through D20.
+        root = get_user_model().objects.create_superuser(username="root", password="x")
+        self.login(root)
+        response = self.client.get(reverse("events:event_roles", args=[self.event.pk]))
+        self.assertEqual(response.status_code, 403)
+
+    def test_a_role_with_nobody_in_it_is_listed_on_the_registrations_page(self):
+        # The one thing this page exists to show a coordinator.
+        empty = make_role(self.event, "interpreting", needed_count=1)
+        self.login(self.zhang)
+        response = self.client.get(
+            reverse("events:event_registrations", args=[self.event.pk]))
+        self.assertContains(response, empty.role.name)
+
+    def test_checking_in_sets_status_to_attended(self):
+        participation = Participation.objects.create(
+            contact=self.lisi.contact, event_role=self.role)
+        self.login(self.zhang)
+        self.client.post(reverse("events:event_attendance", args=[self.event.pk]),
+                         {"participation": participation.pk, "action": "check_in"})
+        participation.refresh_from_db()
+        self.assertEqual(participation.status, Participation.Status.ATTENDED)
+
+    def test_hours_can_be_entered_by_hand_with_no_timestamps(self):
+        participation = Participation.objects.create(
+            contact=self.lisi.contact, event_role=self.role)
+        self.login(self.zhang)
+        self.client.post(reverse("events:event_attendance", args=[self.event.pk]),
+                         {"participation": participation.pk, "action": "hours",
+                          "hours": "3.00"})
+        participation.refresh_from_db()
+        self.assertEqual(participation.hours, Decimal("3.00"))
+        self.assertIsNone(participation.checked_in_at)
+
+    def test_the_attendance_page_shows_a_minors_emergency_phone(self):
+        minor = self.account(
+            "xiaoming", "小明",
+            birth_date=local_today() - datetime.timedelta(days=365 * 15))
+        relationship = RelationshipType.objects.create(
+            code="parent_of", name_a_to_b="parent of", name_b_to_a="child of",
+            usable_as_emergency_contact=True)
+        EmergencyContact.objects.create(
+            person=minor.contact, name="王秀英", phone="+14085550199",
+            relationship_type=relationship)
+        Participation.objects.create(contact=minor.contact, event_role=self.role)
+        self.login(self.zhang)
+        response = self.client.get(
+            reverse("events:event_attendance", args=[self.event.pk]))
+        self.assertContains(response, "王秀英")
+
+    def test_a_ministry_admin_cannot_open_the_grant_page(self):
+        # P5 reads the global group and never MinistryRole: no recruiting one's
+        # own downline.
+        self.login(self.zhang)
+        response = self.client.get(
+            reverse("org:ministry_admins", args=[self.pantry.pk]))
+        self.assertEqual(response.status_code, 403)
+
+    def test_a_foundation_admin_can_grant_and_revoke(self):
+        self.login(self.zhang)
+        self.zhang.groups.add(foundation_admin_group())
+        target = self.account("wang", "王", birth_date=datetime.date(1985, 1, 1))
+        url = reverse("org:ministry_admins", args=[self.tax.pk])
+        self.client.post(url, {"contact": target.contact.pk})
+        grant = MinistryRole.objects.get(contact=target.contact, ministry=self.tax)
+        # granted_by comes from the session, not from a field on the page.
+        self.assertEqual(grant.granted_by, self.zhang)
+
+        self.client.post(url, {"revoke": grant.pk})
+        grant.refresh_from_db()
+        # Revoked by dating it, not by deleting it: the history has to answer
+        # "who could see this ministry's signups last March".
+        self.assertIsNotNone(grant.end_date)
+        self.assertTrue(MinistryRole.objects.filter(pk=grant.pk).exists())
+
+
+class ReportPageTests(PageTestCase):
+    def test_the_report_counts_roles_that_nobody_signed_up_for(self):
+        make_role(self.event, "interpreting", needed_count=1)
+        Participation.objects.create(contact=self.lisi.contact, event_role=self.role)
+        self.login(self.zhang)
+        response = self.client.get(reverse("events:event_report", args=[self.event.pk]))
+        self.assertEqual(response.context["summary"]["role_count"], 2)
+
+    def test_another_ministrys_report_is_403(self):
+        self.login(self.other_admin)
+        response = self.client.get(reverse("events:event_report", args=[self.event.pk]))
+        self.assertEqual(response.status_code, 403)

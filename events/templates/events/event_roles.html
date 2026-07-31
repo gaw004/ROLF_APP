@@ -1,0 +1,40 @@
+{% extends "core/base.html" %}
+{% block title %}{{ event.name }} 的工种{% endblock %}
+
+{% block content %}
+  <h1>{{ event.name }} —— 工种</h1>
+  <p>
+    {{ event.ministry.name }} · {{ event.get_status_display }} ·
+    <a href="{% url 'events:event_registrations' event.pk %}">报名名单</a> ·
+    <a href="{% url 'events:event_attendance' event.pk %}">签到</a> ·
+    <a href="{% url 'events:event_report' event.pk %}">统计</a>
+  </p>
+  <p>状态还是 <code>draft</code> 的话志愿者看不到；改成 <code>open</code> 才发布出去。</p>
+
+  <table border="1" cellpadding="4">
+    <tr><th>工种</th><th>需要</th><th>已报</th><th>备注</th><th></th></tr>
+    {% for role in roles %}
+      <tr>
+        <td>{{ role.role.name }}</td>
+        <td>{{ role.needed_count|default:"不限" }}</td>
+        <td>{{ role.registered_count }}</td>
+        <td>{{ role.notes }}</td>
+        <td>
+          <form method="post" action="{% url 'events:role_delete' role.pk %}">
+            {% csrf_token %}
+            <button type="submit">删除</button>
+          </form>
+        </td>
+      </tr>
+    {% empty %}
+      <tr><td colspan="5">还没开工种。</td></tr>
+    {% endfor %}
+  </table>
+
+  <h2>加一个工种</h2>
+  <form method="post">
+    {% csrf_token %}
+    {{ form.as_p }}
+    <button type="submit">添加</button>
+  </form>
+{% endblock %}

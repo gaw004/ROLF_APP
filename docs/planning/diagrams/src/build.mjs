@@ -74,9 +74,10 @@ if (clipped > 2) {
   throw new Error(`有标签被裁掉 ${clipped}px —— 多半是给 mermaid 设了 fontFamily，见 README`);
 }
 
+// page.html 末尾那段内联脚本要原样留着 —— 它管的是「全屏看图」，生成版同样需要。
+// 它另一半（按 viewBox 钉尺寸）在这里会自动跳过，因为 svg 已经带着写死的尺寸了。
 let index = 0;
-let out = source.replace(/<pre class="mermaid">[\s\S]*?<\/pre>/g, () => svgs[index++]);
-out = out.replace(/\n<script>[\s\S]*?<\/script>\s*$/, '\n');   // 尺寸脚本换成了写死的尺寸
+const out = source.replace(/<pre class="mermaid">[\s\S]*?<\/pre>/g, () => svgs[index++]);
 
 const cut = out.indexOf('</style>') + '</style>'.length;
 fs.writeFileSync(path.join(here, '..', 'data-and-flow.html'), `<!doctype html>

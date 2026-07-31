@@ -155,6 +155,40 @@
     display: flex; align-items: center; gap: .4rem; margin: 0 0 .3rem;
   }
   .scrollhint::before { content: "↔ ↕"; font-family: ui-monospace, Menlo, monospace; color: var(--accent); }
+
+  /* ---------- 全屏看图 ----------
+     图本身是画在浅色图版上的（mermaid base 主题），所以放大器里的颜色不跟随
+     深浅主题走 —— 深色模式下把一张浅色的图放进深色框里，边缘会糊成一片。 */
+  .figure { position: relative; }
+  .zoom-btn {
+    position: absolute; top: .6rem; right: .6rem; z-index: 5;
+    display: inline-flex; align-items: center; gap: .35rem;
+    font-size: .74rem; letter-spacing: .08em; font-weight: 600;
+    color: #3B443F; background: #FFFFFFEE; border: 1px solid #C9CEC8;
+    border-radius: 2px; padding: .34rem .55rem; cursor: pointer;
+  }
+  .zoom-btn:hover, .zoom-btn:focus-visible { color: #14584F; border-color: #14584F; background: #FFF; }
+
+  .viewer { position: fixed; inset: 0; z-index: 200; display: flex; flex-direction: column; background: #F7F8F5; }
+  .viewer__bar {
+    flex: none; display: flex; align-items: center; gap: .45rem;
+    padding: .5rem .8rem; background: #FBFCFA; border-bottom: 1px solid #D8DCD6;
+  }
+  .viewer__title { margin-right: auto; font-size: .82rem; color: #3B443F; }
+  .viewer__bar button {
+    font: inherit; font-size: .78rem; padding: .3rem .6rem; cursor: pointer;
+    color: #3B443F; background: #F1F3F0; border: 1px solid #C9CEC8; border-radius: 2px;
+  }
+  .viewer__bar button:hover, .viewer__bar button:focus-visible { color: #14584F; border-color: #14584F; }
+  .viewer__pct {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-variant-numeric: tabular-nums;
+    font-size: .76rem; color: #6E7671; min-width: 3.6rem; text-align: right;
+  }
+  .viewer__stage { position: relative; flex: 1; overflow: hidden; cursor: grab; touch-action: none; }
+  .viewer__stage.is-panning { cursor: grabbing; }
+  .viewer__stage > svg { position: absolute; top: 0; left: 0; transform-origin: 0 0; }
+  .viewer__hint { flex: none; padding: .4rem .8rem; font-size: .74rem; color: #6E7671; background: #FBFCFA; border-top: 1px solid #D8DCD6; }
+  body.is-viewing { overflow: hidden; }
   .caption { font-size: .82rem; color: var(--ink-3); margin: 0 0 .4rem; max-width: 46rem; }
   .caption b { color: var(--ink-2); font-weight: 600; }
 
@@ -246,7 +280,7 @@
       </p>
     </div>
 
-    <p class="scrollhint">图幅约 4700 × 3100，在图版内横竖拖动查看</p>
+    <p class="scrollhint">图幅约 4700 × 3100 —— 点右上角「全屏」放大看，或在图版内横竖拖动</p>
     <div class="plate plate--tall">
 <pre class="mermaid">
 %%{init: {"theme":"base","themeVariables":{"background":"#F7F8F5","primaryColor":"#FFFFFF","primaryTextColor":"#171B19","primaryBorderColor":"#495049","lineColor":"#5A6560","tertiaryColor":"#ECEFEA","fontSize":"12px"}}}%%
@@ -987,28 +1021,211 @@ flowchart LR
 </div>
 
 <script>
-  /* Mermaid renders each diagram at width:100%, so a 4700px-wide ER diagram gets
-     squeezed into the column and its labels become unreadable. Restore every
-     diagram to the size its own viewBox asks for and let the plate scroll. */
+  /* 两件事，都只用得上这一段内联脚本 —— 没有依赖、没有外部请求：
+     1. mermaid 给 svg 的是 width:100%，4700px 的 ER 图会被压进栏宽里，
+        字缩成一团。按各自的 viewBox 钉死真实尺寸，让图版自己滚。
+        （生成版里 svg 已经带着写死的尺寸，这一步自动跳过。）
+     2. 每张图配一个「全屏」：真全屏 + 缩放 + 拖动平移。 */
   (function () {
-    var done = new WeakSet();
+    'use strict';
+
+    var MIN_SCALE = 0.05, MAX_SCALE = 6, STEP = 1.25;
+    var viewerSeq = 0;
+
+    // ---------- 1. 真实尺寸 ----------
+    var sized = new WeakSet();
     function sizeToViewBox() {
       var svgs = document.querySelectorAll('.plate svg');
       for (var i = 0; i < svgs.length; i++) {
         var svg = svgs[i];
-        if (done.has(svg)) continue;
-        var vb = svg.viewBox && svg.viewBox.baseVal;
-        if (!vb || !vb.width || !vb.height) continue;
-        svg.style.width = Math.ceil(vb.width) + 'px';
-        svg.style.height = Math.ceil(vb.height) + 'px';
+        if (sized.has(svg)) continue;
+        var box = svg.viewBox && svg.viewBox.baseVal;
+        if (!box || !box.width || !box.height) continue;
+        svg.style.width = Math.ceil(box.width) + 'px';
+        svg.style.height = Math.ceil(box.height) + 'px';
         svg.style.maxWidth = 'none';
-        done.add(svg);
+        sized.add(svg);
+        addButton(svg.closest('.plate'));
       }
     }
+
+    // ---------- 2. 每张图一个按钮 ----------
+    function titleFor(plate) {
+      // 图上方最近的一个小标题；没有就用本节的大标题。
+      var node = plate.previousElementSibling;
+      while (node) {
+        if (node.tagName === 'H3') return node.textContent.trim();
+        node = node.previousElementSibling;
+      }
+      var section = plate.closest('section');
+      var head = section && section.querySelector('.sec-head h2');
+      return head ? head.textContent.trim() : '图';
+    }
+
+    function addButton(plate) {
+      if (!plate || plate.parentElement.classList.contains('figure')) return;
+      var figure = document.createElement('div');
+      figure.className = 'figure';
+      plate.parentNode.insertBefore(figure, plate);
+      figure.appendChild(plate);
+
+      var button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'zoom-btn';
+      button.textContent = '⤢ 全屏';
+      button.setAttribute('aria-label', '全屏查看：' + titleFor(plate));
+      button.addEventListener('click', function () {
+        open(plate.querySelector('svg'), titleFor(plate), button);
+      });
+      figure.appendChild(button);
+    }
+
+    // ---------- 3. 放大器 ----------
+    function open(svg, title, opener) {
+      if (!svg) return;
+
+      var viewer = document.createElement('div');
+      viewer.className = 'viewer';
+      viewer.innerHTML =
+        '<div class="viewer__bar">' +
+          '<span class="viewer__title"></span>' +
+          '<button type="button" data-act="out" aria-label="缩小">−</button>' +
+          '<span class="viewer__pct">100%</span>' +
+          '<button type="button" data-act="in" aria-label="放大">+</button>' +
+          '<button type="button" data-act="fit">适应屏幕</button>' +
+          '<button type="button" data-act="one">100%</button>' +
+          '<button type="button" data-act="close">关闭 Esc</button>' +
+        '</div>' +
+        '<div class="viewer__stage"></div>' +
+        '<div class="viewer__hint">滚轮缩放 · 按住拖动平移 · 双击在「适应屏幕」和 100% 之间切换 · + − 0 也能用</div>';
+      viewer.querySelector('.viewer__title').textContent = title;
+
+      var stage = viewer.querySelector('.viewer__stage');
+      var pct = viewer.querySelector('.viewer__pct');
+      // mermaid 把样式写在 svg 内部，且整段用 `#<svg 的 id>` 限定作用域。
+      // 克隆时把 id 抹掉，那段样式就整个失效 —— 关系线会丢掉 fill:none，
+      // 变成一大片黑色实心块。所以：换一个新 id，并把样式里的旧 id 一起改掉。
+      var clone = svg.cloneNode(true);
+      var oldId = svg.getAttribute('id');
+      var newId = 'viewer-diagram-' + (viewerSeq += 1);
+      clone.setAttribute('id', newId);
+      if (oldId) {
+        var sheets = clone.querySelectorAll('style');
+        for (var s = 0; s < sheets.length; s++) {
+          sheets[s].textContent = sheets[s].textContent.split('#' + oldId).join('#' + newId);
+        }
+      }
+      var natural = svg.viewBox && svg.viewBox.baseVal;
+      var w = Math.ceil((natural && natural.width) || svg.getBoundingClientRect().width);
+      var h = Math.ceil((natural && natural.height) || svg.getBoundingClientRect().height);
+      clone.style.width = w + 'px';
+      clone.style.height = h + 'px';
+      clone.style.maxWidth = 'none';
+      stage.appendChild(clone);
+
+      document.body.appendChild(viewer);
+      document.body.classList.add('is-viewing');
+
+      var scale = 1, x = 0, y = 0;
+      function paint() {
+        clone.style.transform = 'translate(' + x + 'px,' + y + 'px) scale(' + scale + ')';
+        pct.textContent = Math.round(scale * 100) + '%';
+      }
+      function fit() {
+        var box = stage.getBoundingClientRect();
+        scale = Math.min((box.width - 24) / w, (box.height - 24) / h);
+        scale = Math.max(MIN_SCALE, Math.min(scale, 1));
+        x = (box.width - w * scale) / 2;
+        y = (box.height - h * scale) / 2;
+        paint();
+      }
+      // 以某个屏幕点为锚缩放：那个点底下的内容不动。
+      function zoomAt(factor, px, py) {
+        var next = Math.max(MIN_SCALE, Math.min(scale * factor, MAX_SCALE));
+        var box = stage.getBoundingClientRect();
+        var ox = (px === undefined ? box.width / 2 : px - box.left);
+        var oy = (py === undefined ? box.height / 2 : py - box.top);
+        x = ox - (ox - x) * (next / scale);
+        y = oy - (oy - y) * (next / scale);
+        scale = next;
+        paint();
+      }
+      function actual() {
+        var box = stage.getBoundingClientRect();
+        zoomAt(1 / scale, box.left + box.width / 2, box.top + box.height / 2);
+      }
+
+      var closing = false;
+      function close() {
+        if (closing) return;
+        closing = true;
+        document.removeEventListener('keydown', onKey, true);
+        document.removeEventListener('fullscreenchange', onFsChange);
+        if (document.fullscreenElement) { try { document.exitFullscreen(); } catch (e) {} }
+        viewer.remove();
+        document.body.classList.remove('is-viewing');
+        if (opener) opener.focus();
+      }
+      function onFsChange() { if (!document.fullscreenElement) close(); }
+      function onKey(event) {
+        if (event.key === 'Escape') { event.preventDefault(); close(); }
+        else if (event.key === '+' || event.key === '=') zoomAt(STEP);
+        else if (event.key === '-' || event.key === '_') zoomAt(1 / STEP);
+        else if (event.key === '0') fit();
+      }
+
+      viewer.querySelector('.viewer__bar').addEventListener('click', function (event) {
+        var act = event.target.getAttribute && event.target.getAttribute('data-act');
+        if (act === 'in') zoomAt(STEP);
+        else if (act === 'out') zoomAt(1 / STEP);
+        else if (act === 'fit') fit();
+        else if (act === 'one') actual();
+        else if (act === 'close') close();
+      });
+
+      stage.addEventListener('wheel', function (event) {
+        event.preventDefault();
+        zoomAt(event.deltaY < 0 ? STEP : 1 / STEP, event.clientX, event.clientY);
+      }, { passive: false });
+
+      stage.addEventListener('dblclick', function (event) {
+        if (Math.abs(scale - 1) < 0.01) fit(); else zoomAt(1 / scale, event.clientX, event.clientY);
+      });
+
+      var dragging = false, lastX = 0, lastY = 0;
+      stage.addEventListener('pointerdown', function (event) {
+        dragging = true; lastX = event.clientX; lastY = event.clientY;
+        stage.classList.add('is-panning');
+        stage.setPointerCapture(event.pointerId);
+      });
+      stage.addEventListener('pointermove', function (event) {
+        if (!dragging) return;
+        x += event.clientX - lastX; y += event.clientY - lastY;
+        lastX = event.clientX; lastY = event.clientY;
+        paint();
+      });
+      function endDrag() { dragging = false; stage.classList.remove('is-panning'); }
+      stage.addEventListener('pointerup', endDrag);
+      stage.addEventListener('pointercancel', endDrag);
+
+      document.addEventListener('keydown', onKey, true);
+      document.addEventListener('fullscreenchange', onFsChange);
+      window.addEventListener('resize', fit);
+
+      fit();
+      // 真全屏要用户手势才批准 —— 这里就是按钮那一下。批不下来也没关系，
+      // 覆盖层本来就已经铺满视口了。
+      if (viewer.requestFullscreen) {
+        var wish = viewer.requestFullscreen();
+        if (wish && wish.catch) wish.catch(function () {});
+      }
+      viewer.querySelector('[data-act="fit"]').focus();
+      setTimeout(fit, 60);
+    }
+
     sizeToViewBox();
     if (window.MutationObserver) {
-      new MutationObserver(sizeToViewBox)
-        .observe(document.documentElement, { childList: true, subtree: true });
+      new MutationObserver(sizeToViewBox).observe(document.documentElement, { childList: true, subtree: true });
     }
     var ticks = 0;
     var timer = setInterval(function () {

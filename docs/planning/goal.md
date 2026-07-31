@@ -19,6 +19,7 @@
 > | [`deferred.md`](deferred.md) | 明确推迟的事 + 各自的重启条件 | 手痒想做某件事时 |
 > | [`revisions.md`](revisions.md) | 全部修订记录（2026-07-29 / 07-28 各轮） | 想知道"这条为什么改口" |
 > | [`01-roadmap.md`](01-roadmap.md) | Phase A 的实施手册，已完成 | 查历史 |
+> | [`diagrams/`](diagrams/README.md) | ERD · DFD · app 边界图（浏览器打开，零依赖） | 想一眼看清"表怎么连、数据怎么走" |
 >
 > ### 约定（不要破坏）
 >

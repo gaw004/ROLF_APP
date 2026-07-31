@@ -252,6 +252,69 @@ class CheckInAndHoursTests(TestCase):
         self.assertEqual(self.participation.status, Participation.Status.ATTENDED)
 
 
+class AttendanceNeedsConsentTests(TestCase):
+    """P3's second gate: an unconsented minor never reaches attended.
+
+    sign_up() refuses to create such a row, but that is a hint layer and the
+    admin creates Participation rows directly — so the row can exist, and this
+    is the gate that decides whether it turns into hours, statistics and a
+    notification. Asserted as a ValidationError rather than a database refusal,
+    because it spans two tables and D14 says not to dress a hint up as
+    enforcement.
+    """
+
+    def setUp(self):
+        self.event = make_event()
+        self.role = make_role(self.event, "lifting")
+
+    def unconsented(self, birth_date):
+        # Created straight on the model, exactly as the admin does: this is the
+        # state sign_up() refuses to produce and cannot prevent.
+        return Participation.objects.create(
+            contact=make_person("Minor", birth_date=birth_date), event_role=self.role)
+
+    def minor(self):
+        return self.unconsented(local_today() - datetime.timedelta(days=365 * 15))
+
+    def test_checking_in_a_minor_without_consent_is_refused(self):
+        participation = self.minor()
+        with self.assertRaises(ConsentRequired):
+            check_in(participation)
+        participation.refresh_from_db()
+        self.assertEqual(participation.status, Participation.Status.REGISTERED)
+
+    def test_an_unknown_birth_date_is_refused_too(self):
+        with self.assertRaises(ConsentRequired):
+            check_in(self.unconsented(None))
+
+    def test_recording_hours_by_hand_is_refused_as_well(self):
+        # The paper-sheet route reaches attended without ever checking in, so
+        # guarding only check_in() would leave a second way round.
+        with self.assertRaises(ConsentRequired):
+            record_hours(self.minor(), Decimal("3.00"))
+
+    def test_checking_out_is_refused_as_well(self):
+        participation = self.minor()
+        participation.checked_in_at = NOW
+        participation.save(update_fields=["checked_in_at"])
+        with self.assertRaises(ConsentRequired):
+            check_out(participation, at=NOW + HOUR)
+
+    def test_a_minor_with_consent_checks_in_normally(self):
+        participation = sign_up(
+            contact=make_person(
+                "Consented", birth_date=local_today() - datetime.timedelta(days=365 * 15)),
+            event_role=self.role,
+            consent={
+                "consent_given_by": "王秀英",
+                "consent_method": Participation.ConsentMethod.VERBAL,
+                "consent_email": "parent@example.com",
+            },
+        )
+        check_in(participation, at=NOW)
+        self.assertEqual(participation.status, Participation.Status.ATTENDED)
+
+
 class EventTests(TestCase):
     def test_event_end_time_cannot_precede_start_time(self):
         with self.assertRaises(IntegrityError), transaction.atomic():
@@ -581,6 +644,14 @@ class DictionaryTableTests(TestCase):
         self.assertEqual(first.pk, second.pk)
         self.assertEqual(first.code, "general")
 
+    def test_the_general_role_is_already_there_after_migrating(self):
+        # This database was built by the migrations and nothing else, so the
+        # row can only have come from 0003. It used to be created by seed_demo,
+        # which refuses to run with DEBUG off — meaning a production database
+        # would have come up without the one row that "no particular job" has
+        # to land on. An invariant of the schema belongs in a migration.
+        self.assertTrue(ParticipationRole.objects.filter(code="general").exists())
+
 
 class PageTestCase(TestCase):
     """Shared cast: two ministries, one admin of each, one plain volunteer.
@@ -714,6 +785,21 @@ class VolunteerPageTests(PageTestCase):
         self.login(self.lisi)
         response = self.client.get(reverse("events:my_participations"))
         self.assertEqual(list(response.context["participations"]), [mine])
+
+    def test_my_participations_leaves_out_signups_on_unpublished_events(self):
+        # Every row on that page links to the detail page, and the detail page
+        # uses visible_to_volunteers() — so a signup an admin entered against a
+        # draft would otherwise be listed with a link that 404s. Both pages ask
+        # the same predicate, which is the point of having two of them.
+        draft = make_event(ministry=self.pantry, name="Unpublished",
+                           owner=self.zhang.contact, status=Event.Status.DRAFT)
+        hidden = Participation.objects.create(
+            contact=self.lisi.contact, event_role=make_role(draft, "lifting"))
+        self.login(self.lisi)
+        response = self.client.get(reverse("events:my_participations"))
+        self.assertNotIn(hidden, response.context["participations"])
+        detail = self.client.get(reverse("events:event_detail", args=[draft.pk]))
+        self.assertEqual(detail.status_code, 404)
 
     def test_cancelling_keeps_the_row_and_changes_the_status(self):
         mine = Participation.objects.create(

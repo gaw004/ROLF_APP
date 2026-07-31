@@ -84,6 +84,31 @@ def sign_up(*, contact, event_role, consent=None):
     return participation
 
 
+def _mark_attended(participation):
+    """Move a row to attended — the one place that transition is made.
+
+    ⚠️ The other half of P3's rule, and the half that had been left out. sign_up()
+       refuses to create a minor's row without consent, but that is a hint layer:
+       bulk_create and the admin both walk straight past it, so such a row can
+       exist. The gate that matters then is this one — "did they turn up" is what
+       the hours, the statistics and the notifications all hang off, and marking
+       an unconsented minor as attended is the state the rule exists to forbid.
+
+    Cross-table again (the age is on Contact, the signup is here), so no
+    CheckConstraint can say it and D14 says to record that plainly rather than
+    dress it up. All three routes to attended come through here — check_in(),
+    check_out() and the paper-sheet record_hours() — because a rule with three
+    entrances and one guard is a rule with two ways round it.
+    """
+    if participation.contact.is_minor in (True, None) and participation.consent_at is None:
+        raise ConsentRequired({
+            "consent_given_by": "There is no guardian's consent on this signup, so "
+                                "it cannot be marked as attended. (An unknown birth "
+                                "date is treated as a minor.)",
+        })
+    participation.status = Participation.Status.ATTENDED
+
+
 def cancel(participation):
     """The volunteer is not coming after all.
 
@@ -97,9 +122,12 @@ def cancel(participation):
 
 
 def check_in(participation, *, at=None):
-    """They turned up. Records the time and moves status to attended."""
+    """They turned up. Records the time and moves status to attended.
+
+    Refuses a minor with no consent on the row — see _mark_attended().
+    """
     participation.checked_in_at = at or local_now()
-    participation.status = Participation.Status.ATTENDED
+    _mark_attended(participation)
     participation.full_clean(exclude=["registered_at"])
     participation.save()
     return participation
@@ -127,7 +155,7 @@ def check_out(participation, *, at=None):
         participation.hours = Decimal(elapsed.total_seconds()) / Decimal(3600)
         participation.hours = participation.hours.quantize(Decimal("0.01"))
     if participation.hours is not None:
-        participation.status = Participation.Status.ATTENDED
+        _mark_attended(participation)
     participation.full_clean(exclude=["registered_at"])
     participation.save()
     return participation
@@ -140,7 +168,7 @@ def record_hours(participation, hours):
     authoritative value; what differs is where the number came from.
     """
     participation.hours = hours
-    participation.status = Participation.Status.ATTENDED
+    _mark_attended(participation)
     participation.full_clean(exclude=["registered_at"])
     participation.save()
     return participation

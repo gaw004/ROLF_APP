@@ -132,12 +132,22 @@ def event_signup(request, pk):
 
 @login_required
 def my_participations(request):
-    """Mine means mine — narrowed in the query, not in the template."""
+    """Mine means mine — narrowed in the query, not in the template.
+
+    visible_to_volunteers() as well, which is not belt and braces: every row
+    here links to the detail page, and that page uses the same predicate. A
+    signup an admin entered against an unpublished event would otherwise appear
+    with a link that 404s — the failure this pair of predicates was written to
+    prevent, arriving from the other end.
+    """
     contact = _my_contact(request)
     rows = Participation.objects.none()
     if contact is not None:
         rows = (
-            Participation.objects.filter(contact=contact)
+            Participation.objects.filter(
+                contact=contact,
+                event_role__event__in=Event.objects.visible_to_volunteers(),
+            )
             .select_related("event_role__event__ministry", "event_role__role")
             .order_by("-event_role__event__start_time")
         )

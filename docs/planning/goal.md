@@ -342,8 +342,8 @@ D1–D22 **一条一个文件**，索引见 [`decisions/README.md`](decisions/RE
 **B6–B13 已经做完了**（2026-07-30）：`events` 五张表 + `EventNotification`、
 `MinistryRole` + `org/permissions.py`、注册流程、志愿者自助页、ministry admin 侧页面、
 活动变更通知、R1–R8 的统计口径、`seed_demo`。
-测试从 192 涨到 353，`check` / `makemigrations --check` / `ruff` 都干净，
-12 条 grep 守卫做过双向验证。实测结果见 [`02-roadmap.md` 的收尾那节](02-roadmap.md#自动化部分的实测结果2026-07-30)。
+测试从 192 涨到 363，`check` / `makemigrations --check` / `ruff` 都干净，
+12 条 grep 守卫做过双向验证。实测结果见 [`02-roadmap.md` 的收尾那节](02-roadmap.md#自动化部分的实测结果)。
 
 **下一步是浏览器里那一遍**：照[验收清单](phase-b.md#验收2026-07-29-重写改成按-14-条需求逐条验收)
 扮三个角色各走一遍。`python manage.py seed_demo` 一条命令把数据造齐

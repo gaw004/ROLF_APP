@@ -143,20 +143,6 @@ class NotifyForm(forms.Form):
         self.fields["reason"].choices = EventNotification.Reason.choices
 
 
-class GrantForm(forms.Form):
-    """P5: appoint somebody as a ministry's admin.
-
-    A plain Form: granted_by comes from the session, not from the page, and a
-    field somebody could type into would be a field somebody could lie in.
-    """
-
-    contact = forms.ModelChoiceField(queryset=None, label="谁")
-    start_date = forms.DateField(
-        required=False, label="生效日", widget=forms.DateInput(attrs={"type": "date"}))
-
-    def __init__(self, *args, **kwargs):
-        from contact.models import Contact
-
-        super().__init__(*args, **kwargs)
-        self.fields["contact"].queryset = Contact.objects.filter(
-            is_active=True, contact_type=Contact.ContactType.INDIVIDUAL)
+# P5's GrantForm used to live here and now lives in org/forms.py. Its subject is
+# a ministry, and org/views.py was importing it back across the one dependency
+# INSTALLED_APPS spells out (events -> org). See org/forms.py.

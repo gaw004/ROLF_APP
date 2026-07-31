@@ -15,8 +15,7 @@ from django.core.exceptions import PermissionDenied
 from django.http import Http404
 from django.shortcuts import get_object_or_404, redirect, render
 
-from events.forms import GrantForm
-
+from .forms import GrantForm
 from .models import Ministry
 from .permissions import can_grant_ministry_admin
 from .services import find_grant, grant_ministry_admin, ministry_admins, revoke_ministry_role

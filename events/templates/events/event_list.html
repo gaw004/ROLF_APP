@@ -1,0 +1,22 @@
+{% extends "core/base.html" %}
+{% block title %}活动{% endblock %}
+
+{% block content %}
+  <h1>可以报名的活动</h1>
+  {% comment %}
+  这一页只列 open_for_signup() + 未开始的。筛选发生在查询里，不是在这里用
+  {% if %} 藏起来 —— 模板里不显示 ≠ 数据没发出去。
+  {% endcomment %}
+
+  <ul>
+    {% for event in events %}
+      <li>
+        <a href="{% url 'events:event_detail' event.pk %}">{{ event.name }}</a>
+        —— {{ event.ministry.name }} · {{ event.start_time }} 至 {{ event.end_time }}
+        {% if event.location %}· {{ event.location }}{% endif %}
+      </li>
+    {% empty %}
+      <li>现在没有开放报名的活动。</li>
+    {% endfor %}
+  </ul>
+{% endblock %}

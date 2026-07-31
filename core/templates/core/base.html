@@ -1,0 +1,46 @@
+{% comment %}
+The one shared shell for the self-service pages. Deliberately plain: no CSS
+framework, no JavaScript, and it extends nothing from the admin.
+
+Styling is out of scope for this phase on purpose — the acceptance test is
+"clickable, usable, permissions correct". Phase C replaces this file (and only
+this file) to give the pages a look; the views, the forms and the services
+carry over untouched, which is the whole point of keeping them out of admin.py.
+{% endcomment %}
+<!doctype html>
+<html lang="zh">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}ROLF{% endblock %}</title>
+</head>
+<body>
+  <header>
+    <nav>
+      <a href="{% url 'events:event_list' %}">活动</a>
+      {% if user.is_authenticated %}
+        · <a href="{% url 'events:my_participations' %}">我的报名</a>
+        {% if user.is_staff %} · <a href="/admin/">管理后台</a>{% endif %}
+        · <span>{{ user.get_username }}</span>
+        <form method="post" action="{% url 'accounts:logout' %}" style="display:inline">
+          {% csrf_token %}
+          <button type="submit">登出</button>
+        </form>
+      {% else %}
+        · <a href="{% url 'accounts:login' %}">登录</a>
+        · <a href="{% url 'accounts:register' %}">注册</a>
+      {% endif %}
+    </nav>
+  </header>
+
+  {% if messages %}
+    <ul>
+      {% for message in messages %}<li>{{ message }}</li>{% endfor %}
+    </ul>
+  {% endif %}
+
+  <main>
+    {% block content %}{% endblock %}
+  </main>
+</body>
+</html>

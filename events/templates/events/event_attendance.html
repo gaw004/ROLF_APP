@@ -1,0 +1,55 @@
+{% extends "core/base.html" %}
+{% block title %}{{ event.name }} 签到{% endblock %}
+
+{% block content %}
+  <h1>{{ event.name }} —— 签到 / 签退 / 工时</h1>
+  <p>
+    签退时工时自动填上；纸质补录的人没有时间戳，直接手工填工时，照样算数 ——
+    <code>hours</code> 是权威值，签到签退只是采集手段。
+  </p>
+
+  <table border="1" cellpadding="4">
+    <tr><th>人</th><th>工种</th><th>状态</th><th>签到</th><th>签退</th><th>工时</th><th>操作</th></tr>
+    {% for row in participations %}
+      <tr>
+        <td>
+          {{ row.contact }}
+          {% if row.contact.is_minor is None %}
+            <br><small>生日未知（按未成年处理）</small>
+          {% elif row.contact.is_minor %}
+            <br><small>未成年</small>
+          {% endif %}
+          {% for emergency in row.contact.emergency_contacts.all %}
+            <br><small>紧急联系人：{{ emergency.name }} {{ emergency.phone }}</small>
+          {% endfor %}
+        </td>
+        <td>{{ row.event_role.role.name }}</td>
+        <td>{{ row.get_status_display }}</td>
+        <td>{{ row.checked_in_at|default:"—" }}</td>
+        <td>{{ row.checked_out_at|default:"—" }}</td>
+        <td>{{ row.hours|default:"—" }}</td>
+        <td>
+          <form method="post">
+            {% csrf_token %}
+            <input type="hidden" name="participation" value="{{ row.pk }}">
+            <button type="submit" name="action" value="check_in">签到</button>
+            <button type="submit" name="action" value="check_out">签退</button>
+          </form>
+          <form method="post">
+            {% csrf_token %}
+            <input type="hidden" name="participation" value="{{ row.pk }}">
+            {{ hours_form.hours }}
+            <button type="submit" name="action" value="hours">手工填工时</button>
+          </form>
+        </td>
+      </tr>
+    {% empty %}
+      <tr><td colspan="7">还没有人报名。</td></tr>
+    {% endfor %}
+  </table>
+
+  <p><small>
+    这里的紧急联系电话是<strong>现场出事时拨号</strong>用的。活动前通知家长走的是
+    报名时收的 consent_email / consent_phone，见通知页 —— 紧急联系人没有邮箱。
+  </small></p>
+{% endblock %}

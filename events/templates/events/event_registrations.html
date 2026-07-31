@@ -1,0 +1,23 @@
+{% extends "core/base.html" %}
+{% block title %}{{ event.name }} 的报名名单{% endblock %}
+
+{% block content %}
+  <h1>{{ event.name }} —— 报名名单</h1>
+
+  {% for role in roles %}
+    <h2>{{ role.role.name }}
+      （需要 {{ role.needed_count|default:"不限" }} 人 / 已报 {{ role.registered_count }} 人）</h2>
+    {% comment %}
+    没人报名的工种在这里也有一节 —— 看不见的缺口等于没有缺口。
+    {% endcomment %}
+    <ul>
+      {% for row in role.participations.all %}
+        <li>{{ row.contact }} —— {{ row.get_status_display }}</li>
+      {% empty %}
+        <li>还没有人报这个工种。</li>
+      {% endfor %}
+    </ul>
+  {% empty %}
+    <p>这场活动还没开工种。</p>
+  {% endfor %}
+{% endblock %}

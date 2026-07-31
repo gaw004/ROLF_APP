@@ -1510,7 +1510,7 @@ python manage.py startapp events
 | 模型 | 要点 |
 |---|---|
 | `EventType` | 字典表：`code`（唯一·不可改）/ `name` / `is_active`。照 `Ministry` 抄，`ImmutableCodeMixin` + `UniqueConstraint(Lower("code"))` |
-| `ParticipationRole` | 字典表，同上。**必须 seed 一行 `code=general`**（"通用志愿者"）—— `Participation.event_role` 非空之后，"没有具体分工"要有地方落 |
+| `ParticipationRole` | 字典表，同上。**必须 seed 一行 `code=general`**（"通用志愿者"）—— `Participation.event_role` 非空之后，"没有具体分工"要有地方落。<br>落点是**数据迁移**（`events/migrations/0003_seed_general_participation_role.py`），不是 `seed_demo`：它是 schema 的一条不变量，而 `seed_demo` 拒绝在 `DEBUG` 关掉时运行，只靠它的话生产库起来就没有这一行（2026-07-31 补，见「计划外（三方核对）」） |
 | `Event` | 见下 |
 | `EventRole` | **本步的核心新表** —— 见下 |
 | `Participation` | 见下 |
@@ -1612,6 +1612,8 @@ class EventRole(ConstraintErrorFieldMixin, TimeStampedModel):
     needed_count = PositiveIntegerField(null=True, blank=True,
                        help_text="Leave empty for no limit. Advisory only — signups are never blocked.")
     notes        = TextField(blank=True)
+
+    history = HistoricalRecords()      # needed_count 是对外发布出去的承诺，见下面 Participation 那条
 
     objects = models.Manager.from_queryset(EventRoleQuerySet)()
 
@@ -1718,7 +1720,7 @@ def check_out(participation, *, at=None):
 
 ### admin
 
-`EventAdmin` 挂两个 inline：`EventRoleInline`（开工种）和…… **不挂 `ParticipationInline`**。
+`EventAdmin` 只挂一个 inline：`EventRoleInline`（开工种）。**不挂 `ParticipationInline`** —— 原计划是两个，当场改掉了，理由见下。
 
 > ⚠️ 原计划是"`EventAdmin` 用 inline 直接登记参与者"。改掉了 ——
 > `Participation` 现在挂 `EventRole` 不挂 `Event`，做成嵌套 inline 需要第三方包
@@ -1996,7 +1998,8 @@ def test_anonymous_users_are_redirected_to_login(self)
 | `/events/<pk>/roles/` | `can_manage_event()` | 开工种、填 `needed_count` |
 | `/events/<pk>/registrations/` | `can_view_registrations()` | 报名名单（P4 上半） |
 | `/events/<pk>/attendance/` | `can_manage_event()` | 签到 / 签退 / 手工填工时（P4 下半） |
-| `/ministries/<pk>/admins/` | `can_grant_ministry_admin()` | P5：指定 ministry admin |
+| `/events/<pk>/report/` | `can_manage_event()` | R3–R8 的那一页（2026-07-31 补进本表）。原来它只在 B12 以「统计的页面」一句话存在，没给 URL 也没给权限 —— 而验收 ② 的 `R4–R7` 和 `R8` 两条勾都是点它 |
+| `/ministries/<pk>/admins/` | `can_grant_ministry_admin()` | P5：指定 ministry admin。⚠️ 视图和表单都在 `org`（`org/views.py` + `org/forms.py`），不在 `events` —— 主语是 ministry，且 `events → org` 是单向的，见「计划外（三方核对）」 |
 
 ### 三条硬要求
 
@@ -2062,10 +2065,16 @@ class NotificationBackend(Protocol):
 `core/notifications/` 下面出现 `Contact` / `Participation` / `is_minor` 就变红。
 
 ```python
-# settings/base.py
-NOTIFICATION_BACKEND = "core.notifications.console.ConsoleBackend"
-# settings/prod.py 换成 novu.NovuBackend；测试 override 成 locmem
+# settings/base.py —— 默认 console，实际值走环境变量
+NOTIFICATION_BACKEND = env("NOTIFICATION_BACKEND", "core.notifications.console.ConsoleBackend")
+# 测试 override 成 locmem
 ```
+
+> 2026-07-31 改的是这一句，代码是对的。 原文写「`settings/prod.py` 换成
+> `novu.NovuBackend`」，而 `prod.py` 只有 `from .base import *` ——
+> 后端名和 Novu 的凭据一样走环境变量（同 `SECRET_KEY`，Phase A 已经拆好了配置）。
+> 把类名硬写进 `prod.py` 等于换 provider 要改代码、要发一次版，
+> 而那正是 D22 拆出适配器要避免的事。
 
 > **Novu 的凭据走环境变量**（同 `SECRET_KEY`，Phase A 已经拆好了配置）。
 > **别在这一步接真实的 Novu** —— 本机没有域名，发不出去也验不了。
@@ -2091,8 +2100,12 @@ def resolve_recipients(event) -> tuple[list[Recipient], list[Unreachable]]:
     """谁该收到通知、用什么地址。换 provider 时这个函数一个字不改。
 
     三条规则：
-    1. 成年人 → 他自己，按 Contact.preferred_contact_method 选渠道，
+    1. 成年人 → 他自己，按 Contact.preferred_communication_method 选渠道，
        该渠道为空就回落到另一个；
+       ⚠️ 字段名 2026-07-30 更正：本文档和 D22 原来写的是 preferred_contact_method，
+          而 contact/models.py 里那个字段叫 preferred_communication_method ——
+          照原文写会 FieldError。同 consent_given_by 那次，是"引用了一个不存在的东西"。
+          顺带：它的四档里 mail 不是可投递渠道，phone 归到 sms，见实现；
     2. 未成年人 → 【家长】。依次找：这条 Participation 的 consent_email /
        consent_phone（B9 报名时收的）→ contact.emergency_contacts 的第一条（只有电话 ⇒ sms）。
        ⚠️ 15 岁的志愿者可能根本没有自己的手机，发给他等于没发；
@@ -2168,6 +2181,12 @@ class EventNotification(ConstraintErrorFieldMixin, TimeStampedModel):
 ⚠️ **默认文案里不写未成年人姓名**，只写活动信息 + "您的孩子报名的活动"
 （D22 代价 2 的缓解：即使走第三方平台，泄露面也只有一个邮箱地址加一段活动公告）。
 文案末尾带一句"新时间来不了请点这里取消报名"，链到 `/me/participations/`。
+
+> ⚠️ **实现时这句话没有变成真的链接**（2026-07-30 如实记）：正文是纯文本，
+> 要生成绝对 URL 得先有域名，而本机没有 —— 这正是 `NovuBackend` 只写薄壳、
+> 真接通留给 Phase C 的同一个原因。现在写的是"请到「我的报名」里取消"。
+> **有域名之后把它换成 `settings.SITE_URL + reverse(...)` 即可**，
+> 收件人解析和留痕都不用动。记在这里，免得以后当成漏做。
 
 > **报名照旧，`Participation` 一个字段不加**（2026-07-29 定）。
 > 别顺手加 `needs_reconfirmation` —— 那是把"这个人和某次改动的关系"塞进
@@ -2296,9 +2315,36 @@ Participation.objects.filter(
 
 ### 收尾
 
-- [ ] `goal.md` 的 Phase B 状态改成 ✅，「还没定的」按实际答复更新
-- [ ] 本文档末尾的「计划外记录」填上实施时才发现的事
-- [ ] README 里补上 `events` app 和自助页面的说明
+- [x] 本文档末尾的「计划外记录」填上实施时才发现的事（B12 / B10 / B13 三条）
+- [x] README 里补上 `events` app 和自助页面的说明
+- [ ] `goal.md` 的 Phase B 状态改成 ✅ —— **等浏览器那一遍走完再改**。
+      B6–B13 的代码和自动化验收已经全绿（见下），但[验收清单](phase-b.md#验收2026-07-29-重写改成按-14-条需求逐条验收)
+      的三个角色仍然要在浏览器里真的点一遍：表单排版坏了、链接指向空处，
+      断言看不出来。**清单本身现在是 `AcceptanceWalkTests`**，浏览器那一遍是复核，不是唯一防线
+- [ ] 「还没定的」按基金会的实际答复更新（5 个问题都还没回，都不阻塞）
+
+#### 自动化部分的实测结果
+
+> 日期从标题里拿掉了（2026-07-31）：它原来叫「…（2026-07-30）」，而重跑一次就要改标题，
+> **改标题会打断所有指向它的链接** —— `MarkdownLinkGuardTests` 当场就红了一条
+> （`goal.md` 指过来的那条）。这类"每次更新都会变"的东西不该进标题。
+
+| 项 | 结果 |
+|---|---|
+| `python manage.py test` | 363 个，全绿（开工基线 192）。<br>⚠️ 这一格 2026-07-30 写的是 `353`，而同一天晚些的 middleware 那个 commit 加了测试没回来改它 —— **写死的数字是一种会过期又不报错的东西**，和文档里写代码行号同一类。留着它是因为验收清单要的是"只增不减"，那需要一个基线数 |
+| `python manage.py check` | 0 issues, 0 silenced |
+| `makemigrations --check --dry-run` | No changes detected |
+| `ruff check .` | All checks passed |
+| `events_participation` 有没有 `event_id` / `role_id` 列 | 没有 —— 都在 `event_role_id` 里 |
+| `events_event` 有没有 `capacity` 列 | 没有 |
+| `ministryrole_unique_grant` | `UNIQUE NULLS NOT DISTINCT (contact_id, ministry_id, role, start_date)` |
+| `eventrole_unique_per_event` / `participation_unique_per_event_role` | 都在库里 |
+| 12 条 grep 守卫**双向**验证 | 该红的都红、不该红的没红（脚本见下） |
+
+守卫的双向验证是照 [B5 复盘那条](#-计划外b0b5-复盘守卫验过会红不等于该红的都红)做的：
+往每个守卫管的文件里塞一段"它该抓的"和一段"它不该抓的"，两边都对才算过。
+汇报链那条特意塞了四种写法（多行循环体 / `_id` 后缀 / 递归 / 推导式），
+因为那正是它上次漏掉的四种。
 
 ---
 
@@ -2685,3 +2731,144 @@ def retired(self):              # 已撤销 —— 第三种状态，必须看�
 > `Event.status` 上又救了一次：可见集初稿写成了 `exclude(DRAFT)`。）
 > 任何「已完成 = 不是已取消」「缺席 = 没签到」这类写法都是同一个病，
 > 而且状态越多，补集捞进来的越多。一律列全 + partition 测试。
+
+### ⚠️ 计划外（B12）：`event.start_time.date()` 是 UTC 的那一天
+
+**症状**：R8 的 `ministry_staff_participation()` 按 roadmap 原文写成
+`on = event.start_time.date()`（B12 那段代码块里就是这么写的），
+一条月份边界的测试变红 —— 一场"8 月 1 日"的活动不在 8 月的窗口里。
+
+**根因**：`DateTimeField` 取回来是 **UTC**。太平洋时间 7 月 31 日下午 6 点的活动，
+`.date()` 答的是 **8 月 1 日**。于是 R8 那句"活动当天在职的 employee"
+问的是**错的那一天**，差一天，**而且不报错** —— 正是 D16 存在的全部理由，
+只是这次不在"今天"上，在"某个存下来的时刻"上。
+
+**修法**：`core/timeutils.py` 加 `local_date_of()` / `local_month_of()`，
+R8 改用前者。顺带加第三条时间守卫：`\w+_(time|at)\.date\(\)`
+（本项目所有 datetime 字段都叫 `*_time` 或 `*_at`）。
+
+**这条守卫加完当场又抓到两处** —— 都在同一天写的测试里，
+而那两处测试正是用来验 R8 时间口径的。**一条只在自己身上验过的守卫等于没有守卫**
+（B5 复盘那条），这次是反过来的证据：守卫一上线就找出了写它的人刚犯的同一个错。
+
+**一般化**：
+> D16 原来只管"今天"。 现在是两句：**取今天走 `local_today()`，
+> 问某个存下来的时刻是哪一天走 `local_date_of()`**。
+> `.date()` 这个方法在本项目里没有正确的用法。
+
+顺带第三次踩到 B1 那条：**守卫的注释里不许把被禁的写法拼出来** ——
+`local_date_of()` 的 docstring 原本举了反例，守卫当场抓到了自己。
+
+### ⚠️ 计划外（B10）：权限守卫第一次跑，红的是 P5 自己那一页
+
+**症状**：`MinistryRole.objects` 的 grep 守卫按"除 `permissions.py` 外一律不许"
+写完，第一次跑就红 —— 命中的是 `org/views.py`，也就是 P5 的授权页本身。
+那一页**按定义就要写这张表**（授权、撤销、列出）。
+
+**根因**：守卫的范围写宽了。 `goal.md` D20 和 roadmap B7 的原话都是
+"**`views.py` / `admin.py` / `forms.py`** 里不许出现"，而不是"除 permissions.py 外"。
+两者的差别正好是 `services.py`。
+
+**修法**：不是放宽豁免，是把写操作搬进 `org/services.py`
+（`ministry_admins()` / `grant_ministry_admin()` / `find_grant()` / `revoke_ministry_role()`），
+视图变成薄壳。守卫按文档原文改成只扫那三个文件名。
+
+**一般化（值得记住的是这条分工）**：
+> **`permissions.py` 负责判断（"他能不能"），`services.py` 负责写（授权 / 撤销），
+> 视图两件都不做，只调其中一个。** 守卫红了的时候，先问是范围写错了
+> 还是代码放错了 —— 这次两样都有一点，而放宽豁免会把后一半永久盖住。
+
+### ⚠️ 计划外（B13）：验收清单跑成测试，当场抓出两个 500 / 403
+
+**这一条本身就是结论**：B13 的三个角色各走一遍，我先写成了自动化的
+`AcceptanceWalkTests`（跑 `seed_demo` 的数据，逐条对着 phase-b.md 的勾）。
+第一次跑就红了两条 —— **而这两处 B6–B12 的单元测试全绿**。
+
+#### 一、未成年人报名，关系那一栏留空 ⇒ 500
+
+`SignUpForm.consent()` 把五个同意字段统一填成 `""`，
+而 `consent_relationship` 是**外键** —— 给外键赋 `""` 直接
+`ValueError: Cannot assign ""`。关系本来就是可空的、留空很常见，
+所以这不是边角情况，**是那条路上最普通的一次点击**。
+单元测试没抓到，是因为它们都直接调 `sign_up()`，绕过了表单那一层。
+
+> 一般化：**表单往 model 送空值时，外键的空是 `None`，字符字段的空是 `""`**。
+> 一句 `or ""` 扫过所有字段看着整齐，遇到外键就是 500。
+
+#### 二、`foundation_admin` 这个 Group 什么权限都没有
+
+验收 ① 要求总管"在 admin 侧看 R1–R3"，而 `foundation_admin_group()`
+只是 `get_or_create` 了一个**空组** —— `is_staff=True` 加一个空组，
+admin 里 403。D20 原文写着这个组要授 `org.add_ministryrole` 那几条，
+**而代码只建了组、没授权限**。
+
+> 一般化（这条更值钱）：**一个空的 Group 和一个满的 Group 在任何列表里长得一模一样**，
+> 只有真的有人去用它的时候才知道是空的。所以权限跟着组一起在代码里建，
+> 不留给"以后去 admin 里点一下"。
+
+#### 三、连带发现：验收清单本身是可执行的
+
+原以为"扮三个角色各走一遍"只能靠人点。实际上其中**大部分**能写成
+`self.client.login(...)` + 打 URL + 断言，而且每一条都对应清单上的一个勾。
+浏览器那一遍仍然要走（表单排版坏了、链接指向空处，断言看不出来），
+但它现在是**复核**，不是唯一防线 —— 同 2026-07-29 晚把四条分层验收
+从清单搬进 grep 守卫的那一次，一模一样的动作。
+
+### ⚠️ 计划外（三方核对）：第二遍核对抓到的三处，都在第一遍的表格之外
+
+2026-07-30 那次三方核对按八张表（模型 / 约束 / `on_delete` / 索引 / 函数签名 /
+页面 / 测试 / seed）逐格核过，结论是"结构层面全部对得上"。**那句话是真的，
+而下面三处一处都不在那八张表里** —— 它们分别是一条规则的第二句、一页的谓词、
+和一个 `import` 的方向。记在这里，因为**核对表本身有形状**：
+它盯得住"这个字段在不在"，盯不住"这条规则的后半句实现了没有"。
+
+#### 一、`check_in()` 少了同意闸门 —— 文档写了两遍，代码里没有
+
+`phase-b.md` 的同意字段那一行和「必须写的测试」那张表，都写着同一条 P3 规则：
+未成年人没有同意记录，**既报不了名，也不能被 `check_in()` 标成 `attended`**。
+`sign_up()` 实现了前半句，后半句一个字都没有，测试也没有。
+
+**可达路径不是边角**：`ParticipationAdmin` 能直接建一行未成年人的 `Participation`
+（模型层没有同意校验，也不该有 —— 那是跨表判断），签到页一点就 `attended`。
+而 `attended` 正是工时、统计和通知挂着的那个状态。
+
+**修法**：`events/services.py::_mark_attended()` —— 通往 `attended` 的三条路
+（`check_in` / `check_out` / `record_hours`）全部走它。
+只补 `check_in()` 的话，纸质补录那条路照样绕得过去。
+
+> **一般化**：**一条规则有几个入口，就要问岗哨是不是只有一个。**
+> 判定方法：grep `status = ...ATTENDED`，数一数有几处 —— 超过一处，
+> 就把那一处抽成函数，而不是在每一处各写一遍判断。
+> 这和 D9 那句"不经过 `save()` 直接写会不会被拒"是同一把尺子，换了一层。
+
+#### 二、`/me/participations/` 没走 `visible_to_volunteers()`
+
+B9 的第 1 条和 `phase-b.md`[可见性与生命周期](phase-b.md#可见性与生命周期两个谓词不是一个-status2026-07-29-晚新增)
+都把这一页和详情页、通知链接列在同一组里，点名用 `visible_to_volunteers()`。
+实现只有 `filter(contact=...)`。
+
+后果具体得刚好是这两个谓词当初要防的那件事，只是从另一头来的：
+这一页**每一行都链到详情页**，而详情页走 `visible_to_volunteers()` ——
+所以一条建在 `draft` 活动上的报名（admin 按纸质名单代录的常规动作），
+在这一页上列得出来，**点过去是 404**。
+
+> 当时那一节盯的是"活动一 `confirmed`，报过名的人打不开它"。
+> 同一对谓词漏在列表页那一侧，症状换成"列得出来、点不开"，
+> 一样不报错。**成对的谓词要成对地核**，只核被写进正文那半条不够。
+
+#### 三、`GrantForm` 放在 `events`，把依赖方向弄反了
+
+P5 的表单定义在 `events/forms.py`，唯一使用者是 `org/views.py` ——
+全项目唯一一条反向跨 app import。而 `INSTALLED_APPS` 的注释自己写着
+"events depends on both"，D17 定的是 `events → org → contact → core`，
+上面「计划外（B5）」那条教训的一般化原话是
+"跨 app 的装配一律写在下游 app 里，别让上游去 import 下游"。
+
+视图当时放对了（`org/views.py`，主语是 ministry），**表单跟着走的时候落在了原地**。
+搬进新建的 `org/forms.py`，`Contact` 的 import 顺带从函数体里提回模块级
+（原来写在函数里正是为了绕开这个方向问题）。
+
+> **一般化**：**"这段代码归哪个 app"要问主语，不问它是被谁调用的。**
+> 上一次这条教训是关于 admin inline 的（B5），这次是表单 —— 同一条判据第二次没执行，
+> 说明它现在**只在 admin 那一格里被记住了**。它对 `forms.py` / `services.py` /
+> `views.py` 一样成立。

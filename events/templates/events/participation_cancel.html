@@ -1,0 +1,13 @@
+{% extends "core/base.html" %}
+{% block title %}取消报名{% endblock %}
+
+{% block content %}
+  <h1>取消报名</h1>
+  <p>{{ participation.event_role.event.name }} —— {{ participation.event_role.role.name }}</p>
+  <p>取消不会删掉这条记录，只是把状态改成"已取消"。</p>
+  <form method="post">
+    {% csrf_token %}
+    <button type="submit">确认取消</button>
+    <a href="{% url 'events:my_participations' %}">算了</a>
+  </form>
+{% endblock %}

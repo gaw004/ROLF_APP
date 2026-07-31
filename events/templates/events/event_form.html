@@ -1,0 +1,15 @@
+{% extends "core/base.html" %}
+{% block title %}发布活动{% endblock %}
+
+{% block content %}
+  <h1>发布一场活动</h1>
+  {% comment %}
+  ministry 下拉里只有这个人管的那几个。那是防手滑；防越权的是视图里对提交值
+  再判一次 —— 两件事，都要有。
+  {% endcomment %}
+  <form method="post">
+    {% csrf_token %}
+    {{ form.as_p }}
+    <button type="submit">建立并开工种</button>
+  </form>
+{% endblock %}

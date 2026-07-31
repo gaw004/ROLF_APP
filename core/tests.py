@@ -247,16 +247,33 @@ class TimeSourceGuardTests(TestCase):
     # in a comment; the first version of this test failed on its own docstring.
     NAIVE_TODAY = r"\bdate\.today\(\)"          # follows the server's timezone
     UTC_DATE = r"\btimezone\.now\(\)\.date\(\)"  # the UTC date, a day early after 5pm PT
+    # The third spelling, added after it was found in shipped code: taking the
+    # day off a stored DateTimeField. Every datetime column in this project is
+    # named *_time or *_at, so that is what it looks for.
+    STORED_INSTANT_DATE = r"\b\w+_(time|at)\.date\(\)"
 
     def test_nobody_computes_today_outside_core_timeutils(self):
-        # ruff's DTZ catches the first pattern but not the second: that one is
-        # tz-aware and looks perfectly legitimate to a linter. Hence this guard.
+        # ruff's DTZ catches the first pattern but not the others: those are
+        # tz-aware and look perfectly legitimate to a linter. Hence this guard.
         hits = offending_lines(
             f"{self.NAIVE_TODAY}|{self.UTC_DATE}",
             skip=["core/timeutils.py"],
         )
         self.assertEqual(
             hits, [], "Use core.timeutils.local_today() instead:\n" + "\n".join(hits))
+
+    def test_nobody_takes_the_day_off_a_stored_instant_directly(self):
+        # A DateTimeField comes back in UTC, so an event at 6pm Pacific on the
+        # 31st has .date() == the 1st. R8 asks "who was employed on the day of
+        # the event" with that value — off by one, and silent. R8 shipped with
+        # exactly this bug and a month-boundary test caught it; the guard is
+        # here so the next one is caught at the point of writing.
+        hits = offending_lines(self.STORED_INSTANT_DATE, skip=["core/timeutils.py"])
+        self.assertEqual(
+            hits,
+            [],
+            "That is the UTC day. Use core.timeutils.local_date_of():\n" + "\n".join(hits),
+        )
 
 
 class LayeringGuardTests(TestCase):
@@ -307,6 +324,178 @@ class OrgTreeGuardTests(TestCase):
             [],
             "Walk the reporting chain via org.services.build_org_tree():\n" + "\n".join(hits),
         )
+
+
+class PermissionGuardTests(TestCase):
+    """Lint-as-test: ministry-scoped authority is judged in exactly one place."""
+
+    # Written escaped and only here, so this file never contains the literal
+    # text it hunts for and the guard can scan itself.
+    DIRECT_QUERY = r"MinistryRole\.objects"
+
+    def test_only_permissions_py_queries_ministryrole(self):
+        """views.py / admin.py / forms.py never touch the grant table themselves.
+
+        Same argument as the org-tree guard, one notch more serious. Checks
+        scattered across views and admin means one of them eventually forgets
+        .active() or ministry__is_active — and where a missed traversal hangs
+        the page (loud), a missed permission check is silent: nothing raises,
+        somebody merely sees what they should not.
+
+        Two places may touch the table, and the split is worth stating:
+        permissions.py *judges* ("may they?"), services.py *writes* (P5's page
+        grants and revokes, which by its nature edits grants). A view does
+        neither — it calls one of them. This guard was first written to skip
+        only permissions.py and immediately went red on P5's own page; the
+        answer was not to widen the exemption but to move the writes into
+        org/services.py, which is where the roadmap's version of this guard
+        pointed all along.
+        """
+        hits = offending_lines(
+            self.DIRECT_QUERY, only_filenames={"views.py", "admin.py", "forms.py"})
+        self.assertEqual(
+            hits,
+            [],
+            "Ask org.permissions to judge, org.services to write:\n" + "\n".join(hits),
+        )
+
+
+class NotificationBackendGuardTests(TestCase):
+    """Lint-as-test: a delivery backend knows an address, a channel and words.
+
+    Nothing else. The moment one of them knows that minors are notified through
+    a guardian, changing provider means rewriting that rule — and it is a rule
+    about this foundation, which no notification platform has ever heard of.
+    Who to tell lives in events/services.py::resolve_recipients(); this package
+    only puts bytes on a wire. See goal.md D22.
+    """
+
+    BUSINESS_NAMES = r"\b(Contact|Participation|is_minor|EventRole|guardian)\b"
+
+    def test_the_backend_never_imports_contact_or_participation(self):
+        hits = [
+            hit for hit in offending_lines(self.BUSINESS_NAMES)
+            if hit.startswith("core/notifications/")
+        ]
+        self.assertEqual(
+            hits,
+            [],
+            "Delivery adapters take (address, channel, content) and nothing "
+            "else:\n" + "\n".join(hits),
+        )
+
+
+class ViewsAreThinGuardTests(TestCase):
+    """Lint-as-test: statistics live in QuerySets and services, not in views.
+
+    R4–R8 are the answers this whole phase exists to produce. Computed in a
+    view, they get rewritten along with the templates the first time the
+    interface changes — which is scheduled, not hypothetical (D18).
+    """
+
+    # Aggregates, capitalised: the ORM functions, not queryset.count().
+    AGGREGATES = r"\b(Sum|Count|Avg|Max|Min)\("
+    # Date arithmetic of any kind belongs to core.timeutils or a QuerySet.
+    DATE_MATHS = r"\btimedelta\(|\bmonth_bounds\(|\blocal_today\(|\blocal_now\("
+
+    def test_views_contain_no_statistics_or_date_arithmetic(self):
+        hits = offending_lines(
+            f"{self.AGGREGATES}|{self.DATE_MATHS}", only_filenames={"views.py"})
+        self.assertEqual(
+            hits,
+            [],
+            "Views are thin shells — put this on a QuerySet or in services.py:\n"
+            + "\n".join(hits),
+        )
+
+
+class AdminHasNoLogicGuardTests(TestCase):
+    """Lint-as-test: the four admin hooks that would hide business logic (D18).
+
+    The executable form of "delete admin.py and every business rule is still
+    there". get_queryset in particular is the tempting one — it is where an
+    annotation would go, and an annotation there is a rule the front end cannot
+    reach.
+    """
+
+    HOOKS = r"def (save_model|save_related|get_queryset|get_formset)\b"
+
+    def test_admin_does_not_override_the_four_hooks(self):
+        hits = offending_lines(self.HOOKS, only_filenames={"admin.py"})
+        self.assertEqual(
+            hits,
+            [],
+            "Move this to models.py / services.py — admin.py renders, it does "
+            "not decide:\n" + "\n".join(hits),
+        )
+
+
+class NotificationBackendTests(TestCase):
+    """The adapters themselves. No network is touched anywhere in here."""
+
+    def message(self, channel="email", to="lisi@example.com"):
+        from core.notifications.base import Message
+
+        return Message(to=to, channel=channel, subject="Subject", body="Body")
+
+    def test_the_configured_backend_is_the_one_that_gets_used(self):
+        from core.notifications.base import get_backend
+        from core.notifications.locmem import LocmemBackend
+
+        with self.settings(NOTIFICATION_BACKEND="core.notifications.locmem.LocmemBackend"):
+            self.assertIsInstance(get_backend(), LocmemBackend)
+
+    def test_the_email_backend_reports_an_sms_as_not_accepted(self):
+        # Rather than dropping it. With this backend configured, an SMS-only
+        # recipient is a real gap — and D22's whole complaint is about gaps
+        # that nobody can see.
+        from core.notifications.django_email import DjangoEmailBackend
+
+        results = DjangoEmailBackend().send([self.message(channel="sms", to="+14085550100")])
+        self.assertFalse(results[0].accepted)
+
+    def test_the_email_backend_sends_email(self):
+        from django.core import mail
+
+        from core.notifications.django_email import DjangoEmailBackend
+
+        with self.settings(EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend"):
+            results = DjangoEmailBackend().send([self.message()])
+        self.assertTrue(results[0].accepted)
+        self.assertEqual(len(mail.outbox), 1)
+
+    def test_the_novu_backend_posts_to_the_api(self):
+        # Mocked on purpose: there is no domain and no sender identity on a
+        # laptop, so a live integration could be neither sent nor verified.
+        # Connecting it for real belongs to Phase C; what is being pinned here
+        # is that the seam is in the right place and the call has the shape.
+        import io
+        import json
+        from unittest import mock
+
+        from core.notifications.novu import NovuBackend
+
+        response = io.BytesIO(json.dumps({"data": {"transactionId": "abc"}}).encode())
+        response.__enter__ = lambda self=response: self
+        response.__exit__ = lambda *args: False
+        with mock.patch("urllib.request.urlopen", return_value=response) as opened:
+            results = NovuBackend(api_key="k").send([self.message()])
+        self.assertTrue(results[0].accepted)
+        self.assertEqual(results[0].provider_ref, "abc")
+        self.assertTrue(opened.called)
+
+    def test_a_novu_failure_is_reported_rather_than_raised(self):
+        # One bad address must not stop the rest of the batch; the caller
+        # records what happened instead.
+        import urllib.error
+        from unittest import mock
+
+        from core.notifications.novu import NovuBackend
+
+        with mock.patch("urllib.request.urlopen",
+                        side_effect=urllib.error.URLError("nope")):
+            results = NovuBackend(api_key="k").send([self.message()])
+        self.assertFalse(results[0].accepted)
 
 
 class MarkdownLinkGuardTests(TestCase):

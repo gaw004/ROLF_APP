@@ -73,8 +73,32 @@ python manage.py createsuperuser
 python manage.py runserver
 ```
 
-The admin is at http://127.0.0.1:8000/admin/ — that is the whole interface for
-now, by design.
+Then build something to click through:
+
+```bash
+python manage.py seed_demo        # refuses to run with DEBUG off; --force overrides
+```
+
+It prints the accounts it made and their shared password. There are seven, and
+the awkward ones are deliberate: a volunteer with no email and no phone, one
+with no birth date on file, a minor reachable only through an emergency
+contact, and an event role nobody signed up for. Those are the branches the
+acceptance walk checks, and they are the ones that quietly do not exist if you
+build the data by hand.
+
+Two interfaces now, and the split matters:
+
+- **http://127.0.0.1:8000/admin/** — for staff. Dictionary tables, contacts,
+  posts, tenures. Volunteers are refused it outright, not merely not linked to it.
+- **http://127.0.0.1:8000/events/** — for everybody. Register, browse published
+  events, sign up, see your own hours; a ministry's admins publish events, open
+  roles, check people in, notify signups and read the statistics. Plain Django
+  templates with no styling at all in this phase — the acceptance test is
+  "clickable, usable, permissions correct".
+
+Authority over a ministry is a row in `org.MinistryRole`, never a Django Group:
+Django's permissions are global, and "the food pantry's admin" is not. Every
+judgement about it is in `org/permissions.py` and nowhere else. See `goal.md` D20.
 
 ## Tests
 
@@ -107,6 +131,9 @@ config/settings/     base.py + dev.py + prod.py; secrets come from the environme
 core/                what every app shares (TimeStampedModel)
 accounts/            the custom User model, optionally linked to a Contact
 contact/             people and organizations in one table, plus their relationships
+org/                 ministries, posts, tenures, and who administers what
+events/              events, the roles they open, signups, hours, notifications
+core/notifications/  delivery adapters (console / locmem / email / Novu)
 docs/planning/       goal.md (entry point), decisions/ (D1-D22), phase-b.md,
                      0N-roadmap.md (per-phase steps), progress/deferred/revisions
 ```
@@ -126,3 +153,9 @@ docs/planning/       goal.md (entry point), decisions/ (D1-D22), phase-b.md,
   can be edited in the admin without a code change or a migration. See `goal.md` D5.
 - **New models get tests in the same commit.** Not a style preference: the tests
   are the only reason it is safe to refactor later.
+- **Some tests are lint.** `core/tests.py` greps the whole project for rules no
+  linter knows: nobody computes "today" outside `core/timeutils`, business logic
+  never imports the admin, only `org/services.py` walks the reporting chain,
+  only `org/permissions.py` judges authority, views hold no arithmetic, delivery
+  backends know nothing about people. They scan themselves too, so never spell a
+  forbidden pattern out in a comment — that has caught four of them so far.

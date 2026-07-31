@@ -5,7 +5,7 @@ from contact.admin import ContactAdmin
 from contact.models import Contact
 from core.admin import InEffectFilter
 
-from .models import Assignment, EmploymentType, Ministry, Position
+from .models import Assignment, EmploymentType, Ministry, MinistryRole, Position
 
 
 class PositionInline(admin.TabularInline):
@@ -152,6 +152,34 @@ class AssignmentAdmin(SimpleHistoryAdmin):
     autocomplete_fields = ["contact", "position", "employment_type"]
     # Both, not one: each of them is a column in the changelist.
     list_select_related = ["contact", "position"]
+
+    @admin.display(boolean=True, description="生效中")
+    def is_currently_active(self, obj):
+        return obj.is_currently_active
+
+
+@admin.register(MinistryRole)
+class MinistryRoleAdmin(SimpleHistoryAdmin):
+    """SimpleHistoryAdmin: who granted what authority, when, and who took it away.
+
+    ⚠️ Revoke by filling in end_date, never by deleting the row. Ending is what
+       the date says — the same rule Assignment lives by — and a deleted grant
+       leaves no answer to "who could see the food pantry's signups last March".
+
+    No automatic link to Position.is_leader in either direction. Somebody being
+    a ministry's leader and being able to operate its pages are separate facts
+    (D20); deriving one from the other would weld them back together.
+    """
+
+    list_display = ["contact", "ministry", "role", "start_date", "end_date",
+                    "is_currently_active", "granted_by"]
+    list_filter = [InEffectFilter, "role", "ministry"]
+    search_fields = [
+        "contact__legal_last_name", "contact__legal_first_name",
+        "contact__preferred_name", "ministry__name",
+    ]
+    autocomplete_fields = ["contact", "ministry"]
+    list_select_related = ["contact", "ministry", "granted_by"]
 
     @admin.display(boolean=True, description="生效中")
     def is_currently_active(self, obj):

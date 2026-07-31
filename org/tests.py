@@ -4,6 +4,7 @@ import inspect
 from django.apps import apps
 from django.contrib import admin
 from django.contrib.auth import get_user_model
+from django.contrib.auth.models import AnonymousUser
 from django.core.exceptions import ValidationError
 from django.db import IntegrityError, connection, transaction
 from django.db.models import ProtectedError
@@ -12,10 +13,19 @@ from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
 
 from contact.models import Contact
-from core.timeutils import local_today
+from core.timeutils import local_now, local_today
+from events.models import Event, EventType
 
 from .admin import StaffingFilter
-from .models import Assignment, EmploymentType, Ministry, Position
+from .models import Assignment, EmploymentType, Ministry, MinistryRole, Position
+from .permissions import (
+    can_grant_ministry_admin,
+    can_manage_event,
+    can_publish_event,
+    can_view_registrations,
+    foundation_admin_group,
+    ministry_ids_administered_by,
+)
 from .services import build_org_tree
 
 TODAY = local_today()
@@ -82,6 +92,8 @@ class ConstraintFieldErrorTests(TestCase):
         "position_reports_to_self",
         "assignment_end_before_start",
         "assignment_duplicate_tenure",
+        "ministryrole_duplicate_grant",
+        "ministryrole_end_before_start",
     }
 
     def setUp(self):
@@ -159,6 +171,21 @@ class ConstraintFieldErrorTests(TestCase):
         messages = self.assertFieldError(
             Assignment(contact=self.person, position=self.position), "start_date")
         self.assertIn("already has a tenure in this position", " ".join(messages))
+
+    def test_a_duplicate_grant_points_at_start_date(self):
+        MinistryRole.objects.create(contact=self.person, ministry=self.ministry)
+        messages = self.assertFieldError(
+            MinistryRole(contact=self.person, ministry=self.ministry), "start_date")
+        self.assertIn("already have that role in this ministry", " ".join(messages))
+
+    def test_a_grant_ending_before_it_starts_points_at_end_date(self):
+        messages = self.assertFieldError(
+            MinistryRole(contact=self.person, ministry=self.ministry,
+                         start_date=datetime.date(2023, 1, 1),
+                         end_date=datetime.date(2020, 1, 1)),
+            "end_date",
+        )
+        self.assertIn("The end date cannot be before the start date.", messages)
 
 
 class PositionTests(TestCase):
@@ -600,3 +627,146 @@ class AssignmentStatusTests(TestCase):
         # Ending is said by end_date and nowhere else. A second place to say it
         # is a second answer, and one of them goes stale.
         self.assertNotIn("ended", Assignment.Status.values)
+
+
+class MinistryRoleTests(TestCase):
+    """The table. Its point is the scope — see PermissionTests below for that."""
+
+    def setUp(self):
+        self.pantry = make_ministry()
+        self.wang = make_person("Wang")
+
+    def grant(self, contact=None, ministry=None, **kwargs):
+        return MinistryRole.objects.create(
+            contact=contact or self.wang, ministry=ministry or self.pantry, **kwargs)
+
+    def test_duplicate_grant_with_no_start_date_is_rejected(self):
+        # nulls_distinct=False: start_date is nullable and routinely left empty,
+        # and without it Postgres would wave every duplicate through.
+        self.grant()
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            self.grant()
+
+    def test_the_same_person_can_be_granted_in_two_ministries(self):
+        self.grant()
+        self.grant(ministry=make_ministry(code="tax_help", name="Tax Help"))
+        self.assertEqual(self.wang.ministry_roles.count(), 2)
+
+    def test_end_date_cannot_precede_start_date(self):
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            self.grant(start_date=TODAY, end_date=YESTERDAY)
+
+    def test_deleting_a_ministry_with_grants_is_blocked(self):
+        # PROTECT, not CASCADE. This table claims that changes of authority
+        # leave a trace; letting a ministry deletion take a batch of grants with
+        # it would contradict that claim silently.
+        self.grant()
+        with self.assertRaises(ProtectedError):
+            self.pantry.delete()
+
+    def test_deleting_a_person_with_grants_is_blocked(self):
+        self.grant()
+        with self.assertRaises(ProtectedError):
+            self.wang.delete()
+
+    def test_deleting_the_granting_user_keeps_the_grant(self):
+        # SET_NULL. CASCADE here would revoke a batch of people's authority
+        # because somebody's account was closed.
+        granter = get_user_model().objects.create_user(username="boss", password="x")
+        grant = self.grant(granted_by=granter)
+        granter.delete()
+        grant.refresh_from_db()
+        self.assertIsNone(grant.granted_by)
+
+    def test_grants_reuse_the_shared_active_predicate(self):
+        # Not a permanent boolean: authority starts and ends, exactly like a
+        # tenure, so it uses the one definition of "in effect".
+        expired = self.grant(start_date=LAST_YEAR, end_date=YESTERDAY)
+        self.assertNotIn(expired, MinistryRole.objects.active())
+        self.assertIn(expired, MinistryRole.objects.active(on=YESTERDAY))
+
+
+class PermissionTests(TestCase):
+    """D20's acceptance point: authority is scoped, and nothing gets a bypass."""
+
+    def setUp(self):
+        self.pantry = make_ministry()
+        self.tax = make_ministry(code="tax_help", name="Tax Help")
+        self.zhang = make_person("Zhang")
+        self.user = get_user_model().objects.create_user(
+            username="zhang", password="x", contact=self.zhang)
+        MinistryRole.objects.create(contact=self.zhang, ministry=self.pantry)
+
+    def make_event(self, ministry):
+        event_type, _ = EventType.objects.get_or_create(
+            code="distribution", defaults={"name": "Distribution"})
+        return Event.objects.create(
+            name="Distribution", event_type=event_type, ministry=ministry,
+            start_time=local_now(), end_time=local_now() + datetime.timedelta(hours=2),
+            owner=self.zhang,
+        )
+
+    def test_a_ministry_admin_can_publish_for_their_own_ministry(self):
+        self.assertTrue(can_publish_event(self.user, self.pantry))
+
+    def test_a_ministry_admin_cannot_publish_for_another_ministry(self):
+        # ⭐ D20 in one line. Fail this and scoped authority was not built:
+        # a Django Group would have said yes here.
+        self.assertFalse(can_publish_event(self.user, self.tax))
+
+    def test_managing_another_ministrys_event_is_refused(self):
+        self.assertTrue(can_manage_event(self.user, self.make_event(self.pantry)))
+        self.assertFalse(can_manage_event(self.user, self.make_event(self.tax)))
+
+    def test_an_expired_grant_stops_conferring_permission(self):
+        MinistryRole.objects.update(end_date=YESTERDAY)
+        self.assertFalse(can_publish_event(self.user, self.pantry))
+
+    def test_a_future_grant_does_not_confer_permission_yet(self):
+        # The other half of .active(), and the half most often left out.
+        MinistryRole.objects.update(start_date=TODAY + datetime.timedelta(days=1))
+        self.assertFalse(can_publish_event(self.user, self.pantry))
+
+    def test_a_grant_on_a_retired_ministry_confers_nothing(self):
+        self.pantry.is_active = False
+        self.pantry.save()
+        self.assertFalse(can_publish_event(self.user, self.pantry))
+
+    def test_a_user_with_no_grants_is_denied_everything(self):
+        # Deny by default, never "allowed unless forbidden".
+        stranger = get_user_model().objects.create_user(
+            username="stranger", password="x", contact=make_person("Stranger"))
+        self.assertFalse(can_publish_event(stranger, self.pantry))
+        self.assertFalse(can_view_registrations(stranger, self.make_event(self.pantry)))
+        self.assertFalse(can_grant_ministry_admin(stranger))
+
+    def test_a_user_with_no_contact_is_denied_everything_without_raising(self):
+        # A normal state, not an error: MinistryRole hangs off Contact while the
+        # entry point is a User, and User.contact must stay nullable (D12/D21).
+        # Raising here would 500 every protected view for such an account.
+        technical = get_user_model().objects.create_user(username="tech", password="x")
+        self.assertEqual(ministry_ids_administered_by(technical), set())
+        self.assertFalse(can_publish_event(technical, self.pantry))
+
+    def test_a_superuser_gets_no_ministry_scope_either(self):
+        # No exemption. One here would be a hole straight through the scoping
+        # that D20 exists to create; a superuser has the admin already.
+        root = get_user_model().objects.create_superuser(username="root", password="x")
+        self.assertFalse(can_publish_event(root, self.pantry))
+        self.assertFalse(can_grant_ministry_admin(root))
+
+    def test_an_anonymous_visitor_is_denied_without_raising(self):
+        self.assertFalse(can_publish_event(AnonymousUser(), self.pantry))
+        self.assertFalse(can_grant_ministry_admin(AnonymousUser()))
+
+    def test_ministry_admins_cannot_grant_ministry_admin(self):
+        # P5 is genuinely global, so it reads the Group and never MinistryRole:
+        # a ministry admin must not be able to recruit their own downline.
+        self.assertFalse(can_grant_ministry_admin(self.user))
+        self.user.groups.add(foundation_admin_group())
+        self.assertTrue(can_grant_ministry_admin(self.user.__class__.objects.get(pk=self.user.pk)))
+
+    def test_the_id_set_is_ids_not_objects(self):
+        # The name says ids because the return value is ids. Two documents once
+        # gave this function two names; it is the most-called one we have.
+        self.assertEqual(ministry_ids_administered_by(self.user), {self.pantry.pk})

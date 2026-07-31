@@ -106,7 +106,8 @@ def resolve_recipients(event) -> tuple[list[Recipient], list[Unreachable]]:
     """谁该收到通知、用什么地址。
 
     ⚠️ 这里的规则是本基金会特有的（未成年人通知家长、生日未知按未成年处理、
-       优先渠道看 Contact.preferred_contact_method），任何通知平台都不知道它们。
+       优先渠道看 Contact.preferred_communication_method），任何通知平台都不知道它们。
+       （2026-07-30 更正字段名：原文写的是 preferred_contact_method，库里没有这个字段。）
     """
 
 def notify_event_change(event, *, reason, message, sent_by) -> EventNotification:

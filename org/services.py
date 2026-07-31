@@ -12,7 +12,9 @@
 import logging
 from collections import defaultdict
 
-from .models import Position
+from core.timeutils import local_today
+
+from .models import MinistryRole, Position
 
 logger = logging.getLogger(__name__)
 
@@ -104,3 +106,51 @@ def _climbs_into_a_loop(position, by_id):
         seen.add(current.pk)
         current = by_id.get(current.reports_to_id)
     return False
+
+
+def ministry_admins(ministry):
+    """Every grant ever made on this ministry, current ones and finished ones.
+
+    Here rather than in the view because the grant table is not something a
+    view touches: permissions.py judges, this writes and reads, and views call
+    one of the two. core/tests.py greps for a view reaching past both.
+    """
+    return (
+        MinistryRole.objects.filter(ministry=ministry)
+        .select_related("contact", "granted_by")
+        .order_by("-start_date")
+    )
+
+
+def grant_ministry_admin(*, contact, ministry, granted_by, start_date=None):
+    """Appoint somebody as a ministry's admin. P5.
+
+    granted_by is passed in from the session by the caller and is never a field
+    on a form — a box somebody can type in is a box somebody can lie in.
+    """
+    return MinistryRole.objects.create(
+        contact=contact,
+        ministry=ministry,
+        role=MinistryRole.Role.ADMIN,
+        start_date=start_date,
+        granted_by=granted_by,
+    )
+
+
+def find_grant(ministry, pk):
+    """One grant on this ministry, or None. Scoped by ministry deliberately:
+    a pk from a form must not be able to reach another ministry's row."""
+    return MinistryRole.objects.filter(ministry=ministry, pk=pk).first()
+
+
+def revoke_ministry_role(grant, *, on=None):
+    """Withdraw a grant by ending it, never by deleting the row.
+
+    Ending is what end_date says — the rule Assignment already lives by. A
+    deleted grant leaves no answer to "who could see this ministry's signups
+    last March", and this table carries simple-history precisely because that
+    question gets asked.
+    """
+    grant.end_date = on or local_today()
+    grant.save(update_fields=["end_date", "updated_at"])
+    return grant

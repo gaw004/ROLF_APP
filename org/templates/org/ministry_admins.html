@@ -1,0 +1,42 @@
+{% extends "core/base.html" %}
+{% block title %}{{ ministry.name }} 的 admin{% endblock %}
+
+{% block content %}
+  <h1>{{ ministry.name }} —— 谁有 admin 权限</h1>
+  <p>
+    这一页只有基金会总管（<code>foundation_admin</code> 组）打得开。
+    ministry 的 admin 不能给自己发展下线 —— 那正是"更高一级"的意思。
+  </p>
+
+  <h2>现有授权</h2>
+  <table border="1" cellpadding="4">
+    <tr><th>谁</th><th>生效</th><th>结束</th><th>生效中</th><th>谁授的</th><th></th></tr>
+    {% for grant in grants %}
+      <tr>
+        <td>{{ grant.contact }}</td>
+        <td>{{ grant.start_date|default:"—" }}</td>
+        <td>{{ grant.end_date|default:"—" }}</td>
+        <td>{{ grant.is_currently_active|yesno:"是,否" }}</td>
+        <td>{{ grant.granted_by|default:"（账号已注销）" }}</td>
+        <td>
+          {% if not grant.end_date %}
+            <form method="post">
+              {% csrf_token %}
+              <button type="submit" name="revoke" value="{{ grant.pk }}">撤销</button>
+            </form>
+          {% endif %}
+        </td>
+      </tr>
+    {% empty %}
+      <tr><td colspan="6">还没有人。</td></tr>
+    {% endfor %}
+  </table>
+  <p>撤销是填结束日期，不是删行 —— 授权历史留着。</p>
+
+  <h2>新增授权</h2>
+  <form method="post">
+    {% csrf_token %}
+    {{ form.as_p }}
+    <button type="submit">授权</button>
+  </form>
+{% endblock %}

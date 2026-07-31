@@ -19,7 +19,13 @@ from django.urls import include, path
 
 urlpatterns = [
     path('admin/', admin.site.urls),
-    # Our own pages. Two of them in Phase B (relationship entry, contact merge),
-    # both staff-only, both pushed out of the admin by D18's shape trigger.
+    # Staff-only pages pushed out of the admin by D18's shape trigger
+    # (relationship entry, contact merge).
     path('', include('contact.urls')),
+    # The outward-facing half: volunteers register, browse and sign up; a
+    # ministry's admins publish, check people in and notify. None of it goes
+    # through the admin — volunteers must not be able to reach it at all (D21).
+    path('', include('accounts.urls')),
+    path('', include('events.urls')),
+    path('', include('org.urls')),
 ]

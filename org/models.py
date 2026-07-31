@@ -7,6 +7,7 @@ reporting lines hang off it rather than off a tenure record. See goal.md D11.
 Assignment is the other half: who is in which box, and between which dates.
 """
 
+from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.db import models
 from django.db.models.functions import Lower
@@ -452,3 +453,105 @@ class Assignment(ConstraintErrorFieldMixin, DateRangeMixin, TimeStampedModel):
 
     def __str__(self):
         return f"{self.contact} — {self.position}"
+
+
+class MinistryRole(ConstraintErrorFieldMixin, DateRangeMixin, TimeStampedModel):
+    """Who has what authority over which ministry.
+
+    Django's permissions are app_label.codename and are global: granting
+    events.add_event grants it for *every* ministry, while P2 and P4 ask for
+    "the food pantry's admin may publish for the food pantry, and see the food
+    pantry's signups". There is no object-level scope to hang that on, so the
+    scope becomes a table. See goal.md D20.
+
+    ⚠️ Not Position(is_leader=True) in disguise. Holding a post in the
+       organisation and being able to operate the system are different
+       questions — accounts/models.py has said so since D12. Conflated, granting
+       authority would mean inventing a post, revoking it would mean editing the
+       org chart, and somebody with authority but no post (an auditor, a
+       stand-in) would have nowhere to live.
+
+    ⚠️ Nor a Django Group. That is what the global tier is for, and P5 — "who
+       may appoint a ministry's admin" — is genuinely global, so it is a Group.
+       The test: does the sentence contain "of some ministry"? Then it belongs
+       here.
+    """
+
+    class Role(models.TextChoices):
+        ADMIN = "admin", "Ministry admin"
+        # Reserved. Nothing branches on it in this phase and permissions.py
+        # answers for ADMIN only — the requirement asked for one tier. Adding a
+        # second means editing this enum *and* the judgements, together.
+        COORDINATOR = "coordinator", "Coordinator"
+
+    contact = models.ForeignKey(
+        Contact,
+        # PROTECT: a grant is something to be answerable for, so deleting a
+        # person must not quietly erase the record that they had it.
+        on_delete=models.PROTECT,
+        related_name="ministry_roles",
+    )
+    ministry = models.ForeignKey(
+        Ministry,
+        # PROTECT, matching contact above. This was CASCADE, on the reasoning
+        # that authority over a ministry that no longer exists is meaningless —
+        # but that sentence reads just as well about the person, and the person
+        # side is PROTECT because grants have to leave a trace. Two foreign keys
+        # on one table justified in contradictory ways means one of them was
+        # after the fact. Ministry also has is_active, so it is retired rather
+        # than deleted, and this table carries simple-history.
+        on_delete=models.PROTECT,
+        related_name="roles",
+    )
+    role = models.CharField(max_length=20, choices=Role.choices, default=Role.ADMIN)
+    start_date = models.DateField(null=True, blank=True)
+    end_date = models.DateField(null=True, blank=True)
+    granted_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        # SET_NULL, never CASCADE: deleting the account of whoever granted this
+        # would otherwise revoke a batch of people's authority in one go. NULL
+        # reads as "the granting account is gone", which beats the row vanishing.
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name="+",
+    )
+
+    history = HistoricalRecords()
+
+    # Grants start and end, exactly like tenures — so they reuse .active() and
+    # there is no second definition of "in effect" anywhere.
+    objects = models.Manager.from_queryset(DateRangeQuerySet)()
+
+    class Meta:
+        ordering = ["ministry__name", "contact"]
+        constraints = [
+            # nulls_distinct=False for A7's reason: start_date is nullable and
+            # is routinely left empty, and Postgres treats NULL != NULL, so
+            # without it the constraint waves through any number of duplicates.
+            models.UniqueConstraint(
+                fields=["contact", "ministry", "role", "start_date"],
+                name="ministryrole_unique_grant",
+                nulls_distinct=False,
+                violation_error_message="They already have that role in this ministry "
+                                        "from that date.",
+                violation_error_code="ministryrole_duplicate_grant",
+            ),
+            models.CheckConstraint(
+                condition=(
+                    models.Q(end_date__isnull=True)
+                    | models.Q(start_date__isnull=True)
+                    | models.Q(end_date__gte=models.F("start_date"))
+                ),
+                name="ministryrole_end_date_not_before_start_date",
+                violation_error_message="The end date cannot be before the start date.",
+                violation_error_code="ministryrole_end_before_start",
+            ),
+        ]
+        # Every permission check in the system runs this lookup ("which
+        # ministries does this person administer"), which makes it the most
+        # frequently executed query we have — at least once per protected
+        # request.
+        indexes = [models.Index(fields=["contact", "end_date"])]
+
+    def __str__(self):
+        return f"{self.contact} — {self.get_role_display()}（{self.ministry.name}）"

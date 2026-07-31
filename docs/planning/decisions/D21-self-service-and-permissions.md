@@ -48,12 +48,19 @@
 | 报名 / 取消报名 | 登录用户 | 未成年人走同意流程 |
 | 我的报名 | 登录用户 | 自己的记录，含工时 |
 | 发布活动 + 开工种 | ministry admin | 走 `can_publish_event()` |
-| 某活动的报名名单 + 签到 | ministry admin | 走 `can_view_registrations()` |
+| 某活动的报名名单 | ministry admin | 走 `can_view_registrations()` |
+| 某活动的签到 / 签退 / 补录工时 | ministry admin | 走 `can_manage_event()` —— 签到是写，看名单是读 |
 | 某活动的统计 | ministry admin | R4–R8 那几个数 |
-| 通知报名者：预览 → 二次确认 → 发送记录 | ministry admin | P6。预览页要分三组显示：成年人自己的地址 / 未成年人**家长**的地址 / **联系不上的人**。二次确认页是 [D22 代价 3](D22-event-notifications.md#要如实说的三条代价)（重复发送）的唯一缓解，不是可选装饰。走 `can_view_registrations()` 同一个判断 |
+| 通知报名者：预览 → 二次确认 → 发送记录 | ministry admin | P6。预览页要分三组显示：成年人自己的地址 / 未成年人**家长**的地址 / **联系不上的人**。二次确认页是 [D22 代价 3](D22-event-notifications.md#要如实说的三条代价)（重复发送）的唯一缓解，不是可选装饰。走 `can_manage_event()`，同签到页 |
 
-> ⚠️ **通知那一行 2026-07-29 晚补** —— 本清单原来只有 7 行、自称"最小集"，
+> 2026-07-29 晚补通知那一行 —— 本清单原来只有 7 行、自称"最小集"，
 > 却漏掉了 P6 的页面，而验收里有 4 个勾在打它。
+>
+> 2026-07-30 拆开签到那一行，并把通知页的判断从 `can_view_registrations()`
+> 改成 `can_manage_event()`。本表原来只按"给谁"分了粗档，而 `02-roadmap.md`
+> B10 / B11 早就分了四个函数：**看名单是读，签到和发通知是写**，
+> 把发通知挂在"能看名单"上，等于让只读的人能对着几十号人的邮箱按发送。
+> 两份文档对同一个页面写了两个判断，改口取 roadmap 那份。
 
 **其余一律留在 Admin**（字典表维护、`Contact` / `Position` / `Assignment` 的 CRUD）——
 那些是内部人员用的，Admin 够用，[D18](D18-admin-boundary.md#admin-允许承载什么) 的表没有变。

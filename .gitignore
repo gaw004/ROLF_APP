@@ -8,3 +8,6 @@ db.sqlite3
 .envrc
 /media/
 /staticfiles/
+node_modules/
+docs/planning/diagrams/src/package*.json
+docs/planning/diagrams/src/.build-preview.html

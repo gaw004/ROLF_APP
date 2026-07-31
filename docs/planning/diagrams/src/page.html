@@ -1,0 +1,1019 @@
+<title>ROLF_APP · 数据与流程全景图</title>
+<style>
+  :root {
+    --paper:   #F1F3F0;
+    --surface: #FBFCFA;
+    --plate:   #F7F8F5;
+    --ink:     #171B19;
+    --ink-2:   #495049;
+    --ink-3:   #7B837D;
+    --rule:    #D8DCD6;
+    --rule-2:  #E7EAE5;
+    --accent:  #14584F;
+    --accent-soft: #E0EBE7;
+    --app-core:     #6C7A74;
+    --app-contact:  #2C6B8E;
+    --app-accounts: #77549F;
+    --app-org:      #2A7752;
+    --app-events:   #AC5C27;
+    --app-defer:    #969E99;
+    --shadow: 0 1px 2px rgba(20,40,34,.06), 0 8px 24px -14px rgba(20,40,34,.22);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --paper:   #121614;
+      --surface: #191E1B;
+      --plate:   #E9ECE7;
+      --ink:     #E7EBE7;
+      --ink-2:   #A7AFAA;
+      --ink-3:   #767E79;
+      --rule:    #2A312D;
+      --rule-2:  #222825;
+      --accent:  #6ECBBB;
+      --accent-soft: #1D2E2A;
+      --app-core:     #97A39D;
+      --app-contact:  #6DADCF;
+      --app-accounts: #B196D7;
+      --app-org:      #5FB689;
+      --app-events:   #DD9C67;
+      --app-defer:    #6E7671;
+      --shadow: 0 1px 2px rgba(0,0,0,.4), 0 10px 28px -16px rgba(0,0,0,.7);
+    }
+  }
+  :root[data-theme="light"] {
+    --paper:#F1F3F0; --surface:#FBFCFA; --plate:#F7F8F5; --ink:#171B19; --ink-2:#495049;
+    --ink-3:#7B837D; --rule:#D8DCD6; --rule-2:#E7EAE5; --accent:#14584F; --accent-soft:#E0EBE7;
+    --app-core:#6C7A74; --app-contact:#2C6B8E; --app-accounts:#77549F; --app-org:#2A7752;
+    --app-events:#AC5C27; --app-defer:#969E99;
+    --shadow: 0 1px 2px rgba(20,40,34,.06), 0 8px 24px -14px rgba(20,40,34,.22);
+  }
+  :root[data-theme="dark"] {
+    --paper:#121614; --surface:#191E1B; --plate:#E9ECE7; --ink:#E7EBE7; --ink-2:#A7AFAA;
+    --ink-3:#767E79; --rule:#2A312D; --rule-2:#222825; --accent:#6ECBBB; --accent-soft:#1D2E2A;
+    --app-core:#97A39D; --app-contact:#6DADCF; --app-accounts:#B196D7; --app-org:#5FB689;
+    --app-events:#DD9C67; --app-defer:#6E7671;
+    --shadow: 0 1px 2px rgba(0,0,0,.4), 0 10px 28px -16px rgba(0,0,0,.7);
+  }
+
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0;
+    background: var(--paper);
+    color: var(--ink);
+    font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB",
+                 "Microsoft YaHei", "Segoe UI", sans-serif;
+    font-size: 16px;
+    line-height: 1.72;
+    font-feature-settings: "kern";
+  }
+  .serif {
+    font-family: "Songti SC", "Source Han Serif SC", "Noto Serif CJK SC", Georgia,
+                 "Times New Roman", serif;
+  }
+  .mono, code, .num {
+    font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* ---------- chrome ---------- */
+  .topbar {
+    position: sticky; top: 0; z-index: 40;
+    display: flex; flex-wrap: wrap; align-items: baseline; gap: .35rem 1.4rem;
+    padding: .7rem clamp(1rem, 4vw, 3rem);
+    background: color-mix(in srgb, var(--paper) 88%, transparent);
+    backdrop-filter: blur(10px);
+    border-bottom: 1px solid var(--rule);
+  }
+  .topbar .mark {
+    font-size: .78rem; letter-spacing: .16em; text-transform: uppercase;
+    color: var(--ink-3); margin-right: auto;
+  }
+  .topbar a {
+    color: var(--ink-2); text-decoration: none; font-size: .84rem;
+    border-bottom: 1px solid transparent; padding-bottom: 1px;
+  }
+  .topbar a:hover, .topbar a:focus-visible { color: var(--accent); border-bottom-color: var(--accent); }
+
+  .wrap { max-width: 78rem; margin: 0 auto; padding: 0 clamp(1rem, 4vw, 3rem) 6rem; }
+  .prose { max-width: 44rem; }
+
+  /* ---------- hero ---------- */
+  .hero { padding: clamp(2.5rem, 7vw, 5rem) 0 2rem; }
+  .hero h1 {
+    margin: 0 0 .6rem; font-size: clamp(2rem, 5.2vw, 3.4rem); line-height: 1.14;
+    font-weight: 600; letter-spacing: -.01em; text-wrap: balance;
+  }
+  .hero .lede { margin: 0 0 1.6rem; font-size: 1.06rem; color: var(--ink-2); max-width: 42rem; }
+  .eyebrow {
+    font-size: .74rem; letter-spacing: .2em; text-transform: uppercase;
+    color: var(--accent); margin-bottom: .9rem; font-weight: 600;
+  }
+
+  .stats {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(8.5rem, 1fr));
+    gap: 1px; background: var(--rule); border: 1px solid var(--rule);
+    border-radius: 3px; overflow: hidden; margin-top: 2rem;
+  }
+  .stat { background: var(--surface); padding: .85rem 1rem 1rem; }
+  .stat .n { display: block; font-size: 1.65rem; font-weight: 600; line-height: 1.15; }
+  .stat .l { display: block; font-size: .76rem; color: var(--ink-3); letter-spacing: .04em; }
+
+  /* ---------- sections ---------- */
+  section { margin-top: clamp(3.5rem, 8vw, 6rem); scroll-margin-top: 4.5rem; }
+  .sec-head { display: flex; gap: 1rem; align-items: baseline; border-bottom: 2px solid var(--ink); padding-bottom: .5rem; margin-bottom: 1.4rem; }
+  .sec-head .idx { font-size: 1.1rem; color: var(--accent); font-weight: 600; }
+  .sec-head h2 { margin: 0; font-size: clamp(1.35rem, 3vw, 1.9rem); font-weight: 600; letter-spacing: -.005em; }
+  .sec-head .tag { margin-left: auto; font-size: .74rem; color: var(--ink-3); letter-spacing: .08em; white-space: nowrap; }
+  h3 { font-size: 1.05rem; margin: 2.2rem 0 .6rem; font-weight: 600; }
+  p { margin: 0 0 1rem; }
+  .prose p { color: var(--ink-2); }
+  strong { color: var(--ink); font-weight: 600; }
+  code { font-size: .88em; background: var(--rule-2); padding: .08em .34em; border-radius: 2px; color: var(--ink); }
+  @media (prefers-color-scheme: dark) { code { background: #232926; } }
+  :root[data-theme="dark"] code { background: #232926; }
+  :root[data-theme="light"] code { background: var(--rule-2); }
+
+  /* ---------- diagram plate ---------- */
+  .plate {
+    background: var(--plate);
+    border: 1px solid var(--rule);
+    border-radius: 3px;
+    box-shadow: var(--shadow);
+    padding: 1.2rem;
+    overflow-x: auto;
+    margin: 1.2rem 0 .7rem;
+  }
+  .plate pre.mermaid { margin: 0; min-width: min-content; text-align: center; }
+  /* mermaid ships the svg at width:100%, which squeezes a wide diagram into the
+     container and makes the labels unreadable instead of letting the plate scroll.
+     The script at the end of the page restores each svg to its viewBox size; this
+     only clears the max-width that would otherwise cap it. */
+  .plate svg { max-width: none !important; }
+  .plate--tall { max-height: 82vh; overflow: auto; }
+  .scrollhint {
+    font-size: .74rem; letter-spacing: .06em; color: var(--ink-3);
+    display: flex; align-items: center; gap: .4rem; margin: 0 0 .3rem;
+  }
+  .scrollhint::before { content: "↔ ↕"; font-family: ui-monospace, Menlo, monospace; color: var(--accent); }
+  .caption { font-size: .82rem; color: var(--ink-3); margin: 0 0 .4rem; max-width: 46rem; }
+  .caption b { color: var(--ink-2); font-weight: 600; }
+
+  /* ---------- legend ---------- */
+  .legend { display: flex; flex-wrap: wrap; gap: .4rem .9rem; margin: 1rem 0 0; padding: 0; list-style: none; font-size: .8rem; }
+  .legend li { display: flex; align-items: center; gap: .4rem; color: var(--ink-2); }
+  .swatch { width: .8rem; height: .8rem; border-radius: 2px; flex: none; }
+
+  /* ---------- tables ---------- */
+  .tablewrap { overflow-x: auto; border: 1px solid var(--rule); border-radius: 3px; background: var(--surface); margin: 1rem 0; }
+  table { border-collapse: collapse; width: 100%; font-size: .855rem; min-width: 46rem; }
+  th, td { text-align: left; padding: .55rem .8rem; border-bottom: 1px solid var(--rule-2); vertical-align: top; }
+  thead th { position: sticky; top: 0; background: var(--surface); border-bottom: 1.5px solid var(--rule); font-size: .74rem; letter-spacing: .09em; text-transform: uppercase; color: var(--ink-3); font-weight: 600; }
+  tbody tr:last-child td { border-bottom: none; }
+  td .tname { font-weight: 600; }
+  .pill {
+    display: inline-block; font-size: .7rem; letter-spacing: .05em; padding: .08rem .42rem;
+    border-radius: 2px; border: 1px solid currentColor; white-space: nowrap;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  .a-core     { color: var(--app-core); }
+  .a-contact  { color: var(--app-contact); }
+  .a-accounts { color: var(--app-accounts); }
+  .a-org      { color: var(--app-org); }
+  .a-events   { color: var(--app-events); }
+  .a-defer    { color: var(--app-defer); }
+  .yes { color: var(--accent); font-weight: 600; }
+  .no  { color: var(--ink-3); }
+
+  ul.notes { padding-left: 1.1rem; margin: .6rem 0 0; }
+  ul.notes li { margin-bottom: .35rem; color: var(--ink-2); }
+
+  .callout {
+    border-left: 3px solid var(--accent); background: var(--accent-soft);
+    padding: .85rem 1.1rem; border-radius: 0 3px 3px 0; margin: 1.4rem 0;
+    font-size: .92rem;
+  }
+  .callout p:last-child { margin-bottom: 0; }
+
+  footer { margin-top: 5rem; padding-top: 1.4rem; border-top: 1px solid var(--rule); font-size: .8rem; color: var(--ink-3); }
+  footer a { color: var(--ink-2); }
+  a:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+  @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+</style>
+
+<header class="topbar">
+  <span class="mark mono">ROLF_APP · Phase B</span>
+  <a href="#erd">一 · ERD</a>
+  <a href="#dfd">二 · DFD</a>
+  <a href="#apps">三 · App 地图</a>
+  <a href="#inventory">四 · 表册</a>
+</header>
+
+<div class="wrap">
+
+  <div class="hero">
+    <div class="eyebrow">数据与流程全景</div>
+    <h1 class="serif">十七张表，五个 app，十四条需求</h1>
+    <p class="lede">
+      这三张图把 <code>docs/planning/</code> 里已经拍板的东西——D1–D22 二十二条决策、
+      <code>phase-b.md</code> 的模型表与约束清单、<code>02-roadmap.md</code> 的 B0–B13——
+      画成一张实体关系图、一张数据流图，和一张 app 边界图。图里的每个字段、每条
+      <code>on_delete</code>、每个谓词都和已落地的代码逐条对过。
+    </p>
+    <div class="stats">
+      <div class="stat"><span class="n num">5</span><span class="l">已建 app（+3 预留）</span></div>
+      <div class="stat"><span class="n num">17</span><span class="l">业务表</span></div>
+      <div class="stat"><span class="n num">7</span><span class="l">simple-history 表</span></div>
+      <div class="stat"><span class="n num">2</span><span class="l">M2M 中间表</span></div>
+      <div class="stat"><span class="n num">26</span><span class="l">实际建出的表</span></div>
+      <div class="stat"><span class="n num">14</span><span class="l">需求 R1–R8 · P1–P6</span></div>
+    </div>
+  </div>
+
+  <!-- ================= 一 · ERD ================= -->
+  <section id="erd">
+    <div class="sec-head">
+      <span class="idx serif">一</span>
+      <h2 class="serif">实体关系图</h2>
+      <span class="tag mono">17 entities · 全字段</span>
+    </div>
+
+    <div class="prose">
+      <p>
+        一张图放全部 17 张业务表和它们的每一个字段。关系线上标的是 <code>on_delete</code>——
+        那不是实现细节，<code>phase-b.md</code> 用了整整一节论证「一次加十几个外键，其中一个选错是灾难级的」。
+        <strong>四条 <code>CASCADE</code> 之外全是 <code>PROTECT</code> 或 <code>SET_NULL</code></strong>，
+        凡是要留痕的东西（任职、授权、工时、通知）一律不许被静默带走。
+      </p>
+    </div>
+
+    <p class="scrollhint">图幅约 4700 × 3100，在图版内横竖拖动查看</p>
+    <div class="plate plate--tall">
+<pre class="mermaid">
+%%{init: {"theme":"base","themeVariables":{"background":"#F7F8F5","primaryColor":"#FFFFFF","primaryTextColor":"#171B19","primaryBorderColor":"#495049","lineColor":"#5A6560","tertiaryColor":"#ECEFEA","fontSize":"12px"}}}%%
+erDiagram
+
+  %% ========== contact app ==========
+  Language {
+    bigint id PK
+    slug code UK "ISO 639-3 · 7923 行"
+    str name
+    str display_name
+    str alt_names
+    char language_type "living / extinct …"
+    int pin_rank "英语·普通话·粤语置顶"
+  }
+  Contact {
+    bigint id PK
+    choice contact_type "person · organization"
+    str legal_first_name
+    str legal_last_name
+    str preferred_name
+    str organization_name
+    email email "不设 unique 一家人可共用"
+    phone phone "E.164"
+    choice gender
+    date birth_date "可空 → is_minor 三态"
+    ref preferred_language FK "→ Language · PROTECT"
+    choice preferred_communication_method "P6 渠道优先级"
+    str address_street
+    str address_city
+    str address_state
+    str address_postal_code
+    country address_country
+    bool is_active "档案在不在用 ≠ 在不在职"
+    text notes
+    prop is_minor "派生 True·False·None"
+    hist history "simple-history"
+  }
+  RelationshipType {
+    bigint id PK
+    slug code UK "唯一·不可改 D5"
+    str name_a_to_b UK "Lower Trim 唯一"
+    str name_b_to_a "反向标签 一段关系只存一行"
+    str description
+    bool is_symmetric "显式 不靠推断"
+    bool usable_as_emergency_contact "紧急联系人下拉的过滤器"
+  }
+  Relationship {
+    bigint id PK
+    ref contact_a FK "→ Contact · CASCADE"
+    ref contact_b FK "→ Contact · CASCADE"
+    ref relationship_type FK "→ RelationshipType · PROTECT"
+    date start_date
+    date end_date
+    uniq unordered_pair UK "Least Greatest type Coalesce start"
+    note no_is_active "is_active 已删 单一真相"
+  }
+  EmergencyContact {
+    bigint id PK
+    ref person FK "→ Contact · CASCADE"
+    str name "文本 不指向 Contact D15"
+    phone phone "必填 无 email 故 P6 只能走 SMS"
+    ref relationship_type FK "→ RelationshipType · PROTECT 非空"
+    uniq person_name_phone UK "Lower Trim 防重复录入"
+  }
+
+  %% ========== accounts app ==========
+  User {
+    bigint id PK
+    str username
+    str password
+    email email
+    bool is_staff "志愿者 False · admin 403"
+    bool is_superuser
+    ref contact FK "O2O → Contact · SET_NULL · 可空 D12"
+  }
+
+  %% ========== org app ==========
+  Ministry {
+    bigint id PK
+    slug code UK "Lower 唯一·不可改"
+    str name "食物银行 报税志愿 ESL 行政…"
+    text description
+    bool is_active
+    date founded_on
+  }
+  EmploymentType {
+    bigint id PK
+    slug code UK "取值基金会未定 故做字典表"
+    str name
+    bool is_active
+  }
+  Position {
+    bigint id PK
+    slug code UK "Lower 唯一·不可改"
+    str name "职务名 给人看 归一化 strip"
+    choice kind "employee · volunteer · board"
+    ref ministry FK "→ Ministry · PROTECT · 可空 理事席位没有"
+    ref reports_to FK "→ Position 自引用 · PROTECT · 禁自环"
+    bool is_leader "给代码查 不用 name contains"
+    bool is_active "编制撤没撤 ≠ 空缺"
+    text description
+    hist history "simple-history"
+  }
+  Assignment {
+    bigint id PK
+    ref contact FK "→ Contact · PROTECT"
+    ref position FK "→ Position · PROTECT"
+    ref employment_type FK "→ EmploymentType · PROTECT · 可空"
+    choice status "active · on_leave · suspended"
+    date start_date
+    date end_date "end 大于等于 start"
+    uniq contact_position_start UK "nulls_distinct False"
+    note two_predicates "active 日期 · serving 日期 AND status"
+    hist history "simple-history"
+  }
+  MinistryRole {
+    bigint id PK
+    ref contact FK "→ Contact · PROTECT"
+    ref ministry FK "→ Ministry · PROTECT"
+    choice role "admin · coordinator 占位不分支"
+    date start_date
+    date end_date "撤权靠填 end_date 不删行"
+    ref granted_by FK "→ User · SET_NULL · P5 谁授的权"
+    uniq contact_ministry_role_start UK "nulls_distinct False"
+    hist history "simple-history"
+  }
+
+  %% ========== events app ==========
+  EventType {
+    bigint id PK
+    slug code UK "Lower 唯一·不可改"
+    str name
+    bool is_active
+  }
+  ParticipationRole {
+    bigint id PK
+    slug code UK "必 seed general 走数据迁移"
+    str name "签到台 搬运 翻译 —— 一次活动之内的工种"
+    bool is_active
+  }
+  Event {
+    bigint id PK
+    str name
+    ref event_type FK "→ EventType · PROTECT"
+    ref ministry FK "→ Ministry · PROTECT · 非空 R2 R8 P2 的轴"
+    datetime start_time "Index R1"
+    datetime end_time "end 大于等于 start · R3 派生不存"
+    str location
+    ref owner FK "→ Contact · PROTECT"
+    choice status "draft open confirmed completed cancelled"
+    text description
+    pred visible_to_volunteers "四档显式列全 不写 exclude draft"
+    pred open_for_signup "只有 open"
+    hist history "simple-history"
+  }
+  EventRole {
+    bigint id PK
+    ref event FK "→ Event · CASCADE"
+    ref role FK "→ ParticipationRole · PROTECT"
+    int needed_count "可空等于不限 · 大于 0 · P2 的原话"
+    text notes
+    uniq event_role UK "同一工种不许开两遍 否则 R4 翻倍"
+    ann with_signup_counts "registered_count attended_count"
+    ann understaffed "零报名的工种也必须出现"
+    hist history "simple-history"
+  }
+  Participation {
+    bigint id PK
+    ref event_role FK "→ EventRole · CASCADE · 没有 event 字段"
+    ref contact FK "→ Contact · PROTECT"
+    choice status "registered attended absent cancelled"
+    datetime registered_at
+    datetime checked_in_at "P4 是否来过"
+    datetime checked_out_at "不早于签到"
+    dec hours "Decimal 6-2 · 唯一权威值 · 非负"
+    str consent_given_by "家长姓名"
+    ref consent_relationship FK "→ RelationshipType · PROTECT · 可空"
+    datetime consent_at "未成年人没有它就报不了名"
+    choice consent_method "口头 纸质 线上"
+    email consent_email "P6 硬前提 与 phone 至少填一个"
+    phone consent_phone "P6 硬前提"
+    uniq event_role_contact UK "一人一工种一行 工时才算得对"
+    hist history "simple-history"
+  }
+  EventNotification {
+    bigint id PK
+    ref event FK "→ Event · CASCADE"
+    choice reason "time_changed location_changed cancelled other"
+    text message "正文快照 事后改活动这条不变"
+    datetime sent_at
+    ref sent_by FK "→ User · SET_NULL"
+    m2m recipients "→ Participation 覆盖到了谁"
+    m2m unreachable "→ Participation 联系不上的是谁 快照非计数"
+    str provider_ref "provider 批次 id 对账用"
+    idx event_sent_at "防重复发送的二次确认页要用"
+  }
+
+  %% ========== 关系 ==========
+  Language           ||--o{ Contact            : "preferred_language PROTECT"
+  Contact            ||--o{ Relationship       : "contact_a CASCADE"
+  Contact            ||--o{ Relationship       : "contact_b CASCADE"
+  RelationshipType   ||--o{ Relationship       : "type PROTECT"
+  Contact            ||--o{ EmergencyContact   : "person CASCADE"
+  RelationshipType   ||--o{ EmergencyContact   : "relationship_type PROTECT"
+  Contact            ||--o| User               : "O2O SET_NULL 可空"
+
+  Ministry           ||--o{ Position           : "ministry PROTECT 可空"
+  Position           ||--o{ Position           : "reports_to PROTECT 汇报线"
+  Contact            ||--o{ Assignment         : "contact PROTECT"
+  Position           ||--o{ Assignment         : "position PROTECT"
+  EmploymentType     ||--o{ Assignment         : "employment_type PROTECT"
+  Contact            ||--o{ MinistryRole       : "contact PROTECT"
+  Ministry           ||--o{ MinistryRole       : "ministry PROTECT"
+  User               ||--o{ MinistryRole       : "granted_by SET_NULL"
+
+  Ministry           ||--o{ Event              : "ministry PROTECT 非空"
+  EventType          ||--o{ Event              : "event_type PROTECT"
+  Contact            ||--o{ Event              : "owner PROTECT"
+  Event              ||--o{ EventRole          : "event CASCADE"
+  ParticipationRole  ||--o{ EventRole          : "role PROTECT"
+  EventRole          ||--o{ Participation      : "event_role CASCADE"
+  Contact            ||--o{ Participation      : "contact PROTECT"
+  RelationshipType   ||--o{ Participation      : "consent_relationship PROTECT"
+  Event              ||--o{ EventNotification  : "event CASCADE"
+  User               ||--o{ EventNotification  : "sent_by SET_NULL"
+  EventNotification  }o--o{ Participation      : "recipients M2M 快照"
+  EventNotification  }o--o{ Participation      : "unreachable M2M 快照"
+</pre>
+    </div>
+    <p class="caption"><b>图注 ·</b> <code>UK</code> 行是表上的唯一约束，<code>note</code> / <code>pred</code> /
+      <code>ann</code> 行不是字段，是这张表上「判定只写一处」的谓词和 annotation
+      （<code>.serving()</code>、<code>visible_to_volunteers()</code>、<code>understaffed()</code>）——
+      它们和字段一样属于模型，写在别处就会被抄第二遍。</p>
+
+    <div class="callout">
+      <p><strong>整张图只有四条 <code>CASCADE</code>：</strong>
+        <code>Relationship→Contact</code>、<code>EmergencyContact→Contact</code>、
+        <code>EventRole→Event</code>、<code>Participation→EventRole</code>、
+        以及 <code>EventNotification→Event</code>。最后两条串起来是一条两级链——
+        <b>删一个 Event 会级联删掉 EventRole，再级联删掉 Participation，工时历史一起没</b>。
+        这就是 D21 规定「删活动这个动作在 admin 里不给普通 Group」的原因。</p>
+    </div>
+
+    <h3>三张不在图里但真的会建出来的表族</h3>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>表族</th><th>张数</th><th>怎么来的</th><th>为什么是它们</th></tr></thead>
+        <tbody>
+          <tr>
+            <td class="mono tname">Historical*</td><td class="num">7</td>
+            <td><code>django-simple-history</code> 自动建：<code>Contact</code> · <code>Position</code> ·
+              <code>Assignment</code> · <code>MinistryRole</code> · <code>Event</code> ·
+              <code>EventRole</code> · <code>Participation</code></td>
+            <td>凡是「改了要能查出是谁改的」都挂：组织架构、授权、对外承诺的
+              <code>needed_count</code>、以及全系统唯一可手工改写的权威值 <code>hours</code></td>
+          </tr>
+          <tr>
+            <td class="mono tname">M2M 中间表</td><td class="num">2</td>
+            <td><code>EventNotification.recipients</code> · <code>.unreachable</code></td>
+            <td>两个都是<b>快照</b>，不事后重算——当时联系不上不等于今天联系不上</td>
+          </tr>
+          <tr>
+            <td class="mono tname">Django 自带</td><td class="num">6+</td>
+            <td><code>auth_group</code> · <code>auth_permission</code> · <code>django_session</code> ·
+              <code>django_admin_log</code> · <code>django_content_type</code> · <code>user_groups</code> 等</td>
+            <td>P5 的「更高一级权限」就靠 <code>auth_group</code> 里那个
+              <code>foundation_admin</code>——真·全局的权限才用 Group（D20）</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>不建的表（形状已想清楚，等触发条件）</h3>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>未建的表</th><th>去哪个 app</th><th>为什么现在不建</th><th>什么时候再看</th></tr></thead>
+        <tbody>
+          <tr><td class="mono tname">VolunteerProfile</td><td><span class="pill a-defer">volunteer</span></td><td>14 条需求一条没提技能和可服务时段</td><td>要按「谁星期六有空」排班时</td></tr>
+          <tr><td class="mono tname">BackgroundCheck</td><td><span class="pill a-defer">volunteer</span></td><td>同上。<b>但「必须独立成 model」的决定不撤销</b>——没有字段级权限，塞进别的表就锁不住</td><td>基金会答复审查有效期时</td></tr>
+          <tr><td class="mono tname">Guardianship</td><td><span class="pill a-contact">contact</span></td><td>需求要的是「<b>这一次</b>活动家长同意了」，那是事件记录，已落在 <code>Participation</code> 六个同意字段上</td><td>出现「每次活动都要重填家长信息」的抱怨时</td></tr>
+          <tr><td class="mono tname">Contribution</td><td><span class="pill a-defer">finance</span></td><td>钱和这 14 条完全无关，整体后移 Phase D</td><td>Phase D</td></tr>
+          <tr><td class="mono tname">Leave</td><td><span class="pill a-org">org</span></td><td><code>Assignment.status</code> 只记当前状态，答不出请假历史</td><td>要按请假历史做统计时</td></tr>
+          <tr><td class="mono tname">Shift</td><td>—</td><td>多班次一律拆成多个 <code>Event</code>；时段差异由 Event、工种差异由 <code>EventRole</code>、时长由 <code>hours</code> 表达，三个维度一个不少</td><td>拆成十个 Event 开始碍事时</td></tr>
+          <tr><td class="mono tname">ParticipationConfirmation</td><td><span class="pill a-events">events</span></td><td>改时间后报名照旧；加一档 <code>needs_reconfirmation</code> 是把两个维度挤进一个字段</td><td>真出现「改完时间没人取消也没人来」时</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ================= 二 · DFD ================= -->
+  <section id="dfd">
+    <div class="sec-head">
+      <span class="idx serif">二</span>
+      <h2 class="serif">数据流图</h2>
+      <span class="tag mono">Level 0 + Level 1</span>
+    </div>
+
+    <div class="prose">
+      <p>
+        先看一眼谁和系统说话，再看数据在里面怎么走。第二张图里的
+        <b>每一个处理都标了它落在哪个文件</b>——因为 D18 的整套落点规矩就是靠这个判的：
+        「换个界面要不要跟着搬？要搬，就不该写在 <code>admin.py</code> 或视图里。」
+      </p>
+    </div>
+
+    <h3>Level 0 · 上下文</h3>
+    <div class="plate">
+<pre class="mermaid">
+%%{init: {"theme":"base","themeVariables":{"background":"#F7F8F5","primaryColor":"#FFFFFF","primaryTextColor":"#171B19","primaryBorderColor":"#495049","lineColor":"#5A6560","fontSize":"13px"}}}%%
+flowchart LR
+  V["志愿者<br/>普通 account"]
+  MA["Ministry Admin<br/>某个 ministry 的 admin"]
+  FA["Foundation Admin<br/>全局 Group"]
+  ST["内部录入员<br/>staff · /admin/"]
+  SYS(("ROLF_APP<br/>5 个 app · 17 张表"))
+  PROV["通知服务商<br/>Console · Email · SMS · Novu"]
+  GD["家长 / 紧急联系人<br/>不是系统用户"]
+
+  V -- "注册 · 报名 · 取消 · 看我的工时" --> SYS
+  SYS -- "已发布活动 · 我的报名记录" --> V
+  MA -- "发活动 · 开工种 · 签到签退 · 补录工时 · 发通知" --> SYS
+  SYS -- "报名名单 · R1–R8 统计 · 联系不上的人" --> MA
+  FA -- "指定某人为某 ministry 的 admin" --> SYS
+  SYS -- "该 ministry 的授权历史" --> FA
+  ST -- "字典表 · Contact · 编制与任职 · 合并重复" --> SYS
+  SYS -- "地址 + 渠道 + 内容<br/>不认 Contact 不认未成年人" --> PROV
+  PROV -- "投递结果 · provider_ref" --> SYS
+  PROV -- "邮件 / 短信" --> GD
+  PROV -- "邮件 / 短信" --> V
+
+  classDef ext fill:#FFFFFF,stroke:#495049,stroke-width:1px,color:#171B19;
+  classDef sys fill:#E0EBE7,stroke:#14584F,stroke-width:2px,color:#0E3F38;
+  class V,MA,FA,ST,PROV,GD ext;
+  class SYS sys;
+</pre>
+    </div>
+    <p class="caption"><b>图注 ·</b> 家长在右下角、不在左边——他们收得到通知，却<b>不是系统用户、也不一定有 Contact 行</b>。
+      通向他们的地址只有两条：<code>Participation.consent_email/phone</code>（优先）和
+      <code>EmergencyContact.phone</code>（回落，只有电话所以只能走 SMS）。</p>
+
+    <h3>Level 1 · 十四条需求走的路</h3>
+    <div class="plate">
+<pre class="mermaid">
+%%{init: {"theme":"base","themeVariables":{"background":"#F7F8F5","primaryColor":"#FFFFFF","primaryTextColor":"#171B19","primaryBorderColor":"#495049","lineColor":"#5A6560","fontSize":"12px"}}}%%
+flowchart TB
+  V(["志愿者"]):::ext
+  MA(["Ministry Admin"]):::ext
+  FA(["Foundation Admin"]):::ext
+  ST(["内部录入员 staff"]):::ext
+  PROV(["通知服务商"]):::ext
+
+  subgraph GATE ["权限层 · org/permissions.py —— 全项目唯一一处回答「他能不能对这个 ministry 做这件事」"]
+    PERM{{"ministry_ids_administered_by · can_publish_event<br/>can_manage_event · can_view_registrations · can_grant_ministry_admin<br/>⚠ user.contact 为空一律 False 不抛异常 · superuser 不特批"}}:::gate
+  end
+
+  subgraph FLOW ["流程侧 P1–P6"]
+    P1["P1 注册建号<br/>accounts/services.py::register_account<br/>一次事务 User + Contact"]:::proc
+    P5["P5 授权 / 撤权<br/>org/services.py::grant_ministry_admin · revoke_ministry_role<br/>撤权 = 填 end_date 不删行"]:::proc
+    P2["P2 发布活动 + 开工种<br/>events/views.py::event_create · event_roles<br/>needed_count 说明每个工种要几人"]:::proc
+    P3["P3 浏览与报名<br/>events/services.py::sign_up<br/>未成年 → 必须有 consent_at + 邮箱或电话"]:::proc
+    P4["P4 名单 · 签到 · 签退 · 补录<br/>check_in → check_out 写入 hours → record_hours<br/>三条路一个岗哨 _mark_attended"]:::proc
+    P6["P6 变更通知<br/>resolve_recipients → notify_event_change<br/>未成年通知家长 · unreachable 自己算"]:::proc
+  end
+
+  subgraph REP ["报表侧 R1–R8 · events/services.py"]
+    R18["events_in_period → R1 R2 R3<br/>event_summary → R4 R5 R6 R7<br/>ministry_staff_participation → R8"]:::rep
+  end
+
+  subgraph STAFF ["staff 侧 · 被 D18 形状触发赶出 admin 的两个页面"]
+    SM["merge_contacts · relationship_create<br/>+ /admin/ 里的字典表与编制维护"]:::proc
+  end
+
+  subgraph ADAPT ["适配器 · core/notifications/ —— 唯一和外部服务打交道的地方"]
+    BK["NotificationBackend<br/>只认（地址 · 渠道 · 内容）"]:::adapt
+  end
+
+  D1[("D1 · Contact<br/>Relationship · EmergencyContact · Language")]:::store
+  D2[("D2 · User")]:::store
+  D3[("D3 · Ministry · Position<br/>Assignment · EmploymentType")]:::store
+  D4[("D4 · MinistryRole")]:::store
+  D5[("D5 · Event · EventRole<br/>EventType · ParticipationRole")]:::store
+  D6[("D6 · Participation")]:::store
+  D7[("D7 · EventNotification<br/>+ recipients / unreachable")]:::store
+  D8[("D8 · simple-history × 7")]:::store
+
+  V --> P1
+  P1 --> D2
+  P1 --> D1
+  FA --> PERM
+  PERM -->|"can_grant_ministry_admin<br/>查 Group 不查 ministry"| P5
+  P5 --> D4
+  P5 -.->|留痕| D8
+
+  MA --> PERM
+  PERM -->|can_publish_event| P2
+  PERM -->|can_manage_event| P4
+  PERM -->|can_manage_event| P6
+  PERM -->|can_view_registrations| R18
+  D4 -->|"每次请求至少查一次<br/>Index(contact,end_date)"| PERM
+  D2 -->|user.contact| PERM
+
+  P2 --> D5
+  P2 -.-> D8
+  D5 -->|"open_for_signup + 未开始"| P3
+  V --> P3
+  P3 --> D6
+  D1 -->|"is_minor 三态 · 生日未知按未成年"| P3
+  P3 -.-> D8
+  D6 -->|"我的报名 + hours"| V
+  P4 --> D6
+  D6 -->|"registered_count / attended_count"| P4
+  P4 -.-> D8
+
+  D5 --> R18
+  D6 --> R18
+  D3 -->|"Assignment.active(on=活动当天)<br/>×  Position(kind=employee, ministry=活动的)"| R18
+  R18 -->|"R1–R8 那几个数"| MA
+
+  D6 --> P6
+  D1 --> P6
+  P6 --> D7
+  P6 --> BK
+  BK --> PROV
+  PROV -->|"DeliveryResult · provider_ref"| P6
+
+  ST --> SM
+  SM --> D1
+  SM --> D3
+  SM --> D5
+  SM -.-> D8
+
+  classDef ext fill:#FFFFFF,stroke:#495049,stroke-width:1px,color:#171B19;
+  classDef proc fill:#E7EFEA,stroke:#2A7752,stroke-width:1.2px,color:#173C29;
+  classDef rep fill:#F6EAE0,stroke:#AC5C27,stroke-width:1.2px,color:#5A3014;
+  classDef gate fill:#EFE7F4,stroke:#77549F,stroke-width:1.5px,color:#3B2A52;
+  classDef adapt fill:#EDEFEA,stroke:#6C7A74,stroke-width:1.2px,color:#2E3733;
+  classDef store fill:#FFFFFF,stroke:#2C6B8E,stroke-width:1.2px,color:#123449;
+</pre>
+    </div>
+    <p class="caption"><b>图注 ·</b> 虚线是写进 simple-history 的旁路。注意<b>权限层横在所有
+      ministry admin 动作的前面，而志愿者那条线不经过它</b>——志愿者不需要范围授权，
+      他们受限的方式是查询层只给「自己的」和「已发布的」（D21 第 2 条：模板里不显示 ≠ 数据没发出去）。</p>
+
+    <div class="callout">
+      <p><strong>这张图里最容易画错、也最贵的一条线是 <code>D3 → R18</code>。</strong>
+        R8 问的是「某场活动里，<b>开设它的那个 ministry 下面的 employee</b> 谁参与了」——
+        时间口径必须是<b>活动当天</b>而不是今天（<code>.active(on=event.start_time.date())</code>），
+        用 <code>.active()</code> 而不是 <code>.serving()</code>（问的是当时是不是员工，不是今天能不能当值），
+        并且 <code>.distinct()</code> 不能省（一人多岗会让他的 Participation 出现两遍）。
+        三个坑都不报错，只是悄悄给出错的数。</p>
+    </div>
+  </section>
+
+  <!-- ================= 三 · App 地图 ================= -->
+  <section id="apps">
+    <div class="sec-head">
+      <span class="idx serif">三</span>
+      <h2 class="serif">App 边界与依赖</h2>
+      <span class="tag mono">前两张图画不出的那一层</span>
+    </div>
+
+    <div class="prose">
+      <p>
+        为什么还要第三张：<b>ERD 的实体框里没有 app 这个维度</b>——mermaid 的
+        <code>erDiagram</code> 不支持分组，17 张表在里面是平的。而 D17 恰恰规定了
+        「一个 app 一个业务领域」和一条<b>单向</b>依赖链，谁也不许反向 import。
+        这张图把表按 app 收拢，只画跨 app 的外键。
+      </p>
+    </div>
+
+    <div class="plate">
+<pre class="mermaid">
+%%{init: {"theme":"base","themeVariables":{"background":"#F7F8F5","primaryColor":"#FFFFFF","primaryTextColor":"#171B19","primaryBorderColor":"#495049","lineColor":"#5A6560","fontSize":"12px"}}}%%
+flowchart TB
+  subgraph CORE ["core · 0 张表"]
+    direction LR
+    C1["TimeStampedModel（抽象）<br/>DateRangeMixin + .active()<br/>timeutils.local_today()<br/>constraints.CONSTRAINT_FIELD<br/>notifications/ 四个后端"]:::core
+  end
+
+  subgraph CONTACT ["contact · 5 张表"]
+    direction LR
+    T1["Contact"]:::contact
+    T2["RelationshipType"]:::contact
+    T3["Relationship"]:::contact
+    T4["Language"]:::contact
+    T5["EmergencyContact"]:::contact
+  end
+
+  subgraph ACCOUNTS ["accounts · 1 张表"]
+    T6["User"]:::accounts
+  end
+
+  subgraph ORG ["org · 5 张表"]
+    direction LR
+    T7["Ministry"]:::org
+    T8["EmploymentType"]:::org
+    T9["Position"]:::org
+    T10["Assignment"]:::org
+    T11["MinistryRole"]:::org
+  end
+
+  subgraph EVENTS ["events · 6 张表"]
+    direction LR
+    T12["EventType"]:::events
+    T13["ParticipationRole"]:::events
+    T14["Event"]:::events
+    T15["EventRole"]:::events
+    T16["Participation"]:::events
+    T17["EventNotification"]:::events
+  end
+
+  subgraph LATER ["预留 · 0 张表"]
+    direction LR
+    L1["volunteer<br/>VolunteerProfile · BackgroundCheck"]:::defer
+    L2["finance<br/>Contribution 等"]:::defer
+    L3["payroll<br/>整个 app 级别不授权"]:::defer
+  end
+
+  T1  -.->|contact O2O| T6
+  T7  -.->|ministry| T9
+  T1  -.->|contact| T10
+  T1  -.->|contact| T11
+  T6  -.->|granted_by| T11
+  T7  -.->|ministry| T11
+  T7  -.->|ministry 非空| T14
+  T1  -.->|owner| T14
+  T1  -.->|contact| T16
+  T2  -.->|consent_relationship| T16
+  T6  -.->|sent_by| T17
+
+  classDef core     fill:#EDEFEA,stroke:#6C7A74,stroke-width:1.2px,color:#2E3733;
+  classDef contact  fill:#E4EEF4,stroke:#2C6B8E,stroke-width:1.2px,color:#123449;
+  classDef accounts fill:#EFE7F4,stroke:#77549F,stroke-width:1.2px,color:#3B2A52;
+  classDef org      fill:#E4F0E9,stroke:#2A7752,stroke-width:1.2px,color:#173C29;
+  classDef events   fill:#F6EAE0,stroke:#AC5C27,stroke-width:1.2px,color:#5A3014;
+  classDef defer    fill:#F2F3F1,stroke:#969E99,stroke-width:1px,stroke-dasharray:4 3,color:#5D645F;
+</pre>
+    </div>
+    <p class="caption"><b>图注 ·</b> 虚线全部是跨 app 外键，一共 11 条，方向清一色朝右——
+      <b>没有一条回头指</b>。图里 <code>core</code> 一张表都没有却在最上面：它装的是
+      <code>.active()</code>、<code>local_today()</code> 和投递适配器，被下面每一个 app 用。</p>
+
+    <h3>依赖链是单向的，这一条最容易搞反</h3>
+    <div class="plate">
+<pre class="mermaid">
+%%{init: {"theme":"base","themeVariables":{"background":"#F7F8F5","primaryColor":"#FFFFFF","primaryTextColor":"#171B19","primaryBorderColor":"#495049","lineColor":"#5A6560","fontSize":"13px"}}}%%
+flowchart LR
+  A["core"]:::core --> B["contact"]:::contact --> C["accounts"]:::accounts --> D["org"]:::org --> E["events"]:::events --> F["volunteer<br/>finance · payroll"]:::defer
+  X["✗ accounts 去 import org<br/>比如想在 User 上加 is_ministry_admin"]:::bad -.->|"循环依赖<br/>那个属性本来就该在 org/permissions.py"| C
+
+  classDef core     fill:#EDEFEA,stroke:#6C7A74,stroke-width:1.4px,color:#2E3733;
+  classDef contact  fill:#E4EEF4,stroke:#2C6B8E,stroke-width:1.4px,color:#123449;
+  classDef accounts fill:#EFE7F4,stroke:#77549F,stroke-width:1.4px,color:#3B2A52;
+  classDef org      fill:#E4F0E9,stroke:#2A7752,stroke-width:1.4px,color:#173C29;
+  classDef events   fill:#F6EAE0,stroke:#AC5C27,stroke-width:1.4px,color:#5A3014;
+  classDef defer    fill:#F2F3F1,stroke:#969E99,stroke-width:1px,stroke-dasharray:4 3,color:#5D645F;
+  classDef bad      fill:#FFFFFF,stroke:#B03A2E,stroke-width:1.2px,stroke-dasharray:5 3,color:#7B241C;
+</pre>
+    </div>
+
+    <ul class="legend">
+      <li><span class="swatch" style="background:var(--app-core)"></span>core · 0 表 · 共享地基</li>
+      <li><span class="swatch" style="background:var(--app-contact)"></span>contact · 5 表 · 人和外部组织</li>
+      <li><span class="swatch" style="background:var(--app-accounts)"></span>accounts · 1 表 · 能不能登录</li>
+      <li><span class="swatch" style="background:var(--app-org)"></span>org · 5 表 · 内部组织结构与授权</li>
+      <li><span class="swatch" style="background:var(--app-events)"></span>events · 6 表 · 活动闭环</li>
+      <li><span class="swatch" style="background:var(--app-defer)"></span>预留 · 0 表</li>
+    </ul>
+
+    <div class="callout">
+      <p><strong>三条边界规矩，各自防一个具体的错：</strong></p>
+      <ul class="notes">
+        <li><b><code>MinistryRole</code> 放 <code>org</code> 不放 <code>accounts</code></b>——它的主语是 ministry；
+          <code>accounts</code> 只该装「能不能登录」这一层。</li>
+        <li><b><code>Ministry</code> 绝不做成 <code>contact_type=organization</code> 的 Contact 行</b>——
+          <code>Contact</code> 装的是人和<b>外部</b>组织，ministry 是<b>内部</b>组织单元。混进去会同时污染联系人列表和内部结构的边界。</li>
+        <li><b><code>payroll</code> 现在就占位</b>——Django 的权限按 <code>app_label.model</code> 授予，
+          一个 Group 直接不给 <code>payroll.*</code>，比逐字段配权限简单也更不容易配漏。</li>
+      </ul>
+    </div>
+  </section>
+
+  <!-- ================= 四 · 表册 ================= -->
+  <section id="inventory">
+    <div class="sec-head">
+      <span class="idx serif">四</span>
+      <h2 class="serif">十七张表分别记什么</h2>
+      <span class="tag mono">逐表对照 R1–R8 · P1–P6</span>
+    </div>
+
+    <div class="tablewrap">
+      <table>
+        <thead>
+          <tr><th>表</th><th>app</th><th>记录什么</th><th>连向谁</th><th>history</th><th>服务哪条需求</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="mono tname">Contact</td><td><span class="pill a-contact">contact</span></td>
+            <td>这个人（或外部机构）<b>是谁</b>：姓名、联系方式、生日、语言、地址、启用状态。一张表管人和组织（D4）</td>
+            <td>→ Language；被 Relationship / EmergencyContact / User / Assignment / MinistryRole / Event.owner / Participation 指</td>
+            <td class="yes">✓</td><td>P1 P3 P6 R8</td>
+          </tr>
+          <tr>
+            <td class="mono tname">Language</td><td><span class="pill a-contact">contact</span></td>
+            <td>ISO 639-3 语种表，7923 行，英语／普通话／粤语置顶（D8）</td>
+            <td>被 Contact.preferred_language 指</td>
+            <td class="no">—</td><td>（支撑 Contact）</td>
+          </tr>
+          <tr>
+            <td class="mono tname">RelationshipType</td><td><span class="pill a-contact">contact</span></td>
+            <td>关系类型字典：正反两个标签 + 是否对称 + 能否当紧急联系人关系。<b>一段关系只存一行</b>，靠两个标签从两头读</td>
+            <td>被 Relationship / EmergencyContact / Participation.consent_relationship 指</td>
+            <td class="no">—</td><td>P3（同意关系）</td>
+          </tr>
+          <tr>
+            <td class="mono tname">Relationship</td><td><span class="pill a-contact">contact</span></td>
+            <td>两个 Contact 之间的一段关系 + 起止日期。<b>没有 <code>is_active</code></b>——它和 <code>end_date</code> 是同一件事记两处</td>
+            <td>→ Contact ×2 · RelationshipType</td>
+            <td class="no">—</td><td>（当前 14 条用不上，但不删）</td>
+          </tr>
+          <tr>
+            <td class="mono tname">EmergencyContact</td><td><span class="pill a-contact">contact</span></td>
+            <td>某人的紧急联系人：姓名 + 电话 + 关系，<b>全是文本，不指向 Contact</b>——邻居室友不该占一行 Contact</td>
+            <td>→ Contact（person）· RelationshipType</td>
+            <td class="no">—</td><td>P3 P6（家长通知的<b>回落</b>，只有电话故只能 SMS）</td>
+          </tr>
+          <tr>
+            <td class="mono tname">User</td><td><span class="pill a-accounts">accounts</span></td>
+            <td>能不能登录、能看什么。<code>contact</code> 是<b>可空</b> O2O——superuser 是技术账号不对应真人（D12）</td>
+            <td>→ Contact（O2O）；被 MinistryRole.granted_by / EventNotification.sent_by 指</td>
+            <td class="no">—</td><td>P1 P5</td>
+          </tr>
+          <tr>
+            <td class="mono tname">Ministry</td><td><span class="pill a-org">org</span></td>
+            <td>基金会的服务单元：食物银行、报税志愿、ESL……<b>行政职能也是这张表里的行</b>，不另建 Department</td>
+            <td>被 Position / MinistryRole / Event 指</td>
+            <td class="no">—</td><td>R2 R8 P2 P4 P5</td>
+          </tr>
+          <tr>
+            <td class="mono tname">EmploymentType</td><td><span class="pill a-org">org</span></td>
+            <td>用工类型字典。<b>取值基金会还没定</b>，所以是字典表不是 TextChoices——以后加一行不改代码</td>
+            <td>被 Assignment 指</td>
+            <td class="no">—</td><td>（支撑 Assignment）</td>
+          </tr>
+          <tr>
+            <td class="mono tname">Position</td><td><span class="pill a-org">org</span></td>
+            <td><b>编制</b>——组织架构的骨架，与人无关。职务名、kind、属哪个 ministry、上级是谁、是不是 leader。<b>没人在任也存在</b>（空缺）</td>
+            <td>→ Ministry · Position（自引用）；被 Assignment 指</td>
+            <td class="yes">✓</td><td>R8（+ Phase C 的组织架构图）</td>
+          </tr>
+          <tr>
+            <td class="mono tname">Assignment</td><td><span class="pill a-org">org</span></td>
+            <td><b>任职</b>——谁在什么时候占了哪个编制。<code>status</code>（在任 / 请假 / 停职）和任期日期是<b>正交</b>的两个维度</td>
+            <td>→ Contact · Position · EmploymentType</td>
+            <td class="yes">✓</td><td>R8 ——三张表 join 才答得出</td>
+          </tr>
+          <tr>
+            <td class="mono tname">MinistryRole</td><td><span class="pill a-org">org</span></td>
+            <td>「某人在某 ministry 有 admin 权限」+ 起止 + 谁授的。<b>Django Group 顶不上</b>：权限没有对象级作用域</td>
+            <td>→ Contact · Ministry · User(granted_by)</td>
+            <td class="yes">✓</td><td>P2 P4 P5 P6 ——每个受保护视图每次请求都查它</td>
+          </tr>
+          <tr>
+            <td class="mono tname">EventType</td><td><span class="pill a-events">events</span></td>
+            <td>活动类型字典</td><td>被 Event 指</td>
+            <td class="no">—</td><td>（支撑 Event）</td>
+          </tr>
+          <tr>
+            <td class="mono tname">ParticipationRole</td><td><span class="pill a-events">events</span></td>
+            <td><b>一次活动之内</b>的工种字典：签到台、搬运、翻译。<b>≠ Position</b>。必须 seed 一行 <code>general</code>，走数据迁移不走 seed_demo</td>
+            <td>被 EventRole 指</td>
+            <td class="no">—</td><td>R4 R5 R7</td>
+          </tr>
+          <tr>
+            <td class="mono tname">Event</td><td><span class="pill a-events">events</span></td>
+            <td>一场活动：属哪个 ministry（<b>非空</b>）、起止时间、地点、负责人、五档 status</td>
+            <td>→ EventType · Ministry · Contact(owner)；被 EventRole / EventNotification 指</td>
+            <td class="yes">✓</td><td>R1 R2 R3 P2 P3</td>
+          </tr>
+          <tr>
+            <td class="mono tname">EventRole</td><td><span class="pill a-events">events</span></td>
+            <td><b>这场活动开了哪些工种、各要几人</b>。它之于 Participation 就是 Position 之于 Assignment——<b>没人报名的工种照样存在</b></td>
+            <td>→ Event(CASCADE) · ParticipationRole；被 Participation 指</td>
+            <td class="yes">✓</td><td>R4 R5 R7 P2 ——<b>没有它，零报名的工种就查不出来</b></td>
+          </tr>
+          <tr>
+            <td class="mono tname">Participation</td><td><span class="pill a-events">events</span></td>
+            <td>报名 + 出勤 + 工时 + 未成年同意，四件事一行。<code>hours</code> 是<b>全系统唯一可手工改写的权威值</b></td>
+            <td>→ EventRole(CASCADE) · Contact · RelationshipType；被两个 M2M 指</td>
+            <td class="yes">✓</td><td>R5 R6 R7 R8 P3 P4 P6</td>
+          </tr>
+          <tr>
+            <td class="mono tname">EventNotification</td><td><span class="pill a-events">events</span></td>
+            <td>一次变更通知的留痕：原因、正文<b>快照</b>、发给了谁、<b>谁联系不上</b>、provider 批次号。<b>不挂 history——它本身就是不可变记录，改它就是伪造</b></td>
+            <td>→ Event(CASCADE) · User(sent_by) · Participation ×2 M2M</td>
+            <td class="no">—</td><td>P6</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>反过来看：十四条需求各自落在哪几张表上</h3>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>#</th><th>需求</th><th>靠哪几张表 / 哪个函数</th></tr></thead>
+        <tbody>
+          <tr><td class="mono">R1</td><td>某段时间有多少场 event</td><td><code>Event.start_time</code> + <code>Index(start_time)</code> → <code>events_in_period()</code></td></tr>
+          <tr><td class="mono">R2</td><td>每场 event 属于哪个 ministry</td><td><code>Event.ministry</code>（非空）+ <code>Index(ministry, start_time)</code></td></tr>
+          <tr><td class="mono">R3</td><td>每场持续多久</td><td><code>end_time - start_time</code>，<b>派生不存</b></td></tr>
+          <tr><td class="mono">R4</td><td>每场开了多少工种</td><td><code>EventRole</code> 一行一个工种——<b>不能数 Participation</b></td></tr>
+          <tr><td class="mono">R5</td><td>每个工种有多少 volunteer</td><td><code>EventRole.with_signup_counts()</code> 条件聚合</td></tr>
+          <tr><td class="mono">R6</td><td>一场活动的总工时</td><td><code>Sum(Participation.hours)</code></td></tr>
+          <tr><td class="mono">R7</td><td>按工种分的工时</td><td><code>Sum(hours)</code> group by <code>event_role</code></td></tr>
+          <tr><td class="mono">R8</td><td>本 ministry 的 employee 谁参与了、负责什么</td><td><code>Participation</code> × <code>Assignment.active(on=活动当天)</code> × <code>Position(kind=employee, ministry=活动的)</code>——三张表 join</td></tr>
+          <tr><td class="mono">P1</td><td>有 account 体系，每建号就建 Contact</td><td><code>User</code> + <code>Contact</code> · <code>register_account()</code> 一次事务</td></tr>
+          <tr><td class="mono">P2</td><td>ministry admin 发布 event，说明每个工种要几人</td><td><code>MinistryRole</code> + <code>Event.status</code> 的 <code>open</code> 档 + <code>EventRole.needed_count</code></td></tr>
+          <tr><td class="mono">P3</td><td>普通 account 看得到、报得上，未成年走同意</td><td><code>visible_to_volunteers()</code> / <code>open_for_signup()</code> + <code>Participation</code> 六个同意字段 + <code>sign_up()</code></td></tr>
+          <tr><td class="mono">P4</td><td>看报名人数、是否来过、来了几个人做了多久</td><td><code>Participation.status</code> + <code>checked_in_at</code> / <code>checked_out_at</code> + <code>hours</code></td></tr>
+          <tr><td class="mono">P5</td><td>更高一级权限指定谁当 ministry admin</td><td><code>MinistryRole</code> + <code>auth_group</code> 里的 <code>foundation_admin</code></td></tr>
+          <tr><td class="mono">P6</td><td>改时间后快速找到报名者并通知</td><td>找人：<code>Participation</code> 一个 filter（<b>免费</b>）· 发通知：<code>EventNotification</code> + <code>resolve_recipients()</code> + <code>core/notifications/</code></td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <footer>
+    <p>
+      画图依据：<code>docs/planning/goal.md</code> · <code>phase-b.md</code> ·
+      <code>02-roadmap.md</code> · <code>progress.md</code> · <code>deferred.md</code> ·
+      <code>decisions/D01–D22</code>，并与 <code>contact/</code> <code>accounts/</code>
+      <code>org/</code> <code>events/</code> <code>core/</code> 五个 app 的
+      <code>models.py</code> / <code>services.py</code> / <code>permissions.py</code> / <code>urls.py</code> 逐条核对。
+    </p>
+    <p>Phase B · B0–B13 代码已全部落地，只差浏览器里那一遍三角色验收。</p>
+  </footer>
+
+</div>
+
+<script>
+  /* Mermaid renders each diagram at width:100%, so a 4700px-wide ER diagram gets
+     squeezed into the column and its labels become unreadable. Restore every
+     diagram to the size its own viewBox asks for and let the plate scroll. */
+  (function () {
+    var done = new WeakSet();
+    function sizeToViewBox() {
+      var svgs = document.querySelectorAll('.plate svg');
+      for (var i = 0; i < svgs.length; i++) {
+        var svg = svgs[i];
+        if (done.has(svg)) continue;
+        var vb = svg.viewBox && svg.viewBox.baseVal;
+        if (!vb || !vb.width || !vb.height) continue;
+        svg.style.width = Math.ceil(vb.width) + 'px';
+        svg.style.height = Math.ceil(vb.height) + 'px';
+        svg.style.maxWidth = 'none';
+        done.add(svg);
+      }
+    }
+    sizeToViewBox();
+    if (window.MutationObserver) {
+      new MutationObserver(sizeToViewBox)
+        .observe(document.documentElement, { childList: true, subtree: true });
+    }
+    var ticks = 0;
+    var timer = setInterval(function () {
+      sizeToViewBox();
+      if (++ticks > 80) clearInterval(timer);
+    }, 250);
+  })();
+</script>

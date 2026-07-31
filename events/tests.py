@@ -9,6 +9,8 @@ import datetime
 from decimal import Decimal
 
 from django.contrib.auth import get_user_model
+from django.core.management import call_command
+from django.core.management.base import CommandError
 from django.core.exceptions import ValidationError
 from django.db import IntegrityError, connection, transaction
 from django.db.models import ProtectedError
@@ -30,7 +32,14 @@ from core.timeutils import (
 from org.models import Assignment, Ministry, MinistryRole, Position
 from org.permissions import foundation_admin_group
 
-from .models import Event, EventRole, EventType, Participation, ParticipationRole
+from .models import (
+    Event,
+    EventNotification,
+    EventRole,
+    EventType,
+    Participation,
+    ParticipationRole,
+)
 from .services import (
     ConsentRequired,
     check_in,
@@ -1122,3 +1131,312 @@ class PeriodReportTests(TestCase):
         event = self.event_at(day_start(datetime.date(2026, 3, 15)))
         event.refresh_from_db()
         self.assertEqual(event.duration, datetime.timedelta(hours=2))
+
+
+class SeedDemoTests(TestCase):
+    """The demo data has to contain every awkward branch, or the walk proves nothing."""
+
+    def seed(self):
+        call_command("seed_demo", verbosity=0)
+
+    def test_it_refuses_to_run_with_debug_off(self):
+        # One mistaken run against production fills the contact table with
+        # invented people who — by this system's own design — look exactly like
+        # real ones and are near-impossible to pick out afterwards.
+        with override_settings(DEBUG=False), self.assertRaises(CommandError):
+            self.seed()
+
+    def test_force_overrides_the_refusal(self):
+        with override_settings(DEBUG=False):
+            call_command("seed_demo", "--force", verbosity=0)
+        self.assertTrue(Event.objects.exists())
+
+    def test_running_it_twice_does_not_double_anything(self):
+        # get_or_create throughout. Three 张三 would set the duplicate warning
+        # off on every page from then on.
+        with override_settings(DEBUG=True):
+            self.seed()
+            counts = (Contact.objects.count(), Event.objects.count(),
+                      EventRole.objects.count(), Participation.objects.count())
+            self.seed()
+        self.assertEqual(
+            counts,
+            (Contact.objects.count(), Event.objects.count(),
+             EventRole.objects.count(), Participation.objects.count()),
+        )
+
+    def test_it_builds_every_branch_the_acceptance_walk_needs(self):
+        # One test per branch would read better; one test that names them all
+        # is what stops a branch being dropped, because the list is the
+        # checklist. Each of these fails silently if it is missing: the walk
+        # looks green and has verified nothing.
+        with override_settings(DEBUG=True):
+            self.seed()
+
+        with self.subTest("a role nobody signed up for — R4 answers 3, not 2"):
+            self.assertTrue(
+                EventRole.objects.filter(participations__isnull=True).exists())
+
+        with self.subTest("somebody with no email and no phone — P6's third group"):
+            self.assertTrue(
+                Contact.objects.filter(
+                    participations__isnull=False, email="", phone="").exists())
+
+        with self.subTest("an unknown birth date — the cautious side of three states"):
+            self.assertTrue(
+                Contact.objects.filter(
+                    participations__isnull=False, birth_date__isnull=True).exists())
+
+        with self.subTest("a minor reachable only through an emergency contact"):
+            self.assertTrue(
+                Contact.objects.filter(
+                    participations__isnull=False,
+                    emergency_contacts__isnull=False,
+                ).exists())
+
+        with self.subTest("hours from a paper sheet, with no timestamps"):
+            self.assertTrue(
+                Participation.objects.filter(
+                    hours__isnull=False, checked_in_at__isnull=True).exists())
+
+        with self.subTest("a draft event and a confirmed one"):
+            self.assertTrue(Event.objects.filter(status=Event.Status.DRAFT).exists())
+            confirmed = Event.objects.filter(status=Event.Status.CONFIRMED).first()
+            self.assertIsNotNone(confirmed)
+            # And somebody signed up to it, so "still opens once full" is walkable.
+            self.assertTrue(
+                Participation.objects.filter(event_role__event=confirmed).exists())
+
+        with self.subTest("two ministries with an admin each — one cannot show scoping"):
+            self.assertEqual(
+                MinistryRole.objects.values("ministry").distinct().count(), 2)
+
+        with self.subTest("an employee who left after the event — R8's clock"):
+            past = Event.objects.filter(status=Event.Status.COMPLETED).first()
+            self.assertIsNotNone(past)
+            self.assertTrue(
+                Assignment.objects.filter(
+                    end_date__lt=local_today(),
+                    contact__participations__event_role__event=past,
+                ).exists())
+
+        with self.subTest("a vacant post — vacancy is a first-class state"):
+            self.assertTrue(Position.objects.vacant().exists())
+
+    def test_the_seeded_data_produces_all_three_notification_groups(self):
+        # The end-to-end point of the fixture: the demo event must exercise
+        # direct recipients, guardian recipients and the unreachable at once.
+        with override_settings(DEBUG=True):
+            self.seed()
+        event = Event.objects.get(name="周六物资发放")
+        recipients, unreachable = resolve_recipients(event)
+        self.assertTrue([r for r in recipients if not r.is_guardian])
+        self.assertTrue([r for r in recipients if r.is_guardian])
+        self.assertTrue(unreachable)
+
+
+@override_settings(DEBUG=True, NOTIFICATION_BACKEND="core.notifications.locmem.LocmemBackend")
+class AcceptanceWalkTests(TestCase):
+    """The three-role walk from phase-b.md, driven over URLs against seed_demo.
+
+    Not a replacement for doing it in a browser — that is still the acceptance,
+    and it catches things no assertion will (a form that renders unusable, a
+    link that goes nowhere). This is the half a machine can hold onto: every
+    step below is one of the ticks on that list, and each of them fails
+    silently if it regresses.
+    """
+
+    PASSWORD = "demo-password-not-a-secret"
+
+    @classmethod
+    def setUpTestData(cls):
+        call_command("seed_demo", verbosity=0)
+
+    def as_role(self, username):
+        self.assertTrue(self.client.login(username=username, password=self.PASSWORD))
+
+    def open_event(self):
+        return Event.objects.get(name="周六物资发放")
+
+    def past_event(self):
+        return Event.objects.get(name="上个月的物资发放")
+
+    def other_event(self):
+        return Event.objects.get(name="报税答疑")
+
+    # --- ① the foundation-wide role ---------------------------------------
+
+    def test_the_foundation_admin_can_appoint_and_revoke_a_ministry_admin(self):
+        # P5, plus the rule that revoking dates the row rather than deleting it.
+        self.as_role("foundation_admin")
+        pantry = Ministry.objects.get(code="food_pantry")
+        newcomer = Contact.objects.get(legal_last_name="孙")
+        url = reverse("org:ministry_admins", args=[pantry.pk])
+        self.client.post(url, {"contact": newcomer.pk})
+        grant = MinistryRole.objects.get(contact=newcomer, ministry=pantry)
+        self.assertEqual(grant.granted_by.username, "foundation_admin")
+
+        self.client.post(url, {"revoke": grant.pk})
+        grant.refresh_from_db()
+        self.assertIsNotNone(grant.end_date)
+        self.assertTrue(MinistryRole.objects.filter(pk=grant.pk).exists())
+
+    def test_r1_to_r3_are_readable_from_the_admin_changelist(self):
+        # The tick that used to sit under "play a volunteer" while the previous
+        # tick required that same volunteer to get 403 from the admin — a step
+        # that contradicts itself gets skipped, and then nobody knows whether
+        # R1–R3 were ever checked.
+        self.as_role("foundation_admin")
+        response = self.client.get("/admin/events/event/")
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "食物银行")          # R2
+        self.assertContains(response, "3:00:00")           # R3, the duration column
+
+    # --- ② the food pantry's admin ----------------------------------------
+
+    def test_the_pantry_admin_sees_a_role_nobody_signed_up_for(self):
+        # ⭐ D19's acceptance point, walked: the event opened three roles and
+        # 翻译 has nobody in it, so it has three — not two.
+        self.as_role("pantry_admin")
+        response = self.client.get(
+            reverse("events:event_registrations", args=[self.open_event().pk]))
+        self.assertContains(response, "翻译")
+        self.assertEqual(len(response.context["roles"]), 3)
+
+    def test_the_pantry_admin_is_refused_the_other_ministrys_event(self):
+        # Fail this one and scoped permission was not built.
+        self.as_role("pantry_admin")
+        for name in ["event_registrations", "event_attendance", "event_notify"]:
+            with self.subTest(page=name):
+                response = self.client.get(
+                    reverse(f"events:{name}", args=[self.other_event().pk]))
+                self.assertEqual(response.status_code, 403)
+
+    def test_the_report_counts_the_empty_role_and_totals_the_hours(self):
+        self.as_role("pantry_admin")
+        response = self.client.get(
+            reverse("events:event_report", args=[self.past_event().pk]))
+        summary = response.context["summary"]
+        self.assertEqual(summary["role_count"], 3)          # R4 — 翻译 had nobody
+        self.assertEqual(summary["total_hours"], Decimal("9.00"))   # R6: 3 + 2 + 4
+
+    def test_r8_lists_the_employee_who_has_since_left(self):
+        # The clock is the day of the event. Asked with today's date this list
+        # would be short by one, and would say nothing about it.
+        self.as_role("pantry_admin")
+        response = self.client.get(
+            reverse("events:event_report", args=[self.past_event().pk]))
+        names = {row.contact.legal_last_name for row in response.context["staff"]}
+        self.assertIn("孙", names)
+
+    def test_the_notification_preview_has_all_three_groups(self):
+        # ⭐ P6. The third group is the one that fails silently: a green
+        # "27 notified" hiding three people nobody could reach.
+        self.as_role("pantry_admin")
+        response = self.client.get(
+            reverse("events:event_notify", args=[self.open_event().pk]))
+        self.assertTrue(response.context["recipients"])
+        self.assertTrue(response.context["guardian_recipients"])
+        self.assertTrue(response.context["unreachable"])
+        # And the guardian rows are the minors', not the minors' own addresses.
+        for row in response.context["guardian_recipients"]:
+            self.assertIn(row.participation.contact.is_minor, (True, None))
+
+    def test_sending_leaves_a_record_naming_who_was_missed(self):
+        self.as_role("pantry_admin")
+        event = self.open_event()
+        url = reverse("events:event_notify", args=[event.pk])
+        preview = self.client.get(url)
+        missed = {row.participation.pk for row in preview.context["unreachable"]}
+        self.client.post(url, {
+            "reason": EventNotification.Reason.TIME_CHANGED,
+            "message": preview.context["form"].initial["message"],
+        })
+        notification = event.notifications.get()
+        self.assertEqual({p.pk for p in notification.unreachable.all()}, missed)
+        # "Last notified …" is the only thing standing between a shaky
+        # connection and a second identical notice.
+        self.assertContains(self.client.get(url), "最近一次")
+
+    def test_checking_somebody_in_and_out_fills_in_their_hours(self):
+        self.as_role("pantry_admin")
+        event = self.open_event()
+        participation = Participation.objects.filter(
+            event_role__event=event, contact__legal_last_name="李").get()
+        url = reverse("events:event_attendance", args=[event.pk])
+        self.client.post(url, {"participation": participation.pk, "action": "check_in"})
+        self.client.post(url, {"participation": participation.pk, "action": "check_out"})
+        participation.refresh_from_db()
+        self.assertEqual(participation.status, Participation.Status.ATTENDED)
+        self.assertIsNotNone(participation.hours)
+
+    # --- ③ the plain volunteer --------------------------------------------
+
+    def test_a_volunteer_is_refused_the_admin_outright(self):
+        # D21's first requirement: refused, not merely unlinked.
+        self.as_role("volunteer_adult")
+        response = self.client.get("/admin/", follow=True)
+        self.assertNotContains(response, "Site administration", status_code=200)
+
+    def test_a_volunteer_sees_open_events_only(self):
+        self.as_role("volunteer_adult")
+        response = self.client.get(reverse("events:event_list"))
+        listed = {event.name for event in response.context["events"]}
+        self.assertIn("周六物资发放", listed)
+        self.assertNotIn("还没发布的圣诞发放", listed)     # draft
+        self.assertNotIn("已招满的英语角", listed)         # confirmed
+
+    def test_a_volunteer_can_still_open_the_event_they_joined_once_it_filled_up(self):
+        # ⭐ Visibility is not signability. Written the other way, P6's
+        # "can't make it? cancel here" link 404s on exactly the full events.
+        self.as_role("volunteer_adult")
+        confirmed = Event.objects.get(name="已招满的英语角")
+        response = self.client.get(reverse("events:event_detail", args=[confirmed.pk]))
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.context["can_sign_up"])
+
+    def test_a_volunteer_cannot_open_a_draft_event(self):
+        self.as_role("volunteer_adult")
+        draft = Event.objects.get(name="还没发布的圣诞发放")
+        response = self.client.get(reverse("events:event_detail", args=[draft.pk]))
+        self.assertEqual(response.status_code, 404)
+
+    def test_a_minor_must_supply_a_guardian_address_to_sign_up(self):
+        # And an email or a phone with it: consent carrying only a name would
+        # leave P6 nothing to send to.
+        self.as_role("volunteer_minor")
+        event = self.open_event()
+        role = event.roles.get(role__code="lifting")
+        url = reverse("events:event_signup", args=[event.pk])
+        before = Participation.objects.count()
+
+        self.client.post(url, {"event_role": role.pk})
+        self.client.post(url, {
+            "event_role": role.pk, "consent_given_by": "家长",
+            "consent_method": Participation.ConsentMethod.VERBAL,
+        })
+        self.assertEqual(Participation.objects.count(), before)
+
+        self.client.post(url, {
+            "event_role": role.pk, "consent_given_by": "家长",
+            "consent_method": Participation.ConsentMethod.VERBAL,
+            "consent_email": "parent2@example.invalid",
+        })
+        self.assertEqual(Participation.objects.count(), before + 1)
+
+    def test_a_volunteer_with_no_birth_date_is_asked_for_consent_too(self):
+        self.as_role("volunteer_unknown")
+        event = self.open_event()
+        role = event.roles.get(role__code="lifting")
+        before = Participation.objects.count()
+        self.client.post(reverse("events:event_signup", args=[event.pk]),
+                         {"event_role": role.pk})
+        self.assertEqual(Participation.objects.count(), before)
+
+    def test_a_volunteer_cannot_reach_another_persons_signup(self):
+        self.as_role("volunteer_adult")
+        someone_else = Participation.objects.exclude(
+            contact__legal_last_name="李").first()
+        response = self.client.get(
+            reverse("events:participation_cancel", args=[someone_else.pk]))
+        self.assertEqual(response.status_code, 404)

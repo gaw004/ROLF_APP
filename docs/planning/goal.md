@@ -307,7 +307,7 @@ D1–D22 **一条一个文件**，索引见 [`decisions/README.md`](decisions/RE
 |---|---|---|
 | 数据核心设计（`Contact` / `Relationship` / `Language`） | ✅ 已完成，有测试 | [`progress.md`](progress.md#-已完成--数据核心设计这是目前最有价值的部分) |
 | **Phase A · 地基加固**（A1–A10） | ✅ 已完成（2026-07-27，分支 `phase-a`） | [`progress.md`](progress.md#-已完成--phase-a-地基加固) · [`01-roadmap.md`](01-roadmap.md) |
-| Phase B · 活动闭环 | 🔄 当前在做。 B0–B5 已完成；B6 起是活动闭环 | [`phase-b.md`](phase-b.md)（要点） · [`02-roadmap.md`](02-roadmap.md)（步骤） |
+| Phase B · 活动闭环 | 🔄 当前在做。 B0–B13 的代码已全部落地、353 个测试全绿；**只差浏览器里那一遍三角色验收** | [`phase-b.md`](phase-b.md)（要点） · [`02-roadmap.md`](02-roadmap.md)（步骤） |
 | Phase C · 上线与真实运营 | ⬜ 未开始 | [`progress.md`](progress.md#phase-c--上线与真实运营) |
 | Phase D · 资金追踪 | ⬜ 未开始 | [`progress.md`](progress.md#phase-d--资金追踪) |
 
@@ -339,16 +339,25 @@ D1–D22 **一条一个文件**，索引见 [`decisions/README.md`](decisions/RE
 [D22](decisions/D22-event-notifications.md#d22--活动变更通知收件人解析是业务逻辑投递是可替换的适配器2026-07-29)。改动清单见文末
 [「2026-07-29 修订记录了什么」](revisions.md#七2026-07-29-修订记录了什么)。
 
-**下一步是 `02-roadmap.md` 的 B6**（`events` 一族：`EventType` / `Event` / `EventRole` /
-`ParticipationRole` / `Participation`）。开工前先做两件事：
+**B6–B13 已经做完了**（2026-07-30）：`events` 五张表 + `EventNotification`、
+`MinistryRole` + `org/permissions.py`、注册流程、志愿者自助页、ministry admin 侧页面、
+活动变更通知、R1–R8 的统计口径、`seed_demo`。
+测试从 192 涨到 353，`check` / `makemigrations --check` / `ruff` 都干净，
+12 条 grep 守卫做过双向验证。实测结果见 [`02-roadmap.md` 的收尾那节](02-roadmap.md#自动化部分的实测结果2026-07-30)。
 
-1. **读[零](#零当前优先级2026-07-29-定)那 14 条需求原文**，而不是读转述。
+**下一步是浏览器里那一遍**：照[验收清单](phase-b.md#验收2026-07-29-重写改成按-14-条需求逐条验收)
+扮三个角色各走一遍。`python manage.py seed_demo` 一条命令把数据造齐
+（账号密码在命令的输出里），清单上大部分勾已经有对应的自动化测试
+（`events.tests.AcceptanceWalkTests`），**但浏览器那一遍仍然要走** ——
+表单排版坏了、链接指向空处，断言看不出来。走完再把上面那张表的 Phase B 改成 ✅。
+
+走之前值得重读的两条：
+
+1. [零](#零当前优先级2026-07-29-定)那 14 条需求**原文**，不是转述。
    转述会丢东西 —— 这一轮最贵的那个发现（R4 靠 `Participation` 反推工种是错的）
    就藏在"每个 event 有多少工种"和"每个工种 volunteers 有多少人"这两句的**并列**里；
-2. 重读 D11 的「第二次修订」，再读 D19。 它们是同一个错误的两次出现 ——
-   *「格子」和「占格子的人」混在一张表里，于是空着的格子表达不了*。
-   第一次代价是重写 `Assignment`，这一次因为 `events` 还没写，代价是零。
-   能第二次认出同一个形状，比第一次解决它更有价值。
+2. `02-roadmap.md` 的「计划外记录」新增的三条 —— 实施时才发现的坑，
+   其中两条（UTC 那一天、空 Group）是**验收跑成测试之后当场抓出来的**。
 
 ### 还没定的（哪些阻塞、哪些不阻塞）
 

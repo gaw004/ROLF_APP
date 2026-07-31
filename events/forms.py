@@ -63,10 +63,20 @@ class SignUpForm(forms.Form):
                 self.fields[name].widget = forms.HiddenInput()
 
     def consent(self):
-        """The consent kwargs for sign_up(), or None for an adult."""
+        """The consent kwargs for sign_up(), or None for an adult.
+
+        ⚠️ consent_relationship is a foreign key, so an empty one has to be
+           None and never "". Assigning "" to a relation raises ValueError, and
+           leaving the relationship blank is both allowed and common — which
+           made this a 500 on the ordinary path rather than an exotic one.
+        """
         if not self.needs_consent:
             return None
-        return {name: self.cleaned_data.get(name) or "" for name in self.CONSENT_FIELDS}
+        empty = {"consent_relationship": None}
+        return {
+            name: self.cleaned_data.get(name) or empty.get(name, "")
+            for name in self.CONSENT_FIELDS
+        }
 
 
 class EventForm(forms.ModelForm):

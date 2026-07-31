@@ -25,7 +25,7 @@ should not. Compare the org-tree guard, where the failure at least hangs.
    that the next person edits their account rather than the check.
 """
 
-from django.contrib.auth.models import Group
+from django.contrib.auth.models import Group, Permission
 
 from .models import MinistryRole
 
@@ -114,7 +114,43 @@ def can_grant_ministry_admin(user) -> bool:
     return user.groups.filter(name=FOUNDATION_ADMIN_GROUP).exists()
 
 
+#: What the global tier may do, as app_label.codename. Global permissions are
+#: the right shape here precisely because none of these sentences contains "of
+#: some ministry" — which is the test for whether something belongs in a Group
+#: or in MinistryRole (D20).
+FOUNDATION_ADMIN_PERMISSIONS = [
+    # P5 itself: appointing and revoking a ministry's admins.
+    "org.add_ministryrole",
+    "org.change_ministryrole",
+    "org.delete_ministryrole",
+    "org.view_ministryrole",
+    # R1–R3 are read off the event changelist, foundation-wide: how many events
+    # ran in a period, whose they were, how long each took.
+    "events.view_event",
+    "events.view_eventrole",
+    "events.view_participation",
+]
+
+
 def foundation_admin_group() -> Group:
-    """The global group, created if it is not there. Used by seed_demo and admin."""
-    group, _ = Group.objects.get_or_create(name=FOUNDATION_ADMIN_GROUP)
+    """The global group, with its permissions. Used by seed_demo and the admin.
+
+    ⚠️ The permissions are attached here rather than clicked on in the admin.
+       A group that exists but grants nothing looks right in every listing and
+       fails only when somebody tries to use it — and an empty group is
+       indistinguishable from a full one until then. Membership of this group
+       still confers no ministry scope whatsoever: the scoped pages ask
+       MinistryRole, and a foundation admin who is not also a ministry's admin
+       gets 403 from them. That is deliberate, not an oversight.
+    """
+    group, created = Group.objects.get_or_create(name=FOUNDATION_ADMIN_GROUP)
+    if created or not group.permissions.exists():
+        wanted = []
+        for label in FOUNDATION_ADMIN_PERMISSIONS:
+            app_label, codename = label.split(".")
+            found = Permission.objects.filter(
+                content_type__app_label=app_label, codename=codename).first()
+            if found:
+                wanted.append(found)
+        group.permissions.set(wanted)
     return group

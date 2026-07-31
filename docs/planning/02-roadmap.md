@@ -2302,9 +2302,32 @@ Participation.objects.filter(
 
 ### 收尾
 
-- [ ] `goal.md` 的 Phase B 状态改成 ✅，「还没定的」按实际答复更新
-- [ ] 本文档末尾的「计划外记录」填上实施时才发现的事
-- [ ] README 里补上 `events` app 和自助页面的说明
+- [x] 本文档末尾的「计划外记录」填上实施时才发现的事（B12 / B10 / B13 三条）
+- [x] README 里补上 `events` app 和自助页面的说明
+- [ ] `goal.md` 的 Phase B 状态改成 ✅ —— **等浏览器那一遍走完再改**。
+      B6–B13 的代码和自动化验收已经全绿（见下），但[验收清单](phase-b.md#验收2026-07-29-重写改成按-14-条需求逐条验收)
+      的三个角色仍然要在浏览器里真的点一遍：表单排版坏了、链接指向空处，
+      断言看不出来。**清单本身现在是 `AcceptanceWalkTests`**，浏览器那一遍是复核，不是唯一防线
+- [ ] 「还没定的」按基金会的实际答复更新（5 个问题都还没回，都不阻塞）
+
+#### 自动化部分的实测结果（2026-07-30）
+
+| 项 | 结果 |
+|---|---|
+| `python manage.py test` | 353 个，全绿（开工基线 192） |
+| `python manage.py check` | 0 issues, 0 silenced |
+| `makemigrations --check --dry-run` | No changes detected |
+| `ruff check .` | All checks passed |
+| `events_participation` 有没有 `event_id` / `role_id` 列 | 没有 —— 都在 `event_role_id` 里 |
+| `events_event` 有没有 `capacity` 列 | 没有 |
+| `ministryrole_unique_grant` | `UNIQUE NULLS NOT DISTINCT (contact_id, ministry_id, role, start_date)` |
+| `eventrole_unique_per_event` / `participation_unique_per_event_role` | 都在库里 |
+| 12 条 grep 守卫**双向**验证 | 该红的都红、不该红的没红（脚本见下） |
+
+守卫的双向验证是照 [B5 复盘那条](#-计划外b0b5-复盘守卫验过会红不等于该红的都红)做的：
+往每个守卫管的文件里塞一段"它该抓的"和一段"它不该抓的"，两边都对才算过。
+汇报链那条特意塞了四种写法（多行循环体 / `_id` 后缀 / 递归 / 推导式），
+因为那正是它上次漏掉的四种。
 
 ---
 
@@ -2737,3 +2760,39 @@ R8 改用前者。顺带加第三条时间守卫：`\w+_(time|at)\.date\(\)`
 > **`permissions.py` 负责判断（"他能不能"），`services.py` 负责写（授权 / 撤销），
 > 视图两件都不做，只调其中一个。** 守卫红了的时候，先问是范围写错了
 > 还是代码放错了 —— 这次两样都有一点，而放宽豁免会把后一半永久盖住。
+
+### ⚠️ 计划外（B13）：验收清单跑成测试，当场抓出两个 500 / 403
+
+**这一条本身就是结论**：B13 的三个角色各走一遍，我先写成了自动化的
+`AcceptanceWalkTests`（跑 `seed_demo` 的数据，逐条对着 phase-b.md 的勾）。
+第一次跑就红了两条 —— **而这两处 B6–B12 的单元测试全绿**。
+
+#### 一、未成年人报名，关系那一栏留空 ⇒ 500
+
+`SignUpForm.consent()` 把五个同意字段统一填成 `""`，
+而 `consent_relationship` 是**外键** —— 给外键赋 `""` 直接
+`ValueError: Cannot assign ""`。关系本来就是可空的、留空很常见，
+所以这不是边角情况，**是那条路上最普通的一次点击**。
+单元测试没抓到，是因为它们都直接调 `sign_up()`，绕过了表单那一层。
+
+> 一般化：**表单往 model 送空值时，外键的空是 `None`，字符字段的空是 `""`**。
+> 一句 `or ""` 扫过所有字段看着整齐，遇到外键就是 500。
+
+#### 二、`foundation_admin` 这个 Group 什么权限都没有
+
+验收 ① 要求总管"在 admin 侧看 R1–R3"，而 `foundation_admin_group()`
+只是 `get_or_create` 了一个**空组** —— `is_staff=True` 加一个空组，
+admin 里 403。D20 原文写着这个组要授 `org.add_ministryrole` 那几条，
+**而代码只建了组、没授权限**。
+
+> 一般化（这条更值钱）：**一个空的 Group 和一个满的 Group 在任何列表里长得一模一样**，
+> 只有真的有人去用它的时候才知道是空的。所以权限跟着组一起在代码里建，
+> 不留给"以后去 admin 里点一下"。
+
+#### 三、连带发现：验收清单本身是可执行的
+
+原以为"扮三个角色各走一遍"只能靠人点。实际上其中**大部分**能写成
+`self.client.login(...)` + 打 URL + 断言，而且每一条都对应清单上的一个勾。
+浏览器那一遍仍然要走（表单排版坏了、链接指向空处，断言看不出来），
+但它现在是**复核**，不是唯一防线 —— 同 2026-07-29 晚把四条分层验收
+从清单搬进 grep 守卫的那一次，一模一样的动作。

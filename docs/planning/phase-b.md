@@ -27,10 +27,10 @@
 | `Event` | `events` | `name` / `event_type`(FK) / **`ministry`(FK，⚠️ 非空)** / `start_time` / `end_time` / `location` / `owner`(FK → `Contact`) / `status`（`TextChoices`：**draft·open**·confirmed·completed·cancelled）/ `description`。**挂 simple-history**。<br>⚠️ **三处改动（2026-07-29）**：① **`ministry` 从可空改成非空** —— R2 和 R8 都以它为轴，P2 的权限判断也以它为轴，为空就是一场无主、无人有权管的活动；② **`status` 加 `draft` 和 `open`** —— P3 要"看到**发布的** event"，可见性必须有一个明确的闸门，不能靠推断（`open` = 已发布且开放报名）；③ **删掉 `capacity`** —— 被 `EventRole.needed_count` 取代，见 D19。<br>**2026-07-29 晚补一条：可见性不能等于 `status=open`**，见下面「[可见性与生命周期](#可见性与生命周期两个谓词不是一个-status2026-07-29-晚新增)」——否则活动一 `confirmed`，已报名的人就打不开它了 |
 | `EventRole` | `events` | 新表（D19）—— 这场活动开了哪些工种、各要几人。 `event`(FK，`CASCADE`) / `role`(FK → `ParticipationRole`，`PROTECT`) / **`needed_count`**（`PositiveIntegerField`，可空 = 不限人数）/ `notes`。<br>**它之于 `Participation` 就是 `Position` 之于 `Assignment`** —— 没人报名的工种照样存在，这正是 R4 / R5 需要它的原因。`needed_count` 就是被推迟过的 `Position.headcount`，但**这次不能推迟**，它是 P2 的原话。<br>约束 `UniqueConstraint(event, role)`、`needed_count IS NULL OR needed_count > 0`。<br>**挂 simple-history**（2026-07-29 晚补上这个结论 —— 原文对它没表态）：`needed_count` 是**对外发布出去的承诺**（"搬运要 5 人"），改了要能追溯，同 `Event` 挂 history 的理由。它是几行/场的小表，成本可忽略 |
 | `ParticipationRole` | `events` | 字典表：`code`（唯一·不可改）/ `name` / `is_active`。装的是**一次活动之内**的工种（签到台、搬运、翻译），**≠ `Position.name`**，见下面那条一句话定义。<br>**必须 seed 一行 `code=general`**（"通用志愿者"）—— `Participation.event_role` 非空之后，"没有具体分工"要有地方落 |
-| `Participation` | `events` | 报名 / 出勤 / 工时，三件事一行。 `event_role`(FK → `EventRole`，`CASCADE`) / `contact`(FK，`PROTECT`) / `status`（`TextChoices`：registered·attended·absent·cancelled）/ `registered_at` / **`checked_in_at`** / **`checked_out_at`**（都可空 datetime）/ **`hours`**（`Decimal(6,2)`，可空）/ 三个同意字段（见下一行）。<br>⚠️ **改动（2026-07-29）**：**`event` 和 `role` 两个字段没了**，合并成 `event_role` —— 理由（跨表一致性 `CheckConstraint` 管不了）见 D19。唯一约束因此简化成 `(event_role, contact)`，**不再需要 `nulls_distinct=False`**。<br>签到签退是 P4 的"是否来过"。**`hours` 仍然是唯一权威值**，签退时由 `services.check_out()` 写入它 —— 见下面「签到签退与 `hours`」。<br>**挂 simple-history**（2026-07-29 晚补上这个结论 —— 原文对它没表态，而模型表里其它表都表过态）：这张表上有**全系统唯一一个可以手工改写的权威值**（`hours`），而工时将来可能连到奖励。按"钱的记录必须能追溯是谁改的"同一条口径，**谁把 3 小时改成 8 小时必须查得出来** |
+| `Participation` | `events` | 报名 / 出勤 / 工时，三件事一行。 `event_role`(FK → `EventRole`，`CASCADE`) / `contact`(FK，`PROTECT`) / `status`（`TextChoices`：registered·attended·absent·cancelled）/ `registered_at` / **`checked_in_at`** / **`checked_out_at`**（都可空 datetime）/ **`hours`**（`Decimal(6,2)`，可空）/ 六个同意字段（见下一行）。<br>⚠️ **改动（2026-07-29）**：**`event` 和 `role` 两个字段没了**，合并成 `event_role` —— 理由（跨表一致性 `CheckConstraint` 管不了）见 D19。唯一约束因此简化成 `(event_role, contact)`，**不再需要 `nulls_distinct=False`**。<br>签到签退是 P4 的"是否来过"。**`hours` 仍然是唯一权威值**，签退时由 `services.check_out()` 写入它 —— 见下面「签到签退与 `hours`」。<br>**挂 simple-history**（2026-07-29 晚补上这个结论 —— 原文对它没表态，而模型表里其它表都表过态）：这张表上有**全系统唯一一个可以手工改写的权威值**（`hours`），而工时将来可能连到奖励。按"钱的记录必须能追溯是谁改的"同一条口径，**谁把 3 小时改成 8 小时必须查得出来** |
 | ↳ `Participation` 的同意字段 | `events` | P3 的未成年人同意，不建 `Guardianship`。 `consent_given_by`（文本，姓名）/ `consent_relationship`(FK → `RelationshipType`，可空) / `consent_at`（可空 datetime）/ `consent_method`（`TextChoices`：口头·纸质·线上）/ **`consent_email`**（可空）/ **`consent_phone`**（`PhoneNumberField`，可空）。<br>⚠️ **后两个字段 2026-07-29 晚补，是 P6 的硬前提**：D22 说"未成年人通知家长"，并说系统里已有"两条线通向家长"—— 而 `consent_given_by` **只是一个姓名，没有任何联系方式**，那条线是断的。不补的话未成年人只能靠 `EmergencyContact.phone`（只有电话、没有邮箱），而默认投递后端是邮件 ⇒ D22 自己认定"最需要被通知的那群人"会全部落进 `unreachable`。<br>**为什么不是 `Guardianship` 表**：需求要的是"**这一次活动**家长同意了"，那是一条**事件记录**；`Guardianship` 是"谁是小明的法定监护人"，那是一段**长期关系**。两者形状不同，先做需求要的那个。`Guardianship` 继续留在推迟清单。<br>规则：未成年人没有同意记录（`consent_at` 为空）就报不了名 —— `Participation` 根本建不出来，也不能被 `check_in()` 标成 `attended`。<br>**2026-07-29 晚更正**：原文写的是"不能进 `confirmed`/`attended`"，**而 `confirmed` 不是 `Participation` 的状态**（这张表只有 registered·attended·absent·cancelled），它是 **`Event.Status`** 的一档（"人齐了，不再收报名"）。一条 P3 的核心规则被写在了另一张表的字段上，照着实现会写出一个永远不触发的判断。<br>**同一条规则还要求 `consent_email` / `consent_phone` 至少填一个** —— 否则同意收了、P6 却通知不到家长。<br>落点：两条都是跨表判断（年龄在 `Contact` 上），`CheckConstraint` 表达不了，落在 `events/services.py::sign_up()` 里，按 D14 记为提示层，不假装它是强制的。<br>2026-07-30 更正：本文档原来三处写的是 `register()`，而 `02-roadmap.md` B9 一直写的是 `sign_up()` 并给了签名 —— 同 `ministry_ids_administered_by` 那次，两份文档给同一个函数起了两个名字。统一成 `sign_up()`：`register()` 和 `accounts/services.py::register_account()` 只差一个词，而那两件事毫无关系 |
 | `EventNotification` | `events` | 新表（D22）—— 活动变更通知的留痕。 `event`(FK，`CASCADE`) / `reason`（`TextChoices`：time_changed·location_changed·cancelled·other）/ `message`（正文**快照**）/ `sent_at` / `sent_by`(FK → `User`，`SET_NULL`) / `recipients`(M2M → `Participation`) / **`unreachable`**(M2M → `Participation`，`related_name="notifications_unreachable"`) / `provider_ref`（可空文本，对账用）。<br>**两个 M2M 都是快照，不能事后重算** —— 当时联系不上不等于今天联系不上，重算会把历史记录改成"当时全通知到了"。同 `hours` 是权威值那条。<br>**2026-07-29 晚从 `unreachable_count`（整数）改成 M2M** —— 只存计数的话事后答不出"是哪几个人"，而 D22 ② 要的恰恰是这个。见 D22。<br>**不挂 simple-history** —— 它本身就是一条不可变的事件记录，改它就是伪造 |
-| 投递适配器 | `core/notifications/` | **不是表** —— 一个 `NotificationBackend` 协议 + 三个实现（console / django_email / novu），走 `settings.NOTIFICATION_BACKEND`。<br>⚠️ **后端只认（地址, 渠道, 内容），不认 `Contact` / `Participation` / "未成年人"** —— 一旦让它知道这些，换 provider 就要把业务规则重写一遍。见 D22 |
+| 投递适配器 | `core/notifications/` | **不是表** —— 一个 `NotificationBackend` 协议 + 四个实现（console 开发默认 / locmem 测试 / django_email 兜底 / novu），走 `settings.NOTIFICATION_BACKEND`。<br>⚠️ **后端只认（地址, 渠道, 内容），不认 `Contact` / `Participation` / "未成年人"** —— 一旦让它知道这些，换 provider 就要把业务规则重写一遍。见 D22 |
 | `MinistryRole` | `org` | 新表（D20）—— "某人在某 ministry 有 admin 权限"。 `contact`(FK，`PROTECT`) / `ministry`(FK，**`PROTECT`** —— 2026-07-29 晚从 `CASCADE` 改，见 `on_delete` 表) / `role`（`TextChoices`：`admin`，**外加一个 `coordinator` 占位** —— **本阶段没有任何代码按它分支**，等基金会答复再决定要不要用，见[六·4](goal.md#还没定的哪些阻塞哪些不阻塞)）/ `start_date` / `end_date` / `granted_by`(FK → `User`，可空，`SET_NULL`)。**挂 simple-history**（授权变更必须留痕）。<br>复用 `core` 的 `DateRangeMixin.active()` —— 授权也有起止，同 `Assignment`。<br>**放 `org` 不放 `accounts`**：它的主语是 ministry（D17：一个 app 一个业务领域），且 `accounts` 只该装"能不能登录"这一层 |
 | `accounts` 的注册流程 | `accounts` | **不是新表** —— `User.contact` 已经有了，**保持可空**（superuser 没有对应真人，D12）。P1 落在 `accounts/services.py::register_account()`：一次事务里建 `User` + 建 `Contact` + 挂上。<br>**流程约束，不是字段约束** —— 理由见 D21 第 3 条（它是 D9 的一个反例，因为这条规则有合法例外） |
 | ~~`VolunteerProfile`~~ / ~~`BackgroundCheck`~~ | — | 移出本阶段（2026-07-29），见推迟清单。14 条需求一条都没碰技能、可服务时段、背景审查。<br>⚠️ **但 D18 那条"背景审查必须独立成模型"的决定不撤销** —— 将来建的时候仍然是两个模型，不是一个 |
@@ -346,7 +346,7 @@ Phase B 一次加十几个外键，其中一个选错是灾难级的：
 | `Position`：`Index(fields=["ministry", "kind", "is_active"])` | ministry 页面的第一段："这个 ministry 有哪些编制、分别是什么 kind"。**这张表只有几十行，索引基本是象征性的** —— 建它是为了 Phase C 组织架构图和以后规模变大，现在别指望它带来可测的差别 |
 | `Event`：`Index(fields=["start_time"])` | **R1**「某段时间有多少场活动」、admin 的 `date_hierarchy` |
 | `Event`：`Index(fields=["ministry", "start_time"])` | **R2**「食物银行这个月办了几场」 |
-| `Event`：`Index(fields=["status", "start_time"])` | **P3** 志愿者的活动列表 = `open_for_signup()` + 未开始，按时间排。**这是全系统被普通用户打得最多的一个查询**，唯一一个真的需要索引的。<br>详情页那条走 `visible_to_volunteers()`（= 排除 `draft`），是主键查 + 一个状态判断，不需要另建索引 |
+| `Event`：`Index(fields=["status", "start_time"])` | **P3** 志愿者的活动列表 = `open_for_signup()` + 未开始，按时间排。**这是全系统被普通用户打得最多的一个查询**，唯一一个真的需要索引的。<br>详情页那条走 `visible_to_volunteers()`（四档**显式列全**，不是「排除 `draft`」—— 同下面那节：补集写法在加第六档时会默默把它放行），是主键查 + 一个状态判断，不需要另建索引 |
 | `EventRole` | `(event, role)` 的唯一约束自带索引，覆盖 R4 / R5 / R7 的 group by |
 | `Participation` | `(event_role, contact)` 的唯一约束自带索引，覆盖活动侧；联系人侧（"我的报名"）走 `contact` 的 FK 自动索引 |
 | `MinistryRole`：`Index(fields=["contact", "end_date"])` | **每一次权限判断都走这个查询**（"这个人管哪几个 ministry"），是全系统调用频率最高的一条 —— 每个受保护的视图每次请求至少一次 |
@@ -1214,6 +1214,17 @@ UniqueConstraint(
 
 Phase A 的 A10 用了"每条钉住什么"的清单，本阶段沿用。下面这些一条都不能少：
 
+> **这张表钉的是"要保证什么"，不是函数名。** 2026-07-30 做过一次机器核对：
+> 两份文档点名的 149 个 `test_*` 里，**14 个在代码里叫别的名字**
+> （`..._inactive_ministry_...` → `..._retired_ministry_...`、
+> `test_active_uses_the_foundation_timezone...` → `test_local_today_uses_...` 之类），
+> 逐条查过，行为都覆盖了；**只有 1 个是真缺口** ——
+> `test_signing_up_over_needed_count_is_allowed_but_flagged` 当时只测了 `allowed`，
+> 没测 `but_flagged`，已补。
+>
+> 记这一笔是因为**名字对不上会让下一次核对重新查一遍这 14 条**。
+> 权威是各 app 的 `tests.py`，不是这张表里的字面量。
+
 | 测试 | 钉住什么 |
 |------|---------|
 | `.active()` 边界：`end_date == 今天`算在职、`== 昨天`不算 | 派生逻辑的下界 |
@@ -1221,6 +1232,7 @@ Phase A 的 A10 用了"每条钉住什么"的清单，本阶段沿用。下面�
 | `.active(on=某日)` 能改变结果 | 时钟可注入，且没有被冻结在导入时 |
 | 太平洋时间晚 8 点（UTC 已次日）判定不跨天 | D16 的时区口径 |
 | 全项目没有 `date.today()` / `timezone.now().date()`（grep 守卫，放 `core/tests.py`） | D16 —— 同迁移守卫，用测试当 lint |
+| 全项目没有「直接问某个存下来的时刻要日期」（`*_time` / `*_at` 后面跟取日期，grep 守卫） | D16 的第二句（2026-07-30 补）。存进库的是 UTC，太平洋时间傍晚的活动答的是次日 —— R8 就是这么错的，而且不报错。<br>这条守卫上线当场又抓到两处，都在同一天写的、**专门用来验 R8 时间口径**的测试里 |
 | 各 app 的 `forms.py` / `services.py` / `models.py` 都不出现 `django.contrib.admin`（grep 守卫，放 `core/tests.py`） | D18 分层 —— 让"这些代码前端上来能原样复用"从承诺变成机器检查的事实。第五次「测试当 lint」 |
 | 每条业务约束都有 `violation_error_code` 且在 `CONSTRAINT_FIELD` 里有映射（遍历所有 model 的 `Meta.constraints`） | D14 —— 把"改一处必须改另一处"的注释纪律换成机器检查 |
 | 每条约束在 admin 表单里提交违规数据时报的是表单错误、不是 `IntegrityError` | D14 的坑：`CheckConstraint.validate()` 遇 `FieldError` 会静默跳过，表达式约束尤其要逐条实测 |
@@ -1268,7 +1280,7 @@ Phase A 的 A10 用了"每条钉住什么"的清单，本阶段沿用。下面�
 | ⭐ 活动从 `open` 改成 `confirmed` 之后，已报名的志愿者**仍然打得开**它的详情页；`draft` 的活动仍然 404 | [可见性与生命周期](#可见性与生命周期两个谓词不是一个-status2026-07-29-晚新增) —— 把可见性写成 `status=open` 的话，P6 通知里那句"来不了请点这里取消"的链接会 404，而且专门发生在人已招满的活动上 |
 | 活动列表页（`open_for_signup()`）里不**出现 `confirmed` / `completed` 的活动** | 同上的另一半：能不能看见 ≠ 能不能报名。两个谓词各管一件事 |
 | **`user.contact is None` 时所有 `can_*()` 返回 `False` 且**不**抛异常；superuser 也不例外** | [D20 的边界](decisions/D20-ministry-role.md#判断只写一处) —— `MinistryRole` 挂 `Contact`、入口是 `user`，而 `User.contact` 必须可空（D12），所以这不是异常而是一种正常状态。**特批 superuser 等于在 `permissions.py` 里开一个绕过 ministry 范围的后门** |
-| 志愿者账号（`is_staff=False`）访问 `/admin/` 得到 403 | D21 第 1 条。不是"没给链接"，是真的进不去 |
+| 志愿者账号（`is_staff=False`）访问 `/admin/` 得到 403 | D21 第 1 条。不是"没给链接"，是真的进不去。<br>2026-07-30 补：**Django 自己给的是 302 跳 admin 登录页**，而那一页会叫一个已经登录的人"输入 staff 账号的密码" —— 既是假话又是死循环。这条要成立得靠 `core/middleware.py::StaffOnlyAdminMiddleware`；**匿名访客照旧跳登录页**（他们可能就是还没登录的 staff） |
 | 志愿者账号访问别人的报名记录得到 404/403；活动列表里看不到 `status=draft` 的活动 | D21 第 2 条 —— **查询层的隔离，不是模板层的**。测试直接打 URL，不看页面 |
 | `register_account()` 建 account 的同时建了 `Contact` 并挂上；中途失败时两个都不留下 | P1 + 事务性。半个账号比没有账号更难查 |
 | `User.contact` 仍然允许为空（建一个 superuser 不报错） | D21 第 3 条 —— P1 是流程约束不是字段约束，别顺手改成 `null=False` |

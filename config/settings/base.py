@@ -86,6 +86,11 @@ MIDDLEWARE = [
     # moving it earlier — the history tests still pass. Kept here anyway because
     # following the documented order costs nothing.
     'simple_history.middleware.HistoryRequestMiddleware',
+    # After AuthenticationMiddleware, because it reads request.user: a signed-in
+    # volunteer asking for /admin/ is refused outright rather than redirected to
+    # a login form that would tell them to sign in again (D21's first
+    # requirement says 403, not "no link").
+    'core.middleware.StaffOnlyAdminMiddleware',
 ]
 
 ROOT_URLCONF = 'config.urls'

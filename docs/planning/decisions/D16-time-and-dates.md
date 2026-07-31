@@ -14,10 +14,31 @@
   UTC 已经是 7 月 28 日，于是"今天在职"的判定**提前跨天**。
 - ✅ `timezone.localdate()` —— 按 `settings.TIME_ZONE`（`America/Los_Angeles`）折算。
 
+## 第二句：问「某个存下来的时刻是哪一天」（2026-07-30 补）
+
+> 上面那三条只管**取**今天。B12 实施时踩到的是另一半：**已经存在库里的
+> `DateTimeField` 是哪一天**。R8 那句"活动当天在职的 employee"照 roadmap 原文写成
+> 直接问那个时刻要日期，而它取回来是 UTC —— 太平洋时间 7 月 31 日下午 6 点的活动，
+> 答的是 **8 月 1 日**，于是整条查询问错了一天，差一天，**照例不报错**。
+
+- ❌ 直接问存下来的时刻要 `.date()` / `.year` / `.month` —— 那是 UTC 的那一天。
+- ✅ `core.timeutils.local_date_of(moment)` / `local_month_of(moment)`。
+
+所以 D16 现在是两句，不是一句：
+
+> 规矩两句话：取"今天"走 `local_today()`，问"某个存下来的时刻是哪一天"走
+> `local_date_of()`。**对一个 `DateTimeField` 直接取日期，在本项目里没有正确的用法。**
+
+守卫也补了第三条模式（本项目所有 datetime 字段都叫 `*_time` 或 `*_at`）。
+它一上线就又抓到两处 —— 都在同一天写的、**专门用来验 R8 时间口径的测试**里。
+经过见 [`02-roadmap.md` 的计划外记录](../02-roadmap.md#-计划外b12eventstart_timedate-是-utc-的那一天)。
+
 **三层落地，缺一层就守不住：**
 
-1. 唯一入口。 `core/timeutils.py` 里一个 `local_today()`，全项目只有这里碰"现在"。
-   Phase C 的报表还会往里加 `month_bounds()` 之类，同一个道理。
+1. 唯一入口。 `core/timeutils.py`，全项目只有这里碰"现在"。
+   现在住着 `local_today()` / `local_now()` / `local_date_of()` / `local_month_of()` /
+   `day_start()` / `month_bounds()` —— 后三个是 B12 的报表边界要的，
+   原文预言的"Phase C 还会往里加 `month_bounds()`"提前兑现了。
 2. 把时钟注入 API，不要在函数体里隐式取。 所有跟日期有关的 queryset 方法都写成
    `def active(self, on=None): on = on or local_today()`。
    默认值必须在**调用时**求值 —— 写成 `def active(self, on=local_today())` 是经典的

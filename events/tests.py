@@ -385,10 +385,15 @@ class SignUpTests(TestCase):
         with self.assertRaises(ValidationError):
             sign_up(contact=adult, event_role=self.role)
 
-    def test_signing_up_over_needed_count_is_allowed(self):
+    def test_signing_up_over_needed_count_is_allowed_but_flagged(self):
         # Advisory, never a limit — the same line taken with duplicate names.
         # Over-subscription is ordinary; the system's job is to say so, not to
         # stand in the way.
+        #
+        # Both halves are asserted, because the name promises both: three
+        # people go in against a need of one, the role stops counting as short,
+        # and the count a page renders is high enough for it to say so. Testing
+        # only "allowed" would leave "flagged" as a claim nothing checks.
         role = make_role(self.event, "welcome", needed_count=1)
         for index in range(3):
             sign_up(
@@ -396,6 +401,9 @@ class SignUpTests(TestCase):
                 event_role=role,
             )
         self.assertEqual(role.participations.count(), 3)
+        self.assertNotIn(role, EventRole.objects.understaffed())
+        counted = EventRole.objects.with_signup_counts().get(pk=role.pk)
+        self.assertGreater(counted.registered_count, counted.needed_count)
 
 
 class ReportingTests(TestCase):
@@ -1373,10 +1381,9 @@ class AcceptanceWalkTests(TestCase):
     # --- ③ the plain volunteer --------------------------------------------
 
     def test_a_volunteer_is_refused_the_admin_outright(self):
-        # D21's first requirement: refused, not merely unlinked.
+        # D21's first requirement: 403, not a redirect to a login form.
         self.as_role("volunteer_adult")
-        response = self.client.get("/admin/", follow=True)
-        self.assertNotContains(response, "Site administration", status_code=200)
+        self.assertEqual(self.client.get("/admin/").status_code, 403)
 
     def test_a_volunteer_sees_open_events_only(self):
         self.as_role("volunteer_adult")

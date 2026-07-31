@@ -65,14 +65,40 @@ class RegistrationTests(TestCase):
         self.assertEqual(user.groups.count(), 0)
 
     def test_a_volunteer_account_gets_403_on_admin(self):
-        # D21's first requirement: not "no link to it", actually refused.
+        """D21's first requirement: refused, not redirected to a login form.
+
+        Django's own behaviour is a 302 to the admin login page, which then
+        tells an already-signed-in volunteer to enter a staff password — a lie
+        and a loop. This test was originally written around that redirect while
+        still being named after a 403, which made it a test whose name did not
+        match what it checked; core.middleware.StaffOnlyAdminMiddleware is what
+        makes the name true.
+        """
         register_account(username="lisi", password="a-good-long-password", legal_last_name="李")
         self.client.login(username="lisi", password="a-good-long-password")
-        response = self.client.get("/admin/", follow=True)
-        # Django's admin bounces a non-staff account to its own login page
-        # rather than serving anything; either way the index is never rendered.
-        self.assertNotContains(response, "Site administration", status_code=200)
-        self.assertIn("/admin/login/", response.redirect_chain[-1][0])
+        for path in ["/admin/", "/admin/events/event/"]:
+            with self.subTest(path=path):
+                self.assertEqual(self.client.get(path).status_code, 403)
+
+    def test_an_anonymous_visitor_is_still_sent_to_the_admin_login(self):
+        # Deliberately untouched: they may be staff who have not signed in yet,
+        # and Django's redirect is the right answer for them. The rule is about
+        # accounts that are signed in and still not staff.
+        self.assertEqual(self.client.get("/admin/").status_code, 302)
+
+    def test_a_staff_account_still_reaches_the_admin(self):
+        # The other side of the guard: it must refuse volunteers without
+        # refusing the people the admin is for.
+        User.objects.create_superuser(username="root", password="a-good-long-password")
+        self.client.login(username="root", password="a-good-long-password")
+        self.assertEqual(self.client.get("/admin/").status_code, 200)
+
+    def test_logging_out_is_never_refused(self):
+        # Somebody whose staff flag was removed mid-session must still be able
+        # to leave a site that refuses them every other page.
+        register_account(username="lisi", password="a-good-long-password", legal_last_name="李")
+        self.client.login(username="lisi", password="a-good-long-password")
+        self.assertNotEqual(self.client.post("/admin/logout/").status_code, 403)
 
     def test_user_contact_may_still_be_null(self):
         # P1 is a rule about this flow, not about the column. A rule with a

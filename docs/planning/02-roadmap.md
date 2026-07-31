@@ -1720,7 +1720,7 @@ def check_out(participation, *, at=None):
 
 ### admin
 
-`EventAdmin` 挂两个 inline：`EventRoleInline`（开工种）和…… **不挂 `ParticipationInline`**。
+`EventAdmin` 只挂一个 inline：`EventRoleInline`（开工种）。**不挂 `ParticipationInline`** —— 原计划是两个，当场改掉了，理由见下。
 
 > ⚠️ 原计划是"`EventAdmin` 用 inline 直接登记参与者"。改掉了 ——
 > `Participation` 现在挂 `EventRole` 不挂 `Event`，做成嵌套 inline 需要第三方包
@@ -2174,6 +2174,12 @@ class EventNotification(ConstraintErrorFieldMixin, TimeStampedModel):
 ⚠️ **默认文案里不写未成年人姓名**，只写活动信息 + "您的孩子报名的活动"
 （D22 代价 2 的缓解：即使走第三方平台，泄露面也只有一个邮箱地址加一段活动公告）。
 文案末尾带一句"新时间来不了请点这里取消报名"，链到 `/me/participations/`。
+
+> ⚠️ **实现时这句话没有变成真的链接**（2026-07-30 如实记）：正文是纯文本，
+> 要生成绝对 URL 得先有域名，而本机没有 —— 这正是 `NovuBackend` 只写薄壳、
+> 真接通留给 Phase C 的同一个原因。现在写的是"请到「我的报名」里取消"。
+> **有域名之后把它换成 `settings.SITE_URL + reverse(...)` 即可**，
+> 收件人解析和留痕都不用动。记在这里，免得以后当成漏做。
 
 > **报名照旧，`Participation` 一个字段不加**（2026-07-29 定）。
 > 别顺手加 `needs_reconfirmation` —— 那是把"这个人和某次改动的关系"塞进

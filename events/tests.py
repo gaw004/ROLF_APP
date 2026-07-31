@@ -20,6 +20,7 @@ from accounts.services import register_account
 from contact.models import Contact, EmergencyContact, RelationshipType
 from core.notifications.locmem import LocmemBackend
 from core.timeutils import (
+    day_start,
     local_date_of,
     local_month_of,
     local_now,
@@ -36,6 +37,7 @@ from .services import (
     check_out,
     default_message,
     event_summary,
+    events_in_period,
     ministry_staff_participation,
     notify_event_change,
     record_hours,
@@ -1079,3 +1081,44 @@ class NotificationPageTests(PageTestCase):
         # The group is rendered even when empty — it is the one part of this
         # page that could fail without anybody noticing.
         self.assertContains(response, "联系不上")
+
+
+class PeriodReportTests(TestCase):
+    """R1 / R2 / R3 — and the timezone trap that sits under all three."""
+
+    def setUp(self):
+        self.pantry = Ministry.objects.create(code="food_pantry", name="Food Pantry")
+        self.tax = Ministry.objects.create(code="tax_help", name="Tax Help")
+
+    def event_at(self, moment, ministry=None, **kwargs):
+        return make_event(
+            ministry=ministry or self.pantry,
+            start_time=moment, end_time=moment + 2 * HOUR, **kwargs)
+
+    def test_r1_counts_the_events_inside_the_window(self):
+        inside = self.event_at(day_start(datetime.date(2026, 3, 15)))
+        self.event_at(day_start(datetime.date(2026, 4, 2)), name="April")
+        start, end = month_bounds(2026, 3)
+        self.assertEqual(list(events_in_period(start, end)), [inside])
+
+    def test_r1_uses_foundation_month_boundaries_not_utc_ones(self):
+        # 11pm Pacific on 31 March is already 1 April in UTC. Sliced in UTC this
+        # event leaves its own month, the count drops by one, and nothing says so.
+        late = self.event_at(
+            day_start(datetime.date(2026, 3, 31)) + datetime.timedelta(hours=23))
+        start, end = month_bounds(2026, 3)
+        self.assertIn(late, events_in_period(start, end))
+        april_start, april_end = month_bounds(2026, 4)
+        self.assertNotIn(late, events_in_period(april_start, april_end))
+
+    def test_r2_can_narrow_the_window_to_one_ministry(self):
+        mine = self.event_at(day_start(datetime.date(2026, 3, 15)))
+        self.event_at(day_start(datetime.date(2026, 3, 16)),
+                      ministry=self.tax, name="Tax clinic")
+        start, end = month_bounds(2026, 3)
+        self.assertEqual(list(events_in_period(start, end, ministry=self.pantry)), [mine])
+
+    def test_r3_duration_survives_a_round_trip_through_the_database(self):
+        event = self.event_at(day_start(datetime.date(2026, 3, 15)))
+        event.refresh_from_db()
+        self.assertEqual(event.duration, datetime.timedelta(hours=2))

@@ -217,15 +217,27 @@ def ministry_staff_participation(event):
     )
 
 
-def events_in_period(start, end):
-    """R1 + R2: how many events ran in a window, and which ministry each is from."""
+def events_in_period(start, end, ministry=None):
+    """R1 + R2 + R3: what ran in a window, whose it was, and how long each took.
+
+    The boundaries come in already resolved through core.timeutils — slicing a
+    month in UTC puts the last evening of it into the next month, and the count
+    is then wrong without anything saying so.
+
+    In this phase R1–R3 are read off the admin changelist (date_hierarchy plus
+    the ministry and duration columns), which is what the acceptance list walks.
+    This is the same question asked in a form the front end can use, and the
+    reason it exists here rather than being spelled out wherever it is needed:
+    the period arithmetic and the ministry join should have one definition.
+    """
     from .models import Event
 
-    return (
+    events = (
         Event.objects.in_period(start, end)
         .select_related("ministry", "event_type")
         .annotate(role_count=Count("roles", distinct=True))
     )
+    return events.filter(ministry=ministry) if ministry is not None else events
 
 
 @transaction.atomic

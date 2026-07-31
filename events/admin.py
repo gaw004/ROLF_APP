@@ -55,7 +55,13 @@ class EventAdmin(SimpleHistoryAdmin):
        exist anyway.
     """
 
-    list_display = ["name", "ministry", "event_type", "status", "start_time", "end_time"]
+    # R1 comes from date_hierarchy plus the row count, R2 from the ministry
+    # column, R3 from duration — which is why all three are here rather than on
+    # a page of their own. The foundation-wide role in the acceptance walk reads
+    # them from this changelist.
+    list_display = [
+        "name", "ministry", "event_type", "status", "start_time", "end_time", "duration",
+    ]
     list_filter = ["status", "ministry", "event_type"]
     search_fields = ["name", "location"]
     date_hierarchy = "start_time"

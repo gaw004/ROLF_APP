@@ -13,8 +13,10 @@
 > |---|---|---|
 > | **`goal.md`**（本文件） | 目标 · 技术选型 · **当前优先级** · 导航 · 进度一览 · 下一步 | 每次开工前 |
 > | [`decisions/`](decisions/README.md) | D1–D22，一条决策一个文件 | 想知道"某件事当初为什么这么定" |
-> | [`phase-b.md`](phase-b.md) | Phase B 的模型表 + 全部实现要点 + 测试清单 + 验收 | 开工期间天天翻 |
-> | [`02-roadmap.md`](02-roadmap.md) | Phase B 的**实施步骤** B0–B13（照着一步步做） | 动手写代码时 |
+> | [`phase-c.md`](phase-c.md) | **Phase C** 的要点：判据 · **落点规矩**（样式写哪、什么该翻）· 验收口径 · 已知缺口 | 当前开工期间天天翻 |
+> | [`03-roadmap.md`](03-roadmap.md) | **Phase C** 的**实施步骤** C0–C5（照着一步步做） | 当前动手写代码时 |
+> | [`phase-b.md`](phase-b.md) | Phase B 的模型表 + 全部实现要点 + 测试清单 + 验收 | 查 Phase B 建的表和它们的判据 |
+> | [`02-roadmap.md`](02-roadmap.md) | Phase B 的**实施步骤** B0–B13 | 查历史 |
 > | [`progress.md`](progress.md) | 已完成的部分（数据核心 / Phase A）+ Phase C / D 的计划 | 想知道"走到哪了" |
 > | [`deferred.md`](deferred.md) | 明确推迟的事 + 各自的重启条件 | 手痒想做某件事时 |
 > | [`revisions.md`](revisions.md) | 全部修订记录（2026-07-29 / 07-28 各轮） | 想知道"这条为什么改口" |
@@ -114,7 +116,7 @@
 | 某件事为什么现在不做？ | [`deferred.md`](deferred.md) |
 | 还有什么没拍板？ | [六 · 还没定的](#还没定的哪些阻塞哪些不阻塞) |
 
-### 决策一览 D1–D22
+### 决策一览 D1–D23
 
 **完整索引在 [`decisions/README.md`](decisions/README.md)**（每条一句话结论 + 它回答的问题）。
 一条决策一个文件，编号是稳定引用。
@@ -191,7 +193,7 @@
 
 | # | 靠什么回答 | 状态 |
 |---|---|---|
-| R1 | `Event.start_time` + `Index(start_time)` | ✅ 设计已就位，B6 建表 |
+| R1 | `Event.start_time` + `Index(start_time)` + `EventQuerySet.in_period()` | ⚠️ 查询就位，**缺页面** —— 2026-07-31 发现 `events_in_period()` 只有测试调用，见 [`phase-c.md`](phase-c.md#phase-b-的五处缺口2026-07-31-发现)。补法：活动列表加时间段筛选 + 一个往期活动页，**所有人可见**（志愿者要靠它挑参加哪一场） |
 | R2 | `Event.ministry` | ⚠️ **原设计可空 → 改非空**，见下面模型表 |
 | R3 | `end_time - start_time`，派生不存 | ✅ |
 | R4 | `EventRole` 一行一个工种 | ❌ **原设计没有这张表**，见 [D19](decisions/D19-event-role.md#d19--活动的工种编制-eventrole2026-07-29) |
@@ -306,8 +308,8 @@ D1–D22 **一条一个文件**，索引见 [`decisions/README.md`](decisions/RE
 |---|---|---|
 | 数据核心设计（`Contact` / `Language` / `EmergencyContact`） | ✅ 已完成，有测试 | [`progress.md`](progress.md#-已完成--数据核心设计这是目前最有价值的部分) |
 | **Phase A · 地基加固**（A1–A10） | ✅ 已完成（2026-07-27，分支 `phase-a`） | [`progress.md`](progress.md#-已完成--phase-a-地基加固) · [`01-roadmap.md`](01-roadmap.md) |
-| Phase B · 活动闭环 | 🔄 当前在做。 B0–B13 的代码已全部落地、353 个测试全绿；**只差浏览器里那一遍三角色验收** | [`phase-b.md`](phase-b.md)（要点） · [`02-roadmap.md`](02-roadmap.md)（步骤） |
-| Phase C · 上线与真实运营 | ⬜ 未开始 | [`progress.md`](progress.md#phase-c--上线与真实运营) |
+| Phase B · 活动闭环 | 🔄 表和服务全部落地、**334 个测试全绿**，但 2026-07-31 查出**五处缺口，四处是「有服务没页面」** —— 补齐（C0.2）+ 浏览器验收（C0.3）之后才能标 ✅ | [`phase-b.md`](phase-b.md)（要点） · [`02-roadmap.md`](02-roadmap.md)（步骤） · [五处缺口](phase-c.md#phase-b-的五处缺口2026-07-31-发现) |
+| Phase C · 上线与真实运营 | 🔄 **当前在做**（2026-07-31 开工） | [`phase-c.md`](phase-c.md)（要点） · [`03-roadmap.md`](03-roadmap.md)（步骤） · [`progress.md`](progress.md#phase-c--上线与真实运营)（原始计划） |
 | Phase D · 资金追踪 | ⬜ 未开始 | [`progress.md`](progress.md#phase-d--资金追踪) |
 
 > **Phase B 完成的定义**：[零](#零当前优先级2026-07-29-定)里 R1–R8 + P1–P6 全部跑通，
@@ -341,14 +343,27 @@ D1–D22 **一条一个文件**，索引见 [`decisions/README.md`](decisions/RE
 **B6–B13 已经做完了**（2026-07-30）：`events` 五张表 + `EventNotification`、
 `MinistryRole` + `org/permissions.py`、注册流程、志愿者自助页、ministry admin 侧页面、
 活动变更通知、R1–R8 的统计口径、`seed_demo`。
-测试从 192 涨到 363，`check` / `makemigrations --check` / `ruff` 都干净，
+测试从 192 涨到 **334**（2026-07-31 删通用关系表带走了六个测试类，从 363 降下来 ——
+下降的口径见 [`phase-c.md`](phase-c.md#测试数基线只增不减的新口径)），
+`check` / `makemigrations --check` / `ruff` 都干净，
 12 条 grep 守卫做过双向验证。实测结果见 [`02-roadmap.md` 的收尾那节](02-roadmap.md#自动化部分的实测结果)。
 
-**下一步是浏览器里那一遍**：照[验收清单](phase-b.md#验收2026-07-29-重写改成按-14-条需求逐条验收)
-扮三个角色各走一遍。`python manage.py seed_demo` 一条命令把数据造齐
-（账号密码在命令的输出里），清单上大部分勾已经有对应的自动化测试
-（`events.tests.AcceptanceWalkTests`），**但浏览器那一遍仍然要走** ——
-表单排版坏了、链接指向空处，断言看不出来。走完再把上面那张表的 Phase B 改成 ✅。
+**2026-07-31 更正：那句「B6–B13 已经做完了」说早了。** 按上面 14 条逐条重查代码，
+查出**五处缺口，四处是「服务层写好了、没有页面」** ——
+改活动、R1、管理侧入口、我的资料页、`RelationshipType` 种子数据。
+证据和成因在 [`phase-c.md`](phase-c.md#phase-b-的五处缺口2026-07-31-发现)，
+补法在 [`03-roadmap.md` 的 C0.2](03-roadmap.md#c02--补齐-14-条的功能缺口)。
+
+**所以下一步是 C0.2 补缺口，然后才是浏览器里那一遍**：照
+[验收清单](phase-b.md#验收2026-07-29-重写改成按-14-条需求逐条验收)扮三个角色各走一遍。
+`python manage.py seed_demo` 一条命令把数据造齐（账号密码在命令的输出里），
+清单上大部分勾已经有对应的自动化测试（`events.tests.AcceptanceWalkTests`），
+**但浏览器那一遍仍然要走** —— 表单排版坏了、链接指向空处，断言看不出来。
+两步都走完，再把上面那张表的 Phase B 改成 ✅。
+
+> **这一轮学到的**：334 个测试全绿，而四个功能没有入口 ——
+> 因为**没有 URL 的功能，测试也没有 URL 可打**。
+> 以后核对完工，问的不是「service 写了吗」，是「**用户从哪个链接点进去**」。
 
 走之前值得重读的两条：
 
@@ -369,6 +384,11 @@ D1–D22 **一条一个文件**，索引见 [`decisions/README.md`](decisions/RE
 | 5 | 工时是志愿者自己填还是 admin 填 | 基金会 | **不阻塞** —— 两条路径都走 `services.check_out()` 那一个函数，区别只在哪个页面上有那个按钮。先做 admin 侧（需求原话是"跟 event 同个 ministry 的权限的人可以统计"） |
 | ~~6~~ | ~~背景审查有效期多长~~ | — | 随 `BackgroundCheck` 一起移出本阶段，不再需要答复 |
 | ~~7~~ | ~~跟不跟踪请假 / 停职~~ | ✅ **已答复（2026-07-28）：跟踪** | 已做进 `Assignment.status` |
+
+> **Phase C 期间新拍的五条**（时长口径 · R1 谁看 · 界面语言 · 生日能不能自己改 ·
+> 改活动走哪条路）在
+> [`phase-c.md`](phase-c.md#2026-07-31-这一轮拍板的不再是待定)。
+> 那里还有一张 Phase C 自己的待定表（发信服务、备份存储、域名、试点选哪个 ministry）。
 
 ---
 

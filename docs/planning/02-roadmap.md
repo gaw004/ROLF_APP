@@ -2094,7 +2094,7 @@ Participation.objects.filter(
 
 | 项 | 结果 |
 |---|---|
-| `python manage.py test` | 363 个，全绿（开工基线 192）。<br>⚠️ 这一格 2026-07-30 写的是 `353`，而同一天晚些的 middleware 那个 commit 加了测试没回来改它 —— **写死的数字是一种会过期又不报错的东西**，和文档里写代码行号同一类。留着它是因为验收清单要的是"只增不减"，那需要一个基线数 |
+| `python manage.py test` | **334 个，全绿**（开工基线 192）。<br>⚠️ 这个数字已经过期过两次：2026-07-30 写的是 `353`，同一天晚些的 middleware commit 加了测试没回来改它，于是改成 `363`；2026-07-31 删通用关系表又把它带到 `334`。**写死的数字是一种会过期又不报错的东西**，和文档里写代码行号同一类。留着它是因为验收清单要的是"只增不减"，那需要一个基线数 |
 | `python manage.py check` | 0 issues, 0 silenced |
 | `makemigrations --check --dry-run` | No changes detected |
 | `ruff check .` | All checks passed |

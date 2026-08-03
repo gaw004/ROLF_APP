@@ -1,0 +1,306 @@
+# Phase C · 上线与真实运营 —— 让基金会真的用起来
+
+> 这一份讲**要做什么、为什么这么定、以及做完怎么算数**。
+> 具体步骤在 [`03-roadmap.md`](03-roadmap.md)，那是照着一步步做的手册。
+> 和 [`goal.md`](goal.md) 冲突时以 `goal.md` 的[零、当前优先级](goal.md#零当前优先级2026-07-29-定)为准。
+>
+> 写于 2026-07-31。
+>
+> **Phase A 没有对应的 `phase-a.md`** —— 它的「是什么、为什么」塞在
+> [`progress.md`](progress.md) 那张带「为什么不能拖」一列的表里就够了。
+> 这一份之所以存在，是因为 Phase C 有一类 `progress.md` 装不下的东西：
+> **落点规矩**（样式写在哪、什么该翻译、配置进哪里）和**不可逆操作的验收口径**
+> （什么叫「备份演练过」）。这两类是**以后每次改都要遵守**的，写进 roadmap 的某一步里，
+> 那一步做完就被埋了。
+
+---
+
+## 一、这一阶段要达成什么
+
+一句话：把 Phase B 建好的东西**交到真人手上，并且交得起**。
+
+Phase B 结束时的状态是：334 个测试全绿，
+但**没有一个真人用过**，页面是裸 HTML，`/` 是 404，忘了密码找不回，
+`prod.py` 是一句 `from .base import *`，备份一行脚本都没有。
+
+2026-07-31 更正：**14 条需求并没有全部落地**。本文件原来写的是「代码全部落地」，
+那是照 `02-roadmap.md` 的完工记录转述的，而那份记录只核对了**模型和服务层**。
+按优先级逐条重查代码之后，发现**五处缺口，其中四处是没有页面**（见下面
+[Phase B 的五处缺口](#phase-b-的五处缺口2026-07-31-发现)）。它们不是 Phase C 的新功能，
+是 Phase B 的收尾 —— 所以进 [`03-roadmap.md` 的 C0.2](03-roadmap.md#c02--补齐-14-条的功能缺口)，
+补完才轮得到上样式。
+
+本阶段完成的定义：**一个 ministry 的真实志愿者，用自己的账号，报名并完成了一场真实活动，
+而这场活动的数据能被恢复出来。**
+
+### 判据：什么必须做完才能放真人，什么可以边用边加
+
+这是本阶段唯一重要的分界线，其余排期问题都由它推出来：
+
+> **这件事不做，出的事可逆吗？**
+> 不可逆 → **交付硬前置，做完才放人**。可逆 → **可后补**。
+
+| | 不做会怎样 | 可逆吗 | 归属 |
+|---|---|---|---|
+| 备份 + **验证过的**恢复 | 数据没了找不回 | ❌ | 硬前置 |
+| 权限复核（真账号越权） | A ministry 看到 B 的未成年人生日、地址、紧急联系人 | ❌ | 硬前置 |
+| 生产加固（HTTPS / secure cookie / HSTS） | 会话被劫持 | ❌ | 硬前置 |
+| 密码重置 | 用户锁死在门外，且只能靠你手工救 | ❌（对用户而言） | 硬前置 |
+| 首页 `/` | 分享出去的链接是 404 | ✅ | 硬前置（成本 1 小时，不值得推） |
+| Ministry 视图 / 组织架构图 | 「食物银行现在谁在管」得进 admin 翻 | ✅ | 可后补 |
+| CSV 导出 | 要做表得手抄 | ✅ | 可后补 |
+| 志愿者活跃排行 | 少一个看板 | ✅ | 可后补 |
+
+> 备份和权限复核这两条的风险是**乘法关系**（账号能删库 × 删了找不回），
+> 所以它们不是「都很重要」，是「缺一个另一个就白做」。
+
+### Phase B 的五处缺口（2026-07-31 发现）
+
+按[零的 14 条需求](goal.md#零当前优先级2026-07-29-定)逐条重查代码查出来的。
+**四处是「服务层写好了、没有页面」** —— 这解释了为什么 334 个测试全绿却没人发现：
+测试打的是 service 和已有的 URL，而**没有 URL 的功能，测试也没有 URL 可打**。
+
+| # | 缺口 | 打在哪条需求上 | 证据 |
+|---|---|---|---|
+| 1 | 没有「改活动」的页面 | P6 的触发动作 | `events/urls.py` 只有 `events/new/`，没有编辑路由；`events/services.py::reschedule()` 全仓**零调用者、零测试**。ministry admin 也进不了 admin（`StaffOnlyAdminMiddleware` 对非 staff 403），所以时间**改不了**，只能发一封「时间改了」的通知 |
+| 2 | R1 没有页面 | R1，你需求原文的第一句 | `EventQuerySet.in_period()` / `events_in_period()` 写好也测过，**只有测试调用**。唯一能答 R1 的 UI 是 Django admin 的 changelist，staff-only |
+| 3 | 管理侧入口是断的 | R4–R8 的可达性 | `events:event_create` 和 `org:ministry_admins` 在**任何模板里都没有链接**；`event_roles.html` 是管理侧枢纽（report / registrations / attendance / notify 四个链接都在它上面），**它自己没有入口**。而 `event_list` 只查 `open_for_signup().upcoming()`，所以**活动一结束就从自助界面消失**，报表页恰恰是那时候才要看的 |
+| 4 | 没有「我的资料」页 | P3 / P6 | `accounts/urls.py` 只有 register / login / logout。连锁后果：`birth_date` 注册时可留空 → `is_minor` 返回 `None` → 这个人**以后每次报名都被要求家长同意**且自己改不了；邮箱电话填错自己改不了（P6 的「联系不上」名单自己解不开）；**紧急联系人自己加不了**，而 `resolve_recipients()` 的未成年兜底和签到页的现场急救电话都靠它 |
+| 5 | `RelationshipType` 没有种子数据 | P3 / P6 的数据前提 | `contact/migrations/` 只有 `0002_seed_languages`。生产库里这张表是空的，而 `EmergencyContact.relationship_type` 是**必填** FK → 空库上**一条紧急联系人都建不了**，未成年同意的「关系」下拉也是空的 |
+
+> **值得记下来的判断**：这五处有一个共同形状 ——
+> 服务层、模型、约束、测试都在，**缺的只是一条 URL 和一个模板**。
+> 上一轮的完工核对是照着 `02-roadmap.md` 的步骤清单逐条打勾的，
+> 而那份清单是按「表和服务」组织的，页面只在其中几步里顺带提到。
+>
+> **下一次的自查问题**：「这条需求，**用户从哪个链接点进去**？」
+> 答不上来的，不算做完 —— `Sum()` 写在 queryset 里没人看得见。
+
+---
+
+## 二、本轮定下的四件事
+
+2026-07-31 定。每条都记了**推翻了什么**或**确认了什么** —— 按本项目的规矩，
+改口要留说明，不能悄悄改（见 [`revisions.md`](revisions.md)）。
+
+| # | 决定 | 和已有决策的关系 |
+|---|---|---|
+| 1 | 前端走 **Django 模板 + Tailwind**，不上 React | **确认** [D2](decisions/D02-frontend-deferred.md)「不上 React / Vue 这一半仍然成立」，以及[技术选型](goal.md#二技术选型)里「Django 模板 + HTMX」那一行 |
+| 2 | 部署走 **Render + 托管 Postgres** | **确认**[技术选型](goal.md#二技术选型)已写的「托管平台（Render / Fly.io）+ 独立托管 Postgres」 |
+| 3 | **界面统一用英文**，不做双语 | **新决策 → [D23](decisions/D23-i18n-interface-only.md)**。⚠️ 当天改过一次口：早上定的是「上完整中英双语」，下午推翻，原方案原样留在 D23 里 |
+| 4 | **硬前置做完就试点**，运营功能边用边加 | **确认** [`progress.md` 的 Phase C](progress.md#phase-c--上线与真实运营) 里「备份必须做完并验证过，才能让基金会开始录真实数据」 |
+
+### 考虑过并否决的：全量 React SPA
+
+否决理由**不是** React 不好，而是：
+
+**分离想买的东西，这个项目已经买到了，而且没付钱。** 分离的核心好处是「换前端时后端不用动」，
+这靠的是业务逻辑不在界面层 —— 而本项目的 [D18 落点规矩](decisions/D18-admin-boundary.md)
+已经强制了这件事：逻辑在 `services.py`、权限只在 `org/permissions.py`、
+统计在 queryset 方法里、视图是薄壳，而且有 **12 条 grep 守卫在测试里盯着**没人破坏它。
+`core/templates/core/base.html` 的注释里写的「替换这一个文件就能上样式，
+views / forms / services 原样带走」不是愿望，是那 12 条守卫保证的。
+
+**而分离要付的代价里最贵的一条，正好打在 [D20](decisions/D20-ministry-role.md) 上：
+权限判断会变成两份。** 服务端那份是安全边界，必须留；但前端还要**再判断一次**
+才知道该不该显示「签到」按钮，而它够不到 `permissions.py`。
+D20 存在的全部理由就是「散落的权限判断迟早有一处忘了 `.active()`，
+而漏掉的权限检查是静默的」—— React 会亲手把这个局面造出来。
+
+其余代价：12 个页面各要一套 (endpoint + serializer + 前端状态 + loading 态 + error 态)，
+同样功能约 3–4 倍代码；现有 334 个测试是端到端的（直接打 URL、断言 403），
+改成 SPA 后它们只覆盖 API 那一半，UI 那一半要另起一套测试设施。
+
+**颜值和这个选择无关** —— Tailwind 是 CSS，服务端渲染照样用。
+
+**重启条件**已写进 [`deferred.md`](deferred.md)：真的要做手机 App，
+或者真的有第二个人专职做前端时。那时加一层 DRF 是几天的事，**因为业务逻辑早就不在模板里**。
+
+### 考虑过并否决的：AWS
+
+**同一个规模下 AWS 更贵、更累。** Render 约 $14–20/月、半天搭好；
+AWS 走 App Runner + RDS 约 $50–90/月、2–3 天，走 ECS Fargate 还要自己搭
+VPC / 子网 / ALB / 安全组，单 NAT Gateway 一项就 ~$32/月。
+AWS 便宜是**有专职运维、多服务共摊、上预留实例**之后的事。
+
+这撞的是[一、终极目标](goal.md#一终极目标)那张表里的两行：「便宜：起步阶段月成本控制在几十美元内」
+和「好维护：一个人能读完全部代码」。
+
+**这不是锁定** —— [D3](decisions/D03-portable-postgres.md) 一直在保护这件事：
+一个 `pg_dump` 带走全库，应用是标准 Django。用 Render 起步不会让以后搬去 AWS 变难。
+**重启条件**同样写进 `deferred.md`。
+
+---
+
+## 三、落点规矩
+
+> **这一节是本文件存在的主要理由。** 下面每条都不是「这次怎么做」，
+> 是「以后每次改都要遵守」，同 [D18 的落点规矩](decisions/D18-admin-boundary.md)。
+
+### 样式的落点：CSS 只许出现在两个地方
+
+1. `core/templates/core/base.html` 的 `<head>`（引 `app.css`）与页面外壳；
+2. 各模板标签上的 Tailwind class。
+
+**不许出现在**：`views.py`（不返回 class 名）、`services.py`、`forms.py` 的
+`widget attrs`（**唯一例外**：`type="date"` 这类**语义**属性，它不是样式）、
+`models.py`、`admin.py`。
+
+> **判据，和 D18 那条同源**：**把 `static/css/app.css` 删掉，页面必须仍然可用** ——
+> 难看但每个按钮都在、每条信息都读得到。做不到，说明有信息只靠样式表达
+> （靠颜色区分「已报名 / 未报名」就是典型），那不是样式，那是内容，得写成文字。
+
+### 界面语言的落点：英文写在哪，中文允许留在哪
+
+口径见 [D23](decisions/D23-i18n-interface-only.md)：**界面统一英文，不做双语，不引 `gettext`。**
+分界线是「**这句话会不会出现在浏览器里**」，不是「它写在哪个文件里」。
+
+| 必须是英文（用户看得见） | 中文照旧（用户看不见） |
+|---|---|
+| 模板里所有给人看的文案 | 代码注释、docstring —— 本项目的推理都写在这里，翻成英文是纯损失 |
+| 表单的 `label` / `help_text` | 规划文档（`docs/planning/` 全部） |
+| `messages.*()` 和 `ValidationError()` 的文案 | 日志、给开发者看的异常字符串 |
+| `TextChoices` 的 **label**（**value 一个字不改** —— 它在库里，改了就是数据迁移） | 测试里的断言字符串（改英文只是让 diff 变大） |
+| 模型的 `verbose_name` / 约束的 `violation_error_message`（会冒到表单上） | — |
+| `org/permissions.py` 的 `SCOPED_DENIAL`（它是 403 页面上给人看的） | — |
+
+2026-08-03 更正：**`seed_demo` 的演示数据从右列挪到左列**。原来写的是「演示数据中文照旧」，
+上手验收时立刻发现行不通 —— 英文界面里满屏中文活动名，人没法核对页面对不对。
+判据就是本节自己写的那条：**这句话会不会出现在浏览器里** —— 演示数据会，
+而且是验收那一遍唯一出现在浏览器里的数据。
+
+⚠️ **基金会自己录进去的值仍然不受这条约束，也管不了。** `Ministry.name` / `EventType.name` /
+`ParticipationRole.name` / `EmploymentType.name` 是基金会自己录进去的，
+录中文就显示中文。**要跟他们说清楚**：界面是英文，但活动名和 ministry 名是录入时那种语言。
+不说清楚，第一个看到混排的人会以为坏了。
+
+**守卫**：`core/tests.py` 加一条 grep —— 模板里不许出现中日韩字符
+（`{% comment %}` 块除外，注释可以是中文）。它比双语方案里那条守卫更强：
+那条只能查「没包 `{% trans %}`」，这条直接查「有没有中文」，**没有漏网的中间态**。
+
+### 部署配置的落点：什么进环境变量，什么进 `render.yaml`
+
+沿用 [`config/settings/base.py`](../../config/settings/base.py) 已有的 `env()` 口径：
+
+| 进环境变量（平台上设，不进 git） | 进 `render.yaml`（进 git） |
+|---|---|
+| `DJANGO_SECRET_KEY`、`DATABASE_URL`、SMTP 凭据、对象存储密钥 | 服务形态、构建命令、健康检查路径、cron 时刻表 |
+| `DJANGO_ALLOWED_HOSTS`（域名会变） | `DJANGO_SETTINGS_MODULE=config.settings.prod`（不是秘密，也不该变） |
+
+⚠️ **生产的 `SECRET_KEY` 必须是新生成的。** 早先硬编码在仓库里的那个已经进了 git 历史，
+按 [Phase A 的记录](progress.md#-已完成--phase-a-地基加固)**已经烧掉，永远不能再用**。
+
+### 备份脚本的落点
+
+`pg_dump` 走**平台的定时任务 + 一个 shell 脚本**，不写成 Django management command。
+
+> **判据**：备份必须在**应用起不来的时候**照样能跑。
+> 写成 management command 就意味着它依赖 Django 能启动、依赖 settings 能加载 ——
+> 而需要备份的那天，坏掉的往往正是这些。它只需要 `DATABASE_URL` 和 `pg_dump`。
+
+---
+
+## 四、验收口径
+
+> 每条都是**能当场做的动作**，不是「检查一下」。
+> 沿用本项目一贯的判定方式（见 [D18 的落点判据](decisions/D18-admin-boundary.md)）。
+
+### 备份：什么叫「演练过」
+
+⭐ **三样都做了才算，少一样就是没验证过**：
+
+1. 从对象存储**取回**最新的 dump（不是本地那份）；
+2. 灌进一个**空库**，`python manage.py migrate --check` 通过
+   （证明 schema 和代码同代，不是半年前的）；
+3. 对着这个恢复出来的库**跑一遍测试**。
+
+⚠️ **只做第 1 步是最危险的状态** —— 文件在、看着有几十兆，
+而它可能是一个空库的 dump、或者是用不同 Postgres 大版本导出的。
+文件存在不等于能恢复，而这件事只有真的恢复一次才知道。
+
+这一步同时是 [D3](decisions/D03-portable-postgres.md)「一个 `pg_dump` 就能带走」
+第一次真正兑现 —— 在此之前它只是纸上承诺，没有任何脚本落地。
+
+### 权限复核：拿真账号做的四件事
+
+**不是读代码，是登录进去点。** Phase B 已经建好 [D20](decisions/D20-ministry-role.md)
+和 [D21](decisions/D21-self-service-and-permissions.md)，这里做的是**验证**：
+
+1. ⭐ 拿 A ministry 的 admin 账号，打 B ministry 的
+   `/events/<id>/registrations/`、`/attendance/`、`/notify/` —— **三个都要 403**；
+2. 志愿者账号打 `/admin/` —— **403，不是跳登录页**（`core/middleware.py` 的
+   `StaffOnlyAdminMiddleware` 负责这条）；
+3. 基金会的人**不用 superuser 登录**，且默认**不给 delete 权限** ——
+   尤其 `delete_event`，它两级级联到 `Participation`（见 phase-b.md 的 `on_delete` 表）；
+4. 未成年人的姓名 / 生日 / 地址 / 紧急联系人 / 同意记录，**谁能看要逐个账号过一遍**。
+
+> ⚠️ 用 superuser 点这些页面会得到一串 403，看起来像坏了 —— 那是
+> `org/permissions.py` 的设计（superuser 没有 ministry scope），
+> 它的 `SCOPED_DENIAL` 文案就是为了让下一个人去改账号而不是改检查。**别照着「修」。**
+
+### 生产配置
+
+`python manage.py check --deploy` **零警告**。这是一个跑得出来的数字，不是判断题。
+
+### 测试数基线：「只增不减」的新口径
+
+`02-roadmap.md` 的验收里写着「测试数只增不减」。**这条规则在 2026-07-31 被合法打破过一次**：
+删掉通用关系表时，它的六个测试类跟着删掉，测试数从 363 掉到 334。
+
+新口径：
+
+> 测试数下降**必须伴随一次功能删除**，且在提交信息里点名删了哪几个测试类。
+> 没有对应删除的下降 = 有人删了测试。
+
+---
+
+## 五、已知缺口与处置
+
+列在这里的都是**主动接受的，不是遗漏**。
+
+| 缺口 | 处置 | 什么时候再看 |
+|---|---|---|
+| 没有 email 的账号拿不回密码 | 注册必填 email（`RegistrationForm` 已经是必填）；ministry admin 代录的 `Contact` **不强制** —— 他们本来就不登录。密码重置只服务前者 | 出现「代录的人后来想自己登录」时 |
+| 不做 Excel 导入（2026-07-31 定） | 所有志愿者自行注册。理由：字段对不上的成本大于收益，而需求原文说的就是「每个普通 **account**」 | 某个 ministry 真的交来一份表格时。那时**不要直接建 User** —— 先建 `Contact` 再发认领链接，否则会造一堆僵尸账号 |
+| 活动当天来的没注册的人 | ministry admin 在 admin 里建 `Contact`（**不建账号**）+ 建 `Participation`。这是 [D12](decisions/D12-user-on-contact.md) 里 `User.contact` 可空所允许的合法状态，零新代码。代价：这个人自己登录不了，看不到自己的工时 | 这类人多到 admin 手工录变成负担时 |
+| ⚠️ R8 在试点初期答不出来 | R8 要 join `Assignment`，而 `Assignment` 挂 `Contact`。不导入的话，**employee 也得先注册，你才能给他们建 `Assignment`**。顺序是：employee 注册 → 建 `Assignment` → 再办活动。跳过中间那步，**R8 会安静地返回空名单，不报错** | — |
+| ⚠️ 重复 `Contact` 的时间窗 | 同一个人从两个渠道进系统（admin 代录一次、自己又注册一次）会有两条 `Contact`。合并之前，他**用新账号看不到自己以前的工时** —— 不是丢了，是挂在另一条上。工具都在：`contact/services.py::merge_contacts()`、`/contacts/merge/`、`list_duplicate_contacts` | 试点期间定期跑一次 `list_duplicate_contacts` |
+| 界面是英文，数据是录入时那种语言 | 见上面[界面语言的落点](#界面语言的落点英文写在哪中文允许留在哪)。⚠️ **要跟基金会说清楚**，否则第一个看到混排的人会以为坏了 | 基金会明确要中文界面时，见 [D23](decisions/D23-i18n-interface-only.md) |
+| ⚠️ 生日由本人自由修改（2026-07-31 定） | 「我的资料」页允许本人改 `birth_date`，**不做「填过就锁」**。代价如实说：**未成年人可以把生日改大，绕过 P3 的 guardian consent 那道门** —— 主动接受，不是遗漏。缓解只有一条：`Contact` 有 simple-history，改动留痕，事后查得出来 | 真的发生过一次绕过、或基金会对同意书有合规要求时。那时的做法是「只能补空白，填过要改找 admin」，**不是**加审批流 |
+| email 只在自助那一侧必填（2026-08-03 定） | 注册和「我的资料」都不允许没有 email：能登录的账号必须找得回密码、收得到报名确认。⚠️ **没有加数据库约束** —— 同一张 `Contact` 表还装着 admin 代录的不登录者和机构，两者都没有收件箱。代价：走 admin / 导入 / 合并这些路径建出来的 `Contact` 仍可能没有 email | 出现「代录的人后来想自己登录」时，和上面那条一起处理 |
+| ⚠️ 活动可以整场豁免未成年限制 | `Event.requires_guardian_consent` 不勾 → 未成年人和成年人一样报名，不要同意、也不要紧急联系人。**这是主动给出去的口子**，判断收在 `services.consent_required_for()` 一个函数里，报名和签到两道门共用。默认勾上 | 真的发生过「不该豁免的活动被豁免了」时。那时的做法不是删字段，是让不勾这个选项**留痕给上一级看**（`Event` 已有 simple-history） |
+| 生产库的第一个 `foundation_admin` | 部署步骤里 `createsuperuser` 造一个，加进 `foundation_admin` group（`org/permissions.py::foundation_admin_group()` 会按需创建这个组）。**之后日常不用这个 superuser 登录** —— 所以还要给基金会的人建一个**非 superuser 的 staff 账号**（`is_staff=True` + 同一个 group），R1–R3 之外的全局视角靠它 | — |
+| 基础数据要手工录 | `Ministry` / `Position` / `EmploymentType` / `EventType` / `ParticipationRole` 在生产库里是空的（`ParticipationRole` 的 `general` 那一行除外 —— 它在数据迁移里）。试点前在 admin 里建齐，几十行。<br>⚠️ **`RelationshipType` 不在这个清单里，它走迁移** —— 见[缺口 5](#phase-b-的五处缺口2026-07-31-发现)：它是必填 FK 的目标，空表等于紧急联系人建不了，这种东西不能靠「记得手工录」 | — |
+
+---
+
+## 六、还没定的（哪些阻塞、哪些不阻塞）
+
+| # | 待定的事 | 等谁 | 阻塞吗 |
+|---|---|---|---|
+| 1 | 用哪家发信服务（Resend / Postmark / SES） | 你 | **阻塞 C3** —— 密码重置和 P6 通知都要它。三家对 Django 都是填 SMTP 四个环境变量，换家的成本≈0，**先挑一个开始** |
+| 2 | 备份存到哪（S3 / Cloudflare R2 / Backblaze） | 你 | **阻塞 C3** —— 同上，脚本只认 endpoint 和密钥 |
+| 3 | 域名买什么 | 你 | **不阻塞** —— 先用 `xxx.onrender.com` 跑通，C5 再挂。⚠️ 挂域名时 `DJANGO_ALLOWED_HOSTS` 和 `CSRF_TRUSTED_ORIGINS` **必须同时改**，只改前者的话所有 POST 表单会被拒 |
+| 4 | 试点用哪个 ministry、哪场活动 | 基金会 | **阻塞 C5**，不阻塞 C0–C4 |
+| 5 | `/contacts/merge/` 要不要开放给 ministry admin | 你 | **不阻塞** —— 现在是 staff-only。跨 ministry 的重复本来也只有全局角色能处理 |
+| 6 | `MinistryRole` 除 admin 外还需要哪几档 | 基金会 | 不阻塞（沿用 [goal.md 六·4](goal.md#还没定的哪些阻塞哪些不阻塞) 的结论：先只做 `admin` 一档） |
+| 7 | 基金会内部沟通用中文吗 | 基金会 | **不阻塞，但要早问** —— 界面已定为英文（[D23](decisions/D23-i18n-interface-only.md)）。如果答案是「主要说中文」，那不是加双语，是**先确认志愿者读不读得懂**，再决定重启不重启 |
+
+### 2026-07-31 这一轮拍板的（不再是待定）
+
+| 问题 | 结论 |
+|---|---|
+| 「每个 event 创办了多久时长」指什么 | **单场时长 = `end_time − start_time`**，就是现在 R3 的读法。不引入活动系列 / 第几届的概念（那一条留在 [`deferred.md`](deferred.md#五明确推迟的事) 的 `Event.parent` 行里） |
+| R1 谁看、放在哪 | **所有人都看得到** —— 志愿者要靠它决定参加哪一场。做成两个页面：活动列表按时间段筛选（未来），加一个**往期活动**页。不是只给管理员的报表 |
+| 界面语言 | 英文单语，见 [D23](decisions/D23-i18n-interface-only.md) |
+| 生日能不能自己改 | 能，自由改。代价见上面[已知缺口](#五已知缺口与处置) |
+| 每个 contact 的 email 必填到哪一层 | **只管自助侧**：注册 + 我的资料。不加数据库约束（2026-08-03 改选，先选的是全库强制，量过影响面之后改口：30 处建 `Contact` 的代码没带 email，另有组织类型） |
+| 未成年人的紧急联系人在哪一步拦 | **报名时拦**，不在注册时。它同时是「一键套用紧急联系人」的前提 |
+| 未成年限制是全局还是每场活动 | **每场活动自己决定**（`Event.requires_guardian_consent`，默认要求） |
+| 报名确认发给谁 | 本人**和**家长（未成年）。本人也发，因为 15 岁的孩子有手机也得自己知道要去 |
+| 改活动走哪条路 | **自建 `event_update` 页**接已写好的 `services.reschedule()`；**不**给 ministry admin `is_staff`。后者是零代码，但它让 ministry admin 看见全库数据，直接撞下面[权限复核第 4 条](#权限复核拿真账号做的四件事) |
+
+---
+
+> 本文件讲的是**什么和为什么**。**怎么做**在 [`03-roadmap.md`](03-roadmap.md)，
+> 一步一步，每步带验证。

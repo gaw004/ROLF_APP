@@ -28,7 +28,7 @@ class PossibleDuplicateFilter(admin.SimpleListFilter):
     admin action would have to inherit admin templates for its confirmation step.
     """
 
-    title = "疑似重复（同名同号）"
+    title = "Possible duplicate (same name and number)"
     parameter_name = "duplicates"
 
     def lookups(self, request, model_admin):
@@ -58,7 +58,7 @@ class MinorFilter(admin.SimpleListFilter):
     annotation, in every Django version.
     """
 
-    title = "未成年"
+    title = "Under 18"
     parameter_name = "minor"
 
     def lookups(self, request, model_admin):
@@ -148,7 +148,7 @@ class ContactAdmin(SimpleHistoryAdmin):
         if namesakes.exists():
             self.message_user(
                 request,
-                f"系统里还有 {namesakes.count()} 位同名的联系人（号码不同）。"
+                f"{namesakes.count()} other contacts share this name (different numbers)."
                 "重名是合法的，这里只是提醒。",
                 messages.WARNING,
             )
@@ -170,7 +170,7 @@ class ContactAdmin(SimpleHistoryAdmin):
             request._contact_duplicate_partners = Contact.objects.duplicate_partners()
         partners = request._contact_duplicate_partners
 
-        @admin.display(description="合并")
+        @admin.display(description="Merge")
         def merge_link(obj):
             other_pk = partners.get(obj.pk)
             if other_pk is None:

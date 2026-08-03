@@ -43,7 +43,7 @@ def contact_merge(request):
         except MergeConflict as conflict:
             messages.error(request, str(conflict))
         else:
-            messages.success(request, f"已把 #{drop.pk} 合并进 #{keep.pk}。")
+            messages.success(request, f"Merged #{drop.pk} into #{keep.pk}.")
             return redirect(reverse("admin:contact_contact_change", args=[keep.pk]))
 
     return render(request, "contact/merge_confirm.html", {

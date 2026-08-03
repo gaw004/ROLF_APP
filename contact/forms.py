@@ -20,7 +20,7 @@ class ContactAdminForm(forms.ModelForm):
     """
 
     force_save = forms.BooleanField(
-        required=False, label="确认不是重复人员，强制保存")
+        required=False, label="Not a duplicate — save anyway")
 
     class Meta:
         model = Contact
@@ -83,7 +83,7 @@ class ContactAdminForm(forms.ModelForm):
             names = "、".join(str(contact) for contact in duplicates[:3])
             raise ValidationError({
                 "force_save": (
-                    f"已有同名同号的记录：{names}。"
+                    f"A record with the same name and number already exists: {names}. "
                     "确认这是另一个人的话，勾选本框再保存。"
                 ),
             })

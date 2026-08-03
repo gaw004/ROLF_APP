@@ -563,8 +563,9 @@ class EmergencyContact(ConstraintErrorFieldMixin, TimeStampedModel):
         limit_choices_to={"usable_as_emergency_contact": True},
         # Spelling the direction out is not optional: leave it implicit and it
         # gets entered backwards. a = the emergency contact, b = this person.
-        help_text="读作「紧急联系人 是 本人 的 ___」。"
-                  "例：小明名下填「王秀英」+「母亲」= 王秀英是小明的母亲。",
+        help_text="Read it as a sentence: “Wang Xiuying is this person's "
+                  "parent.” Pick what the emergency contact is to them, "
+                  "not the other way round.",
     )
 
     class Meta:

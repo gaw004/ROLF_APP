@@ -39,7 +39,7 @@ def merge_contacts(keep, drop, *, actor=None):
     far safer than deleting one side on the caller's behalf.
     """
     if keep.pk == drop.pk:
-        raise MergeConflict("不能把一条记录合并到它自己。")
+        raise MergeConflict("A record cannot be merged into itself.")
 
     for relation in Contact._meta.related_objects:
         model = relation.related_model
@@ -59,7 +59,8 @@ def merge_contacts(keep, drop, *, actor=None):
         if relation.one_to_one and model._base_manager.filter(
                 **{field_name: keep}).exists():
             raise MergeConflict(
-                f"两条记录都有 {model._meta.verbose_name}，无法自动合并 —— "
+                f"Both records have a {model._meta.verbose_name}, so this cannot be "
+                f"merged automatically — "
                 "请先决定保留哪一个。"
             )
 
@@ -77,7 +78,8 @@ def merge_contacts(keep, drop, *, actor=None):
                 rows.update(**{field_name: keep})
         except IntegrityError as error:
             raise MergeConflict(
-                f"{model._meta.verbose_name} 上有冲突的唯一约束，无法自动合并："
+                f"Conflicting unique values on {model._meta.verbose_name}, so this "
+                f"cannot be merged automatically: "
                 f"{error}"
             ) from error
 
@@ -85,9 +87,9 @@ def merge_contacts(keep, drop, *, actor=None):
 
     # Two trails: simple_history already records the edit, and this line is
     # visible to a human reading the record months later.
-    stamp = f"已合并 #{drop.pk}（{local_today().isoformat()}）"
+    stamp = f"Merged #{drop.pk} ({local_today().isoformat()})"
     if actor:
-        stamp += f"，操作人 {actor}"
+        stamp += f", by {actor}"
     keep.notes = f"{keep.notes}\n{stamp}".strip() if keep.notes else stamp
     keep.save()
 

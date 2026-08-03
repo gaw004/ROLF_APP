@@ -14,8 +14,8 @@ class Command(BaseCommand):
         duplicates = Contact.objects.possible_duplicates().order_by(
             "legal_last_name", "legal_first_name", "phone", "pk")
         if not duplicates:
-            self.stdout.write("没有发现同名同号的记录。")
+            self.stdout.write("No records share a name and a number.")
             return
         for contact in duplicates:
             self.stdout.write(f"#{contact.pk}\t{contact}")
-        self.stdout.write(f"\n共 {len(duplicates)} 条，合并走 /contacts/merge/。")
+        self.stdout.write(f"\n{len(duplicates)} in total. Merge them at /contacts/merge/.")

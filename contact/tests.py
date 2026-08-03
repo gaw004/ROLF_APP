@@ -170,6 +170,46 @@ class LanguageTests(TestCase):
         )
 
 
+class SeededRelationshipTypeTests(TestCase):
+    """The vocabulary contact/0004 seeds, and why it is a migration.
+
+    EmergencyContact.relationship_type is a required FK. On an empty table the
+    form has a required field with no valid choice, which is not "the dropdown
+    looks sparse" but "nobody can record an emergency contact at all" — and
+    that lands on P6, whose guardian fallback reads emergency contacts, and on
+    the attendance page, which shows the on-site number. seed_demo cannot own
+    it: it refuses to run with DEBUG off.
+    """
+
+    def test_the_vocabulary_is_there_and_all_of_it_is_offered(self):
+        offered = RelationshipType.objects.filter(usable_as_emergency_contact=True)
+        self.assertGreaterEqual(offered.count(), 7)
+        for code in ["parent", "guardian", "grandparent", "spouse", "sibling"]:
+            self.assertTrue(offered.filter(code=code).exists(), code)
+
+    def test_an_emergency_contact_can_be_recorded_with_nothing_else_set_up(self):
+        # The whole point, stated as the action it enables.
+        person = Contact.objects.create(
+            contact_type=Contact.ContactType.INDIVIDUAL, legal_last_name="Alice")
+        kin = EmergencyContact.objects.create(
+            person=person, name="Wang Xiuying", phone="+14085550101",
+            relationship_type=RelationshipType.objects.get(code="parent"))
+        kin.full_clean()
+
+    def test_no_seeded_forward_name_repeats_another_rows_reverse_name(self):
+        # The rule RelationshipType.clean() enforces, applied to the seed itself:
+        # a mirror row splits one vocabulary entry in two, and half the emergency
+        # contacts end up filed under each. Migrations run on the historical
+        # model, so clean() never sees these rows — nothing but this test would
+        # catch a mirror pair being added to the list later.
+        rows = list(RelationshipType.objects.all())
+        reverses = {r.name_b_to_a.casefold() for r in rows if r.name_b_to_a}
+        for row in rows:
+            self.assertNotIn(
+                row.name_a_to_b.casefold(), reverses,
+                f'"{row.name_a_to_b}" is already some other type\'s reverse label')
+
+
 class ContactNameConstraintTests(TestCase):
     """The name rule at the database level (goal.md D9 / D14).
 
@@ -199,7 +239,11 @@ class ContactNameConstraintTests(TestCase):
 class RelationshipTypeTests(TestCase):
     """code, symmetry, and the two duplicate gaps A7's constraints missed (B2)."""
 
-    def make(self, code="parent_of", name_a_to_b="parent of", name_b_to_a="child of", **kw):
+    # ⚠️ Not "parent of": contact/0004_seed_relationship_types seeds that one, and
+    #    these tests are about the rules, not about the vocabulary. Reusing a
+    #    seeded name here would make every case fail on the name constraint
+    #    before reaching the rule it is testing.
+    def make(self, code="mentor_of", name_a_to_b="mentor of", name_b_to_a="mentee of", **kw):
         return RelationshipType.objects.create(
             code=code, name_a_to_b=name_a_to_b, name_b_to_a=name_b_to_a, **kw)
 
@@ -211,7 +255,7 @@ class RelationshipTypeTests(TestCase):
     def test_code_is_lowercased_and_stripped_on_save(self):
         # Cosmetic only: uniqueness is the constraint's job now. Kept so stored
         # values are clean and the admin behaves the same way every time.
-        self.assertEqual(self.make(code="  Parent_Of  ").code, "parent_of")
+        self.assertEqual(self.make(code="  Mentor_Of  ").code, "mentor_of")
 
     def test_code_cannot_be_changed_once_created(self):
         relationship_type = self.make()
@@ -233,7 +277,7 @@ class RelationshipTypeTests(TestCase):
         # and the data split between them.
         self.make()
         with self.assertRaises(IntegrityError), transaction.atomic():
-            self.make(code="parent_of_2", name_a_to_b="Parent Of")
+            self.make(code="mentor_of_2", name_a_to_b="Mentor Of")
 
     def test_a_forward_name_colliding_with_an_existing_reverse_name_is_rejected(self):
         # Gap 1: "child of" already exists as the reverse of "parent of". Letting
@@ -242,7 +286,7 @@ class RelationshipTypeTests(TestCase):
         # filed under one and half under the other.
         self.make()
         mirror = RelationshipType(
-            code="child_of", name_a_to_b="Child Of", name_b_to_a="parent of")
+            code="mentee_of", name_a_to_b="Mentee Of", name_b_to_a="mentor of")
         with self.assertRaises(ValidationError) as caught:
             mirror.full_clean()
         self.assertIn("name_a_to_b", caught.exception.message_dict)
@@ -263,24 +307,30 @@ class RelationshipTypeTests(TestCase):
         self.make()
         with self.assertRaises(IntegrityError), transaction.atomic():
             RelationshipType.objects.bulk_create([
-                RelationshipType(code="parent_of_2", name_a_to_b="  parent of  "),
+                RelationshipType(code="mentor_of_2", name_a_to_b="  mentor of  "),
             ])
 
     def test_symmetry_is_an_explicit_flag_not_an_inference(self):
         # Whoever adds the type may well type "spouse of" into both boxes, which
         # is exactly when "name_b_to_a is empty" stops meaning symmetric.
-        spouse = self.make(
-            code="spouse_of", name_a_to_b="spouse of", name_b_to_a="spouse of",
+        peer = self.make(
+            code="peer_of", name_a_to_b="peer of", name_b_to_a="peer of",
             is_symmetric=True)
-        self.assertTrue(spouse.is_symmetric)
+        self.assertTrue(peer.is_symmetric)
         self.assertFalse(self.make().is_symmetric)
 
     def test_only_flagged_types_are_offered_for_emergency_contacts(self):
-        self.make(code="mother_of", name_a_to_b="mother of", name_b_to_a="child of",
-                  usable_as_emergency_contact=True)
-        self.make(code="employee_of", name_a_to_b="employee of", name_b_to_a="employer of")
+        flagged = self.make(code="mother_of", name_a_to_b="mother of",
+                            usable_as_emergency_contact=True)
+        unflagged = self.make(
+            code="employee_of", name_a_to_b="employee of", name_b_to_a="employer of")
         offered = RelationshipType.objects.filter(usable_as_emergency_contact=True)
-        self.assertEqual([t.code for t in offered], ["mother_of"])
+        self.assertIn(flagged, offered)
+        self.assertNotIn(unflagged, offered)
+        # Containment, not equality: contact/0004 seeds seven flagged rows, and
+        # the foundation can add more in the admin. An exact list here would go
+        # red every time the vocabulary grows, which is not what this is about.
+        self.assertIn("parent", [t.code for t in offered])
 
 
 class ConstraintFieldErrorTests(TestCase):
@@ -332,8 +382,8 @@ class ConstraintFieldErrorTests(TestCase):
             contact_type=Contact.ContactType.INDIVIDUAL, legal_last_name="Alice")
         self.bob = Contact.objects.create(
             contact_type=Contact.ContactType.INDIVIDUAL, legal_last_name="Bob")
-        self.parent_of = RelationshipType.objects.create(
-            code="parent_of", name_a_to_b="parent of", name_b_to_a="child of")
+        # The seeded vocabulary (contact/0004), not a second copy of it.
+        self.parent_of = RelationshipType.objects.get(code="parent")
 
     def assertFieldError(self, instance, field):
         with self.assertRaises(ValidationError) as caught:
@@ -368,14 +418,14 @@ class ConstraintFieldErrorTests(TestCase):
         # warned could be skipped at form time and only bite as an
         # IntegrityError, so they are the ones most worth a case here.
         messages = self.assertFieldError(
-            RelationshipType(code="parent_two", name_a_to_b="  Parent Of  "),
+            RelationshipType(code="parent_two", name_a_to_b="  Parent  "),
             "name_a_to_b",
         )
         self.assertIn("A relationship type with this name already exists.", messages)
 
     def test_a_duplicate_type_code_points_at_code(self):
         messages = self.assertFieldError(
-            RelationshipType(code="PARENT_OF", name_a_to_b="guardian of"), "code")
+            RelationshipType(code="PARENT", name_a_to_b="guardian of"), "code")
         self.assertIn("A relationship type with this code already exists.", messages)
 
     def test_a_duplicate_emergency_contact_points_at_name(self):
@@ -695,7 +745,7 @@ class MergeContactsTests(TestCase):
     def test_the_merge_leaves_a_note_a_human_can_read(self):
         merge_contacts(self.keep, self.drop, actor="gabrielle")
         self.keep.refresh_from_db()
-        self.assertIn(f"已合并 #{self.drop.pk}", self.keep.notes)
+        self.assertIn(f"Merged #{self.drop.pk}", self.keep.notes)
         self.assertIn("gabrielle", self.keep.notes)
 
     def test_merging_a_contact_into_itself_is_refused(self):

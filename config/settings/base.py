@@ -105,6 +105,9 @@ TEMPLATES = [
                 'django.template.context_processors.request',
                 'django.contrib.auth.context_processors.auth',
                 'django.contrib.messages.context_processors.messages',
+                # Which management entrances the shared nav should draw. Asks
+                # org.permissions, never MinistryRole directly (D20).
+                'core.context_processors.navigation',
             ],
         },
     },

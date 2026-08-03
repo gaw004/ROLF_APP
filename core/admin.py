@@ -20,7 +20,7 @@ class InEffectFilter(admin.SimpleListFilter):
     confidently return the wrong rows.
     """
 
-    title = "生效中"
+    title = "In effect"
     parameter_name = "in_effect"
 
     def lookups(self, request, model_admin):

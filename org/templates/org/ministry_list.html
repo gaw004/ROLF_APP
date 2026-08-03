@@ -1,0 +1,24 @@
+{% extends "core/base.html" %}
+{% block title %}Ministries{% endblock %}
+
+{% block content %}
+  <h1>Ministries</h1>
+  {% comment %}
+  P5 的入口。在这一页出现之前，授权页需要一个 pk 而没有任何地方给得出来 ——
+  想用 P5 就得先知道某个 ministry 的 id，然后手敲 URL。
+
+  只列 is_active 的：停用的 ministry 不该再任命新 admin。已有的授权不受影响，
+  它们在 MinistryRole 上，撤销要去那一条自己的页面。
+  {% endcomment %}
+
+  <ul>
+    {% for ministry in ministries %}
+      <li>
+        <a href="{% url 'org:ministry_admins' ministry.pk %}">{{ ministry.name }}</a>
+        — manage who administers it
+      </li>
+    {% empty %}
+      <li>No active ministries yet. Add them in the admin site.</li>
+    {% endfor %}
+  </ul>
+{% endblock %}

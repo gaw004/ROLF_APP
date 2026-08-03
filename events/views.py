@@ -19,6 +19,7 @@ from django.contrib.auth.decorators import login_required
 from django.core.exceptions import PermissionDenied, ValidationError
 from django.db.models import Prefetch
 from django.shortcuts import get_object_or_404, redirect, render
+from django.urls import reverse
 
 from org.permissions import (
     SCOPED_DENIAL,
@@ -28,19 +29,30 @@ from org.permissions import (
     ministry_ids_administered_by,
 )
 
-from .forms import EventForm, EventRoleForm, HoursForm, NotifyForm, SignUpForm
+from .forms import (
+    EventForm,
+    EventPeriodForm,
+    EventRoleForm,
+    EventStatusForm,
+    HoursForm,
+    NotifyForm,
+    SignUpForm,
+)
 from .models import Event, EventNotification, EventRole, Participation
 from .services import (
     ConsentRequired,
     cancel,
     check_in,
     check_out,
+    confirm_signup,
     default_message,
     event_summary,
     ministry_staff_participation,
     notify_event_change,
     record_hours,
+    reschedule,
     resolve_recipients,
+    set_status,
     sign_up,
 )
 
@@ -66,13 +78,50 @@ def event_list(request):
     the other predicate — being able to see something and being able to join it
     are different questions.
     """
+    period = EventPeriodForm(request.GET or None)
     events = (
         Event.objects.open_for_signup()
         .upcoming()
         .select_related("ministry", "event_type")
         .order_by("start_time")
     )
-    return render(request, "events/event_list.html", {"events": events})
+    events = period.narrow(events)
+    return render(request, "events/event_list.html", {
+        "events": events,
+        "period": period,
+        # R1, in the plainest possible form: how many, in the window they asked
+        # for. Counted here rather than with {{ events|length }} so the template
+        # cannot quietly count a different set than the one it lists.
+        "total": events.count(),
+    })
+
+
+@login_required
+def past_events(request):
+    """R1's other half: everything already over.
+
+    Not an admin report. The requirement's first line is "how many events run
+    in a given period", and a volunteer answering "which of these do I want to
+    join" needs the same query pointed the other way — event_list only ever
+    shows what is open and upcoming, so an event vanished from the interface
+    the moment it ended, taking its report page with it.
+
+    visible_to_volunteers(), so a cancelled or completed event still appears:
+    the people who were there have hours on it.
+    """
+    period = EventPeriodForm(request.GET or None)
+    events = (
+        Event.objects.visible_to_volunteers()
+        .past()
+        .select_related("ministry", "event_type")
+        .order_by("-start_time")
+    )
+    events = period.narrow(events)
+    return render(request, "events/past_events.html", {
+        "events": events,
+        "period": period,
+        "total": events.count(),
+    })
 
 
 @login_required
@@ -114,7 +163,7 @@ def event_signup(request, pk):
         try:
             # The rule lives in sign_up(), not here: an admin registering
             # somebody from a paper list has to meet the same one.
-            sign_up(
+            participation = sign_up(
                 contact=contact,
                 event_role=form.cleaned_data["event_role"],
                 consent=form.consent(),
@@ -122,7 +171,11 @@ def event_signup(request, pk):
         except (ConsentRequired, ValidationError) as error:
             form.add_error(None, error)
         else:
-            messages.success(request, "报名成功。")
+            # The confirmation is a courtesy on top of the row, not part of it:
+            # a signup that was accepted must not be undone because a message
+            # could not go out. confirm_signup() returns rather than raises.
+            confirm_signup(participation)
+            messages.success(request, "You are signed up. We have sent a confirmation.")
             return redirect("events:event_detail", pk=event.pk)
 
     return render(request, "events/event_signup.html", {
@@ -167,7 +220,7 @@ def participation_cancel(request, pk):
         owned.select_related("event_role__event"), pk=pk)
     if request.method == "POST":
         cancel(participation)
-        messages.success(request, "已取消报名。")
+        messages.success(request, "Your signup has been cancelled.")
         return redirect("events:my_participations")
     return render(request, "events/participation_cancel.html", {
         "participation": participation,
@@ -191,6 +244,51 @@ def _managed_event(request, pk):
 
 
 @login_required
+def event_manage_list(request):
+    """Everything this account administers — including drafts and finished ones.
+
+    The entrance the ministry-admin side never had. event_roles links onward to
+    registrations, attendance, the report and the notice page, but the only way
+    to reach event_roles was the redirect after creating an event: come back
+    tomorrow and there was no route to any of it. event_list is no help, since
+    it shows only what is open and upcoming — which excludes drafts, and
+    excludes every event whose report anybody would actually want to read.
+
+    No ministry filter beyond the scope itself: somebody who administers two
+    ministries wants one list, and the ministry is a column.
+    """
+    administered = ministry_ids_administered_by(request.user)
+    if not administered:
+        raise PermissionDenied(SCOPED_DENIAL)
+
+    if request.method == "POST":
+        # Status is editable straight from the list: publishing an event and
+        # closing a finished one are frequent, and both are a single choice.
+        # The times are not, and are shown read-only — moving an event obliges
+        # somebody to notify the volunteers, so it goes through the edit page,
+        # which routes to the notice. Two fields, two different consequences.
+        event = _managed_event(request, request.POST.get("event"))
+        form = EventStatusForm(request.POST, instance=event)
+        if form.is_valid():
+            set_status(event, form.cleaned_data["status"])
+            messages.success(request, f"“{event.name}” is now {event.get_status_display()}.")
+        return redirect("events:event_manage_list")
+
+    events = (
+        Event.objects.filter(ministry_id__in=administered)
+        .select_related("ministry", "event_type")
+        .order_by("-start_time")
+    )
+    return render(request, "events/event_manage_list.html", {
+        "events": events,
+        # One unbound form, reused to draw every row's dropdown: the choices are
+        # identical, and building one per event would be a form per row for no
+        # gain.
+        "status_form": EventStatusForm(),
+    })
+
+
+@login_required
 def event_create(request):
     """P2: publish an event, for a ministry this person actually runs."""
     if not ministry_ids_administered_by(request.user):
@@ -205,10 +303,58 @@ def event_create(request):
         event = form.save(commit=False)
         event.owner = _my_contact(request)
         event.save()
-        messages.success(request, "活动已建立，接下来开工种。")
+        messages.success(request, "Event created. Next, open the roles it needs.")
         return redirect("events:event_roles", pk=event.pk)
 
-    return render(request, "events/event_form.html", {"form": form})
+    return render(request, "events/event_form.html", {"form": form, "event": None})
+
+
+@login_required
+def event_update(request, pk):
+    """Change an event — including its time, which is what makes P6 usable.
+
+    Without this page a ministry admin could send "the time has changed" and
+    have no way to change it: EventForm was only ever reachable from
+    event_create, and the admin site is closed to them by StaffOnlyAdminMiddleware.
+    Event.status has the same problem — nothing else can mark an event completed.
+
+    A move goes through services.reschedule() rather than form.save(), so that
+    every path that shifts an event runs the same full_clean inside the same
+    transaction. Everything else is an ordinary save.
+    """
+    event = _managed_event(request, pk)
+    form = EventForm(request.POST or None, instance=event, user=request.user)
+    if request.method == "POST" and form.is_valid():
+        # Re-checked on the submitted value, exactly as event_create does: the
+        # dropdown is narrowed, but a POST can still name any ministry id — and
+        # handing an event to a ministry you do not run is the same over-reach
+        # as publishing into one.
+        if not can_publish_event(request.user, form.cleaned_data["ministry"]):
+            raise PermissionDenied(SCOPED_DENIAL)
+
+        # The form answers this, not the view: it depends on what its widgets
+        # can express. See EventForm.time_changed for the seconds trap.
+        moved = form.time_changed()
+        event = form.save(commit=False)
+        if moved:
+            reschedule(
+                event,
+                start_time=form.cleaned_data["start_time"],
+                end_time=form.cleaned_data["end_time"],
+            )
+            # Straight to the notice, with the reason already chosen. Whoever
+            # moved an event that people signed up for is one click from telling
+            # them, instead of having to know that the page exists.
+            messages.success(request, "Time changed. Tell the volunteers who signed up.")
+            return redirect(
+                f"{reverse('events:event_notify', args=[event.pk])}"
+                f"?reason={EventNotification.Reason.TIME_CHANGED}"
+            )
+        event.save()
+        messages.success(request, "Event updated.")
+        return redirect("events:event_detail", pk=event.pk)
+
+    return render(request, "events/event_form.html", {"form": form, "event": event})
 
 
 @login_required
@@ -218,7 +364,7 @@ def event_roles(request, pk):
     form = EventRoleForm(request.POST or None, event=event)
     if request.method == "POST" and form.is_valid():
         form.save()
-        messages.success(request, "工种已添加。")
+        messages.success(request, "Role added.")
         return redirect("events:event_roles", pk=event.pk)
 
     return render(request, "events/event_roles.html", {
@@ -236,7 +382,7 @@ def role_delete(request, pk):
         raise PermissionDenied(SCOPED_DENIAL)
     if request.method == "POST":
         role.delete()
-        messages.success(request, "工种已删除。")
+        messages.success(request, "Role removed.")
     return redirect("events:event_roles", pk=role.event_id)
 
 

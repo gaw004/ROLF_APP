@@ -18,7 +18,7 @@
 >    那段存量代码在 `02-roadmap.md` B1 里已经收编过了。
 >
 > **开工时的实测基线**（不是估计，是跑出来的）：
-> - `contact` app 有 Contact / Relationship / RelationshipType / Language 四个模型 + admin
+> - `contact` app 有 Contact / RelationshipType / Language 三个模型 + admin
 > - `python manage.py test` → **11 个测试，全绿**
 > - `python manage.py check` → **3 条 W042 警告**（`DEFAULT_AUTO_FIELD` 没设）
 > - 数据库是 SQLite，配置是 `startproject` 的默认单文件
@@ -140,7 +140,7 @@ TIME_ZONE = "America/Los_Angeles"
 设完 `DEFAULT_AUTO_FIELD` 立刻生成迁移：
 
 ```bash
-python manage.py makemigrations contact    # 预期 3 个 AlterField：Contact / Relationship / RelationshipType
+python manage.py makemigrations contact    # 预期 2 个 AlterField：Contact / RelationshipType
 ```
 
 `Language` 用 `code` 当主键，不受影响 —— 如果它也出现在迁移里，说明哪里搞错了。
@@ -256,8 +256,8 @@ python manage.py startapp core
 - `INSTALLED_APPS` 加 `'core'`，**放在 `'contact'` 前面**（读的时候依赖方向一目了然）。
 - `core/views.py` 用不上，可以留空。
 
-> 不会产生迁移。 `TimeStampedModel` 是抽象基类，换个地方定义不改变 `Contact` /
-> `Relationship` 的任何字段。此时 `makemigrations` 应该只有 A2 那个主键迁移，不该多出新的。
+> 不会产生迁移。 `TimeStampedModel` 是抽象基类，换个地方定义不改变 `Contact`
+> 的任何字段。此时 `makemigrations` 应该只有 A2 那个主键迁移，不该多出新的。
 > 如果它检测到字段改动，说明搬的时候定义被改了 —— 回去核对。
 
 顺手在 `core/tests.py` 放一个**全项目级的迁移守卫**（决策 #9）：
@@ -444,58 +444,6 @@ class Meta:
 
 `Contact.clean()` 已经实现了同一条规则，不用改逻辑，**只加一句注释指回约束**。
 
-### Relationship：三条约束（决策 #2）
-
-```python
-class Meta:
-    indexes = [...]                     # 保留现有的两个
-    constraints = [
-        models.CheckConstraint(
-            condition=~models.Q(contact_a=models.F("contact_b")),
-            name="relationship_no_self_reference",
-            violation_error_message="一个联系人不能和自己建立关系。",
-        ),
-        models.UniqueConstraint(
-            fields=["contact_a", "contact_b", "relationship_type", "start_date"],
-            name="relationship_unique_per_type_and_start",
-            nulls_distinct=False,
-            violation_error_message="这条关系已经记录过了。",
-        ),
-        models.CheckConstraint(
-            condition=(
-                models.Q(end_date__isnull=True)
-                | models.Q(start_date__isnull=True)
-                | models.Q(end_date__gte=models.F("start_date"))
-            ),
-            name="relationship_end_date_not_before_start_date",
-            violation_error_message="结束日期不能早于开始日期。",
-        ),
-    ]
-```
-
-三个细节：
-
-- `nulls_distinct=False` 不能省。 Postgres 默认认为 `NULL != NULL`，而 `start_date`
-  是可空的 —— 不加这个参数，两条起始日期都为空的相同关系照样能重复插入，约束等于白加。
-  PG 15+ 支持，我们是 18，没问题。**这也是 A7 必须排在切库之后的原因**：
-  SQLite 上这个参数会被静默忽略。
-- Django 5.1 起 `CheckConstraint` 的参数叫 `condition`（旧的 `check` 已废弃）。
-- 日期约束里的两个 `isnull` 分支在 SQL 层其实可以省（`NULL >= NULL` 是 NULL，
-  CHECK 遇到 NULL 视为通过），但写出来更自明，也省得以后有人怀疑它会不会误伤空值。
-
-**明确不做的**：镜像重复 —— `(Alice, Bob, 'parent of')` 和 `(Bob, Alice, 'child of')`
-是同一件事存两遍，唯一约束挡不住（决策 #2 选择不处理）。
-数据库表达不了这个，真要管只能写在 `clean()` 里。记在这里是为了以后别以为已经解决了。
-
-### `clean()` 提示层
-
-给 `Relationship` 加一个 `clean()`，做和上面三条约束相同的检查，把错误挂到具体字段上
-（`contact_b` / `end_date`），每条都注释指回对应的约束名。
-
-> Django 4.1 起 `full_clean()` 会自动校验约束，所以就算不写 `clean()`，
-> admin 也**不会**抛 `IntegrityError`，只是提示挂在表单顶部、措辞是给程序员看的。
-> 写 `clean()` 纯粹为了体验，不承担兜底 —— 这是 D14 的原话，别把它当安全网。
-
 ### 测试（决策 #9）
 
 `contact/tests.py` 补五条：
@@ -506,13 +454,7 @@ def test_create_bypassing_full_clean_still_cannot_break_the_name_rule(self):
     # Contact.objects.create(contact_type="individual") 不填姓氏 → IntegrityError。
     # 这是修订前能存进去的那条路径。
 def test_organization_without_a_name_is_rejected_at_the_database(self):
-
-# Relationship 三条约束
-def test_cannot_relate_a_contact_to_itself(self):
-def test_cannot_store_the_same_relationship_twice(self):
-    # 同一对 contact + 同一 type + 同为空的 start_date，第二次应失败。
-    # 这条专门验 nulls_distinct=False 真的生效了。
-def test_end_date_cannot_be_before_start_date(self):
+def test_bulk_create_cannot_break_the_name_rule_either(self):
 ```
 
 > 测数据库约束时记得 `from django.db import transaction` 并用
@@ -520,12 +462,10 @@ def test_end_date_cannot_be_before_start_date(self):
 > 事务会被标记为中止，同一个测试里后面的查询全会报错。
 >
 > ✅ **未决点已验证（实施时实测）**：Django 的 Python 侧 `validate_constraints()`
-> **认** `nulls_distinct=False`，行为与数据库一致 —— `full_clean()` 会拦下
-> `start_date` 同为空的重复行，且用的就是约束上写的 `violation_error_message`。
-> 所以 `clean()` 里**不需要**再手写一遍重复检查（也确实没写）。
+> 行为与数据库一致，用的就是约束上写的 `violation_error_message` ——
+> 所以 `clean()` 里**不需要**再手写一遍同样的检查（也确实没写）。
 >
-> 另外在 psql 里核对了四条约束真的落地了，不是「Django 以为建了」：
-> `\d` 显示 `UNIQUE NULLS NOT DISTINCT (contact_a_id, contact_b_id, relationship_type_id, start_date)`。
+> 另外在 psql 里用 `\d` 核对了约束真的落地了，不是「Django 以为建了」。
 
 ---
 
@@ -625,9 +565,7 @@ def test_the_middleware_is_installed(self):
 | `test_no_model_changes_are_missing_a_migration` | 忘了 `makemigrations` 会当场红 | A4 |
 | `test_create_bypassing_full_clean_still_cannot_break_the_name_rule` | D9 原来漏掉的那条路 | A7 |
 | `test_organization_without_a_name_is_rejected_at_the_database` | 同上，机构侧 | A7 |
-| `test_cannot_relate_a_contact_to_itself` | 自我关系挡得住 | A7 |
-| `test_cannot_store_the_same_relationship_twice` | `nulls_distinct=False` 真的生效 | A7 |
-| `test_end_date_cannot_be_before_start_date` | 日期倒挂挡得住 | A7 |
+| `test_bulk_create_cannot_break_the_name_rule_either` | `bulk_create` 也绕不过去 | A7 |
 | `test_editing_a_contact_records_who_changed_it` | middleware 顺序对，记得到"谁" | A8 |
 
 ### 其余
@@ -653,7 +591,7 @@ def test_the_middleware_is_installed(self):
 
 - [ ] **没有新增任何功能**
 - [ ] **原本合法的数据仍然全部能存得下** —— admin 里能录的合法记录一条没少
-- [ ] 唯一少掉的是脏数据：自我关系、重复关系、日期倒挂、没有姓名的联系人
+- [ ] 唯一少掉的是脏数据：没有姓名的联系人、类型和姓名对不上的行
 
 做完回 `goal.md` 把 Phase A 那张表的状态改成 ✅，然后把本文档换成 Phase B 的实施步骤。
 
@@ -680,7 +618,7 @@ A7 / A8 / A9 彼此独立，可以分开做、分开提交。
 | # | 改了什么 | 为什么 |
 |---|---------|-------|
 | 1 | A7 增加 `Contact` 姓名 `CheckConstraint` | D9 原来是**假生效**的，`save()` 不调 `clean()` |
-| 2 | A7 增加 `end_date >= start_date`；明确**不做**镜像重复 | 日期倒挂便宜且以后加要洗数据；镜像重复数据库表达不了 |
+| 2 | A7 的约束一律加在**空表**上 | 等表里有了真数据再加，就得先清洗存量数据 |
 | 3 | A2 增加 `DEFAULT_AUTO_FIELD` | 原计划漏了，导致 A10 的"check 无警告"当时根本过不了 |
 | 4 | A2 增加 `TIME_ZONE` | Phase B/C 要用；但它不满足 Phase A 准入标准，是"顺手"进来的 |
 | 5 | A7 明确约束 + `clean()` 两层 + 注释纪律 | 新增 D14；这是明知故犯违反"一件事记一处"，靠纪律兜住 |

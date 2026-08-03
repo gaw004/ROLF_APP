@@ -14,7 +14,7 @@ run seed_demo, and this migration has to be a no-op there.
 from django.db import migrations
 
 GENERAL_CODE = "general"
-GENERAL_NAME = "通用志愿者"
+GENERAL_NAME = "General volunteer"
 
 
 def add_general_role(apps, schema_editor):

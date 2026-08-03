@@ -20,9 +20,9 @@ class GrantForm(forms.Form):
     field somebody could type into would be a field somebody could lie in.
     """
 
-    contact = forms.ModelChoiceField(queryset=None, label="谁")
+    contact = forms.ModelChoiceField(queryset=None, label="Who")
     start_date = forms.DateField(
-        required=False, label="生效日", widget=forms.DateInput(attrs={"type": "date"}))
+        required=False, label="Starting on", widget=forms.DateInput(attrs={"type": "date"}))
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)

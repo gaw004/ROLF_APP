@@ -29,6 +29,32 @@ class ConsentRequired(ValidationError):
     """
 
 
+def consent_required_for(contact, event):
+    """Does this person, on this event, need a guardian's consent?
+
+    Two conditions, and both have to hold. The person: is_minor is three-state
+    and the unknown case takes the cautious branch, because folding "no date on
+    file" into "adult" is exactly how a minor stops having anybody notified on
+    their behalf. The event: requires_guardian_consent, which a coordinator sets
+    when publishing — sorting tins on a Saturday morning with parents in the
+    room is not a weekend away, and one blanket answer would either burden the
+    first or under-protect the second.
+
+    ⚠️ One function, called from both gates. sign_up() refuses to create an
+       unconsented minor's row and _mark_attended() refuses to turn one into
+       hours; asking the question differently in those two places is how an
+       event ends up refusing the signup and then accepting the attendance.
+    """
+    return contact.is_minor in (True, None) and event.requires_guardian_consent
+
+
+# The consent columns on Participation, named once. sign_up() has to be able to
+# clear all of them when an adult reuses a row a minor's signup once filled in.
+CONSENT_FIELDS = (
+    "consent_given_by", "consent_method", "consent_email", "consent_phone",
+)
+
+
 def sign_up(*, contact, event_role, consent=None):
     """Sign `contact` up for `event_role`. Returns the new Participation.
 
@@ -51,9 +77,24 @@ def sign_up(*, contact, event_role, consent=None):
        raises, the person simply never hears.
     """
     consent = dict(consent or {})
-    needs_consent = contact.is_minor in (True, None)
+    needs_consent = consent_required_for(contact, event_role.event)
 
     if needs_consent:
+        # An emergency contact first, before anything about consent is asked.
+        #
+        # ⚠️ Checked here rather than on the form because the form is not the
+        #    only door: an admin entering somebody from a paper list reaches
+        #    this function too, and a minor with nobody to call is the state
+        #    this rule exists to prevent — on the day, not at signup. It also
+        #    has to come before the consent questions: telling somebody their
+        #    guardian's email is missing, when the real answer is "add an
+        #    emergency contact first", sends them to the wrong page.
+        if not contact.emergency_contacts.exists():
+            raise ConsentRequired({
+                "__all__": "Add an emergency contact to your profile before "
+                           "signing up. Anyone under 18 — or whose date of "
+                           "birth we do not have — needs one on file.",
+            })
         if not consent.get("consent_given_by") or not consent.get("consent_method"):
             raise ConsentRequired({
                 "consent_given_by": "A guardian's consent is needed before a minor "
@@ -71,12 +112,40 @@ def sign_up(*, contact, event_role, consent=None):
         # An adult's row carries no consent fields, even if a form sent some.
         consent = {}
 
-    participation = Participation(
-        contact=contact,
-        event_role=event_role,
-        registered_at=local_now(),
-        **consent,
-    )
+    # Signing up again after pulling out reuses the existing row rather than
+    # adding a second one.
+    #
+    # ⚠️ cancel() is a status change, never a delete (the notification history
+    #    points at these rows), so the cancelled row still holds the unique
+    #    (event_role, contact) pair. Building a fresh Participation here made
+    #    changing your mind a permanent decision: the second signup came back
+    #    as "you have already signed up for this role", which is both wrong and
+    #    unfixable from the volunteer's side. Found in the browser, not by the
+    #    tests — every test that cancelled a signup stopped there.
+    existing = Participation.objects.filter(
+        contact=contact, event_role=event_role).first()
+    if existing is not None:
+        if existing.status != Participation.Status.CANCELLED:
+            raise ValidationError({
+                "event_role": "You have already signed up for this role.",
+            })
+        participation = existing
+        participation.status = Participation.Status.REGISTERED
+        participation.registered_at = local_now()
+        # Yesterday's consent does not carry: the form has just collected it
+        # again, and an adult's row must end up with none at all.
+        for field, value in {**{name: "" for name in CONSENT_FIELDS}, **consent}.items():
+            setattr(participation, field, value)
+        if not consent:
+            participation.consent_relationship = None
+            participation.consent_at = None
+    else:
+        participation = Participation(
+            contact=contact,
+            event_role=event_role,
+            registered_at=local_now(),
+            **consent,
+        )
     # full_clean() rather than a bare save(): the uniqueness of (event_role,
     # contact) has to come back as a form error, not as an IntegrityError 500.
     participation.full_clean(exclude=["registered_at"])
@@ -100,7 +169,8 @@ def _mark_attended(participation):
     check_out() and the paper-sheet record_hours() — because a rule with three
     entrances and one guard is a rule with two ways round it.
     """
-    if participation.contact.is_minor in (True, None) and participation.consent_at is None:
+    if (consent_required_for(participation.contact, participation.event)
+            and participation.consent_at is None):
         raise ConsentRequired({
             "consent_given_by": "There is no guardian's consent on this signup, so "
                                 "it cannot be marked as attended. (An unknown birth "
@@ -145,7 +215,7 @@ def check_out(participation, *, at=None):
        back (one pair of timestamps cannot say it, but the hours can).
 
     ⚠️ Nor is hours a property over the timestamps. Two fields answering one
-       question independently is Relationship.is_active next to end_date: two
+       question independently is is_active sitting next to end_date: two
        answers, free to disagree, and nothing to tell you they have.
     """
     at = at or local_now()
@@ -266,6 +336,25 @@ def events_in_period(start, end, ministry=None):
         .annotate(role_count=Count("roles", distinct=True))
     )
     return events.filter(ministry=ministry) if ministry is not None else events
+
+
+def set_status(event, status):
+    """Publish, close, or cancel an event — the one field the manage list edits inline.
+
+    Separate from reschedule() because it is a different business event with a
+    different consequence: moving an event obliges somebody to tell the
+    volunteers, changing its status does not. Both go through full_clean so the
+    end-after-start constraint is checked on either path.
+
+    ⚠️ Not a plain save(update_fields=["status"]). draft -> open is publication:
+       it is the moment volunteers can see the event at all, and it should fail
+       loudly on a row that would not otherwise validate rather than quietly
+       publishing a broken one.
+    """
+    event.status = status
+    event.full_clean(exclude=["created_at", "updated_at"])
+    event.save()
+    return event
 
 
 @transaction.atomic
@@ -393,7 +482,8 @@ def resolve_recipients(event):
             if guardian is None:
                 unreachable.append(Unreachable(
                     participation=participation,
-                    why="未成年（或生日未知），但没有任何家长联系方式",
+                    why="Under 18 (or no date of birth on file), and no guardian "
+                        "contact of any kind",
                 ))
                 continue
             address, channel = guardian
@@ -411,10 +501,76 @@ def resolve_recipients(event):
                 break
         else:
             unreachable.append(Unreachable(
-                participation=participation, why="既没有邮箱也没有电话",
+                participation=participation, why="No email address and no phone number",
             ))
 
     return recipients, unreachable
+
+
+def confirm_signup(participation, *, backend=None):
+    """Tell them the signup went through, and tell a minor's guardian too.
+
+    Returns the DeliveryResults, which the caller is free to ignore: a
+    confirmation that could not be sent must never undo a signup that was
+    accepted. The row is the record; this is a courtesy on top of it.
+
+    Who hears about it:
+
+    · the volunteer, on their own preferred channel — including a minor, who
+      may well have a phone and an email of their own. Sending only to a parent
+      would leave the person who actually has to turn up unconfirmed;
+    · and, for a minor, the guardian as well. Both, not one or the other:
+      whoever gave consent has to know it was used, and D22's argument for
+      reaching a guardian holds just as much for "your child signed up" as for
+      "the time has changed".
+
+    ⚠️ Addresses only, never a name in the body — same rule as
+       default_message(). What leaves this database is an announcement and an
+       address, so that a minor's name is not sitting in a third party's logs.
+    """
+    contact = participation.contact
+    event = participation.event
+    to = []
+
+    for channel in _preferred_channels(contact):
+        address = _address_for(contact, channel)
+        if address:
+            to.append((address, channel))
+            break
+
+    if contact.is_minor in (True, None):
+        # The consent record first, then the emergency contact — the same order
+        # resolve_recipients() uses, so a guardian is not reached one way for a
+        # change of time and another way for a confirmation.
+        guardian = participation.guardian_address
+        if guardian is None:
+            emergency = next(iter(contact.emergency_contacts.all()), None)
+            guardian = (str(emergency.phone), SMS) if emergency else None
+        if guardian is not None and guardian not in to:
+            to.append(guardian)
+
+    if not to:
+        # Nobody reachable. Not an error: the signup stands, and the person can
+        # see it under "My signups". Returning the empty list rather than
+        # raising keeps that true.
+        return []
+
+    body = "\n".join([
+        f"You are signed up for “{event.name}” ({event.ministry.name}).",
+        "",
+        f"When: {event.start_time:%Y-%m-%d %H:%M} — {event.end_time:%H:%M}",
+        *( [f"Where: {event.location}"] if event.location else [] ),
+        f"Role: {participation.event_role.role.name}",
+        "",
+        "(If this message is for a parent: your child has signed up.)",
+        "To withdraw, open “My signups”.",
+    ])
+    backend = backend or get_backend()
+    return backend.send([
+        Message(to=address, channel=channel,
+                subject=f"[{event.ministry.name}] {event.name}", body=body)
+        for address, channel in to
+    ])
 
 
 def default_message(event, reason):
@@ -426,22 +582,22 @@ def default_message(event, reason):
        aggressive the provider turns out to be.
     """
     lines = [
-        f"关于「{event.name}」（{event.ministry.name}）：",
+        f"About “{event.name}” ({event.ministry.name}):",
         "",
         {
-            EventNotification.Reason.TIME_CHANGED: "活动时间有变动。",
-            EventNotification.Reason.LOCATION_CHANGED: "活动地点有变动。",
-            EventNotification.Reason.CANCELLED: "这场活动取消了。",
-        }.get(reason, "这场活动有变动。"),
+            EventNotification.Reason.TIME_CHANGED: "The time has changed.",
+            EventNotification.Reason.LOCATION_CHANGED: "The location has changed.",
+            EventNotification.Reason.CANCELLED: "This event has been cancelled.",
+        }.get(reason, "This event has changed."),
         "",
-        f"现在的时间：{event.start_time:%Y-%m-%d %H:%M} — {event.end_time:%H:%M}",
+        f"Now: {event.start_time:%Y-%m-%d %H:%M} — {event.end_time:%H:%M}",
     ]
     if event.location:
-        lines.append(f"地点：{event.location}")
+        lines.append(f"Where: {event.location}")
     lines += [
         "",
-        "（如果这封信是发给家长的：您的孩子报名了这场活动。）",
-        "新时间来不了的话，请到「我的报名」里取消。",
+        "(If this message is for a parent: your child signed up for this event.)",
+        "If the new time does not work, please cancel under “My signups”.",
     ]
     return "\n".join(lines)
 

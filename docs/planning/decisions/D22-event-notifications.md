@@ -164,7 +164,7 @@ NOTIFICATION_BACKEND = "core.notifications.console.ConsoleBackend"     # 开发�
 （registered / attended / absent / cancelled）回答的是"**这个人怎么样了**"，
 而 `needs_reconfirmation` 回答的是"**这个人和某次改动的关系**" —— 两个维度。
 本项目已经为"两个维度挤进一个字段"付过两次代价
-（[`Relationship.is_active`](../phase-b.md#单一真相删掉-relationshipis_activeassignment-用-status不用-is_active)、
+（[`is_active` 挨着 `end_date`](../phase-b.md#单一真相任何带日期的表都不加-is_activeassignment-用-status)、
 [`Assignment.status`](../phase-b.md#assignmentstatus状态和任期是正交的两个维度2026-07-28-修订)），不付第三次。
 
 **代价（如实说）**：改完时间到大家陆续取消之间，报名数是虚高的，

@@ -1,10 +1,10 @@
 {% extends "core/base.html" %}
-{% block title %}我的报名{% endblock %}
+{% block title %}My signups{% endblock %}
 
 {% block content %}
-  <h1>我的报名</h1>
+  <h1>My signups</h1>
   <table border="1" cellpadding="4">
-    <tr><th>活动</th><th>工种</th><th>状态</th><th>工时</th><th></th></tr>
+    <tr><th>Event</th><th>Role</th><th>Status</th><th>Hours</th><th></th></tr>
     {% for row in participations %}
       <tr>
         <td><a href="{% url 'events:event_detail' row.event_role.event.pk %}">{{ row.event_role.event.name }}</a></td>
@@ -13,12 +13,12 @@
         <td>{{ row.hours|default:"—" }}</td>
         <td>
           {% if row.status == "registered" %}
-            <a href="{% url 'events:participation_cancel' row.pk %}">取消</a>
+            <a href="{% url 'events:participation_cancel' row.pk %}">Cancel</a>
           {% endif %}
         </td>
       </tr>
     {% empty %}
-      <tr><td colspan="5">还没报过名。</td></tr>
+      <tr><td colspan="5">You have not signed up for anything yet.</td></tr>
     {% endfor %}
   </table>
 {% endblock %}

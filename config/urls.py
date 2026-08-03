@@ -20,7 +20,7 @@ from django.urls import include, path
 urlpatterns = [
     path('admin/', admin.site.urls),
     # Staff-only pages pushed out of the admin by D18's shape trigger
-    # (relationship entry, contact merge).
+    # (the contact merge page).
     path('', include('contact.urls')),
     # The outward-facing half: volunteers register, browse and sign up; a
     # ministry's admins publish, check people in and notify. None of it goes

@@ -31,7 +31,7 @@ class MinistryAdmin(admin.ModelAdmin):
     inlines = [PositionInline]
 
     def get_readonly_fields(self, request, obj=None):
-        # Same split as RelationshipType: editable while adding, frozen after.
+        # Same split as every other code column: editable while adding, frozen after.
         # The admin covers the admin; Ministry.clean() covers everything else.
         return ["code"] if obj else []
 
@@ -62,7 +62,7 @@ class StaffingFilter(admin.SimpleListFilter):
     PositionQuerySet so the front end reuses them (D18).
     """
 
-    title = "在任情况"
+    title = "Staffing"
     parameter_name = "staffing"
 
     def lookups(self, request, model_admin):
@@ -127,13 +127,13 @@ class PositionAdmin(SimpleHistoryAdmin):
             }
         counts = request._position_headcounts
 
-        @admin.display(description="在任人数")
+        @admin.display(description="People in post")
         def headcount(obj):
             holders, serving = counts.get(obj.pk, (0, 0))
             if holders == 0:
                 return "—"
             # Only worth splitting out when somebody is on leave or suspended.
-            return holders if holders == serving else f"{holders}（在岗 {serving}）"
+            return holders if holders == serving else f"{holders} ({serving} available)"
 
         return [*super().get_list_display(request), headcount]
 
@@ -153,7 +153,7 @@ class AssignmentAdmin(SimpleHistoryAdmin):
     # Both, not one: each of them is a column in the changelist.
     list_select_related = ["contact", "position"]
 
-    @admin.display(boolean=True, description="生效中")
+    @admin.display(boolean=True, description="In effect")
     def is_currently_active(self, obj):
         return obj.is_currently_active
 
@@ -181,7 +181,7 @@ class MinistryRoleAdmin(SimpleHistoryAdmin):
     autocomplete_fields = ["contact", "ministry"]
     list_select_related = ["contact", "ministry", "granted_by"]
 
-    @admin.display(boolean=True, description="生效中")
+    @admin.display(boolean=True, description="In effect")
     def is_currently_active(self, obj):
         return obj.is_currently_active
 

@@ -1,0 +1,34 @@
+{% extends "core/base.html" %}
+{% block title %}Past events{% endblock %}
+
+{% block content %}
+  <h1>Past events</h1>
+  {% comment %}
+  在这一页出现之前，活动一结束就从界面上消失了 —— 而 R4–R8 的报表页恰恰是
+  活动结束之后才要看的。visible_to_volunteers()，所以已取消 / 已完成的都还在：
+  去过的人的工时挂在上面。
+  {% endcomment %}
+
+  <form method="get">
+    {{ period.as_p }}
+    <button type="submit">Filter</button>
+    <a href="{% url 'events:past_events' %}">Clear</a>
+  </form>
+
+  <p><strong>{{ total }}</strong> event{{ total|pluralize }} in this period.</p>
+
+  <ul>
+    {% for event in events %}
+      <li>
+        <a href="{% url 'events:event_detail' event.pk %}">{{ event.name }}</a>
+        — {{ event.ministry.name }} · {{ event.start_time }} to {{ event.end_time }}
+        {% if event.location %}· {{ event.location }}{% endif %}
+        · {{ event.get_status_display }}
+      </li>
+    {% empty %}
+      <li>No past events in this period.</li>
+    {% endfor %}
+  </ul>
+
+  <p><a href="{% url 'events:event_list' %}">Events open for signup</a></p>
+{% endblock %}

@@ -15,7 +15,7 @@ class Migration(migrations.Migration):
     initial = True
 
     dependencies = [
-        ('contact', '0009_emergencycontact'),
+        ('contact', '0002_seed_languages'),
         ('org', '0003_alter_assignment_contact'),
         migrations.swappable_dependency(settings.AUTH_USER_MODEL),
     ]

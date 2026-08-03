@@ -1,42 +1,52 @@
 {% extends "core/base.html" %}
-{% block title %}{{ event.name }} 统计{% endblock %}
+{% block title %}Report — {{ event.name }}{% endblock %}
 
 {% block content %}
-  <h1>{{ event.name }} —— 统计</h1>
+  <h1>{{ event.name }} — report</h1>
+  <p>
+    <a href="{% url 'events:event_roles' event.pk %}">← Back to roles</a> ·
+    <a href="{% url 'events:event_manage_list' %}">Events I manage</a>
+  </p>
   {% comment %}
   这一页一个数都不算：全部来自 services.event_summary() 和
   ministry_staff_participation()。换个界面这些查询原样搬走。
   {% endcomment %}
 
   <ul>
-    <li>R2 所属 ministry：{{ event.ministry.name }}</li>
-    <li>R3 时长：{{ summary.duration }}</li>
-    <li>R4 开了几个工种：{{ summary.role_count }}</li>
-    <li>R6 总工时：{{ summary.total_hours }}</li>
+    <li>R2 Ministry: {{ event.ministry.name }}</li>
+    <li>R3 Duration: {{ summary.duration }}</li>
+    <li>R4 Roles opened: {{ summary.role_count }}</li>
+    <li>R6 Total hours: {{ summary.total_hours }}</li>
   </ul>
 
-  <h2>R5 / R7 按工种</h2>
+  <h2>R5 / R7 by role</h2>
   <table border="1" cellpadding="4">
-    <tr><th>工种</th><th>需要</th><th>报名</th><th>到场</th><th>工时</th></tr>
+    <tr><th>Role</th><th>Wanted</th><th>Signed up</th><th>Attended</th><th>Hours</th></tr>
     {% for role in summary.roles %}
       <tr>
         <td>{{ role.role.name }}</td>
-        <td>{{ role.needed_count|default:"不限" }}</td>
+        <td>{{ role.needed_count|default:"No limit" }}</td>
         <td>{{ role.registered_count }}</td>
         <td>{{ role.attended_count }}</td>
         <td>{{ role.hours_total|default:"—" }}</td>
       </tr>
     {% endfor %}
   </table>
-  <p><small>零报名的工种也在这张表里，工种数因此答的是"开了几个"，不是"有人报的有几个"。</small></p>
+  <p><small>
+    Roles nobody signed up for are in this table too, which is why the role
+    count answers “how many were opened” rather than “how many got takers”.
+  </small></p>
 
-  <h2>R8 本 ministry 的 employee 参与情况</h2>
+  <h2>R8 Employees of this ministry who took part</h2>
   <ul>
     {% for row in staff %}
-      <li>{{ row.contact }} —— {{ row.event_role.role.name }}</li>
+      <li>{{ row.contact }} — {{ row.event_role.role.name }}</li>
     {% empty %}
-      <li>活动当天在职的 employee 里没有人参加。</li>
+      <li>No employee who was in post on the day took part.</li>
     {% endfor %}
   </ul>
-  <p><small>口径是<strong>活动当天</strong>在职，不是今天 —— 之后离职的人仍然算数，之后入职的不算。</small></p>
+  <p><small>
+    In post <strong>on the day of the event</strong>, not today — somebody who
+    has left since still counts, and somebody who joined since does not.
+  </small></p>
 {% endblock %}

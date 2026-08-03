@@ -12,8 +12,8 @@ class Migration(migrations.Migration):
     initial = True
 
     dependencies = [
+        ('contact', '0001_initial'),
         ('auth', '0012_alter_user_first_name_max_length'),
-        ('contact', '0002_seed_languages'),
     ]
 
     operations = [

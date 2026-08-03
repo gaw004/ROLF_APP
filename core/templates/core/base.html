@@ -6,9 +6,13 @@ Styling is out of scope for this phase on purpose — the acceptance test is
 "clickable, usable, permissions correct". Phase C replaces this file (and only
 this file) to give the pages a look; the views, the forms and the services
 carry over untouched, which is the whole point of keeping them out of admin.py.
+
+管理侧那两个入口靠 core.context_processors.navigation 决定显不显示，而它问的是
+org/permissions.py，不是 MinistryRole —— 导航里再抄一份判断，抄出来的那份迟早
+和真的那份不一致，而不一致的表现是「菜单里有个链接，点进去 403」。
 {% endcomment %}
 <!doctype html>
-<html lang="zh">
+<html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -17,18 +21,26 @@ carry over untouched, which is the whole point of keeping them out of admin.py.
 <body>
   <header>
     <nav>
-      <a href="{% url 'events:event_list' %}">活动</a>
+      <a href="{% url 'events:event_list' %}">Events</a>
+      · <a href="{% url 'events:past_events' %}">Past events</a>
       {% if user.is_authenticated %}
-        · <a href="{% url 'events:my_participations' %}">我的报名</a>
-        {% if user.is_staff %} · <a href="/admin/">管理后台</a>{% endif %}
+        · <a href="{% url 'events:my_participations' %}">My signups</a>
+        · <a href="{% url 'accounts:profile' %}">My profile</a>
+        {% if is_ministry_admin %}
+          · <a href="{% url 'events:event_manage_list' %}">Events I manage</a>
+        {% endif %}
+        {% if can_grant_ministry_admin %}
+          · <a href="{% url 'org:ministry_list' %}">Ministry admins</a>
+        {% endif %}
+        {% if user.is_staff %} · <a href="/admin/">Admin site</a>{% endif %}
         · <span>{{ user.get_username }}</span>
         <form method="post" action="{% url 'accounts:logout' %}" style="display:inline">
           {% csrf_token %}
-          <button type="submit">登出</button>
+          <button type="submit">Log out</button>
         </form>
       {% else %}
-        · <a href="{% url 'accounts:login' %}">登录</a>
-        · <a href="{% url 'accounts:register' %}">注册</a>
+        · <a href="{% url 'accounts:login' %}">Log in</a>
+        · <a href="{% url 'accounts:register' %}">Register</a>
       {% endif %}
     </nav>
   </header>

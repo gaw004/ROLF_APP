@@ -1,0 +1,63 @@
+{% extends "core/base.html" %}
+{% block title %}Events I manage{% endblock %}
+
+{% block content %}
+  <h1>Events I manage</h1>
+  {% comment %}
+  管理侧唯一的入口页。在它出现之前，report / registrations / attendance /
+  notify 四个页面只能从 event_roles 点进去，而 event_roles 自己只有「刚建完活动」
+  那一次重定向能到 —— 第二天回来就找不着了。
+
+  草稿和已结束的都在：报表恰恰是活动结束之后才要看的，而草稿在志愿者那一侧
+  按设计是不可见的（Event.VISIBLE_TO_VOLUNTEERS 不含 draft）。
+  {% endcomment %}
+
+  <p><a href="{% url 'events:event_create' %}">Publish a new event</a></p>
+
+  <table>
+    <thead>
+      <tr>
+        <th>Event</th><th>Ministry</th><th>Starts</th><th>Ends</th>
+        <th>Status</th><th>Actions</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for event in events %}
+        <tr>
+          <td><a href="{% url 'events:event_detail' event.pk %}">{{ event.name }}</a></td>
+          <td>{{ event.ministry.name }}</td>
+          <td>{{ event.start_time }}</td>
+          <td>{{ event.end_time }}</td>
+          <td>
+            {% comment %}
+            状态在这里直接改：发布和收尾是最常做的两件事，各自只是一个选项。
+            时间不在这里改 —— 挪时间要通知已报名的人，所以它走 Edit 页，
+            那条路会把人送到通知页。两个字段，两种后果。
+            {% endcomment %}
+            <form method="post">
+              {% csrf_token %}
+              <input type="hidden" name="event" value="{{ event.pk }}">
+              <select name="status">
+                {% for value, label in status_form.fields.status.choices %}
+                  <option value="{{ value }}"
+                    {% if value == event.status %}selected{% endif %}>{{ label }}</option>
+                {% endfor %}
+              </select>
+              <button type="submit">Save</button>
+            </form>
+          </td>
+          <td>
+            <a href="{% url 'events:event_update' event.pk %}">Edit</a> ·
+            <a href="{% url 'events:event_roles' event.pk %}">Roles</a> ·
+            <a href="{% url 'events:event_registrations' event.pk %}">Signups</a> ·
+            <a href="{% url 'events:event_attendance' event.pk %}">Attendance</a> ·
+            <a href="{% url 'events:event_report' event.pk %}">Report</a> ·
+            <a href="{% url 'events:event_notify' event.pk %}">Notify</a>
+          </td>
+        </tr>
+      {% empty %}
+        <tr><td colspan="6">You do not manage any events yet.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+{% endblock %}

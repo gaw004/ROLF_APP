@@ -68,59 +68,56 @@ class Command(BaseCommand):
         self.stdout.write(self.style.SUCCESS("\nDemo data ready. Accounts (password "
                                              f"'{PASSWORD}'):"))
         for line in [
-            "  foundation_admin  —— 全局 Group，能指定 ministry admin（P5）",
-            "  pantry_admin      —— 食物银行的 admin",
-            "  tax_admin         —— 报税志愿的 admin（用来试越权）",
-            "  volunteer_adult   —— 普通志愿者",
-            "  volunteer_minor   —— 未成年志愿者（报名要家长同意）",
-            "  volunteer_unknown —— 生日未知（按未成年处理）",
-            "  volunteer_silent  —— 没有邮箱也没有电话（会落进「联系不上」）",
+            "  foundation_admin  — the foundation-wide group; appoints ministry admins (P5)",
+            "  pantry_admin      — administers Food Pantry",
+            "  tax_admin         — administers Tax Help (use this one to try over-reach)",
+            "  volunteer_adult   — an ordinary volunteer",
+            "  volunteer_minor   — under 18; signing up needs a guardian's consent",
+            "  volunteer_unknown — no date of birth; treated as a minor",
+            "  volunteer_silent  — no email and no phone; lands in “cannot be reached”",
         ]:
             self.stdout.write(line)
 
     # --- the pieces ------------------------------------------------------
 
     def dictionaries(self):
-        self.parent_of, _ = RelationshipType.objects.get_or_create(
-            code="parent_of",
-            defaults={
-                "name_a_to_b": "parent of", "name_b_to_a": "child of",
-                "usable_as_emergency_contact": True,
-            },
-        )
+        # Not created here: contact/0004_seed_relationship_types owns this row,
+        # because EmergencyContact.relationship_type is a required FK and a
+        # production database has to come up with somewhere for it to point.
+        self.parent_of = RelationshipType.objects.get(code="parent")
         self.full_time, _ = EmploymentType.objects.get_or_create(
-            code="full_time", defaults={"name": "全职"})
-        EmploymentType.objects.get_or_create(code="part_time", defaults={"name": "兼职"})
+            code="full_time", defaults={"name": "Full time"})
+        EmploymentType.objects.get_or_create(code="part_time", defaults={"name": "Part time"})
         self.distribution, _ = EventType.objects.get_or_create(
-            code="distribution", defaults={"name": "物资发放"})
-        EventType.objects.get_or_create(code="class", defaults={"name": "课程"})
+            code="distribution", defaults={"name": "Distribution"})
+        EventType.objects.get_or_create(code="class", defaults={"name": "Class"})
         # The catch-all role has to exist: event_role is not nullable, so "no
         # particular job" needs somewhere to land.
         self.general = ParticipationRole.seed_general()
         self.lifting, _ = ParticipationRole.objects.get_or_create(
-            code="lifting", defaults={"name": "搬运"})
+            code="lifting", defaults={"name": "Lifting"})
         self.welcome, _ = ParticipationRole.objects.get_or_create(
-            code="welcome", defaults={"name": "签到台"})
+            code="welcome", defaults={"name": "Welcome desk"})
         self.interpreting, _ = ParticipationRole.objects.get_or_create(
-            code="interpreting", defaults={"name": "翻译"})
+            code="interpreting", defaults={"name": "Interpreting"})
 
     def ministries_and_posts(self):
         self.pantry, _ = Ministry.objects.get_or_create(
-            code="food_pantry", defaults={"name": "食物银行"})
+            code="food_pantry", defaults={"name": "Food Pantry"})
         self.tax, _ = Ministry.objects.get_or_create(
-            code="tax_help", defaults={"name": "报税志愿"})
+            code="tax_help", defaults={"name": "Tax Help"})
 
         self.pantry_lead, _ = Position.objects.get_or_create(
             code="pantry_lead",
             defaults={
-                "name": "食物银行负责人", "kind": Position.Kind.EMPLOYEE,
+                "name": "Food Pantry lead", "kind": Position.Kind.EMPLOYEE,
                 "ministry": self.pantry, "is_leader": True,
             },
         )
         self.pantry_staff, _ = Position.objects.get_or_create(
             code="pantry_staff",
             defaults={
-                "name": "食物银行专员", "kind": Position.Kind.EMPLOYEE,
+                "name": "Food Pantry officer", "kind": Position.Kind.EMPLOYEE,
                 "ministry": self.pantry, "reports_to": self.pantry_lead,
             },
         )
@@ -129,7 +126,7 @@ class Command(BaseCommand):
         Position.objects.get_or_create(
             code="pantry_driver",
             defaults={
-                "name": "司机", "kind": Position.Kind.VOLUNTEER,
+                "name": "Driver", "kind": Position.Kind.VOLUNTEER,
                 "ministry": self.pantry, "reports_to": self.pantry_lead,
             },
         )
@@ -146,7 +143,7 @@ class Command(BaseCommand):
 
     def accounts(self):
         self.boss = self.account(
-            "foundation_admin", "总", "管", email="boss@example.invalid",
+            "foundation_admin", "Boss", "Terry", email="boss@example.invalid",
             birth_date=datetime.date(1975, 4, 4))
         # Staff, because the acceptance walk reads R1–R3 off the admin
         # changelist. The scoped pages still refuse them — a global group is
@@ -156,10 +153,10 @@ class Command(BaseCommand):
         self.boss.groups.add(foundation_admin_group())
 
         self.pantry_admin = self.account(
-            "pantry_admin", "张", "三", email="zhangsan@example.invalid",
+            "pantry_admin", "Zhang", "San", email="zhangsan@example.invalid",
             birth_date=datetime.date(1982, 6, 1))
         self.tax_admin = self.account(
-            "tax_admin", "陈", "四", email="chensi@example.invalid",
+            "tax_admin", "Chen", "Si", email="chensi@example.invalid",
             birth_date=datetime.date(1979, 9, 9))
         # Two ministries, two admins. One of each cannot demonstrate scoping:
         # "she can see her own" passes just as well with no scoping at all.
@@ -175,28 +172,37 @@ class Command(BaseCommand):
         )
 
         self.adult = self.account(
-            "volunteer_adult", "李", "四", email="lisi@example.invalid",
+            "volunteer_adult", "Li", "Si", email="lisi@example.invalid",
             phone="+14085550101", birth_date=datetime.date(1990, 2, 2))
         self.minor = self.account(
-            "volunteer_minor", "小", "明", email="xiaoming@example.invalid",
+            "volunteer_minor", "Xiao", "Ming", email="xiaoming@example.invalid",
             birth_date=local_today() - datetime.timedelta(days=365 * 15))
         # Unknown birth date: the cautious branch of the three-state. Signing
         # up asks for consent, and notifications go to the guardian.
         self.unknown = self.account(
-            "volunteer_unknown", "王", "未知", email="wang@example.invalid",
+            "volunteer_unknown", "Wang", "Unknown", email="wang@example.invalid",
             birth_date=None)
+        # ⚠️ Both of these need somebody to call: sign_up() refuses a minor —
+        #    and an unknown birth date counts as one — with no emergency
+        #    contact on file. Demo data has to satisfy the rules it demonstrates,
+        #    or the acceptance walk fails on its own fixtures.
+        for person, kin in [(self.minor, "Ming's mother"), (self.unknown, "Wang's guardian")]:
+            EmergencyContact.objects.get_or_create(
+                person=person.contact, name=kin, phone="+14085550199",
+                defaults={"relationship_type": self.parent_of},
+            )
         # Neither an email nor a phone. Without this person the "cannot be
         # reached" group on the notification page is always empty, which looks
         # like a pass and verifies nothing.
-        self.silent = self.account("volunteer_silent", "无", "联系方式",
+        self.silent = self.account("volunteer_silent", "Noreach", "Sam",
                                    birth_date=datetime.date(1988, 3, 3))
         # A second minor whose only route to a guardian is the emergency
         # contact — phone-only, so it exercises the SMS fallback.
         self.minor_emergency = self.account(
-            "volunteer_minor2", "赵", "小雨",
+            "volunteer_minor2", "Zhao", "Xiaoyu",
             birth_date=local_today() - datetime.timedelta(days=365 * 16))
         EmergencyContact.objects.get_or_create(
-            person=self.minor_emergency.contact, name="赵母", phone="+14085550188",
+            person=self.minor_emergency.contact, name="Zhao's mother", phone="+14085550188",
             defaults={"relationship_type": self.parent_of},
         )
 
@@ -204,7 +210,7 @@ class Command(BaseCommand):
         # since left — R8's clock is the day of the event, and without somebody
         # like this that is untestable by hand.
         self.leaver = Contact.objects.get_or_create(
-            legal_last_name="孙", legal_first_name="离职",
+            legal_last_name="Sun", legal_first_name="Former",
             defaults={"contact_type": Contact.ContactType.INDIVIDUAL,
                       "birth_date": datetime.date(1985, 1, 1)},
         )[0]
@@ -229,11 +235,11 @@ class Command(BaseCommand):
         #    filled, and one nobody has taken. That third one is R4's whole
         #    point: the event has three roles, not two.
         self.open_event, created = Event.objects.get_or_create(
-            name="周六物资发放",
+            name="Saturday distribution",
             defaults={
                 "event_type": self.distribution, "ministry": self.pantry,
                 "start_time": now + 7 * DAY, "end_time": now + 7 * DAY + 3 * HOUR,
-                "location": "教会一楼", "owner": self.pantry_admin.contact,
+                "location": "Church ground floor", "owner": self.pantry_admin.contact,
                 "status": Event.Status.OPEN,
             },
         )
@@ -250,7 +256,7 @@ class Command(BaseCommand):
 
         # 2. A draft: volunteers must not see it at all.
         Event.objects.get_or_create(
-            name="还没发布的圣诞发放",
+            name="Christmas distribution (not published yet)",
             defaults={
                 "event_type": self.distribution, "ministry": self.pantry,
                 "start_time": now + 30 * DAY, "end_time": now + 30 * DAY + 2 * HOUR,
@@ -262,7 +268,7 @@ class Command(BaseCommand):
         #    can still open it. That is the difference between "can see" and
         #    "can join", and P6's cancel link depends on it.
         confirmed, made = Event.objects.get_or_create(
-            name="已招满的英语角",
+            name="English corner (full)",
             defaults={
                 "event_type": self.distribution, "ministry": self.pantry,
                 "start_time": now + 3 * DAY, "end_time": now + 3 * DAY + 2 * HOUR,
@@ -275,7 +281,7 @@ class Command(BaseCommand):
         # 4. A finished event with hours on it — R6 / R7 — including one entry
         #    from a paper sheet with no timestamps at all.
         past, made = Event.objects.get_or_create(
-            name="上个月的物资发放",
+            name="Last month's distribution",
             defaults={
                 "event_type": self.distribution, "ministry": self.pantry,
                 "start_time": now - 30 * DAY, "end_time": now - 30 * DAY + 3 * HOUR,
@@ -306,7 +312,7 @@ class Command(BaseCommand):
         # 5. The tax ministry's own event, so over-reach can be tried against
         #    something that really exists.
         Event.objects.get_or_create(
-            name="报税答疑",
+            name="Tax clinic",
             defaults={
                 "event_type": self.distribution, "ministry": self.tax,
                 "start_time": now + 5 * DAY, "end_time": now + 5 * DAY + 2 * HOUR,
@@ -327,7 +333,7 @@ class Command(BaseCommand):
         fields = {"registered_at": local_now()}
         if contact.is_minor in (True, None) and consent:
             fields.update(
-                consent_given_by="家长（演示数据）",
+                consent_given_by="Guardian (demo data)",
                 consent_relationship=self.parent_of,
                 consent_at=local_now(),
                 consent_method=Participation.ConsentMethod.VERBAL,

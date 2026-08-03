@@ -11,16 +11,16 @@ from django.contrib import admin
 class InEffectFilter(admin.SimpleListFilter):
     """In effect / not, for any model whose manager has .active().
 
-    Used by contact.Relationship and org.Assignment. Every branch is one call
-    to a QuerySet method: no date arithmetic here, so the definition of "in
-    effect" stays in core/querysets.py where Phase C reads it too (D18).
+    Used by org.Assignment and org.MinistryRole. Every branch is one call to a
+    QuerySet method: no date arithmetic here, so the definition of "in effect"
+    stays in core/querysets.py where Phase C reads it too (D18).
 
-    list_filter = ["is_active"] is exactly what made that old field dangerous —
-    it could be filtered independently of the dates and would confidently
-    return the wrong rows.
+    list_filter = ["is_active"] is exactly what made a boolean-beside-the-dates
+    dangerous — it could be filtered independently of the dates and would
+    confidently return the wrong rows.
     """
 
-    title = "生效中"
+    title = "In effect"
     parameter_name = "in_effect"
 
     def lookups(self, request, model_admin):

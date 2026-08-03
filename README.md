@@ -130,7 +130,7 @@ pass `--noinput`, or `dropdb test_rolf_dev` once.
 config/settings/     base.py + dev.py + prod.py; secrets come from the environment
 core/                what every app shares (TimeStampedModel)
 accounts/            the custom User model, optionally linked to a Contact
-contact/             people and organizations in one table, plus their relationships
+contact/             people and organizations in one table, plus emergency contacts
 org/                 ministries, posts, tenures, and who administers what
 events/              events, the roles they open, signups, hours, notifications
 core/notifications/  delivery adapters (console / locmem / email / Novu)

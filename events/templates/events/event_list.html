@@ -1,22 +1,35 @@
 {% extends "core/base.html" %}
-{% block title %}活动{% endblock %}
+{% block title %}Events{% endblock %}
 
 {% block content %}
-  <h1>可以报名的活动</h1>
+  <h1>Events open for signup</h1>
   {% comment %}
   这一页只列 open_for_signup() + 未开始的。筛选发生在查询里，不是在这里用
   {% if %} 藏起来 —— 模板里不显示 ≠ 数据没发出去。
+
+  R1 的一半：条数由视图数（total），不是 {{ events|length }}。模板自己数的话，
+  数的可能是另一个集合 —— 比如某天有人在循环里加了 {% if %}。
   {% endcomment %}
+
+  <form method="get">
+    {{ period.as_p }}
+    <button type="submit">Filter</button>
+    <a href="{% url 'events:event_list' %}">Clear</a>
+  </form>
+
+  <p><strong>{{ total }}</strong> event{{ total|pluralize }} in this period.</p>
 
   <ul>
     {% for event in events %}
       <li>
         <a href="{% url 'events:event_detail' event.pk %}">{{ event.name }}</a>
-        —— {{ event.ministry.name }} · {{ event.start_time }} 至 {{ event.end_time }}
+        — {{ event.ministry.name }} · {{ event.start_time }} to {{ event.end_time }}
         {% if event.location %}· {{ event.location }}{% endif %}
       </li>
     {% empty %}
-      <li>现在没有开放报名的活动。</li>
+      <li>No events are open for signup in this period.</li>
     {% endfor %}
   </ul>
+
+  <p><a href="{% url 'events:past_events' %}">Past events</a></p>
 {% endblock %}

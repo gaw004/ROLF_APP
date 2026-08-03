@@ -19,8 +19,8 @@ class EventTypeAdmin(admin.ModelAdmin):
     search_fields = ["name", "code"]
 
     def get_readonly_fields(self, request, obj=None):
-        # Same split as Ministry and RelationshipType: editable while adding,
-        # frozen afterwards. clean() covers everything that is not the admin.
+        # Same split as Ministry: editable while adding, frozen afterwards.
+        # clean() covers everything that is not the admin.
         return ["code"] if obj else []
 
 

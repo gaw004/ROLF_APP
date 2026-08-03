@@ -6,15 +6,15 @@ Phase C replaces this file; contact_merge() and services.merge_contacts()
 carry over untouched.
 {% endcomment %}
 <!doctype html>
-<html lang="zh">
+<html lang="en">
 <head>
   <meta charset="utf-8">
-  <title>合并重复联系人</title>
+  <title>Merge duplicate contacts</title>
 </head>
 <body>
-  <h1>合并重复联系人</h1>
+  <h1>Merge duplicate contacts</h1>
 
-  <p>疑似重复（同名同号）待处理：{{ waiting }} 条。</p>
+  <p>Possible duplicates (same name and number) waiting: {{ waiting }}.</p>
 
   {% if messages %}
     <ul>
@@ -23,15 +23,16 @@ carry over untouched.
   {% endif %}
 
   <p>
-    <strong>保留</strong> #{{ keep.pk }} {{ keep }}，
-    <strong>合并掉</strong> #{{ drop.pk }} {{ drop }}。
-    指向被合并方的记录会全部改指到保留方；保留方为空的字段才会从被合并方补进来。
-    被合并方不会被删除，只会停用。
+    <strong>Keeping</strong> #{{ keep.pk }} {{ keep }},
+    <strong>merging away</strong> #{{ drop.pk }} {{ drop }}.
+    Everything pointing at the merged record will point at the kept one instead;
+    a field is copied over only where the kept record is empty. The merged
+    record is deactivated, never deleted.
   </p>
 
   <table border="1" cellpadding="4">
     <thead>
-      <tr><th>字段</th><th>保留 #{{ keep.pk }}</th><th>合并掉 #{{ drop.pk }}</th></tr>
+      <tr><th>Field</th><th>Keeping #{{ keep.pk }}</th><th>Merging away #{{ drop.pk }}</th></tr>
     </thead>
     <tbody>
       {% for row in fields %}
@@ -46,8 +47,8 @@ carry over untouched.
 
   <form method="post">
     {% csrf_token %}
-    <button type="submit">确认合并</button>
-    <a href="{% url 'admin:contact_contact_change' keep.pk %}">取消</a>
+    <button type="submit">Merge them</button>
+    <a href="{% url 'admin:contact_contact_change' keep.pk %}">Cancel</a>
   </form>
 </body>
 </html>

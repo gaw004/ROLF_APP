@@ -31,10 +31,6 @@ CONSTRAINT_FIELD = {
     # contact.RelationshipType
     "reltype_name_taken": "name_a_to_b",
     "reltype_code_taken": "code",
-    # contact.Relationship
-    "relationship_self_reference": "contact_b",
-    "relationship_already_recorded": "contact_b",
-    "relationship_end_before_start": "end_date",
     # contact.EmergencyContact
     "emergency_contact_duplicate": "name",
     # org.Ministry / org.EmploymentType

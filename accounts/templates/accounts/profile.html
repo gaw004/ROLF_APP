@@ -1,0 +1,51 @@
+{% extends "core/base.html" %}
+{% block title %}My profile{% endblock %}
+
+{% block content %}
+  <h1>My profile</h1>
+  {% comment %}
+  三个 POST 动作共用一页：改资料、加紧急联系人、删紧急联系人。靠 action 区分。
+
+  生日那一格是自由改的（2026-07-31 拍板）—— 代价写在 phase-c.md 的已知缺口里：
+  未成年人可以改大生日绕过同意门，缓解只有 Contact 的 simple-history 留痕。
+  {% endcomment %}
+
+  {% if is_minor is None %}
+    <p>
+      Your date of birth is missing, so every signup will ask for a guardian's
+      consent. Fill it in below and that stops.
+    </p>
+  {% elif is_minor %}
+    <p>You are under 18, so signing up needs a guardian's consent.</p>
+  {% endif %}
+
+  <form method="post">
+    {% csrf_token %}
+    {{ form.as_p }}
+    <button type="submit" name="action" value="save">Save my details</button>
+  </form>
+
+  <h2>Emergency contacts</h2>
+  <p>Who we call about you on the day, and who we tell if you are under 18.</p>
+
+  <ul>
+    {% for row in kin %}
+      <li>
+        {{ row.name }} — {{ row.phone }} ({{ row.relationship_type.name_a_to_b }})
+        <form method="post" style="display:inline">
+          {% csrf_token %}
+          <input type="hidden" name="kin" value="{{ row.pk }}">
+          <button type="submit" name="action" value="remove_kin">Remove</button>
+        </form>
+      </li>
+    {% empty %}
+      <li>None yet.</li>
+    {% endfor %}
+  </ul>
+
+  <form method="post">
+    {% csrf_token %}
+    {{ kin_form.as_p }}
+    <button type="submit" name="action" value="add_kin">Add emergency contact</button>
+  </form>
+{% endblock %}

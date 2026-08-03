@@ -17,6 +17,7 @@ from django.db.models import ProtectedError
 from django.test import TestCase, override_settings
 from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
+from django.utils.timezone import localtime
 
 from accounts.services import register_account
 from contact.models import Contact, EmergencyContact, RelationshipType
@@ -32,6 +33,7 @@ from core.timeutils import (
 from org.models import Assignment, Ministry, MinistryRole, Position
 from org.permissions import foundation_admin_group
 
+from .forms import EventForm, SignUpForm
 from .models import (
     Event,
     EventNotification,
@@ -44,6 +46,7 @@ from .services import (
     ConsentRequired,
     check_in,
     check_out,
+    confirm_signup,
     default_message,
     event_summary,
     events_in_period,
@@ -79,6 +82,19 @@ def make_event(ministry=None, **kwargs):
     }
     fields.update(kwargs)
     return Event.objects.create(**fields)
+
+
+def give_emergency_contact(contact, name="Emergency Kin", phone="+14085550177"):
+    """Minors must have somebody to call — sign_up() refuses without one.
+
+    A helper rather than a line in each fixture: the rule applies to every
+    minor, so every minor's setup needs it, and spelling it out five times is
+    five places to forget it when the rule changes.
+    """
+    return EmergencyContact.objects.create(
+        person=contact, name=name, phone=phone,
+        relationship_type=RelationshipType.objects.get(code="parent"),
+    )
 
 
 def make_role(event, code, name=None, needed_count=None):
@@ -301,9 +317,11 @@ class AttendanceNeedsConsentTests(TestCase):
             check_out(participation, at=NOW + HOUR)
 
     def test_a_minor_with_consent_checks_in_normally(self):
+        consented = make_person(
+            "Consented", birth_date=local_today() - datetime.timedelta(days=365 * 15))
+        give_emergency_contact(consented)
         participation = sign_up(
-            contact=make_person(
-                "Consented", birth_date=local_today() - datetime.timedelta(days=365 * 15)),
+            contact=consented,
             event_role=self.role,
             consent={
                 "consent_given_by": "王秀英",
@@ -399,7 +417,12 @@ class SignUpTests(TestCase):
         }
 
     def minor(self):
-        return make_person("Minor", birth_date=local_today() - datetime.timedelta(days=365 * 15))
+        # With an emergency contact: sign_up() refuses a minor without one, and
+        # that refusal has its own test rather than shadowing every other case.
+        person = make_person(
+            "Minor", birth_date=local_today() - datetime.timedelta(days=365 * 15))
+        give_emergency_contact(person)
+        return person
 
     def test_an_adult_can_sign_up_without_consent(self):
         adult = make_person("Adult", birth_date=datetime.date(1980, 1, 1))
@@ -901,9 +924,7 @@ class MinistryAdminPageTests(PageTestCase):
         minor = self.account(
             "xiaoming", "小明",
             birth_date=local_today() - datetime.timedelta(days=365 * 15))
-        relationship = RelationshipType.objects.create(
-            code="parent_of", name_a_to_b="parent of", name_b_to_a="child of",
-            usable_as_emergency_contact=True)
+        relationship = RelationshipType.objects.get(code="parent")
         EmergencyContact.objects.create(
             person=minor.contact, name="王秀英", phone="+14085550199",
             relationship_type=relationship)
@@ -939,6 +960,313 @@ class MinistryAdminPageTests(PageTestCase):
         self.assertTrue(MinistryRole.objects.filter(pk=grant.pk).exists())
 
 
+class NavigationEntranceTests(PageTestCase):
+    """C0.2.4: every management page is reachable by clicking, and only by those who may.
+
+    The gap this closes was not a permission bug — the checks were all correct.
+    It was that event_create and org:ministry_admins appeared in no template at
+    all, and event_roles (which links onward to registrations, attendance, the
+    report and the notice page) was reachable only by the redirect after
+    creating an event. 334 tests passed the whole time, because a test reverses
+    a URL directly and never has to find the link.
+    """
+
+    def nav_of(self, user):
+        self.login(user)
+        return self.client.get(reverse("events:event_list")).content.decode()
+
+    def test_a_ministry_admin_is_offered_the_pages_they_can_use(self):
+        nav = self.nav_of(self.zhang)
+        self.assertIn(reverse("events:event_manage_list"), nav)
+
+    def test_a_plain_volunteer_is_offered_neither_management_entrance(self):
+        # ⚠️ The failure this asserts against is a link that 403s. Showing an
+        #    entrance you may not walk through teaches people that the app is
+        #    broken, which is how a correct permission check gets deleted.
+        nav = self.nav_of(self.lisi)
+        self.assertNotIn(reverse("events:event_manage_list"), nav)
+        self.assertNotIn(reverse("org:ministry_list"), nav)
+
+    def test_only_a_foundation_admin_is_offered_the_grant_page(self):
+        self.assertNotIn(reverse("org:ministry_list"), self.nav_of(self.zhang))
+
+        boss = self.account("boss", "Boss", birth_date=datetime.date(1970, 1, 1))
+        boss.groups.add(foundation_admin_group())
+        self.assertIn(reverse("org:ministry_list"), self.nav_of(boss))
+
+    def test_the_hub_lists_drafts_and_finished_events(self):
+        # Why event_list cannot serve as the entrance: it shows what is open
+        # and upcoming, which excludes drafts and excludes every event whose
+        # report anybody would want to read.
+        make_event(ministry=self.pantry, owner=self.zhang.contact,
+                   name="Draft one", status=Event.Status.DRAFT)
+        make_event(ministry=self.pantry, owner=self.zhang.contact,
+                   name="Finished one", status=Event.Status.COMPLETED,
+                   start_time=NOW - 10 * DAY, end_time=NOW - 10 * DAY + HOUR)
+        self.login(self.zhang)
+        response = self.client.get(reverse("events:event_manage_list"))
+        self.assertContains(response, "Draft one")
+        self.assertContains(response, "Finished one")
+
+    def test_the_hub_links_onward_to_every_page_for_an_event(self):
+        self.login(self.zhang)
+        page = self.client.get(reverse("events:event_manage_list")).content.decode()
+        for name in ["event_update", "event_roles", "event_registrations",
+                     "event_attendance", "event_report", "event_notify"]:
+            with self.subTest(link=name):
+                self.assertIn(reverse(f"events:{name}", args=[self.event.pk]), page)
+
+    def test_the_hub_shows_only_ministries_this_account_administers(self):
+        make_event(ministry=self.tax, owner=self.other_admin.contact,
+                   name="Not mine")
+        self.login(self.zhang)
+        response = self.client.get(reverse("events:event_manage_list"))
+        self.assertNotContains(response, "Not mine")
+
+    def test_the_hub_refuses_an_account_with_no_ministry(self):
+        self.login(self.lisi)
+        self.assertEqual(
+            self.client.get(reverse("events:event_manage_list")).status_code, 403)
+
+    def test_the_ministry_list_refuses_a_mere_ministry_admin(self):
+        # P5 asks for a tier above ministry admin; if zhang could reach this he
+        # could appoint his own downline.
+        self.login(self.zhang)
+        self.assertEqual(
+            self.client.get(reverse("org:ministry_list")).status_code, 403)
+
+
+class PeriodFilterPageTests(PageTestCase):
+    """C0.2.3: R1 with a URL — "how many events run in this window".
+
+    in_period() and events_in_period() were written and tested in Phase B and
+    then had no caller but the tests: the only UI that could answer the first
+    line of the requirement was the admin changelist, which volunteers cannot
+    reach. These two pages are for everybody, because deciding which event to
+    join is the same question pointed forwards.
+    """
+
+    def setUp(self):
+        super().setUp()
+        # self.event (from PageTestCase) is NOW + 1 day, open.
+        self.old = make_event(
+            ministry=self.pantry, owner=self.zhang.contact,
+            name="Last month", status=Event.Status.COMPLETED,
+            start_time=NOW - 30 * DAY, end_time=NOW - 30 * DAY + 3 * HOUR,
+        )
+
+    def day(self, when):
+        return local_date_of(when).isoformat()
+
+    def test_the_upcoming_list_reports_how_many(self):
+        self.login(self.lisi)
+        response = self.client.get(reverse("events:event_list"))
+        self.assertEqual(response.context["total"], 1)
+
+    def test_a_window_narrows_the_count(self):
+        self.login(self.lisi)
+        response = self.client.get(reverse("events:event_list"), {
+            "start": self.day(NOW + 10 * DAY), "end": self.day(NOW + 20 * DAY),
+        })
+        self.assertEqual(response.context["total"], 0)
+        self.assertNotContains(response, self.event.name)
+
+    def test_the_last_day_of_the_window_is_included(self):
+        # in_period() is half-open, so the end date has to become midnight at
+        # the start of the *next* day. Getting this wrong drops everything on
+        # the final day of the range somebody asked for, and the answer still
+        # looks plausible — which is why it is asserted rather than trusted.
+        self.login(self.lisi)
+        response = self.client.get(reverse("events:event_list"), {
+            "start": self.day(NOW), "end": self.day(self.event.start_time),
+        })
+        self.assertEqual(response.context["total"], 1)
+
+    def test_past_events_are_listed_and_counted(self):
+        self.login(self.lisi)
+        response = self.client.get(reverse("events:past_events"))
+        self.assertEqual(response.context["total"], 1)
+        self.assertContains(response, "Last month")
+
+    def test_a_finished_event_is_reachable_again(self):
+        # The point of the page: before it existed, an event left the interface
+        # the moment it ended, taking its report with it.
+        self.login(self.lisi)
+        response = self.client.get(reverse("events:past_events"))
+        self.assertContains(
+            response, reverse("events:event_detail", args=[self.old.pk]))
+
+    def test_an_event_running_right_now_is_neither_upcoming_nor_past(self):
+        # past() reads end_time, not "not upcoming". An event that started this
+        # morning and runs until tonight is still happening; filing it under
+        # history while people are checking in would be wrong in both places.
+        running = make_event(
+            ministry=self.pantry, owner=self.zhang.contact, name="Running now",
+            start_time=NOW - HOUR, end_time=NOW + HOUR,
+        )
+        self.login(self.lisi)
+        self.assertNotContains(
+            self.client.get(reverse("events:past_events")), "Running now")
+        self.assertNotContains(
+            self.client.get(reverse("events:event_list")), "Running now")
+        self.assertTrue(Event.objects.filter(pk=running.pk).exists())
+
+    def test_a_draft_never_appears_on_either_page(self):
+        make_event(
+            ministry=self.pantry, owner=self.zhang.contact, name="Secret draft",
+            status=Event.Status.DRAFT,
+            start_time=NOW - 5 * DAY, end_time=NOW - 5 * DAY + HOUR,
+        )
+        self.login(self.lisi)
+        self.assertNotContains(
+            self.client.get(reverse("events:past_events")), "Secret draft")
+        self.assertNotContains(
+            self.client.get(reverse("events:event_list")), "Secret draft")
+
+    def test_an_end_before_the_start_is_a_form_error_not_an_empty_list(self):
+        self.login(self.lisi)
+        response = self.client.get(reverse("events:event_list"), {
+            "start": self.day(NOW + 10 * DAY), "end": self.day(NOW),
+        })
+        self.assertFalse(response.context["period"].is_valid())
+
+    def test_both_pages_need_a_login(self):
+        for name in ["event_list", "past_events"]:
+            with self.subTest(page=name):
+                response = self.client.get(reverse(f"events:{name}"))
+                self.assertEqual(response.status_code, 302)
+
+
+class EventUpdatePageTests(PageTestCase):
+    """C0.2.2: the page that makes P6's trigger possible.
+
+    Until this existed, services.reschedule() had no caller anywhere in the
+    repo: an admin could send "the time has changed" and had no way to change
+    it, because EventForm was reachable only from event_create and the admin
+    site is closed to them (StaffOnlyAdminMiddleware). Event.status was stuck
+    for the same reason — nothing could mark an event completed.
+    """
+
+    def url(self, event=None):
+        return reverse("events:event_update", args=[(event or self.event).pk])
+
+    def widget_value(self, when):
+        """What the datetime-local input would actually contain.
+
+        ⚠️ localtime() is the whole point. Formatting the stored UTC instant
+           directly posts a different wall clock than the browser would, the
+           view parses it back as a *different* instant, and the "nothing
+           moved" case then looks like a move — the bug this helper exists to
+           keep out of the payload rather than out of the assertions.
+        """
+        return localtime(when).strftime("%Y-%m-%dT%H:%M")
+
+    def payload(self, **overrides):
+        fields = {
+            "name": self.event.name,
+            "event_type": self.event.event_type_id,
+            "ministry": self.event.ministry_id,
+            "start_time": self.widget_value(self.event.start_time),
+            "end_time": self.widget_value(self.event.end_time),
+            "location": self.event.location,
+            "status": self.event.status,
+            "description": self.event.description,
+        }
+        fields.update(overrides)
+        return fields
+
+    def test_moving_an_event_saves_the_new_time(self):
+        self.login(self.zhang)
+        # Minute precision, because that is all the widget carries.
+        moved_to = (NOW + 3 * DAY).replace(second=0, microsecond=0)
+        response = self.client.post(self.url(), self.payload(
+            start_time=self.widget_value(moved_to),
+            end_time=self.widget_value(moved_to + 3 * HOUR),
+        ))
+        self.assertEqual(response.status_code, 302)
+        self.event.refresh_from_db()
+        self.assertEqual(self.event.start_time, moved_to)
+
+    def test_a_move_lands_on_the_notice_page_with_the_reason_chosen(self):
+        # The half of P6 that is easy to leave out: whoever moved the event is
+        # one click from telling the people who signed up, rather than having
+        # to know that the notify page exists at all.
+        self.login(self.zhang)
+        moved_to = (NOW + 4 * DAY).replace(second=0, microsecond=0)
+        response = self.client.post(self.url(), self.payload(
+            start_time=self.widget_value(moved_to),
+            end_time=self.widget_value(moved_to + 3 * HOUR),
+        ))
+        self.assertRedirects(
+            response,
+            f"{reverse('events:event_notify', args=[self.event.pk])}"
+            f"?reason={EventNotification.Reason.TIME_CHANGED}",
+        )
+
+    def test_editing_without_moving_does_not_go_to_the_notice_page(self):
+        # Renaming an event is not news. Sending everybody a notice for it
+        # would train them to ignore the ones that matter.
+        self.login(self.zhang)
+        response = self.client.post(self.url(), self.payload(name="Renamed"))
+        self.assertRedirects(
+            response, reverse("events:event_detail", args=[self.event.pk]))
+        self.event.refresh_from_db()
+        self.assertEqual(self.event.name, "Renamed")
+
+    def test_seconds_the_widget_cannot_show_are_not_read_as_a_reschedule(self):
+        # Found by the tests above, and silent in production: datetime-local
+        # carries no seconds, so an event stored at 09:00:37 comes back from an
+        # untouched form as 09:00:00. Compared naively that is a reschedule —
+        # and correcting a typo in the location would then mail every volunteer
+        # to announce a time change that never happened.
+        self.event.start_time = self.event.start_time.replace(second=37, microsecond=5)
+        self.event.save(update_fields=["start_time"])
+        self.login(self.zhang)
+        response = self.client.post(self.url(), self.payload(location="Hall B"))
+        self.assertRedirects(
+            response, reverse("events:event_detail", args=[self.event.pk]))
+
+    def test_an_event_can_be_marked_completed(self):
+        # R4–R8 are read after the event. Nothing else in the project can move
+        # status off its published value.
+        self.login(self.zhang)
+        self.client.post(self.url(), self.payload(status=Event.Status.COMPLETED))
+        self.event.refresh_from_db()
+        self.assertEqual(self.event.status, Event.Status.COMPLETED)
+
+    def test_an_end_time_before_the_start_is_refused(self):
+        # reschedule() runs full_clean inside its transaction, so the check
+        # constraint comes back as a form error rather than an IntegrityError.
+        self.login(self.zhang)
+        original = self.event.start_time
+        response = self.client.post(self.url(), self.payload(
+            start_time=self.widget_value(NOW + 5 * DAY),
+            end_time=self.widget_value(NOW + 5 * DAY - HOUR),
+        ))
+        self.assertEqual(response.status_code, 200)
+        self.event.refresh_from_db()
+        self.assertEqual(self.event.start_time, original)
+
+    def test_another_ministrys_admin_cannot_open_or_post_to_it(self):
+        self.login(self.other_admin)
+        self.assertEqual(self.client.get(self.url()).status_code, 403)
+        self.assertEqual(self.client.post(self.url(), self.payload()).status_code, 403)
+
+    def test_a_plain_volunteer_gets_403(self):
+        self.login(self.lisi)
+        self.assertEqual(self.client.get(self.url()).status_code, 403)
+
+    def test_an_event_cannot_be_handed_to_a_ministry_you_do_not_run(self):
+        # The forged-POST case, the same one event_create guards. The dropdown
+        # is narrowed, but a POST can name any id — and moving an event into
+        # another ministry would take its signups and hours with it.
+        self.login(self.zhang)
+        response = self.client.post(self.url(), self.payload(ministry=self.tax.pk))
+        self.assertIn(response.status_code, (403, 200))
+        self.event.refresh_from_db()
+        self.assertEqual(self.event.ministry, self.pantry)
+
+
 class ReportPageTests(PageTestCase):
     def test_the_report_counts_roles_that_nobody_signed_up_for(self):
         make_role(self.event, "interpreting", needed_count=1)
@@ -963,9 +1291,7 @@ class NotificationTests(TestCase):
         self.event = make_event(ministry=self.pantry)
         self.role = make_role(self.event, "lifting")
         self.sender = get_user_model().objects.create_user(username="zhang", password="x")
-        self.parent_of = RelationshipType.objects.create(
-            code="parent_of", name_a_to_b="parent of", name_b_to_a="child of",
-            usable_as_emergency_contact=True)
+        self.parent_of = RelationshipType.objects.get(code="parent")
 
     def minor(self, last_name="小明", **fields):
         return make_person(
@@ -1140,7 +1466,7 @@ class NotificationTests(TestCase):
 
         body = default_message(self.event, EventNotification.Reason.TIME_CHANGED)
         self.assertNotIn("小明", body)
-        self.assertIn("您的孩子", body)
+        self.assertIn("your child", body)
 
     # --- the seam --------------------------------------------------------
 
@@ -1183,7 +1509,7 @@ class NotificationPageTests(PageTestCase):
         self.assertEqual(len(response.context["unreachable"]), 1)
         # The group is rendered even when empty — it is the one part of this
         # page that could fail without anybody noticing.
-        self.assertContains(response, "联系不上")
+        self.assertContains(response, "Cannot be reached")
 
 
 class PeriodReportTests(TestCase):
@@ -1322,7 +1648,7 @@ class SeedDemoTests(TestCase):
         # direct recipients, guardian recipients and the unreachable at once.
         with override_settings(DEBUG=True):
             self.seed()
-        event = Event.objects.get(name="周六物资发放")
+        event = Event.objects.get(name="Saturday distribution")
         recipients, unreachable = resolve_recipients(event)
         self.assertTrue([r for r in recipients if not r.is_guardian])
         self.assertTrue([r for r in recipients if r.is_guardian])
@@ -1350,13 +1676,13 @@ class AcceptanceWalkTests(TestCase):
         self.assertTrue(self.client.login(username=username, password=self.PASSWORD))
 
     def open_event(self):
-        return Event.objects.get(name="周六物资发放")
+        return Event.objects.get(name="Saturday distribution")
 
     def past_event(self):
-        return Event.objects.get(name="上个月的物资发放")
+        return Event.objects.get(name="Last month's distribution")
 
     def other_event(self):
-        return Event.objects.get(name="报税答疑")
+        return Event.objects.get(name="Tax clinic")
 
     # --- ① the foundation-wide role ---------------------------------------
 
@@ -1364,7 +1690,7 @@ class AcceptanceWalkTests(TestCase):
         # P5, plus the rule that revoking dates the row rather than deleting it.
         self.as_role("foundation_admin")
         pantry = Ministry.objects.get(code="food_pantry")
-        newcomer = Contact.objects.get(legal_last_name="孙")
+        newcomer = Contact.objects.get(legal_last_name="Sun")
         url = reverse("org:ministry_admins", args=[pantry.pk])
         self.client.post(url, {"contact": newcomer.pk})
         grant = MinistryRole.objects.get(contact=newcomer, ministry=pantry)
@@ -1383,18 +1709,18 @@ class AcceptanceWalkTests(TestCase):
         self.as_role("foundation_admin")
         response = self.client.get("/admin/events/event/")
         self.assertEqual(response.status_code, 200)
-        self.assertContains(response, "食物银行")          # R2
+        self.assertContains(response, "Food Pantry")          # R2
         self.assertContains(response, "3:00:00")           # R3, the duration column
 
     # --- ② the food pantry's admin ----------------------------------------
 
     def test_the_pantry_admin_sees_a_role_nobody_signed_up_for(self):
         # ⭐ D19's acceptance point, walked: the event opened three roles and
-        # 翻译 has nobody in it, so it has three — not two.
+        # Interpreting has nobody in it, so it has three — not two.
         self.as_role("pantry_admin")
         response = self.client.get(
             reverse("events:event_registrations", args=[self.open_event().pk]))
-        self.assertContains(response, "翻译")
+        self.assertContains(response, "Interpreting")
         self.assertEqual(len(response.context["roles"]), 3)
 
     def test_the_pantry_admin_is_refused_the_other_ministrys_event(self):
@@ -1421,7 +1747,7 @@ class AcceptanceWalkTests(TestCase):
         response = self.client.get(
             reverse("events:event_report", args=[self.past_event().pk]))
         names = {row.contact.legal_last_name for row in response.context["staff"]}
-        self.assertIn("孙", names)
+        self.assertIn("Sun", names)
 
     def test_the_notification_preview_has_all_three_groups(self):
         # ⭐ P6. The third group is the one that fails silently: a green
@@ -1450,13 +1776,13 @@ class AcceptanceWalkTests(TestCase):
         self.assertEqual({p.pk for p in notification.unreachable.all()}, missed)
         # "Last notified …" is the only thing standing between a shaky
         # connection and a second identical notice.
-        self.assertContains(self.client.get(url), "最近一次")
+        self.assertContains(self.client.get(url), "most recently")
 
     def test_checking_somebody_in_and_out_fills_in_their_hours(self):
         self.as_role("pantry_admin")
         event = self.open_event()
         participation = Participation.objects.filter(
-            event_role__event=event, contact__legal_last_name="李").get()
+            event_role__event=event, contact__legal_last_name="Li").get()
         url = reverse("events:event_attendance", args=[event.pk])
         self.client.post(url, {"participation": participation.pk, "action": "check_in"})
         self.client.post(url, {"participation": participation.pk, "action": "check_out"})
@@ -1475,22 +1801,22 @@ class AcceptanceWalkTests(TestCase):
         self.as_role("volunteer_adult")
         response = self.client.get(reverse("events:event_list"))
         listed = {event.name for event in response.context["events"]}
-        self.assertIn("周六物资发放", listed)
-        self.assertNotIn("还没发布的圣诞发放", listed)     # draft
-        self.assertNotIn("已招满的英语角", listed)         # confirmed
+        self.assertIn("Saturday distribution", listed)
+        self.assertNotIn("Christmas distribution (not published yet)", listed)     # draft
+        self.assertNotIn("English corner (full)", listed)         # confirmed
 
     def test_a_volunteer_can_still_open_the_event_they_joined_once_it_filled_up(self):
         # ⭐ Visibility is not signability. Written the other way, P6's
         # "can't make it? cancel here" link 404s on exactly the full events.
         self.as_role("volunteer_adult")
-        confirmed = Event.objects.get(name="已招满的英语角")
+        confirmed = Event.objects.get(name="English corner (full)")
         response = self.client.get(reverse("events:event_detail", args=[confirmed.pk]))
         self.assertEqual(response.status_code, 200)
         self.assertFalse(response.context["can_sign_up"])
 
     def test_a_volunteer_cannot_open_a_draft_event(self):
         self.as_role("volunteer_adult")
-        draft = Event.objects.get(name="还没发布的圣诞发放")
+        draft = Event.objects.get(name="Christmas distribution (not published yet)")
         response = self.client.get(reverse("events:event_detail", args=[draft.pk]))
         self.assertEqual(response.status_code, 404)
 
@@ -1533,3 +1859,362 @@ class AcceptanceWalkTests(TestCase):
         response = self.client.get(
             reverse("events:participation_cancel", args=[someone_else.pk]))
         self.assertEqual(response.status_code, 404)
+
+
+class SignUpAgainAfterCancellingTests(PageTestCase):
+    """Pulling out of a role and then changing your mind.
+
+    ⚠️ Found in the browser, not by the tests: cancel() is a status change and
+       never a delete, so the cancelled row still holds the unique
+       (event_role, contact) pair. Building a fresh Participation made the
+       second signup come back as "you have already signed up" — wrong, and
+       unfixable from the volunteer's side. Every existing test that cancelled
+       a signup stopped at the cancellation.
+    """
+
+    def signup_url(self):
+        return reverse("events:event_signup", args=[self.event.pk])
+
+    def test_a_volunteer_can_sign_up_again_after_cancelling(self):
+        self.login(self.lisi)
+        self.client.post(self.signup_url(), {"event_role": self.role.pk})
+        row = Participation.objects.get(contact=self.lisi.contact, event_role=self.role)
+
+        self.client.post(reverse("events:participation_cancel", args=[row.pk]))
+        row.refresh_from_db()
+        self.assertEqual(row.status, Participation.Status.CANCELLED)
+
+        self.client.post(self.signup_url(), {"event_role": self.role.pk})
+        row.refresh_from_db()
+        self.assertEqual(row.status, Participation.Status.REGISTERED)
+
+    def test_it_reuses_the_row_rather_than_adding_a_second(self):
+        # One person, one role, one row — the unique constraint says so, and a
+        # second row would double them in every count on the report page.
+        self.login(self.lisi)
+        self.client.post(self.signup_url(), {"event_role": self.role.pk})
+        row = Participation.objects.get(contact=self.lisi.contact, event_role=self.role)
+        self.client.post(reverse("events:participation_cancel", args=[row.pk]))
+        self.client.post(self.signup_url(), {"event_role": self.role.pk})
+        self.assertEqual(
+            Participation.objects.filter(
+                contact=self.lisi.contact, event_role=self.role).count(), 1)
+
+    def test_signing_up_again_moves_the_registered_time_forward(self):
+        self.login(self.lisi)
+        self.client.post(self.signup_url(), {"event_role": self.role.pk})
+        row = Participation.objects.get(contact=self.lisi.contact, event_role=self.role)
+        first = row.registered_at
+        self.client.post(reverse("events:participation_cancel", args=[row.pk]))
+        self.client.post(self.signup_url(), {"event_role": self.role.pk})
+        row.refresh_from_db()
+        self.assertGreater(row.registered_at, first)
+
+    def test_signing_up_twice_without_cancelling_is_still_refused(self):
+        # The uniqueness error still has to reach the form rather than 500.
+        self.login(self.lisi)
+        self.client.post(self.signup_url(), {"event_role": self.role.pk})
+        response = self.client.post(self.signup_url(), {"event_role": self.role.pk})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            Participation.objects.filter(
+                contact=self.lisi.contact, event_role=self.role).count(), 1)
+
+
+class ManageListStatusTests(PageTestCase):
+    """The status dropdown on the manage list, and the two fields it is not.
+
+    Publishing a draft and closing a finished event are the two most frequent
+    things a coordinator does, and each is a single choice — so status is
+    editable in the list. The times are shown read-only there on purpose:
+    moving an event obliges somebody to notify the volunteers, so it goes
+    through the edit page, which routes on to the notice.
+    """
+
+    def url(self):
+        return reverse("events:event_manage_list")
+
+    def test_the_times_are_shown(self):
+        self.login(self.zhang)
+        response = self.client.get(self.url())
+        self.assertContains(response, "Starts")
+        self.assertContains(response, "Ends")
+
+    def test_status_can_be_changed_from_the_list(self):
+        self.event.status = Event.Status.DRAFT
+        self.event.save(update_fields=["status"])
+        self.login(self.zhang)
+        self.client.post(self.url(), {"event": self.event.pk, "status": Event.Status.OPEN})
+        self.event.refresh_from_db()
+        self.assertEqual(self.event.status, Event.Status.OPEN)
+
+    def test_publishing_from_the_list_makes_the_event_visible_to_volunteers(self):
+        # What the status change is actually for, asserted as the consequence.
+        self.event.status = Event.Status.DRAFT
+        self.event.save(update_fields=["status"])
+        self.login(self.lisi)
+        self.assertNotContains(self.client.get(reverse("events:event_list")), self.event.name)
+
+        self.login(self.zhang)
+        self.client.post(self.url(), {"event": self.event.pk, "status": Event.Status.OPEN})
+        self.login(self.lisi)
+        self.assertContains(self.client.get(reverse("events:event_list")), self.event.name)
+
+    def test_the_times_cannot_be_changed_from_the_list(self):
+        # Posting them is ignored: EventStatusForm has one field, so a forged
+        # start_time never reaches the instance — and a time change that skipped
+        # the edit page would also skip the prompt to notify anybody.
+        original = self.event.start_time
+        self.login(self.zhang)
+        self.client.post(self.url(), {
+            "event": self.event.pk, "status": Event.Status.OPEN,
+            "start_time": "2030-01-01T09:00", "end_time": "2030-01-01T12:00",
+        })
+        self.event.refresh_from_db()
+        self.assertEqual(self.event.start_time, original)
+
+    def test_another_ministrys_event_cannot_be_touched(self):
+        theirs = make_event(ministry=self.tax, owner=self.other_admin.contact,
+                            status=Event.Status.DRAFT)
+        self.login(self.zhang)
+        response = self.client.post(self.url(), {
+            "event": theirs.pk, "status": Event.Status.OPEN})
+        self.assertEqual(response.status_code, 403)
+        theirs.refresh_from_db()
+        self.assertEqual(theirs.status, Event.Status.DRAFT)
+
+
+class MinorEmergencyContactTests(TestCase):
+    """A minor needs somebody to call, and that record can stand in for consent.
+
+    Two rules that arrived together and lean on each other: requiring an
+    emergency contact is what makes reusing it possible, and reusing it is what
+    stops the requirement from being one more box to fill at every signup.
+    """
+
+    def setUp(self):
+        self.event = make_event()
+        self.role = make_role(self.event, "lifting")
+        self.minor = make_person(
+            "Minor", birth_date=local_today() - datetime.timedelta(days=365 * 15))
+
+    def test_a_minor_with_nobody_to_call_cannot_sign_up(self):
+        with self.assertRaises(ConsentRequired):
+            sign_up(contact=self.minor, event_role=self.role, consent={
+                "consent_given_by": "王秀英",
+                "consent_method": Participation.ConsentMethod.VERBAL,
+                "consent_email": "parent@example.com",
+            })
+        self.assertEqual(Participation.objects.count(), 0)
+
+    def test_the_refusal_comes_before_the_consent_questions(self):
+        # ⚠️ Order matters more than it looks. Told "the guardian's email is
+        #    missing" when the real answer is "add an emergency contact", the
+        #    volunteer fixes the wrong thing on the wrong page and the signup
+        #    still fails.
+        with self.assertRaises(ConsentRequired) as caught:
+            sign_up(contact=self.minor, event_role=self.role)
+        self.assertIn("emergency contact", str(caught.exception))
+
+    def test_an_adult_needs_no_emergency_contact(self):
+        adult = make_person("Adult", birth_date=datetime.date(1980, 1, 1))
+        participation = sign_up(contact=adult, event_role=self.role)
+        self.assertEqual(participation.status, Participation.Status.REGISTERED)
+
+    def test_an_unknown_birth_date_is_held_to_the_same_rule(self):
+        unknown = make_person("Unknown", birth_date=None)
+        with self.assertRaises(ConsentRequired):
+            sign_up(contact=unknown, event_role=self.role)
+
+    def test_picking_an_emergency_contact_fills_the_consent_in(self):
+        kin = give_emergency_contact(self.minor, name="Wang Xiuying")
+        form = SignUpForm(
+            {"event_role": self.role.pk, "use_emergency_contact": kin.pk,
+             "consent_method": Participation.ConsentMethod.VERBAL},
+            event=self.event, contact=self.minor,
+        )
+        self.assertTrue(form.is_valid(), form.errors)
+        participation = sign_up(
+            contact=self.minor, event_role=self.role, consent=form.consent())
+        self.assertEqual(participation.consent_given_by, "Wang Xiuying")
+        self.assertEqual(str(participation.consent_phone), str(kin.phone))
+        self.assertEqual(participation.consent_relationship, kin.relationship_type)
+
+    def test_the_consent_is_copied_not_referenced(self):
+        # ⚠️ Editing the emergency contact later must not rewrite consent that
+        #    was already given: Participation's consent columns record what was
+        #    agreed on the day. Same rule as hours and the notice snapshot.
+        kin = give_emergency_contact(self.minor, name="Wang Xiuying")
+        form = SignUpForm(
+            {"event_role": self.role.pk, "use_emergency_contact": kin.pk,
+             "consent_method": Participation.ConsentMethod.VERBAL},
+            event=self.event, contact=self.minor,
+        )
+        form.is_valid()
+        participation = sign_up(
+            contact=self.minor, event_role=self.role, consent=form.consent())
+
+        kin.name = "Somebody Else"
+        kin.save(update_fields=["name"])
+        participation.refresh_from_db()
+        self.assertEqual(participation.consent_given_by, "Wang Xiuying")
+
+    def test_only_this_persons_own_emergency_contacts_are_offered(self):
+        give_emergency_contact(self.minor, name="Mine")
+        stranger = make_person("Stranger", birth_date=datetime.date(1980, 1, 1))
+        give_emergency_contact(stranger, name="Theirs")
+        form = SignUpForm(event=self.event, contact=self.minor)
+        offered = [k.name for k in form.fields["use_emergency_contact"].queryset]
+        self.assertEqual(offered, ["Mine"])
+
+    def test_typing_a_guardian_by_hand_still_works(self):
+        # The emergency contact is a shortcut, not a replacement: a guardian who
+        # is not the person you would call on the day is a real situation, and
+        # D15 keeps those two ideas separate on purpose.
+        give_emergency_contact(self.minor)
+        participation = sign_up(contact=self.minor, event_role=self.role, consent={
+            "consent_given_by": "Another Guardian",
+            "consent_method": Participation.ConsentMethod.ONLINE,
+            "consent_email": "guardian@example.com",
+        })
+        self.assertEqual(participation.consent_given_by, "Another Guardian")
+
+
+class SignupConfirmationTests(TestCase):
+    """Item 10: the signup went through, and who gets told.
+
+    A minor hears about it themselves *and* through their guardian. Both,
+    because a fifteen-year-old with a phone still has to turn up, and whoever
+    gave consent has to know it was used.
+    """
+
+    def setUp(self):
+        LocmemBackend.outbox = []
+        self.event = make_event()
+        self.role = make_role(self.event, "lifting")
+
+    def sent(self):
+        return [(m.to, m.channel) for m in LocmemBackend.outbox]
+
+    def sign_up_adult(self, **fields):
+        adult = make_person("Adult", birth_date=datetime.date(1980, 1, 1), **fields)
+        participation = sign_up(contact=adult, event_role=self.role)
+        confirm_signup(participation, backend=LocmemBackend())
+        return participation
+
+    def test_an_adult_is_confirmed_on_their_preferred_channel(self):
+        self.sign_up_adult(email="adult@example.com")
+        self.assertEqual(self.sent(), [("adult@example.com", "email")])
+
+    def test_sms_is_used_when_that_is_the_preference(self):
+        self.sign_up_adult(
+            email="adult@example.com", phone="+14085550111",
+            preferred_communication_method=Contact.CommunicationMethod.SMS)
+        self.assertEqual(self.sent(), [("+14085550111", "sms")])
+
+    def test_a_minor_and_their_guardian_are_both_told(self):
+        minor = make_person(
+            "Minor", email="teen@example.com",
+            birth_date=local_today() - datetime.timedelta(days=365 * 15))
+        give_emergency_contact(minor)
+        participation = sign_up(contact=minor, event_role=self.role, consent={
+            "consent_given_by": "Guardian",
+            "consent_method": Participation.ConsentMethod.VERBAL,
+            "consent_email": "guardian@example.com",
+        })
+        confirm_signup(participation, backend=LocmemBackend())
+        self.assertIn(("teen@example.com", "email"), self.sent())
+        self.assertIn(("guardian@example.com", "email"), self.sent())
+
+    def test_a_minor_with_no_address_of_their_own_still_reaches_the_guardian(self):
+        minor = make_person(
+            "Minor", birth_date=local_today() - datetime.timedelta(days=365 * 15))
+        give_emergency_contact(minor)
+        participation = sign_up(contact=minor, event_role=self.role, consent={
+            "consent_given_by": "Guardian",
+            "consent_method": Participation.ConsentMethod.VERBAL,
+            "consent_phone": "+14085550122",
+        })
+        confirm_signup(participation, backend=LocmemBackend())
+        self.assertEqual(self.sent(), [("+14085550122", "sms")])
+
+    def test_nobody_reachable_is_not_an_error(self):
+        # ⚠️ The signup stands. A confirmation that could not be sent must never
+        #    undo a row that was accepted — the person can still see it under
+        #    "My signups".
+        silent = make_person("Silent", birth_date=datetime.date(1980, 1, 1))
+        participation = sign_up(contact=silent, event_role=self.role)
+        self.assertEqual(confirm_signup(participation, backend=LocmemBackend()), [])
+        self.assertEqual(participation.status, Participation.Status.REGISTERED)
+
+    def test_no_minors_name_leaves_the_database(self):
+        # Same rule as default_message(): what goes out is an address and an
+        # announcement, never "your child 小明".
+        minor = make_person(
+            "Xiaoming", birth_date=local_today() - datetime.timedelta(days=365 * 15))
+        give_emergency_contact(minor)
+        participation = sign_up(contact=minor, event_role=self.role, consent={
+            "consent_given_by": "Guardian",
+            "consent_method": Participation.ConsentMethod.VERBAL,
+            "consent_email": "guardian@example.com",
+        })
+        confirm_signup(participation, backend=LocmemBackend())
+        for message in LocmemBackend.outbox:
+            self.assertNotIn("Xiaoming", message.body)
+
+
+class PerEventMinorRuleTests(TestCase):
+    """Event.requires_guardian_consent: the coordinator decides, per event.
+
+    Sorting tins on a Saturday with parents in the room is not a weekend away.
+    Default True, so a new event is protected until somebody deliberately says
+    otherwise — the other default fails silently, on the day.
+    """
+
+    def setUp(self):
+        self.event = make_event()
+        self.role = make_role(self.event, "lifting")
+        self.minor = make_person(
+            "Minor", birth_date=local_today() - datetime.timedelta(days=365 * 15))
+
+    def test_the_default_is_to_require_consent(self):
+        self.assertTrue(self.event.requires_guardian_consent)
+
+    def test_a_waived_event_lets_a_minor_sign_up_like_an_adult(self):
+        self.event.requires_guardian_consent = False
+        self.event.save(update_fields=["requires_guardian_consent"])
+        participation = sign_up(contact=self.minor, event_role=self.role)
+        self.assertEqual(participation.status, Participation.Status.REGISTERED)
+        self.assertEqual(participation.consent_given_by, "")
+
+    def test_a_waived_event_needs_no_emergency_contact_either(self):
+        # The emergency-contact rule hangs off the same question; leaving it on
+        # would make "no consent needed" still refuse the signup, for a reason
+        # the page never mentioned.
+        self.event.requires_guardian_consent = False
+        self.event.save(update_fields=["requires_guardian_consent"])
+        self.assertEqual(self.minor.emergency_contacts.count(), 0)
+        sign_up(contact=self.minor, event_role=self.role)
+
+    def test_a_waived_event_lets_a_minor_be_marked_attended(self):
+        # ⚠️ Both gates have to answer the same way. Refusing the attendance
+        #    after accepting the signup would strand somebody who did the work,
+        #    with their hours uncounted.
+        self.event.requires_guardian_consent = False
+        self.event.save(update_fields=["requires_guardian_consent"])
+        participation = sign_up(contact=self.minor, event_role=self.role)
+        check_in(participation)
+        self.assertEqual(participation.status, Participation.Status.ATTENDED)
+
+    def test_a_required_event_still_refuses(self):
+        with self.assertRaises(ConsentRequired):
+            sign_up(contact=self.minor, event_role=self.role)
+
+    def test_the_form_stops_drawing_the_consent_boxes_when_waived(self):
+        self.event.requires_guardian_consent = False
+        self.event.save(update_fields=["requires_guardian_consent"])
+        form = SignUpForm(event=self.event, contact=self.minor)
+        self.assertFalse(form.needs_consent)
+
+    def test_a_coordinator_can_set_it_when_publishing(self):
+        self.assertIn("requires_guardian_consent", EventForm.Meta.fields)

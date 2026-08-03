@@ -144,8 +144,8 @@ class ConstraintFieldErrorTests(TestCase):
         # first, and full_clean() excludes any field that already has an error
         # from constraint validation — so through that door the constraint's
         # own mapping never runs. The mapping still earns its place, because
-        # RelationshipForm._check_constraints() calls validate_constraints()
-        # directly and that door has no clean() in front of it.
+        # any form that leaves reports_to off its field list calls
+        # validate_constraints() directly, with no clean() in front of it.
         self.position.reports_to_id = self.position.pk
         with self.assertRaises(ValidationError) as caught:
             self.position.validate_constraints()

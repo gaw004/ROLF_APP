@@ -17,7 +17,7 @@ class ImmutableCodeMixin:
     EmploymentType, Position) and all four want it for one reason: `code` is
     what the rest of the codebase matches on, so renaming it breaks lookups
     *silently* — filter(code="food_pantry") simply stops returning rows, and
-    nothing raises. See goal.md D5 / D6.
+    nothing raises. See goal.md D5.
 
     Carries no fields on purpose. An abstract model holding `code` would tie
     four tables' migrations to one class, and their columns differ anyway

@@ -36,14 +36,14 @@
 | ~~`VolunteerProfile`~~ / ~~`BackgroundCheck`~~ | — | 移出本阶段（2026-07-29），见推迟清单。14 条需求一条都没碰技能、可服务时段、背景审查。<br>⚠️ **但 D18 那条"背景审查必须独立成模型"的决定不撤销** —— 将来建的时候仍然是两个模型，不是一个 |
 | `EmergencyContact` | `contact` | **专用表**（2026-07-28 定案，取代早先的 `Contact.emergency_contact` 自引用 FK + `is_reference_only`）。`person`(FK → `Contact`，`CASCADE`，`related_name="emergency_contacts"`) / `name`（文本，必填）/ `phone`（`PhoneNumberField`，必填）/ `relationship_type`(FK → `RelationshipType`，**非空**，`limit_choices_to={"usable_as_emergency_contact": True}`)。<br>**姓名电话存文本，不指向 `Contact`** —— 紧急联系人可能是邻居、室友，不是与基金会交互的主体，不该占一行 `Contact`（D15 第四条判据）。<br>**表天然支持一人多个紧急联系人**，不加人为的唯一限制（基金会目前只需要一个）。见 D15、下面「紧急联系人的录入」 |
 | 合并重复 `Contact`（`contact/services.py::merge_contacts()`） | `contact` | 不是新表，是一个功能**：把重复的两条 Contact 合并成一条。**落在 `services.py` 不落在 model 上** —— 跨表写入按 D18 落点表归 `services.py`。范围和实现见下面「合并重复记录」。<br>⚠️ **它进 Phase B 的原始理由已经失效** —— 当时是"reference-only 记录会持续制造重复"，而 reference-only 已经不存在了。**保留在本阶段的新理由**：跨渠道录入（活动签到、志愿者自荐、员工代录）仍然会产生重复，而同名同号硬拦截只挡得住同一表单里的手滑。**如果要削减 Phase B 范围，这是第一个候选** |
-| `RelationshipType` 加三个字段 | `contact` | `code`（唯一·不可改，见 D5 / D6）+ `is_symmetric`（布尔，见 D15）+ `usable_as_emergency_contact`（布尔，默认 `False`，见 D6 补强 —— 它是 `EmergencyContact` 的前置）。加到**有数据**的表要三步迁移，见下面「`code` 的三步迁移」；**本机这张表实测 0 行，所以 `02-roadmap.md` B2 一步到位** |
+| `RelationshipType` 加三个字段 | `contact` | `code`（唯一·不可改，见 D5）+ `is_symmetric`（布尔，见 D15）+ `usable_as_emergency_contact`（布尔，默认 `False` —— 它是 `EmergencyContact` 的前置）。加到**有数据**的表要三步迁移，见下面「`code` 的三步迁移」；**本机这张表实测 0 行，所以 `02-roadmap.md` B2 一步到位** |
 | ~~`Guardianship`~~ | — | **移出 Phase B**（2026-07-28 决定，2026-07-29 需求原文答复"有同意流程"后**仍然不建**，见 [D15 的已答复那节](decisions/D15-relationship-carriers.md#-已答复2026-07-29有同意流程但仍然不建-guardianship)）—— 需求要的是"这一次活动家长同意了吗"，那是一条事件记录，落在上面那六个同意字段上；`Guardianship` 是"谁是他的法定监护人"，那是一段长期关系。<br>⚠️ 原文写的是"家长通知已经靠 `is_minor` + `EmergencyContact` 闭环了"，**那句话被 D22 推翻了一半**：`EmergencyContact` 只有电话没有邮箱，默认后端是邮件。现在是 `consent_email` / `consent_phone` 优先、`EmergencyContact` 回落走 SMS。见推迟清单 |
 | ~~`Skill`~~ | — | **推迟**（见推迟清单）—— 没有任何东西依赖它，ministry 视图不需要它 |
 
 ##### 本阶段内部的硬性顺序
 
-> 2026-07-29 重排。 原来的三条（`RelationshipType.code` / `Contact.__str__` 消歧 /
-> 关系双向显示）**已经在 B2–B4 做完了**，留在这里作记录。当前的顺序是下面这条。
+> 2026-07-29 重排。 原来的两条（`RelationshipType.code` / `Contact.__str__` 消歧）
+> **已经在 B2 / B4 做完了**，留在这里作记录。当前的顺序是下面这条。
 
 `MinistryRole` + `org/permissions.py` 必须先于任何自助页面。
 
@@ -100,7 +100,7 @@ MinistryRole → permissions.py                  （P2 / P4 / P5 的判断）
 
 ##### `.active()` 与时间口径
 
-`Assignment` 和 `Relationship` 共用同一套「在职 / 生效中」的派生逻辑，
+`Assignment` 和 `MinistryRole` 共用同一套「在职 / 生效中」的派生逻辑，
 **定义只写一处**，放在 `core` 里做成 QuerySet mixin：
 
 ```python
@@ -126,7 +126,7 @@ def active(self, on=None):
 > ⚠️ `.active()` 只管日期，不管状态。 `Assignment` 另有一个 `.serving()`
 > （= `.active()` AND `status=active`），请假 / 停职的人在 `.active()` 里**仍然算数**。
 > 两个都对，用哪个取决于问题是"他还属不属于这个团队"还是"他今天能不能当值" ——
-> 见下面「`Assignment.status`」。**`Relationship` 只有 `.active()`**，关系不会被停职。
+> 见下面「`Assignment.status`」。**`MinistryRole` 只有 `.active()`**，一次授权不会被停职。
 
 顺带：显示姓名时记得 `select_related("contact")`，否则每行一次查询（N+1）。
 
@@ -138,16 +138,16 @@ A7 的原话是"等表里有了真数据再加，就得先清洗存量数据"。
 |---|---|---|
 | `Participation` | `UniqueConstraint(event_role, contact)` | 同一人同一活动同一工种能登记 10 次，**工时统计直接错** —— 而工时是这张表的全部价值。<br>**2026-07-29：不再需要 `nulls_distinct=False`** —— 两列都非空了（D19 把 `event` + `role` 合并成 `event_role`） |
 | `Participation.hours` | `DecimalField`（**不是 `Float`**）+ `hours IS NULL OR hours >= 0` | 对钱写过"永远不用 `FloatField`"，工时同理（浮点累加会飘）；还能存出负工时。**`null=True`**：报名了还没发生 ≠ 干了 0 小时 |
-| `Participation` | `status = 'attended' OR hours IS NULL OR hours = 0` | 否则能存出 `status=缺席` + `hours=5`。这和 `Relationship` 的 `is_active=True` + `end_date=2020` 是**同一种病**，见下面「单一真相」 |
+| `Participation` | `status = 'attended' OR hours IS NULL OR hours = 0` | 否则能存出 `status=缺席` + `hours=5`。这和 `is_active=True` + `end_date=2020` 是**同一种病**，见下面「单一真相」 |
 | `Participation` | `checked_out_at IS NULL OR checked_in_at IS NULL OR checked_out_at >= checked_in_at` | 签退早于签到。同 `end_date >= start_date`，新表重钉一遍 |
 | `Participation` | `checked_in_at IS NULL OR status <> 'absent'` | 签到了又标记缺席。**单一真相** —— "是否来过"（P4）只能有一个答案 |
 | `EventRole` | `UniqueConstraint(event, role)` | 同一场活动把同一个工种开两遍，`needed_count` 从此有两个答案，R4 直接翻倍 |
 | `EventRole` | `needed_count IS NULL OR needed_count > 0` | 需要 0 人的工种没有意义。同原 `Event.capacity` 那条 |
 | `MinistryRole` | `UniqueConstraint(contact, ministry, role, start_date)`，**带 `nulls_distinct=False`** | 同一个人在同一个 ministry 的同一角色授两遍。`start_date` 可空且留空常见 —— 同 `Assignment` 的教训 |
-| `MinistryRole` | `end_date >= start_date` | 同 `Assignment` / `Relationship`。新表漏掉就不一致了 |
+| `MinistryRole` | `end_date >= start_date` | 同 `Assignment`。新表漏掉就不一致了 |
 | ~~**`EventNotification`**~~ | ~~`unreachable_count >= 0`~~ | **2026-07-29 晚删除** —— 字段本身没了，`unreachable` 改成 M2M（见 D22），负数这种状态不存在了。<br>⚠️ 顺带记一笔：**这条约束原本就没什么用** —— 一个 `PositiveIntegerField` 本来就挡住了负数，它是"便宜就加"进来的，不是"漏了会出事"进来的。同 `TIME_ZONE` 那条"靠顺手进来的" |
 | `EventNotification` | `Index(fields=["event", "-sent_at"])` | "这场活动通知过几次、最近一次什么时候" —— 发送前的二次确认页要显示它（防重复发送的唯一缓解） |
-| `Assignment` | `end_date >= start_date` | `Relationship` 在 A7 加了这条，`Assignment` 是新表却漏掉就不一致了 |
+| `Assignment` | `end_date >= start_date` | 凡是带起止日期的表都必须有这条，新表漏掉就不一致了 |
 | `Assignment` | `UniqueConstraint(contact, position, start_date)`，**带 `nulls_distinct=False`** | 见下面「`Assignment` 的唯一约束」 |
 | `Position` | `reports_to` 不能指向自己那一行（`CheckConstraint`） | 见下面「汇报线的环」 |
 | `Position` | `UniqueConstraint(Lower("code"))`（**不是**字段上的 `unique=True`） | 同下面字典表那条。`Position` 不是字典表，但 `code` 的作用一样：代码只认 `code`，不认 `name` |
@@ -157,7 +157,6 @@ A7 的原话是"等表里有了真数据再加，就得先清洗存量数据"。
 | `EmergencyContact` | `relationship_type` **FK 非空** | 记了联系人就必须写清关系。 拆成专用表之后这条从 `CheckConstraint` 降级成一个 `null=False`，是拆表白捡的简化 |
 | `Ministry` / `Position` / `EmploymentType` / `EventType` / `ParticipationRole` | `UniqueConstraint(Lower("code"))`（不是 `unique=True`）<br>⚠️ `EventRole` / `Participation` / `MinistryRole` **没有 `code`** —— 它们不是字典表，是业务记录，锚点是外键组合 | 见 D5：不唯一的 `code` 不是锚点，`get(code=...)` 会抛 `MultipleObjectsReturned`。**必须是 `Lower()` 版**，否则 `bulk_create` 能塞进 `Food_Pantry` + `food_pantry` 两行 —— D9 归一化通则 |
 | `RelationshipType` | `UniqueConstraint(Lower(Trim("name_a_to_b")))` | 缺口 2。`Trim` 不能省，理由同上 |
-| `Relationship` | `UniqueConstraint(Least(a,b), Greatest(a,b), type, Coalesce(start_date, date.min))` —— **替换** A7 那条，不是并存 | 缺口 3 升级成强制层。镜像重复 `bulk_create` 塞得进来，而 `save()` 的归一化拦不住它 |
 
 按 D14：每条约束配 `violation_error_message` + `violation_error_code`，在 `CONSTRAINT_FIELD` 里登记一条映射，**不要再写一遍 `clean()`**。
 守卫测试会检查有没有漏登记；另外每条都要实测在表单里是不是真会报错（见 D14 的坑）。
@@ -356,28 +355,20 @@ Phase B 一次加十几个外键，其中一个选错是灾难级的：
 `ministry` 单列索引就冗余了（最左前缀覆盖）；`Assignment` 上 `(position, status, end_date)` 之于
 `position` 同理。数据量小无所谓，知道就行。
 
-##### 单一真相：删掉 `Relationship.is_active`；`Assignment` 用 `status`，**不用** `is_active`
+##### 单一真相：任何带日期的表都不加 `is_active`；`Assignment` 用 `status`
 
-> ✅ 已完成（B3.3）。 本节保留论证，动词改成过去时。
-> ⚠️ 原文写的是"`Relationship` **现在**同时有 `is_active` 和 `end_date`
-> （`contact/models.py:247-249`）"——**字段早就删了**，而那个行号现在指向的是
-> `Contact.is_active`，属于会主动误导人的引用。**别在正文里写行号**，
-> 代码搬一次它就变成假的了（这是本文档第二次踩它，第一次是 `contact/admin.py:12`）。
+> ⚠️ 顺带一条本文档吃过两次亏的教训：**别在正文里写行号**
+> （原文引用过 `contact/models.py:247-249` 和 `contact/admin.py:12`，
+> 两处后来都指向了别的东西）。代码搬一次行号就变成假的了。
 
-`Relationship` 曾经同时有 `is_active` 和 `end_date`，
-于是可以存出 `is_active=True` + `end_date=2020-01-01` 这种自相矛盾的行。
+一张表同时有 `is_active` 和 `end_date`，就能存出
+`is_active=True` + `end_date=2020-01-01` 这种自相矛盾的行。
 这违反 D11 自己那句"不是两处都能记，是只有一处能记"。
 
-**`Relationship.is_active` 已在本阶段删掉**（2026-07-28 修订，原计划是"既存字段不动"）。
-改口的理由是原理由站不住：Phase A 刚把库整个重建过，当时只有开发数据，而这个字段
-全项目只出现在 `contact/admin.py` 的 `list_display` / `list_filter` 两行里，
-**零业务逻辑引用**。删掉 = 一个迁移 + 改两行 admin；留着 = 一个永久自相矛盾的字段，
-外加每个新人都要重新理解一次"该信哪个"。按 Phase A 反复用的那条标准
-（"现在改成本≈0，以后改很痛"），就是现在删。删完 `Relationship` 复用同一个
-`.active()` mixin，全项目只有一处日期派生逻辑。
-
-**关系不会被"停职"** —— 张三要么在某段时间是 XX 公司的员工，要么不是；配偶关系没有
-"暂时中止"这个状态。所以 `Relationship` 只需要日期，这条决定不受下面的修订影响。
+**通则：结束只由 `end_date` 表达**，凡是带起止日期的表一律不加 `is_active`，
+全项目只有一处日期派生逻辑（`core.querysets` 的 `.active()`）。
+`Contact.is_active` 是唯一的例外，且它不是这个意思 —— 那是"这条档案还用不用"，
+它身上根本没有起止日期。
 
 #### `Assignment.status`：状态和任期是正交的两个维度（2026-07-28 修订）
 
@@ -410,7 +401,7 @@ Assignment(
 ##### 两个谓词：`.active()` 和 `.serving()`
 
 ```python
-# core 的共享 mixin —— Assignment / Relationship 通用，纯日期
+# core 的共享 mixin —— Assignment / MinistryRole 通用，纯日期
 def active(self, on=None):    ...        # 在任期内 / 生效中
 
 # Assignment 专有
@@ -427,8 +418,8 @@ def serving(self, on=None):
 **所以不加"状态必须和日期一致"的约束** —— 那需要在 `CheckConstraint` 里引用"今天"，
 而"今天"不是不可变表达式，数据库拒绝。靠 AND 的查询纪律，不靠约束。
 
-> **病根辨析（重要）**：原来 `Relationship.is_active` 之所以危险，不是因为"有两个维度"，
-> 而是因为 admin 把它当成了日期的**替代筛选项**（`list_filter = ["is_active"]`
+> **病根辨析（重要）**：`is_active` 之所以危险，不是因为"有两个维度"，
+> 而是因为 admin 会把它当成日期的**替代筛选项**（`list_filter = ["is_active"]`
 > 能独立按它过滤，给出错误答案）。两个维度被当成二选一才是病，正交本身不是。
 
 已知限制：只记当前状态，不记请假历史。 "谁在去年三月请过假"这个问题
@@ -476,7 +467,7 @@ def serving(self, on=None):
 本阶段要新增好几个指向 Contact 的 autocomplete（`reports_to` 经 Assignment、
 `Participation.contact`、`Event.owner`）。而 `Contact.__str__` 现在对两个都叫"王强"的人
 返回**完全一样的字符串** —— 下拉框里两个一模一样的选项，选错了不会报错，
-是**静默的数据错误**（关系挂到了错的人身上）。
+是**静默的数据错误**（报名、任职、紧急联系人全挂到错的人身上）。
 
 不要用唯一约束禁止重名。 重名是合法现实，这个领域**没有可靠的自然键**：
 email 不能设 unique（一家人共用一个邮箱很常见）、电话同理。
@@ -536,14 +527,14 @@ email 不能设 unique（一家人共用一个邮箱很常见）、电话同理�
 `emergency_contact IS NULL OR emergency_contact_relationship IS NOT NULL` 的
 `CheckConstraint` 降级成一个 `null=False`。这是拆表白捡的简化。
 
-词表复用 `RelationshipType` + `usable_as_emergency_contact` 过滤（见 D6 补强），
+词表复用 `RelationshipType` + `usable_as_emergency_contact` 过滤（见 D15），
 **不新建词表** —— 这一条不受本次修订影响。
 
 2. 方向约定必须写进 `help_text`
 
 `relationship_type` 一律读作**「紧急联系人 是 本人 的 ___」**，即 `name_a_to_b`。
 小明那一行填 `王秀英` + `parent of` = "王秀英是小明的母亲"。
-**不写死一定会录反** —— 同 B3 关系录入的方向问题。
+**不写死一定会录反**。
 
 3. 电话必填，用 `PhoneNumberField`
 
@@ -649,12 +640,12 @@ Ministry: Food Pantry
 
 ⚠️ Ministry 绝不做成 `contact_type=organization` 的 Contact 行。
 这个念头很自然（CiviCRM 风格），但在本设计里是错的：`Contact` 装的是人和**外部**组织
-（D4/D6），ministry 是**内部**组织单元（D11 那一侧）。混进去会同时踩两个已知的坑 ——
+（D4），ministry 是**内部**组织单元（D11 那一侧）。混进去会同时踩两个已知的坑 ——
 联系人列表被非人记录污染，以及"外部组织归属"和内部结构的边界糊掉。
 
 **为什么不能像 `Skill` 那样推迟**：推迟就意味着先用自由文本记 ministry 名，
 以后收编成外键时要去重 "Food Pantry" / "food pantry" / "Pantry" ——
-**正是 D15 论证过的那个痛的迁移方向（字段 → 关系表）**。现在建表几乎免费。
+**正是 D15 论证过的那个痛的迁移方向（字段 → 表）**。现在建表几乎免费。
 
 > 同一条理由这次也适用于 `Position`，而且更强。 如果 Phase B 先做 `Assignment.title`
 > 自由文本、以后再收编成 `Position`，要去重的就是几百行任职记录里的职务名 ——
@@ -854,7 +845,7 @@ class EventRoleQuerySet(models.QuerySet):
 通知里那句'来不了请点这里取消'" —— **那个链接会 404**，而且最可能发生在人已经招满的活动上。
 
 > 这是本项目第四次遇到同一个形状：两个维度挤进一个字段。
-> 前三次是 [`Relationship.is_active`](#单一真相删掉-relationshipis_activeassignment-用-status不用-is_active)、
+> 前三次是 [`is_active` 挨着 `end_date`](#单一真相任何带日期的表都不加-is_activeassignment-用-status)、
 > [`Assignment.status`](#assignmentstatus状态和任期是正交的两个维度2026-07-28-修订)、
 > 以及拒绝 [`Participation.needs_reconfirmation`](decisions/D22-event-notifications.md#报名有效性改了时间报名照旧)。
 > **这一次没有被认出来**，因为 `status` 看上去只是"一个状态字段"。
@@ -921,7 +912,7 @@ def check_out(participation, *, at=None):
 - 有人是**纸质签到表事后补录** —— 根本没有时间戳，只有一个"他干了 3 小时"；
 - 有人**中途离开又回来** —— 一对时间戳表达不了，但工时是清楚的。
 
-**为什么不让两者各算各的**：那就是 `Relationship.is_active` + `end_date` 那个病 ——
+**为什么不让两者各算各的**：那就是 `is_active` + `end_date` 那个病 ——
 两个字段回答同一个问题，可以互相矛盾，而且没有任何机制会告诉你。
 所以**签退时写入一次，之后 `hours` 说了算**，时间戳只回答"他来了没有、几点来的"。
 
@@ -954,208 +945,31 @@ def check_out(participation, *, at=None):
 [Phase C 的权限复核](progress.md#phase-c--上线与真实运营)里要和未成年人信息并列处理
 （**2026-07-29 C / D 对调后是 C**，原文写的是 Phase D）。
 
-##### 关系类的收口（见 D6 / D15）
+##### `RelationshipType` 词表的收口（见 D15）
 
-代码里查关系一律用 `RelationshipType.code`，**不用显示名**。
+代码里查关系类型一律用 `RelationshipType.code`，**不用显示名** ——
+显示名在 admin 里随时能改，`filter(name_a_to_b="parent of")` 会在改名之后静默失效。
 
-**关系的反向显示 —— ✅ 已完成（B3.1）**：
-`RelationshipType.name_b_to_a` 这个字段建对了 —— 一段关系只存**一行**，
-靠正反两个标签从两头读，所以不需要存第二行、也不需要建第二个"反向"类型行。
-**但当时没有任何代码读它**：`ContactAdmin` 只挂了一个 `fk_name="contact_a"` 的 inline，
-`Relationship.__str__` 也只用 `name_a_to_b`。
-结果是：录了「王强 parent of 小明」之后，**小明的页面上看不到王强**。
-设计省下的那行数据已经省了，另一头的显示欠了一阵。
-
-> 2026-07-29 晚改的是时态，不是结论。 原文写的是"**现有缺口，必须在本阶段修**"
-> 和"**目前**没有任何代码读它（`contact/admin.py:12`）"，而 B3.1 早就做完了 ——
-> `contact/admin.py` 里两个只读 inline 都在。**一份把已完成的事写成待办的文档，
-> 会让人第二次去做同一件事**；行号引用同样已经失效（同上一节那笔）。
-
-**做法（2026-07-28 定，已落地）**：`Contact` 页面挂**两个只读 inline**
-（`fk_name="contact_a"` 用 `name_a_to_b`、`fk_name="contact_b"` 用 `name_b_to_a`），
-**录入不在 inline 里做**，见下面「录入方向的防线」。
-`is_symmetric=True` 时两侧都用 `name_a_to_b`（`name_b_to_a` 留空）。
-
-> 更好的是把两个方向合并成一张"此人的所有关系"列表（用户根本看不出 a/b 谁是谁）。
-> **那属于 Phase C**，本阶段两个只读 inline 够用 —— 只读之后，
-> 早先担心的"对称关系保存后从 inline A 跳到 inline B"就只是显示位置变了，
-> 不再是"我明明填在上面"的困惑（用户本来也不是在那儿填的）。
-
-对称关系：`is_symmetric` 是显式字段，不靠推断。
-过去只能靠"`name_b_to_a` 为空"隐式推断对称性，但录入的人完全可能把 "spouse of"
-同时填进正反两栏，推断就失效了。加一个显式布尔字段解决三件事：显示回落有明确依据、
-归一化知道该对哪些行生效、以及缺口 3 那个"以后要冗余布尔列才能建条件唯一索引"的退路
-需要的正是它。现在加成本为零。
-
-⚠️ 顺序不能反：双向显示必须先于归一化落地。
-对称类型在 `save()` 里把 id 小的换到 `contact_a`，只挂一个
-`fk_name="contact_a"` 的 inline 时，用户录的"配偶：李梅"保存后会跑到李梅那一侧，
-**在王强页面上直接消失**。双向显示先做好，交换就无所谓了。
-
-> **2026-07-28 补**：缺口 3 改用无序对唯一约束之后，`save()` 的交换**不再承担正确性**
-> （重复由数据库拒绝），它只剩"规范化存储 + 让对称关系有个确定的读法"这一个作用。
-> **但上面这条顺序仍然不能反** —— 理由从"数据会查不到"降级成"用户会看不见自己刚录的东西"，
-> 后者一样是不可接受的。
->
-> **原来记在这里的那笔欠账（"两个 inline 下对称关系会跳盒子"）已经消解**：
-> 录入移出 inline 之后（见下），两个 inline 都是只读的，
-> 一行显示在哪个盒子里只是排版问题，不再是"我明明填在上面"的困惑。
-
-**录入方向的防线：用方向感知的表单，不用人工纪律**（2026-07-28 修订）。
-
-`(小明, 王强, parent of)` 在数据库看来完全合法，但意思反了 —— 这类语义错误约束抓不到
-（约束只能抓"自己是自己的父亲"）。
-
-> 原方案是"总是从 A 那一方的页面录入" + 写进 `help_text`。已废弃。
-> 那是**把外键的方向翻译成了一条人工纪律** —— D18 说的"物理结构泄露给操作员"
-> 最典型的一例。而且它有个直接的功能缺口：站在小明的页面上，
-> **你根本没法录"王强是我爸爸"**，必须先导航到王强的页面去。
-
-**改成**：一个方向感知的 `ModelForm`，类型下拉**同时列出正反两个方向的读法**
-（复用已有的 `name_a_to_b` / `name_b_to_a`，`is_symmetric=True` 的类型只出现一次）：
-
-```
-subject = 小明 时，关系类型下拉显示：
-    小明 是 ___ 的儿子        ← 选它 ⇒ (___, 小明, parent of)，即 contact_a = 对方
-    小明 是 ___ 的父亲        ← 选它 ⇒ (小明, ___, parent of)
-    小明 的配偶是 ___         ← 对称类型，只有一条
-```
-
-##### 这个表单挂在独立页面上，不挂 inline（2026-07-28 定，方案 b）
-
-**`/relationships/add/?subject=<id>`**，形状同 `/contacts/merge/`：
-`Contact` 页面的两个只读 inline 上方放一个「添加关系」按钮，带着当前 contact 的 id 跳过去。
-
-> 同日短暂定过挂 inline（方案 a），当天推翻。 三条理由，按分量排：
->
-> 1. 前端上来时更省。 Phase C 用 HTMX 写这个功能，**根本不会用 Django formset** ——
->    那时的写法就是"一个 subject + 一个表单片段，POST 回来插一行"，
->    **正好就是独立页面这个形状**。挂 inline 等于 Phase B 写一套 formset 管道扔掉、
->    Phase C 再把独立页面写一遍。同一件事写两遍，正是这一整轮要消除的东西。
-> 2. inline 拿不到"当前是谁的页面"。 `subject` 是这个表单的全部前提，
->    而 inline 表单默认拿不到父对象 —— 要么覆盖 `InlineModelAdmin.get_formset()`，
->    要么自定义 `BaseInlineFormSet._construct_form`。**那是 admin 的表单集管道，
->    是全项目最深的一处 admin 耦合**，而它买到的东西 Phase C 一点都用不上。
-> 3. 形状触发本来就指向它。 D18 新加的第二条触发说"复杂录入 → 独立视图"。
->    合并页面已经按这条走了，关系录入是同一个形状 —— **两处用同一个模式，
->    比一处 inline 一处页面好维护。**
->
-> **代价（如实记）**：多一次跳页。可接受 —— 那一跳 Phase C 也要有（HTMX 里是弹出一个片段），
-> 而且录关系不是高频操作。
-
-**表单接口写成前端能直接用的形状**：
-
-```python
-class RelationshipForm(forms.ModelForm):
-    def __init__(self, *args, subject: Contact, **kwargs): ...
-```
-
-`subject` 是**显式关键字参数**，不是从 `request` 或父对象里摸出来的 ——
-Phase C 的视图直接 `RelationshipForm(subject=contact)`，一个字不用改。
-
-**方向路由本身是一个纯函数，不写在表单里**（2026-07-28 补，修正与 D18 的口径冲突）：
-
-```python
-# contact/services.py —— 唯一的一份方向路由
-def orient(*, subject, other, subject_is_a: bool) -> tuple[Contact, Contact]:
-    """返回 (contact_a, contact_b)。表单和以后的视图都调它。"""
-```
-
-> 三个参数全是**关键字参数**，且**不含 `relationship_type`** —— 方向只由
-> `subject_is_a` 决定，类型是关系行自己的字段，路由不需要看它。
-> 同一份签名写在 `02-roadmap.md` B3.1b。
-
-`RelationshipForm.save()` **只调用它**，不自己判断。原因是 D18 的落点表把
-「关系方向路由」明确划给了 `services.py` —— 写在 `Form.save()` 里字面上不算违规
-（`Form` 不是 `ModelAdmin` 钩子），但那是同一种泄露：Phase C 若把这个页面
-做成"此人的所有关系"合并视图（形状变了、表单复用不了），路由就得抄一遍。
-抽成函数之后，抄不抄表单都无所谓。这和 `force_save` 那条已经写明的
-"拦截逻辑放 model / services 层，`ContactForm` 只调用"是同一条规矩。
-
-**对称类型的 id 排序仍然只在 `Relationship.save()` 里做** —— 那是规范化，
-表单和 `orient()` 都不重复它，理由见 D9 归一化通则（导入路径根本不经过表单）。
-
-**收益**：两侧页面都能录、录的人不需要知道 A/B 是什么、
-「总是从 A 那一方录入」这条纪律**整条删掉**。
-**成本**：一个 `ModelForm` + 一个视图 + 一个模板 + 两个函数。**没有一行进 `admin.py`**，
-Phase C 全部原样接管（模板换成 HTMX 片段）。
-
-##### 关系数据完整性的三个缺口（A7 的约束没覆盖到，本阶段补）
-
-A7 的唯一约束是 `(contact_a, contact_b, relationship_type, start_date)`。
-它挡住了**结构重复**（一模一样的行存两次），但挡不住下面三类**语义重复** ——
-数据库只认列值，不知道 "child of" 是 "parent of" 的反面。
+这张词表有两个使用方（`EmergencyContact.relationship_type`、
+`Participation.consent_relationship`），所以"同一个意思攒出好几行"是真实风险。
+两条唯一约束把它堵死：
 
 | # | 缺口 | 现在会发生什么 | 补法 | 层级 |
 |---|---|---|---|---|
-| 1 | `RelationshipType` 建了反向类型 | 建一个 `name_a_to_b="child of"` 的类型，再录 `(小明, 王强, child of)` —— **三个字段和第一行全都不同，唯一约束不触发，不报错**。双向渲染做好后症状是小明页面上同一条关系**显示两遍** | `RelationshipType.clean()`：新类型的 `name_a_to_b` 撞上任何已有类型的 `name_b_to_a`（忽略大小写和首尾空格）就报错，并指出撞的是哪一行 | 提示层（类型表十几行，`clean()` 足够；这是唯一正确的拦截时机 —— 建类型那一次，而不是之后每条关系行） |
-| 2 | `RelationshipType.name_a_to_b` 没有唯一约束 | 能建两个一模一样的 "parent of"，admin 下拉出现两个同名选项，选哪个都对但数据分裂成两半 | `UniqueConstraint(Lower(Trim("name_a_to_b")))` —— 大小写不敏感（普通唯一约束挡不住 "Parent of" vs "parent of"，那和缺口 1 的 `clean()` 口径也对不上），**`Trim` 也不能省**：只靠 `save()` strip 的话 `" parent of"` 会被 `bulk_create` 塞进来，见 D9 归一化通则 | 强制层 |
-| 3 | 同一对人、同一类型出现两个方向 | `(王强, 李梅, spouse)` 和 `(李梅, 王强, spouse)` 只是调了个位，A7 的唯一约束不触发 | 把 A7 那条唯一约束换成无序对版本（见下），外加 `save()` 里对 `is_symmetric=True` 的类型交换 a/b | **强制层**（2026-07-28 从提示层升上来） |
+| 1 | 建了反向类型行 | 已经有 `name_a_to_b="parent of"` / `name_b_to_a="child of"` 了，还能再建一个 `name_a_to_b="child of"` 的类型 —— 三个字段全都不同，唯一约束不触发。结果是同一层关系被两行词表瓜分 | `RelationshipType.clean()`：新类型的 `name_a_to_b` 撞上任何已有类型的 `name_b_to_a`（忽略大小写和首尾空格）就报错，并指出撞的是哪一行 | 提示层（类型表十几行，`clean()` 足够；这是唯一正确的拦截时机 —— 建类型那一次） |
+| 2 | `name_a_to_b` 没有唯一约束 | 能建两个一模一样的 "parent of"，admin 下拉出现两个同名选项，选哪个都对但数据分裂成两半 | `UniqueConstraint(Lower(Trim("name_a_to_b")))` —— 大小写不敏感（普通唯一约束挡不住 "Parent of" vs "parent of"，那和缺口 1 的 `clean()` 口径也对不上），**`Trim` 也不能省**：只靠 `save()` strip 的话 `" parent of"` 会被 `bulk_create` 塞进来，见 D9 归一化通则 | 强制层 |
 
-#### 缺口 3 的正确修法：无序对唯一约束（2026-07-28 修订）
+**根因说明（比补法更重要）**：缺口 1 的根本原因是**那个反向类型行本来就不该存在** ——
+"child of" 已经是 "parent of" 的 `name_b_to_a` 了。防线加在建类型那一刻，
+而不是之后每一处用到它的地方。
 
-> 本条改过一次。 原方案是"只在 `save()` 里归一化 + 承认这只能到提示层"，
-> 并写明"真要强制得在 `Relationship` 上冗余一个 `is_symmetric` 布尔列才能建条件索引"。
-> **那个备选方案是错的，不要采纳** —— 理由见下面「为什么不用冗余列」。
-> 保留记录，因为这次的教训很具体。
+`is_symmetric` 是显式字段，不靠推断。 过去只能靠"`name_b_to_a` 为空"隐式推断对称性，
+但录入的人完全可能把 "spouse of" 同时填进正反两栏，推断就失效了。
+显式布尔让"这个标签反着读还是它自己"有个明确依据。
 
-**替换掉** A7 的 `UniqueConstraint(contact_a, contact_b, relationship_type, start_date)`，
-不是并存 —— 新的严格更强，旧的每一种情形它都覆盖：
-
-```python
-UniqueConstraint(
-    Least("contact_a", "contact_b"),
-    Greatest("contact_a", "contact_b"),
-    "relationship_type",
-    Coalesce("start_date", Value(date.min)),
-    name="relationship_unique_unordered_pair",
-)
-```
-
-关键：它不带条件，对所有类型一律生效。 原方案以为需要"只对对称类型生效"的条件索引，
-是因为把问题框成了"**对称类型**的 a/b 调位"。但**缺口 1 修好之后**（反向类型行根本不该存在），
-同一对人 + 同一类型出现两个方向**对任何类型都是错的**：
-
-- `spouse` 对称 → 本来就只该有一行
-- `parent of` → `(小明, 王强, parent of)` 意思是小明是王强的父亲，同一对人不可能双向都成立
-- `employee of` / `student at` / `referred by` → 反向无意义
-
-条件是多余的，去掉条件之后冗余列也就不需要了。方案反而更简单。
-
-两件事要分清，它们都对、但作用不同：
-
-| | 作用范围 | 层级 |
-|---|---|---|
-| `save()` 里交换 a/b | 只对 `is_symmetric=True` —— 非对称类型的方向带语义，**绝不能换** | 规范化存储与显示，**不再承担正确性** |
-| 上面那条唯一约束 | 所有类型 | 强制层，`bulk_create` 绕不过 |
-
-这也顺带解决了 `save()` 归一化"看上去在防重复其实防不住"的问题：
-现在防重复的活全部在数据库，`save()` 只管好看。
-
-**为什么用 `Coalesce` 而不是 `nulls_distinct=False`**：表达式 `UniqueConstraint` 与
-`nulls_distinct` 能否共存尚未实测（`Assignment` 那条正因为这个疑虑放弃了 `Lower("title")`）。
-`Coalesce("start_date", Value(date.min))` 语义完全等价 —— 两行都为空时仍然算重复 ——
-且不依赖那个不确定的组合。这是主方案，不是退路。
-
-为什么不用冗余列（原方案）—— 这条教训值得单独记：
-
-> 原方案要在 `Relationship` 上冗余一个 `is_symmetric` 布尔列，再建 `WHERE is_symmetric`
-> 的条件索引。**问题是那个冗余列本身由 `save()` 维护** —— 导入脚本不填它（它不是业务字段，
-> 最容易忘），条件索引就覆盖不到那些行，**漏口原封不动，只是挪了一格**；
-> 外加 `RelationshipType.is_symmetric` 每翻转一次都要配一次数据迁移回填存量行。
->
-> 用一个 `save()` 去支撑一个号称防 `save()` 绕过的约束，是自指的。
-> 判定方法就是 D9 通则那句话：不经过 `save()` 直接写两行，数据库会不会拒？
-> 冗余列方案的答案仍然是"不会"。
-
-**残余代价（如实记）**：如果将来冒出一种类型确实需要同一对人双向各一行
-（想不出例子，但 D6 适用范围第 5 条本来就是"说不清要什么字段的新关系"），
-这条约束会挡住，那时要缩小范围或加回条件。这是一个**会报错的**限制，
-不是静默的坏数据 —— 可以接受。
-
-**根因说明（比三个补法更重要）**：缺口 1 的根本原因不是"存了第二行关系"，
-而是**那个反向类型行本来就不该存在** —— "child of" 已经是 "parent of" 的 `name_b_to_a` 了。
-类型行不存在，反向关系行就根本录不出来。所以防线加在类型层，不是关系层。
+**方向约定必须写死**（`EmergencyContact.relationship_type` 的 `help_text` 里）：
+不写死一定会录反 —— "王秀英 + 母亲"到底是"王秀英是小明的母亲"还是反过来，
+读的人和录的人可以有两种理解，而两种都不报错。
 
 ##### `code` 的三步迁移（给已有的 `RelationshipType` 加字段）
 
@@ -1302,15 +1116,7 @@ Phase A 的 A10 用了"每条钉住什么"的清单，本阶段沿用。下面�
 | 两个都叫"王强"的联系人 `__str__` 不同 | 所有 autocomplete 的正确性 |
 | **同名同号**第二条被表单**拒绝保存**；勾上 `force_save` 后能存 | 硬拦截真的拦得住，且没有否认重名合法 |
 | **仅同名**（号码不同）**不**拦截，只出警告 | 拦截没有绑错信号 —— 绑到同名上就会被点习惯 |
-| `RelationshipForm(subject=小明)` 选「小明 是 ___ 的儿子」，存出 `(王强, 小明, parent of)` | 方向感知表单：两侧都能录，且方向不会反。**测试直接构造表单，不经过任何界面** —— 这本身就证明了它前端上来能复用 |
-| `/relationships/add/` 未登录被挡；`?subject=` 缺失或非法时返回 404 | 第二个自己写的视图 |
-| 录「王强 parent of 小明」后，小明侧读到 "child of" | 反向显示的缺口 |
 | ~~`BackgroundCheck` 是独立模型~~ | 随 `BackgroundCheck` 一起移出本阶段（2026-07-29）。建表时这条测试要一起写 |
-| `is_symmetric=True` 的类型显示时两侧都用 `name_a_to_b` | 对称回落 |
-| `is_symmetric=True` 存入时归一化成 id 小的在前 | 缺口 3 的规范化那一半（显示，不是正确性） |
-| `bulk_create` 直插 `(王强,李梅,spouse)` + `(李梅,王强,spouse)` 被数据库拒绝 | 缺口 3 的**强制**那一半 —— 绕过 `save()` 才是这条约束存在的理由，测试必须绕过它 |
-| `bulk_create` 直插 `(王强,小明,parent of)` + `(小明,王强,parent of)` 也被拒绝 | 无序对约束**不带条件**，对非对称类型一样生效 |
-| 同一对人、同一类型、**不同 `start_date`** 能存两行；**都为 `None`** 时第二行被拒 | `Coalesce` 版和 `nulls_distinct=False` 语义等价 |
 | `RelationshipType` 建 "Parent of" 与已有 "parent of" 冲突 | 缺口 2 大小写不敏感 |
 | `bulk_create` 直插 `" parent of"`（带前导空格）与已有 "parent of" 冲突 | 缺口 2 的 `Trim()` —— 只靠 `save()` strip 是漏的 |
 | `RelationshipType.code` 唯一，且 change 页只读 | D5 的锚点真的稳定 |

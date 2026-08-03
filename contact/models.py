@@ -1,17 +1,14 @@
-import datetime
 from collections import defaultdict
 
 from django.core.exceptions import ValidationError
 from django.db import models
-from django.db.models import Value
-from django.db.models.functions import Coalesce, Greatest, Least, Lower, Trim
+from django.db.models.functions import Lower, Trim
 from phonenumber_field.modelfields import PhoneNumberField
 from django_countries.fields import CountryField
 from simple_history.models import HistoricalRecords
 
 from core.constraints import ConstraintErrorFieldMixin
 from core.models import ImmutableCodeMixin, TimeStampedModel
-from core.querysets import DateRangeMixin, DateRangeQuerySet
 from core.timeutils import local_today
 
 
@@ -390,7 +387,8 @@ class Contact(ConstraintErrorFieldMixin, TimeStampedModel):
         Two contacts both called 王强 used to stringify identically, and every
         autocomplete in the project is built out of this string: two identical
         options in a dropdown, picking the wrong one raises nothing. That is a
-        silent data error — the relationship lands on the wrong person.
+        silent data error — the sign-up, the assignment, the emergency contact
+        all land on the wrong person.
 
         Duplicate names are NOT forbidden by a constraint: they are a legitimate
         fact and this domain has no reliable natural key (an email cannot be
@@ -415,15 +413,17 @@ class Contact(ConstraintErrorFieldMixin, TimeStampedModel):
 
 
 class RelationshipType(ImmutableCodeMixin, ConstraintErrorFieldMixin, models.Model):
-    """A dictionary of relationship kinds: 'volunteer at', 'parent of', 'spouse of'.
+    """A dictionary of relationship kinds: 'parent of', 'spouse of', 'neighbour of'.
 
-    Note 'manages' / 'managed by' are no longer used for the org chart — reporting
-    lines hang off Position.reports_to (goal.md D6 / D11).
+    The vocabulary EmergencyContact.relationship_type and
+    Participation.consent_relationship both draw on — "who is this person to
+    them". Nothing stores person-to-person relationships as rows; reporting
+    lines hang off Position.reports_to (goal.md D11).
     """
 
     # Code is what the code matches on, forever. Display names are editable in the
     # admin, which means filter(name_a_to_b="parent of") stops finding anything the
-    # day somebody renames one — silently, with no error. See goal.md D5 / D6.
+    # day somebody renames one — silently, with no error. See goal.md D5.
     code = models.SlugField(
         max_length=50,
         help_text="Stable identifier used by code. Lowercase, cannot be changed later.",
@@ -443,7 +443,7 @@ class RelationshipType(ImmutableCodeMixin, ConstraintErrorFieldMixin, models.Mod
         help_text="The relationship reads the same in both directions (spouse, sibling).",
     )
 
-    # Emergency contacts reuse this vocabulary (goal.md D6). This boolean keeps
+    # Emergency contacts draw on this vocabulary (goal.md D15). This boolean keeps
     # 'employee of' and friends out of that dropdown via limit_choices_to — the
     # same trick Contact.preferred_language already uses for living languages.
     usable_as_emergency_contact = models.BooleanField(
@@ -494,9 +494,9 @@ class RelationshipType(ImmutableCodeMixin, ConstraintErrorFieldMixin, models.Mod
 
         1. Gap 1: a new type's forward name collides with an existing type's
            reverse name. The root cause is that the reverse type row should never
-           exist at all — "child of" is already the name_b_to_a of "parent of".
-           No reverse type, no reverse relationship rows: the defence belongs at
-           the type level, not on every relationship.
+           exist at all — "child of" is already the name_b_to_a of "parent of",
+           and two rows saying the same thing means half the emergency contacts
+           get filed under one and half under the other.
         2. code is immutable once created — the shared rule, borrowed from
            ImmutableCodeMixin so Ministry / EmploymentType / Position say it
            the same way.
@@ -526,121 +526,6 @@ class RelationshipType(ImmutableCodeMixin, ConstraintErrorFieldMixin, models.Mod
 
     def __str__(self):
         return self.name_a_to_b
-
-
-class Relationship(ConstraintErrorFieldMixin, DateRangeMixin, TimeStampedModel):
-    """Connects two contacts with a typed, dated relationship.
-
-    Example rows:
-      (Alice, RedCross, 'volunteer at')
-      (Bob, Alice, 'manages')
-      (Carol, Ming, 'parent of')
-    """
-
-    contact_a = models.ForeignKey(
-        Contact,
-        on_delete=models.CASCADE,
-        related_name="relationships_as_a",
-    )
-    contact_b = models.ForeignKey(
-        Contact,
-        on_delete=models.CASCADE,
-        related_name="relationships_as_b",
-    )
-    relationship_type = models.ForeignKey(
-        RelationshipType,
-        on_delete=models.PROTECT,
-        related_name="relationships",
-    )
-
-    start_date = models.DateField(null=True, blank=True)
-    end_date = models.DateField(null=True, blank=True)
-    # No is_active: it and end_date were the same fact recorded twice, and the
-    # pair could contradict each other (is_active=True with end_date in 2020).
-    # Whether a relationship is in effect is derived — see .active() below.
-    # created_at / updated_at come from TimeStampedModel
-
-    objects = models.Manager.from_queryset(DateRangeQuerySet)()
-
-    class Meta:
-        indexes = [
-            models.Index(fields=["contact_a", "relationship_type"]),
-            models.Index(fields=["contact_b", "relationship_type"]),
-        ]
-        # These three constraints are the only statement of their rules
-        # (goal.md D14). Nothing restates them in clean(); the admin gets
-        # field-level errors from violation_error_code, via
-        # core.constraints.CONSTRAINT_FIELD.
-        constraints = [
-            models.CheckConstraint(
-                condition=~models.Q(contact_a=models.F("contact_b")),
-                name="relationship_no_self_reference",
-                violation_error_message="A contact cannot be related to themselves.",
-                violation_error_code="relationship_self_reference",
-            ),
-            # Replaces A7's (contact_a, contact_b, type, start_date) — not
-            # alongside it. The unordered version is strictly stronger: it covers
-            # every case the old one did, plus the mirrored row A7 could not see
-            # ((王强,李梅,spouse) and (李梅,王强,spouse) are different column
-            # values, so the old constraint stayed quiet).
-            #
-            # No condition on it: once the mirror *type* is impossible (gap 1,
-            # RelationshipType.clean()), one pair holding one type in two
-            # directions is wrong for every type, not just symmetric ones —
-            # (小明, 王强, parent of) says 小明 is the parent, and the two cannot
-            # both be true.
-            #
-            # Coalesce rather than nulls_distinct=False: whether an expression
-            # UniqueConstraint can carry nulls_distinct is untested, and
-            # date.min is exactly equivalent — two rows with no start date still
-            # collide — without depending on that unknown.
-            models.UniqueConstraint(
-                Least("contact_a", "contact_b"),
-                Greatest("contact_a", "contact_b"),
-                "relationship_type",
-                Coalesce("start_date", Value(datetime.date.min)),
-                name="relationship_unique_unordered_pair",
-                violation_error_message="This relationship has already been recorded.",
-                violation_error_code="relationship_already_recorded",
-            ),
-            models.CheckConstraint(
-                condition=(
-                    models.Q(end_date__isnull=True)
-                    | models.Q(start_date__isnull=True)
-                    | models.Q(end_date__gte=models.F("start_date"))
-                ),
-                name="relationship_end_date_not_before_start_date",
-                violation_error_message="The end date cannot be before the start date.",
-                violation_error_code="relationship_end_before_start",
-            ),
-        ]
-
-    def save(self, *args, **kwargs):
-        # Symmetric types (spouse, sibling) always store the lower id as
-        # contact_a, so the row has one settled reading.
-        #
-        # ⚠️ Cosmetic only — duplicates are refused by
-        #    relationship_unique_unordered_pair above, which bulk_create cannot
-        #    dodge. And asymmetric types must never be swapped: their direction
-        #    carries the meaning, so swapping reverses the sentence.
-        if self.relationship_type_id and self.relationship_type.is_symmetric:
-            if (self.contact_a_id and self.contact_b_id
-                    and self.contact_a_id > self.contact_b_id):
-                self.contact_a_id, self.contact_b_id = self.contact_b_id, self.contact_a_id
-        super().save(*args, **kwargs)
-
-    def label_from(self, side):
-        """How this relationship reads from one side: 'parent of' / 'child of'.
-
-        Symmetric types fall back to the forward label, because their reverse
-        one is empty by design — 'spouse of' backwards is still 'spouse of'.
-        """
-        if side == "contact_a" or self.relationship_type.is_symmetric:
-            return self.relationship_type.name_a_to_b
-        return self.relationship_type.name_b_to_a or self.relationship_type.name_a_to_b
-
-    def __str__(self):
-        return f"{self.contact_a} — {self.relationship_type} → {self.contact_b}"
 
 
 class EmergencyContact(ConstraintErrorFieldMixin, TimeStampedModel):
@@ -678,8 +563,9 @@ class EmergencyContact(ConstraintErrorFieldMixin, TimeStampedModel):
         limit_choices_to={"usable_as_emergency_contact": True},
         # Spelling the direction out is not optional: leave it implicit and it
         # gets entered backwards. a = the emergency contact, b = this person.
-        help_text="读作「紧急联系人 是 本人 的 ___」。"
-                  "例：小明名下填「王秀英」+「母亲」= 王秀英是小明的母亲。",
+        help_text="Read it as a sentence: “Wang Xiuying is this person's "
+                  "parent.” Pick what the emergency contact is to them, "
+                  "not the other way round.",
     )
 
     class Meta:

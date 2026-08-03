@@ -1,26 +1,35 @@
 {% extends "core/base.html" %}
-{% block title %}{{ event.name }} 签到{% endblock %}
+{% block title %}Attendance — {{ event.name }}{% endblock %}
 
 {% block content %}
-  <h1>{{ event.name }} —— 签到 / 签退 / 工时</h1>
+  <h1>{{ event.name }} — attendance and hours</h1>
   <p>
-    签退时工时自动填上；纸质补录的人没有时间戳，直接手工填工时，照样算数 ——
-    <code>hours</code> 是权威值，签到签退只是采集手段。
+    <a href="{% url 'events:event_roles' event.pk %}">← Back to roles</a> ·
+    <a href="{% url 'events:event_manage_list' %}">Events I manage</a>
+  </p>
+  <p>
+    Checking somebody out fills their hours in. Anyone entered afterwards from a
+    paper sheet has no timestamps — type the hours straight in and they count
+    just the same: the hours are the authoritative value, and check-in and
+    check-out are only one way of collecting them.
   </p>
 
   <table border="1" cellpadding="4">
-    <tr><th>人</th><th>工种</th><th>状态</th><th>签到</th><th>签退</th><th>工时</th><th>操作</th></tr>
+    <tr>
+      <th>Person</th><th>Role</th><th>Status</th><th>In</th><th>Out</th>
+      <th>Hours</th><th>Actions</th>
+    </tr>
     {% for row in participations %}
       <tr>
         <td>
           {{ row.contact }}
           {% if row.contact.is_minor is None %}
-            <br><small>生日未知（按未成年处理）</small>
+            <br><small>No date of birth — treated as under 18</small>
           {% elif row.contact.is_minor %}
-            <br><small>未成年</small>
+            <br><small>Under 18</small>
           {% endif %}
           {% for emergency in row.contact.emergency_contacts.all %}
-            <br><small>紧急联系人：{{ emergency.name }} {{ emergency.phone }}</small>
+            <br><small>Emergency contact: {{ emergency.name }} {{ emergency.phone }}</small>
           {% endfor %}
         </td>
         <td>{{ row.event_role.role.name }}</td>
@@ -32,24 +41,26 @@
           <form method="post">
             {% csrf_token %}
             <input type="hidden" name="participation" value="{{ row.pk }}">
-            <button type="submit" name="action" value="check_in">签到</button>
-            <button type="submit" name="action" value="check_out">签退</button>
+            <button type="submit" name="action" value="check_in">Check in</button>
+            <button type="submit" name="action" value="check_out">Check out</button>
           </form>
           <form method="post">
             {% csrf_token %}
             <input type="hidden" name="participation" value="{{ row.pk }}">
             {{ hours_form.hours }}
-            <button type="submit" name="action" value="hours">手工填工时</button>
+            <button type="submit" name="action" value="hours">Enter hours</button>
           </form>
         </td>
       </tr>
     {% empty %}
-      <tr><td colspan="7">还没有人报名。</td></tr>
+      <tr><td colspan="7">Nobody has signed up yet.</td></tr>
     {% endfor %}
   </table>
 
   <p><small>
-    这里的紧急联系电话是<strong>现场出事时拨号</strong>用的。活动前通知家长走的是
-    报名时收的 consent_email / consent_phone，见通知页 —— 紧急联系人没有邮箱。
+    The emergency number above is <strong>the one to ring if something happens
+    on the day</strong>. Telling a guardian about a change beforehand goes to
+    the consent email or phone collected at signup — see the notice page.
+    Emergency contacts have no email address.
   </small></p>
 {% endblock %}

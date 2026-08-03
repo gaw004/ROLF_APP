@@ -1,13 +1,16 @@
 {% extends "core/base.html" %}
-{% block title %}取消报名{% endblock %}
+{% block title %}Cancel signup{% endblock %}
 
 {% block content %}
-  <h1>取消报名</h1>
-  <p>{{ participation.event_role.event.name }} —— {{ participation.event_role.role.name }}</p>
-  <p>取消不会删掉这条记录，只是把状态改成"已取消"。</p>
+  <h1>Cancel signup</h1>
+  <p>{{ participation.event_role.event.name }} — {{ participation.event_role.role.name }}</p>
+  <p>
+    Cancelling does not delete this record; it marks it cancelled. You can sign
+    up again later if you change your mind.
+  </p>
   <form method="post">
     {% csrf_token %}
-    <button type="submit">确认取消</button>
-    <a href="{% url 'events:my_participations' %}">算了</a>
+    <button type="submit">Yes, cancel it</button>
+    <a href="{% url 'events:my_participations' %}">Never mind</a>
   </form>
 {% endblock %}

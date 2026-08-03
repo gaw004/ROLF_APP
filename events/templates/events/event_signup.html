@@ -1,20 +1,26 @@
 {% extends "core/base.html" %}
-{% block title %}报名 {{ event.name }}{% endblock %}
+{% block title %}Sign up — {{ event.name }}{% endblock %}
 
 {% block content %}
-  <h1>报名：{{ event.name }}</h1>
+  <h1>Sign up: {{ event.name }}</h1>
   {% if needs_consent %}
     <p>
-      你还未成年（或者系统里没有你的生日），所以要填家长/监护人的同意。
-      <strong>邮箱和电话至少填一个</strong> —— 活动改时间的时候要通知得到他们。
+      You are under 18 (or we do not have your date of birth), so this event
+      needs a guardian's consent.
+    </p>
+    <p>
+      The quickest way is to pick one of your emergency contacts below and say
+      how they gave consent. To name somebody else instead, fill in their
+      details — <strong>an email address or a phone number is required</strong>,
+      because they have to be reachable if the event changes.
     </p>
   {% endif %}
 
   <form method="post">
     {% csrf_token %}
     {{ form.as_p }}
-    <button type="submit">确认报名</button>
+    <button type="submit">Confirm signup</button>
   </form>
 
-  <p><a href="{% url 'events:event_detail' event.pk %}">返回</a></p>
+  <p><a href="{% url 'events:event_detail' event.pk %}">Back</a></p>
 {% endblock %}

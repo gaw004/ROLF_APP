@@ -104,7 +104,7 @@ class ParticipationRole(ImmutableCodeMixin, ConstraintErrorFieldMixin, models.Mo
     def seed_general(cls):
         """The catch-all role, created if it is not there yet."""
         role, _ = cls.objects.get_or_create(
-            code=cls.GENERAL_CODE, defaults={"name": "通用志愿者"},
+            code=cls.GENERAL_CODE, defaults={"name": "General volunteer"},
         )
         return role
 
@@ -150,6 +150,17 @@ class EventQuerySet(models.QuerySet):
         saying so.
         """
         return self.filter(start_time__gte=now or local_now())
+
+    def past(self, now=None):
+        """Already over — paired with upcoming(), and deliberately not its negation.
+
+        ⚠️ Read off end_time, not start_time. An event that began this morning
+           and runs until tonight is neither upcoming nor past, and calling it
+           past would file a running event under history while people are still
+           checking in. The two methods leave that gap on purpose; "not
+           upcoming" would have silently closed it.
+        """
+        return self.filter(end_time__lt=now or local_now())
 
     def in_period(self, start, end):
         """R1: the events that ran in a window, half-open [start, end).
@@ -199,6 +210,22 @@ class Event(ConstraintErrorFieldMixin, TimeStampedModel):
     end_time = models.DateTimeField()
     location = models.CharField(max_length=200, blank=True)
     owner = models.ForeignKey(Contact, on_delete=models.PROTECT, related_name="events_owned")
+    # Whether this event holds minors to the consent rule. Per event, and not a
+    # setting, because it genuinely differs: a Saturday food sort with parents
+    # in the room is not a weekend away, and one blanket answer would either
+    # burden the first or under-protect the second.
+    #
+    # ⚠️ Default True. A new event is protected until somebody deliberately says
+    #    otherwise — the safe direction, because the failure mode of the other
+    #    default is a minor signed up with nobody informed, and nothing about
+    #    that is visible until the day.
+    requires_guardian_consent = models.BooleanField(
+        default=True,
+        verbose_name="Minors need a guardian's consent",
+        help_text="Untick only when under-18s may sign up on their own, like an "
+                  "adult. Ticked, they need consent on file and somebody to call.",
+    )
+
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.DRAFT)
     description = models.TextField(blank=True)
 

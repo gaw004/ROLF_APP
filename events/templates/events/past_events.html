@@ -1,20 +1,18 @@
 {% extends "core/base.html" %}
-{% block title %}Events{% endblock %}
+{% block title %}Past events{% endblock %}
 
 {% block content %}
-  <h1>Events open for signup</h1>
+  <h1>Past events</h1>
   {% comment %}
-  这一页只列 open_for_signup() + 未开始的。筛选发生在查询里，不是在这里用
-  {% if %} 藏起来 —— 模板里不显示 ≠ 数据没发出去。
-
-  R1 的一半：条数由视图数（total），不是 {{ events|length }}。模板自己数的话，
-  数的可能是另一个集合 —— 比如某天有人在循环里加了 {% if %}。
+  在这一页出现之前，活动一结束就从界面上消失了 —— 而 R4–R8 的报表页恰恰是
+  活动结束之后才要看的。visible_to_volunteers()，所以已取消 / 已完成的都还在：
+  去过的人的工时挂在上面。
   {% endcomment %}
 
   <form method="get">
     {{ period.as_p }}
     <button type="submit">Filter</button>
-    <a href="{% url 'events:event_list' %}">Clear</a>
+    <a href="{% url 'events:past_events' %}">Clear</a>
   </form>
 
   <p><strong>{{ total }}</strong> event{{ total|pluralize }} in this period.</p>
@@ -25,11 +23,12 @@
         <a href="{% url 'events:event_detail' event.pk %}">{{ event.name }}</a>
         — {{ event.ministry.name }} · {{ event.start_time }} to {{ event.end_time }}
         {% if event.location %}· {{ event.location }}{% endif %}
+        · {{ event.get_status_display }}
       </li>
     {% empty %}
-      <li>No events are open for signup in this period.</li>
+      <li>No past events in this period.</li>
     {% endfor %}
   </ul>
 
-  <p><a href="{% url 'events:past_events' %}">Past events</a></p>
+  <p><a href="{% url 'events:event_list' %}">Events open for signup</a></p>
 {% endblock %}

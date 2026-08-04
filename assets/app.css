@@ -1,0 +1,141 @@
+/* Tailwind 入口 + 设计令牌。产物是 static/css/app.css。
+ *
+ * ⚠️ 源文件在 assets/ 而不是 static/src/ —— 04-roadmap.md 的 C1.1 原文写的是
+ *    static/src/app.css，这里**故意偏离**，理由和实测记在
+ *    04-roadmap.md 的计划外记录里。一句话：static/ 是要被 collectstatic 收走并
+ *    对外提供的目录，而这个文件第一行的 @import "tailwindcss" 不是一个真实存在的
+ *    静态文件 —— ManifestStaticFilesStorage 会去解析它然后在部署时直接失败。
+ *
+ * 令牌的用途分组、以及「颜色永远不许是唯一的信息载体」那条判据，
+ * 在 docs/planning/design-system.md 一、设计令牌。模板里只用语义名，
+ * 不写具体色值 —— 这个文件是它们唯一的定义处。
+ */
+
+/* ⚠️ `source(none)` 不能省。它关掉 v4 的自动扫描 —— 下面那几行 @source 是
+ *    **追加**，不是替换。只写 @source 而不写 source(none)，自动扫描照样在跑，
+ *    下面警告的那件事一件都没挡住（实测过：加了 @source 之后，
+ *    只在 design-system.md 正文里出现的 class 仍然全部进了产物）。 */
+@import "tailwindcss" source(none);
+
+/* 深色模式走 class 策略（design-system.md 二）。Tailwind v4 里 dark: 默认跟
+ * prefers-color-scheme 走，而我们要的是「跟系统，但用户能手动覆盖」——
+ * 覆盖需要一个我们说了算的开关，那就是 <html> 上的 .dark。
+ * <head> 里那段内联脚本负责在首帧之前决定加不加它。 */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* 扫哪些文件找 class。
+ *
+ * ⚠️ 04-roadmap.md 的 C1.1 写着「漏配这一行的表现是样式在开发时正常、构建后
+ *    大面积消失」——**那是 Tailwind v3 的问题，v4 上不成立**。实测把这几行全删掉，
+ *    产物照样有 bg-brand-600：v4 会从 cwd 自动扫描（并且尊重 .gitignore）。
+ *
+ * ⚠️ 但**自动扫描更糟，而且糟得不报错**。实测：不写 @source 时，
+ *    rounded-full / shadow-lg / text-4xl / max-w-6xl / overflow-x-auto
+ *    全都进了产物 —— 它们一个模板都没用过，只出现在
+ *    docs/planning/design-system.md 的**正文里**。也就是说自动扫描把设计文档
+ *    当成了 class 的来源。
+ *
+ *    这不只是多几 KB。真正的代价是**它会掩盖拼错**：模板里写了 bg-brnad-600，
+ *    只要正确拼法在某份文档里出现过，产物里就有那条规则 —— 页面照样不对，
+ *    而你唯一能指望的信号（「这个 class 没被生成」）已经被喂饱了。
+ *
+ * 所以显式列到 app 名一级。⚠️ 不写 ../**\/templates —— 那个会把 .venv 里
+ * Django admin 的模板也扫进来，而显式 @source 是不看 .gitignore 的。 */
+@source "../accounts/templates";
+@source "../contact/templates";
+@source "../core/templates";
+@source "../events/templates";
+@source "../org/templates";
+
+
+@theme {
+  /* --- 品牌：青蓝。冷静、非营利感，不像促销 -------------------------------
+   * 用在主按钮、链接、选中态、焦点环。
+   * ⚠️ 两个实测过的对比度，模板里照着用，别换档：
+   *      链接文字 = brand-700，白底上 7.2:1（正文要求 4.5:1）
+   *      主按钮   = brand-600 底 + 白字，5.2:1
+   *    design-system.md 原文写的是「brand-500 做背景配白字够」——**不够**，
+   *    实测 3.65:1。那一行已按实测改掉。 */
+  --color-brand-50:  #eff9fb;
+  --color-brand-100: #d7f0f6;
+  --color-brand-200: #b0e1ed;
+  --color-brand-300: #7cccdf;
+  --color-brand-400: #45aecb;
+  --color-brand-500: #2591b0;
+  --color-brand-600: #1f7594;
+  --color-brand-700: #1f5e78;
+  --color-brand-800: #204e62;
+  --color-brand-900: #1e4152;
+
+  /* --- 中性：带一点蓝的灰。纯灰会显得脏 -----------------------------------
+   * 用在文字、边框、背景、分隔线。 */
+  --color-ink-50:  #f6f8fa;
+  --color-ink-100: #eceff3;
+  --color-ink-200: #dde2e9;
+  --color-ink-300: #c3ccd6;
+  --color-ink-400: #94a2b1;
+  --color-ink-500: #6b7b8c;
+  --color-ink-600: #52616f;
+  --color-ink-700: #3e4b57;
+  --color-ink-800: #2b343d;
+  --color-ink-900: #1a2027;
+  --color-ink-950: #10151a;
+
+  /* --- 语义：各带 -fg / -bg 两档 -------------------------------------------
+   * 用在消息提示、状态标签、破坏性按钮。
+   * ⚠️ 颜色只是装饰。每个状态标签必须带文字 —— 判据是「把 app.css 删掉页面仍然
+   *    可用」，而「靠绿色和灰色区分已报名/未报名」删掉样式之后什么都不剩。
+   *    那不是样式，那是内容。 */
+  --color-success-fg: #166534;
+  --color-success-bg: #dcfce7;
+  --color-warning-fg: #854d0e;
+  --color-warning-bg: #fef9c3;
+  --color-danger-fg:  #991b1b;
+  --color-danger-bg:  #fee2e2;
+  --color-info-fg:    #1e40af;
+  --color-info-bg:    #dbeafe;
+
+  /* 深色下的语义色。前景提亮、背景压暗 —— 浅色那一套直接搬到深色底上，
+   * 前景会亮得刺眼而背景会糊成一块。 */
+  --color-success-fg-dark: #86efac;
+  --color-success-bg-dark: #14361f;
+  --color-warning-fg-dark: #fde047;
+  --color-warning-bg-dark: #3a2e08;
+  --color-danger-fg-dark:  #fca5a5;
+  --color-danger-bg-dark:  #3f1414;
+  --color-info-fg-dark:    #93c5fd;
+  --color-info-bg-dark:    #16244d;
+
+  /* 系统字体栈，不引 web font。一个内部工具为几十 KB 的字体文件付一次首屏延迟，
+   * 换不来东西。 */
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+               "Helvetica Neue", Arial, "Noto Sans", sans-serif,
+               "Apple Color Emoji", "Segoe UI Emoji";
+}
+
+/* x-cloak：Alpine 接手之前先把元素藏起来，否则模态和下拉会在加载瞬间闪一下。
+ * ⚠️ 这条规则必须存在于 CSS 里，光在模板上写 x-cloak 属性没有任何作用 ——
+ *    x-cloak 只是一个属性选择器的钩子，藏起来的是这条规则。 */
+[x-cloak] {
+  display: none !important;
+}
+
+/* 键盘可达性的两条底线，写在这里而不是每个组件各写一遍。 */
+@layer base {
+  /* 焦点环统一。⚠️ 不许在模板里用 outline-none 关掉它而不给替代 ——
+   * 键盘用户和读屏用户靠它，而它是最容易在「觉得难看」时被删掉的东西。 */
+  :focus-visible {
+    outline: 2px solid var(--color-brand-500);
+    outline-offset: 2px;
+  }
+
+  /* 尊重「减少动效」。有前庭系统敏感的人，而这条是一行的事。 */
+  @media (prefers-reduced-motion: reduce) {
+    *, ::before, ::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+}

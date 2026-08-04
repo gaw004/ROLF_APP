@@ -814,3 +814,92 @@ class ErrorPageTests(TestCase):
 
         html = loader.get_template("500.html").render()
         self.assertIn("Something went wrong", html)
+
+
+def _theme_colors():
+    """The --color-* tokens in assets/app.css, as {name: "#rrggbb"}.
+
+    Parsed from the stylesheet rather than repeated here: that file is the one
+    definition point for colour, and a table of hex values in a test is a
+    second one — the copy that drifts is always the one nobody remembers.
+    """
+    source = (Path(settings.BASE_DIR) / "assets" / "app.css").read_text(encoding="utf-8")
+    return {
+        name: value.lower()
+        for name, value in re.findall(r"--color-([\w-]+):\s*(#[0-9a-fA-F]{6})\s*;", source)
+    }
+
+
+def _relative_luminance(hex_colour):
+    """WCAG 2.x relative luminance."""
+    channels = [int(hex_colour[i:i + 2], 16) / 255 for i in (1, 3, 5)]
+    linear = [c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4 for c in channels]
+    return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2]
+
+
+def contrast_ratio(one, other):
+    """How far apart two colours are, 1.0 (identical) to 21.0 (black on white)."""
+    a, b = _relative_luminance(one), _relative_luminance(other)
+    lighter, darker = max(a, b), min(a, b)
+    return (lighter + 0.05) / (darker + 0.05)
+
+
+class ContrastGuardTests(TestCase):
+    """design-system.md 那张对比度表，做成跑得出来的数字。
+
+    ⚠️ 这条守卫存在的理由是**目测查不出来**：`ink-500` 在白底上是 4.34:1，
+       差 4.5 那条线一点点，而 4.34 和 4.5 在屏幕上看不出任何区别。
+       写这份规范的第一版就凭感觉写错了两条（见 design-system.md 对比度那节）。
+
+    颜色从 assets/app.css 解析，不在这里抄一份 —— 抄一份就是第二个真相。
+    """
+
+    # (前景, 背景, 至少几比几, 这是干什么用的)。改色值改到不达标会红。
+    PAIRS = [
+        ("brand-700", "white",     4.5, "链接文字"),
+        ("white",     "brand-600", 4.5, "主按钮：白字配品牌底"),
+        ("ink-900",   "ink-50",    4.5, "浅色下的正文"),
+        ("ink-600",   "white",     4.5, "浅色下的次要文字 / 帮助文字"),
+        ("ink-50",    "ink-950",   4.5, "深色下的正文"),
+        ("brand-300", "ink-950",   4.5, "深色下的链接"),
+        ("success-fg", "success-bg", 4.5, "状态标签 success"),
+        ("warning-fg", "warning-bg", 4.5, "状态标签 warning"),
+        ("danger-fg",  "danger-bg",  4.5, "状态标签 danger"),
+        ("info-fg",    "info-bg",    4.5, "状态标签 info"),
+        ("success-fg-dark", "success-bg-dark", 4.5, "深色下的 success"),
+        ("warning-fg-dark", "warning-bg-dark", 4.5, "深色下的 warning"),
+        ("danger-fg-dark",  "danger-bg-dark",  4.5, "深色下的 danger"),
+        ("info-fg-dark",    "info-bg-dark",    4.5, "深色下的 info"),
+        # 焦点环只要看得见就行，按「大字号和图标」那档 3:1。
+        ("brand-500", "white",   3.0, "焦点环，浅色下"),
+        ("brand-500", "ink-950", 3.0, "焦点环，深色下"),
+    ]
+
+    def test_every_documented_pair_meets_its_ratio(self):
+        palette = _theme_colors() | {"white": "#ffffff", "black": "#000000"}
+        failures = []
+        for fg, bg, minimum, purpose in self.PAIRS:
+            missing = [n for n in (fg, bg) if n not in palette]
+            if missing:
+                failures.append(f"{purpose}: 令牌不存在 {missing}")
+                continue
+            got = contrast_ratio(palette[fg], palette[bg])
+            if got < minimum:
+                failures.append(
+                    f"{purpose}: {fg} on {bg} = {got:.2f}, 要求 {minimum}")
+        self.assertEqual(
+            failures, [],
+            "design-system.md 的对比度表对不上 assets/app.css：\n" + "\n".join(failures))
+
+    def test_ink_500_is_not_usable_as_body_text(self):
+        """规范里那条最容易破的规矩，写成断言。
+
+        `ink-500` 看起来就像个「次要文字」色，而它在白底上是 4.34:1 —— 过不了线。
+        ⚠️ 这条断言的方向是**反的**（断言它 < 4.5），所以有人把 ink-500 调深到
+        达标时它会红。那不是误报：调深了就该回到规范里把「只做边框」那条删掉，
+        而不是留着一条已经不成立的规矩。
+        """
+        palette = _theme_colors()
+        self.assertLess(
+            contrast_ratio(palette["ink-500"], "#ffffff"), 4.5,
+            "ink-500 现在够做正文了 —— 去 design-system.md 删掉「只做边框」那条")

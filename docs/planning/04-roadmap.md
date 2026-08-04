@@ -58,6 +58,24 @@ C1 / C2 **还是叫 C1 / C2**，只是正文搬到了这里——同 `goal.md` �
 - `content` 指向 `["./*/templates/**/*.html"]`——⚠️ **漏配这一行的表现是
   样式在开发时正常、构建后大面积消失**，因为 Tailwind 扫不到模板就把 class 全摇掉了。
 
+> ⚠️ **上面这两条实施时都改掉了**（2026-08-03），各有一次实测：
+> 源文件从 `static/src/` 挪到了 **`assets/`**（放 `static/` 里会让部署当天的
+> `collectstatic` 直接失败），`content` 那条在 Tailwind v4 上**不成立**，
+> 而真正要写的是另一样东西。经过在[计划外记录](#c11--源文件不能放在-static-里面)。
+
+### C1.1 的实际落点（2026-08-03 实测）
+
+| 项 | 值 |
+|---|---|
+| 版本 | tailwindcss 4.3.3 · htmx.org 2.0.10 · alpinejs 3.15.12 · esbuild 0.28.1 |
+| 源文件 | `assets/app.css` · `assets/js/app.js`（**不是** `static/src/`，见下） |
+| 产物 | `static/css/app.css`（6.5 KB，模板还没上 class）· `static/js/app.js`（104.6 KB） |
+| 构建 | `npm run build` = Tailwind CLI + esbuild bundle，实测 **65ms** |
+| JS 打包器 | **esbuild** —— 原计划没提。`app.js` 要 `import` htmx 和 alpine，浏览器吃不了裸 `import`，得有人把它们打成一个文件 |
+| 扫描口径 | `@import "tailwindcss" source(none)` + 五条 `@source` 指到各 app 的 `templates/` |
+| 令牌 | 品牌 10 档 · 中性 11 档 · 语义 4 组 ×（`-fg`/`-bg`/`-fg-dark`/`-bg-dark`） |
+| 新守卫 | `core.tests.ContrastGuardTests` —— 对比度做成跑得出来的数字，见下 |
+
 ### C1.2 产物走 CI，不进主分支
 
 **GitHub Actions 构建 → 推部署分支**，Render 盯那个分支。
@@ -93,6 +111,23 @@ C1 / C2 **还是叫 C1 / C2**，只是正文搬到了这里——同 `goal.md` �
 **验证**：`npm run build` 产出两个文件；
 `python manage.py collectstatic --noinput` 成功；
 `test` 全绿且测试数不低于 C0.5 收尾时的实测数；`ruff check .` 干净。
+
+**实测结果（2026-08-03，C1 四步全部做完）**：
+
+| 项 | 结果 |
+|---|---|
+| `npm run build` | 两个产物都在（CSS 6.5 KB · JS 104.6 KB），65ms |
+| `collectstatic`（dev） | 387 files copied |
+| `collectstatic`（**prod 的 Manifest 存储**） | 653 post-processed，产物带 hash 和 `.gz` |
+| `python manage.py test` | **411 个，全绿**（37.0s）—— C0.5 收尾是 409，对比度守卫带来 2 个 |
+| `check` / `makemigrations --check` / `ruff check .` | 干净 / No changes / All checks passed |
+| 新增文件 | `package.json` · `package-lock.json` · `assets/app.css` · `assets/js/app.js` · `.github/workflows/deploy-branch.yml` |
+| 改动 | `base.py`（whitenoise 中间件 + `STATICFILES_DIRS`）· `prod.py`（Manifest 存储）· `requirements.txt`（whitenoise）· `.gitignore`（产物不进 git）· `ci.yml`（接前端 + prod collectstatic） |
+
+⚠️ **CI 里多加了一步不在计划里的**：用 **prod 的 settings** 跑一遍 `collectstatic`。
+dev 用的是普通存储，什么都不检查；会失败的是 prod 的
+`CompressedManifestStaticFilesStorage`，而它失败的时刻本来是**部署当天**。
+这一步把那一刻提前到 PR 上 —— 它正是下面第一条计划外记录的守卫。
 
 ---
 
@@ -204,4 +239,96 @@ views / forms / services 原样带走」——这一步就是兑现它。**注�
 > **实施时才发现的坑记在这里。** 这一节是这个项目最贵的资产之一
 > （见 [`goal.md` 的约定 2](goal.md#-文件地图2026-07-30-拆分)）——一条都不删。
 
-（还没开工。C0.5 和 C1 踩到的坑记进来。）
+### C1.1 · 源文件不能放在 `static/` 里面
+
+计划写的是 `static/src/app.css`。**照着做会在部署当天失败**，而且在本机怎么跑都发现不了。
+
+`static/` 是 `collectstatic` 要收走并对外提供的目录。生产用的
+`CompressedManifestStaticFilesStorage` 会**解析每个收进来的 CSS 里的 `@import`
+和 `url()`**，把它们当成静态文件去找。而 Tailwind 入口文件的第一行正是：
+
+```css
+@import "tailwindcss";
+```
+
+它不是一个文件。实测（把源文件放回 `static/src/` 复现的）：
+
+```
+Post-processing 'src/app.css' failed!
+MissingFileError: The file 'src/tailwindcss' could not be found
+```
+
+⚠️ **在本机永远看不到它** —— dev 用的是普通存储，不做 post-processing。
+所以这件事只会在 Render 第一次跑 `build.sh` 时发生，那时 20 个模板都写完了。
+
+处置两条：
+
+1. 源文件挪到 **`assets/`**，`static/` 只装构建产物。
+   `STATICFILES_DIRS = [BASE_DIR / "static"]`；
+2. CI 里加一步**用 prod 的 settings 跑 `collectstatic`**。
+   光挪目录只是绕开了这一次，那一步才让下一次也撞不上。
+
+### C1.1 · Tailwind v4 的扫描口径：计划里那条警告是反的
+
+计划写着「`content` 指向 `["./*/templates/**/*.html"]`——⚠️ 漏配这一行的表现是
+样式在开发时正常、构建后大面积消失」。**那是 Tailwind v3 的问题，v4 上不成立。**
+实测把 `@source` 全删掉，产物里照样有 `bg-brand-600` —— v4 会从 cwd 自动扫描。
+
+⚠️ **但自动扫描更糟，而且糟得不报错。** 实测不写 `@source` 时，
+`rounded-full` / `shadow-lg` / `text-4xl` / `max-w-6xl` / `overflow-x-auto`
+全都进了产物 —— 它们**一个模板都没用过**，只出现在
+[`design-system.md`](design-system.md) 的**正文里**。自动扫描把设计文档当成了
+class 的来源（它尊重 `.gitignore`，而 `docs/` 是提交进 git 的）。
+
+代价不是多几 KB，是**它会掩盖拼错**：模板里写 `bg-brnad-600`，
+只要正确拼法在某份文档里出现过，产物里就有那条规则 —— 页面照样不对，
+而唯一能指望的信号（「这个 class 没被生成」）已经被喂饱了。
+
+⭐ **然后踩了第二脚**：加上 `@source` 之后再量，那五个 class **还在**。
+因为 v4 的 `@source` 是**追加**，不是替换。要关掉自动扫描得写：
+
+```css
+@import "tailwindcss" source(none);
+```
+
+⚠️ 少了 `source(none)`，上面那一整段警告一条都没挡住，
+而产物看起来完全正常 —— 加了 `@source` 那一刻你会以为已经解决了。
+
+### C1.1 · 对比度是算得出来的数，凭感觉写规范就会写错
+
+[`design-system.md`](design-system.md) 原来写「`brand-500` 在白底上做正文文字不够，
+**做背景配白字够**」。写令牌时顺手算了一遍：**不够，实测 3.65:1**。
+对比度是对称的 —— 换个方向不会变大，白字配 `brand-500` 和 `brand-500` 做文字是同一个数。
+主按钮改用 `brand-600`（5.21:1）。
+
+同一次量出来的第二条：**`ink-500` 在白底上是 4.34:1**，差 4.5 那条线一点点。
+它看着就像个「次要文字」色，实际只能做边框和分隔线，次要文字最浅到 `ink-600`。
+
+> ⚠️ **这两条最要命的地方是目测查不出来** —— 4.34 和 4.5 在屏幕上没有任何区别。
+> 所以补了一条守卫 `core.tests.ContrastGuardTests`：色值从 `assets/app.css`
+> **解析**出来（不在测试里抄第二份），照 design-system.md 那张表逐对算。
+> 验证过它抓得住：把 `brand-600` 调回 `brand-500` 的值，
+> 报的是「主按钮：白字配品牌底: white on brand-600 = 3.65, 要求 4.5」。
+
+### C1.2 · 产物分支的 `git commit` 失败不能 `exit`
+
+第一版写成：
+
+```bash
+git commit -m "build: ..." || { echo "Nothing changed."; exit 0; }
+git push --force origin deploy
+```
+
+⚠️ **`push` 被跳过了**。「产物没变」和「main 前进了」是两件事，而后者仍然要推 ——
+表现会是**只改了 Python 的那次提交永远上不了线**，而 CI 全绿、Render 说部署成功
+（它部署的是上一版）。改成 `|| echo`，`push` 永远跑。
+
+### C1.2 · 构建出空壳不会报错，所以给产物定了个下限
+
+Tailwind 扫不到任何模板时**不报错**，只是产出一个几百字节的空壳，
+后面每一步都照常成功 —— 直到有人打开线上页面。
+所以 `deploy-branch.yml` 里加了一步：CSS 小于 2KB 或 JS 小于 20KB 就红。
+
+> 这条和上面「自动扫描掩盖拼错」是同一个形状：
+> 前端构建的失败模式**大多是「安静地少做了一点」，不是「炸掉」**。
+> 所以每一处都要有一个能量出来的下限。

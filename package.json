@@ -1,0 +1,27 @@
+{
+  "name": "rolf_app",
+  "version": "1.0.0",
+  "description": "A volunteer- and resource-management web application for a non-profit foundation: who the people are, what posts they hold, what they turn up to, and what money comes in.",
+  "private": true,
+  "license": "ISC",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/gaw004/ROLF_APP.git"
+  },
+  "scripts": {
+    "build:css": "tailwindcss --input assets/app.css --output static/css/app.css --minify",
+    "build:js": "esbuild assets/js/app.js --bundle --minify --format=iife --outfile=static/js/app.js",
+    "build": "npm run build:css && npm run build:js",
+    "watch:css": "tailwindcss --input assets/app.css --output static/css/app.css --watch",
+    "watch:js": "esbuild assets/js/app.js --bundle --format=iife --outfile=static/js/app.js --watch"
+  },
+  "devDependencies": {
+    "@tailwindcss/cli": "^4.3.3",
+    "esbuild": "^0.28.1",
+    "tailwindcss": "^4.3.3"
+  },
+  "dependencies": {
+    "alpinejs": "^3.15.12",
+    "htmx.org": "^2.0.10"
+  }
+}

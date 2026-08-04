@@ -73,6 +73,16 @@ AUTH_USER_MODEL = "accounts.User"
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
+    # ⚠️ Directly after SecurityMiddleware and before everything else, as
+    # whitenoise documents. It serves the built CSS and JS itself so that
+    # Render needs no separate web server or CDN in front of gunicorn — the
+    # whole reason the deployment in C3.5 is one service rather than two.
+    #
+    # Order is not cosmetic here: a static file answered from this position
+    # never runs the session, auth or history middleware below, which is both
+    # faster and the reason a missing asset cannot take a database query with
+    # it.
+    'whitenoise.middleware.WhiteNoiseMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
@@ -182,6 +192,17 @@ USE_TZ = True
 
 STATIC_URL = 'static/'
 STATIC_ROOT = BASE_DIR / 'staticfiles'
+
+# The built CSS and JS. `static/` holds **build products only** — the sources
+# they are built from live in `assets/`, outside anything collectstatic looks
+# at.
+#
+# ⚠️ 04-roadmap.md 的 C1.1 原文把源文件放在 `static/src/`。**故意偏离**，理由是
+#    一个会在部署那天才炸的东西：`assets/app.css` 的第一行是
+#    `@import "tailwindcss"`，而 ManifestStaticFilesStorage 会去解析 CSS 里的
+#    @import 并把它当成一个静态文件来找。找不到 → collectstatic 直接失败。
+#    经过和实测记在 04-roadmap.md 的计划外记录里。
+STATICFILES_DIRS = [BASE_DIR / 'static']
 
 
 # --- Models -----------------------------------------------------------------

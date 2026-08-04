@@ -66,6 +66,21 @@ jobs:
           python-version: "3.14"
           cache: pip
 
+      # C1.3 —— 前端接进同一个 workflow。
+      # ⚠️ 必须在跑测试之前构建：static/css/app.css 和 static/js/app.js 不进
+      #    git（见 .gitignore 里的理由），而 prod.py 的 ManifestStaticFilesStorage
+      #    要求每个 {% static %} 引到的文件真的存在。少了这一步，任何一条
+      #    collectstatic 相关的检查都会在 CI 上红而在本机绿。
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Build the front end
+        run: |
+          npm ci
+          npm run build
+
       - name: Install dependencies
         run: pip install -r requirements-dev.txt
 
@@ -84,3 +99,14 @@ jobs:
 
       - name: tests
         run: python manage.py test
+
+      # ⚠️ 用 **prod** 的 settings 跑，不是 dev。dev 用的是普通存储，什么都不检查；
+      #    真正会失败的是 prod 的 CompressedManifestStaticFilesStorage —— 它解析
+      #    每个 CSS 里的 @import 和 url()，解析不了就 MissingFileError，
+      #    而那一刻是**部署当天**。这一步把那一刻提前到 PR 上。
+      #    （这条守卫的由来：C1.1 把 Tailwind 源文件放进 static/ 会踩的正是它。）
+      - name: collectstatic with the production storage
+        env:
+          DJANGO_SETTINGS_MODULE: config.settings.prod
+          DJANGO_ALLOWED_HOSTS: example.com
+        run: python manage.py collectstatic --noinput

@@ -12,9 +12,11 @@
 > | 文件 | 装什么 | 什么时候看 |
 > |---|---|---|
 > | **`goal.md`**（本文件） | 目标 · 技术选型 · **当前优先级** · 导航 · 进度一览 · 下一步 | 每次开工前 |
-> | [`decisions/`](decisions/README.md) | D1–D22，一条决策一个文件 | 想知道"某件事当初为什么这么定" |
-> | [`phase-c.md`](phase-c.md) | **Phase C** 的要点：判据 · **落点规矩**（样式写哪、什么该翻）· 验收口径 · 已知缺口 | 当前开工期间天天翻 |
-> | [`03-roadmap.md`](03-roadmap.md) | **Phase C** 的**实施步骤** C0–C5（照着一步步做） | 当前动手写代码时 |
+> | [`decisions/`](decisions/README.md) | D1–D24，一条决策一个文件 | 想知道"某件事当初为什么这么定" |
+> | [`phase-c.md`](phase-c.md) | **Phase C** 的要点：判据 · **落点规矩**（样式写哪、JS 写哪、什么该翻）· 验收口径 · 已知缺口 | 当前开工期间天天翻 |
+> | [`03-roadmap.md`](03-roadmap.md) | **Phase C** 的**实施步骤** C0 · C0.5 · C3 · C4 · C5（照着一步步做） | 当前动手写代码时 |
+> | [`04-roadmap.md`](04-roadmap.md) | **Phase C 的前端分册**：C1（构建链）· C2（设计系统 + 20 个模板） | 做前端那一段时 |
+> | [`design-system.md`](design-system.md) | 色板 · 字号 · 间距 · 组件 · HTMX 与 Alpine 的用法 | C2 逐页重写时天天翻 |
 > | [`phase-b.md`](phase-b.md) | Phase B 的模型表 + 全部实现要点 + 测试清单 + 验收 | 查 Phase B 建的表和它们的判据 |
 > | [`02-roadmap.md`](02-roadmap.md) | Phase B 的**实施步骤** B0–B13 | 查历史 |
 > | [`progress.md`](progress.md) | 已完成的部分（数据核心 / Phase A）+ Phase C / D 的计划 | 想知道"走到哪了" |
@@ -30,6 +32,10 @@
 >    正文搬走了，但**"见 goal.md X"这种引用仍然成立**，因为本文档一定能把你导到 X。
 > 2. **每个 Phase 一份 `0N-roadmap.md`**，编号递增，**旧的不覆盖、不删除** ——
 >    里面的「计划外」记录（踩过的坑）是这个项目最贵的资产之一。
+>    **2026-08-03 放宽了一格**：Phase C 有两份手册（`03` 是主册，
+>    `04` 是它的前端分册），因为前端目标改成 Tailwind + HTMX + Alpine 之后
+>    C1 / C2 装不下了。**所以 Phase D 的手册用 `05-roadmap.md`**，不是 `04`。
+>    约定的意图（旧的不覆盖、编号是稳定引用）不变，只是「一个 Phase 一份」这条形式松了。
 > 3. 正文不写代码行号。 代码搬一次行号就变成假的，而假引用比没引用更糟
 >    （已经踩过两次，见 [`revisions.md`](revisions.md)）。写文件名 + 符号名。
 > 4. **链接由测试看着**（`core.tests.MarkdownLinkGuardTests`，第十一次「测试当 lint」）：
@@ -116,7 +122,7 @@
 | 某件事为什么现在不做？ | [`deferred.md`](deferred.md) |
 | 还有什么没拍板？ | [六 · 还没定的](#还没定的哪些阻塞哪些不阻塞) |
 
-### 决策一览 D1–D23
+### 决策一览 D1–D24
 
 **完整索引在 [`decisions/README.md`](decisions/README.md)**（每条一句话结论 + 它回答的问题）。
 一条决策一个文件，编号是稳定引用。
@@ -282,8 +288,8 @@
 | 后端 | Django 5.2 | 自带 ORM / Admin / 认证 / 权限 |
 | 数据库 | PostgreSQL | 数据高度关系化，不碰 NoSQL |
 | 界面（起步） | Django Admin | 不写前端 |
-| 界面（对外，Phase B 起） | Django 模板 + HTMX | **2026-07-29 提前**：志愿者不能用 Admin，自助页面进当前阶段（[D21](decisions/D21-self-service-and-permissions.md#d21--对外账号志愿者自助页面提前权限成为它的前置条件2026-07-29)）。原备注"等后端和数据模型稳定了再做"随 [D2](decisions/D02-frontend-deferred.md#d2--前端推迟到后端与数据模型完善之后) 一起部分作废；**不上 React / Vue 这一半仍然成立** |
-| 部署 | 托管平台（Render / Fly.io）+ 独立托管 Postgres | 数据库独立于应用，随时能迁走 |
+| 界面（对外，Phase B 起） | Django 模板 + Tailwind + HTMX + Alpine | **2026-07-29 提前**：志愿者不能用 Admin，自助页面进当前阶段（[D21](decisions/D21-self-service-and-permissions.md#d21--对外账号志愿者自助页面提前权限成为它的前置条件2026-07-29)）。原备注"等后端和数据模型稳定了再做"随 [D2](decisions/D02-frontend-deferred.md#d2--前端推迟到后端与数据模型完善之后) 一起部分作废；**不上 React / Vue 这一半仍然成立**。<br>**2026-08-03 补齐**：本行原来只写 HTMX，而 `phase-c.md` 那边只写 Tailwind —— 两份文档各记了一半。三层的分工见 [D24](decisions/D24-htmx-alpine-tailwind.md)，具体写法见 [`design-system.md`](design-system.md) |
+| 部署 | **Render**（Web Service + 它的托管 Postgres） | 2026-08-03 定死了是 Render，数据库也用它的。原文写的是「托管平台（Render / Fly.io）+ 独立托管 Postgres」——**「独立」指的是独立于应用进程、能被一个 `pg_dump` 整体带走，不是「必须另找一家」**。判据和代价见 [D3 的 2026-08-03 补](decisions/D03-portable-postgres.md#2026-08-03-补render-的托管-postgres-过不过这一关)。<br>⚠️ **备份不放 Render** —— 库和备份在同一家，平台出事两边一起没。备份走 Cloudflare R2 |
 
 ---
 
@@ -292,7 +298,7 @@
 
 ## 三、重大决策记录 → [`decisions/`](decisions/README.md)
 
-D1–D22 **一条一个文件**，索引见 [`decisions/README.md`](decisions/README.md)。
+D1–D24 **一条一个文件**，索引见 [`decisions/README.md`](decisions/README.md)。
 
 > **为什么搬走**：D1–D18 原来全部塞在 `<details>` 里，而本文档有几十处链接指向它们内部的小节 ——
 > **点过去都是收起状态**。拆开之后每条决策是一页，链接落在正文上。
@@ -308,8 +314,8 @@ D1–D22 **一条一个文件**，索引见 [`decisions/README.md`](decisions/RE
 |---|---|---|
 | 数据核心设计（`Contact` / `Language` / `EmergencyContact`） | ✅ 已完成，有测试 | [`progress.md`](progress.md#-已完成--数据核心设计这是目前最有价值的部分) |
 | **Phase A · 地基加固**（A1–A10） | ✅ 已完成（2026-07-27，分支 `phase-a`） | [`progress.md`](progress.md#-已完成--phase-a-地基加固) · [`01-roadmap.md`](01-roadmap.md) |
-| Phase B · 活动闭环 | 🔄 表和服务全部落地、**334 个测试全绿**，但 2026-07-31 查出**五处缺口，四处是「有服务没页面」** —— 补齐（C0.2）+ 浏览器验收（C0.3）之后才能标 ✅ | [`phase-b.md`](phase-b.md)（要点） · [`02-roadmap.md`](02-roadmap.md)（步骤） · [五处缺口](phase-c.md#phase-b-的五处缺口2026-07-31-发现) |
-| Phase C · 上线与真实运营 | 🔄 **当前在做**（2026-07-31 开工） | [`phase-c.md`](phase-c.md)（要点） · [`03-roadmap.md`](03-roadmap.md)（步骤） · [`progress.md`](progress.md#phase-c--上线与真实运营)（原始计划） |
+| Phase B · 活动闭环 | 🔄 五处缺口已补齐（C0.2）、**404 个测试全绿**，**只差 [C0.3](03-roadmap.md#c03-三角色浏览器验收) 那一遍浏览器验收**就能标 ✅ | [`phase-b.md`](phase-b.md)（要点） · [`02-roadmap.md`](02-roadmap.md)（步骤） · [五处缺口](phase-c.md#phase-b-的五处缺口2026-07-31-发现) |
+| Phase C · 上线与真实运营 | 🔄 **当前在做**（2026-07-31 开工，2026-08-03 重排） | [`phase-c.md`](phase-c.md)（要点） · [`03-roadmap.md`](03-roadmap.md)（主册） · [`04-roadmap.md`](04-roadmap.md)（前端分册） · [`progress.md`](progress.md#phase-c--上线与真实运营)（原始计划） |
 | Phase D · 资金追踪 | ⬜ 未开始 | [`progress.md`](progress.md#phase-d--资金追踪) |
 
 > **Phase B 完成的定义**：[零](#零当前优先级2026-07-29-定)里 R1–R8 + P1–P6 全部跑通，
@@ -344,7 +350,8 @@ D1–D22 **一条一个文件**，索引见 [`decisions/README.md`](decisions/RE
 `MinistryRole` + `org/permissions.py`、注册流程、志愿者自助页、ministry admin 侧页面、
 活动变更通知、R1–R8 的统计口径、`seed_demo`。
 测试从 192 涨到 **334**（2026-07-31 删通用关系表带走了六个测试类，从 363 降下来 ——
-下降的口径见 [`phase-c.md`](phase-c.md#测试数基线只增不减的新口径)），
+下降的口径见 [`phase-c.md`](phase-c.md#测试数基线只增不减的新口径)；
+C0.2 和它的返工之后是 **404**），
 `check` / `makemigrations --check` / `ruff` 都干净，
 12 条 grep 守卫做过双向验证。实测结果见 [`02-roadmap.md` 的收尾那节](02-roadmap.md#自动化部分的实测结果)。
 
@@ -354,16 +361,33 @@ D1–D22 **一条一个文件**，索引见 [`decisions/README.md`](decisions/RE
 证据和成因在 [`phase-c.md`](phase-c.md#phase-b-的五处缺口2026-07-31-发现)，
 补法在 [`03-roadmap.md` 的 C0.2](03-roadmap.md#c02--补齐-14-条的功能缺口)。
 
-**所以下一步是 C0.2 补缺口，然后才是浏览器里那一遍**：照
-[验收清单](phase-b.md#验收2026-07-29-重写改成按-14-条需求逐条验收)扮三个角色各走一遍。
-`python manage.py seed_demo` 一条命令把数据造齐（账号密码在命令的输出里），
-清单上大部分勾已经有对应的自动化测试（`events.tests.AcceptanceWalkTests`），
-**但浏览器那一遍仍然要走** —— 表单排版坏了、链接指向空处，断言看不出来。
-两步都走完，再把上面那张表的 Phase B 改成 ✅。
+**C0.2 已经做完了**（2026-08-03）：五处缺口全补上，加上浏览器带回的那一轮返工，
+测试 **334 → 404**。
 
-> **这一轮学到的**：334 个测试全绿，而四个功能没有入口 ——
+**所以下一步是 [C0.3](03-roadmap.md#c03-三角色浏览器验收) 和
+[C0.5](03-roadmap.md#c05--上线前的三条死链) 这两件。**
+
+- **C0.3**：照[验收清单](phase-b.md#验收2026-07-29-重写改成按-14-条需求逐条验收)扮三个角色各走一遍。
+  `python manage.py seed_demo` 一条命令把数据造齐（账号密码在命令的输出里），
+  清单上大部分勾已经有对应的自动化测试（`events.tests.AcceptanceWalkTests`），
+  **但浏览器那一遍仍然要走** —— 表单排版坏了、链接指向空处，断言看不出来。
+  ⚠️ C0.2 交付后确实走过一遍浏览器（带回 10 条返工），
+  **但那不是这一遍** —— 清单上「撤销授权不删行」和「employee 任职结束后从 R8 名单消失」
+  两条一条都没碰到；
+- **C0.5**（2026-08-03 新增）：`LOGIN_URL` 没设，**匿名点导航第一个链接就是 404**；
+  没有 `403.html`，`SCOPED_DENIAL` 那些文案一个字都看不见。
+  顺带把 12 条 grep 守卫接进 pre-commit 和 CI。
+
+两件都走完，再把上面那张表的 Phase B 改成 ✅。
+
+> **这一轮学到的**：404 个测试全绿，而四个功能没有入口 ——
 > 因为**没有 URL 的功能，测试也没有 URL 可打**。
 > 以后核对完工，问的不是「service 写了吗」，是「**用户从哪个链接点进去**」。
+>
+> **2026-08-03 补一句，同一个病的第二次发作**：`LOGIN_URL` 和 403 模板这两处，
+> 代码和 URL 都在，缺的是**把它们连起来的那一个设置 / 那一个模板**。
+> 所以问题要再往前问一步：不是「用户从哪个链接点进去」，
+> 是「**用户点进去之后，看到的是不是我以为的那一页**」。
 
 走之前值得重读的两条：
 
@@ -385,10 +409,12 @@ D1–D22 **一条一个文件**，索引见 [`decisions/README.md`](decisions/RE
 | ~~6~~ | ~~背景审查有效期多长~~ | — | 随 `BackgroundCheck` 一起移出本阶段，不再需要答复 |
 | ~~7~~ | ~~跟不跟踪请假 / 停职~~ | ✅ **已答复（2026-07-28）：跟踪** | 已做进 `Assignment.status` |
 
-> **Phase C 期间新拍的五条**（时长口径 · R1 谁看 · 界面语言 · 生日能不能自己改 ·
-> 改活动走哪条路）在
-> [`phase-c.md`](phase-c.md#2026-07-31-这一轮拍板的不再是待定)。
-> 那里还有一张 Phase C 自己的待定表（发信服务、备份存储、域名、试点选哪个 ministry）。
+> **Phase C 期间拍板的都在 [`phase-c.md`](phase-c.md#2026-07-31-这一轮拍板的不再是待定)** ——
+> 2026-07-31 那一轮（时长口径 · R1 谁看 · 界面语言 · 生日能不能自己改 · 改活动走哪条路）
+> 和 [2026-08-03 那一轮](phase-c.md#2026-08-03-这一轮拍板的)（前端三件套 · 构建方式 ·
+> 四条上线硬前置 · SES / R2 / Sentry · 域名提前 · 隐私说明）。
+> 那里还有一张 Phase C 自己的待定表，现在只剩四条（试点选哪个 ministry、
+> 合并页开不开放、`MinistryRole` 的档位、基金会内部沟通语言）。
 
 ---
 

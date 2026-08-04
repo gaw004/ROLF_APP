@@ -5,7 +5,10 @@
 > [`01-roadmap.md`](01-roadmap.md) / [`02-roadmap.md`](02-roadmap.md) 是 Phase A / B 的手册，
 > 已完成，留作记录，不再更新。
 >
-> 写于 2026-07-31。
+> **前端那两步（C1 / C2）的正文在 [`04-roadmap.md`](04-roadmap.md)**（2026-08-03 拆出去）。
+> 编号没有改——「见 C2.5」这种引用照旧成立，本文档负责把你导过去。
+>
+> 写于 2026-07-31，2026-08-03 按当轮拍板的二十条重排。
 
 ## 开工时的实测基线
 
@@ -18,7 +21,7 @@
 | `makemigrations --check` | No changes detected |
 | `ruff check .` | All checks passed |
 | Django / Python / Postgres | 5.2.16 / 3.14 / 18（psycopg 3） |
-| 模板 | **16 个** `.html`（events 11 · accounts 2 · core 1 · org 1 · contact 1） |
+| 模板 | **16 个** `.html`（events 11 · accounts 2 · core 1 · org 1 · contact 1）—— C0.2 之后是 20 个 |
 | 模板文案的语言 | 全中文（[D23](decisions/D23-i18n-interface-only.md) 定：改成英文） |
 | `config/settings/prod.py` | **一句** `from .base import *` |
 | 访问 `/` | **404**（`config/urls.py` 没有根路由） |
@@ -49,17 +52,23 @@
 
 ## 为什么按这个顺序
 
-四条硬性顺序，其余可以调：
+六条硬性顺序，其余可以调：
 
 1. **C0.2 补缺口必须在 C2 之前。** 补出来的是**五个新页面**；
    排在样式之后就要再排一遍。这也是 C0.2 插在验收之前的理由 ——
    拿一份不完整的功能去走浏览器验收，等于走两遍。
-2. **C1 必须在 C2 之前。** Tailwind 构建先就位，模板才能一次过
-   （同时上 class 和把文案改成英文）。反过来每个模板要动两遍。
-3. **C3 的备份和权限复核必须在放真人之前。** 见
+2. **C0.5 必须在 C1 之前，理由和上一条完全相同。** 它产出的是三个错误页模板
+   和一批文案（2026-08-03 新增）。
+3. **C1 必须在 C2 之前。** 构建链先就位，模板才能一次过
+   （同时上 class、写 `dark:` 对、接 HTMX / Alpine、把文案改成英文）。
+   反过来每个模板要动两遍甚至四遍。正文见 [`04-roadmap.md`](04-roadmap.md)。
+4. **C3.0（域名 + SES）建议在 C1 开工当天就启动**（2026-08-03 新增）。
+   它是整个 Phase C 里唯一**靠别人**的事 —— SES 出沙箱要审核 24–48h。
+   让这段等待和前端工作重叠，等于白赚两天。
+5. **C3 的备份和权限复核必须在放真人之前。** 见
    [`phase-c.md` 的判据](phase-c.md#判据什么必须做完才能放真人什么可以边用边加) ——
    两个风险是乘法关系。
-4. **C4 排在 C5 之后开工**（试点期间并行）。它们是可后补的，
+6. **C4 排在 C5 之后开工**（试点期间并行）。它们是可后补的，
    而真实使用会告诉你它们该长什么样。
 
 ---
@@ -189,7 +198,9 @@ python manage.py seed_demo          # 账号和共享密码在命令输出里
 ### C0.2.6 · 浏览器验收后的返工（2026-08-03）
 
 C0.2 交付之后先走了一遍浏览器，回来带了 10 条。**其中 1 条是 bug，1 条是新需求，
-其余是界面口径。** 全部做完，测试 334 → **404**。
+其余是界面口径。** 全部做完，测试 **372 → 404**（开工基线是 334，
+这一段的起点是 C0.2 交付后的 372 —— 原文这里写的是「334 → 404」，
+把两个不同的起点混成了一个）。
 
 | 需求 | 落点 |
 |---|---|
@@ -227,136 +238,127 @@ C0.2 的五处缺口正是这一类：334 个测试全绿，而四个功能没�
 
 **验证**：清单每条都勾上；踩到的坑记进本文档末尾的[计划外记录](#计划外记录)。
 
+**状态**（2026-08-03 核对）：还没走。
+
+C0.2.6 记的那一遍浏览器**不是这一遍** —— 它带回来的 10 条里，
+清单上这两个验收点一条都没碰到：
+
+- 「撤销授权填 `end_date`，**不删行**」（总管那一组）；
+- 「把一个 employee 的任职 `end_date` 改到活动之前，**他应该从 R8 名单里消失**」
+  （食物银行 admin 那一组，时间口径是活动当天不是今天）。
+
+所以那是一次**功能自查**，不是照清单逐条勾的三角色验收。
+两者的区别正是这份清单存在的理由：自查看的是「我改的东西对不对」，
+验收看的是「清单上每一条都过了没有」。
+
+> 这一节做完之后，**照 C0.2 的样子在这里补一张「实测结果」表**。
+> C0.2 有那张表而 C0.3 没有，是这次能一眼看出「它没走完」的唯一线索 ——
+> 下一次也要留得下这条线索。
+
 ### C0.4 修文档漂移，Phase B 标 ✅
 
 1. ✅ **已做**：`02-roadmap.md` 的实测结果表里 `363` → **`334`**，
    并把「过期过两次」的经过记在同一格里；
-2. `goal.md` 两处：第四节进度表里的「353 个测试全绿」、
-   [六、下一步](goal.md#六下一步)里的「测试从 192 涨到 363」，都改成 C0.2 之后的实测数；
+2. ✅ **已做（2026-08-03）**：`goal.md` 两处测试数改成 **404**（返工之后的实测）。
+   写的时候一并把[六、下一步](goal.md#六下一步)那段「下一步是 C0.2」改成
+   「下一步是 C0.3 + C0.5」；
 3. `goal.md` 第四节那张表的 Phase B 改成 ✅，并把「只差浏览器里那一遍」删掉 ——
-   ⚠️ **要等 C0.2 和 C0.3 都做完**，别照原计划在补缺口之前就标；
+   ⚠️ **要等 C0.2 和 C0.3 都做完**，别照原计划在补缺口之前就标。
+   2026-08-03 状态：C0.2 做完了，**C0.3 还没走**，所以这一格暂时只改数字不改状态；
 4. `phase-c.md` 里[测试数基线的新口径](phase-c.md#测试数基线只增不减的新口径)已经写好，
    `02-roadmap.md` 的验收那条不改（它记录的是当时的口径）。
 
 **验证**：`python manage.py test core.tests.MarkdownLinkGuardTests` 绿。
 
+### C0.5 · 上线前的三条死链
+
+2026-08-03 新增。这一步的三件事有一个共同形状，
+和 [C0.2 那五处缺口](phase-c.md#phase-b-的五处缺口2026-07-31-发现)完全一样：
+**代码是对的，只是没人能走到它。** 404 个测试全绿，一条都没抓到。
+
+#### C0.5.1 `LOGIN_URL` —— 匿名点导航第一个链接就是 404
+
+实测：
+
+```
+GET /events/          -> 302 /accounts/login/?next=/events/
+GET /accounts/login/  -> 404
+GET /login/           -> 200
+```
+
+`config/settings/base.py` 没有设 `LOGIN_URL`，Django 用了默认值 `/accounts/login/`，
+而 `accounts/urls.py` 挂在根前缀下，真实路径是 `/login/`。
+`base.html` 对**未登录**访客也画 `Events` / `Past events` 两个链接，
+两个视图都 `@login_required` —— 所以**任何人第一次访问这个站，
+点导航第一个链接，得到的是 404**。
+
+改法是 `base.py` 一行 `LOGIN_URL = "/login/"`。
+
+⚠️ **带一条测试：匿名 GET 一个 `@login_required` 页面，
+`follow=True` 之后必须 200。** 现有测试没抓到它，
+是因为它们要么先登录、要么只断言 302 不跟随 —— 和「没有 URL 的功能测试也没 URL 可打」
+是同一个成因的两种表现。
+
+#### C0.5.2 三个错误页模板
+
+仓库里**没有 `403.html` / `404.html` / `500.html`**。
+Django 在模板不存在时返回一个 `details` 为空的裸页面，
+于是 `raise PermissionDenied(SCOPED_DENIAL)` 传出去的那段文案**一个字都不会显示**。
+
+打在两处已经写下的口径上：
+[`phase-c.md` 的界面语言落点](phase-c.md#界面语言的落点英文写在哪中文允许留在哪)
+把 `SCOPED_DENIAL` 列进「必须是英文（用户看得见）」，而 [C2.5](04-roadmap.md#c25-python-侧的文案改成英文)
+专门有一步改它的字符串 —— **在这三个模板存在之前，那是一次没有任何效果的修改。**
+
+三个模板放 `core/templates/`，**直接写英文**（同 C0.2 新模板的做法）。
+403 那个要把 `{{ exception }}` 显示出来 —— 那正是 `SCOPED_DENIAL`
+和 `org/views.py` 的 `FOUNDATION_ONLY`、`core/middleware.py` 的那段提示语的落点。
+
+⚠️ **带一条测试：403 页面上出现 `SCOPED_DENIAL` 的原文。**
+没有这条断言，模板以后被换掉、`{{ exception }}` 被删掉，都不会有任何东西变红。
+
+样式留到 [C2](04-roadmap.md#c2--设计系统与-20-个模板) 那一遍统一上，
+这里只求「读得到」。
+
+#### C0.5.3 守卫的两层防御
+
+现在那 12 条 grep 守卫只在有人主动跑 `manage.py test` 时才生效。改成两层：
+
+1. **本地**：`.pre-commit-config.yaml`，`git commit` 时闪电跑一遍守卫。
+   有人赶进度 `--no-verify` 跳过也没关系，还有第二道；
+2. **强制**：`.github/workflows/ci.yml` —— `test` + `check` +
+   `makemigrations --check` + `ruff check .`，**不过就红灯，禁止合并**。
+
+> 第 2 道才是底线。本项目的记录里反复出现同一件事：
+> **只写在验收清单里的规则跨不过下一轮**（`views.py` 不许有 `Sum` 那条、
+> `admin.py` 四个钩子那条，都是先只写在清单里、后来才补成守卫的）。
+>
+> 这个 workflow 在 [C1.2](04-roadmap.md#c12-产物走-ci不进主分支) 会被复用来构建前端产物，
+> 所以现在就建好它，不是提前投资，是少建一次。
+
+**验证**：`test` 全绿且**测试数比 404 多两条**；
+`check` / `makemigrations --check` / `ruff` 干净；
+匿名浏览器打开站点，**点导航每一个链接都不出现 404**；
+拿 A ministry 的 admin 打 B ministry 的 `/registrations/`，403 页面上**读得到为什么**。
+
 ---
 
-## C1 · Tailwind 构建
+## C1 / C2 · 前端 —— 正文在 [`04-roadmap.md`](04-roadmap.md)
 
-**目标**：让 C2 能一次过。**这一步不碰任何模板文案。**
+**这两步的正文 2026-08-03 搬去 [`04-roadmap.md`](04-roadmap.md) 了**，
+因为前端目标从「上个样式」改成了「Tailwind + HTMX + Alpine，现代且经得起看」
+（[D24](decisions/D24-htmx-alpine-tailwind.md)），两步装不下。
 
-> **原计划的 C1.1「i18n 骨架」已删除** —— [D23](decisions/D23-i18n-interface-only.md)
-> 2026-07-31 当天改口：界面统一英文，不做双语。
-> `LocaleMiddleware` / `LANGUAGES` / `LOCALE_PATHS` / `set_language` 一律不加。
-> 那份方案原样留在 D23 折叠的那一节里，重启时照抄。
+**编号一个字没改**：那边仍然叫 C1 / C2 / C2.5 / C2.6 ——
+同 `goal.md` 拆分时的做法，正文搬走了，「见 C2.5」这种引用仍然成立。
 
-### C1.1 Tailwind 构建
+| 步 | 内容 |
+|---|---|
+| [C1](04-roadmap.md#c1--构建链) | npm + Tailwind + htmx + Alpine；产物走 GitHub Actions 推部署分支；whitenoise |
+| [C2](04-roadmap.md#c2--设计系统与-20-个模板) | 写 [`design-system.md`](design-system.md) → `base.html` 定调子 → 20 个模板逐页重写（class + `dark:` + 文案改英文 + HTMX/Alpine，一次过）→ Python 侧文案 → 两条新守卫 |
 
-用 **Tailwind standalone CLI**（单个二进制，**不引 Node / npm**）：
-
-- `tailwind.config.js`：`content` 指向 `["./*/templates/**/*.html"]`；
-- 源文件 `static/src/app.css`，产物 `static/css/app.css`，**产物提交进 git**；
-- `.gitignore` 加 `tailwindcss`（那个二进制本身不进仓库）。
-
-> **为什么提交产物**：Render 的构建就只剩 `pip install` + `collectstatic`，
-> 不需要在生产环境装 Node。代价是改样式后要记得重跑一次 CLI ——
-> 写进 `README.md`，并在 C3 的部署检查里带一条。
-
-### C1.2 whitenoise
-
-- `requirements.txt` 加 `whitenoise`；
-- `MIDDLEWARE` 里 `whitenoise.middleware.WhiteNoiseMiddleware`
-  **紧跟在 `SecurityMiddleware` 之后**；
-- `STORAGES["staticfiles"]` 用
-  `whitenoise.storage.CompressedManifestStaticFilesStorage` ——
-  ⚠️ **只在 `prod.py` 里启用**。dev 里启用的话，没跑过 `collectstatic` 就会
-  在渲染时抛 `Missing staticfiles manifest entry`。
-
-**验证**：`python manage.py collectstatic --noinput` 成功；
-`test` 334 全绿；`ruff check .` 干净。
-
----
-
-## C2 · 模板逐页重写（Tailwind + 改成英文，一次过）
-
-**目标**：页面好看、文案是英文。**一个模板只碰一次。**
-
-⚠️ **是 21 个模板，不是 16 个** —— C0.2 新增了「我管理的活动」「往期活动」
-「我的资料」「改活动」（复用 `event_form.html`）等几个页面。
-**C0.2 里新写的模板直接写英文**，不要先写中文再来这一步改。
-
-落点规矩见 [`phase-c.md` 的样式落点](phase-c.md#样式的落点css-只许出现在两个地方)
-和[界面语言落点](phase-c.md#界面语言的落点英文写在哪中文允许留在哪)。
-
-### C2.1 `base.html` 先做，它定调子
-
-`core/templates/core/base.html`：版心宽度、字号阶梯、配色、导航条
-（含 C0.2.4 加的那两个入口）、消息提示（`messages`）样式、页脚。
-
-> 原计划这里还要加一个语言切换器，随 [D23](decisions/D23-i18n-interface-only.md)
-> 改口一起删掉了。
-
-这个文件的注释里已经写着「Phase C 替换这一个文件就能上样式，
-views / forms / services 原样带走」—— 这一步就是兑现它。**注释要跟着更新**，
-别留一句已经发生过的预告。
-
-### C2.2 志愿者路径（用户最多，要手机友好）
-
-`event_list` → `past_events` → `event_detail` → `event_signup` →
-`my_participations` → `participation_cancel` → `accounts/profile`。
-
-⚠️ `event_signup` 的未成年人同意分支（姓名 / 关系 / 方式 / **邮箱或电话至少一个**）
-是这一组里唯一有条件显示的表单，重排时**别把「邮箱或电话至少一个」那句提示丢了** ——
-丢了不报错，只是用户不知道为什么提交被拒。
-
-### C2.3 ministry admin 路径（表单重、表格多）
-
-`event_manage_list` → `event_form`（建 / 改共用）→ `event_roles` →
-`event_registrations` → `event_attendance` → `event_report` → `event_notify`。
-
-- 表格一律加**横向滚动容器**，否则窄屏上整页横向滚动；
-- `event_report` 是 R4–R7 的落点，**数字全部来自 queryset**，
-  重排时不许把任何计算搬进模板（`core/tests.py` 的守卫会红）；
-- `event_notify` 的**「联系不上（N 人）」那一组必须显著** ——
-  它是 P6 里唯一会静默失败的地方（见 [D22](decisions/D22-event-notifications.md)）。
-
-### C2.4 账号页与其余
-
-`accounts/register.html` → `accounts/login.html` →
-`org/ministry_admins.html` → `contact/merge_confirm.html`。
-
-### C2.5 Python 侧的文案改成英文
-
-范围就是[界面语言落点](phase-c.md#界面语言的落点英文写在哪中文允许留在哪)那张表的左列：
-
-- **~34 处** `label=` / `help_text=` / `verbose_name=`
-  （`accounts/forms.py` 8 处、`contact/models.py` 11 处、`org/models.py` 8 处、
-  `events/models.py` 3 处、`events/forms.py` 10 处、`contact/forms.py` / `org/forms.py` 各几处）；
-- **10 处** `messages.*()` 和 **10 处** `ValidationError()` 的字面量；
-- `org/permissions.py` 的 `SCOPED_DENIAL`（403 页面上给人看的）——
-  **只改那个字符串，那个模块的逻辑一个字不动**；
-- `TextChoices` 的 **label** 改英文，⚠️ **value 一个字不改**
-  （它们在库里，改了就是数据迁移）；
-- 约束的 `violation_error_message`（它会冒到表单上）—— 大部分**本来就是英文**，
-  只改剩下的中文那几条。
-
-**注释和 docstring 不动。** 本项目的推理都写在注释里，翻成英文是纯损失。
-
-### C2.6 第 13 条 grep 守卫：模板里不许有中文
-
-`core/tests.py` 加一条：**模板里出现中日韩字符 → 红**。
-`{% comment %}` 块除外 —— 模板顶部那些解释性注释可以是中文。
-
-> 这条比原计划那条（「未被 `{% trans %}` 包裹的中日韩字符」）**更强**：
-> 那条只能查「忘了包」，这条直接查「有没有」，**没有漏网的中间态**。
-> 单语的一个附带好处。
-
-⚠️ **写这条测试时，别在注释里拼出它自己要找的那个模式** ——
-守卫测试会扫自己，这个项目已经因此踩过四次（见 `README.md` 末节）。
-
-**验证**：`test` 全绿且测试数比 C0.2 之后**又多一条**；
-`check` / `ruff` 干净；浏览器走完三条路径；375px 宽度过一遍志愿者那几页。
+⚠️ **C1 必须在 C0.5 之后**，理由和「C0.2 必须先于 C2」完全一样：
+C0.5 产出的是三个模板和一批文案，排在样式之后就要再排一遍。
 
 ---
 
@@ -364,6 +366,31 @@ views / forms / services 原样带走」—— 这一步就是兑现它。**注�
 
 **目标**：做完这一段才可以放真实用户。见
 [`phase-c.md` 的判据](phase-c.md#判据什么必须做完才能放真人什么可以边用边加)。
+
+> **2026-08-03 从 7 步扩到 11 步。** 新增的四步（C3.0 / C3.8 / C3.9 / C3.10）
+> 来自同日那次对账 —— 原来的 C3 覆盖的是「系统是对的」，
+> 缺的是「坏了你怎么知道、被滥用了你怎么挡、出了事谁负责」。
+> 四条都按本阶段自己的判据判过：**不做，出的事可逆吗？**
+
+### C3.0 域名 + SES —— 最先做，因为它靠别人
+
+**这一步是整个 Phase C 里唯一等别人的事**，所以建议在 C1 开工当天就启动，
+让等待和前端工作重叠。
+
+1. **买域名**（2026-08-03 决定：从 C5 提前到这里）；
+2. **SES 域名验证 + DKIM / SPF / DMARC** 三条 DNS 记录；
+3. **提交出沙箱申请** —— 审核 24–48h。
+
+⚠️ **沙箱里的 SES 只能发给已验证过的地址。** 不出沙箱的话，
+密码重置和 P6 通知对真实志愿者**全部发不出去**，而 [C3.3](#c33-真实发信) 的验证
+（「线上注册一个账号 → 收到邮件」）**发给你自己的邮箱大概率能通过** ——
+这正是本项目反复判过刑的那种验收：它测的不是真实路径。
+
+> **为什么域名不能再拖到 C5**：原来 `phase-c.md` 的待定表里写着
+> 「域名不阻塞，先用 `xxx.onrender.com` 跑通」。那句话在 2026-08-03 之后不成立了 ——
+> 选了 SES（正式发信要验证域名）+ 把「邮件送达」升级成交付硬前置，
+> 两个决定叠起来就把域名变成了 C3 的前置。**应用仍然先跑在 `onrender.com` 上**，
+> 挂自定义域名仍然在 C5；这一步买域名是为了**发信**，不是为了访问。
 
 ### C3.1 首页 `/`
 
@@ -386,36 +413,106 @@ C0.2.4 已经把这两个判断放进上下文处理器了，这里直接用。
 
 ### C3.3 真实发信
 
-- `prod.py` 配 SMTP（`EMAIL_HOST` / `PORT` / `USER` / `PASSWORD` / `USE_TLS`
-  全走环境变量）+ `DEFAULT_FROM_EMAIL`；
+**服务商 = Amazon SES**（2026-08-03 定，待定 #1 结案）。
+
+- `prod.py` 配 SES 的 SMTP（`EMAIL_HOST` / `PORT` / `USER` / `PASSWORD` / `USE_TLS`
+  全走环境变量）+ `DEFAULT_FROM_EMAIL` + `SERVER_EMAIL`；
 - `NOTIFICATION_BACKEND` 在生产环境变量里指向
   `core.notifications.django_email.DjangoEmailBackend`
   （**适配器早就写好了，这一步只是接线**）。
 
-**验证**：线上真的注册一个账号 → 收到邮件；改一场活动时间 → 通知发出去 → 收到。
+> **为什么 SES，尽管刚否决过 AWS**：否决的是**把应用跑在 AWS 上**
+> （见 [`phase-c.md` 的「考虑过并否决的：AWS」](phase-c.md#考虑过并否决的aws)），
+> 理由是 VPC / ALB / NAT 那一整套的复杂度和月成本。
+> SES 是一个**单独的 SMTP 端点**，四个环境变量，不带来任何那些东西，
+> 而它是三家里最便宜的（$0.10/千封）。这不是改口，是两个不同的问题。
+>
+> 换家的成本仍然≈0 —— 都是同样那四个环境变量。
+
+**验证**：**必须用一个不属于你自己的邮箱**注册一个账号 → 收到邮件；
+改一场活动时间 → 通知发出去 → 收到；**并且不在垃圾箱里**。
+
+⚠️ **发给自己的邮箱不算验证过。** 自己的域名 / 自己常收的地址会被邮箱服务商放行，
+而 SPF / DKIM 没配好的信对**陌生收件人**才会进垃圾箱 —— 这件事不报错、
+不退信，只是「他说他没收到」。C3.0 那三条 DNS 记录就是为这一条存在的。
 
 ### C3.4 生产加固
 
 `config/settings/prod.py` 从空壳补齐：
-`SECURE_SSL_REDIRECT` / `SECURE_HSTS_SECONDS` + `_INCLUDE_SUBDOMAINS` + `_PRELOAD` /
+`SECURE_SSL_REDIRECT` / `SECURE_HSTS_SECONDS` /
 `SESSION_COOKIE_SECURE` / `CSRF_COOKIE_SECURE` / `X_FRAME_OPTIONS` /
 `SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")`。
 
 ⚠️ **`SECURE_PROXY_SSL_HEADER` 不配，`SECURE_SSL_REDIRECT` 会造成无限重定向** ——
 Render 在反代后面终止 TLS，应用看到的是 http。
 
+**HSTS 分两步开**（2026-08-03 改口，原计划是三个一次开满）：
+
+| | 这里（C3.4） | [C5](#c5--试点)，域名稳定跑一周之后 |
+|---|---|---|
+| `SECURE_HSTS_SECONDS` | `3600` | 一年 |
+| `SECURE_HSTS_INCLUDE_SUBDOMAINS` | 不开 | 开 |
+| `SECURE_HSTS_PRELOAD` | 不开 | 开 |
+
+⚠️ **HSTS 记在用户的浏览器里，改服务器没用。** 在自己的域名和证书稳定之前
+上长 `max-age` + `includeSubDomains`，任何一个还没有 HTTPS 的子域会被浏览器
+**硬性拒绝**，而且 `max-age` 期内你做什么都撑不住。
+preload 更是单向门 —— 退出要等月级。
+
+短值一样通过验收：`check --deploy` 只看这个设置**有没有值**，不看值多大。
+
 **验证**：`python manage.py check --deploy` 零警告。这是跑得出来的数字，不是判断题。
 
 ### C3.5 部署到 Render
 
+- **先查 Render 支持到哪个 Python 版本**（本机跑的是 3.14）。
+  ⚠️ 这一条排在最前面是有原因的：它是**唯一一件到这一步才发现就已经太晚的事** ——
+  那时 Tailwind、20 个模板、prod 配置全都做完了。
+  需要的话加 `.python-version` 或降版本，**降完在本机先跑一遍全部测试**；
 - `requirements.txt` 加 `gunicorn`；
-- `render.yaml`：Web Service + PostgreSQL，健康检查指向 `/`；
+- `render.yaml`：Web Service + **Render 自己的托管 Postgres**（2026-08-03 定），
+  健康检查指向 `/`；
+  ⚠️ **分支盯的是 [C1.2](04-roadmap.md#c12-产物走-ci不进主分支) 那个部署分支，不是 `main`** ——
+  前端产物由 CI 推到那里。盯错分支的表现是「合进 main 了但线上没变」，且看不出为什么；
+- **数据库这一项有三条要当场定，不能等到出事**：
+  1. ⚠️ **不能用免费档的 Postgres。** Render 的免费数据库**到期会被直接删掉**，
+     而试点期间里面装的是基金会的真实数据。这不是性能问题，是数据会没。
+     **开最便宜的那个付费档**（2026-08-03 定）—— 试点是一个 ministry、
+     一场活动、几十个人，最小档绰绰有余，**而且事后能原地升档，不用搬数据**。
+     ⚠️ 最小档的**自带备份保留期也是最短的**，这反过来又是下面第 3 条的理由：
+     真正的备份是 [C3.6](#c36-备份--恢复演练) 那个往 R2 推的脚本，不是它；
+  2. **major 版本 pin 成和本机一样**（本机是 18）。跨大版本时
+     `pg_dump` 的客户端比服务端旧会**直接拒绝导出** ——
+     而备份 cron 里那个客户端就是最容易和服务端不同步的东西。
+     [C3.6](#c36-备份--恢复演练) 的恢复演练之所以要求「灌进空库 + 跑测试」，
+     防的正是这一类；
+  3. **Render 自带的备份留着当第二道，不当第一道** —— 理由见
+     [D3 的 2026-08-03 补](decisions/D03-portable-postgres.md#2026-08-03-补render-的托管-postgres-过不过这一关)：
+     库和备份在同一家，平台出事两边一起没；
 - `build.sh`：`pip install -r requirements.txt` → `collectstatic --noinput` → `migrate`
-  （原计划中间那步 `compilemessages` 随 [D23](decisions/D23-i18n-interface-only.md) 改口删掉）；
+  （原计划中间那步 `compilemessages` 随 [D23](decisions/D23-i18n-interface-only.md) 改口删掉；
+  **不需要 `npm`**，产物是 CI 构建好推过来的）；
 - 环境变量：`DJANGO_SETTINGS_MODULE=config.settings.prod`、
-  **新生成的** `DJANGO_SECRET_KEY`、`DJANGO_ALLOWED_HOSTS`、SMTP 四项、
-  `NOTIFICATION_BACKEND`（`DATABASE_URL` 由 Render 注入）；
-- **先用 `xxx.onrender.com` 跑通**，域名留到 C5。
+  **新生成的** `DJANGO_SECRET_KEY`、`DJANGO_ALLOWED_HOSTS`、SES 的 SMTP 四项、
+  `NOTIFICATION_BACKEND`、`SENTRY_DSN`、R2 的 endpoint 和密钥
+  （`DATABASE_URL` 由 Render 注入）；
+- **先用 `xxx.onrender.com` 跑通**，挂自定义域名留到 C5
+  （域名本身在 [C3.0](#c30-域名--ses--最先做因为它靠别人) 就买好了，那是给发信用的）；
+- ⚠️ **别用 Render 的免费档跑试点。** 免费 Web Service 无请求十几分钟就休眠，
+  冷启动几十秒 —— 基金会第一次点开链接等半分钟，会直接读成「这东西坏了」，
+  而你在本机永远看不到这个现象。
+
+**顺带把账单算一次**（2026-08-03）：Web Service 和 Postgres 都开最便宜的付费档，
+加上域名（年付摊到月）、SES（按量，这个量级几乎为零）、
+R2 和 Sentry（都在免费额度内）—— 合计**每月十几美元量级**。
+
+这是[终极目标](goal.md#一终极目标)那张表里「便宜：起步阶段月成本控制在几十美元内」
+第一次真的被结算，**结论是够用，还有余量**。
+
+⚠️ **这里不写具体价格。** 云厂商的定价会变，而
+「写死的数字是一种会过期又不报错的东西」——
+这条教训 [`02-roadmap.md`](02-roadmap.md#自动化部分的实测结果) 已经为测试数付过一次学费。
+开通那天照页面上的实际价格算一遍，**只要总数还在「几十美元内」这个判据里就通过**。
 
 **账号，两个不是一个**：
 
@@ -435,9 +532,18 @@ Render 在反代后面终止 TLS，应用看到的是 http。
 
 ### C3.6 备份 + 恢复演练
 
-- 一个 shell 脚本：`pg_dump` → 上传对象存储（**不写成 management command**，
+**存储 = Cloudflare R2**（2026-08-03 定，待定 #2 结案）。
+选它是因为**出流量不收钱** —— 而恢复演练的第一步就是把 dump 拉回来，
+这一条直接打在下面那个验收口径上。三家都是 S3 协议，脚本只认 endpoint 和密钥。
+
+- 一个 shell 脚本：`pg_dump` → 上传 R2（**不写成 management command**，
   理由见 [`phase-c.md` 的备份落点](phase-c.md#备份脚本的落点)）；
 - Render Cron Job 每天跑一次；
+- **桶必须是私有的**，密钥只给写权限，开服务端加密。
+  ⚠️ dump 里是**未成年人的姓名、生日、住址、紧急联系电话、家长邮箱**的全量明文。
+  一个默认公开的桶就是一次全库泄露 —— 而它比删库更难发现：
+  什么都不会坏，什么都不会报错，你只是不知道有人下载过。
+  这条是 2026-08-03 升级进硬前置的，原来只写了「上传对象存储」；
 - ⭐ **演练一次恢复**：取回 dump → 灌进空库 → `migrate --check` 通过 → 跑一遍测试。
   **三样都做了才算**，口径见
   [`phase-c.md`](phase-c.md#备份什么叫演练过)。
@@ -446,6 +552,48 @@ Render 在反代后面终止 TLS，应用看到的是 http。
 
 四件事，拿真账号做，清单见
 [`phase-c.md`](phase-c.md#权限复核拿真账号做的四件事)。
+第 4 条（未成年人数据谁能看）在 2026-08-03 改写成了一张**页面清单** ——
+原来那句「逐个账号过一遍」不是一个能当场做的动作。
+
+### C3.8 错误可见性
+
+2026-08-03 新增。现在仓库里 `LOGGING` / `ADMINS` / `SERVER_EMAIL` **一个都没有**，
+所以 `DEBUG=False` 之后未捕获异常既不写有用的日志、也不通知任何人：
+用户看到一个裸 500，而**你永远不会知道它发生过**。
+
+- **Sentry 免费档**：`sentry-sdk` + `SENTRY_DSN` 环境变量。
+  ⚠️ **`send_default_pii` 保持关闭** —— 这个库里装着未成年人的资料，
+  不该有第二份副本躺在第三方的服务里；
+- `LOGGING` 兜底：`django.request` 的 `ERROR` 打到 stderr（Render 抓得到），
+  这样 Sentry 挂了或额度用完时还剩一条线。
+
+**验证**：线上故意打一个会 500 的 URL（临时加一个抛异常的视图，验完删掉），
+**Sentry 里看得到它，并且收到告警邮件**。
+
+### C3.9 登录限流
+
+2026-08-03 新增。开放注册的站上，**密码重置端点可以被拿来给任意邮箱发信** ——
+发信额度和域名信誉一起烧，而 SES 对退信率和投诉率是会封端点的。
+
+- `django-axes` 管登录爆破；
+- 密码重置加一条 per-IP 节流。
+
+**注册暂不加验证码**（2026-08-03 定）：试点只有一个 ministry、人数可数，
+垃圾账号真出现了肉眼就看得见。⚠️ 这条**只在试点期成立** ——
+重看条件写进 [`phase-c.md` 的已知缺口](phase-c.md#五已知缺口与处置)：公开放开注册之前必须补。
+
+### C3.10 一页隐私说明
+
+2026-08-03 新增。系统里存着**未成年人的姓名、生日、住址、紧急联系电话、
+家长的邮箱和电话**，而且对公众开放注册。原来的计划里关于这些数据只有一句
+「谁能看要过一遍」—— 那是**内部**的访问控制，不是对**当事人**的交代。
+
+一页，四段：存什么 · 谁看得到 · 留多久 · 怎么要求删除。
+注册页和页脚各一个链接。
+
+**初稿按代码里实际存的字段写**（`Contact` / `EmergencyContact` /
+`Participation` 的六个同意字段），不要凭印象写 —— 写多了是承诺，写少了是漏。
+⚠️ **内容要基金会确认后才能上线**：留存期限和删除流程是他们的决定，不是技术决定。
 
 ---
 
@@ -470,9 +618,14 @@ Render 在反代后面终止 TLS，应用看到的是 http。
 - **顺序有依赖**：employee 先注册 → 给他们建 `Assignment` → 再办活动，
   否则 R8 会安静地返回空名单（见
   [`phase-c.md` 的已知缺口](phase-c.md#五已知缺口与处置)）。
-- **域名在这一步买并挂上**：Render 加 custom domain + 自动证书。
+- **域名在这一步挂上**：Render 加 custom domain + 自动证书。
   ⚠️ `DJANGO_ALLOWED_HOSTS` 和 `CSRF_TRUSTED_ORIGINS` **必须同时改** ——
   只改前者的话页面能打开，但所有 POST 表单被拒。
+  2026-08-03 更正：**买域名不在这一步了，提前到了
+  [C3.0](#c30-域名--ses--最先做因为它靠别人)**（SES 要验证域名）。
+  这里只剩「挂到应用上」。
+- **域名稳定跑一周之后，把 HSTS 调长**：`SECURE_HSTS_SECONDS` 改成一年，
+  加 `INCLUDE_SUBDOMAINS` 和 `PRELOAD`。理由见 [C3.4](#c34-生产加固) 那张两步表。
 - 试点期间每周跑一次 `python manage.py list_duplicate_contacts`。
 
 ---
@@ -482,17 +635,24 @@ Render 在反代后面终止 TLS，应用看到的是 http。
 - [ ] ⭐ **14 条需求每一条都能从某个链接点得到** —— 不是「service 写好了」，
       是「用户从哪进去」。这是 C0.2 那五处缺口的成因，见
       [`phase-c.md`](phase-c.md#phase-b-的五处缺口2026-07-31-发现)
-- [ ] `python manage.py test` 全绿；测试数**高于 334**（下降必须伴随一次功能删除，
+- [ ] `python manage.py test` 全绿；测试数**高于 404**（下降必须伴随一次功能删除，
       口径见 [`phase-c.md`](phase-c.md#测试数基线只增不减的新口径)）
 - [ ] `check` 零警告 / `makemigrations --check` 无变更 / `ruff check .` 干净
 - [ ] `python manage.py check --deploy` **零警告**
-- [ ] 中英各切一遍，三条路径走通；375px 宽度可用
+- [ ] CI 的 workflow 在守卫不过时**真的红灯**（故意破坏一条，确认它拦得住）
+- [ ] **匿名**打开站点，导航上每一个链接都点一遍，**没有 404**
+- [ ] 三条路径走通，**深浅两色各一遍**；375px 宽度可用
 - [ ] 把 `static/css/app.css` 删掉，页面**仍然可用**（判据见
       [`phase-c.md`](phase-c.md#样式的落点css-只许出现在两个地方)）
-- [ ] **备份恢复演练三样都做过**
+- [ ] 把所有 `x-` 属性删掉、关掉 JavaScript，**每个写操作仍然能完成**
+      （判据见 [D24](decisions/D24-htmx-alpine-tailwind.md#渐进增强的口径只管写操作)）
+- [ ] **备份恢复演练三样都做过**；R2 的桶**确认是私有的**
 - [ ] ⭐ **越权实测**：A ministry 的 admin 打 B ministry 三个 URL 全 403；
-      志愿者打 `/admin/` 得 403
-- [ ] 线上完成一次「注册 → 收密码重置邮件 → 改密 → 登录」
+      志愿者打 `/admin/` 得 403。**且 403 页面上读得到为什么**
+- [ ] 线上完成一次「注册 → 收密码重置邮件 → 改密 → 登录」，
+      用**一个不属于你自己的邮箱**，且信**不在垃圾箱里**
+- [ ] 线上故意打一个 500，**Sentry 里看得到**
+- [ ] 隐私说明上线，且基金会确认过内容
 - [ ] 一个 ministry 的真实志愿者报名并完成了一场真实活动
 
 ---

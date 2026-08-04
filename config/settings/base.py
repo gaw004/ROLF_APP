@@ -143,6 +143,19 @@ NOVU_WORKFLOW = env("NOVU_WORKFLOW", "event-change")
 
 # --- Authentication ---------------------------------------------------------
 
+# Django's default is "/accounts/login/", and accounts/urls.py is mounted at the
+# root prefix, so the real path is "/login/". Left at the default, every
+# @login_required page redirected an anonymous visitor to a 404 — which is what
+# the nav's first link did to anyone arriving at this site for the first time.
+# Nothing failed loudly: the redirect was correct, the target simply did not
+# exist, and no test followed the redirect far enough to notice.
+#
+# ⚠️ Only LOGIN_URL. LOGIN_REDIRECT_URL / LOGOUT_REDIRECT_URL stay unset on
+#    purpose: VolunteerLoginView.get_success_url() and VolunteerLogoutView.
+#    next_page already answer "where to afterwards", and a setting saying the
+#    same thing is a second copy that nothing reads until the day it disagrees.
+LOGIN_URL = "/login/"
+
 AUTH_PASSWORD_VALIDATORS = [
     {'NAME': 'django.contrib.auth.password_validation.UserAttributeSimilarityValidator'},
     {'NAME': 'django.contrib.auth.password_validation.MinimumLengthValidator'},

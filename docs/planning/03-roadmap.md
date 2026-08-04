@@ -341,6 +341,38 @@ Django 在模板不存在时返回一个 `details` 为空的裸页面，
 匿名浏览器打开站点，**点导航每一个链接都不出现 404**；
 拿 A ministry 的 admin 打 B ministry 的 `/registrations/`，403 页面上**读得到为什么**。
 
+**实测结果（2026-08-03，三件全部做完）**：
+
+| 项 | 结果 |
+|---|---|
+| `python manage.py test` | **409 个，全绿**（34.6s）—— 这一段的起点是 404，新增 5 条（计划里写的是「多两条」） |
+| `check` / `makemigrations --check` / `ruff check .` | 干净 / No changes / All checks passed |
+| 新增的文件 | `core/templates/403.html` · `404.html` · `500.html` · `.pre-commit-config.yaml` · `.github/workflows/ci.yml` |
+| 改动 | `config/settings/base.py` 加 `LOGIN_URL`；`requirements-dev.txt` 加 `pre-commit` |
+| 死链复现 | `/events/` → 302 `/accounts/login/?next=…` → **404**，而真实路径是 `/login/`（和计划写的一字不差） |
+| 守卫真的拦得住 | 故意在 `events/views.py` 里查一次 `MinistryRole`：本地 pre-commit `Failed`，`manage.py test` **exit 1** |
+
+新增的 5 条测试（计划写「两条」，实际拆成 5 条，因为它们盯的是 5 件不同的事）：
+
+| 测试 | 盯的是 |
+|---|---|
+| `test_following_the_login_redirect_lands_on_a_real_page` | **`follow=True` 是这条的全部价值** —— 不跟随的断言证明的是「跳了」，而坏掉的是「跳到哪」 |
+| `test_every_link_the_anonymous_navigation_draws_resolves` | 扫渲染出来的 HTML 取 `href`，不在测试里列 URL —— 这样 `base.html` 新加一个链接**当天就被覆盖** |
+| `test_the_403_page_prints_the_reason_it_was_refused` | 断言 `SCOPED_DENIAL` **原文**出现，不是「页面非空」 |
+| `test_the_404_page_is_ours` | `assertTemplateUsed` |
+| `test_the_500_template_renders_with_no_request_at_all` | Django 渲染 500 时**不带 request**，见下面[计划外记录](#c052--500html-不能-extends-basehtml) |
+
+⚠️ **两条要害，都不在原计划里**：
+
+1. **「红灯禁止合并」不在 `ci.yml` 里** —— 那是 GitHub 仓库的**分支保护规则**。
+   这份 workflow 只负责变红；要让红了就不许合，得去
+   Settings → Branches 把 `guards` 这个 job 设成 required status check。
+   ⚠️ **少了那一步，这个文件的作用只是「PR 页面上显示一个红叉，然后照样能点合并」** ——
+   而那正是本节开头说的「只写在清单里的规则」的另一种形态；
+2. pre-commit 的守卫**按模块跑（`core.tests`），不按类名列**。
+   `core/tests.py` 开头写着「Project-wide guards … they police every app」——
+   按模块跑，新加的守卫当天自动生效；按类名列，新守卫要等有人记得回来改配置。
+
 ---
 
 ## C1 / C2 · 前端 —— 正文在 [`04-roadmap.md`](04-roadmap.md)
@@ -737,3 +769,39 @@ roadmap 原来写的做法是 `moved = bool({"start_time", "end_time"} & set(for
 ⚠️ **这一条会静默失败，所以有一条测试专门盯着它**
 （`test_seconds_the_widget_cannot_show_are_not_read_as_a_reschedule`）——
 把库里的时间改成带 `37` 秒，然后只改地点，断言**不**跳通知页。
+
+### C0.5.2 · 500.html 不能 extends base.html
+
+403 和 404 都 `extends "core/base.html"`，500 **不能** —— 而这件事看代码看不出来，
+要去读 Django 的 `django.views.defaults.server_error`：
+
+```python
+return HttpResponseServerError(template.render())   # 注意：没有 request
+```
+
+**不带 request**，所以 context processors 一个都不跑、`user` 是空的、
+`{% csrf_token %}` 拿不到 token。这些大多不会当场炸，但 **500 页面自己再抛一次异常
+是这一层最糟的结局**：用户拿到的是 Django 的兜底纯文本，而你连这一页写过什么都看不见。
+
+所以 500 那份是自足的：不继承、不依赖 context。**底下那个链接也故意写死成 `/events/`，
+不用 `{% url %}`** —— 理由不是 `{% url %}` 在这里跑不动（它只查 urlconf，跑得动），
+而是它**会抛 `NoReverseMatch`**：路由名改了这一页就自己炸掉，而别处炸了有它兜着，
+它炸了没有下一层。⚠️ 代价如实说：路由改了这里不会跟着改，**也不会有测试变红**。
+
+配套那条测试打的正是这个条件本身 ——
+`loader.get_template("500.html").render()`，不给 context，
+和 Django 真实调用的形状一样。用 `self.client.get()` 触发一个真 500 测不出这件事，
+因为那条路径上 request 是有的。
+
+### C0.5.3 · pre-commit 里不能用 `--keepdb`
+
+第一版写的是 `manage.py test --keepdb core.tests`，图它快。
+**实测差别只有 1 秒**（2.0s → 3.0s），而它留下的 `test_rolf_dev` 会让**下一次普通的
+`manage.py test` 停在一个交互提问上**（「要不要删掉这个测试库」）——
+当场就撞到了：跑全套的时候拿到的是 `EOFError`，而那个报错的样子完全不像
+「上一次用了 `--keepdb`」。
+
+一秒换一个每天要撞很多次的坑，不划算。改成 `--noinput`，
+顺带解决 pre-commit 没有 tty 时任何交互提问都变成 `EOFError` 的问题。
+
+> **这条的一般形式**：**优化一个 2 秒的东西之前，先量一下它到底省几秒。**

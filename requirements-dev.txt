@@ -4,3 +4,8 @@
 # ruff 的 DTZ 规则组（flake8-datetimez）就是为「时区错一天」这类问题存在的，
 # 见 goal.md D16 第三层。配置在 pyproject.toml。
 ruff==0.16.0
+
+# C0.5.3 —— 守卫两层防御的第一层。配置在 .pre-commit-config.yaml，
+# 装一次：`pre-commit install`。第二层（真正拦得住的那层）在
+# .github/workflows/ci.yml，不需要装任何东西。
+pre-commit==4.4.0

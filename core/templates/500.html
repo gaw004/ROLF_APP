@@ -1,0 +1,44 @@
+{% comment %}
+⚠️ 这一份**不 extends base.html**，和 403 / 404 不一样。
+
+Django 的 server_error 视图渲染这个模板时**不带 request**（`template.render()`，
+没有 context），所以 base.html 依赖的东西一个都不在：context processors 不跑、
+user 是空的、{% csrf_token %} 拿不到 token。那些大多不会炸，但 500 页面自己再抛
+一次异常是这一层最糟的结局 —— 用户得到的是 Django 的兜底纯文本，而你连这一页
+写过什么都看不见。
+
+所以这一页是自足的：没有继承、没有 context 依赖。它是最后一道网，网不该挂在
+别的东西上。
+
+底下那个链接**故意写死成 /events/**，不用 {% url %}。理由不是 {% url %} 在这里
+跑不动（它只查 urlconf，不需要 request，跑得动），而是它**会抛 NoReverseMatch**：
+名字改了、app_name 动了，这一页就自己炸掉。别处炸了有这一页兜着，这一页炸了
+没有下一层。⚠️ 代价是路由改了这里不会跟着改，也不会有测试变红 —— 主动接受，
+换的是「它永远渲染得出来」。
+
+它也不解释发生了什么 —— 因为在这个时刻我们并不知道。知道的是 Sentry（C3.8），
+不是这一页。
+{% endcomment %}
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Something went wrong</title>
+</head>
+<body>
+  <h1>Something went wrong</h1>
+
+  <p>
+    This is our fault, not yours. The error has been recorded and nothing you
+    did needs undoing — but the page you asked for did not load.
+  </p>
+
+  <p>
+    Try again in a moment. If it keeps happening, tell whoever runs this site
+    what you were doing when it broke; that sentence is usually the whole fix.
+  </p>
+
+  <p><a href="/events/">Back to events</a></p>
+</body>
+</html>

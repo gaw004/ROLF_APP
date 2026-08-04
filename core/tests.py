@@ -12,8 +12,10 @@ from unittest import mock
 
 from django.apps import apps
 from django.conf import settings
+from django.contrib.auth import get_user_model
 from django.core.management import call_command
 from django.test import TestCase
+from django.urls import reverse
 
 from core.constraints import CONSTRAINT_FIELD
 from core.querysets import DateRangeQuerySet
@@ -729,3 +731,86 @@ class ConstraintMappingGuardTests(TestCase):
                 wrong.append(f"{model._meta.label}: {code} -> {field}")
         self.assertEqual(
             wrong, [], "Mapped to a field that does not exist:\n" + "\n".join(wrong))
+
+
+class AnonymousReachabilityTests(TestCase):
+    """C0.5.1 — the first thing a first-time visitor does had better not 404.
+
+    Django's LOGIN_URL defaults to "/accounts/login/"; accounts/urls.py is
+    mounted at the root prefix, so the login page really lives at "/login/".
+    Nothing about that mismatch is loud: the redirect is issued correctly, the
+    target simply is not there.
+
+    ⚠️ 404 个测试没有一个抓到它，成因和 C0.2 那五处缺口是同一个：既有的测试要么
+       先登录、要么只断言 302 不跟随。**这一条的价值全在 follow=True 上** ——
+       不跟随的断言证明的是「跳了」，而坏掉的是「跳到哪」。
+    """
+
+    def test_following_the_login_redirect_lands_on_a_real_page(self):
+        response = self.client.get("/events/", follow=True)
+        self.assertEqual(response.status_code, 200)
+        # Named rather than literal so a future move of the login page keeps
+        # this honest: what is asserted is "the redirect chain ends at the
+        # login page", not "it ends at some URL that happens to answer".
+        self.assertRedirects(self.client.get("/events/"), f"{settings.LOGIN_URL}?next=/events/")
+
+    def test_every_link_the_anonymous_navigation_draws_resolves(self):
+        """The acceptance criterion, as a test: click every nav link, no 404.
+
+        Scanning the rendered HTML rather than listing the URLs here on purpose
+        — a link added to base.html is covered the moment it exists, which is
+        the only version of this guard worth having.
+        """
+        page = self.client.get(settings.LOGIN_URL)
+        self.assertEqual(page.status_code, 200)
+        hrefs = {
+            href for href in re.findall(r'href="([^"]+)"', page.content.decode())
+            if href.startswith("/")
+        }
+        self.assertIn("/events/", hrefs, "The nav stopped drawing its own links.")
+        dead = [
+            href for href in sorted(hrefs)
+            if self.client.get(href, follow=True).status_code == 404
+        ]
+        self.assertEqual(dead, [], "Anonymous nav links that 404:\n" + "\n".join(dead))
+
+
+class ErrorPageTests(TestCase):
+    """C0.5.2 — without these templates every refusal explains nothing.
+
+    Django renders a bare page with an empty `details` when 403.html is absent,
+    so the string in PermissionDenied() never reaches a human. That string is
+    the mitigation: org/permissions.py writes SCOPED_DENIAL once precisely so
+    the next person fixes the account rather than deleting the check.
+    """
+
+    def test_the_403_page_prints_the_reason_it_was_refused(self):
+        from org.permissions import SCOPED_DENIAL
+
+        user = get_user_model().objects.create_user(username="nobody", password="x")
+        self.client.force_login(user)
+        response = self.client.get(reverse("events:event_create"))
+        self.assertEqual(response.status_code, 403)
+        self.assertTemplateUsed(response, "403.html")
+        # ⚠️ 断言的是原文，不是「页面非空」。没有这一条，模板以后被换掉、
+        #    {{ exception }} 被删掉，都不会有任何东西变红。
+        self.assertIn(SCOPED_DENIAL, response.content.decode())
+
+    def test_the_404_page_is_ours(self):
+        response = self.client.get("/no-such-page-exists/")
+        self.assertEqual(response.status_code, 404)
+        self.assertTemplateUsed(response, "404.html")
+
+    def test_the_500_template_renders_with_no_request_at_all(self):
+        """The exact condition Django puts it in: template.render(), no context.
+
+        django.views.defaults.server_error renders this template without a
+        request, so context processors do not run and `user` is empty. Anything
+        the template needed from a request would raise here — and a 500 page
+        that raises leaves the visitor with Django's plain-text fallback and
+        leaves us unable to see what this page said.
+        """
+        from django.template import loader
+
+        html = loader.get_template("500.html").render()
+        self.assertIn("Something went wrong", html)

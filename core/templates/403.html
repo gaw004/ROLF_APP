@@ -1,0 +1,34 @@
+{% extends "core/base.html" %}
+{% block title %}Not allowed{% endblock %}
+
+{% block content %}
+  {% comment %}
+  这个模板存在的唯一理由是 {{ exception }} 那一行。
+
+  在它之前，PermissionDenied(SCOPED_DENIAL) 传出去的那段文案一个字都不会显示 ——
+  Django 找不到 403.html 就返回一个 details 为空的裸页面。于是 org/permissions.py
+  写在 SCOPED_DENIAL 里的那句「superuser 没有 ministry scope，去换个带 MinistryRole
+  的账号」，以及 org/views.py 的 FOUNDATION_ONLY、core/middleware.py 那段提示语，
+  三处解释全部落在地上。
+
+  而这些解释就是缓解措施本身：读不到「为什么」的下一个人，改的是检查，不是账号。
+
+  样式留到 C2 统一上，这里只求读得到。
+  {% endcomment %}
+
+  <h1>Not allowed</h1>
+
+  {% if exception %}
+    <p>{{ exception }}</p>
+  {% else %}
+    <p>This account does not have permission to open that page.</p>
+  {% endif %}
+
+  <p>
+    If you think this is wrong, it is almost always the account rather than the
+    page: these pages are granted per ministry, and the grant has to be active
+    today. Ask whoever appointed your ministry's admins.
+  </p>
+
+  <p><a href="{% url 'events:event_list' %}">Back to events</a></p>
+{% endblock %}

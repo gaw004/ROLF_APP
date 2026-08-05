@@ -278,10 +278,27 @@ AWS 便宜是**有专职运维、多服务共摊、上预留实例**之后的事
 
 | 页面 | 暴露什么 | 谁应该看得到 |
 |---|---|---|
-| `event_notify` 的预览行 | 未成年人那几行显示的是**家长的邮箱 / 电话**（`row.to`） | 只有本 ministry 的 admin。这是 [D22](decisions/D22-event-notifications.md) 有意为之，不是泄露 —— 但要确认换个 ministry 的账号打同一个 URL 是 403 |
-| `event_registrations` | 只有姓名和报名状态，不含生日地址 | 本 ministry 的 admin |
+| `event_notify` 的预览行 | 未成年人那几行显示的是**家长的邮箱 / 电话**（`row.to`） | 只有本 ministry 的 admin。这是 [D22](decisions/D22-event-notifications.md) 有意为之，不是泄露 —— 但要确认换个 ministry 的账号打同一个 URL 是 403。⚠️ **foundation tier 也进不来这一页** |
+| `event_registrations` | 只有姓名和报名状态，不含生日地址 | 本 ministry 的 admin，**外加 foundation tier（只读）** |
+| `event_attendance` | ⚠️ **未成年标记 + 紧急联系人的姓名、电话、邮箱** —— 那是当天出事时拨的号码 | 本 ministry 的 admin，**外加 foundation tier（只读）** |
+| `event_report` | 工时和人数的汇总，不含联系方式 | 本 ministry 的 admin，**外加 foundation tier（只读）** |
 | `accounts/profile` | 生日 / 地址 / 紧急联系人全在这里 | 只有本人。它读的是 `request.user.contact`，**从不认提交的 id** —— 别人的行只能 404 |
 | `/admin/` | 全都看得到，包括同意记录和 simple-history | 只有 staff。所以「基金会的人不用 superuser 登录 + 不给 delete」那两条，是这一层唯一的闸门 |
+
+> 2026-08-05 改写：新增了 foundation tier 这一档，**未成年人数据的可见范围跟着变大了**。
+>
+> 上面三行的「外加 foundation tier」是当天拍板的，**有意为之**：基金会全局角色能读
+> 任何 ministry 的报名、签到和报表，但一个字都改不了。代价说清楚 ——
+> 签到页上画着**未成年人的标记和紧急联系人电话**，所以这一档一开，
+> 这些数据就从「本 ministry 的 admin」扩到了「基金会全局角色」。
+>
+> ⚠️ **「不能改」不是靠不画按钮。** `event_attendance` 是个写页面，
+> 视图对只读身份的 **POST 直接 403** —— 藏按钮是界面，拒 POST 才是边界。
+> 有一组测试专门发这些写请求（`events.tests.FoundationTierReadOnlyTests`），
+> 因为读 HTML 证明不了这件事。
+>
+> **所以第 1 条验收要多打一遍**：拿 `foundation_admin` 账号
+> **POST** 一次签到（`action=check_in`）—— 必须 403，且那个人**没有被签到**。
 
 > ⚠️ 用 superuser 点这些页面会得到一串 403，看起来像坏了 —— 那是
 > `org/permissions.py` 的设计（superuser 没有 ministry scope），
@@ -321,6 +338,7 @@ AWS 便宜是**有专职运维、多服务共摊、上预留实例**之后的事
 | 生产库的第一个 `foundation_admin` | 部署步骤里 `createsuperuser` 造一个，加进 `foundation_admin` group（`org/permissions.py::foundation_admin_group()` 会按需创建这个组）。**之后日常不用这个 superuser 登录** —— 所以还要给基金会的人建一个**非 superuser 的 staff 账号**（`is_staff=True` + 同一个 group），R1–R3 之外的全局视角靠它 | — |
 | 基础数据要手工录 | `Ministry` / `Position` / `EmploymentType` / `EventType` / `ParticipationRole` 在生产库里是空的（`ParticipationRole` 的 `general` 那一行除外 —— 它在数据迁移里）。试点前在 admin 里建齐，几十行。<br>⚠️ **`RelationshipType` 不在这个清单里，它走迁移** —— 见[缺口 5](#phase-b-的五处缺口2026-07-31-发现)：它是必填 FK 的目标，空表等于紧急联系人建不了，这种东西不能靠「记得手工录」 | — |
 | 不给基金会写书面操作说明（2026-08-03 定） | 靠当面演示。试点只有一个 ministry、一场活动，当面走一遍比写一页纸快。⚠️ 代价如实说：**这份知识只存在于演示当天在场的那几个人脑子里** —— 换个人来发活动，他不会知道「草稿不发布就没人看得见」，也不会知道「改时间必须走 Edit 页，因为那条路才会经过通知页」 | 换人接手时，或试点扩到第二个 ministry 时。⚠️ 那时**不是补一份文档就够了** —— 得先问当初演示过的人「他们后来卡在哪」，否则写出来的是你以为难的地方 |
+| ⚠️ 紧急联系人的 email 必填（2026-08-05 定） | 目的是省钱：P6 在未成年人没有同意地址时兜底到紧急联系人，而在此之前那条路**只能发短信**（那张表没有 email 列）。现在优先 email。⚠️ **代价：ministry admin 拿着纸质签到表，录一个只留了电话的家长就录不进去了。** 迁移里那些先于本次变更存在的行 email 是空串，模型却说必填 —— 下次编辑那一行时才会被表单拒绝，在此之前没有任何东西报告它 | 试点里真的撞上「只有电话的家长」时。退路是把这个字段改回可空 —— `EmergencyContact.reachable_at` 已经处理了空 email 的情况，所以那是一行的事 |
 | ⚠️ 签到页的工时框有预填值（2026-08-04 定） | `Enter hours` 那一格默认填这场活动排定的时长（`end − start`），已经记过工时的显示已记录值。⚠️ **代价：预填出来的数字和人工确认过的数字长得一模一样。** 有人早退两小时、admin 没注意直接点了保存，库里记下的是满勤，而事后**没有任何办法分辨这个数是量过的还是默认的**。空框逼人打一个数，预填省了力气也省掉了那一下停顿 —— 主动接受，换的是几十人签退时少打几十次字 | 真的发生过一次「按默认值记了工时、事后要追」时。那时的做法不是删掉预填，是给 `Participation` 加一个「这个数是怎么来的」的来源字段 |
 | ⚠️ ministry admin 可以自己新建工种（2026-08-04 定） | 工种下拉里找不到时可以直接建一个新的。查重只做**去空格 + 不区分大小写的整名比对** —— `lifting` 拦得住，`Heavy lifting` 拦不住。⚠️ `ParticipationRole` 是 R5 / R7 的分组维度，**两行意思相同的工种不会报错，只会把报表的一列拆成两列，而两半都看着合理**。`code` 由名字 slug 化生成且建完不可改 | 词表长到没人认得全时。那时的做法是在 admin 里合并（改名 + 把 `EventRole` 指过去），**不是**删行 —— 历史活动指着它 |
 | 注册不加验证码 / 邮箱验证（2026-08-03 定） | 只做登录限流（`django-axes`）和密码重置节流。试点期人数可数，垃圾账号肉眼看得见。代价：任何人都能建账号并看到全部已发布活动，且会在 `Contact` 表里留行 —— `merge_contacts()` 治的是重复，不是垃圾 | **公开放开注册之前必须补**，这条只在试点期成立。做法见 [`03-roadmap.md` 的 C3.9](03-roadmap.md#c39-登录限流) |

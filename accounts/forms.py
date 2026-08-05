@@ -75,7 +75,7 @@ class ProfileForm(forms.ModelForm):
         model = Contact
         fields = [
             "legal_first_name", "legal_last_name", "email", "phone",
-            "birth_date", "preferred_communication_method",
+            "birth_date", "preferred_communication_method", "preferred_language",
             "address_street", "address_city", "address_state",
             "address_postal_code", "address_country",
         ]
@@ -87,6 +87,10 @@ class ProfileForm(forms.ModelForm):
             "phone": "Phone",
             "birth_date": "Date of birth",
             "preferred_communication_method": "Preferred contact method",
+            # The field has been on Contact since the data-core phase, narrowed
+            # to living languages. It was simply never offered to the person it
+            # describes — only a staff account could set it.
+            "preferred_language": "Preferred language",
             "address_street": "Street",
             "address_city": "City",
             "address_state": "State or province",
@@ -125,7 +129,7 @@ class ProfileForm(forms.ModelForm):
 
 
 class EmergencyContactForm(forms.ModelForm):
-    """Somebody to call. All three fields are required, by the model's design.
+    """Somebody to call. All four fields are required, by the model's design.
 
     Reachable by the volunteer because P6's guardian fallback reads this table
     when a minor has no consent address, and the attendance page shows the
@@ -134,13 +138,19 @@ class EmergencyContactForm(forms.ModelForm):
 
     class Meta:
         model = EmergencyContact
-        fields = ["name", "phone", "relationship_type"]
+        fields = ["name", "phone", "email", "relationship_type"]
         labels = {
             "name": "Their name",
             "phone": "Their phone",
+            "email": "Their email",
             "relationship_type": "They are your…",
         }
         help_texts = {
+            "email": (
+                "Required. If you are under 18 this is where we tell them the "
+                "event has changed, and email reaches them for free where a "
+                "text message does not."
+            ),
             "relationship_type": (
                 "Read it as a sentence: “Wang Xiuying is your parent.” "
                 "Pick what this person is to you, not the other way round."

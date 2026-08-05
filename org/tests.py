@@ -24,7 +24,7 @@ from .permissions import (
     can_grant_ministry_admin,
     can_manage_event,
     can_publish_event,
-    can_view_registrations,
+    can_view_event_records,
     foundation_admin_group,
     ministry_ids_administered_by,
 )
@@ -739,7 +739,7 @@ class PermissionTests(TestCase):
         stranger = get_user_model().objects.create_user(
             username="stranger", password="x", contact=make_person("Stranger"))
         self.assertFalse(can_publish_event(stranger, self.pantry))
-        self.assertFalse(can_view_registrations(stranger, self.make_event(self.pantry)))
+        self.assertFalse(can_view_event_records(stranger, self.make_event(self.pantry)))
         self.assertFalse(can_grant_ministry_admin(stranger))
 
     def test_a_user_with_no_contact_is_denied_everything_without_raising(self):

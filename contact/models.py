@@ -552,10 +552,23 @@ class EmergencyContact(ConstraintErrorFieldMixin, TimeStampedModel):
     person = models.ForeignKey(
         Contact, on_delete=models.CASCADE, related_name="emergency_contacts",
     )
-    # All three are required. An emergency contact with no phone number is
+    # All four are required. An emergency contact with no phone number is
     # pointless, and one with no relationship does not say who they are.
+    #
+    # ⚠️ `email` became required on 2026-08-05, and the reason is money rather
+    #    than completeness: this address is what P6 falls back to when a minor
+    #    has no consent address on file, and until now that fallback could only
+    #    send SMS because this table had no email column. Email costs
+    #    essentially nothing to send and SMS does not.
+    #
+    # ⚠️ The cost is real and is recorded in phase-c.md's known gaps: somebody
+    #    being entered from a paper sign-in sheet, whose guardian left only a
+    #    phone number, **cannot be recorded at all**. If that turns out to
+    #    happen in the pilot, the way back is to make this blank again and have
+    #    reachable_at() below simply skip the empty case — it already does.
     name = models.CharField(max_length=200)
     phone = PhoneNumberField(region="US")
+    email = models.EmailField()
     relationship_type = models.ForeignKey(
         RelationshipType,
         on_delete=models.PROTECT,
@@ -567,6 +580,25 @@ class EmergencyContact(ConstraintErrorFieldMixin, TimeStampedModel):
                   "parent.” Pick what the emergency contact is to them, "
                   "not the other way round.",
     )
+
+    @property
+    def reachable_at(self):
+        """(address, channel) for this person, or None — email first, then phone.
+
+        ⚠️ One definition, because P6 reaches an emergency contact from two
+           different places (a change of time, and a signup confirmation) and a
+           guardian reached by email for one and by SMS for the other is a bug
+           nobody would ever file — it just looks like the messages went
+           missing.
+
+        The order matches Participation.guardian_address deliberately: whichever
+        route a notice takes to a guardian, it prefers the same channel.
+        """
+        if self.email:
+            return self.email, "email"
+        if self.phone:
+            return str(self.phone), "sms"
+        return None
 
     class Meta:
         # No "one per person" rule. The table supports several by nature; the

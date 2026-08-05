@@ -542,10 +542,12 @@ def resolve_recipients(event):
         if contact.is_minor in (True, None):
             guardian = participation.guardian_address
             if guardian is None:
-                # The emergency contact is the fallback, and it is phone-only
-                # because that table has no email column at all.
+                # The emergency contact is the fallback. Its own reachable_at
+                # decides the channel — email first, then phone — so a guardian
+                # reached about a change of time and a guardian reached about a
+                # confirmation get the same treatment.
                 emergency = next(iter(contact.emergency_contacts.all()), None)
-                guardian = (str(emergency.phone), SMS) if emergency else None
+                guardian = emergency.reachable_at if emergency else None
             if guardian is None:
                 unreachable.append(Unreachable(
                     participation=participation,
@@ -612,7 +614,7 @@ def confirm_signup(participation, *, backend=None):
         guardian = participation.guardian_address
         if guardian is None:
             emergency = next(iter(contact.emergency_contacts.all()), None)
-            guardian = (str(emergency.phone), SMS) if emergency else None
+            guardian = emergency.reachable_at if emergency else None
         if guardian is not None and guardian not in to:
             to.append(guardian)
 

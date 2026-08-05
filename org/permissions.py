@@ -97,9 +97,18 @@ def can_manage_event(user, event) -> bool:
     return event is not None and administers(user, event.ministry_id)
 
 
-def can_view_registrations(user, event) -> bool:
-    """P4's first half: see who has signed up. The read side."""
-    return event is not None and administers(user, event.ministry_id)
+def in_foundation_tier(user) -> bool:
+    """Is this account in the foundation-wide group?
+
+    The primitive the global tier is built on. Named for what it reads rather
+    than for one thing it permits, because it now answers two questions —
+    "may they appoint ministry admins" and "may they read any event's records"
+    — and giving each of those its own copy of `groups.filter(...)` is how two
+    checks end up disagreeing about who is in the tier.
+    """
+    if user is None or not getattr(user, "is_authenticated", False):
+        return False
+    return user.groups.filter(name=FOUNDATION_ADMIN_GROUP).exists()
 
 
 def can_grant_ministry_admin(user) -> bool:
@@ -109,9 +118,32 @@ def can_grant_ministry_admin(user) -> bool:
     ministry admin must not be able to recruit their own downline. That is what
     makes this tier "higher", and it is the one thing about P5 worth testing.
     """
-    if user is None or not getattr(user, "is_authenticated", False):
+    return in_foundation_tier(user)
+
+
+def can_view_event_records(user, event) -> bool:
+    """Read one event's signups, attendance and report. **Read only.**
+
+    Two ways in, and they are not the same authority (2026-08-05):
+
+      · the ministry's own admin, who may also change these things;
+      · the foundation tier, who may only look.
+
+    ⚠️ Nothing that writes may be gated on this. The attendance page in
+       particular is a write page — check-in, check-out, hours — so it asks
+       this for GET and `can_manage_event` for POST. Hiding the buttons is
+       interface; refusing the POST is the permission, and only the second one
+       is a boundary.
+
+    ⚠️ This widens who can see a minor's emergency contact number, because the
+       attendance page shows it (that is the number somebody dials when an
+       ankle gets twisted). Deliberate, decided 2026-08-05, and written into
+       phase-c.md's "who can see a minor's data" table — which is what C3.7
+       checks against, so it cannot be widened quietly.
+    """
+    if event is None:
         return False
-    return user.groups.filter(name=FOUNDATION_ADMIN_GROUP).exists()
+    return administers(user, event.ministry_id) or in_foundation_tier(user)
 
 
 #: What the global tier may do, as app_label.codename. Global permissions are

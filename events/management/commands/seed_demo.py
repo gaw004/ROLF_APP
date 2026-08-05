@@ -186,10 +186,13 @@ class Command(BaseCommand):
         #    and an unknown birth date counts as one — with no emergency
         #    contact on file. Demo data has to satisfy the rules it demonstrates,
         #    or the acceptance walk fails on its own fixtures.
-        for person, kin in [(self.minor, "Ming's mother"), (self.unknown, "Wang's guardian")]:
+        for person, kin, kin_email in [
+            (self.minor, "Ming's mother", "ming.mother@example.invalid"),
+            (self.unknown, "Wang's guardian", "wang.guardian@example.invalid"),
+        ]:
             EmergencyContact.objects.get_or_create(
                 person=person.contact, name=kin, phone="+14085550199",
-                defaults={"relationship_type": self.parent_of},
+                defaults={"relationship_type": self.parent_of, "email": kin_email},
             )
         # Neither an email nor a phone. Without this person the "cannot be
         # reached" group on the notification page is always empty, which looks
@@ -197,13 +200,21 @@ class Command(BaseCommand):
         self.silent = self.account("volunteer_silent", "Noreach", "Sam",
                                    birth_date=datetime.date(1988, 3, 3))
         # A second minor whose only route to a guardian is the emergency
-        # contact — phone-only, so it exercises the SMS fallback.
+        # contact, with no consent address of her own — so she exercises the
+        # fallback branch of resolve_recipients().
+        #
+        # ⚠️ 2026-08-05 更正：这里原来写的是「phone-only，用来跑 SMS 兜底」。
+        #    EmergencyContact.email 当天变成必填，所以这一行现在走的是 email。
+        #    SMS 那条分支仍然存在（email 为空时），但只有
+        #    contact.tests.EmergencyContactReachabilityTests 覆盖得到它 ——
+        #    演示数据不再制造一个模型自己会拒绝的行。
         self.minor_emergency = self.account(
             "volunteer_minor2", "Zhao", "Xiaoyu",
             birth_date=local_today() - datetime.timedelta(days=365 * 16))
         EmergencyContact.objects.get_or_create(
             person=self.minor_emergency.contact, name="Zhao's mother", phone="+14085550188",
-            defaults={"relationship_type": self.parent_of},
+            defaults={"relationship_type": self.parent_of,
+                      "email": "zhao.mother@example.invalid"},
         )
 
         # An employee who was in post on the day of the past event and has

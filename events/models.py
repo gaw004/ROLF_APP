@@ -502,9 +502,13 @@ class Participation(ConstraintErrorFieldMixin, TimeStampedModel):
     def guardian_address(self):
         """(address, channel) for the guardian, or None — D22's rule 2.
 
-        Email first: the default backend is email, and the fallback path
-        (EmergencyContact) can only manage SMS because that table has no email
-        column at all.
+        Email first: the default backend is email, and it costs essentially
+        nothing where a text message does not.
+
+        ⚠️ 2026-08-05 更正：这段原来写的是「兜底路径（EmergencyContact）只能走
+           短信，因为那张表根本没有 email 列」。**那句话不再成立** ——
+           EmergencyContact 现在有必填的 email，兜底的顺序由它自己的
+           reachable_at 决定，和这里同序。
         """
         if self.consent_email:
             return self.consent_email, "email"

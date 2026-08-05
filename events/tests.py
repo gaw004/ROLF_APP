@@ -1011,9 +1011,13 @@ class NavigationEntranceTests(PageTestCase):
         self.assertContains(response, "Finished one")
 
     def test_the_hub_links_onward_to_every_page_for_an_event(self):
+        # ⚠️ `event_roles` is deliberately absent: the roles panel moved onto
+        #    the edit page on 2026-08-04, so `event_update` is now that link
+        #    too. Keeping it in this list would assert a route that exists only
+        #    to redirect.
         self.login(self.zhang)
         page = self.client.get(reverse("events:event_manage_list")).content.decode()
-        for name in ["event_update", "event_roles", "event_registrations",
+        for name in ["event_update", "event_registrations",
                      "event_attendance", "event_report", "event_notify"]:
             with self.subTest(link=name):
                 self.assertIn(reverse(f"events:{name}", args=[self.event.pk]), page)
@@ -1464,6 +1468,32 @@ class PrefilledHoursTests(PageTestCase):
         self.login(self.zhang)
         page = self.client.get(self.url).content.decode()
         self.assertIn('value="0.00"', self.box(page))
+
+    def test_using_an_emergency_contact_copies_its_email_too(self):
+        """2026-08-05: the shortcut used to write an empty consent_email.
+
+        ⚠️ It did that because EmergencyContact had no email column, so the only
+           address it could hand over was a phone number — every guardian
+           reached through this path got an SMS. Now that the column exists,
+           not copying it would leave the field looking filled in while P6 fell
+           back to the more expensive channel.
+        """
+        from contact.models import EmergencyContact, RelationshipType
+
+        minor = self.account(
+            "xiaoming", "Xiao",
+            birth_date=local_today() - datetime.timedelta(days=365 * 15))
+        kin = EmergencyContact.objects.create(
+            person=minor.contact, name="Xiao's mother", phone="+14085550111",
+            email="mother@example.com",
+            relationship_type=RelationshipType.objects.get(code="parent"))
+
+        form = SignUpForm(
+            {"event_role": self.role.pk, "use_emergency_contact": kin.pk,
+             "consent_method": Participation.ConsentMethod.VERBAL},
+            event=self.event, contact=minor.contact)
+        self.assertTrue(form.is_valid(), form.errors)
+        self.assertEqual(form.consent()["consent_email"], "mother@example.com")
 
     def test_the_length_is_computed_in_services_not_in_the_view(self):
         # D18: date arithmetic in a view gets rewritten along with the
@@ -2595,3 +2625,153 @@ class PerEventMinorRuleTests(TestCase):
 
     def test_a_coordinator_can_set_it_when_publishing(self):
         self.assertIn("requires_guardian_consent", EventForm.Meta.fields)
+
+
+class FoundationTierReadOnlyTests(PageTestCase):
+    """2026-08-05 feedback: the foundation tier reads any event, changes none.
+
+    ⭐ The assertion that matters is the POST one. Not drawing a button keeps
+       nobody out — a form posted from anywhere at all arrives at the view with
+       the same shape — so every one of these pages is checked by sending the
+       write, not by reading the HTML.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.boss = self.account("boss", "Boss", birth_date=datetime.date(1975, 1, 1))
+        self.boss.groups.add(foundation_admin_group())
+        self.boss = type(self.boss).objects.get(pk=self.boss.pk)
+        self.participation = Participation.objects.create(
+            contact=self.lisi.contact, event_role=self.role)
+
+    # --- may read, on any ministry's event ---------------------------------
+
+    def test_the_three_read_pages_open(self):
+        self.login(self.boss)
+        for name in ["event_registrations", "event_attendance", "event_report"]:
+            with self.subTest(page=name):
+                response = self.client.get(reverse(f"events:{name}", args=[self.event.pk]))
+                self.assertEqual(response.status_code, 200)
+
+    def test_it_works_for_a_ministry_they_do_not_administer(self):
+        # The whole point of the tier: it is not scoped to one ministry.
+        other = make_event(ministry=self.tax, owner=self.other_admin.contact,
+                           name="Someone else's")
+        self.login(self.boss)
+        self.assertEqual(
+            self.client.get(reverse("events:event_report", args=[other.pk])).status_code,
+            200)
+
+    def test_the_hub_lists_every_ministrys_events(self):
+        make_event(ministry=self.tax, owner=self.other_admin.contact, name="Tax one")
+        self.login(self.boss)
+        response = self.client.get(reverse("events:event_manage_list"))
+        self.assertContains(response, "Tax one")
+        self.assertContains(response, self.event.name)
+        self.assertContains(response, "All events")
+        self.assertFalse(response.context["can_manage"])
+
+    # --- may not write, anywhere -------------------------------------------
+
+    def test_it_cannot_check_anybody_in(self):
+        """⭐ The boundary. Buttons are hidden too, but that is not why."""
+        self.login(self.boss)
+        response = self.client.post(
+            reverse("events:event_attendance", args=[self.event.pk]),
+            {"participation": self.participation.pk, "action": "check_in"})
+        self.assertEqual(response.status_code, 403)
+        self.participation.refresh_from_db()
+        self.assertIsNone(self.participation.checked_in_at)
+
+    def test_it_cannot_enter_hours(self):
+        self.login(self.boss)
+        self.client.post(
+            reverse("events:event_attendance", args=[self.event.pk]),
+            {"participation": self.participation.pk, "action": "hours", "hours": "5"})
+        self.participation.refresh_from_db()
+        self.assertIsNone(self.participation.hours)
+
+    def test_the_three_write_pages_stay_shut(self):
+        self.login(self.boss)
+        for name in ["event_update", "event_notify"]:
+            with self.subTest(page=name):
+                self.assertEqual(
+                    self.client.get(reverse(f"events:{name}", args=[self.event.pk])).status_code,
+                    403)
+        self.assertEqual(
+            self.client.get(reverse("events:event_create")).status_code, 403)
+
+    def test_it_cannot_change_an_events_status_from_the_hub(self):
+        self.login(self.boss)
+        response = self.client.post(reverse("events:event_manage_list"), {
+            "event": self.event.pk, "status": Event.Status.CANCELLED})
+        self.assertEqual(response.status_code, 403)
+        self.event.refresh_from_db()
+        self.assertNotEqual(self.event.status, Event.Status.CANCELLED)
+
+    def test_it_cannot_add_or_delete_a_role(self):
+        self.login(self.boss)
+        self.assertEqual(
+            self.client.post(reverse("events:event_roles", args=[self.event.pk]),
+                             {"role": self.role.role.pk, "needed_count": 1}).status_code,
+            403)
+        self.assertEqual(
+            self.client.post(reverse("events:role_delete", args=[self.role.pk])).status_code,
+            403)
+
+    # --- the interface agrees with the permission --------------------------
+
+    def test_no_edit_or_notify_links_are_drawn_for_it(self):
+        self.login(self.boss)
+        page = self.client.get(
+            reverse("events:event_report", args=[self.event.pk])).content.decode()
+        self.assertNotIn(reverse("events:event_update", args=[self.event.pk]), page)
+        self.assertNotIn(reverse("events:event_notify", args=[self.event.pk]), page)
+        self.assertIn(reverse("events:event_attendance", args=[self.event.pk]), page)
+
+    def test_a_ministry_admin_who_is_also_foundation_keeps_managing(self):
+        """⚠️ Being promoted must not take the publish button away.
+
+        zhang administers the pantry. Adding the foundation group as well has to
+        leave the managing view of their own ministries intact, not replace it
+        with the read-only view of everything.
+        """
+        self.zhang.groups.add(foundation_admin_group())
+        self.login(type(self.zhang).objects.get(pk=self.zhang.pk))
+        response = self.client.get(reverse("events:event_manage_list"))
+        self.assertTrue(response.context["can_manage"])
+        self.assertContains(response, "Events I manage")
+
+    def test_the_navigation_actually_offers_the_page(self):
+        """⚠️ The seventh time this project has built a page nothing linked to.
+
+        `is_ministry_admin` is False for this tier — it holds no MinistryRole —
+        so the shared nav drew nothing at all and the only way in was typing
+        the URL. The view was open the whole time; that is precisely what makes
+        this class of gap invisible.
+
+        Caught by looking at a screenshot, not by a test. This is the test.
+        """
+        self.login(self.boss)
+        page = self.client.get(reverse("events:event_list")).content.decode()
+        self.assertIn(reverse("events:event_manage_list"), page)
+        self.assertIn("All events", page)
+
+    def test_a_ministry_admin_still_sees_the_managing_label(self):
+        self.login(self.zhang)
+        page = self.client.get(reverse("events:event_list")).content.decode()
+        self.assertIn("Events I manage", page)
+        self.assertNotIn("All events", page)
+
+    def test_a_plain_volunteer_is_offered_neither(self):
+        self.login(self.lisi)
+        page = self.client.get(reverse("events:event_list")).content.decode()
+        self.assertNotIn(reverse("events:event_manage_list"), page)
+
+    def test_a_plain_volunteer_still_gets_nothing(self):
+        self.login(self.lisi)
+        for name in ["event_registrations", "event_attendance", "event_report"]:
+            with self.subTest(page=name):
+                self.assertEqual(
+                    self.client.get(reverse(f"events:{name}", args=[self.event.pk])).status_code,
+                    403)

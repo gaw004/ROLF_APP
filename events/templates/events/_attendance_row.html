@@ -48,6 +48,13 @@
   <td class="font-medium">{{ row.hours|default_if_none:"—" }}</td>
   <td>
     {% comment %}
+    ⚠️ 只读身份（foundation tier）这里什么都不画。**但藏起来不是权限** ——
+       视图对它的 POST 直接 403，那才是边界。这里只是不给一个按不动的按钮。
+    {% endcomment %}
+    {% if not can_manage %}
+      <span class="text-xs text-ink-600 dark:text-ink-300">Read only</span>
+    {% else %}
+    {% comment %}
     ⭐ 两张**完整的服务端表单**，hx-post 只是它们的快路。
        关掉 JavaScript，签到签退和补工时全部照样能走完 —— D24 的口径。
     ⚠️ hx-indicator 不是装饰：没有加载态的按钮用户会点第二次，
@@ -88,5 +95,6 @@
              class="w-24 rounded-md border border-ink-300 bg-white px-2 py-1 text-sm text-ink-900 dark:border-ink-600 dark:bg-ink-800 dark:text-ink-50">
       {% include "core/components/button.html" with label="Enter hours" variant="ghost" name="action" value="hours" %}
     </form>
+    {% endif %}
   </td>
 </tr>

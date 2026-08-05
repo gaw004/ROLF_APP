@@ -23,9 +23,10 @@ from django.urls import reverse
 
 from org.permissions import (
     SCOPED_DENIAL,
+    in_foundation_tier,
     can_manage_event,
     can_publish_event,
-    can_view_registrations,
+    can_view_event_records,
     ministry_ids_administered_by,
 )
 
@@ -283,7 +284,13 @@ def event_manage_list(request):
     ministries wants one list, and the ministry is a column.
     """
     administered = ministry_ids_administered_by(request.user)
-    if not administered:
+    # The foundation tier gets the same page over every ministry — read only.
+    # ⚠️ Without this it had no entrance at all: it holds no MinistryRole, so
+    #    nothing anywhere listed events for it to open. That is the same gap
+    #    C0.2 closed five times over — the pages existed and nothing pointed at
+    #    them.
+    foundation = in_foundation_tier(request.user)
+    if not administered and not foundation:
         raise PermissionDenied(SCOPED_DENIAL)
 
     if request.method == "POST":
@@ -299,13 +306,16 @@ def event_manage_list(request):
             messages.success(request, f"“{event.name}” is now {event.get_status_display()}.")
         return redirect("events:event_manage_list")
 
-    events = (
-        Event.objects.filter(ministry_id__in=administered)
-        .select_related("ministry", "event_type")
-        .order_by("-start_time")
-    )
+    events = Event.objects.all() if not administered else Event.objects.filter(
+        ministry_id__in=administered)
+    # ⚠️ Somebody who is both — a foundation admin who also runs a ministry —
+    #    keeps the managing view of their own ministries rather than the
+    #    read-only view of everything. Losing the ability to publish an event
+    #    because you were also promoted would be a strange way to be rewarded.
+    events = events.select_related("ministry", "event_type").order_by("-start_time")
     return render(request, "events/event_manage_list.html", {
         "events": events,
+        "can_manage": bool(administered),
         # One unbound form, reused to draw every row's dropdown: the choices are
         # identical, and building one per event would be a form per row for no
         # gain.
@@ -398,6 +408,10 @@ def _edit_page_context(event, *, form=None, role_form=None, user=None):
     """
     return {
         "event": event,
+        # Always true here: every path into this page goes through
+        # _managed_event() first. Passed explicitly rather than left out, so the
+        # shared nav does not have to treat "missing" as "false".
+        "can_manage": True,
         "form": form if form is not None else EventForm(instance=event, user=user),
         "role_form": role_form if role_form is not None else EventRoleForm(event=event),
         "roles": event.roles.with_signup_counts().select_related("role"),
@@ -461,7 +475,7 @@ def role_delete(request, pk):
 def event_registrations(request, pk):
     """P4's first half: who signed up, by role. Read-only, so the read check."""
     event = get_object_or_404(Event.objects.select_related("ministry"), pk=pk)
-    if not can_view_registrations(request.user, event):
+    if not can_view_event_records(request.user, event):
         raise PermissionDenied(SCOPED_DENIAL)
 
     roles = event.roles.with_signup_counts().select_related("role").prefetch_related(
@@ -471,7 +485,10 @@ def event_registrations(request, pk):
         )
     )
     return render(request, "events/event_registrations.html", {
-        "event": event, "roles": roles,
+        "event": event,
+        # Drives the shared event nav: Edit and Notify are drawn only for
+        # somebody who can actually open them.
+        "can_manage": can_manage_event(request.user, event), "roles": roles,
     })
 
 
@@ -479,16 +496,26 @@ def event_registrations(request, pk):
 def event_attendance(request, pk):
     """P4's second half: sign people in and out, or enter hours from paper.
 
-    can_manage_event(), not the read check — this one writes.
-
     The minors and their emergency numbers are shown here because this is the
     page somebody has open when an ankle gets twisted. That is dialling a
     number on the spot; it is not the same thing as reaching a guardian before
     the event, which goes through consent_email / consent_phone (B11).
     """
-    event = _managed_event(request, pk)
+    # ⭐ Two different questions, asked separately (2026-08-05). The foundation
+    #    tier may read this page for any event; only the ministry's own admin
+    #    may change anything on it.
+    #
+    # ⚠️ The POST check is the boundary. Not drawing the buttons is interface,
+    #    and interface keeps nobody out — a form posted from anywhere at all
+    #    arrives at this view with the same shape.
+    event = get_object_or_404(Event.objects.select_related("ministry"), pk=pk)
+    if not can_view_event_records(request.user, event):
+        raise PermissionDenied(SCOPED_DENIAL)
+    can_manage = can_manage_event(request.user, event)
 
     if request.method == "POST":
+        if not can_manage:
+            raise PermissionDenied(SCOPED_DENIAL)
         participation = get_object_or_404(
             Participation.objects.filter(event_role__event=event),
             pk=request.POST.get("participation"),
@@ -513,6 +540,7 @@ def event_attendance(request, pk):
                 "row": participation,
                 "hours_form": HoursForm(),
                 "scheduled_hours": scheduled_hours(event),
+                "can_manage": True,
             })
         return redirect("events:event_attendance", pk=event.pk)
 
@@ -527,6 +555,7 @@ def event_attendance(request, pk):
         "event": event,
         "participations": rows,
         "hours_form": HoursForm(),
+        "can_manage": can_manage,
         # What the box starts at for somebody with no hours yet. Computed in
         # services, never here — this is date arithmetic, and there is a grep
         # guard on views doing any (D18).
@@ -536,10 +565,18 @@ def event_attendance(request, pk):
 
 @login_required
 def event_report(request, pk):
-    """R3–R8 for one event. Every number arrives from services.py."""
-    event = _managed_event(request, pk)
+    """R3–R8 for one event. Every number arrives from services.py.
+
+    ⚠️ Reads, so it asks the read check — not `_managed_event()`, which is the
+       write gate this page used to go through. The foundation tier may read
+       any event's report without being able to touch the event.
+    """
+    event = get_object_or_404(Event.objects.select_related("ministry"), pk=pk)
+    if not can_view_event_records(request.user, event):
+        raise PermissionDenied(SCOPED_DENIAL)
     return render(request, "events/event_report.html", {
         "event": event,
+        "can_manage": can_manage_event(request.user, event),
         "summary": event_summary(event),
         "staff": ministry_staff_participation(event),
     })
@@ -583,6 +620,8 @@ def event_notify(request, pk):
 
     return render(request, "events/event_notify.html", {
         "event": event,
+        # Always true: this view is gated on can_manage_event above.
+        "can_manage": True,
         "form": form,
         "recipients": [r for r in recipients if not r.is_guardian],
         "guardian_recipients": [r for r in recipients if r.is_guardian],

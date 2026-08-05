@@ -125,7 +125,10 @@ class SignUpForm(forms.Form):
                 "consent_given_by": kin.name,
                 "consent_relationship": kin.relationship_type,
                 "consent_method": self.cleaned_data.get("consent_method") or "",
-                "consent_email": "",
+                # ⚠️ 2026-08-05：email 也复制过来了。原来这里写死成 "" ——
+                #    那时 EmergencyContact 没有 email 列，所以这条路上的家长
+                #    只能收短信。现在它有了，而 P6 优先走 email。
+                "consent_email": kin.email,
                 "consent_phone": str(kin.phone),
             }
 
@@ -215,6 +218,14 @@ class EventPeriodForm(forms.Form):
         queryset=Ministry.objects.filter(is_active=True).order_by("name"),
         required=False, label="Ministry", empty_label="All ministries",
     )
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # ⚠️ Ministry first (2026-08-05). Declared after the dates because it was
+        #    added later, and declaration order is render order — so the box most
+        #    people reach for first was sitting third. Which ministry you are
+        #    looking at narrows the list far more than a date range does.
+        self.order_fields(["ministry", "start", "end"])
 
     def clean(self):
         cleaned = super().clean()

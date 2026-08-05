@@ -3,7 +3,7 @@ from django.db import IntegrityError, transaction
 from django.test import TestCase
 from django.urls import reverse
 
-from contact.models import Contact, EmergencyContact, RelationshipType
+from contact.models import Contact, EmergencyContact, Language, RelationshipType
 
 from .services import register_account
 
@@ -245,7 +245,8 @@ class ProfilePageTests(TestCase):
         relationship = RelationshipType.objects.get(code="parent")
         self.client.post(self.url, {
             "action": "add_kin", "name": "Wang Xiuying",
-            "phone": "+14085550101", "relationship_type": relationship.pk,
+            "phone": "+14085550101", "email": "wang@example.com",
+            "relationship_type": relationship.pk,
         })
         kin = self.contact().emergency_contacts.get()
         self.assertEqual(kin.name, "Wang Xiuying")
@@ -282,3 +283,50 @@ class ProfilePageTests(TestCase):
         root = get_user_model().objects.create_superuser(username="root", password="x")
         self.client.force_login(root)
         self.assertEqual(self.client.get(self.url).status_code, 403)
+
+
+class ProfileLanguageAndKinEmailTests(TestCase):
+    """2026-08-05 feedback: two fields the volunteer could not reach.
+
+    `preferred_language` has been on Contact since the data-core phase, narrowed
+    to living languages — it was simply never offered to the person it describes,
+    so only a staff account could set it. No migration was needed for it; the
+    field existed and the form did not list it.
+    """
+
+    def setUp(self):
+        self.user = register_account(
+            username="lang", password="a-good-long-password",
+            legal_last_name="Lang", email="lang@example.com")
+        self.client.force_login(self.user)
+        self.url = reverse("accounts:profile")
+
+    def test_preferred_language_is_offered_and_saved(self):
+        english = Language.objects.get(code="eng")
+        response = self.client.post(self.url, {
+            "action": "save", "legal_last_name": "Lang",
+            "email": "lang@example.com", "preferred_language": english.pk,
+        })
+        self.assertEqual(response.status_code, 302)
+        self.user.contact.refresh_from_db()
+        self.assertEqual(self.user.contact.preferred_language, english)
+
+    def test_only_living_languages_are_offered(self):
+        # Same narrowing the admin form already had: Latin is in the table, not
+        # in the dropdown.
+        choices = self.client.get(self.url).context["form"].fields[
+            "preferred_language"].queryset
+        self.assertFalse(choices.filter(code="lat").exists())
+
+    def test_an_emergency_contact_without_an_email_is_refused(self):
+        """⚠️ Required, and refused at the form rather than silently stored blank.
+
+        The cost of this rule is in phase-c.md's known gaps: a guardian who left
+        only a phone number cannot be recorded at all.
+        """
+        relationship = RelationshipType.objects.get(code="parent")
+        self.client.post(self.url, {
+            "action": "add_kin", "name": "No Email",
+            "phone": "+14085550103", "relationship_type": relationship.pk,
+        })
+        self.assertEqual(self.user.contact.emergency_contacts.count(), 0)

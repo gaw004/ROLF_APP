@@ -101,6 +101,8 @@ def _back_link(request):
        as a broken site rather than as a page not meant for them.
     """
     marker = request.GET.get("from")
+    if marker == "mine":
+        return reverse("events:my_participations"), "My signups"
     if marker == "past":
         return reverse("events:past_events"), "Past events"
     if marker == "manage":
@@ -365,7 +367,9 @@ def event_create(request):
     if not ministry_ids_administered_by(request.user):
         raise PermissionDenied(SCOPED_DENIAL)
 
-    form = EventForm(request.POST or None, user=request.user)
+    # ⚠️ request.FILES is not optional. Without it the upload is silently
+    #    dropped: the form validates, the event saves, and no image arrives.
+    form = EventForm(request.POST or None, request.FILES or None, user=request.user)
     if request.method == "POST" and form.is_valid():
         # Checked again, on the submitted value. The narrowed dropdown stops a
         # slip; this stops a forged POST. Two different jobs, both needed.
@@ -394,7 +398,8 @@ def event_update(request, pk):
     transaction. Everything else is an ordinary save.
     """
     event = _managed_event(request, pk)
-    form = EventForm(request.POST or None, instance=event, user=request.user)
+    form = EventForm(request.POST or None, request.FILES or None,
+                     instance=event, user=request.user)
     if request.method == "POST" and form.is_valid():
         # Re-checked on the submitted value, exactly as event_create does: the
         # dropdown is narrowed, but a POST can still name any ministry id — and

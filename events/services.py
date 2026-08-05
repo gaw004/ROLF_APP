@@ -6,6 +6,8 @@ imports the same functions unchanged.
 """
 
 import datetime
+import io
+import uuid
 from dataclasses import dataclass
 from decimal import Decimal
 
@@ -13,13 +15,15 @@ from django.core.exceptions import ValidationError
 from django.db import transaction
 from django.db.models import Count, Sum
 from django.utils.text import slugify
+from PIL import Image as PILImage
+from PIL import ImageOps as PILImageOps
 
 from contact.models import Contact
 from core.notifications.base import EMAIL, SMS, Message, get_backend
 from core.timeutils import local_date_of, local_now
 from org.models import Assignment, Position
 
-from .models import EventNotification, Participation, ParticipationRole
+from .models import Event, EventNotification, Participation, ParticipationRole
 
 
 class ConsentRequired(ValidationError):
@@ -393,6 +397,96 @@ def scheduled_hours(event) -> Decimal:
        left after two has one answer here and a different one there.
     """
     return duration_hours(event.end_time - event.start_time)
+
+
+# --- Event pictures --------------------------------------------------------
+# Storage is the whole design constraint here: the picture has to be small, it
+# has to disappear when the event is over, and it must never end up in a
+# backup. Everything below serves one of those three.
+
+#: Longest edge kept. Sized from the display, not from the source: the thumbnail
+#: is at most ~140 CSS px, so this leaves headroom for a 4x display and for the
+#: picture being shown larger later, while still turning a 4 MB phone photo into
+#: something under 100 KB.
+EVENT_IMAGE_MAX_EDGE = 900
+EVENT_IMAGE_QUALITY = 82
+
+
+def normalise_event_image(uploaded):
+    """Re-encode an upload into a small, safe WebP. Returns a Django File.
+
+    ⚠️ Everything here is a decision about **bytes**, never about how the
+       picture looks. Tone, saturation and opacity are styling and live in
+       app.css — see design-system.md. Baking a look into the stored file would
+       put a design decision somewhere no stylesheet can reach and make
+       changing it a re-processing job over every image ever uploaded.
+
+    Four things happen, and three of them are not optional:
+
+      1. ⚠️ `exif_transpose` **before** anything else. A phone photo records
+         "this is sideways" in EXIF rather than rotating the pixels; strip the
+         EXIF first and every portrait photo comes out on its side. Silently —
+         the file is valid, it is just wrong.
+      2. ⚠️ EXIF is then dropped, and the reason is privacy rather than size:
+         phone photos carry GPS coordinates. A picture taken at a volunteer's
+         house would publish their address to everybody who can see the event.
+      3. Resized down (never up) and re-encoded as WebP.
+      4. ⚠️ Opening it with Pillow **is** the validation. A file that is not a
+         raster image cannot survive this, which is what keeps SVG out — an SVG
+         can carry script, and it would be served from this site's own origin.
+
+    Raises ValidationError for anything that is not a usable image, so the form
+    can put the complaint next to the field.
+    """
+    from django.core.files.base import ContentFile
+
+    try:
+        with PILImage.open(uploaded) as source:
+            upright = PILImageOps.exif_transpose(source)
+            # RGBA is kept where it exists — WebP carries alpha, and flattening
+            # a logo onto white would put a white box on a dark page.
+            upright = upright.convert("RGBA" if "A" in upright.getbands() else "RGB")
+            upright.thumbnail(
+                (EVENT_IMAGE_MAX_EDGE, EVENT_IMAGE_MAX_EDGE), PILImage.LANCZOS)
+            buffer = io.BytesIO()
+            # No exif= argument, so none is written. Stated rather than assumed,
+            # because "Pillow does not copy it by default" is the kind of
+            # default that changes.
+            upright.save(buffer, "WEBP", quality=EVENT_IMAGE_QUALITY, method=6)
+    except ValidationError:
+        raise
+    except Exception as error:
+        raise ValidationError(
+            "That file could not be read as an image. JPEG, PNG and WebP work; "
+            "SVG and PDF do not."
+        ) from error
+
+    return ContentFile(buffer.getvalue(), name=f"{uuid.uuid4().hex}.webp")
+
+
+def events_with_images_to_purge(now=None):
+    """Finished events still holding a picture.
+
+    ⚠️ Judged on `end_time`, not on `status`. Marking an event completed is a
+       human action somebody forgets, and a picture that only disappears when
+       somebody remembers is a picture that stays.
+    """
+    return Event.objects.filter(end_time__lt=now or local_now()).exclude(image="")
+
+
+def purge_event_image(event):
+    """Delete one event's picture and forget it. Safe to call twice.
+
+    ⚠️ The field is cleared as well as the file. Leaving the name behind gives a
+       row that points at nothing, and the page then renders a broken image
+       rather than the default — worse than either.
+    """
+    if not event.image:
+        return False
+    event.image.delete(save=False)
+    event.image = ""
+    event.save(update_fields=["image"])
+    return True
 
 
 # --- Opening a job that does not exist in the vocabulary yet ---------------

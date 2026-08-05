@@ -305,3 +305,40 @@
     opacity: 1;
   }
 }
+
+@layer components {
+  /* --- 活动缩略图 -----------------------------------------------------------
+   *
+   * 口径和取值的理由写在 docs/planning/design-system.md 七、活动图片。
+   * 这里只是那一节的实现。
+   *
+   * ⚠️ 这四个值是**样式**，所以在这里，不烤进上传的文件。烤进去的话，
+   *    改一次要把所有已上传的图重新处理一遍，而且这个设计决定会落到
+   *    样式表够不到的地方 —— 违反 phase-c.md 的样式落点规矩。
+   *
+   * ⚠️ 深色下额外压一点亮度。一张为白底拍的照片放进深色页面会「发光」，
+   *    在一排暗色卡片里格外扎眼。
+   */
+  .event-thumb {
+    filter: saturate(0.72) contrast(0.96);
+    opacity: 0.94;
+    background-color: var(--color-ink-100);
+    transition: filter 150ms ease, opacity 150ms ease;
+  }
+
+  /* 悬停时还原成本色。⚠️ 这不是装饰：降饱和是为了整页安静，
+   * 而人真的想看清那张图时得有办法看清。 */
+  .event-thumb:hover {
+    filter: none;
+    opacity: 1;
+  }
+
+  .dark .event-thumb {
+    filter: saturate(0.72) contrast(0.96) brightness(0.88);
+    background-color: var(--color-ink-800);
+  }
+
+  .dark .event-thumb:hover {
+    filter: brightness(0.96);
+  }
+}

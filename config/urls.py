@@ -14,6 +14,8 @@ Including another URLconf
     1. Import the include() function: from django.urls import include, path
     2. Add a URL to urlpatterns:  path('blog/', include('blog.urls'))
 """
+from django.conf import settings
+from django.conf.urls.static import static
 from django.contrib import admin
 from django.urls import include, path
 
@@ -29,3 +31,10 @@ urlpatterns = [
     path('', include('events.urls')),
     path('', include('org.urls')),
 ]
+
+# ⚠️ Development only, and django.conf.urls.static.static() enforces that by
+#    returning nothing when DEBUG is off. In production these files are served
+#    by the object store, not by Django — serving user uploads through the
+#    application is both slow and the shape of problem this project has no
+#    reason to take on.
+urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)

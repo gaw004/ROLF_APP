@@ -524,6 +524,13 @@ preload 更是单向门 —— 退出要等月级。
 - `build.sh`：`pip install -r requirements.txt` → `collectstatic --noinput` → `migrate`
   （原计划中间那步 `compilemessages` 随 [D23](decisions/D23-i18n-interface-only.md) 改口删掉；
   **不需要 `npm`**，产物是 CI 构建好推过来的）；
+- **两个 Cron Job，不是一个**：备份那个在 [C3.6](#c36-备份--恢复演练)；
+  另一个每天跑 `python manage.py purge_event_images`，删掉已结束活动的图片。
+  ⚠️ 它**是** management command 而备份**不是**，两者不矛盾：备份必须在应用起不来
+  的时候照样能跑，而这一个要问 ORM「哪些活动结束了」——没有不依赖 Django 的版本；
+- ⚠️ `STORAGES["default"]` 要指向对象存储。Render 的磁盘每次部署都会清空，
+  留着默认的本地文件存储的话，图片**不是活动结束时消失，是下次部署时消失** ——
+  而那是随机的，看起来像 bug 不像设计；
 - 环境变量：`DJANGO_SETTINGS_MODULE=config.settings.prod`、
   **新生成的** `DJANGO_SECRET_KEY`、`DJANGO_ALLOWED_HOSTS`、SES 的 SMTP 四项、
   `NOTIFICATION_BACKEND`、`SENTRY_DSN`、R2 的 endpoint 和密钥
@@ -571,6 +578,13 @@ R2 和 Sentry（都在免费额度内）—— 合计**每月十几美元量级*
 - 一个 shell 脚本：`pg_dump` → 上传 R2（**不写成 management command**，
   理由见 [`phase-c.md` 的备份落点](phase-c.md#备份脚本的落点)）；
 - Render Cron Job 每天跑一次；
+- ⚠️ **活动图片要另开一个桶，不能和备份共用**（2026-08-05 新增）。
+  备份桶按上一条是**私有**的、装着未成年人的全量明文；活动图片要给**每个登录的
+  志愿者**看得见。一个桶满足不了这两条，而合并的诱惑正是「反正都是 R2」。
+- ⚠️ **图片桶不能开版本控制。** 开了的话
+  [`purge_event_images`](#c35-部署到-render) 的「删除」只是加一个删除标记，
+  旧版本还在 —— 而**控制台上看确实显示已删除**。
+  「活动结束后图片不再存在于任何地方」这条要求，会以一种看起来已经满足的方式落空；
 - **桶必须是私有的**，密钥只给写权限，开服务端加密。
   ⚠️ dump 里是**未成年人的姓名、生日、住址、紧急联系电话、家长邮箱**的全量明文。
   一个默认公开的桶就是一次全库泄露 —— 而它比删库更难发现：

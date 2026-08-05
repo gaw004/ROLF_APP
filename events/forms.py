@@ -8,6 +8,7 @@ reaching into a request. Phase C's views construct the same classes unchanged.
 import datetime
 
 from django import forms
+from django.conf import settings
 
 from contact.models import EmergencyContact, RelationshipType
 from core.timeutils import day_start
@@ -152,13 +153,46 @@ class EventForm(forms.ModelForm):
         fields = [
             "name", "event_type", "ministry", "start_time", "end_time",
             "location", "status", "requires_guardian_consent", "description",
+            "image",
         ]
         widgets = {
             "start_time": forms.DateTimeInput(attrs={"type": "datetime-local"}),
             "end_time": forms.DateTimeInput(attrs={"type": "datetime-local"}),
+            # `accept` is a semantic attribute, not styling — it tells the file
+            # picker what to offer, the same exception type="date" gets under
+            # phase-c.md's placement rules. It is a convenience and never a
+            # check: clean_image() below is the check.
+            "image": forms.ClearableFileInput(attrs={"accept": "image/*"}),
         }
 
     TIME_FIELDS = ("start_time", "end_time")
+
+    def clean_image(self):
+        """Re-encode the upload, or refuse it.
+
+        ⚠️ 2026-08-05 更正：这段注释原来写的是「大小检查发生在 Pillow 打开文件
+           **之前**」。**那是错的** —— Django 的 `ImageField.to_python()` 早在
+           `clean_image()` 被调用之前就已经 `Image.open()` + `verify()` 过一遍了。
+           一条测试当场抓出来：喂一个超大的假文件，回来的报错是 Django 的
+           「不是有效图片」，而不是这里的大小提示。
+
+           所以真正挡住解压炸弹的是 **Pillow 自己的 `MAX_IMAGE_PIXELS`**，不是
+           下面这个比较。这里这一条管的是**存储和带宽**：一张 40 MB 的原图能被
+           解码，但不该被接收。两件事，别再把它们写成一件。
+        """
+        uploaded = self.cleaned_data.get("image")
+        # An unchanged field hands back the stored FieldFile, which has already
+        # been through this and must not be re-encoded on every save.
+        if not uploaded or not hasattr(uploaded, "content_type"):
+            return uploaded
+        if uploaded.size > settings.EVENT_IMAGE_MAX_UPLOAD_BYTES:
+            raise forms.ValidationError(
+                f"That image is larger than "
+                f"{settings.EVENT_IMAGE_MAX_UPLOAD_BYTES // (1024 * 1024)} MB. "
+                f"Most phone photos are well under it.")
+        from .services import normalise_event_image
+
+        return normalise_event_image(uploaded)
 
     def __init__(self, *args, user, **kwargs):
         super().__init__(*args, **kwargs)

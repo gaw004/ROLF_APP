@@ -29,7 +29,11 @@
     </div>
   {% endif %}
 
-  <form method="post" class="card mt-6">
+  {% comment %}
+  ⚠️ enctype 不能少。没有它，浏览器把表单当 urlencoded 发，文件**只发文件名**——
+     表单照样通过验证、活动照样保存，就是没有图片。整条路上没有任何报错。
+  {% endcomment %}
+  <form method="post" enctype="multipart/form-data" class="card mt-6">
     {% csrf_token %}
     {% include "core/components/form_fields.html" %}
     <div class="mt-6 flex flex-wrap gap-2">

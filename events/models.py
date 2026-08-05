@@ -181,6 +181,8 @@ class Event(ConstraintErrorFieldMixin, TimeStampedModel):
     dimensions, no third table. See phase-b.md「一人一活动多角色」.
     """
 
+    IMAGE_DIR = "event-images"
+
     class Status(models.TextChoices):
         DRAFT = "draft", "Draft"                      # only this ministry sees it
         OPEN = "open", "Open for signup"              # published, taking signups
@@ -228,6 +230,23 @@ class Event(ConstraintErrorFieldMixin, TimeStampedModel):
 
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.DRAFT)
     description = models.TextField(blank=True)
+
+    # A picture for the listing. Optional, and short-lived by design.
+    #
+    # ⚠️ **Deleted once the event is over** — purge_event_images, on a daily
+    #    schedule. The picture is gone for good at that point: the past-events
+    #    list shows the default logo from then on. That is the requirement, not
+    #    an oversight, and it is what keeps this feature from accumulating.
+    #
+    # ⚠️ A file, never a column of bytes. The backup is a pg_dump, so anything
+    #    stored in the database is in every backup forever — the opposite of
+    #    what was asked for. See the MEDIA notes in config/settings/base.py.
+    #
+    # ⚠️ Uploads are re-encoded before they are stored (services.normalise_
+    #    event_image): resized, converted to WebP and **stripped of EXIF**.
+    #    A phone photo carries GPS coordinates, and an event picture taken at
+    #    somebody's home would publish where they live to every signed-in user.
+    image = models.ImageField(upload_to=IMAGE_DIR, blank=True)
 
     # Published to the outside world: a change of time or place has to be
     # answerable for afterwards.

@@ -205,6 +205,32 @@ STATIC_ROOT = BASE_DIR / 'staticfiles'
 STATICFILES_DIRS = [BASE_DIR / 'static']
 
 
+# --- Uploaded files ---------------------------------------------------------
+# Event images, and nothing else so far.
+#
+# ⚠️ These deliberately do **not** live in the database. The backup is a
+#    pg_dump (C3.6), so anything in a column is in every backup forever — and
+#    the requirement for these is the opposite: they go away when the event
+#    ends and are in no backup at all. A BinaryField would have made that
+#    impossible to honour.
+#
+# ⚠️ The local filesystem is right for development and **wrong for Render**,
+#    whose disk is wiped on every deploy. Production points STORAGES["default"]
+#    at an object store (C3.5/C3.6). Until that is configured, "not in any
+#    backup" is a promise rather than a verified fact — said plainly because
+#    the local setup cannot demonstrate it either way.
+#
+# ⚠️ The image bucket must be a **different** bucket from the backup one. The
+#    backup bucket is private and full of minors' data; these have to be
+#    readable by every signed-in volunteer. One bucket cannot be both.
+MEDIA_URL = 'media/'
+MEDIA_ROOT = BASE_DIR / 'media'
+
+# The largest upload accepted before it is resized. Anything past this is
+# refused by the form rather than streamed to disk first.
+EVENT_IMAGE_MAX_UPLOAD_BYTES = 10 * 1024 * 1024
+
+
 # --- Models -----------------------------------------------------------------
 # Set explicitly rather than left to Django's AutoField default: changing the
 # primary key type once tables hold data means altering every table's PK and

@@ -6,6 +6,9 @@ could not, because it is「空缺编制」moved to a different table (goal.md D1
 """
 
 import datetime
+import io
+import os
+import tempfile
 from decimal import Decimal
 
 from django.contrib.auth import get_user_model
@@ -14,7 +17,10 @@ from django.core.management.base import CommandError
 from django.core.exceptions import ValidationError
 from django.db import IntegrityError, connection, transaction
 from django.db.models import ProtectedError
+from django.core.files.base import ContentFile
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase, override_settings
+from PIL import Image as PILImage
 from django.utils import formats, timezone
 from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
@@ -1328,6 +1334,12 @@ class DetailPageBackLinkTests(PageTestCase):
         self.login(type(boss).objects.get(pk=boss.pk))
         response = self.client.get(self.url("manage"))
         self.assertContains(response, "&larr; All events")
+
+    def test_arriving_from_my_signups_goes_back_to_my_signups(self):
+        self.login(self.lisi)
+        response = self.client.get(self.url("mine"))
+        self.assertContains(response, reverse("events:my_participations"))
+        self.assertContains(response, "&larr; My signups")
 
     def test_an_unknown_marker_falls_back_rather_than_breaking(self):
         # ⚠️ The marker is a key into a table in the view, never a URL. Anything
@@ -2869,3 +2881,233 @@ class FoundationTierReadOnlyTests(PageTestCase):
                 self.assertEqual(
                     self.client.get(reverse(f"events:{name}", args=[self.event.pk])).status_code,
                     403)
+
+
+def a_photo(size=(1200, 800), fmt="JPEG", exif=None, colour=(200, 60, 40)):
+    """An uploaded image file, as a browser would send one."""
+    buffer = io.BytesIO()
+    image = PILImage.new("RGB", size, colour)
+    if exif is not None:
+        image.save(buffer, fmt, exif=exif)
+    else:
+        image.save(buffer, fmt)
+    return SimpleUploadedFile(
+        f"photo.{fmt.lower()}", buffer.getvalue(),
+        content_type=f"image/{fmt.lower()}")
+
+
+@override_settings(MEDIA_ROOT=tempfile.mkdtemp())
+class EventImageUploadTests(PageTestCase):
+    """2026-08-05: a picture for the listing, small and short-lived.
+
+    Three requirements drove every decision here — barely any storage, gone when
+    the event ends, in no backup at all — and the third is why this is a file
+    rather than a column: the backup is a pg_dump.
+    """
+
+    def upload(self, upload):
+        from events.forms import EventForm
+        return EventForm(
+            {
+                "name": "With a picture", "event_type": EventType.objects.first().pk,
+                "ministry": self.pantry.pk,
+                "start_time": "2026-09-01T09:00", "end_time": "2026-09-01T12:00",
+                "status": Event.Status.OPEN,
+            },
+            {"image": upload},
+            user=self.zhang,
+        )
+
+    def test_a_big_photo_is_re_encoded_small(self):
+        form = self.upload(a_photo(size=(3000, 2000)))
+        self.assertTrue(form.is_valid(), form.errors)
+        stored = form.cleaned_data["image"]
+        with PILImage.open(stored) as check:
+            self.assertLessEqual(max(check.size), 900)
+            self.assertEqual(check.format, "WEBP")
+
+    def test_a_small_photo_is_not_blown_up(self):
+        # thumbnail() only ever shrinks. Upscaling would add bytes and no detail.
+        form = self.upload(a_photo(size=(120, 90)))
+        self.assertTrue(form.is_valid(), form.errors)
+        with PILImage.open(form.cleaned_data["image"]) as check:
+            self.assertEqual(check.size, (120, 90))
+
+    def test_a_sideways_phone_photo_comes_out_upright(self):
+        """⚠️ exif_transpose has to run **before** the EXIF is dropped.
+
+        A phone records "this is rotated" in EXIF rather than rotating pixels.
+        Strip the EXIF first and every portrait photo is stored on its side —
+        a perfectly valid file that is simply wrong, with nothing raised.
+        """
+        exif = PILImage.Exif()
+        exif[274] = 6  # Orientation: rotate 90°
+        form = self.upload(a_photo(size=(400, 200), exif=exif))
+        self.assertTrue(form.is_valid(), form.errors)
+        with PILImage.open(form.cleaned_data["image"]) as check:
+            # 400x200 rotated a quarter turn is 200x400.
+            self.assertEqual(check.size, (200, 400))
+
+    def test_no_exif_at_all_survives_the_re_encode(self):
+        """⚠️ Privacy, not file size.
+
+        GPS coordinates live in this same EXIF block, so a picture taken at a
+        volunteer's home would publish where they live to everybody who can
+        open the event. Asserted on the block as a whole rather than on the GPS
+        tag alone — "nothing carried over" is both easier to be sure of and the
+        rule actually wanted.
+        """
+        exif = PILImage.Exif()
+        exif[271] = "TestPhone"      # Make
+        exif[272] = "Model X"        # Model
+        form = self.upload(a_photo(exif=exif))
+        self.assertTrue(form.is_valid(), form.errors)
+        with PILImage.open(form.cleaned_data["image"]) as check:
+            self.assertFalse(dict(check.getexif()))
+
+    def test_an_svg_is_refused(self):
+        """⚠️ Not fussiness — SVG can carry script, served from our own origin.
+
+        Opening it with Pillow *is* the check: an SVG cannot be opened as a
+        raster image, so nothing extra is needed to keep it out.
+        """
+        svg = SimpleUploadedFile(
+            "logo.svg", b'<svg xmlns="http://www.w3.org/2000/svg"></svg>',
+            content_type="image/svg+xml")
+        form = self.upload(svg)
+        self.assertFalse(form.is_valid())
+        self.assertIn("image", form.errors)
+
+    def test_something_that_is_not_an_image_at_all_is_refused(self):
+        pdf = SimpleUploadedFile("notes.pdf", b"%PDF-1.4 not really",
+                                 content_type="application/pdf")
+        self.assertFalse(self.upload(pdf).is_valid())
+
+    @override_settings(EVENT_IMAGE_MAX_UPLOAD_BYTES=512)
+    def test_an_upload_over_the_size_limit_is_refused(self):
+        """⚠️ This limit is about storage and bandwidth, not about safety.
+
+        The first version of this test sent a fake oversized file and expected
+        the size complaint. It got Django's "not a valid image" instead —
+        because `ImageField.to_python()` opens the file with Pillow **before**
+        `clean_image()` ever runs. Decompression bombs are stopped by Pillow's
+        own `MAX_IMAGE_PIXELS`, not by the comparison below.
+
+        So the file here is a real image, and what is being asserted is that a
+        genuine photo can still be too big to accept.
+        """
+        form = self.upload(a_photo(size=(600, 400)))
+        self.assertFalse(form.is_valid())
+        self.assertIn("larger than", " ".join(form.errors["image"]))
+
+    def test_an_event_without_a_picture_is_perfectly_valid(self):
+        from events.forms import EventForm
+        form = EventForm({
+            "name": "No picture", "event_type": EventType.objects.first().pk,
+            "ministry": self.pantry.pk,
+            "start_time": "2026-09-01T09:00", "end_time": "2026-09-01T12:00",
+            "status": Event.Status.OPEN,
+        }, user=self.zhang)
+        self.assertTrue(form.is_valid(), form.errors)
+
+
+@override_settings(MEDIA_ROOT=tempfile.mkdtemp())
+class EventImagePurgeTests(PageTestCase):
+    """The picture goes when the event is over. That is the whole storage plan."""
+
+    def with_image(self, event):
+        event.image.save("x.webp", ContentFile(a_photo(size=(20, 20)).read()),
+                         save=True)
+        return event
+
+    def test_a_finished_events_picture_is_deleted_and_forgotten(self):
+        old = make_event(
+            ministry=self.pantry, owner=self.zhang.contact, name="Over",
+            start_time=NOW - 2 * DAY, end_time=NOW - 2 * DAY + HOUR)
+        self.with_image(old)
+        path = old.image.path
+
+        call_command("purge_event_images", verbosity=0)
+
+        old.refresh_from_db()
+        # ⚠️ Both halves. Deleting the file but leaving the name gives a row
+        #    pointing at nothing, and the page then renders a broken image
+        #    rather than falling back to the default — worse than either.
+        self.assertEqual(old.image.name, "")
+        self.assertFalse(os.path.exists(path))
+
+    def test_an_event_still_to_come_keeps_its_picture(self):
+        self.with_image(self.event)
+        call_command("purge_event_images", verbosity=0)
+        self.event.refresh_from_db()
+        self.assertTrue(self.event.image.name)
+
+    def test_the_clock_is_end_time_not_the_status(self):
+        """⚠️ Not `status == completed`.
+
+        Marking an event completed is a human action somebody forgets, and a
+        picture that only goes when somebody remembers is a picture that stays.
+        """
+        finished_but_unmarked = make_event(
+            ministry=self.pantry, owner=self.zhang.contact, name="Nobody closed it",
+            status=Event.Status.OPEN,
+            start_time=NOW - 3 * DAY, end_time=NOW - 3 * DAY + HOUR)
+        self.with_image(finished_but_unmarked)
+        call_command("purge_event_images", verbosity=0)
+        finished_but_unmarked.refresh_from_db()
+        self.assertEqual(finished_but_unmarked.image.name, "")
+
+    def test_a_dry_run_changes_nothing(self):
+        old = make_event(
+            ministry=self.pantry, owner=self.zhang.contact, name="Over",
+            start_time=NOW - 2 * DAY, end_time=NOW - 2 * DAY + HOUR)
+        self.with_image(old)
+        call_command("purge_event_images", "--dry-run", verbosity=0)
+        old.refresh_from_db()
+        self.assertTrue(old.image.name)
+
+    def test_running_it_twice_is_harmless(self):
+        old = make_event(
+            ministry=self.pantry, owner=self.zhang.contact, name="Over",
+            start_time=NOW - 2 * DAY, end_time=NOW - 2 * DAY + HOUR)
+        self.with_image(old)
+        call_command("purge_event_images", verbosity=0)
+        call_command("purge_event_images", verbosity=0)  # must not raise
+
+
+@override_settings(MEDIA_ROOT=tempfile.mkdtemp())
+class EventImageDisplayTests(PageTestCase):
+    """Where the picture appears, and where it deliberately does not."""
+
+    def test_the_list_falls_back_to_the_foundation_logo(self):
+        self.login(self.lisi)
+        self.assertContains(self.client.get(reverse("events:event_list")),
+                            "core/img/event-default")
+
+    def test_the_list_shows_an_uploaded_picture_instead(self):
+        self.event.image.save("x.webp", ContentFile(a_photo(size=(20, 20)).read()),
+                              save=True)
+        self.login(self.lisi)
+        response = self.client.get(reverse("events:event_list"))
+        self.assertContains(response, self.event.image.url)
+
+    def test_past_events_carry_no_picture_column(self):
+        """⚠️ Deliberate: every finished event shows the default logo, so a
+           column of identical logos would be noise rather than information.
+        """
+        make_event(
+            ministry=self.pantry, owner=self.zhang.contact, name="Over",
+            status=Event.Status.COMPLETED,
+            start_time=NOW - 2 * DAY, end_time=NOW - 2 * DAY + HOUR)
+        self.login(self.lisi)
+        self.assertNotContains(self.client.get(reverse("events:past_events")),
+                               "event-thumb")
+
+    def test_the_detail_page_carries_no_picture_yet(self):
+        # Not decided where it should sit; drawn nowhere until it is.
+        self.event.image.save("x.webp", ContentFile(a_photo(size=(20, 20)).read()),
+                              save=True)
+        self.login(self.lisi)
+        self.assertNotContains(
+            self.client.get(reverse("events:event_detail", args=[self.event.pk])),
+            "event-thumb")

@@ -14,7 +14,7 @@
           {% for row in participations %}
             <tr>
               <td>
-                <a href="{% url 'events:event_detail' row.event_role.event.pk %}"
+                <a href="{% url 'events:event_detail' row.event_role.event.pk %}?from=mine"
                    class="prose-link">{{ row.event_role.event.name }}</a>
               </td>
               {% comment %}

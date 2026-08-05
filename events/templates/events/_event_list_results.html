@@ -1,4 +1,4 @@
-{% comment %}
+{% load static %}{% comment %}
 event_list 的结果区。整页和 HTMX 片段渲染的是同一份 —— 视图两个分支共用同一个
 上下文（views._template 的注释写了为什么），所以这里的条数不可能和整页对不上。
 
@@ -13,7 +13,40 @@ event_list 的结果区。整页和 HTMX 片段渲染的是同一份 —— 视�
 
   <ul class="space-y-3">
     {% for event in events %}
-      <li class="card">
+      {% comment %}
+      图和卡片是**同一行里两个分开的盒子**，不是卡片里的一张图。
+
+      ⚠️ 尺寸分两档：窄屏固定 64×64，宽屏才是「和卡片等高的正方形」
+         （self-stretch 拿到行高，aspect-square 据此算宽）。
+         窄屏也用等高正方形的话，卡片有两三行文字时那个方块会吃掉近一半屏宽。
+
+      色调处理（降饱和、微透明）在 .event-thumb 里，见 design-system.md。
+      ⚠️ 那是**样式**，所以在样式表里，不烤进上传的文件 ——
+         烤进去就等于把一个设计决定放到样式表够不到的地方，改一次要把所有
+         已上传的图重新处理一遍。
+      {% endcomment %}
+      {% comment %}
+      ⚠️ 尺寸**写死成正方形，再用 min-h 让卡片去够它** —— 不是让方块去够卡片。
+         试过后者两次，都不成立：
+
+         第一版把 aspect-square + self-stretch 直接写在 <img> 上，整行被图片的
+         固有高度撑成 600px —— 浏览器先拿图自己的尺寸算行高，方向反了。
+
+         第二版把图绝对定位进一个 self-stretch + aspect-square 的壳里，
+         **壳的宽度塌成 0，图整个消失**。原因是 CSS 的硬限制而不是写法问题：
+         flex 行里主轴（宽）先于交叉轴（高）解析，`aspect-ratio` 拿不到那个
+         「被 stretch 出来的高度」去反推宽度。
+
+         所以「和卡片等高」和「正方形」在卡片高度可变时**不可能同时恒成立**。
+         取法：方块固定 112px（sm 以上），整行 min-h 也是 112px —— 卡片被撑到
+         和方块一样高，两条要求在正常内容下都成立。标题长到换行时卡片会更高一点，
+         那时方块仍然是正方形、略矮 —— 选这一边，因为另一边是图变成长方形。
+      {% endcomment %}
+      <li class="flex items-stretch gap-3 sm:min-h-28">
+        <img class="event-thumb h-16 w-16 shrink-0 rounded-lg object-cover sm:h-28 sm:w-28"
+             src="{% if event.image %}{{ event.image.url }}{% else %}{% static 'core/img/event-default.webp' %}{% endif %}"
+             alt="" loading="lazy" decoding="async">
+        <div class="card min-w-0 flex-1">
         <div class="flex flex-wrap items-baseline justify-between gap-2">
           <a href="{% url 'events:event_detail' event.pk %}"
              class="text-lg font-semibold prose-link">{{ event.name }}</a>
@@ -23,6 +56,7 @@ event_list 的结果区。整页和 HTMX 片段渲染的是同一份 —— 视�
           {{ event.start_time }} &ndash; {{ event.end_time }}
           {% if event.location %}<br>{{ event.location }}{% endif %}
         </p>
+        </div>
       </li>
     {% empty %}
       <li>

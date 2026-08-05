@@ -26,26 +26,31 @@ event_list 的结果区。整页和 HTMX 片段渲染的是同一份 —— 视�
          已上传的图重新处理一遍。
       {% endcomment %}
       {% comment %}
-      ⚠️ 尺寸**写死成正方形，再用 min-h 让卡片去够它** —— 不是让方块去够卡片。
-         试过后者两次，都不成立：
+      ⚠️ 图**拉伸到卡片的自然高度**，不反过来把卡片撑高（2026-08-05 第三版）。
 
-         第一版把 aspect-square + self-stretch 直接写在 <img> 上，整行被图片的
-         固有高度撑成 600px —— 浏览器先拿图自己的尺寸算行高，方向反了。
+         实测：一行详情的卡片自然高 90px，带地点那种 110px —— 本来就不一样。
+         上一版给整行加了 min-h-28，把矮的那张也撑到 112，等于改了「加图之前
+         每个活动占多高」这件事。这一版把最小高度去掉了。
 
-         第二版把图绝对定位进一个 self-stretch + aspect-square 的壳里，
-         **壳的宽度塌成 0，图整个消失**。原因是 CSS 的硬限制而不是写法问题：
-         flex 行里主轴（宽）先于交叉轴（高）解析，`aspect-ratio` 拿不到那个
-         「被 stretch 出来的高度」去反推宽度。
+      ⚠️ 壳是必需的，不是包着好看：`self-stretch` + `h-auto` 让它拿到行高
+         （也就是卡片的高度），而它自己的内容高度是 0 —— 唯一的子元素绝对定位了 ——
+         所以它不参与行高的计算。直接把 self-stretch 写在 <img> 上试过，
+         整行会被图片的固有高度撑成 600px，方向正好反。
 
-         所以「和卡片等高」和「正方形」在卡片高度可变时**不可能同时恒成立**。
-         取法：方块固定 112px（sm 以上），整行 min-h 也是 112px —— 卡片被撑到
-         和方块一样高，两条要求在正常内容下都成立。标题长到换行时卡片会更高一点，
-         那时方块仍然是正方形、略矮 —— 选这一边，因为另一边是图变成长方形。
+      ⚠️ 宽度只能写死。CSS 没法让宽度跟着「兄弟元素决定的高度」走 ——
+         flex 行里主轴先于交叉轴解析，试过 aspect-ratio，壳的宽度直接塌成 0。
+         所以 96px 是取值：卡片 90 时接近正方形，110 时略高一点。
+
+      圆角照你给的那张参考图量的：青色方块边长 572px、圆角 130px = **22.7%**，
+      和苹果图标那个约 22% 的比例对得上。按宽度算：96 × 22.5% ≈ 22px，
+      64 × 22.5% ≈ 14px。
       {% endcomment %}
-      <li class="flex items-stretch gap-3 sm:min-h-28">
-        <img class="event-thumb h-16 w-16 shrink-0 rounded-lg object-cover sm:h-28 sm:w-28"
-             src="{% if event.image %}{{ event.image.url }}{% else %}{% static 'core/img/event-default.webp' %}{% endif %}"
-             alt="" loading="lazy" decoding="async">
+      <li class="flex items-stretch gap-6">
+        <div class="relative h-16 w-16 shrink-0 self-start sm:h-auto sm:w-24 sm:self-stretch">
+          <img class="event-thumb absolute inset-0 h-full w-full rounded-[14px] object-cover sm:rounded-[22px]"
+               src="{% if event.image %}{{ event.image.url }}{% else %}{% static 'core/img/event-default.webp' %}{% endif %}"
+               alt="" loading="lazy" decoding="async">
+        </div>
         <div class="card min-w-0 flex-1">
         <div class="flex flex-wrap items-baseline justify-between gap-2">
           <a href="{% url 'events:event_detail' event.pk %}"

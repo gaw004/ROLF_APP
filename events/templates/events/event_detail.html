@@ -3,15 +3,17 @@
 
 {% block content %}
   {% comment %}
-  ⚠️ 这条返回链接**只对能管理这场活动的人**显示，而这个判断由视图问
-     org/permissions.py 得出、放进上下文 —— 模板里不许自己判权限。
-     给所有人画的话，普通志愿者点进去得到的是一个 403。
+  ⚠️ 返回哪里由**来路**决定，不由身份决定（2026-08-05 改）。
+
+     原来这条链接只看「能不能管理这场活动」，于是一个 ministry admin 从
+     /events/ 点进来，返回按钮把他扔回管理列表 —— 他从来没去过那一页。
+
+     视图的 _back_link() 算好 URL 和文案再交过来。模板不认 ?from=，
+     更不会把它当 URL 用：那个参数只是一个键，映射表写在视图里。
   {% endcomment %}
-  {% if can_manage %}
-    <p class="mb-4 text-sm">
-      <a href="{% url 'events:event_manage_list' %}" class="prose-link">&larr; Events I manage</a>
-    </p>
-  {% endif %}
+  <p class="mb-4 text-sm">
+    <a href="{{ back_url }}" class="prose-link">&larr; {{ back_label }}</a>
+  </p>
 
   <div class="card">
     <div class="flex flex-wrap items-start justify-between gap-3">
@@ -21,7 +23,23 @@
     <dl class="mt-4 grid gap-x-6 gap-y-2 text-sm sm:grid-cols-2">
       <div>
         <dt class="text-xs text-ink-600 dark:text-ink-300">Ministry</dt>
-        <dd>{{ event.ministry.name }}</dd>
+        <dd>
+          {% comment %}
+          ⚠️ 有 website 才渲染成链接，没有就是纯文本 —— **不放占位链接**。
+             一个点了不动的链接读起来不是「这个还没做」，是「这个站坏了」，
+             而 C0.5 整整一步就是在修同一件事。这个字段由基金会自己在 admin 里填。
+
+          ⚠️ 外链要 rel="noopener noreferrer"：少了 noopener，被打开的那个站
+             能通过 window.opener 把这一页导航去别处（反向标签页劫持），
+             而这件事**在本页上看不出任何异常**。
+          {% endcomment %}
+          {% if event.ministry.website %}
+            <a href="{{ event.ministry.website }}" class="prose-link"
+               target="_blank" rel="noopener noreferrer">{{ event.ministry.name }}</a>
+          {% else %}
+            {{ event.ministry.name }}
+          {% endif %}
+        </dd>
       </div>
       <div>
         <dt class="text-xs text-ink-600 dark:text-ink-300">When</dt>

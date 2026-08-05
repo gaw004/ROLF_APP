@@ -76,6 +76,43 @@ def _template(request, full, fragment):
     return fragment if request.headers.get("HX-Request") else full
 
 
+def _back_link(request):
+    """Where "back" goes from an event's page, and what it should be called.
+
+    Decided by **where they came from**, not by who they are: a ministry admin
+    who reached an event from the volunteer list wants the volunteer list back,
+    and the same person arriving from the management list wants that one.
+    Before this, the link was chosen by role alone and sent half the arrivals
+    somewhere they had not been.
+
+    ⚠️ Read from a `?from=` marker on the link, never from the Referer header.
+       Referer is empty for a pasted URL, a new tab, a link in an email, or a
+       browser configured not to send it — and when it is empty this function
+       silently returns the default, which is exactly the case nobody tests.
+       It is also attacker-controlled, and this value ends up in an href.
+
+    ⚠️ The marker is a **key into a table written here**, never a URL. Taking a
+       URL from the query string and rendering it into a link is how a page
+       ends up with a "back" button pointing at somebody else's site.
+
+    ⚠️ `manage` is honoured only if this account can actually open that page.
+       A volunteer handed a `?from=manage` link would otherwise get a back
+       button that 403s — a link that refuses the person who clicked it reads
+       as a broken site rather than as a page not meant for them.
+    """
+    marker = request.GET.get("from")
+    if marker == "past":
+        return reverse("events:past_events"), "Past events"
+    if marker == "manage":
+        administers_any = bool(ministry_ids_administered_by(request.user))
+        if administers_any or in_foundation_tier(request.user):
+            # Same label the navigation uses for this account, so the two do
+            # not name one page two different things.
+            label = "Events I manage" if administers_any else "All events"
+            return reverse("events:event_manage_list"), label
+    return reverse("events:event_list"), "Events"
+
+
 def _my_contact(request):
     """The Contact behind the logged-in account, or None.
 
@@ -163,16 +200,15 @@ def event_detail(request, pk):
         mine = Participation.objects.filter(
             event_role__event=event, contact=contact,
         ).select_related("event_role__role")
+    back_url, back_label = _back_link(request)
     return render(request, "events/event_detail.html", {
         "event": event,
         "roles": event.roles.with_signup_counts().select_related("role"),
         "mine": mine,
         "can_sign_up": event.status in Event.OPEN_FOR_SIGNUP,
-        # Whether to draw the way back to "Events I manage". Asked here and
-        # never in the template: a template deciding who may manage something
-        # is a second copy of the rule, and the copy that drifts is the one
-        # nobody remembers is there (D20).
         "can_manage": can_manage_event(request.user, event),
+        "back_url": back_url,
+        "back_label": back_label,
     })
 
 

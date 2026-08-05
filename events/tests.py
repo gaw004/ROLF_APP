@@ -1253,39 +1253,133 @@ class ConsentFormShapeTests(PageTestCase):
 
 
 class DetailPageBackLinkTests(PageTestCase):
-    """2026-08-04 feedback: getting back to "Events I manage" from an event.
+    """2026-08-05: "back" goes where you came from, not where your role lives.
 
-    The six management pages have carried that link since C2. The one that did
-    not is the page reached by clicking the event's **name** — which is the
-    volunteer-facing detail page, shared by both audiences.
+    The first version of this link was chosen by role — a manager got "Events I
+    manage", everybody else got nothing. That sent a ministry admin who had
+    arrived from the volunteer list to a page they had never been on, and left
+    a volunteer with no way back at all.
+
+    The origin travels as a `?from=` marker on the link.
+
+    ⚠️ Never the Referer header: empty for a pasted URL, a new tab, a link in
+       an email, or a browser told not to send it — and empty silently means
+       "default", which is the case nobody tests.
     """
 
-    # ⚠️ Asserted on the back link's own markup, not on the URL. The shared
-    #    navigation draws "Events I manage" for **any** ministry admin, so
-    #    searching the whole page for that URL says nothing about this page —
-    #    the first version of this test passed for the wrong reason and failed
-    #    for the wrong reason.
-    BACK_LINK = "&larr; Events I manage"
+    def url(self, marker=None):
+        base = reverse("events:event_detail", args=[self.event.pk])
+        return f"{base}?from={marker}" if marker else base
+
+    def back(self, response):
+        """The href and text of the back link, as they were rendered."""
+        page = response.content.decode()
+        chunk = page.split("&larr;", 1)[1].split("</a>", 1)[0]
+        return page.split('<a href="', 1), chunk.strip()
+
+    def test_arriving_with_no_marker_goes_to_events(self):
+        # A pasted URL, a bookmark, a link out of a notification email.
+        self.login(self.lisi)
+        response = self.client.get(self.url())
+        self.assertContains(response, reverse("events:event_list"))
+        self.assertContains(response, "&larr; Events")
+
+    def test_a_manager_arriving_from_the_volunteer_list_goes_back_to_it(self):
+        """⭐ The case the old role-based link got wrong.
+
+        zhang administers this event, so the previous version sent them to the
+        management list — a page they had not come from.
+        """
+        self.login(self.zhang)
+        response = self.client.get(self.url())
+        self.assertContains(response, "&larr; Events")
+        self.assertNotContains(response, "&larr; Events I manage")
+
+    def test_arriving_from_the_management_list_goes_back_to_it(self):
+        self.login(self.zhang)
+        response = self.client.get(self.url("manage"))
+        self.assertContains(response, reverse("events:event_manage_list"))
+        self.assertContains(response, "&larr; Events I manage")
+
+    def test_arriving_from_past_events_goes_back_to_past_events(self):
+        # Otherwise somebody three pages into the history is dropped into the
+        # "upcoming" list and has to start again.
+        self.login(self.lisi)
+        response = self.client.get(self.url("past"))
+        self.assertContains(response, reverse("events:past_events"))
+        self.assertContains(response, "&larr; Past events")
+
+    def test_a_volunteer_handed_a_manage_marker_is_not_sent_somewhere_they_are_refused(self):
+        """⚠️ The marker is honoured only if the page is actually reachable.
+
+        A back button that 403s reads as a broken site, not as a page that is
+        not for you — and the marker is in a URL anybody can construct.
+        """
+        self.login(self.lisi)
+        response = self.client.get(self.url("manage"))
+        self.assertNotContains(response, reverse("events:event_manage_list"))
+        self.assertContains(response, "&larr; Events")
+
+    def test_the_foundation_tier_gets_the_label_its_navigation_uses(self):
+        # The same page is called "All events" for this tier, and one page
+        # should not have two names.
+        boss = self.account("boss", "Boss", birth_date=datetime.date(1975, 1, 1))
+        boss.groups.add(foundation_admin_group())
+        self.login(type(boss).objects.get(pk=boss.pk))
+        response = self.client.get(self.url("manage"))
+        self.assertContains(response, "&larr; All events")
+
+    def test_an_unknown_marker_falls_back_rather_than_breaking(self):
+        # ⚠️ The marker is a key into a table in the view, never a URL. Anything
+        #    not in that table is simply not a destination.
+        self.login(self.lisi)
+        response = self.client.get(self.url("https://example.com/evil"))
+        self.assertNotContains(response, "example.com")
+        self.assertContains(response, "&larr; Events")
+
+
+class MinistryWebsiteLinkTests(PageTestCase):
+    """2026-08-05: the ministry's name links to its own page — when there is one.
+
+    ⚠️ No placeholder link. A link that does nothing does not read as "not
+       written yet", it reads as a broken site; C0.5 spent a whole step on that
+       failure. The field is optional and the foundation fills it in the admin.
+    """
 
     def url(self):
         return reverse("events:event_detail", args=[self.event.pk])
 
-    def test_the_manager_of_this_event_is_offered_the_way_back(self):
-        self.login(self.zhang)
-        self.assertContains(self.client.get(self.url()), self.BACK_LINK)
-
-    def test_a_plain_volunteer_is_not(self):
-        # ⚠️ Drawing it for everybody would send a volunteer to a 403. A link
-        #    that refuses the person who clicked it is worse than no link:
-        #    it reads as a broken site rather than as a page not meant for them.
+    def test_a_ministry_with_no_website_is_plain_text(self):
         self.login(self.lisi)
-        self.assertNotContains(self.client.get(self.url()), self.BACK_LINK)
+        response = self.client.get(self.url())
+        self.assertContains(response, self.pantry.name)
+        self.assertNotContains(response, 'rel="noopener noreferrer"')
 
-    def test_another_ministrys_admin_is_not_either(self):
-        # can_manage_event is scoped, so "an admin" is not enough — it has to
-        # be an admin *of this event's ministry*.
-        self.login(self.other_admin)
-        self.assertNotContains(self.client.get(self.url()), self.BACK_LINK)
+    def test_a_ministry_with_a_website_becomes_a_link(self):
+        self.pantry.website = "https://pantry.example.org/"
+        self.pantry.save()
+        self.login(self.lisi)
+        response = self.client.get(self.url())
+        self.assertContains(response, 'href="https://pantry.example.org/"')
+
+    def test_the_link_cannot_hand_the_other_site_this_window(self):
+        """⚠️ `noopener` is not decoration.
+
+        Without it the opened page can navigate this one somewhere else through
+        `window.opener`, and nothing about this tab looks wrong while it happens.
+        """
+        self.pantry.website = "https://pantry.example.org/"
+        self.pantry.save()
+        self.login(self.lisi)
+        self.assertContains(self.client.get(self.url()), 'rel="noopener noreferrer"')
+
+    def test_a_javascript_url_is_refused_by_validation(self):
+        # URLField's scheme whitelist is what keeps this out of an href.
+        # ⚠️ It runs in full_clean(), which the admin calls and bulk paths do
+        #    not — D9's standing caveat, restated because this value is rendered.
+        self.pantry.website = "javascript:alert(1)"
+        with self.assertRaises(ValidationError):
+            self.pantry.full_clean()
 
 
 class MyParticipationsColumnTests(PageTestCase):

@@ -102,8 +102,14 @@ class Command(BaseCommand):
             code="interpreting", defaults={"name": "Interpreting"})
 
     def ministries_and_posts(self):
+        # ⚠️ One with a website and one without, deliberately: the ministry's
+        #    name on an event page is a link only where there is somewhere to
+        #    link to, and demo data that exercises one branch verifies half a
+        #    feature.
         self.pantry, _ = Ministry.objects.get_or_create(
-            code="food_pantry", defaults={"name": "Food Pantry"})
+            code="food_pantry",
+            defaults={"name": "Food Pantry",
+                      "website": "https://example.invalid/food-pantry"})
         self.tax, _ = Ministry.objects.get_or_create(
             code="tax_help", defaults={"name": "Tax Help"})
 

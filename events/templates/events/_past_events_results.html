@@ -15,7 +15,11 @@ past_events 的结果区。和 _event_list_results.html 分开写，因为这一
     {% for event in events %}
       <li class="card">
         <div class="flex flex-wrap items-baseline justify-between gap-2">
-          <a href="{% url 'events:event_detail' event.pk %}"
+          {% comment %}
+          ?from=past —— 翻到第三页再点进去，返回时要回到往期活动而不是被扔进
+          「即将开始」。参数只是个标记，视图有白名单。
+          {% endcomment %}
+          <a href="{% url 'events:event_detail' event.pk %}?from=past"
              class="text-lg font-semibold prose-link">{{ event.name }}</a>
           {% include "core/components/badge.html" with label=event.get_status_display %}
         </div>

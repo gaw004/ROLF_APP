@@ -41,6 +41,25 @@ class Ministry(ImmutableCodeMixin, ConstraintErrorFieldMixin, TimeStampedModel):
     )
     name = models.CharField(max_length=100)
     description = models.TextField(blank=True)
+    # Optional, and optional is the whole design (2026-08-05). Where a ministry
+    # has a page of its own, its name becomes a link on the event page; where it
+    # does not, the name is plain text and nothing is drawn.
+    #
+    # ⚠️ The alternative considered and rejected was a placeholder link — an
+    #    <a href="#"> now, a real address later. A link that does nothing does
+    #    not read as "not written yet"; it reads as a broken site. C0.5 spent a
+    #    whole step on exactly that failure, and two other places in this
+    #    codebase already refuse to draw a link until its destination exists.
+    #
+    # ⚠️ URLField's validation runs in full_clean(), which the admin calls and
+    #    bulk_create does not (D9's standing caveat). The scheme whitelist is
+    #    what keeps `javascript:` out of an href, so a row written by a bulk
+    #    path is a row nobody validated.
+    website = models.URLField(
+        blank=True,
+        help_text="Optional. If this ministry has a page of its own, events "
+                  "will link to it from the ministry's name.",
+    )
     is_active = models.BooleanField(default=True)
     founded_on = models.DateField(null=True, blank=True)
 

@@ -45,7 +45,8 @@
           {% for event in events %}
             <tr>
               <td>
-                <a href="{% url 'events:event_detail' event.pk %}" class="prose-link">{{ event.name }}</a>
+                <a href="{% url 'events:event_detail' event.pk %}?from=manage"
+                   class="prose-link">{{ event.name }}</a>
               </td>
               <td>{{ event.ministry.name }}</td>
               <td>{{ event.start_time }}</td>

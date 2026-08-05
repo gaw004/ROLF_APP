@@ -57,6 +57,23 @@ from .services import (
 )
 
 
+def _template(request, full, fragment):
+    """Whole page, or just the part HTMX asked to swap.
+
+    ⚠️ Both branches are handed **the same context** by the caller. Building a
+       smaller one for the fragment is the obvious optimisation and the thing
+       that eventually makes the count on the fragment disagree with the count
+       on the full page — and nothing would report that, because both renders
+       succeed.
+
+    ⭐ HTMX is only ever the fast path here. Every one of these views still
+       answers a plain GET or POST with a complete page, which is what keeps the
+       end-to-end tests (they never send HX-Request) testing the real thing —
+       see D24's progressive-enhancement rule.
+    """
+    return fragment if request.headers.get("HX-Request") else full
+
+
 def _my_contact(request):
     """The Contact behind the logged-in account, or None.
 
@@ -86,7 +103,8 @@ def event_list(request):
         .order_by("start_time")
     )
     events = period.narrow(events)
-    return render(request, "events/event_list.html", {
+    return render(request, _template(
+        request, "events/event_list.html", "events/_event_list_results.html"), {
         "events": events,
         "period": period,
         # R1, in the plainest possible form: how many, in the window they asked
@@ -117,7 +135,8 @@ def past_events(request):
         .order_by("-start_time")
     )
     events = period.narrow(events)
-    return render(request, "events/past_events.html", {
+    return render(request, _template(
+        request, "events/past_events.html", "events/_past_events_results.html"), {
         "events": events,
         "period": period,
         "total": events.count(),
@@ -365,9 +384,15 @@ def event_roles(request, pk):
     if request.method == "POST" and form.is_valid():
         form.save()
         messages.success(request, "Role added.")
-        return redirect("events:event_roles", pk=event.pk)
+        # ⭐ The plain-form path is the one that must always work: redirect, so a
+        #    refresh cannot post twice. HTMX gets the list back instead — same
+        #    write, same message, one fewer full page.
+        if not request.headers.get("HX-Request"):
+            return redirect("events:event_roles", pk=event.pk)
+        form = EventRoleForm(event=event)
 
-    return render(request, "events/event_roles.html", {
+    return render(request, _template(
+        request, "events/event_roles.html", "events/_event_roles_swap.html"), {
         "event": event,
         "form": form,
         "roles": event.roles.with_signup_counts().select_related("role"),
@@ -383,6 +408,15 @@ def role_delete(request, pk):
     if request.method == "POST":
         role.delete()
         messages.success(request, "Role removed.")
+        if request.headers.get("HX-Request"):
+            # Same panel event_roles renders, so the two can never disagree
+            # about what is in the list.
+            event = role.event
+            return render(request, "events/_event_roles_swap.html", {
+                "event": event,
+                "form": EventRoleForm(event=event),
+                "roles": event.roles.with_signup_counts().select_related("role"),
+            })
     return redirect("events:event_roles", pk=role.event_id)
 
 
@@ -433,6 +467,15 @@ def event_attendance(request, pk):
                 # The paper-sheet path: no timestamps, just a number. Same
                 # field, because there is only one authoritative value.
                 record_hours(participation, hours_form.cleaned_data["hours"])
+        # ⭐ HTMX swaps just this person's row; the plain form path redirects, as
+        #    it always did. This is the page the rule was written for — checking
+        #    forty people in one at a time reloads the whole table forty times.
+        if request.headers.get("HX-Request"):
+            participation.refresh_from_db()
+            return render(request, "events/_attendance_row_swap.html", {
+                "row": participation,
+                "hours_form": HoursForm(),
+            })
         return redirect("events:event_attendance", pk=event.pk)
 
     rows = (
@@ -486,7 +529,7 @@ def event_notify(request, pk):
             )
             messages.success(
                 request,
-                f"已通知 {len(recipients)} 人，另有 {len(unreachable)} 人联系不上。",
+                f"Notified {len(recipients)}; {len(unreachable)} could not be reached.",
             )
             return redirect("events:event_notify", pk=event.pk)
     else:

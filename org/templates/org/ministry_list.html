@@ -2,7 +2,6 @@
 {% block title %}Ministries{% endblock %}
 
 {% block content %}
-  <h1>Ministries</h1>
   {% comment %}
   P5 的入口。在这一页出现之前，授权页需要一个 pk 而没有任何地方给得出来 ——
   想用 P5 就得先知道某个 ministry 的 id，然后手敲 URL。
@@ -10,15 +9,22 @@
   只列 is_active 的：停用的 ministry 不该再任命新 admin。已有的授权不受影响，
   它们在 MinistryRole 上，撤销要去那一条自己的页面。
   {% endcomment %}
+  <h1 class="mb-2 text-2xl font-semibold">Ministries</h1>
+  <p class="mb-6 text-sm text-ink-600 dark:text-ink-300">
+    Pick one to see who administers it, and to appoint or remove its admins.
+  </p>
 
-  <ul>
-    {% for ministry in ministries %}
-      <li>
-        <a href="{% url 'org:ministry_admins' ministry.pk %}">{{ ministry.name }}</a>
-        — manage who administers it
-      </li>
-    {% empty %}
-      <li>No active ministries yet. Add them in the admin site.</li>
-    {% endfor %}
-  </ul>
+  {% if ministries %}
+    <ul class="grid gap-3 sm:grid-cols-2">
+      {% for ministry in ministries %}
+        <li class="card">
+          <a href="{% url 'org:ministry_admins' ministry.pk %}"
+             class="text-lg font-semibold prose-link">{{ ministry.name }}</a>
+          <p class="mt-1 text-sm text-ink-600 dark:text-ink-300">Manage who administers it</p>
+        </li>
+      {% endfor %}
+    </ul>
+  {% else %}
+    {% include "core/components/empty.html" with message="No active ministries yet. They are created in the admin site — this page only appoints their admins." %}
+  {% endif %}
 {% endblock %}

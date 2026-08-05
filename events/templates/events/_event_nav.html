@@ -1,0 +1,21 @@
+{% comment %}
+一场活动的管理侧页间导航。六个页面共用。
+
+⚠️ 它存在的理由是 C0.2.4 那处缺口的直接后果：event_roles 曾经是管理侧的枢纽
+   （report / registrations / attendance / notify 四个链接都挂在它上面），
+   而**它自己没有入口** —— 只有「刚建完活动」那一次重定向能到，第二天回来就找不着了。
+   现在每一页都带着全套链接，任何一页都是入口。
+
+参数：event、current（当前页的名字，用来高亮）。
+{% endcomment %}
+<nav class="mb-6 flex flex-wrap items-center gap-1 text-sm" aria-label="This event">
+  <a href="{% url 'events:event_manage_list' %}"
+     class="rounded-md px-2 py-1 text-ink-600 hover:bg-ink-100 dark:text-ink-300 dark:hover:bg-ink-800">&larr; Events I manage</a>
+  <span class="px-1 text-ink-300 dark:text-ink-600">|</span>
+  {% include "events/_event_nav_link.html" with label="Edit" to="events:event_update" name="edit" %}
+  {% include "events/_event_nav_link.html" with label="Roles" to="events:event_roles" name="roles" %}
+  {% include "events/_event_nav_link.html" with label="Signups" to="events:event_registrations" name="registrations" %}
+  {% include "events/_event_nav_link.html" with label="Attendance" to="events:event_attendance" name="attendance" %}
+  {% include "events/_event_nav_link.html" with label="Report" to="events:event_report" name="report" %}
+  {% include "events/_event_nav_link.html" with label="Notify" to="events:event_notify" name="notify" %}
+</nav>

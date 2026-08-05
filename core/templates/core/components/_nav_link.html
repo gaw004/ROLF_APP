@@ -1,0 +1,14 @@
+{% comment %}
+导航里的一个链接。参数：label、to（一个 URL name）。
+
+`{% url to %}` 里的 `to` 是变量 —— Django 的 url 标签接受变量形式的名字，
+所以调用方只写名字，不用先 `{% url ... as %}` 一遍。
+
+⚠️ 高亮当前页用的是 `request.path == 目标`，不是在每个页面上传一个
+   `active_nav` 变量。后者要求 20 个视图各记得传一次，而漏传不报错 ——
+   表现是「点进去了但菜单没高亮」，没人会为这个开 bug。
+{% endcomment %}
+{% url to as target %}
+<a href="{{ target }}"
+   class="rounded-md px-3 py-2 text-sm {% if request.path == target %}bg-brand-50 font-medium text-brand-700 dark:bg-ink-800 dark:text-brand-300{% else %}text-ink-700 hover:bg-ink-100 dark:text-ink-200 dark:hover:bg-ink-800{% endif %}"
+   {% if request.path == target %}aria-current="page"{% endif %}>{{ label }}</a>

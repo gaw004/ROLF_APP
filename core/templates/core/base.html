@@ -1,58 +1,172 @@
-{% comment %}
-The one shared shell for the self-service pages. Deliberately plain: no CSS
-framework, no JavaScript, and it extends nothing from the admin.
+{% load static %}{% comment %}
+所有自助页面共用的外壳。
 
-Styling is out of scope for this phase on purpose — the acceptance test is
-"clickable, usable, permissions correct". Phase C replaces this file (and only
-this file) to give the pages a look; the views, the forms and the services
-carry over untouched, which is the whole point of keeping them out of admin.py.
+C2.1 兑现了这个文件原来那句注释：「Phase C 替换这一个文件就能上样式，
+views / forms / services 原样带走」—— 那不是愿望，是 core/tests.py 里那些
+守卫保证的。这一版换掉了整个外壳、加了一套组件片段，
+**没有动过任何一个视图、表单或服务函数**。
 
 管理侧那两个入口靠 core.context_processors.navigation 决定显不显示，而它问的是
 org/permissions.py，不是 MinistryRole —— 导航里再抄一份判断，抄出来的那份迟早
 和真的那份不一致，而不一致的表现是「菜单里有个链接，点进去 403」。
-{% endcomment %}
-<!doctype html>
-<html lang="en">
+
+页面可以覆盖的两个 block：
+  content     正文
+  main_width  版心。默认 max-w-6xl；表单页用 max-w-2xl（长行读起来累）
+{% endcomment %}<!doctype html>
+<html lang="en" class="h-full">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{% block title %}ROLF{% endblock %}</title>
+  <title>{% block title %}ROLF{% endblock %} · ROLF</title>
+  <link rel="stylesheet" href="{% static 'css/app.css' %}">
+  {% comment %}
+  ⚠️ 深色模式那段脚本：**必须内联、必须在 <head> 里、必须在样式表之后**，
+     三条缺一不可。放到外部 JS 或者 <body> 末尾，页面会先按浅色画一遍再跳成深色 ——
+     那一下闪白是「廉价感」最大的单一来源，而且**它在本机开发时几乎看不出来**
+     （缓存命中太快），只有真实网络下才明显。
+
+  ⚠️ 这里的 key 和规则必须和 assets/js/app.js 的 themeToggle 一致。
+     两处读同一个 localStorage.theme，只是时机不同：这里管「进来时是什么」，
+     那边管「点了按钮之后变成什么」。分叉的表现是刷新一下主题就跳回去。
+
+  ⚠️ 隐私模式下 localStorage 会直接抛异常，所以整段包在 try 里：
+     一个主题偏好读不到，不该把整个页面带下去。
+
+  ⚠️ 这段脚本里的注释写英文，不写中文 —— 它虽然不显示给人看，但它**进了
+     发给浏览器的 HTML**，而界面语言守卫的口径是「模板里注释块之外没有汉字」。
+     给 <script> 开个例外就是给守卫开个洞，而洞会被用来放真正给人看的文案。
+  {% endcomment %}
+  <script>
+    (function () {
+      try {
+        var saved = localStorage.getItem("theme");
+        var dark = saved ? saved === "dark"
+                         : window.matchMedia("(prefers-color-scheme: dark)").matches;
+        document.documentElement.classList.toggle("dark", dark);
+      } catch (e) {
+        /* See the template comment above: a blocked localStorage must not
+           take the page down with it. */
+      }
+    })();
+  </script>
+  <script defer src="{% static 'js/app.js' %}"></script>
 </head>
-<body>
-  <header>
-    <nav>
-      <a href="{% url 'events:event_list' %}">Events</a>
-      · <a href="{% url 'events:past_events' %}">Past events</a>
-      {% if user.is_authenticated %}
-        · <a href="{% url 'events:my_participations' %}">My signups</a>
-        · <a href="{% url 'accounts:profile' %}">My profile</a>
-        {% if is_ministry_admin %}
-          · <a href="{% url 'events:event_manage_list' %}">Events I manage</a>
+
+{% comment %}
+hx-headers 挂一次，所有 HTMX 请求都带上 CSRF —— 不要每个表单各写一遍。
+{% endcomment %}
+<body class="flex min-h-full flex-col bg-ink-50 text-ink-900 antialiased dark:bg-ink-950 dark:text-ink-100"
+      hx-headers='{"X-CSRFToken": "{{ csrf_token }}"}'>
+
+  {% comment %}
+  跳到主内容。只在键盘 Tab 到它的时候才出现 —— 读屏和键盘用户不必每页先听
+  一遍完整导航。
+  {% endcomment %}
+  <a href="#main"
+     class="sr-only focus:not-sr-only focus:absolute focus:left-4 focus:top-4 focus:z-50 focus:rounded-md focus:bg-brand-600 focus:px-4 focus:py-2 focus:text-sm focus:text-white">
+    Skip to main content
+  </a>
+
+  <header class="relative border-b border-ink-200 bg-white dark:border-ink-800 dark:bg-ink-900">
+    <nav class="mx-auto flex max-w-6xl items-center gap-4 px-4 py-3" x-data="{ open: false }">
+      <a href="{% url 'events:event_list' %}"
+         class="shrink-0 text-lg font-semibold text-brand-700 dark:text-brand-300">ROLF</a>
+
+      {% comment %}
+      窄屏把链接收进汉堡菜单。⚠️ 汉堡本身是一个 <button>，不是一个挂了
+      x-on:click 的 <div> —— 后者键盘按不到，而这是进入整个站的入口。
+      {% endcomment %}
+      <button type="button" x-on:click="open = !open"
+              class="ml-auto rounded-md p-2 text-ink-700 hover:bg-ink-100 sm:hidden dark:text-ink-200 dark:hover:bg-ink-800"
+              x-bind:aria-expanded="open ? 'true' : 'false'" aria-controls="site-nav">
+        <span class="sr-only">Menu</span>
+        <svg class="h-5 w-5" width="20" height="20" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+          <path d="M3 5h14v2H3V5zm0 4h14v2H3V9zm0 4h14v2H3v-2z"/>
+        </svg>
+      </button>
+
+      {% comment %}
+      ⚠️ 静态 class 里写的是 `hidden sm:flex`，Alpine 只在窄屏切换它。
+         这样**没有 JavaScript 时宽屏导航照常显示** —— 而窄屏用户拿不到菜单，
+         那是可接受的降级：D24 的口径只保写操作，导航是读。
+      {% endcomment %}
+      <div id="site-nav"
+           class="absolute left-0 right-0 top-full z-40 hidden flex-col gap-1 border-b border-ink-200 bg-white p-4 shadow-lg sm:static sm:ml-auto sm:flex sm:flex-row sm:items-center sm:gap-1 sm:border-0 sm:bg-transparent sm:p-0 sm:shadow-none dark:border-ink-800 dark:bg-ink-900"
+           x-bind:class="open ? 'flex' : 'hidden sm:flex'">
+
+        {% include "core/components/_nav_link.html" with label="Events" to="events:event_list" %}
+        {% include "core/components/_nav_link.html" with label="Past events" to="events:past_events" %}
+
+        {% if user.is_authenticated %}
+          {% include "core/components/_nav_link.html" with label="My signups" to="events:my_participations" %}
+          {% include "core/components/_nav_link.html" with label="My profile" to="accounts:profile" %}
+          {% if is_ministry_admin %}
+            {% include "core/components/_nav_link.html" with label="Events I manage" to="events:event_manage_list" %}
+          {% endif %}
+          {% if can_grant_ministry_admin %}
+            {% include "core/components/_nav_link.html" with label="Ministry admins" to="org:ministry_list" %}
+          {% endif %}
+          {% if user.is_staff %}
+            <a href="/admin/"
+               class="rounded-md px-3 py-2 text-sm text-ink-700 hover:bg-ink-100 dark:text-ink-200 dark:hover:bg-ink-800">Admin site</a>
+          {% endif %}
         {% endif %}
-        {% if can_grant_ministry_admin %}
-          · <a href="{% url 'org:ministry_list' %}">Ministry admins</a>
-        {% endif %}
-        {% if user.is_staff %} · <a href="/admin/">Admin site</a>{% endif %}
-        · <span>{{ user.get_username }}</span>
-        <form method="post" action="{% url 'accounts:logout' %}" style="display:inline">
-          {% csrf_token %}
-          <button type="submit">Log out</button>
-        </form>
-      {% else %}
-        · <a href="{% url 'accounts:login' %}">Log in</a>
-        · <a href="{% url 'accounts:register' %}">Register</a>
-      {% endif %}
+
+        <div class="mt-2 flex items-center gap-2 border-t border-ink-200 pt-2 sm:ml-2 sm:mt-0 sm:border-l sm:border-t-0 sm:pl-3 sm:pt-0 dark:border-ink-800">
+          {% comment %}
+          主题切换。Alpine 只碰 localStorage 和 <html> 上那个 class ——
+          纯 UI 状态，正好是 x- 属性允许管的东西。
+          {% endcomment %}
+          <button type="button" x-data="themeToggle" x-on:click="toggle()"
+                  class="rounded-md p-2 text-ink-700 hover:bg-ink-100 dark:text-ink-200 dark:hover:bg-ink-800">
+            <span class="sr-only">Switch between light and dark</span>
+            <svg class="h-5 w-5 dark:hidden" width="20" height="20" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+              <path d="M10 2a1 1 0 011 1v1a1 1 0 11-2 0V3a1 1 0 011-1zm0 12a4 4 0 100-8 4 4 0 000 8zm7-4a1 1 0 01-1 1h-1a1 1 0 110-2h1a1 1 0 011 1zM5 10a1 1 0 01-1 1H3a1 1 0 110-2h1a1 1 0 011 1zm10.07-5.07a1 1 0 010 1.41l-.71.71a1 1 0 11-1.41-1.41l.7-.71a1 1 0 011.42 0zM6.05 13.95a1 1 0 010 1.41l-.71.71a1 1 0 01-1.41-1.42l.7-.7a1 1 0 011.42 0zm9.02 2.12a1 1 0 01-1.42 0l-.7-.71a1 1 0 011.41-1.41l.71.7a1 1 0 010 1.42zM6.05 6.05a1 1 0 01-1.42 0l-.7-.71a1 1 0 011.41-1.41l.71.7a1 1 0 010 1.42zM10 16a1 1 0 011 1v1a1 1 0 11-2 0v-1a1 1 0 011-1z"/>
+            </svg>
+            <svg class="hidden h-5 w-5 dark:block" width="20" height="20" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+              <path d="M17.293 13.293A8 8 0 016.707 2.707a8.001 8.001 0 1010.586 10.586z"/>
+            </svg>
+          </button>
+
+          {% if user.is_authenticated %}
+            <span class="truncate text-sm text-ink-600 dark:text-ink-300">{{ user.get_username }}</span>
+            <form method="post" action="{% url 'accounts:logout' %}">
+              {% csrf_token %}
+              {% include "core/components/button.html" with label="Log out" variant="ghost" %}
+            </form>
+          {% else %}
+            {% url 'accounts:login' as login_url %}
+            {% url 'accounts:register' as register_url %}
+            {% include "core/components/button.html" with label="Log in" href=login_url variant="secondary" %}
+            {% include "core/components/button.html" with label="Register" href=register_url variant="primary" %}
+          {% endif %}
+        </div>
+      </div>
     </nav>
   </header>
 
-  {% if messages %}
-    <ul>
-      {% for message in messages %}<li>{{ message }}</li>{% endfor %}
-    </ul>
-  {% endif %}
+  <main id="main" class="mx-auto w-full flex-1 px-4 py-8 {% block main_width %}max-w-6xl{% endblock %}">
+    {% comment %}
+    ⚠️ 这个 id 是 HTMX 片段响应回填 messages 的落点，别改名。
 
-  <main>
+    片段响应不经过 base.html，所以一个 messages.success() 在 HTMX 路径上会
+    **既不显示、又不消失** —— 它躺在 session 里，等下一次整页加载时才冒出来，
+    表现是「刚才那次操作的提示，在你点开另一个页面时才弹出来」。
+    片段模板用 hx-swap-oob 往这里回填，见 core/components/_messages_oob.html。
+    {% endcomment %}
+    <div id="messages">{% include "core/components/messages.html" %}</div>
     {% block content %}{% endblock %}
   </main>
+
+  <footer class="border-t border-ink-200 bg-white dark:border-ink-800 dark:bg-ink-900">
+    <div class="mx-auto max-w-6xl px-4 py-6 text-xs text-ink-600 dark:text-ink-300">
+      {% comment %}
+      C3.10 的隐私说明链接进这里。现在不放占位链接 ——
+      一个指向 404 的页脚链接比没有链接更糟，C0.5 刚为同一件事付过一次学费。
+      {% endcomment %}
+      Rivers of Living Faith — volunteer and event management.
+    </div>
+  </footer>
 </body>
 </html>

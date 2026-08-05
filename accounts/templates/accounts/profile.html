@@ -1,51 +1,81 @@
 {% extends "core/base.html" %}
 {% block title %}My profile{% endblock %}
+{% block main_width %}max-w-2xl{% endblock %}
 
 {% block content %}
-  <h1>My profile</h1>
   {% comment %}
   三个 POST 动作共用一页：改资料、加紧急联系人、删紧急联系人。靠 action 区分。
 
   生日那一格是自由改的（2026-07-31 拍板）—— 代价写在 phase-c.md 的已知缺口里：
   未成年人可以改大生日绕过同意门，缓解只有 Contact 的 simple-history 留痕。
+
+  ⚠️ **这一页没有上 HTMX**，尽管 design-system.md 的表里列了它。
+     判据是那份文档自己写的下一句：「别为了用而用 —— 每加一个片段端点，
+     就多一处『整页和片段可能对不上』的地方」。
+     增删紧急联系人一个人一辈子做两三次，整页刷新完全够用；
+     而换来的是这一页上三个写操作全部只有一条路，没有第二种可能出错的方式。
+     真正值得上 HTMX 的是签到那一页 —— 那是一场活动里要重复几十次的动作。
   {% endcomment %}
+  <h1 class="text-2xl font-semibold">My profile</h1>
 
   {% if is_minor is None %}
-    <p>
-      Your date of birth is missing, so every signup will ask for a guardian's
-      consent. Fill it in below and that stops.
-    </p>
+    <div class="card mt-6 border-warning-fg/30 bg-warning-bg dark:border-warning-fg-dark/30 dark:bg-warning-bg-dark">
+      <p class="text-sm text-warning-fg dark:text-warning-fg-dark">
+        Your date of birth is missing, so every signup will ask for a guardian's
+        consent. Fill it in below and that stops.
+      </p>
+    </div>
   {% elif is_minor %}
-    <p>You are under 18, so signing up needs a guardian's consent.</p>
+    <div class="card mt-6 border-info-fg/30 bg-info-bg dark:border-info-fg-dark/30 dark:bg-info-bg-dark">
+      <p class="text-sm text-info-fg dark:text-info-fg-dark">
+        You are under 18, so signing up needs a guardian's consent.
+      </p>
+    </div>
   {% endif %}
 
-  <form method="post">
+  <form method="post" class="card mt-6">
     {% csrf_token %}
-    {{ form.as_p }}
-    <button type="submit" name="action" value="save">Save my details</button>
+    {% include "core/components/form_fields.html" %}
+    <div class="mt-6">
+      {% include "core/components/button.html" with label="Save my details" variant="primary" name="action" value="save" %}
+    </div>
   </form>
 
-  <h2>Emergency contacts</h2>
-  <p>Who we call about you on the day, and who we tell if you are under 18.</p>
+  <h2 class="mt-10 text-lg font-semibold">Emergency contacts</h2>
+  <p class="mt-1 text-sm text-ink-600 dark:text-ink-300">
+    Who we call about you on the day, and who we tell if you are under 18.
+  </p>
 
-  <ul>
-    {% for row in kin %}
-      <li>
-        {{ row.name }} — {{ row.phone }} ({{ row.relationship_type.name_a_to_b }})
-        <form method="post" style="display:inline">
-          {% csrf_token %}
-          <input type="hidden" name="kin" value="{{ row.pk }}">
-          <button type="submit" name="action" value="remove_kin">Remove</button>
-        </form>
-      </li>
-    {% empty %}
-      <li>None yet.</li>
-    {% endfor %}
-  </ul>
+  {% if kin %}
+    <ul class="mt-4 space-y-2">
+      {% for row in kin %}
+        <li class="card flex flex-wrap items-center justify-between gap-3">
+          <div class="text-sm">
+            <span class="font-medium">{{ row.name }}</span>
+            <span class="text-ink-600 dark:text-ink-300">
+              &middot; {{ row.phone }} &middot; {{ row.relationship_type.name_a_to_b }}
+            </span>
+          </div>
+          <form method="post">
+            {% csrf_token %}
+            <input type="hidden" name="kin" value="{{ row.pk }}">
+            {% include "core/components/button.html" with label="Remove" variant="danger" name="action" value="remove_kin" confirm="Remove this emergency contact?" %}
+          </form>
+        </li>
+      {% endfor %}
+    </ul>
+  {% else %}
+    <div class="mt-4">
+      {% include "core/components/empty.html" with message="None yet. If you are under 18 you need at least one before you can sign up for an event." %}
+    </div>
+  {% endif %}
 
-  <form method="post">
+  <form method="post" class="card mt-6">
     {% csrf_token %}
-    {{ kin_form.as_p }}
-    <button type="submit" name="action" value="add_kin">Add emergency contact</button>
+    <h3 class="mb-4 text-sm font-semibold">Add an emergency contact</h3>
+    {% include "core/components/form_fields.html" with form=kin_form %}
+    <div class="mt-6">
+      {% include "core/components/button.html" with label="Add emergency contact" variant="secondary" name="action" value="add_kin" %}
+    </div>
   </form>
 {% endblock %}

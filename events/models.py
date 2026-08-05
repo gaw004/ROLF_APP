@@ -283,6 +283,17 @@ class EventRoleQuerySet(models.QuerySet):
                 filter=Q(participations__status=Participation.Status.ATTENDED),
                 distinct=True,
             ),
+        ).annotate(
+            # "Is this role short?" as a column, so the signups page can flag it
+            # without restating the rule.
+            #
+            # ⚠️ The rule has a trap in it — needed_count NULL means "no limit",
+            #    so such a role is never short rather than short by infinity —
+            #    and a template writing `registered_count < needed_count` would
+            #    be a second copy of it. Copies of a rule with a trap in it do
+            #    not stay in step; understaffed() below filters on this same
+            #    annotation for exactly that reason.
+            is_short=Q(needed_count__isnull=False) & Q(registered_count__lt=F("needed_count")),
         )
 
     def understaffed(self):
@@ -293,10 +304,12 @@ class EventRoleQuerySet(models.QuerySet):
         ⚠️ Roles nobody signed up for have to appear here. That is the whole
            reason this table exists: they have no row in Participation to be
            found through. See goal.md D19.
+
+        Filters on the `is_short` annotation rather than spelling the condition
+        out again — one definition, so this and the badge on the signups page
+        can never come to different conclusions about the same role.
         """
-        return self.with_signup_counts().filter(
-            needed_count__isnull=False, registered_count__lt=F("needed_count"),
-        )
+        return self.with_signup_counts().filter(is_short=True)
 
 
 class EventRole(ConstraintErrorFieldMixin, TimeStampedModel):
@@ -375,9 +388,12 @@ class Participation(ConstraintErrorFieldMixin, TimeStampedModel):
         CANCELLED = "cancelled", "Cancelled"
 
     class ConsentMethod(models.TextChoices):
-        VERBAL = "verbal", "口头"
-        PAPER = "paper", "纸质"
-        ONLINE = "online", "线上"
+        # ⚠️ C2.5 改的是**标签**（右边那半，显示给人看的）。左边的 value 一个字
+        #    没动，也不许动 —— 它们已经写在库里了，改 value 是一次数据迁移，
+        #    而漏掉迁移的表现是旧行的同意方式变成一个不在选项里的值。
+        VERBAL = "verbal", "In person"
+        PAPER = "paper", "On paper"
+        ONLINE = "online", "Online"
 
     event_role = models.ForeignKey(
         EventRole, on_delete=models.CASCADE, related_name="participations",

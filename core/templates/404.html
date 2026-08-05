@@ -1,20 +1,25 @@
 {% extends "core/base.html" %}
 {% block title %}Page not found{% endblock %}
+{% block main_width %}max-w-2xl{% endblock %}
 
 {% block content %}
   {% comment %}
-  这一页刻意不显示 {{ exception }}。404 的 exception 里装的是 Django 试过哪些
-  URL 模式 —— 那是给开发者看的，而且它会把路由表的形状说给任何一个打错地址的人听。
-  403 那边显示它是因为那段文案是我们自己写的、专门给人读的；这里不是。
+  ⚠️ 这一页刻意**不显示** {{ exception }}。404 的 exception 里装的是 Django 试过
+     哪些 URL 模式 —— 那是给开发者看的，而且它会把路由表的形状说给任何一个打错
+     地址的人听。403 那边显示它是因为那段文案是我们自己写的、专门给人读的；
+     这里不是。
   {% endcomment %}
+  <h1 class="text-2xl font-semibold">Page not found</h1>
 
-  <h1>Page not found</h1>
-
-  <p>That address does not exist. It may have been mistyped, or the thing it
-  pointed at may have been removed.</p>
-
-  <p>
-    <a href="{% url 'events:event_list' %}">Events</a> ·
-    <a href="{% url 'events:past_events' %}">Past events</a>
+  <p class="mt-4 text-sm text-ink-600 dark:text-ink-300">
+    That address does not exist. It may have been mistyped, or the thing it pointed at
+    may have been removed.
   </p>
+
+  <div class="mt-6 flex flex-wrap gap-2">
+    {% url 'events:event_list' as events_url %}
+    {% url 'events:past_events' as past_url %}
+    {% include "core/components/button.html" with label="Events" href=events_url variant="primary" %}
+    {% include "core/components/button.html" with label="Past events" href=past_url variant="secondary" %}
+  </div>
 {% endblock %}

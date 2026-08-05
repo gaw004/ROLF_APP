@@ -1,0 +1,33 @@
+{% comment %}
+按钮。**模板里不许手抄 class 串** —— 抄第二遍就会分叉，而分叉出来的第二种按钮
+单独看没问题，和第一种放在一起就是业余感的来源（design-system.md 开头那条判据）。
+
+参数：
+  label    必填，按钮上的字
+  variant  primary / secondary / danger / ghost，默认 secondary
+  href     给了就渲染成 <a>，否则是 <button>
+  type     submit / button，默认 submit（只对 <button> 有意义）
+  name     配合 value 用，同一张表单里区分多个动作
+  value
+  confirm  给了就带二次确认。⚠️ 破坏性动作必须给
+  full     真值时占满一行（窄屏上的表单按钮）
+
+⚠️ 一屏最多一个 primary。两个 primary 等于没有 primary ——
+   它的全部作用是告诉人「这一屏你最可能要做的是这件事」。
+
+⚠️ 每个变体都写了 dark: 对。留到最后统一补等于把所有模板再扫一遍。
+{% endcomment %}
+{% spaceless %}
+{% with base="inline-flex items-center justify-center gap-2 rounded-md px-4 py-2 text-sm font-medium transition-colors disabled:opacity-50 disabled:pointer-events-none" %}
+{% if variant == "primary" %}
+  {% comment %}白字配 brand-600 = 5.21:1。⚠️ 别改成 brand-500，那是 3.65:1，过不了线。{% endcomment %}
+  {% with cls=base|add:" bg-brand-600 text-white hover:bg-brand-700 dark:bg-brand-500 dark:hover:bg-brand-400 dark:text-ink-950" %}{% include "core/components/_button_tag.html" %}{% endwith %}
+{% elif variant == "danger" %}
+  {% with cls=base|add:" bg-danger-bg text-danger-fg ring-1 ring-inset ring-danger-fg/30 hover:bg-danger-fg hover:text-white dark:bg-danger-bg-dark dark:text-danger-fg-dark dark:ring-danger-fg-dark/30 dark:hover:bg-danger-fg-dark dark:hover:text-ink-950" %}{% include "core/components/_button_tag.html" %}{% endwith %}
+{% elif variant == "ghost" %}
+  {% with cls=base|add:" text-ink-700 hover:bg-ink-100 dark:text-ink-200 dark:hover:bg-ink-800" %}{% include "core/components/_button_tag.html" %}{% endwith %}
+{% else %}
+  {% with cls=base|add:" bg-white text-ink-800 ring-1 ring-inset ring-ink-300 hover:bg-ink-50 dark:bg-ink-800 dark:text-ink-100 dark:ring-ink-600 dark:hover:bg-ink-700" %}{% include "core/components/_button_tag.html" %}{% endwith %}
+{% endif %}
+{% endwith %}
+{% endspaceless %}

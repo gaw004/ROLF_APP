@@ -314,7 +314,7 @@ D1–D24 **一条一个文件**，索引见 [`decisions/README.md`](decisions/RE
 |---|---|---|
 | 数据核心设计（`Contact` / `Language` / `EmergencyContact`） | ✅ 已完成，有测试 | [`progress.md`](progress.md#-已完成--数据核心设计这是目前最有价值的部分) |
 | **Phase A · 地基加固**（A1–A10） | ✅ 已完成（2026-07-27，分支 `phase-a`） | [`progress.md`](progress.md#-已完成--phase-a-地基加固) · [`01-roadmap.md`](01-roadmap.md) |
-| Phase B · 活动闭环 | 🔄 五处缺口已补齐（C0.2）、**409 个测试全绿**，**只差 [C0.3](03-roadmap.md#c03-三角色浏览器验收) 那一遍浏览器验收**就能标 ✅ | [`phase-b.md`](phase-b.md)（要点） · [`02-roadmap.md`](02-roadmap.md)（步骤） · [五处缺口](phase-c.md#phase-b-的五处缺口2026-07-31-发现) |
+| Phase B · 活动闭环 | 🔄 五处缺口已补齐（C0.2）、**414 个测试全绿**，**只差 [C0.3](03-roadmap.md#c03-三角色浏览器验收) 那一遍浏览器验收**就能标 ✅ | [`phase-b.md`](phase-b.md)（要点） · [`02-roadmap.md`](02-roadmap.md)（步骤） · [五处缺口](phase-c.md#phase-b-的五处缺口2026-07-31-发现) |
 | Phase C · 上线与真实运营 | 🔄 **当前在做**（2026-07-31 开工，2026-08-03 重排） | [`phase-c.md`](phase-c.md)（要点） · [`03-roadmap.md`](03-roadmap.md)（主册） · [`04-roadmap.md`](04-roadmap.md)（前端分册） · [`progress.md`](progress.md#phase-c--上线与真实运营)（原始计划） |
 | Phase D · 资金追踪 | ⬜ 未开始 | [`progress.md`](progress.md#phase-d--资金追踪) |
 
@@ -382,9 +382,12 @@ C0.2 和它的返工之后是 **404**），
 
 走完再把上面那张表的 Phase B 改成 ✅。
 
-⚠️ **C0.3 不阻塞 [C1](04-roadmap.md#c1--构建链)**：构建链和设计系统不碰业务逻辑，
-而 C0.3 查的是业务逻辑对不对。两件可以并行 —— 但**顺序上 C0.3 越早越好**，
-因为它一旦查出返工，那些返工落在模板上，而 C2 正在重写那些模板。
+[C1](04-roadmap.md#c1--构建链) 和 [C2](04-roadmap.md#c2--设计系统与-20-个模板) **也做完了**
+（2026-08-04，分支 `phase-c-frontend`）：构建链 + 20 个模板重写完毕，测试 409 → **414**。
+所以前端不再挡任何事，**C0.3 现在是 Phase B 收尾唯一剩下的一步**。
+
+⚠️ C0.3 那一遍现在走**正好**：模板刚重写过，而它带回来的返工正是落在模板上的。
+早一天走，返工就少改一遍。
 
 > **这一轮学到的**：404 个测试全绿，而四个功能没有入口 ——
 > 因为**没有 URL 的功能，测试也没有 URL 可打**。

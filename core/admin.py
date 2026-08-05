@@ -24,7 +24,7 @@ class InEffectFilter(admin.SimpleListFilter):
     parameter_name = "in_effect"
 
     def lookups(self, request, model_admin):
-        return [("yes", "生效中"), ("no", "已结束或未开始")]
+        return [("yes", "In effect"), ("no", "Ended or not started")]
 
     def queryset(self, request, queryset):
         if self.value() == "yes":

@@ -852,7 +852,11 @@ class ChangelistCostTests(TestCase):
             contact_type=Contact.ContactType.INDIVIDUAL,
             legal_last_name="Name0", phone="+14085550000")
         page = self.client.get(self.url).content.decode()
-        self.assertEqual(page.count("合并掉"), 2)
+        # ⚠️ Counts the merge URL, not the link text. C2.5 translated the label
+        #    and this assertion went to zero — it was testing the wording, not
+        #    the pairing. The query string is what the link has to carry for a
+        #    merge to be reachable at all, and it does not move with the copy.
+        self.assertEqual(page.count("?keep="), 2)
 
 
 class MinorTests(TestCase):

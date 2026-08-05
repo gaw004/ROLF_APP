@@ -1,0 +1,13 @@
+{% comment %}
+HTMX 片段响应里带上 messages，回填到 base.html 的 #messages。
+
+⚠️ 每个**写操作**的片段模板都要 include 这一份。少了它，
+   messages.success() 在 HTMX 路径上会既不显示、又不消失 —— 它躺在 session 里，
+   等下一次整页加载才冒出来，于是用户在另一个页面上看到「Role added」。
+   那种错位比没有提示更让人困惑。
+
+⚠️ 读操作（筛选、排序）**不要** include 它。那些路径上没有新消息，
+   而 include 一次就会把 session 里还没显示过的消息**提前消费掉** ——
+   同一个 bug 的镜像。
+{% endcomment %}
+<div id="messages" hx-swap-oob="true">{% include "core/components/messages.html" %}</div>

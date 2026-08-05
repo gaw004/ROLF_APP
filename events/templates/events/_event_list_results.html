@@ -1,0 +1,34 @@
+{% comment %}
+event_list 的结果区。整页和 HTMX 片段渲染的是同一份 —— 视图两个分支共用同一个
+上下文（views._template 的注释写了为什么），所以这里的条数不可能和整页对不上。
+
+⚠️ 条数用 {{ total }}，不是 {{ events|length }}。模板自己数的话，数的可能是
+   另一个集合 —— 比如某天有人在循环里加了 {% if %}。R1 的答案不能是这么来的。
+{% endcomment %}
+<div id="event-results">
+  <p class="mb-4 text-sm text-ink-600 dark:text-ink-300">
+    <span class="font-semibold text-ink-900 dark:text-ink-50">{{ total }}</span>
+    event{{ total|pluralize }} open for signup in this period.
+  </p>
+
+  <ul class="space-y-3">
+    {% for event in events %}
+      <li class="card">
+        <div class="flex flex-wrap items-baseline justify-between gap-2">
+          <a href="{% url 'events:event_detail' event.pk %}"
+             class="text-lg font-semibold prose-link">{{ event.name }}</a>
+          {% include "core/components/badge.html" with label=event.ministry.name tone="info" %}
+        </div>
+        <p class="mt-2 text-sm text-ink-600 dark:text-ink-300">
+          {{ event.start_time }} &ndash; {{ event.end_time }}
+          {% if event.location %}<br>{{ event.location }}{% endif %}
+        </p>
+      </li>
+    {% empty %}
+      <li>
+        {% url 'events:past_events' as past_url %}
+        {% include "core/components/empty.html" with message="Nothing is open for signup in this period. Try a wider date range, or look at what has already happened." action_label="Past events" action_href=past_url %}
+      </li>
+    {% endfor %}
+  </ul>
+</div>

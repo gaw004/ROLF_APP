@@ -2,23 +2,50 @@
 {% block title %}My signups{% endblock %}
 
 {% block content %}
-  <h1>My signups</h1>
-  <table border="1" cellpadding="4">
-    <tr><th>Event</th><th>Role</th><th>Status</th><th>Hours</th><th></th></tr>
-    {% for row in participations %}
-      <tr>
-        <td><a href="{% url 'events:event_detail' row.event_role.event.pk %}">{{ row.event_role.event.name }}</a></td>
-        <td>{{ row.event_role.role.name }}</td>
-        <td>{{ row.get_status_display }}</td>
-        <td>{{ row.hours|default:"—" }}</td>
-        <td>
-          {% if row.status == "registered" %}
-            <a href="{% url 'events:participation_cancel' row.pk %}">Cancel</a>
-          {% endif %}
-        </td>
-      </tr>
-    {% empty %}
-      <tr><td colspan="5">You have not signed up for anything yet.</td></tr>
-    {% endfor %}
-  </table>
+  <h1 class="mb-6 text-2xl font-semibold">My signups</h1>
+
+  {% if participations %}
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th>Event</th><th>Role</th><th>Status</th><th>Hours</th><th></th></tr>
+        </thead>
+        <tbody>
+          {% for row in participations %}
+            <tr>
+              <td>
+                <a href="{% url 'events:event_detail' row.event_role.event.pk %}"
+                   class="prose-link">{{ row.event_role.event.name }}</a>
+              </td>
+              <td>{{ row.event_role.role.name }}</td>
+              <td>
+                {% if row.status == "registered" %}
+                  {% include "core/components/badge.html" with label=row.get_status_display tone="success" %}
+                {% elif row.status == "attended" %}
+                  {% include "core/components/badge.html" with label=row.get_status_display tone="info" %}
+                {% else %}
+                  {% include "core/components/badge.html" with label=row.get_status_display %}
+                {% endif %}
+              </td>
+              <td>{{ row.hours|default_if_none:"—" }}</td>
+              <td>
+                {% comment %}
+                取消走一个独立的确认页，不是这里一个带确认框的按钮 ——
+                那一页解释了「取消不会删除记录，你以后还能再报一次」，
+                而那句话正是这个动作最容易被误解的地方。
+                {% endcomment %}
+                {% if row.status == "registered" %}
+                  {% url 'events:participation_cancel' row.pk as cancel_url %}
+                  {% include "core/components/button.html" with label="Cancel" href=cancel_url variant="ghost" %}
+                {% endif %}
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% else %}
+    {% url 'events:event_list' as browse_url %}
+    {% include "core/components/empty.html" with message="You have not signed up for anything yet." action_label="Browse events" action_href=browse_url %}
+  {% endif %}
 {% endblock %}

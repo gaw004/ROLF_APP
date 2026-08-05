@@ -84,7 +84,7 @@ class ContactAdminForm(forms.ModelForm):
             raise ValidationError({
                 "force_save": (
                     f"A record with the same name and number already exists: {names}. "
-                    "确认这是另一个人的话，勾选本框再保存。"
+                    "If this really is a different person, tick this box and save again."
                 ),
             })
         return cleaned

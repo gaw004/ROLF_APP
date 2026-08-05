@@ -1,0 +1,20 @@
+{% comment %}
+messages 框架的四档。位置固定在主内容区顶部 —— 每一页都在同一个地方，
+因为「操作成功了没有」是用户每次提交之后第一个要找的东西。
+
+⚠️ role="status" 而不是 role="alert"：读屏软件对后者会打断当前朗读，
+   而这里大多数是「保存成功了」。真正需要打断的是表单错误，那些在 field.html 里。
+{% endcomment %}
+{% if messages %}
+  <div class="mb-6 space-y-2" role="status" aria-live="polite">
+    {% for message in messages %}
+      <div class="rounded-md border p-3 text-sm
+        {% if message.level_tag == 'success' %}border-success-fg/30 bg-success-bg text-success-fg dark:border-success-fg-dark/30 dark:bg-success-bg-dark dark:text-success-fg-dark
+        {% elif message.level_tag == 'warning' %}border-warning-fg/30 bg-warning-bg text-warning-fg dark:border-warning-fg-dark/30 dark:bg-warning-bg-dark dark:text-warning-fg-dark
+        {% elif message.level_tag == 'error' %}border-danger-fg/30 bg-danger-bg text-danger-fg dark:border-danger-fg-dark/30 dark:bg-danger-bg-dark dark:text-danger-fg-dark
+        {% else %}border-info-fg/30 bg-info-bg text-info-fg dark:border-info-fg-dark/30 dark:bg-info-bg-dark dark:text-info-fg-dark{% endif %}">
+        {{ message }}
+      </div>
+    {% endfor %}
+  </div>
+{% endif %}

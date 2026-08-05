@@ -2,46 +2,73 @@
 {% block title %}Admins — {{ ministry.name }}{% endblock %}
 
 {% block content %}
-  <h1>{{ ministry.name }} — who administers it</h1>
-  <p><a href="{% url 'org:ministry_list' %}">← All ministries</a></p>
-  <p>
-    Only the foundation-wide role (the <code>foundation_admin</code> group) can
-    open this page. A ministry's own admins cannot appoint more of themselves —
-    that is what “a level above” means.
+  <p class="mb-4 text-sm">
+    <a href="{% url 'org:ministry_list' %}" class="prose-link">&larr; All ministries</a>
   </p>
 
-  <h2>Current grants</h2>
-  <table border="1" cellpadding="4">
-    <tr>
-      <th>Who</th><th>From</th><th>Until</th><th>In effect</th>
-      <th>Granted by</th><th></th>
-    </tr>
-    {% for grant in grants %}
-      <tr>
-        <td>{{ grant.contact }}</td>
-        <td>{{ grant.start_date|default:"—" }}</td>
-        <td>{{ grant.end_date|default:"—" }}</td>
-        <td>{{ grant.is_currently_active|yesno:"Yes,No" }}</td>
-        <td>{{ grant.granted_by|default:"(account deleted)" }}</td>
-        <td>
-          {% if not grant.end_date %}
-            <form method="post">
-              {% csrf_token %}
-              <button type="submit" name="revoke" value="{{ grant.pk }}">Revoke</button>
-            </form>
-          {% endif %}
-        </td>
-      </tr>
-    {% empty %}
-      <tr><td colspan="6">Nobody yet.</td></tr>
-    {% endfor %}
-  </table>
-  <p>Revoking sets an end date; it never deletes the row, so the history stands.</p>
+  <h1 class="text-2xl font-semibold">{{ ministry.name }}</h1>
+  <p class="mt-1 text-sm text-ink-600 dark:text-ink-300">Who administers it</p>
 
-  <h2>Grant it to somebody</h2>
-  <form method="post">
+  <div class="card mt-4 border-info-fg/30 bg-info-bg dark:border-info-fg-dark/30 dark:bg-info-bg-dark">
+    <p class="text-sm text-info-fg dark:text-info-fg-dark">
+      Only the foundation-wide role (the <code>foundation_admin</code> group) can open
+      this page. A ministry's own admins cannot appoint more of themselves — that is
+      what “a level above” means.
+    </p>
+  </div>
+
+  <h2 class="mb-3 mt-8 text-lg font-semibold">Current grants</h2>
+  {% if grants %}
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th>Who</th><th>From</th><th>Until</th><th>In effect</th><th>Granted by</th><th></th></tr>
+        </thead>
+        <tbody>
+          {% for grant in grants %}
+            <tr>
+              <td class="font-medium">{{ grant.contact }}</td>
+              <td>{{ grant.start_date|default_if_none:"—" }}</td>
+              <td>{{ grant.end_date|default_if_none:"—" }}</td>
+              <td>
+                {% if grant.is_currently_active %}
+                  {% include "core/components/badge.html" with label="Yes" tone="success" %}
+                {% else %}
+                  {% include "core/components/badge.html" with label="No" %}
+                {% endif %}
+              </td>
+              <td>{{ grant.granted_by|default:"(account deleted)" }}</td>
+              <td>
+                {% if not grant.end_date %}
+                  <form method="post">
+                    {% csrf_token %}
+                    {% include "core/components/button.html" with label="Revoke" variant="danger" name="revoke" value=grant.pk confirm="Revoke this grant? It sets an end date; the row stays." %}
+                  </form>
+                {% endif %}
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% else %}
+    {% include "core/components/empty.html" with message="Nobody administers this ministry yet, so nobody can publish events for it." %}
+  {% endif %}
+
+  {% comment %}
+  ⚠️ 「撤销填 end_date、不删行」是 C0.3 验收清单上的一条，而它在界面上唯一的
+     说明就是下面这句。删掉它，下一个人会以为撤销把历史也带走了。
+  {% endcomment %}
+  <p class="mt-2 text-xs text-ink-600 dark:text-ink-300">
+    Revoking sets an end date; it never deletes the row, so the history stands.
+  </p>
+
+  <form method="post" class="card mt-8">
     {% csrf_token %}
-    {{ form.as_p }}
-    <button type="submit">Grant</button>
+    <h2 class="mb-4 text-lg font-semibold">Grant it to somebody</h2>
+    {% include "core/components/form_fields.html" %}
+    <div class="mt-6">
+      {% include "core/components/button.html" with label="Grant" variant="primary" %}
+    </div>
   </form>
 {% endblock %}

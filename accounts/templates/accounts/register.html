@@ -1,19 +1,25 @@
 {% extends "core/base.html" %}
 {% block title %}Register{% endblock %}
+{% block main_width %}max-w-2xl{% endblock %}
 
 {% block content %}
-  <h1>Create an account</h1>
-  <p>
-    Once you have an account you can sign up for events. Leave your date of
-    birth blank and we will treat you as under 18, which means signups ask for
-    a guardian's consent — you can fill it in later under My profile.
+  <h1 class="text-2xl font-semibold">Create an account</h1>
+  <p class="mt-2 text-sm text-ink-600 dark:text-ink-300">
+    Once you have an account you can sign up for events. Leave your date of birth
+    blank and we will treat you as under 18, which means signups ask for a
+    guardian's consent — you can fill it in later under My profile.
   </p>
 
-  <form method="post">
+  <form method="post" class="card mt-6">
     {% csrf_token %}
-    {{ form.as_p }}
-    <button type="submit">Register</button>
+    {% include "core/components/form_fields.html" %}
+    <div class="mt-6">
+      {% include "core/components/button.html" with label="Register" variant="primary" full=1 %}
+    </div>
   </form>
 
-  <p>Already have an account? <a href="{% url 'accounts:login' %}">Log in</a></p>
+  <p class="mt-6 text-center text-sm text-ink-600 dark:text-ink-300">
+    Already have an account?
+    <a href="{% url 'accounts:login' %}" class="prose-link">Log in</a>
+  </p>
 {% endblock %}

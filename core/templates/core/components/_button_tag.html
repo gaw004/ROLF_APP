@@ -1,0 +1,20 @@
+{% comment %}
+button.html 挑好变体之后落地的那一层。分成两个文件是为了让四个变体只写一次
+标签结构 —— 否则 <a> 和 <button> 的区别要在四个分支里各抄一遍。
+
+⚠️ 二次确认走 Alpine 的 x-on:click，不用原生 onclick。
+   理由是 D24 的三层分工：JS 全归 HTMX 和 Alpine 两层管，而一个内联 onclick
+   是第三种写法 —— 将来上 CSP 时它会是唯一挡路的东西。
+   确认框是纯 UI 状态，正好落在 Alpine 的职责里。
+
+⚠️ Alpine 没加载出来时按钮**照常提交**，只是少了确认框。这是有意的降级：
+   确认框防的是手滑，不是越权 —— 越权由服务端挡，那一层不依赖任何 JS。
+{% endcomment %}
+{% if href %}
+  <a href="{{ href }}" class="{{ cls }}{% if full %} w-full{% endif %}"
+     {% if confirm %}x-on:click="if (!window.confirm('{{ confirm|escapejs }}')) $event.preventDefault()"{% endif %}>{{ label }}</a>
+{% else %}
+  <button type="{{ type|default:'submit' }}" class="{{ cls }}{% if full %} w-full{% endif %}"
+          {% if name %}name="{{ name }}" value="{{ value }}"{% endif %}
+          {% if confirm %}x-on:click="if (!window.confirm('{{ confirm|escapejs }}')) $event.preventDefault()"{% endif %}>{{ label }}</button>
+{% endif %}

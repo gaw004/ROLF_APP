@@ -232,6 +232,36 @@ views / forms / services 原样带走」——这一步就是兑现它。**注�
 - [`design-system.md` 六、验收](design-system.md#六验收)那七条逐条勾——
   尤其「删掉 `app.css` 页面仍可用」和「删掉所有 `x-` 属性写操作仍能完成」这两条。
 
+**实测结果（2026-08-04，C2 六步全部做完）**：
+
+| 项 | 结果 |
+|---|---|
+| `python manage.py test` | **414 个，全绿**（37.9s）—— C1 收尾是 411，两条新守卫 +2、一条零工时回归测试 +1 |
+| `check` / `makemigrations --check` / `ruff check .` | 干净 / No changes / All checks passed |
+| 重写的模板 | 20 个，各只碰一次 |
+| 新增的组件片段 | `core/templates/core/components/` 下 8 个：`button` · `_button_tag` · `_nav_link` · `field` · `form_fields` · `badge` · `empty` · `messages` · `_messages_oob` |
+| 新增的 HTMX 片段 | `_event_list_results` · `_past_events_results` · `_period_filter` · `_event_roles_panel` · `_event_roles_swap` · `_attendance_row` · `_attendance_row_swap` · `_event_nav` · `_event_nav_link` |
+| 新增的迁移 | `events/0006_consent_method_labels_in_english`（**只改 label，value 一个字没动**） |
+| 新增的守卫 | `InterfaceLanguageGuardTests`（模板里注释块之外不许有中日韩字符）· `AlpineStaysUiOnlyGuardTests`（`x-` 属性里不许有权限 / 工时 / 日期运算） |
+
+**七条验收逐条的结果**：
+
+| 判据 | 怎么验的 | 结果 |
+|---|---|---|
+| 两个页面的主按钮像同一个产品 | 截图并排看 | ✅ 全部走 `button.html` 一个组件，没有第二种写法 |
+| 删掉 `app.css` 页面仍然可用 | 去掉 `<link>` 重新渲染签到页截图 | ✅ 每个按钮都在、每条信息都读得到；状态标签带文字 |
+| 删掉所有 `x-` 属性写操作仍能完成 | **414 个测试本身就是这一条** —— 它们从不发 `HX-Request`，走的全是服务端表单路径 | ✅ |
+| 关掉 JavaScript，六个写操作走得完 | 同上，加上每处 `hx-post` 都配了 `method="post" action=`| ✅ |
+| 375px 不横向滚动 | 见下面[计划外记录](#c22--375px-的横向滚动量出来的和看出来的不是一回事) | ✅ 八个页面 `scrollWidth == 375` |
+| 深浅两色各切一遍 | 每页两张截图 | ✅ |
+| 只用键盘走完一次报名 | 焦点环写在 `app.css` 的 `:focus-visible`，skip link 在 `base.html` | ⏳ **留给浏览器那一遍**，键盘顺序机器验不了 |
+
+⚠️ **一处文档打架，这里定了**：`03-roadmap.md` 的 C0.5.2 写「三个错误页的样式留到 C2 统一上」，
+而本文档 C2 开头写「C0.5 加的三个错误页各自在自己那一步里写好样式，不回到这一步」。
+**按 `03-roadmap.md` 那条办**：403 / 404 在 C2 里跟着 `base.html` 一起上了样式
+（它们 `extends base.html`，本来就是顺带的）；**500 仍然是自足的**，不继承、自带内联样式，
+理由见 [`03-roadmap.md` 的计划外记录](03-roadmap.md#c052--500html-不能-extends-basehtml)。
+
 ---
 
 ## 计划外记录
@@ -332,3 +362,96 @@ Tailwind 扫不到任何模板时**不报错**，只是产出一个几百字节�
 > 这条和上面「自动扫描掩盖拼错」是同一个形状：
 > 前端构建的失败模式**大多是「安静地少做了一点」，不是「炸掉」**。
 > 所以每一处都要有一个能量出来的下限。
+
+### C2.2 · 375px 的横向滚动：量出来的和看出来的不是一回事
+
+先踩了一个**工具的坑**，再抓到一个**真 bug**，两件都值得记。
+
+**工具那件**：`--window-size=375,900` 截出来的图是 375px 宽，
+但 **macOS 上的 Chrome 把窗口宽度下限卡在 500px** —— 页面按 500px 布局，
+再裁成 375px 交给你。于是「卡片右边被切掉、导航条不见了」看起来像溢出，
+实际是**裁剪假象**。照着这张图去改布局，改的是一个不存在的问题。
+
+改用**同源 iframe** 强制 375px，读 `contentDocument.documentElement.scrollWidth`。
+这才是一个数字：`scrollWidth > clientWidth` 就是溢出，没有别的解释。
+
+**真 bug 那件**：签到页实测 `viewport=375 scrollWidth=632`，
+而 `body` 和 `main` 都是 375、表格也确实在 `.table-wrap` 里滚。
+差的那一层是 —— **`overflow` 只裁剪以它为包含块的绝对定位后代**。
+`.table-wrap` 当时是 `position: static`，于是表格里那个给读屏用的
+`<label class="sr-only">Hours for …</label>`（Tailwind 的 `.sr-only` 是
+`position: absolute`）把**初始包含块**当成了自己的包含块，
+逃出裁剪，停在表格自然宽度那个 x 坐标上，把整个文档撑到 632。
+
+修法是 `.table-wrap` 加一行 `position: relative`。632 → 375。
+
+> ⚠️ **这个 bug 的形状值得记住**：一个**为无障碍加的、屏幕上根本看不见的元素**，
+> 把整页的横向滚动撑开了。它不会出现在任何截图里 —— 你只会看到页面能横着拖，
+> 而拖到头是一片空白。八个页面里只有签到页有这个 `sr-only`，所以也只有它中招。
+
+### C2.2 · `|default:` 把「记了 0」和「没记」显示成同一个东西
+
+截图验收当场看出来的：seed 数据里有人 3:44 签到、3:45 签退，
+状态写着 **Attended**，工时那一格却是「—」。
+
+原因是模板写的 `{{ row.hours|default:"—" }}`。Django 的 `default` 在值为**假**时替换，
+而 `Decimal("0.00")` 是假。于是：
+
+| 库里 | 应该显示 | 实际显示 |
+|---|---|---|
+| `None`（没记过） | — | — |
+| `Decimal("0.00")`（记了，是零） | 0.00 | — |
+
+这两件事差别很大：**0 小时是一条要解释的记录**（人来了又走了，或者忘了签退），
+**没记过是一件还没做的事**。一个要去问，一个要去做。
+
+⚠️ 这个 bug **是从旧模板原样搬过来的**，不是 C2 引入的 —— C2 只是第一次
+有人真的盯着那一格看。全仓 `|default:` 逐个过了一遍，
+凡是「0 有意义」的都换成 `default_if_none:`（工时、`needed_count`、签到签退时间、
+授权的起止日期）。`{{ type|default:'submit' }}` 那种字符串默认值不动。
+
+配套一条回归测试 `test_zero_recorded_hours_do_not_read_as_no_hours_recorded`，
+验证过它抓得住：换回 `|default:` 就红。
+
+### C2.3 · OOB 的 messages 不能写进被整页复用的那个片段
+
+HTMX 的写操作响应不经过 `base.html`，所以 `messages.success()` 在那条路径上会
+**既不显示、又不消失** —— 它躺在 session 里，等下一次整页加载才冒出来，
+表现是「刚才那次操作的提示，在你点开另一个页面时才弹出来」。
+
+解法是片段响应里带一个 `hx-swap-oob` 的 `#messages` 回填。
+⚠️ **但那一句不能写进片段模板本身**：`_event_roles_panel.html` 整页也要用，
+而整页里 `base.html` 已经画了一个 `<div id="messages">` —— 同一个 id 出现两次，
+HTML 无效，而 OOB 正是靠 id 找目标的。**坏的方式是「有时候换对了有时候换错了」**，
+取决于哪个先被找到。
+
+所以多一层壳：`_event_roles_swap.html` = 片段 + OOB，视图只在 HTMX 分支渲染它。
+
+### C2 · 两条测试断言的是文案，不是行为
+
+C2 改文案时红了两条，都不是代码坏了：
+
+| 测试 | 断言 | 为什么红 |
+|---|---|---|
+| `test_sending_leaves_a_record_naming_who_was_missed` | `assertContains(…, "most recently")` | 那句话挪到了句首，`m` 变成了 `M` |
+| `test_both_sides_of_a_duplicate_pair_offer_a_merge` | `page.count("合并掉") == 2` | 链接文案按 D23 改成了英文 |
+
+两条都改成断言**不随文案移动的东西**：前者大小写无关地找关键词，
+后者数 `?keep=` 这个查询串 —— 那是「这条链接能不能真的走到合并页」的充要条件。
+
+> **一般形式**：断言页面上有某句话，测的往往是**措辞**而不是**行为**。
+> 每改一次文案就要回来改一次测试，而那种修改**永远是照着报错改的**，
+> 久了就变成「把期望值改成实际值」的橡皮图章 —— 那时它已经不拦任何东西了。
+
+### C2.3 · 「这个工种还缺人」不能写进模板的 `{% if %}`
+
+报名名单页想给缺人的工种加一个显眼标记。第一版写的是
+`{% if role.needed_count and role.registered_count < role.needed_count %}`。
+
+它是对的，但它是**规则的第二份拷贝** —— `EventRoleQuerySet.understaffed()`
+已经定义了同一件事，而那条规则里有个坑：**`needed_count` 为 NULL 表示「不限」，
+所以这种工种永远不算缺人，而不是「缺无穷多」**。
+带坑的规则抄两份，两份不会一直同步。
+
+改法是把它提成一个 annotation（`is_short`），`understaffed()` 反过来 filter 它。
+模板只问 `{% if role.is_short %}`，一处定义，两处使用。

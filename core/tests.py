@@ -760,11 +760,19 @@ class AnonymousReachabilityTests(TestCase):
         Scanning the rendered HTML rather than listing the URLs here on purpose
         — a link added to base.html is covered the moment it exists, which is
         the only version of this guard worth having.
+
+        ⚠️ `<a href>` only, not every href on the page. The first version matched
+           any href= and started failing the moment base.html grew a
+           `<link rel="stylesheet">`: static files are served by whitenoise out
+           of STATIC_ROOT, which is a build product and legitimately absent
+           here. That was the guard being wrong, not the page — what this
+           asserts is "click every link", and a stylesheet is not something a
+           visitor clicks.
         """
         page = self.client.get(settings.LOGIN_URL)
         self.assertEqual(page.status_code, 200)
         hrefs = {
-            href for href in re.findall(r'href="([^"]+)"', page.content.decode())
+            href for href in re.findall(r'<a\b[^>]*\bhref="([^"]+)"', page.content.decode())
             if href.startswith("/")
         }
         self.assertIn("/events/", hrefs, "The nav stopped drawing its own links.")
@@ -903,3 +911,125 @@ class ContrastGuardTests(TestCase):
         self.assertLess(
             contrast_ratio(palette["ink-500"], "#ffffff"), 4.5,
             "ink-500 现在够做正文了 —— 去 design-system.md 删掉「只做边框」那条")
+
+
+TEMPLATE_COMMENT = re.compile(r"\{%\s*comment\s*%\}.*?\{%\s*endcomment\s*%\}", re.S)
+INLINE_TEMPLATE_COMMENT = re.compile(r"\{#.*?#\}", re.S)
+# Han, hiragana/katakana, Hangul. Built from ranges rather than written out, so
+# this module contains no character it is looking for — the guards scan the
+# project, and four earlier ones in this repo matched their own source.
+CJK_RANGES = (
+    (0x4E00, 0x9FFF), (0x3400, 0x4DBF), (0x3040, 0x30FF),
+    (0xAC00, 0xD7AF), (0x3000, 0x303F), (0xFF00, 0xFF65),
+)
+
+
+def _is_cjk(character):
+    return any(low <= ord(character) <= high for low, high in CJK_RANGES)
+
+
+def project_template_files():
+    """Every .html file we wrote, as (relative path, text) pairs.
+
+    Walked, not listed: a template added tomorrow is covered the moment it
+    exists, which is the only version of a guard worth having.
+    """
+    root = Path(settings.BASE_DIR)
+    for path in sorted(root.rglob("*.html")):
+        relative = path.relative_to(root)
+        if SKIPPED_DIRS & set(relative.parts) or ".git" in relative.parts:
+            continue
+        # ⚠️ Django templates only — an app's templates/ directory. Everything
+        #    else that happens to end in .html is not interface: the diagrams
+        #    under docs/planning/ are planning documents, and D23 keeps those
+        #    in Chinese along with the rest of docs/. Scanning by extension
+        #    alone made the language guard fail on a diagram, which is the
+        #    guard being wrong rather than the document.
+        if "templates" not in relative.parts:
+            continue
+        yield relative, path.read_text(encoding="utf-8")
+
+
+def _blank_out_comments(text):
+    """Replace template comments with blank lines, keeping line numbers honest."""
+    def blanks(match):
+        return "\n" * match.group(0).count("\n")
+    return INLINE_TEMPLATE_COMMENT.sub(blanks, TEMPLATE_COMMENT.sub(blanks, text))
+
+
+class InterfaceLanguageGuardTests(TestCase):
+    """D23: the interface is English. Templates carry no CJK outside comments.
+
+    Stronger than the guard the abandoned bilingual plan would have needed.
+    That one could only ask "is this string wrapped in a translation tag?",
+    which leaves a middle state — wrapped but never translated — that looks
+    fine and ships the wrong language. This one asks "is there any of it?",
+    and there is no middle state to hide in.
+
+    ⚠️ 分界线是「这句话会不会出现在浏览器里」，不是「它写在哪个文件里」。
+       所以 {% comment %} 块里的中文不算 —— 那是本项目推理的落点，
+       翻成英文是纯损失。注释之外的一个汉字都不许有。
+    """
+
+    def test_no_cjk_outside_template_comments(self):
+        offenders = []
+        for relative, source in project_template_files():
+            for number, line in enumerate(_blank_out_comments(source).splitlines(), 1):
+                found = [c for c in line if _is_cjk(c)]
+                if found:
+                    offenders.append(f"{relative}:{number}: {''.join(found)}")
+        self.assertEqual(
+            offenders, [],
+            "D23: interface text is English. Move prose into a template comment "
+            "or translate it:\n" + "\n".join(offenders))
+
+
+# Attribute names Alpine reads: the x- prefix plus the two shorthands.
+ALPINE_ATTRIBUTE = re.compile(r'(?:\bx-[\w:.-]+|\s@[\w:.-]+|\s:[\w:.-]+)\s*=\s*"([^"]*)"')
+# What may never be decided in the browser. Split by why, because the
+# consequences differ.
+ALPINE_FORBIDDEN = {
+    # Permission. The server is the only place that knows, and a button drawn
+    # for somebody who may not press it has already leaked the information.
+    "can_manage", "can_publish", "can_view", "can_grant", "is_admin",
+    "is_staff", "is_superuser", "perms", "has_perm",
+    # Arithmetic the server has already done. A second answer is a second
+    # truth, free to disagree and with nothing to report that it has.
+    "hours", "total_hours", "amount", "subtotal", "salary",
+    # Dates. D16: "today" has one spelling, and the browser's timezone is not
+    # the foundation's.
+    "new Date", "Date.now", "getFullYear", "getMonth", "setDate", "toISOString",
+}
+ALPINE_EXEMPT = "alpine-guard-ok"
+
+
+class AlpineStaysUiOnlyGuardTests(TestCase):
+    """D24: x- attributes hold UI state, never business decisions.
+
+    ⚠️ 越界不会报错。把一个权限判断写进 x-show，页面照常渲染、测试照常绿，
+       只是那个按钮对不该看见它的人也画出来了。服务端仍然会 403，
+       所以泄露的是**信息**不是权限 —— 但那也是泄露，而且没有任何东西会告诉你
+       它发生了。这条守卫就是为这一件事存在的。
+
+    False positives cost one `alpine-guard-ok` comment on the line or just
+    above it — the same escape hatch the loop guard uses, and for the same
+    reason: a miss here is silent and a false positive is not.
+    """
+
+    def test_no_business_logic_in_alpine_attributes(self):
+        offenders = []
+        for relative, source in project_template_files():
+            lines = _blank_out_comments(source).splitlines()
+            for number, line in enumerate(lines, 1):
+                exempted = (ALPINE_EXEMPT in line
+                            or (number > 1 and ALPINE_EXEMPT in lines[number - 2]))
+                if exempted:
+                    continue
+                for expression in ALPINE_ATTRIBUTE.findall(line):
+                    hit = sorted(w for w in ALPINE_FORBIDDEN if w in expression)
+                    if hit:
+                        offenders.append(f"{relative}:{number}: {hit} in {expression[:60]}")
+        self.assertEqual(
+            offenders, [],
+            "D24: Alpine holds UI state only — permissions, arithmetic and date "
+            "maths belong on the server:\n" + "\n".join(offenders))

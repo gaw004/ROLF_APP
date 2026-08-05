@@ -1,0 +1,19 @@
+{% comment %}
+状态标签。
+
+⚠️ **必须带文字，颜色只是装饰。** 判据是「把 app.css 删掉页面仍然可用」——
+   而「靠绿色和灰色区分已报名 / 未报名」删掉样式之后什么都不剩。
+   那不是样式，那是内容。所以这个组件永远渲染 {{ label }}，没有只有颜色的分支。
+
+参数：
+  label  必填，显示出来的字（用 get_*_display，别自己拼）
+  tone   success / warning / danger / info / neutral，默认 neutral
+{% endcomment %}
+{% spaceless %}
+<span class="inline-flex items-center rounded-md px-2 py-0.5 text-xs font-medium
+  {% if tone == 'success' %}bg-success-bg text-success-fg dark:bg-success-bg-dark dark:text-success-fg-dark
+  {% elif tone == 'warning' %}bg-warning-bg text-warning-fg dark:bg-warning-bg-dark dark:text-warning-fg-dark
+  {% elif tone == 'danger' %}bg-danger-bg text-danger-fg dark:bg-danger-bg-dark dark:text-danger-fg-dark
+  {% elif tone == 'info' %}bg-info-bg text-info-fg dark:bg-info-bg-dark dark:text-info-fg-dark
+  {% else %}bg-ink-100 text-ink-700 dark:bg-ink-800 dark:text-ink-200{% endif %}">{{ label }}</span>
+{% endspaceless %}

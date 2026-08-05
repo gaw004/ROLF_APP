@@ -1,0 +1,37 @@
+{% comment %}
+两页共用的时间段筛选。
+
+⭐ 这是一个**读操作**，所以按 D24 的口径它可以只有 HTMX 一条路 —— 但它偏偏
+   不需要：`method="get"` 的普通表单本来就能用，HTMX 只是省掉整页重绘。
+   关掉 JavaScript，筛选照样工作。
+
+参数：action（表单要打的 URL）。
+{% endcomment %}
+<form method="get" action="{{ action }}"
+      hx-get="{{ action }}" hx-target="#event-results" hx-swap="outerHTML"
+      hx-push-url="true" hx-indicator="#filter-busy"
+      class="card mb-6 flex flex-wrap items-end gap-4">
+  {% comment %}
+  ⚠️ `w-full sm:w-auto` + `min-w-0`，两个都不能少。
+
+     第一版写的是 `grow sm:grow-0`，375px 下**整页横向滚动**了 —— flex 项的
+     `min-width` 默认是 `auto`，也就是「不许缩到比内容窄」，而两个 date 控件
+     的固有宽度加上间距超过 375px。表现是导航条被推出屏幕、卡片右边被切掉，
+     而在宽屏上一切正常。
+     `min-w-0` 解除那条下限，`w-full` 让它们在窄屏上直接各占一行。
+  {% endcomment %}
+  <div class="w-full min-w-0 sm:w-auto">{% include "core/components/field.html" with field=period.start %}</div>
+  <div class="w-full min-w-0 sm:w-auto">{% include "core/components/field.html" with field=period.end %}</div>
+  <div class="flex flex-wrap items-center gap-2">
+    {% include "core/components/button.html" with label="Filter" variant="primary" %}
+    {% include "core/components/button.html" with label="Clear" href=action variant="ghost" %}
+    {% comment %}
+    加载态。⚠️ 没有加载态的按钮用户会点第二次 —— 这一个是读操作所以点两次无害，
+    但同一条规矩下面签到那几个按钮点第二次是有后果的，写法要一致。
+    {% endcomment %}
+    <span id="filter-busy" class="htmx-indicator text-xs text-ink-600 dark:text-ink-300">Loading…</span>
+  </div>
+  {% for error in period.non_field_errors %}
+    <p class="w-full text-xs font-medium text-danger-fg dark:text-danger-fg-dark">{{ error }}</p>
+  {% endfor %}
+</form>

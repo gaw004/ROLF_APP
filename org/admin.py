@@ -66,7 +66,7 @@ class StaffingFilter(admin.SimpleListFilter):
     parameter_name = "staffing"
 
     def lookups(self, request, model_admin):
-        return [("vacant", "空缺"), ("occupied", "有人在任"), ("retired", "已撤销")]
+        return [("vacant", "Vacant"), ("occupied", "Filled"), ("retired", "Retired")]
 
     def queryset(self, request, queryset):
         if self.value() == "vacant":

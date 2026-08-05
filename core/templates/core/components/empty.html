@@ -1,0 +1,17 @@
+{% comment %}
+空状态：一句话说明 + 一个下一步动作。
+
+⚠️ 「暂无数据」四个字是最没用的空状态 —— 它把「你什么都不用做」和
+   「你还差一步」说成了同一句话。所以 message 要说清楚是哪一种，
+   而 action_label / action_href 给出那一步。
+
+参数：message 必填；action_label + action_href 选填。
+{% endcomment %}
+<div class="rounded-lg border border-dashed border-ink-300 p-6 text-center dark:border-ink-600">
+  <p class="text-sm text-ink-600 dark:text-ink-300">{{ message }}</p>
+  {% if action_label and action_href %}
+    <div class="mt-3">
+      {% include "core/components/button.html" with label=action_label href=action_href variant="primary" %}
+    </div>
+  {% endif %}
+</div>

@@ -1,0 +1,80 @@
+{% comment %}
+签到表的一行。整页渲染和 HTMX 换行渲染的是同一份 —— 所以换过的那一行和
+整页刷新出来的那一行不可能长得不一样。
+
+⚠️ tr 上的 id 是 HTMX 的落点。少了它，hx-target="closest tr" 换回来的内容
+   会缺一个 id，第二次点同一个人的按钮就找不到目标了。
+
+参数：row（一条 Participation）、hours_form。
+{% endcomment %}
+<tr id="participation-{{ row.pk }}">
+  <td>
+    <div class="font-medium">{{ row.contact }}</div>
+    {% comment %}
+    ⚠️ 未成年标记和急救电话画在这里，是因为这是「有人崴了脚」那一刻打开着的页面。
+       那是当场拨一个号码；和「活动改期之前联系家长」不是一回事 ——
+       后者走报名时收的 consent_email / consent_phone，在通知页。
+    {% endcomment %}
+    {% if row.contact.is_minor is None %}
+      <div class="mt-1">{% include "core/components/badge.html" with label="No date of birth — treated as under 18" tone="warning" %}</div>
+    {% elif row.contact.is_minor %}
+      <div class="mt-1">{% include "core/components/badge.html" with label="Under 18" tone="warning" %}</div>
+    {% endif %}
+    {% for emergency in row.contact.emergency_contacts.all %}
+      <div class="mt-1 text-xs text-ink-600 dark:text-ink-300">
+        Emergency: {{ emergency.name }} {{ emergency.phone }}
+      </div>
+    {% endfor %}
+  </td>
+  <td>{{ row.event_role.role.name }}</td>
+  <td>
+    {% if row.status == "attended" %}
+      {% include "core/components/badge.html" with label=row.get_status_display tone="success" %}
+    {% else %}
+      {% include "core/components/badge.html" with label=row.get_status_display %}
+    {% endif %}
+  </td>
+  {% comment %}
+  ⚠️ `default_if_none`，**不是** `default`。`default` 在值为**假**时替换，
+     而 Decimal("0.00") 是假 —— 于是「签到签退都做了，工时记的是 0」会显示成
+     「—」，和「根本没记过」长得一模一样。
+
+     这两件事在这个项目里差别很大：0 小时是一条要解释的记录（人来了又走了，
+     或者忘了签退），而没记过是一件还没做的事。截图验收时就是这么发现的 ——
+     seed 数据里有人 3:44 签到、3:45 签退，状态写着 Attended，工时那格却是「—」。
+  {% endcomment %}
+  <td>{{ row.checked_in_at|default_if_none:"—" }}</td>
+  <td>{{ row.checked_out_at|default_if_none:"—" }}</td>
+  <td class="font-medium">{{ row.hours|default_if_none:"—" }}</td>
+  <td>
+    {% comment %}
+    ⭐ 两张**完整的服务端表单**，hx-post 只是它们的快路。
+       关掉 JavaScript，签到签退和补工时全部照样能走完 —— D24 的口径。
+    ⚠️ hx-indicator 不是装饰：没有加载态的按钮用户会点第二次，
+       而这里点第二次的后果是把刚签进去的人签出来。
+    {% endcomment %}
+    <form method="post" action="{% url 'events:event_attendance' row.event_role.event_id %}"
+          hx-post="{% url 'events:event_attendance' row.event_role.event_id %}"
+          hx-target="#participation-{{ row.pk }}" hx-swap="outerHTML"
+          hx-indicator="#busy-{{ row.pk }}"
+          class="flex flex-wrap items-center gap-2">
+      {% csrf_token %}
+      <input type="hidden" name="participation" value="{{ row.pk }}">
+      {% include "core/components/button.html" with label="Check in" variant="secondary" name="action" value="check_in" %}
+      {% include "core/components/button.html" with label="Check out" variant="secondary" name="action" value="check_out" %}
+      <span id="busy-{{ row.pk }}" class="htmx-indicator text-xs text-ink-600 dark:text-ink-300">Saving…</span>
+    </form>
+
+    <form method="post" action="{% url 'events:event_attendance' row.event_role.event_id %}"
+          hx-post="{% url 'events:event_attendance' row.event_role.event_id %}"
+          hx-target="#participation-{{ row.pk }}" hx-swap="outerHTML"
+          class="mt-2 flex flex-wrap items-center gap-2">
+      {% csrf_token %}
+      <input type="hidden" name="participation" value="{{ row.pk }}">
+      <label for="hours-{{ row.pk }}" class="sr-only">Hours for {{ row.contact }}</label>
+      <input type="number" step="0.25" min="0" name="hours" id="hours-{{ row.pk }}"
+             class="w-24 rounded-md border border-ink-300 bg-white px-2 py-1 text-sm text-ink-900 dark:border-ink-600 dark:bg-ink-800 dark:text-ink-50">
+      {% include "core/components/button.html" with label="Enter hours" variant="ghost" name="action" value="hours" %}
+    </form>
+  </td>
+</tr>

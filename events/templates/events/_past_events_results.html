@@ -1,0 +1,32 @@
+{% comment %}
+past_events 的结果区。和 _event_list_results.html 分开写，因为这一页多一列状态，
+而空状态那句话说的是完全不同的一件事。
+
+⚠️ 已取消 / 已完成的都在这里 —— visible_to_volunteers()。
+   去过的人的工时挂在这些活动上，报表页也是活动结束之后才要看的。
+{% endcomment %}
+<div id="event-results">
+  <p class="mb-4 text-sm text-ink-600 dark:text-ink-300">
+    <span class="font-semibold text-ink-900 dark:text-ink-50">{{ total }}</span>
+    event{{ total|pluralize }} in this period.
+  </p>
+
+  <ul class="space-y-3">
+    {% for event in events %}
+      <li class="card">
+        <div class="flex flex-wrap items-baseline justify-between gap-2">
+          <a href="{% url 'events:event_detail' event.pk %}"
+             class="text-lg font-semibold prose-link">{{ event.name }}</a>
+          {% include "core/components/badge.html" with label=event.get_status_display %}
+        </div>
+        <p class="mt-2 text-sm text-ink-600 dark:text-ink-300">
+          {{ event.ministry.name }}<br>
+          {{ event.start_time }} &ndash; {{ event.end_time }}
+          {% if event.location %}<br>{{ event.location }}{% endif %}
+        </p>
+      </li>
+    {% empty %}
+      <li>{% include "core/components/empty.html" with message="No events finished in this period." %}</li>
+    {% endfor %}
+  </ul>
+</div>

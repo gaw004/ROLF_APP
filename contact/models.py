@@ -140,7 +140,7 @@ class ContactQuerySet(models.QuerySet):
 
         Pairing lives on the queryset for the reason the judgement does (D18):
         admin.py renders this, it does not work it out. It also means the merge
-        column and the "疑似重复" filter now answer from one definition instead
+        column and the "Possible duplicates" admin filter now answer from one
         of two that could disagree.
         """
         grouped = defaultdict(list)

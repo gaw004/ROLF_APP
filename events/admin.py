@@ -87,7 +87,7 @@ class EventAdmin(SimpleHistoryAdmin):
             }
         counts = request._event_counts
 
-        @admin.display(description="工种 / 报名")
+        @admin.display(description="Roles / signups")
         def roles_and_signups(obj):
             roles, registered = counts.get(obj.pk, (0, 0))
             return f"{roles} / {registered}"
@@ -103,11 +103,11 @@ class UnderstaffedFilter(admin.SimpleListFilter):
     short — "no limit" is not "short by infinity".
     """
 
-    title = "缺人"
+    title = "Short of people"
     parameter_name = "understaffed"
 
     def lookups(self, request, model_admin):
-        return [("yes", "还缺人"), ("no", "不缺人")]
+        return [("yes", "Still short"), ("no", "Fully signed up")]
 
     def queryset(self, request, queryset):
         if self.value() == "yes":

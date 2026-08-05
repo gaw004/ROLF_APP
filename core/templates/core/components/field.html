@@ -1,0 +1,39 @@
+{% comment %}
+一个表单字段：标签、控件、帮助文字、错误。
+
+⚠️ **错误文案在字段下方，不在页面顶部。** 顶部的错误在长表单上会滚出屏幕，
+   用户看得到「提交失败」却看不到自己错在哪 —— 报名页那个未成年同意分支正是长表单。
+
+⚠️ **控件本身的样式不在这里，也不在 forms.py 的 widget attrs 里。**
+   phase-c.md 的样式落点规矩：CSS 只许出现在样式表和模板 class 上，
+   `forms.py` 的 widget attrs 只放 type="date" 这类**语义**属性。
+   所以 input / select / textarea 的外观由 assets/app.css 里 `.field` 的后代选择器管 ——
+   这样换掉整套样式不需要动任何一个 Form 类。
+
+参数：field（一个 bound field）。
+{% endcomment %}
+<div class="field {% if field.errors %}field-invalid{% endif %}">
+  {% if field.field.widget.input_type == "checkbox" %}
+    <div class="flex items-start gap-2">
+      {{ field }}
+      <label for="{{ field.id_for_label }}" class="text-sm text-ink-800 dark:text-ink-100">
+        {{ field.label }}
+      </label>
+    </div>
+  {% else %}
+    <label for="{{ field.id_for_label }}"
+           class="block text-sm font-medium text-ink-800 dark:text-ink-100">
+      {{ field.label }}{% if field.field.required %}<span class="text-danger-fg dark:text-danger-fg-dark" aria-hidden="true"> *</span>{% endif %}
+    </label>
+    {{ field }}
+  {% endif %}
+
+  {% if field.help_text %}
+    {% comment %}ink-600 而不是 ink-500 —— 后者在白底上只有 4.34:1，过不了 4.5 那条线。{% endcomment %}
+    <p class="mt-1 text-xs text-ink-600 dark:text-ink-300">{{ field.help_text }}</p>
+  {% endif %}
+
+  {% for error in field.errors %}
+    <p class="mt-1 text-xs font-medium text-danger-fg dark:text-danger-fg-dark">{{ error }}</p>
+  {% endfor %}
+</div>

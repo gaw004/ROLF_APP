@@ -1774,9 +1774,19 @@ class AcceptanceWalkTests(TestCase):
         })
         notification = event.notifications.get()
         self.assertEqual({p.pk for p in notification.unreachable.all()}, missed)
-        # "Last notified …" is the only thing standing between a shaky
+        # "Already notified …" is the only thing standing between a shaky
         # connection and a second identical notice.
-        self.assertContains(self.client.get(url), "most recently")
+        #
+        # ⚠️ Asserted case-insensitively, and on the word that carries the
+        #    meaning rather than on a whole sentence. C2 rewrote this page and
+        #    the previous assertion — the literal "most recently" — broke purely
+        #    because the phrase moved to the start of a sentence and gained a
+        #    capital. A test that fails on capitalisation is not testing the
+        #    warning; it is testing the wording, and it will keep costing a
+        #    round trip every time the copy is touched.
+        page = self.client.get(url).content.decode().lower()
+        self.assertIn("most recently", page)
+        self.assertIn("already notified", page)
 
     def test_checking_somebody_in_and_out_fills_in_their_hours(self):
         self.as_role("pantry_admin")
@@ -1789,6 +1799,35 @@ class AcceptanceWalkTests(TestCase):
         participation.refresh_from_db()
         self.assertEqual(participation.status, Participation.Status.ATTENDED)
         self.assertIsNotNone(participation.hours)
+
+    def test_zero_recorded_hours_do_not_read_as_no_hours_recorded(self):
+        """Somebody who checked straight back out shows 0, not a dash.
+
+        ⚠️ The template filter for this is `default_if_none`, never `default`:
+           `default` substitutes on any falsy value and Decimal("0.00") is
+           falsy, so "checked in and out, worked zero hours" rendered exactly
+           like "nothing recorded yet". Those are different facts — the first
+           wants explaining (came and left again, or forgot to check out), the
+           second is a job still to do.
+
+        Found by looking at a screenshot of the page, not by a failing test:
+        the seed data has somebody checked in at 3:44 and out at 3:45, marked
+        Attended, with a dash under Hours.
+        """
+        self.as_role("pantry_admin")
+        event = self.open_event()
+        participation = Participation.objects.filter(
+            event_role__event=event, contact__legal_last_name="Li").get()
+        url = reverse("events:event_attendance", args=[event.pk])
+        self.client.post(url, {"participation": participation.pk, "action": "hours",
+                               "hours": "0"})
+        participation.refresh_from_db()
+        self.assertEqual(participation.hours, Decimal("0"))
+
+        row = self.client.get(url).content.decode()
+        cell = row.split(f'id="participation-{participation.pk}"', 1)[1].split("</tr>", 1)[0]
+        self.assertIn("0.00", cell)
+        self.assertNotIn("—", cell.split("Hours")[-1] if "Hours" in cell else cell)
 
     # --- ③ the plain volunteer --------------------------------------------
 

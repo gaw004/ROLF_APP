@@ -71,8 +71,20 @@
           class="mt-2 flex flex-wrap items-center gap-2">
       {% csrf_token %}
       <input type="hidden" name="participation" value="{{ row.pk }}">
+      {% comment %}
+      ⚠️ 预填规则：**已经记过工时的显示已记录的值**，没记过的才显示这场活动排定的
+         时长（end − start）。反过来做（永远显示排定时长）会让一个已经签退、
+         算出 3 小时的人，框里写着 6 小时 —— 一手滑就覆盖掉真实值。
+
+      ⚠️ 代价如实说，也记进了 phase-c.md 的已知缺口：**预填出来的数字，和一个
+         人工确认过的数字长得一模一样**。有人早退两小时，admin 没注意直接点了
+         Enter hours，库里记下的是满勤，而事后没有任何办法分辨这个数是「量过的」
+         还是「默认的」。空框逼你打一个数，预填省了力气也省掉了那一下停顿。
+         2026-08-04 主动接受。
+      {% endcomment %}
       <label for="hours-{{ row.pk }}" class="sr-only">Hours for {{ row.contact }}</label>
       <input type="number" step="0.25" min="0" name="hours" id="hours-{{ row.pk }}"
+             value="{{ row.hours|default_if_none:scheduled_hours }}"
              class="w-24 rounded-md border border-ink-300 bg-white px-2 py-1 text-sm text-ink-900 dark:border-ink-600 dark:bg-ink-800 dark:text-ink-50">
       {% include "core/components/button.html" with label="Enter hours" variant="ghost" name="action" value="hours" %}
     </form>

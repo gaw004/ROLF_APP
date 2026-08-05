@@ -15,6 +15,7 @@ from django.core.exceptions import ValidationError
 from django.db import IntegrityError, connection, transaction
 from django.db.models import ProtectedError
 from django.test import TestCase, override_settings
+from django.utils import formats, timezone
 from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
 from django.utils.timezone import localtime
@@ -54,6 +55,7 @@ from .services import (
     notify_event_change,
     record_hours,
     resolve_recipients,
+    scheduled_hours,
     sign_up,
 )
 
@@ -1135,6 +1137,342 @@ class PeriodFilterPageTests(PageTestCase):
             with self.subTest(page=name):
                 response = self.client.get(reverse(f"events:{name}"))
                 self.assertEqual(response.status_code, 302)
+
+    # --- R2 as a filter, not only as a column (2026-08-04) -----------------
+
+    def test_filtering_by_ministry_alone_answers_what_is_open_here(self):
+        """"Everything the food pantry has open" — no dates involved.
+
+        One of the three questions this one form has to answer; the other two
+        are "what is on next month" and both together.
+        """
+        other = make_event(
+            ministry=self.tax, owner=self.zhang.contact, name="Tax clinic",
+            start_time=NOW + 2 * DAY, end_time=NOW + 2 * DAY + 2 * HOUR,
+        )
+        self.login(self.lisi)
+        response = self.client.get(reverse("events:event_list"),
+                                   {"ministry": self.pantry.pk})
+        self.assertEqual(response.context["total"], 1)
+        self.assertContains(response, self.event.name)
+        self.assertNotContains(response, other.name)
+
+    def test_a_ministry_and_a_window_narrow_together(self):
+        make_event(
+            ministry=self.tax, owner=self.zhang.contact, name="Tax clinic",
+            start_time=self.event.start_time, end_time=self.event.end_time,
+        )
+        self.login(self.lisi)
+        response = self.client.get(reverse("events:event_list"), {
+            "ministry": self.pantry.pk,
+            "start": self.day(NOW), "end": self.day(self.event.start_time),
+        })
+        self.assertEqual(response.context["total"], 1)
+
+    def test_the_dropdown_offers_every_active_ministry(self):
+        """Not "ministries with events in the current results".
+
+        ⚠️ The narrower list reads better until somebody picks a ministry and
+           watches it disappear from the dropdown it was just chosen from —
+           the options would depend on the filter they are part of.
+        """
+        self.login(self.lisi)
+        response = self.client.get(reverse("events:event_list"),
+                                   {"ministry": self.pantry.pk})
+        offered = set(response.context["period"].fields["ministry"].queryset)
+        self.assertIn(self.tax, offered)
+
+    def test_past_events_can_be_filtered_by_ministry_too(self):
+        self.login(self.lisi)
+        response = self.client.get(reverse("events:past_events"),
+                                   {"ministry": self.tax.pk})
+        self.assertEqual(response.context["total"], 0)
+
+
+class ConsentFormShapeTests(PageTestCase):
+    """2026-08-04 feedback: the consent section says what it actually enforces.
+
+    ⚠️ `consent_method` was `required=False` on the form while
+       `services.sign_up()` refused any signup without it. The field was
+       therefore **already compulsory and the page did not say so** — the only
+       way to find out was to submit and be bounced, with the complaint
+       attached to a different field.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.minor = self.account(
+            "xiaoming", "Xiao",
+            birth_date=local_today() - datetime.timedelta(days=365 * 15))
+
+    def minor_form(self):
+        return SignUpForm(event=self.event, contact=self.minor.contact)
+
+    def test_consent_method_is_required_when_consent_applies(self):
+        self.assertTrue(self.minor_form().fields["consent_method"].required)
+
+    def test_consent_method_is_asked_last(self):
+        """It applies to both paths, so it sits after the branch, not inside it.
+
+        Picking an emergency contact still leaves "how was consent given?"
+        unanswered — which is why it cannot live in the group that greys out.
+        """
+        names = list(self.minor_form().fields)
+        self.assertEqual(names[-1], "consent_method")
+        self.assertLess(names.index("use_emergency_contact"),
+                        names.index("consent_method"))
+
+    def test_an_adult_is_not_asked_for_a_consent_method(self):
+        # required=True is switched on in __init__ and only when it applies —
+        # at class level it would demand a method from adults, for whom the
+        # whole section is hidden.
+        form = SignUpForm(event=self.event, contact=self.lisi.contact)
+        self.assertFalse(form.needs_consent)
+        self.assertFalse(form.fields["consent_method"].required)
+
+    def test_the_manual_details_are_grouped_so_they_can_be_disabled_together(self):
+        """The four fields the emergency-contact shortcut makes irrelevant.
+
+        Asserted on the rendered page rather than on the form, because the
+        grouping is what lets one native `disabled` on the fieldset switch all
+        four off at once — and `consent_method` has to stay outside it.
+        """
+        self.login(self.minor)
+        page = self.client.get(
+            reverse("events:event_signup", args=[self.event.pk])).content.decode()
+        block = page.split("<fieldset", 1)[1].split("</fieldset>", 1)[0]
+        for name in ["consent_given_by", "consent_relationship",
+                     "consent_email", "consent_phone"]:
+            with self.subTest(field=name):
+                self.assertIn(name, block)
+        self.assertNotIn("consent_method", block)
+
+
+class DetailPageBackLinkTests(PageTestCase):
+    """2026-08-04 feedback: getting back to "Events I manage" from an event.
+
+    The six management pages have carried that link since C2. The one that did
+    not is the page reached by clicking the event's **name** — which is the
+    volunteer-facing detail page, shared by both audiences.
+    """
+
+    # ⚠️ Asserted on the back link's own markup, not on the URL. The shared
+    #    navigation draws "Events I manage" for **any** ministry admin, so
+    #    searching the whole page for that URL says nothing about this page —
+    #    the first version of this test passed for the wrong reason and failed
+    #    for the wrong reason.
+    BACK_LINK = "&larr; Events I manage"
+
+    def url(self):
+        return reverse("events:event_detail", args=[self.event.pk])
+
+    def test_the_manager_of_this_event_is_offered_the_way_back(self):
+        self.login(self.zhang)
+        self.assertContains(self.client.get(self.url()), self.BACK_LINK)
+
+    def test_a_plain_volunteer_is_not(self):
+        # ⚠️ Drawing it for everybody would send a volunteer to a 403. A link
+        #    that refuses the person who clicked it is worse than no link:
+        #    it reads as a broken site rather than as a page not meant for them.
+        self.login(self.lisi)
+        self.assertNotContains(self.client.get(self.url()), self.BACK_LINK)
+
+    def test_another_ministrys_admin_is_not_either(self):
+        # can_manage_event is scoped, so "an admin" is not enough — it has to
+        # be an admin *of this event's ministry*.
+        self.login(self.other_admin)
+        self.assertNotContains(self.client.get(self.url()), self.BACK_LINK)
+
+
+class MyParticipationsColumnTests(PageTestCase):
+    """2026-08-04 feedback: "when is it?" answered on the list itself."""
+
+    def test_each_row_carries_the_events_start_time(self):
+        self.client.force_login(self.lisi)
+        self.client.post(reverse("events:event_signup", args=[self.event.pk]),
+                         {"event_role": self.role.pk})
+        response = self.client.get(reverse("events:my_participations"))
+        self.assertContains(response, "Starts")
+        self.assertContains(response, formats.date_format(
+            timezone.localtime(self.event.start_time), "DATETIME_FORMAT"))
+
+
+class MergedEditAndRolesPageTests(PageTestCase):
+    """2026-08-04 feedback: an event is edited in one place, not two.
+
+    The roles page never had an entrance of its own — you arrived at it from
+    the redirect after creating an event, and a day later there was no way back
+    except typing the URL. That is the same shape as the five gaps C0.2 closed.
+    """
+
+    def edit_url(self):
+        return reverse("events:event_update", args=[self.event.pk])
+
+    def test_the_edit_page_carries_the_roles(self):
+        self.login(self.zhang)
+        response = self.client.get(self.edit_url())
+        self.assertContains(response, "Roles for this event")
+        self.assertContains(response, self.role.role.name)
+
+    def test_the_old_roles_url_sends_you_to_the_edit_page(self):
+        # Kept rather than deleted: the roles form still posts here, and
+        # templates, tests and bookmarks point at it.
+        self.login(self.zhang)
+        response = self.client.get(reverse("events:event_roles", args=[self.event.pk]))
+        self.assertRedirects(response, self.edit_url())
+
+    def test_creating_an_event_lands_on_the_merged_page(self):
+        self.login(self.zhang)
+        response = self.client.post(reverse("events:event_create"), {
+            "name": "Soup run", "event_type": EventType.objects.first().pk,
+            "ministry": self.pantry.pk,
+            "start_time": "2026-09-01T09:00", "end_time": "2026-09-01T12:00",
+            "status": Event.Status.OPEN,
+        })
+        created = Event.objects.get(name="Soup run")
+        self.assertRedirects(
+            response, reverse("events:event_update", args=[created.pk]))
+
+    def test_a_rejected_role_keeps_its_errors_instead_of_redirecting(self):
+        """⚠️ The reason this POST renders rather than redirects.
+
+        A redirect after an invalid submission throws the errors away, and the
+        page comes back looking as though nothing happened.
+        """
+        self.login(self.zhang)
+        response = self.client.post(
+            reverse("events:event_roles", args=[self.event.pk]), {"needed_count": 2})
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.context["role_form"].errors)
+
+    def test_the_two_forms_on_the_page_do_not_share_errors(self):
+        """One request binds one form; the other has to come back clean.
+
+        ⚠️ Sharing a context key between them was the trap this merge could
+           easily have introduced — the event form would come back covered in
+           complaints about a role nobody was editing.
+        """
+        self.login(self.zhang)
+        response = self.client.post(
+            reverse("events:event_roles", args=[self.event.pk]), {"needed_count": 2})
+        self.assertFalse(response.context["form"].errors)
+
+
+class NewParticipationRoleTests(PageTestCase):
+    """2026-08-04 feedback: a ministry admin can add a job to the vocabulary.
+
+    ⚠️ ParticipationRole is the grouping dimension for R5 and R7. Two rows
+       meaning one job do not raise anything — they split one column of every
+       report in two, and both halves look plausible. That is the cost this
+       feature buys, and the duplicate check is what keeps it rare.
+    """
+
+    def add(self, **payload):
+        self.login(self.zhang)
+        return self.client.post(
+            reverse("events:event_roles", args=[self.event.pk]),
+            {"needed_count": 1, **payload})
+
+    def test_a_new_name_becomes_a_role_and_gets_opened(self):
+        self.add(new_role_name="Sound desk")
+        created = ParticipationRole.objects.get(name="Sound desk")
+        self.assertEqual(created.code, "sound-desk")
+        self.assertTrue(self.event.roles.filter(role=created).exists())
+
+    def test_a_duplicate_is_refused_and_names_the_one_that_exists(self):
+        """⚠️ The existing name is the whole content of the error.
+
+        "That already exists" leaves somebody hunting a dropdown of thirty
+        entries for a word they may have spelled differently.
+        """
+        response = self.add(new_role_name="  lIfTiNg ")
+        self.assertEqual(response.status_code, 200)
+        errors = response.context["role_form"].errors["new_role_name"]
+        self.assertIn(self.role.role.name, " ".join(errors))
+        self.assertEqual(
+            ParticipationRole.objects.filter(name__iexact="lifting").count(), 1)
+
+    def test_only_near_misses_are_caught_not_synonyms(self):
+        """The limit, asserted so nobody mistakes it for more than it is.
+
+        "Heavy lifting" is a different string, so it goes straight in next to
+        "Lifting". Catching that needs a human, not a comparison.
+        """
+        self.add(new_role_name="Heavy lifting")
+        self.assertTrue(ParticipationRole.objects.filter(name="Heavy lifting").exists())
+
+    def test_picking_one_and_naming_one_is_refused(self):
+        response = self.add(role=self.role.role.pk, new_role_name="Sound desk")
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.context["role_form"].non_field_errors())
+        self.assertFalse(ParticipationRole.objects.filter(name="Sound desk").exists())
+
+    def test_neither_is_refused(self):
+        response = self.add()
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.context["role_form"].non_field_errors())
+
+    def test_two_different_names_that_slugify_alike_still_get_distinct_codes(self):
+        # ⚠️ The suffix loop produces a usable code; the database constraint is
+        #    what actually guarantees uniqueness (D9). This asserts the first.
+        self.add(new_role_name="Set-up")
+        self.add(new_role_name="Set up")
+        codes = set(ParticipationRole.objects.filter(
+            name__in=["Set-up", "Set up"]).values_list("code", flat=True))
+        self.assertEqual(len(codes), 2)
+
+
+class PrefilledHoursTests(PageTestCase):
+    """2026-08-04 feedback: the hours box starts at the event's own length.
+
+    ⚠️ The cost is recorded rather than hidden, in phase-c.md's known gaps: a
+       prefilled number is **indistinguishable from a considered one**. The
+       empty box forced somebody to type; this one does not.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.participation = Participation.objects.create(
+            contact=self.lisi.contact, event_role=self.role)
+        self.url = reverse("events:event_attendance", args=[self.event.pk])
+
+    def box(self, page):
+        return page.split(f'id="hours-{self.participation.pk}"', 1)[1].split(">", 1)[0]
+
+    def test_somebody_with_no_hours_yet_gets_the_scheduled_length(self):
+        self.login(self.zhang)
+        page = self.client.get(self.url).content.decode()
+        expected = scheduled_hours(self.event)
+        self.assertIn(f'value="{expected}"', self.box(page))
+
+    def test_somebody_with_hours_already_recorded_gets_those(self):
+        """⚠️ Not the scheduled length.
+
+        Otherwise a volunteer who checked out after three hours has a box
+        reading six, and one careless click overwrites the real number with
+        the plan.
+        """
+        record_hours(self.participation, Decimal("3.00"))
+        self.login(self.zhang)
+        page = self.client.get(self.url).content.decode()
+        self.assertIn('value="3.00"', self.box(page))
+
+    def test_zero_recorded_hours_are_not_treated_as_missing(self):
+        # Same trap as the dash in the Hours column: Decimal("0.00") is falsy,
+        # so `default` would quietly replace a real zero with the plan.
+        record_hours(self.participation, Decimal("0"))
+        self.login(self.zhang)
+        page = self.client.get(self.url).content.decode()
+        self.assertIn('value="0.00"', self.box(page))
+
+    def test_the_length_is_computed_in_services_not_in_the_view(self):
+        # D18: date arithmetic in a view gets rewritten along with the
+        # templates. There is a grep guard on it; this asserts the answer is
+        # the one services gives, so the two cannot drift apart either.
+        self.login(self.zhang)
+        response = self.client.get(self.url)
+        self.assertEqual(response.context["scheduled_hours"],
+                         scheduled_hours(self.event))
 
 
 class EventUpdatePageTests(PageTestCase):

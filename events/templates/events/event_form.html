@@ -42,4 +42,16 @@
       {% endif %}
     </div>
   </form>
+
+  {% if event %}
+    {% comment %}
+    工种并进这一页（2026-08-04）。在此之前它是单独的 /events/<pk>/roles/，
+    而那一页**自己没有入口** —— 只有「刚建完活动」那一次重定向能到，
+    第二天回来就找不着了。合并之后「改这场活动」是一个地方，不是两个。
+
+    ⚠️ 两张独立的表单，不是一张。上面那张改时间会跳通知页，下面这张不会。
+    {% endcomment %}
+    <h2 class="mb-4 mt-10 text-lg font-semibold">Roles for this event</h2>
+    {% include "events/_event_roles_panel.html" %}
+  {% endif %}
 {% endblock %}

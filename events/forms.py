@@ -44,15 +44,22 @@ class SignUpForm(forms.Form):
         queryset=RelationshipType.objects.filter(usable_as_emergency_contact=True),
         required=False, label="They are the volunteer's…",
     )
-    consent_method = forms.ChoiceField(
-        choices=[("", "---------"), *Participation.ConsentMethod.choices],
-        required=False, label="How consent was given",
-    )
     # ⚠️ At least one of these two. Consent carrying only a *name* satisfies the
     #    paperwork and leaves P6 with no address to send anything to, so the
     #    signup would go in already guaranteed to be unreachable.
     consent_email = forms.EmailField(required=False, label="Guardian's email")
     consent_phone = forms.CharField(required=False, label="Guardian's phone")
+    # Declared last because it is asked last: it applies to **both** paths
+    # through this form — the emergency-contact shortcut still has to say how
+    # consent was given — so it sits after the branch rather than inside it.
+    #
+    # `required=False` here and switched on in __init__ when consent actually
+    # applies. Marking it required at class level would demand it from adults
+    # too, for whom the whole section is hidden.
+    consent_method = forms.ChoiceField(
+        choices=[("", "---------"), *Participation.ConsentMethod.choices],
+        required=False, label="How consent was given",
+    )
 
     CONSENT_FIELDS = [
         "consent_given_by", "consent_relationship", "consent_method",
@@ -79,6 +86,19 @@ class SignUpForm(forms.Form):
             self.fields["use_emergency_contact"].queryset = (
                 contact.emergency_contacts.select_related("relationship_type")
             )
+            # ⚠️ Genuinely required, not just marked with a star.
+            #
+            #    services.sign_up() has always refused a signup whose consent
+            #    carries no method — so the field was **already** compulsory,
+            #    and the form simply did not say so. The cost of that gap is a
+            #    whole round trip: submit, get bounced by the service layer,
+            #    and read the complaint attached to a different field. Saying
+            #    it here puts the error under the box that caused it.
+            #
+            #    The service-layer check stays. It guards the other callers —
+            #    an admin entering somebody from a paper list meets the same
+            #    rule, and that path never touches this form.
+            self.fields["consent_method"].required = True
         else:
             for name in [*self.CONSENT_FIELDS, "use_emergency_contact"]:
                 self.fields[name].widget = forms.HiddenInput()
@@ -169,12 +189,13 @@ class EventForm(forms.ModelForm):
 
 
 class EventPeriodForm(forms.Form):
-    """R1: "how many events in this window", as two optional date boxes.
+    """R1: "how many events in this window", plus which ministry ran them.
 
     Lives here rather than in the view for the reason the grep guard states:
     a view holding date arithmetic gets rewritten along with the templates.
-    Both boxes are optional — an empty form means "no limit at that end", which
-    is what makes the same form work for the upcoming list and the past one.
+    Every box is optional, and that is what makes one form answer three
+    different questions — "what is on next month", "what does the food pantry
+    have open at all", and the two together.
     """
 
     start = forms.DateField(
@@ -184,6 +205,15 @@ class EventPeriodForm(forms.Form):
     end = forms.DateField(
         required=False, label="Until",
         widget=forms.DateInput(attrs={"type": "date"}),
+    )
+    # ⚠️ Every active ministry, not "the ones with events in the current
+    #    results". The narrower list reads better right up to the moment
+    #    somebody picks a ministry and watches it vanish from the dropdown it
+    #    was just chosen from — the options would then depend on the filter
+    #    they are part of.
+    ministry = forms.ModelChoiceField(
+        queryset=Ministry.objects.filter(is_active=True).order_by("name"),
+        required=False, label="Ministry", empty_label="All ministries",
     )
 
     def clean(self):
@@ -211,17 +241,43 @@ class EventPeriodForm(forms.Form):
         )
 
     def narrow(self, events):
-        """Apply whichever ends were filled in."""
+        """Apply whichever boxes were filled in.
+
+        ⚠️ An invalid form narrows by nothing rather than raising. The page
+           still has to render — with the error shown next to the box — and a
+           list that 500s because somebody typed a bad date is a worse answer
+           than the unfiltered list plus an explanation.
+        """
         start, end = self.bounds()
         if start is not None:
             events = events.filter(start_time__gte=start)
         if end is not None:
             events = events.filter(start_time__lt=end)
+        ministry = self.cleaned_data.get("ministry") if self.is_valid() else None
+        if ministry is not None:
+            events = events.filter(ministry=ministry)
         return events
 
 
 class EventRoleForm(forms.ModelForm):
-    """Open one job on an event and say how many people it wants."""
+    """Open one job on an event and say how many people it wants.
+
+    2026-08-04: it can also **add to the vocabulary**. A ministry admin is not
+    staff, so the admin site is shut to them, and a job nobody had entered
+    before used to be a dead end — the dropdown was the whole world.
+
+    ⚠️ The cost is real and is accepted rather than hidden: ParticipationRole is
+       the grouping dimension for R5 and R7, so two rows meaning one job split
+       one column of every report in two. Nothing raises; both halves look
+       right. The duplicate check below is what keeps that rare, and it only
+       catches exact-after-normalising matches — see
+       services.matching_participation_role().
+    """
+
+    new_role_name = forms.CharField(
+        required=False, max_length=100, label="…or add a new kind of role",
+        help_text="Only if none of the above fits. Everyone will see it from then on.",
+    )
 
     class Meta:
         model = EventRole
@@ -231,6 +287,49 @@ class EventRoleForm(forms.ModelForm):
         super().__init__(*args, **kwargs)
         self.instance.event = event
         self.fields["role"].queryset = ParticipationRole.objects.filter(is_active=True)
+        # Not required on its own any more: one of `role` and `new_role_name`
+        # has to be filled, and clean() is where "one of" can be said.
+        self.fields["role"].required = False
+        # ⚠️ Directly under the dropdown it is the alternative to. Declared
+        #    fields render after Meta.fields by default, which put "…or add a
+        #    new kind of role" three boxes below the one it replaces — far
+        #    enough down that it reads as a fourth thing to fill in rather than
+        #    as the other half of a choice.
+        self.order_fields(["role", "new_role_name", "needed_count", "notes"])
+
+    def clean(self):
+        cleaned = super().clean()
+        role = cleaned.get("role")
+        new_name = (cleaned.get("new_role_name") or "").strip()
+
+        if role and new_name:
+            raise forms.ValidationError(
+                "Pick a role from the list or add a new one — not both.")
+        if not role and not new_name:
+            raise forms.ValidationError("Pick a role, or add a new one.")
+
+        if new_name:
+            from .services import matching_participation_role
+
+            existing = matching_participation_role(new_name)
+            if existing is not None:
+                # ⚠️ Named in the message. "That already exists" leaves the
+                #    person hunting a dropdown of thirty entries for something
+                #    they may have spelled differently; the name they need to
+                #    look for is the whole content of this error.
+                self.add_error("new_role_name", forms.ValidationError(
+                    f"There is already a role called “{existing.name}”. "
+                    f"Pick it from the list above instead of adding a second one."))
+        return cleaned
+
+    def save(self, commit=True):
+        """Create the vocabulary entry first, then the row that points at it."""
+        new_name = (self.cleaned_data.get("new_role_name") or "").strip()
+        if new_name:
+            from .services import create_participation_role
+
+            self.instance.role = create_participation_role(new_name)
+        return super().save(commit=commit)
 
 
 class HoursForm(forms.Form):

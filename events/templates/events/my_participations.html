@@ -8,7 +8,7 @@
     <div class="table-wrap">
       <table>
         <thead>
-          <tr><th>Event</th><th>Role</th><th>Status</th><th>Hours</th><th></th></tr>
+          <tr><th>Event</th><th>Starts</th><th>Role</th><th>Status</th><th>Hours</th><th></th></tr>
         </thead>
         <tbody>
           {% for row in participations %}
@@ -17,6 +17,12 @@
                 <a href="{% url 'events:event_detail' row.event_role.event.pk %}"
                    class="prose-link">{{ row.event_role.event.name }}</a>
               </td>
+              {% comment %}
+              ⚠️ 只显示开始时间，不显示起止两个。表格已经六列，两个完整时间会把
+                 窄屏挤到只剩横向滚动 —— 而「什么时候」这个问题，开始时间答得了
+                 九成，完整时段在详情页上。
+              {% endcomment %}
+              <td class="whitespace-nowrap">{{ row.event_role.event.start_time }}</td>
               <td>{{ row.event_role.role.name }}</td>
               <td>
                 {% if row.status == "registered" %}

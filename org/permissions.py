@@ -129,6 +129,27 @@ FOUNDATION_ADMIN_PERMISSIONS = [
     "events.view_event",
     "events.view_eventrole",
     "events.view_participation",
+    # Ministries themselves. A production database comes up with none, and
+    # nothing else in the interface can create one — so without these the
+    # foundation cannot get started at all. Django hides a model from the admin
+    # index entirely when you hold no permission on it, which is why this looked
+    # like a missing page rather than a missing permission.
+    #
+    # ⚠️ No delete_ministry, deliberately. Deleting a ministry cascades into its
+    #    events, and "we are not running this any more" is is_active=False —
+    #    the same "an ending is a date, not a deletion" rule the rest of this
+    #    project follows.
+    "org.add_ministry",
+    "org.change_ministry",
+    "org.view_ministry",
+    # The other lookup tables: read-only for now (2026-08-04 拍板). They still
+    # have to be filled in before the pilot, and that is done by a staff account
+    # in the admin — this tier can see what is there without being able to
+    # rename a category out from under existing rows.
+    "events.view_eventtype",
+    "events.view_participationrole",
+    "org.view_position",
+    "org.view_employmenttype",
 ]
 
 
@@ -143,14 +164,25 @@ def foundation_admin_group() -> Group:
        MinistryRole, and a foundation admin who is not also a ministry's admin
        gets 403 from them. That is deliberate, not an oversight.
     """
-    group, created = Group.objects.get_or_create(name=FOUNDATION_ADMIN_GROUP)
-    if created or not group.permissions.exists():
-        wanted = []
-        for label in FOUNDATION_ADMIN_PERMISSIONS:
-            app_label, codename = label.split(".")
-            found = Permission.objects.filter(
-                content_type__app_label=app_label, codename=codename).first()
-            if found:
-                wanted.append(found)
-        group.permissions.set(wanted)
+    group, _ = Group.objects.get_or_create(name=FOUNDATION_ADMIN_GROUP)
+    wanted = []
+    for label in FOUNDATION_ADMIN_PERMISSIONS:
+        app_label, codename = label.split(".")
+        found = Permission.objects.filter(
+            content_type__app_label=app_label, codename=codename).first()
+        if found:
+            wanted.append(found)
+    # ⚠️ Reconciled every time, not only when the group is new or empty.
+    #
+    #    The earlier version was `if created or not group.permissions.exists()`,
+    #    and it made the list above a **lie on every database that already had
+    #    this group** — adding a permission here did nothing at all, silently,
+    #    and the only symptom was a page missing from the admin index. That is
+    #    exactly how add_ministry went missing: the list was right, the group
+    #    was stale, and nothing reported the difference.
+    #
+    #    Making it authoritative also means a permission ticked by hand in the
+    #    admin is removed on the next call. That is intended and is what the
+    #    docstring above already promised: this list is where the answer lives.
+    group.permissions.set(wanted)
     return group

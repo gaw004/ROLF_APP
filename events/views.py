@@ -51,6 +51,7 @@ from .services import (
     notify_event_change,
     record_hours,
     reschedule,
+    scheduled_hours,
     resolve_recipients,
     set_status,
     sign_up,
@@ -166,6 +167,11 @@ def event_detail(request, pk):
         "roles": event.roles.with_signup_counts().select_related("role"),
         "mine": mine,
         "can_sign_up": event.status in Event.OPEN_FOR_SIGNUP,
+        # Whether to draw the way back to "Events I manage". Asked here and
+        # never in the template: a template deciding who may manage something
+        # is a second copy of the rule, and the copy that drifts is the one
+        # nobody remembers is there (D20).
+        "can_manage": can_manage_event(request.user, event),
     })
 
 
@@ -323,7 +329,7 @@ def event_create(request):
         event.owner = _my_contact(request)
         event.save()
         messages.success(request, "Event created. Next, open the roles it needs.")
-        return redirect("events:event_roles", pk=event.pk)
+        return redirect("events:event_update", pk=event.pk)
 
     return render(request, "events/event_form.html", {"form": form, "event": None})
 
@@ -373,30 +379,65 @@ def event_update(request, pk):
         messages.success(request, "Event updated.")
         return redirect("events:event_detail", pk=event.pk)
 
-    return render(request, "events/event_form.html", {"form": form, "event": event})
+    return render(request, "events/event_form.html",
+                  _edit_page_context(event, form=form))
+
+
+def _edit_page_context(event, *, form=None, role_form=None, user=None):
+    """Everything the merged edit page needs, from whichever view got the POST.
+
+    2026-08-04: the event's own form and its list of roles are one page. They
+    were two, and the second one had no entrance of its own — you reached
+    "Roles" from a redirect after creating the event, and a day later there was
+    no way back to it except the URL.
+
+    ⚠️ Built once, here, so `event_update` and `event_roles` cannot render the
+       same page from two different contexts. They both post to it, and only
+       one of the two forms is bound on any given request — the other has to be
+       a fresh one or the page comes back with somebody else's errors on it.
+    """
+    return {
+        "event": event,
+        "form": form if form is not None else EventForm(instance=event, user=user),
+        "role_form": role_form if role_form is not None else EventRoleForm(event=event),
+        "roles": event.roles.with_signup_counts().select_related("role"),
+    }
 
 
 @login_required
 def event_roles(request, pk):
-    """P2's second half: which jobs, and how many people each one wants."""
+    """P2's second half: which jobs, and how many people each one wants.
+
+    ⚠️ No page of its own any more — a GET here goes to the edit page, which
+       renders the same panel. The URL stays because templates, tests and
+       anybody's bookmarks point at it, and because the roles form still posts
+       here: deleting the route would have been a bigger change than merging
+       the pages was.
+    """
     event = _managed_event(request, pk)
-    form = EventRoleForm(request.POST or None, event=event)
-    if request.method == "POST" and form.is_valid():
+    if request.method != "POST":
+        return redirect("events:event_update", pk=event.pk)
+
+    form = EventRoleForm(request.POST, event=event)
+    if form.is_valid():
         form.save()
         messages.success(request, "Role added.")
         # ⭐ The plain-form path is the one that must always work: redirect, so a
         #    refresh cannot post twice. HTMX gets the list back instead — same
         #    write, same message, one fewer full page.
         if not request.headers.get("HX-Request"):
-            return redirect("events:event_roles", pk=event.pk)
+            return redirect("events:event_update", pk=event.pk)
         form = EventRoleForm(event=event)
+    elif not request.headers.get("HX-Request"):
+        # Errors have to survive, so this one renders rather than redirects —
+        # and it renders the merged page, because that is the only page these
+        # fields now live on.
+        return render(request, "events/event_form.html",
+                      _edit_page_context(event, role_form=form, user=request.user))
 
     return render(request, _template(
-        request, "events/event_roles.html", "events/_event_roles_swap.html"), {
-        "event": event,
-        "form": form,
-        "roles": event.roles.with_signup_counts().select_related("role"),
-    })
+        request, "events/event_form.html", "events/_event_roles_swap.html"),
+        _edit_page_context(event, role_form=form, user=request.user))
 
 
 @login_required
@@ -411,13 +452,9 @@ def role_delete(request, pk):
         if request.headers.get("HX-Request"):
             # Same panel event_roles renders, so the two can never disagree
             # about what is in the list.
-            event = role.event
-            return render(request, "events/_event_roles_swap.html", {
-                "event": event,
-                "form": EventRoleForm(event=event),
-                "roles": event.roles.with_signup_counts().select_related("role"),
-            })
-    return redirect("events:event_roles", pk=role.event_id)
+            return render(request, "events/_event_roles_swap.html",
+                          _edit_page_context(role.event, user=request.user))
+    return redirect("events:event_update", pk=role.event_id)
 
 
 @login_required
@@ -475,6 +512,7 @@ def event_attendance(request, pk):
             return render(request, "events/_attendance_row_swap.html", {
                 "row": participation,
                 "hours_form": HoursForm(),
+                "scheduled_hours": scheduled_hours(event),
             })
         return redirect("events:event_attendance", pk=event.pk)
 
@@ -489,6 +527,10 @@ def event_attendance(request, pk):
         "event": event,
         "participations": rows,
         "hours_form": HoursForm(),
+        # What the box starts at for somebody with no hours yet. Computed in
+        # services, never here — this is date arithmetic, and there is a grep
+        # guard on views doing any (D18).
+        "scheduled_hours": scheduled_hours(event),
     })
 
 

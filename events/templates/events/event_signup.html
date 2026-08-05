@@ -29,7 +29,74 @@
 
   <form method="post" class="card mt-6">
     {% csrf_token %}
-    {% include "core/components/form_fields.html" %}
+
+    {% if not needs_consent %}
+      {% comment %}成年人：同意那一段整段是 HiddenInput，交给通用渲染就行。{% endcomment %}
+      {% include "core/components/form_fields.html" %}
+    {% else %}
+      {% if form.non_field_errors %}
+        <div role="alert"
+             class="rounded-md border border-danger-fg/30 bg-danger-bg p-3 text-sm text-danger-fg dark:border-danger-fg-dark/30 dark:bg-danger-bg-dark dark:text-danger-fg-dark">
+          {% for error in form.non_field_errors %}<p>{{ error }}</p>{% endfor %}
+        </div>
+      {% endif %}
+
+      {% comment %}
+      选了紧急联系人之后，手填的那四格变灰不可填。
+
+      ⚠️ 这不是界面上偷懒，是**让界面和服务端说同一句话**：
+         SignUpForm.consent() 在选了紧急联系人时，拿的是那个人的姓名 / 关系 / 电话，
+         手填的四格**本来就被忽略**。在此之前它们能填、填了不起作用 ——
+         那比不能填更糟，因为用户以为自己填的东西生效了。
+
+      ⚠️ 用 <fieldset x-bind:disabled>，不给每个 widget 加 x- 属性。两个理由：
+         `disabled` 加在 fieldset 上是**原生 HTML**，浏览器自动禁掉里面所有控件；
+         而给 widget 加属性要走 forms.py 的 widget attrs，那是 phase-c.md
+         落点规矩明确划出去的地方（那里只放 type="date" 这类语义属性）。
+
+      ⚠️ 选择框自己不写 x-model，改成在外面套一层 x-on:change 接事件 ——
+         同一个理由：x-model 必须落在 <select> 标签上，而那个标签是 Django 渲染的。
+
+      ⭐ 关掉 JavaScript 时四个格子照常可填 —— 填了仍然被服务端忽略，行为不变。
+         这符合 D24「只保写操作」的口径：报名本身照样能完成。
+      {% endcomment %}
+      <div x-data="{ kin: '' }">
+        {% include "core/components/field.html" with field=form.event_role %}
+
+        {% comment %}
+        ⚠️ 这层 wrapper 上要自己写 mt-4：app.css 里字段间距靠 `.field + .field`
+           这个**相邻兄弟**选择器，而套一层 div 就把相邻关系打断了 ——
+           表现是这一格和上面那格贴在一起，别处都正常。
+        {% endcomment %}
+        <div class="mt-4" x-on:change="kin = $event.target.value">
+          {% include "core/components/field.html" with field=form.use_emergency_contact %}
+        </div>
+
+        <fieldset class="mt-4 rounded-md border border-ink-200 p-4 transition-opacity dark:border-ink-700"
+                  x-bind:disabled="kin !== ''"
+                  x-bind:class="kin !== '' ? 'opacity-50' : ''">
+          <legend class="px-1 text-xs font-medium text-ink-600 dark:text-ink-300">
+            Or name somebody else
+          </legend>
+          <p x-cloak x-show="kin !== ''" class="mb-3 text-xs text-ink-600 dark:text-ink-300">
+            Not needed — these come from the emergency contact you picked above.
+          </p>
+          {% include "core/components/field.html" with field=form.consent_given_by %}
+          {% include "core/components/field.html" with field=form.consent_relationship %}
+          {% include "core/components/field.html" with field=form.consent_email %}
+          {% include "core/components/field.html" with field=form.consent_phone %}
+        </fieldset>
+
+        {% comment %}
+        ⚠️ 这一格在 fieldset **外面**。它对两条路径都必填 —— 用紧急联系人也得说清
+           同意是怎么给的 —— 所以它不能跟着上面那一组一起变灰。
+        {% endcomment %}
+        <div class="mt-4">
+          {% include "core/components/field.html" with field=form.consent_method %}
+        </div>
+      </div>
+    {% endif %}
+
     <div class="mt-6 flex flex-wrap gap-2">
       {% include "core/components/button.html" with label="Confirm signup" variant="primary" %}
       {% url 'events:event_detail' event.pk as back_url %}

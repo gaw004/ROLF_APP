@@ -12,13 +12,14 @@ from decimal import Decimal
 from django.core.exceptions import ValidationError
 from django.db import transaction
 from django.db.models import Count, Sum
+from django.utils.text import slugify
 
 from contact.models import Contact
 from core.notifications.base import EMAIL, SMS, Message, get_backend
 from core.timeutils import local_date_of, local_now
 from org.models import Assignment, Position
 
-from .models import EventNotification, Participation
+from .models import EventNotification, Participation, ParticipationRole
 
 
 class ConsentRequired(ValidationError):
@@ -376,6 +377,72 @@ def reschedule(event, *, start_time, end_time):
 def duration_hours(delta: datetime.timedelta) -> Decimal:
     """A timedelta as hours, two decimal places — for display only."""
     return (Decimal(delta.total_seconds()) / Decimal(3600)).quantize(Decimal("0.01"))
+
+
+def scheduled_hours(event) -> Decimal:
+    """How long this event is supposed to run, in hours.
+
+    ⚠️ Lives here rather than in a view or a template because it is date
+       arithmetic, and there is a grep guard on exactly that: a view that
+       computes gets rewritten along with the templates (D18), and "how long"
+       is a question the reports already answer from this same function.
+
+    ⚠️ This is the **scheduled** length, never what anybody actually did.
+       check_out() writes real elapsed time into Participation.hours, and the
+       two must not be confused: an event scheduled for six hours that somebody
+       left after two has one answer here and a different one there.
+    """
+    return duration_hours(event.end_time - event.start_time)
+
+
+# --- Opening a job that does not exist in the vocabulary yet ---------------
+# 2026-08-04: ministry admins are not staff, so the admin site is closed to
+# them and a job nobody had thought of before used to be a dead end.
+
+
+def matching_participation_role(name):
+    """An existing role whose name is the same once case and padding are gone.
+
+    ⚠️ **Only exact-after-normalising matches.** "lifting" finds "Lifting", and
+       " Lifting " finds it too — but "Heavy lifting" is a different string and
+       this will not catch it. That limit is real and is the price of letting
+       ministry admins add to a shared vocabulary at all: the check stops the
+       accidental duplicate, not the synonym.
+
+       It matters because ParticipationRole is the grouping dimension for R5
+       and R7. Two rows meaning one job do not raise anything; they just split
+       one column of the report into two, and both halves look plausible.
+    """
+    cleaned = (name or "").strip()
+    if not cleaned:
+        return None
+    return ParticipationRole.objects.filter(name__iexact=cleaned).first()
+
+
+def create_participation_role(name):
+    """Add a job to the shared vocabulary. Returns the new ParticipationRole.
+
+    ⚠️ `code` is generated from the name and is **immutable afterwards**
+       (ImmutableCodeMixin) — the rest of the codebase matches on it, so
+       renaming one silently stops lookups returning rows. The display name
+       stays editable in the admin; the code does not.
+
+    ⚠️ Uniqueness of the code is enforced by a database constraint, not by the
+       suffix loop below. The loop is there to produce a *usable* code on the
+       ordinary path; two admins submitting the same new name at the same
+       instant is settled by the constraint, which is the only thing bulk paths
+       also have to obey (D9).
+    """
+    cleaned = (name or "").strip()
+    base = slugify(cleaned)[:40] or "role"
+    code, suffix = base, 2
+    while ParticipationRole.objects.filter(code__iexact=code).exists():
+        code = f"{base}-{suffix}"
+        suffix += 1
+    role = ParticipationRole(code=code, name=cleaned)
+    role.full_clean()
+    role.save()
+    return role
 
 
 # --- P6: telling people the event changed --------------------------------

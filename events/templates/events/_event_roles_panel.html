@@ -45,7 +45,12 @@
         class="card mt-6">
     {% csrf_token %}
     <h2 class="mb-4 text-lg font-semibold">Add a role</h2>
-    {% include "core/components/form_fields.html" %}
+    {% comment %}
+    ⚠️ 这张表单**不是**上面那张活动表单的一部分，尽管它们在同一页上。
+       两张独立的 <form>，两个提交按钮 —— 改时间会跳到通知页，加工种不会，
+       混成一张的话加一个工种就会给所有报名的人发一封「时间改了」。
+    {% endcomment %}
+    {% include "core/components/form_fields.html" with form=role_form %}
     <div class="mt-6">
       {% include "core/components/button.html" with label="Add" variant="primary" %}
     </div>

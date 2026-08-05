@@ -12,8 +12,12 @@
   <a href="{% url 'events:event_manage_list' %}"
      class="rounded-md px-2 py-1 text-ink-600 hover:bg-ink-100 dark:text-ink-300 dark:hover:bg-ink-800">&larr; Events I manage</a>
   <span class="px-1 text-ink-300 dark:text-ink-600">|</span>
-  {% include "events/_event_nav_link.html" with label="Edit" to="events:event_update" name="edit" %}
-  {% include "events/_event_nav_link.html" with label="Roles" to="events:event_roles" name="roles" %}
+  {% comment %}
+  ⚠️ 「Roles」那一格 2026-08-04 去掉了 —— 工种已经并进 Edit 页。
+     /events/<pk>/roles/ 这个 URL 还在（GET 会 302 到 Edit），
+     因为工种表单仍然 POST 到它，而删路由比合并页面动静更大。
+  {% endcomment %}
+  {% include "events/_event_nav_link.html" with label="Edit &amp; roles" to="events:event_update" name="edit" %}
   {% include "events/_event_nav_link.html" with label="Signups" to="events:event_registrations" name="registrations" %}
   {% include "events/_event_nav_link.html" with label="Attendance" to="events:event_attendance" name="attendance" %}
   {% include "events/_event_nav_link.html" with label="Report" to="events:event_report" name="report" %}

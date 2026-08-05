@@ -4,7 +4,7 @@ import inspect
 from django.apps import apps
 from django.contrib import admin
 from django.contrib.auth import get_user_model
-from django.contrib.auth.models import AnonymousUser
+from django.contrib.auth.models import AnonymousUser, Group, Permission
 from django.core.exceptions import ValidationError
 from django.db import IntegrityError, connection, transaction
 from django.db.models import ProtectedError
@@ -19,6 +19,8 @@ from events.models import Event, EventType
 from .admin import StaffingFilter
 from .models import Assignment, EmploymentType, Ministry, MinistryRole, Position
 from .permissions import (
+    FOUNDATION_ADMIN_GROUP,
+    FOUNDATION_ADMIN_PERMISSIONS,
     can_grant_ministry_admin,
     can_manage_event,
     can_publish_event,
@@ -770,3 +772,47 @@ class PermissionTests(TestCase):
         # The name says ids because the return value is ids. Two documents once
         # gave this function two names; it is the most-called one we have.
         self.assertEqual(ministry_ids_administered_by(self.user), {self.pantry.pk})
+
+
+class FoundationAdminGroupTests(TestCase):
+    """The global tier's permissions, and the reconciliation that keeps them true.
+
+    ⚠️ 这一组存在的理由是一次真实的静默失败：`foundation_admin_group()` 原来写的是
+       `if created or not group.permissions.exists()`，于是**在任何已经有这个组的
+       库上，往清单里加一条权限都不会生效** —— 清单是对的，组是旧的，没有任何东西
+       报告这个差别。症状是 admin 首页少一个模块，看起来像「页面没做」。
+    """
+
+    def test_the_group_grants_what_the_list_says(self):
+        group = foundation_admin_group()
+        granted = {
+            f"{p.content_type.app_label}.{p.codename}" for p in group.permissions.all()
+        }
+        # Subset rather than equality: a permission named in the list but absent
+        # from this database (an app not installed yet) is skipped by design.
+        self.assertTrue(granted <= set(FOUNDATION_ADMIN_PERMISSIONS))
+        self.assertIn("org.add_ministry", granted,
+                      "A production database starts with no ministries and nothing "
+                      "else can create one.")
+
+    def test_it_never_grants_delete_ministry(self):
+        # Deleting a ministry cascades into its events. "We stopped running it"
+        # is is_active=False — an ending is a date, not a deletion.
+        granted = {p.codename for p in foundation_admin_group().permissions.all()}
+        self.assertNotIn("delete_ministry", granted)
+
+    def test_an_existing_group_is_brought_up_to_date(self):
+        """The bug this whole class is about, as an assertion.
+
+        Build the group with one stale permission, then call again: the second
+        call has to reconcile it, not walk away because the group was non-empty.
+        """
+        group, _ = Group.objects.get_or_create(name=FOUNDATION_ADMIN_GROUP)
+        stale = Permission.objects.get(
+            content_type__app_label="org", codename="view_ministryrole")
+        group.permissions.set([stale])
+
+        refreshed = foundation_admin_group()
+        granted = {p.codename for p in refreshed.permissions.all()}
+        self.assertIn("add_ministry", granted)
+        self.assertGreater(len(granted), 1)

@@ -70,7 +70,11 @@ hx-headers 挂一次，所有 HTMX 请求都带上 CSRF —— 不要每个表�
 
   <header class="relative border-b border-ink-200 bg-white dark:border-ink-800 dark:bg-ink-900">
     <nav class="mx-auto flex max-w-6xl items-center gap-4 px-4 py-3" x-data="{ open: false }">
-      <a href="{% url 'events:event_list' %}"
+      {% comment %}
+      左上角的字样链回公开首页（2026-08-05）。原来链的是 /events/ ——
+      那时还没有首页可链。
+      {% endcomment %}
+      <a href="{% url 'home' %}"
          class="shrink-0 text-lg font-semibold text-brand-700 dark:text-brand-300">ROLF</a>
 
       {% comment %}

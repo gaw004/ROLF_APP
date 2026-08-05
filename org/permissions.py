@@ -174,6 +174,13 @@ FOUNDATION_ADMIN_PERMISSIONS = [
     "org.add_ministry",
     "org.change_ministry",
     "org.view_ministry",
+    # The public front page: its picture, its video and the verse over them.
+    # ⚠️ Foundation-wide by construction — the sentence "change the face of the
+    #    foundation" contains no "of some ministry", which is D20's test for
+    #    which tier a permission belongs to. A ministry admin publishes events;
+    #    they do not speak for the whole foundation.
+    "core.change_homepage",
+    "core.view_homepage",
     # The other lookup tables: read-only for now (2026-08-04 拍板). They still
     # have to be filled in before the pilot, and that is done by a staff account
     # in the admin — this tier can see what is there without being able to

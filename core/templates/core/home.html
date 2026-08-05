@@ -1,0 +1,180 @@
+{% load static %}{% comment %}
+公开首页。**不继承 base.html** —— 那是应用内部的外壳（导航条、消息区、页脚），
+而这一页要的是整屏的画面。两者共用的只有 app.css 和 app.js。
+
+⚠️ 这一页替换了 03-roadmap.md 的 C3.1 原计划（按角色分流的调度页），
+   改口的理由记在 D25 里，不是悄悄改的。
+
+结构：
+  · 满幅的图或视频（视频优先，由 HomePage.hero 决定）
+  · 顶栏：Menu 在左、字样在中、login/logout 在右。**平时透明、字是白的**；
+    鼠标移到页面上端时白色 bar 从虚到实淡入，字从白变成主题深蓝
+  · 左侧菜单面板：点 Menu 滑出，背景压暗，条目自上而下逐个入场
+{% endcomment %}<!doctype html>
+<html lang="en" class="h-full">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>River of Life Foundation</title>
+  <link rel="stylesheet" href="{% static 'css/app.css' %}">
+  {% comment %}
+  ⚠️ 首页**不跟随深色模式**，也不读 localStorage.theme。它是一张满屏的照片
+     加白字，深色版本没有意义 —— 而如果这里也切主题，那段内联脚本给 <html>
+     加上 .dark 之后，顶栏那套「白字 / 深蓝字」的规则会全部翻转。
+  {% endcomment %}
+  <script defer src="{% static 'js/app.js' %}"></script>
+</head>
+
+<body class="h-full overflow-hidden bg-ink-950">
+  {% comment %}
+  整页一个 Alpine 作用域：`menu` 管左侧面板，`bar` 管顶栏浮不浮出来。
+  两个都是纯 UI 状态，符合 D24 对 x- 属性的口径。
+
+  ⚠️ Esc 关菜单。一个只能用鼠标点关闭的模态，对键盘用户是个死胡同。
+  {% endcomment %}
+  <div class="relative h-full w-full" x-data="{ menu: false, bar: false }"
+       x-on:keydown.escape.window="menu = false">
+
+    {% comment %}
+    --- 背景：视频优先，其次图片，都没有就用基金会的 logo ---
+    ⚠️ 视频必须 muted 才能自动播放 —— 浏览器一律拒绝带声音的自动播放，
+       而这不是可以绕过的限制，是设计上就该如此：一个打开就出声的页面更糟。
+       playsinline 是为了 iOS：少了它，视频会被强制全屏接管整个屏幕。
+    {% endcomment %}
+    {% if page.hero_video %}
+      <video class="absolute inset-0 h-full w-full object-cover"
+             src="{{ page.hero_video.url }}"
+             autoplay muted loop playsinline preload="metadata"
+             aria-hidden="true"></video>
+    {% else %}
+      <img class="absolute inset-0 h-full w-full object-cover"
+           src="{% if page.hero_image %}{{ page.hero_image.url }}{% else %}{% static 'core/img/event-default.webp' %}{% endif %}"
+           alt="" fetchpriority="high">
+    {% endif %}
+
+    {% comment %}
+    ⚠️ 两层压暗，不是装饰，是**可读性的唯一保障**。
+
+       白字压在一张没见过的照片上，遇到浅色区域就会完全读不出来 ——
+       而这张照片是基金会自己传的，内容不可预知。第一版只有一层温和的渐变，
+       拿一张带白色云团的测试图一试，经文中间那两行直接糊掉了。
+
+       所以：一层全屏的轻压暗（顶栏那几个字要读得清），
+       外加一层**集中在下三分之一**的强压暗（经文在那里）。
+       宁可照片暗一点，也不能有一行读不出来的字。
+    {% endcomment %}
+    <div class="absolute inset-0 bg-gradient-to-b from-black/45 via-black/15 to-black/40"></div>
+    <div class="absolute inset-x-0 bottom-0 h-2/3 bg-gradient-to-t from-black/75 via-black/45 to-transparent"></div>
+
+    {% comment %}
+    --- 顶栏 ---
+    ⚠️ 感应区是顶部一条 96px 高的透明带，不是顶栏自己 —— 顶栏平时是透明的，
+       鼠标要先能「碰到」它才谈得上浮出来。
+    ⚠️ `focus-within` 也要触发：键盘用户 Tab 进来时看不见这一栏的话，
+       首页对他们就是一张没有任何入口的图。
+    ⚠️ 窄屏常驻显示（sm 以下强制 bar 状态为真），因为**触屏没有 hover** ——
+       一条只在悬停时出现的栏，在手机上等于永远不出现。
+    {% endcomment %}
+    <div class="absolute inset-x-0 top-0 z-20 h-24"
+         x-on:mouseenter="bar = true" x-on:mouseleave="bar = false">
+      <header class="home-bar" x-bind:class="bar ? 'is-open' : ''">
+        <nav class="mx-auto flex max-w-7xl items-center px-6 py-5">
+          <button type="button" x-on:click="menu = true"
+                  class="home-bar-item flex items-center gap-2 text-sm tracking-wide">
+            <svg width="18" height="18" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+              <path d="M3 5h14v1.5H3V5zm0 4.25h14v1.5H3v-1.5zM3 13.5h14V15H3v-1.5z"/>
+            </svg>
+            Menu
+          </button>
+
+          {% comment %}
+          字样居中。hover 到它上面时白色 bar 淡入、字变深蓝 —— 两件事同一个触发。
+          {% endcomment %}
+          <a href="{% url 'home' %}"
+             class="home-bar-item absolute left-1/2 -translate-x-1/2 text-lg font-semibold tracking-[0.18em]">
+            RIVER OF LIFE FOUNDATION
+          </a>
+
+          <div class="ml-auto text-sm">
+            {% if user.is_authenticated %}
+              <form method="post" action="{% url 'accounts:logout' %}">
+                {% csrf_token %}
+                <button type="submit" class="home-bar-item tracking-wide">Log out</button>
+              </form>
+            {% else %}
+              <a href="{% url 'accounts:login' %}" class="home-bar-item tracking-wide">Log in</a>
+            {% endif %}
+          </div>
+        </nav>
+      </header>
+    </div>
+
+    {% comment %}
+    --- 经文 ---
+    照 LV 那张截图排：正文在上、出处在下，整体居中偏下。
+    ⚠️ 经文在前、章节在后（2026-08-05 定），和引用惯例一致。
+    {% endcomment %}
+    {% if page.verse_text or page.verse_reference %}
+      <div class="pointer-events-none absolute inset-x-0 bottom-[14vh] z-10 px-6 text-center">
+        {% if page.verse_text %}
+          <p class="mx-auto max-w-3xl text-balance text-lg font-light leading-relaxed text-white [text-shadow:0_2px_12px_rgb(0_0_0/0.55)] sm:text-2xl">
+            {{ page.verse_text }}
+          </p>
+        {% endif %}
+        {% if page.verse_reference %}
+          <p class="mt-6 text-xs tracking-[0.25em] text-white/85 [text-shadow:0_2px_10px_rgb(0_0_0/0.55)]">
+            {{ page.verse_reference|upper }}
+          </p>
+        {% endif %}
+      </div>
+    {% endif %}
+
+    {% comment %}
+    --- 左侧菜单面板 ---
+    ⚠️ 遮罩和面板都用 x-cloak：Alpine 接手之前它们会闪一下，
+       而那一下正好是整页最显眼的位置。
+    ⚠️ 面板里的链接**始终在 DOM 里**，只是被移出视口 —— 读屏软件读得到，
+       而 display:none 的话它们对辅助技术就不存在了。
+    {% endcomment %}
+    <div x-cloak x-show="menu" x-transition.opacity.duration.300ms
+         x-on:click="menu = false"
+         class="fixed inset-0 z-30 bg-black/55"></div>
+
+    <aside x-cloak
+           class="home-menu fixed inset-y-0 left-0 z-40 w-full max-w-sm overflow-y-auto bg-white px-8 py-6"
+           x-bind:class="menu ? 'is-open' : ''"
+           aria-label="Site menu">
+      <button type="button" x-on:click="menu = false"
+              class="flex items-center gap-2 text-sm text-ink-700 hover:text-ink-900">
+        <svg width="18" height="18" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+          <path d="M5.3 4.2 10 8.9l4.7-4.7 1.1 1.1L11.1 10l4.7 4.7-1.1 1.1L10 11.1l-4.7 4.7-1.1-1.1L8.9 10 4.2 5.3z"/>
+        </svg>
+        Close
+      </button>
+
+      {% comment %}
+      逐个入场：每一项的 transition-delay 由 --i 决定，CSS 里算，不用 JS。
+      ⚠️ prefers-reduced-motion 下这些延迟会被 app.css 里那条全局规则清零，
+         所以不需要在这里额外判断。
+      {% endcomment %}
+      <nav class="mt-10 flex flex-col">
+        {% include "core/components/_home_menu_link.html" with label="Events" to="events:event_list" i=0 %}
+        {% include "core/components/_home_menu_link.html" with label="Past events" to="events:past_events" i=1 %}
+        {% if user.is_authenticated %}
+          {% include "core/components/_home_menu_link.html" with label="My signups" to="events:my_participations" i=2 %}
+          {% include "core/components/_home_menu_link.html" with label="My profile" to="accounts:profile" i=3 %}
+          {% if can_see_all_events %}
+            {% include "core/components/_home_menu_link.html" with label="Events I manage" to="events:event_manage_list" i=4 %}
+          {% endif %}
+          {% if can_grant_ministry_admin %}
+            {% include "core/components/_home_menu_link.html" with label="Ministry admins" to="org:ministry_list" i=5 %}
+          {% endif %}
+        {% else %}
+          {% include "core/components/_home_menu_link.html" with label="Log in" to="accounts:login" i=2 %}
+          {% include "core/components/_home_menu_link.html" with label="Register" to="accounts:register" i=3 %}
+        {% endif %}
+      </nav>
+    </aside>
+  </div>
+</body>
+</html>

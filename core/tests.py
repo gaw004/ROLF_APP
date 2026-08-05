@@ -14,10 +14,12 @@ from django.apps import apps
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.core.management import call_command
+from django.db import IntegrityError
 from django.test import TestCase
 from django.urls import reverse
 
 from core.constraints import CONSTRAINT_FIELD
+from core.models import HomePage
 from core.querysets import DateRangeQuerySet
 from core.timeutils import local_today
 
@@ -1033,3 +1035,99 @@ class AlpineStaysUiOnlyGuardTests(TestCase):
             offenders, [],
             "D24: Alpine holds UI state only — permissions, arithmetic and date "
             "maths belong on the server:\n" + "\n".join(offenders))
+
+
+class HomePageTests(TestCase):
+    """The public front page (D25).
+
+    ⚠️ It replaced C3.1's role-router design. That plan sent each account to
+       whichever list suited it, which is useful and is not a front page: a link
+       shared with somebody who had never heard of the foundation opened a login
+       form.
+    """
+
+    def test_it_opens_without_a_session(self):
+        # ⭐ The one thing that makes it a front page rather than a dashboard.
+        response = self.client.get(reverse("home"))
+        self.assertEqual(response.status_code, 200)
+
+    def test_a_signed_in_visitor_sees_the_same_page(self):
+        # Not a router: everybody gets the picture. What changes is one word in
+        # the corner and which entries the menu offers.
+        user = get_user_model().objects.create_user(username="v", password="x")
+        self.client.force_login(user)
+        response = self.client.get(reverse("home"))
+        self.assertEqual(response.status_code, 200)
+        self.assertTemplateUsed(response, "core/home.html")
+
+    def test_the_menu_offers_signing_in_to_a_stranger(self):
+        page = self.client.get(reverse("home")).content.decode()
+        self.assertIn(reverse("accounts:login"), page)
+        self.assertIn(reverse("accounts:register"), page)
+
+    def test_the_menu_offers_the_volunteer_pages_once_signed_in(self):
+        user = get_user_model().objects.create_user(username="v", password="x")
+        self.client.force_login(user)
+        page = self.client.get(reverse("home")).content.decode()
+        self.assertIn(reverse("events:my_participations"), page)
+        self.assertIn(reverse("accounts:profile"), page)
+
+    def test_the_verse_is_shown_reference_last(self):
+        """⚠️ Passage first, citation after — the ordering was specified.
+
+        Asserted on position rather than on presence, because both being on the
+        page says nothing about which one reads first.
+        """
+        page = HomePage.load()
+        page.verse_text = "Whatever you do, work heartily."
+        page.verse_reference = "Colossians 3:23-24"
+        page.save()
+        body = self.client.get(reverse("home")).content.decode()
+        self.assertLess(body.index("Whatever you do"), body.index("COLOSSIANS"))
+
+    def test_an_empty_home_page_still_renders(self):
+        # No picture, no verse — a fresh production database. It must not 500.
+        self.assertEqual(self.client.get(reverse("home")).status_code, 200)
+
+    def test_the_logo_in_the_app_shell_points_here(self):
+        user = get_user_model().objects.create_user(username="v", password="x")
+        self.client.force_login(user)
+        page = self.client.get(reverse("events:event_list")).content.decode()
+        self.assertIn(f'href="{reverse("home")}"', page)
+
+
+class HomePageSingletonTests(TestCase):
+    """One row, always. A model that can hold two eventually holds two."""
+
+    def test_load_creates_it_and_then_returns_the_same_one(self):
+        first = HomePage.load()
+        self.assertEqual(HomePage.load().pk, first.pk)
+        self.assertEqual(HomePage.objects.count(), 1)
+
+    def test_saving_a_second_one_overwrites_rather_than_adds(self):
+        # ⚠️ save() forces the pk. Without that, a shell session or a fixture
+        #    can create a second row, and load() then picks one by chance.
+        HomePage.load()
+        HomePage(verse_reference="Somewhere else").save()
+        self.assertEqual(HomePage.objects.count(), 1)
+        self.assertEqual(HomePage.load().verse_reference, "Somewhere else")
+
+    def test_it_refuses_to_be_deleted(self):
+        # The public front page cannot be "not there".
+        with self.assertRaises(IntegrityError):
+            HomePage.load().delete()
+
+    def test_video_wins_over_image_when_both_are_set(self):
+        """⚠️ Stated, because the alternative is invisible.
+
+        Showing whichever was uploaded most recently would make the page's
+        appearance depend on something nobody can see from the form.
+        """
+        page = HomePage.load()
+        page.hero_image = "home/a.jpg"
+        page.hero_video = "home/b.mp4"
+        self.assertEqual(page.hero[1], "video")
+        page.hero_video = ""
+        self.assertEqual(page.hero[1], "image")
+        page.hero_image = ""
+        self.assertIsNone(page.hero)

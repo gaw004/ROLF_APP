@@ -342,3 +342,129 @@
     filter: brightness(0.96);
   }
 }
+
+@layer components {
+  /* --- 首页的顶栏 -----------------------------------------------------------
+   * 平时透明、字是白的；鼠标碰到页面上端时白色 bar 从虚到实淡入，字变成主题深蓝。
+   * 口径写在 design-system.md 八、首页。
+   */
+  .home-bar {
+    position: relative;
+    background-color: rgb(255 255 255 / 0);
+    transition: background-color 400ms ease, box-shadow 400ms ease;
+  }
+
+  .home-bar.is-open {
+    background-color: rgb(255 255 255 / 1);
+    box-shadow: 0 1px 2px 0 rgb(0 0 0 / 0.06);
+  }
+
+  .home-bar-item {
+    color: #fff;
+    /* ⚠️ 白字压在一张内容不可知的照片上，浅色天空会让它整个消失。
+     * 这道阴影是可读性的兜底，不是效果。 */
+    text-shadow: 0 1px 3px rgb(0 0 0 / 0.45);
+    transition: color 400ms ease, text-shadow 400ms ease;
+  }
+
+  .home-bar.is-open .home-bar-item {
+    /* 主题里最深的那一档蓝。白底上 9:1 以上，远超正文要求的 4.5。 */
+    color: var(--color-brand-900);
+    text-shadow: none;
+  }
+
+  /* ⚠️ 窄屏常驻显示：**触屏没有 hover**，一条只在悬停时出现的栏在手机上
+   * 等于永远不出现，也就是首页对手机用户没有任何入口。 */
+  @media (max-width: 639px) {
+    .home-bar {
+      background-color: rgb(255 255 255 / 1);
+      box-shadow: 0 1px 2px 0 rgb(0 0 0 / 0.06);
+    }
+
+    .home-bar .home-bar-item {
+      color: var(--color-brand-900);
+      text-shadow: none;
+    }
+  }
+
+  /* ⚠️ 键盘用户 Tab 进来时也要浮出来。少了这一条，首页对他们就是一张
+   * 没有任何可达入口的图 —— 而那是纯粹的可达性缺陷，不是观感问题。 */
+  .home-bar:focus-within {
+    background-color: rgb(255 255 255 / 1);
+  }
+
+  .home-bar:focus-within .home-bar-item {
+    color: var(--color-brand-900);
+    text-shadow: none;
+  }
+
+  /* --- 首页的左侧菜单 -------------------------------------------------------
+   * ⚠️ 面板用 translate 移出视口，不用 display:none —— 后者会让里面的链接对
+   *    读屏软件**不存在**，而它们是这一页唯一的导航。 */
+  .home-menu {
+    transform: translateX(-100%);
+    visibility: hidden;
+    transition: transform 420ms cubic-bezier(0.32, 0.72, 0, 1), visibility 420ms;
+  }
+
+  .home-menu.is-open {
+    transform: translateX(0);
+    visibility: visible;
+  }
+
+  /* 逐个入场。--i 是序号，模板给的；延迟在这里算。
+   * ⚠️ 面板关着的时候条目要回到初始状态，否则第二次打开是一次性全部出现 ——
+   *    「呼吸感」只在第一次有。 */
+  .home-menu-link {
+    opacity: 0;
+    transform: translateY(12px);
+    transition: opacity 380ms ease, transform 380ms cubic-bezier(0.32, 0.72, 0, 1);
+  }
+
+  .home-menu.is-open .home-menu-link {
+    opacity: 1;
+    transform: none;
+    /* 面板滑到一半再开始，条目才像是「跟着进来的」而不是和面板一起出现。 */
+    transition-delay: calc(160ms + var(--i, 0) * 55ms);
+  }
+
+  /* --- 滚动时的呼吸感 -------------------------------------------------------
+   *
+   * 用在活动列表的每一项上。口径和取舍在 design-system.md 九、滚动。
+   *
+   * ⚠️ 只动 transform，**绝不动间距，也不动透明度**。
+   *
+   *    不动间距：滚动中改 margin 会改变页面总高度，浏览器要不断重排、滚动位置
+   *    和手指打架 —— 结果不是呼吸感，是页面在抖。
+   *
+   *    不动透明度：这一条是**实测出来的**。第一版两端 opacity 降到 0.35，
+   *    结果在**没有滚动条的短页面上整列表一打开就是灰的** —— 时间轴退化了，
+   *    进度直接停在 100%，也就是那一帧。而演示数据只有两场活动，正是这种页面。
+   *    位移停在 ±6px 肉眼看不出来，透明度停在 0.35 一眼就是坏的。
+   *
+   * ⚠️ 纯 CSS 的滚动驱动动画，零 JS。Firefox 目前不支持 animation-timeline，
+   *    @supports 保证那里连规则都不会应用 —— 列表照常可用。
+   *
+   * ⚠️ prefers-reduced-motion 要**单独挡一层**，不能只靠文件顶上那条全局规则：
+   *    那条压的是 animation-duration，而滚动驱动动画的进度由滚动位置决定、
+   *    根本不看时长，压不住。
+   */
+  @supports (animation-timeline: view()) {
+    @media (prefers-reduced-motion: no-preference) {
+      .scroll-breathe {
+        animation: scroll-breathe linear both;
+        animation-timeline: view();
+        /* ⚠️ 一个区间，不是两个。第一版写成 `entry 0% cover 20%, cover 80%
+         * exit 100%` —— 逗号在这里是「给多个动画各配一个区间」的意思，
+         * 于是后半段被整个丢掉，而且没有任何报错。 */
+        animation-range: entry 0% exit 100%;
+      }
+    }
+  }
+
+  @keyframes scroll-breathe {
+    0%   { transform: translateY(6px) scale(0.992); }
+    50%  { transform: none; }
+    100% { transform: translateY(-6px) scale(0.992); }
+  }
+}

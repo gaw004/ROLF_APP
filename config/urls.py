@@ -19,7 +19,12 @@ from django.conf.urls.static import static
 from django.contrib import admin
 from django.urls import include, path
 
+from core.views import home
+
 urlpatterns = [
+    # The public front page. ⚠️ No login_required: this is the one page a link
+    # shared with a stranger has to open. See D25.
+    path('', home, name='home'),
     path('admin/', admin.site.urls),
     # Staff-only pages pushed out of the admin by D18's shape trigger
     # (the contact merge page).

@@ -5,7 +5,9 @@
    不需要：`method="get"` 的普通表单本来就能用，HTMX 只是省掉整页重绘。
    关掉 JavaScript，筛选照样工作。
 
-参数：action（表单要打的 URL）。
+参数：
+  action        表单要打的 URL
+  report_button 真值 → 多一个「Generate report」按钮（只有管理列表用）
 {% endcomment %}
 <form method="get" action="{{ action }}"
       hx-get="{{ action }}" hx-target="#event-results" hx-swap="outerHTML"
@@ -25,6 +27,20 @@
   <div class="w-full min-w-0 sm:w-auto">{% include "core/components/field.html" with field=period.end %}</div>
   <div class="flex flex-wrap items-center gap-2">
     {% include "core/components/button.html" with label="Filter" variant="primary" %}
+    {% if report_button %}
+      {% comment %}
+      ⚠️ 报表**不跟着筛选实时算**（2026-08-05 拍板）。十三个指标是十来条聚合查询，
+         挂在每一次改日期上会让筛选本身变慢，而大多数时候人只是在翻列表。
+
+      ⚠️ 它是同一个表单里的第二个 submit，靠 name=report 区分 —— 于是筛选条件和
+         「要不要报表」一起进 URL，这一份报表可以被收藏、被转发、被刷新。
+         另开一个表单的话两边的日期会各填各的。
+
+      ⚠️ 反过来：点「Filter」不带 report，报表就消失。一份算给旧筛选的报表贴在
+         新列表旁边，是会主动误导人的 —— 那两个东西看起来属于同一页。
+      {% endcomment %}
+      {% include "core/components/button.html" with label="Generate report" variant="secondary" name="report" value="1" %}
+    {% endif %}
     {% include "core/components/button.html" with label="Clear" href=action variant="ghost" %}
     {% comment %}
     加载态。⚠️ 没有加载态的按钮用户会点第二次 —— 这一个是读操作所以点两次无害，

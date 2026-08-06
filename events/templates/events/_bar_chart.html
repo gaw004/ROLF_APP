@@ -1,0 +1,57 @@
+{% comment %}
+一张横向条形图。报表里五张图共用这一份。
+
+⚠️ 五张全是横的，包括两张按月的。理由不是偏好：这个面板在宽屏上只有半个屏，
+   十二根竖条各 20px 宽，底下还要塞「Aug 2026」。横过来每个标签独占一行、
+   按自然字号排，而且五张图共用一个组件 —— 于是这一页上不可能出现两张
+   长得不一样的图。按月的图因此是**从上往下**读，最早的在上面。
+
+⚠️ 条长按**最大值**缩放，不是按总和。最长那根只画到三分之一的图，会被读成
+   「占某个东西的三分之一」，而页面上没有任何东西说那是什么。
+
+⚠️ 少于三根就不画图（chart.sparse），退回文字。一根柱子的柱状图比一句话
+   更难读 —— 它看起来像在比较，但没有可比的对象。
+
+⚠️ 数字**始终**以文字形式写在条子旁边。条子是给眼睛扫的，不是唯一的载体：
+   读屏软件读不出一个 div 的宽度。
+
+参数：chart（services.Chart）。
+{% endcomment %}
+<section class="mb-6">
+  <h3 class="mb-1 text-sm font-semibold text-ink-900 dark:text-ink-50">{{ chart.title }}</h3>
+  {% if chart.note %}
+    <p class="mb-2 text-xs text-ink-600 dark:text-ink-300">{{ chart.note }}</p>
+  {% endif %}
+
+  {% if not chart.bars %}
+    <p class="text-xs text-ink-600 dark:text-ink-300">Nothing recorded in this period.</p>
+  {% elif chart.sparse %}
+    <ul class="space-y-1 text-sm">
+      {% for bar in chart.bars %}
+        <li class="flex flex-wrap justify-between gap-x-3">
+          <span class="text-ink-700 dark:text-ink-200">{{ bar.label }}</span>
+          <span class="font-medium text-ink-900 dark:text-ink-50">{{ bar.caption }}</span>
+        </li>
+      {% endfor %}
+    </ul>
+  {% else %}
+    <ul class="space-y-2">
+      {% for bar in chart.bars %}
+        <li>
+          <div class="flex flex-wrap justify-between gap-x-3 text-xs">
+            <span class="text-ink-700 dark:text-ink-200">{{ bar.label }}</span>
+            <span class="font-medium text-ink-900 dark:text-ink-50">{{ bar.caption }}</span>
+          </div>
+          <div class="mt-1 h-2 w-full rounded-full bg-ink-100 dark:bg-ink-700">
+            {% comment %}
+            ⚠️ 宽度是行内样式，因为它是**数据**，不是设计 —— Tailwind 的类名在
+               构建时就固定了，没有办法表达一个运行时算出来的百分比。
+               百分比本身在 services.py 里算好（模板里不许有算术，D18）。
+            {% endcomment %}
+            <div class="h-2 rounded-full bg-brand-500" style="width: {{ bar.pct }}%"></div>
+          </div>
+        </li>
+      {% endfor %}
+    </ul>
+  {% endif %}
+</section>

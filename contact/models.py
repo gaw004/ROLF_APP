@@ -411,6 +411,29 @@ class Contact(ConstraintErrorFieldMixin, TimeStampedModel):
             return f"{base} ({self.phone})"
         return f"{base} #{self.pk}" if self.pk else base
 
+    @property
+    def short_label(self):
+        """The name, disambiguated by id rather than by contact details.
+
+        ⚠️ For places that **display a list**, not places that offer a choice.
+           `__str__` pays for its disambiguation in disclosure — it prints an
+           email or a phone number, which it needs to, because picking the wrong
+           王强 out of a dropdown is a silent data error nothing would catch.
+           A ranked list is not a picker: nothing is chosen from it, so the
+           email buys nothing and is simply published (2026-08-05, the report's
+           "Most hours" chart — a panel people screenshot and send around).
+
+        ⚠️ Still disambiguated, just not with contact details. Two identical
+           names in a leaderboard read as one person listed twice, and the id
+           costs nobody anything.
+        """
+        if self.contact_type == self.ContactType.ORGANIZATION:
+            base = self.organization_name or "(unnamed organization)"
+        else:
+            full = f"{self.legal_first_name} {self.legal_last_name}".strip()
+            base = self.preferred_name or full or "(unnamed contact)"
+        return f"{base} #{self.pk}" if self.pk else base
+
 
 class RelationshipType(ImmutableCodeMixin, ConstraintErrorFieldMixin, models.Model):
     """A dictionary of relationship kinds: 'parent of', 'spouse of', 'neighbour of'.

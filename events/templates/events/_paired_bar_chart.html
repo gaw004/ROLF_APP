@@ -1,0 +1,44 @@
+{% comment %}
+「要几人 / 报了几人」——一行两根条，共用一把尺子。
+
+⚠️ 两根条**必须共用同一个最大值**，否则各自撑满自己那行，看起来永远刚好够人。
+   缩放在 services._role_gap() 里做，那里两根条算的是同一个 largest。
+
+⚠️ 缺人的那一行标出来（短的那根用 warning 色），但**不排在最前面** ——
+   顺序按「要的人数」从多到少，因为这一列问的是「哪个工种规模大」，
+   而缺不缺是叠在上面的一层信息。
+
+参数：chart（services.Chart，bars 是 PairedBar）。
+{% endcomment %}
+<section class="mb-6">
+  <h3 class="mb-1 text-sm font-semibold text-ink-900 dark:text-ink-50">{{ chart.title }}</h3>
+  {% if chart.note %}
+    <p class="mb-2 text-xs text-ink-600 dark:text-ink-300">{{ chart.note }}</p>
+  {% endif %}
+
+  {% if not chart.bars %}
+    <p class="text-xs text-ink-600 dark:text-ink-300">
+      No role in this period was opened with a number on it.
+    </p>
+  {% else %}
+    <ul class="space-y-3">
+      {% for bar in chart.bars %}
+        <li>
+          <div class="flex flex-wrap justify-between gap-x-3 text-xs">
+            <span class="text-ink-700 dark:text-ink-200">{{ bar.label }}</span>
+            <span class="font-medium {% if bar.short %}text-warning-fg dark:text-warning-fg-dark{% else %}text-ink-900 dark:text-ink-50{% endif %}">
+              {{ bar.signed }} of {{ bar.needed }}
+            </span>
+          </div>
+          <div class="mt-1 h-1.5 w-full rounded-full bg-ink-100 dark:bg-ink-700">
+            <div class="h-1.5 rounded-full bg-ink-300 dark:bg-ink-500" style="width: {{ bar.needed_pct }}%"></div>
+          </div>
+          <div class="mt-1 h-1.5 w-full rounded-full bg-ink-100 dark:bg-ink-700">
+            <div class="h-1.5 rounded-full {% if bar.short %}bg-warning-fg dark:bg-warning-fg-dark{% else %}bg-brand-500{% endif %}"
+                 style="width: {{ bar.signed_pct }}%"></div>
+          </div>
+        </li>
+      {% endfor %}
+    </ul>
+  {% endif %}
+</section>

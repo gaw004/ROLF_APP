@@ -28,8 +28,14 @@
   </td>
   <td>{{ row.event_role.role.name }}</td>
   <td>
+    {% comment %}
+    ⚠️ 「No-show」用 warning 而不是 danger。它是一条如实的记录，不是一次事故，
+       而 danger 那一档在全站的意思是「这里出问题了」。
+    {% endcomment %}
     {% if row.status == "attended" %}
       {% include "core/components/badge.html" with label=row.get_status_display tone="success" %}
+    {% elif row.status == "absent" %}
+      {% include "core/components/badge.html" with label=row.get_status_display tone="warning" %}
     {% else %}
       {% include "core/components/badge.html" with label=row.get_status_display %}
     {% endif %}
@@ -69,6 +75,19 @@
       <input type="hidden" name="participation" value="{{ row.pk }}">
       {% include "core/components/button.html" with label="Check in" variant="secondary" name="action" value="check_in" %}
       {% include "core/components/button.html" with label="Check out" variant="secondary" name="action" value="check_out" %}
+      {% comment %}
+      ⚠️ 「没来」是一条要**记下来**的事实，不是「没记」。这个状态从一开始就在
+         Status 里，但全项目没有一处写入它 —— 于是任何缺勤率都恒等于 0，
+         一个永远不报错、也永远不对的数（2026-08-05 补上）。
+
+      ⚠️ 和 Check in / Check out 一样是 secondary，**不是**更弱的 ghost。
+         第一版用了 ghost 想让它低调一点，截图上的结果是它变成了三个按钮旁边
+         的一段**纯文字** —— 没人会知道那能点。要「弱一档」得靠位置（排第三），
+         不是靠让一个控件看起来不像控件。
+
+      已记工时或已签到的行按了会被拒绝，理由回在 messages 里。
+      {% endcomment %}
+      {% include "core/components/button.html" with label="No-show" variant="secondary" name="action" value="absent" %}
       <span id="busy-{{ row.pk }}" class="htmx-indicator text-xs text-ink-600 dark:text-ink-300">Saving…</span>
     </form>
 

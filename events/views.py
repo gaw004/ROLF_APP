@@ -21,6 +21,7 @@ from django.db.models import Prefetch
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 
+from org.models import Ministry
 from org.permissions import (
     SCOPED_DENIAL,
     in_foundation_tier,
@@ -42,12 +43,15 @@ from .forms import (
 from .models import Event, EventNotification, EventRole, Participation
 from .services import (
     ConsentRequired,
+    TurnedUp,
     cancel,
     check_in,
     check_out,
     confirm_signup,
     default_message,
     event_summary,
+    mark_absent,
+    ministry_report,
     ministry_staff_participation,
     notify_event_change,
     record_hours,
@@ -318,8 +322,16 @@ def event_manage_list(request):
     it shows only what is open and upcoming — which excludes drafts, and
     excludes every event whose report anybody would actually want to read.
 
-    No ministry filter beyond the scope itself: somebody who administers two
-    ministries wants one list, and the ministry is a column.
+    2026-08-05 — the same period filter the volunteer lists have, plus a report
+    over whatever it selected.
+
+    ⭐ The report describes **exactly the events in the list**: it is handed the
+       filtered queryset, not a ministry id. So both tiers run one code path,
+       and the panel cannot widen past the page it is drawn on.
+
+    ⚠️ It is computed only when asked for (`?report=1`), not on every filter.
+       Thirteen figures are a dozen aggregate queries, and most of the time
+       somebody changing a date is only reading the list.
     """
     administered = ministry_ids_administered_by(request.user)
     # The foundation tier gets the same page over every ministry — read only.
@@ -351,9 +363,27 @@ def event_manage_list(request):
     #    read-only view of everything. Losing the ability to publish an event
     #    because you were also promoted would be a strange way to be rewarded.
     events = events.select_related("ministry", "event_type").order_by("-start_time")
-    return render(request, "events/event_manage_list.html", {
+
+    # The dropdown offers what this account's list can actually contain. A
+    # ministry admin shown all sixty ministries, picking one and getting an
+    # empty list, would read that as a broken filter rather than as scope.
+    period = EventPeriodForm(
+        request.GET or None,
+        ministries=None if not administered else Ministry.objects.filter(
+            pk__in=administered, is_active=True).order_by("name"),
+    )
+    events = period.narrow(events)
+    return render(request, _template(
+        request, "events/event_manage_list.html",
+        "events/_event_manage_results.html"), {
         "events": events,
+        "total": events.count(),
+        "period": period,
         "can_manage": bool(administered),
+        # ⚠️ Present only when asked for, and the template keys the whole panel
+        #    off "is it there". `report=1` without it would draw an empty panel
+        #    full of zeros, which is a different claim from "not run yet".
+        "report": ministry_report(events) if request.GET.get("report") else None,
         # One unbound form, reused to draw every row's dropdown: the choices are
         # identical, and building one per event would be a form per row for no
         # gain.
@@ -566,6 +596,18 @@ def event_attendance(request, pk):
             check_in(participation)
         elif action == "check_out":
             check_out(participation)
+        elif action == "absent":
+            # ⚠️ The refusal is shown, not swallowed. mark_absent() declines when
+            #    the row already carries hours or a check-in, and a button that
+            #    quietly does nothing reads as a broken page — the person clicks
+            #    it again, then goes looking for the row somewhere else.
+            try:
+                mark_absent(participation)
+            except TurnedUp as error:
+                messages.error(request, "; ".join(
+                    message for messages_ in error.message_dict.values()
+                    for message in messages_
+                ))
         elif action == "hours":
             hours_form = HoursForm(request.POST)
             if hours_form.is_valid():

@@ -51,12 +51,15 @@ from .models import (
 )
 from .services import (
     ConsentRequired,
+    TurnedUp,
     check_in,
     check_out,
     confirm_signup,
     default_message,
     event_summary,
     events_in_period,
+    mark_absent,
+    ministry_report,
     ministry_staff_participation,
     notify_event_change,
     record_hours,
@@ -274,6 +277,284 @@ class CheckInAndHoursTests(TestCase):
         self.assertIsNone(self.participation.checked_in_at)
         self.assertEqual(self.participation.hours, Decimal("3.00"))
         self.assertEqual(self.participation.status, Participation.Status.ATTENDED)
+
+
+class NoShowTests(TestCase):
+    """The status that existed for months with nothing able to write it.
+
+    ⚠️ The bug this closes is not a crash. Every "no-show rate" the reports
+       could have produced would have been a hard zero, on every ministry, in
+       every period — right-looking, never raising, never right. 2026-08-05.
+    """
+
+    def setUp(self):
+        self.event = make_event()
+        self.role = make_role(self.event, "lifting")
+        self.wang = make_person("Wang", birth_date=datetime.date(1980, 5, 5))
+        self.participation = Participation.objects.create(
+            contact=self.wang, event_role=self.role)
+
+    def test_marking_absent_records_the_status(self):
+        mark_absent(self.participation)
+        self.participation.refresh_from_db()
+        self.assertEqual(self.participation.status, Participation.Status.ABSENT)
+
+    def test_refused_when_hours_are_already_recorded(self):
+        # "Did three hours" and "did not come" cannot both be true, and the
+        # hours are the value a human is answerable for having typed.
+        record_hours(self.participation, Decimal("3.00"))
+        with self.assertRaises(TurnedUp):
+            mark_absent(self.participation)
+        self.participation.refresh_from_db()
+        self.assertEqual(self.participation.status, Participation.Status.ATTENDED)
+        self.assertEqual(self.participation.hours, Decimal("3.00"))
+
+    def test_refused_when_they_were_checked_in(self):
+        # Left in place this would print a row reading "checked in 3:44 p.m. ·
+        # No-show". Refusing is the only answer that does not either lie or
+        # delete something.
+        check_in(self.participation, at=NOW)
+        with self.assertRaises(TurnedUp):
+            mark_absent(self.participation)
+        self.participation.refresh_from_db()
+        self.assertEqual(self.participation.status, Participation.Status.ATTENDED)
+
+    def test_checking_in_afterwards_puts_them_back_to_attended(self):
+        # Somebody marked up the sheet, then the volunteer walked in an hour
+        # late. Requiring the absence to be undone first is how people stop
+        # marking absences at all.
+        mark_absent(self.participation)
+        check_in(self.participation, at=NOW)
+        self.participation.refresh_from_db()
+        self.assertEqual(self.participation.status, Participation.Status.ATTENDED)
+
+    def test_paper_hours_afterwards_also_put_them_back(self):
+        mark_absent(self.participation)
+        record_hours(self.participation, Decimal("2.00"))
+        self.participation.refresh_from_db()
+        self.assertEqual(self.participation.status, Participation.Status.ATTENDED)
+
+    def test_a_no_show_still_appears_on_the_attendance_page_query(self):
+        # notifiable() drops cancelled rows. An absence must survive it, or the
+        # only way back — checking them in — would have no row to click.
+        mark_absent(self.participation)
+        rows = Participation.objects.filter(event_role__event=self.event).notifiable()
+        self.assertIn(self.participation, rows)
+
+
+class MinistryReportTests(TestCase):
+    """D27's thirteen figures, and the four places they could quietly lie."""
+
+    def setUp(self):
+        self.pantry = Ministry.objects.create(code="food_pantry", name="Food Pantry")
+        self.tax = Ministry.objects.create(code="tax_help", name="Tax Help")
+        self.event = make_event(ministry=self.pantry, start_time=NOW - 30 * DAY,
+                                end_time=NOW - 30 * DAY + 3 * HOUR)
+        self.lifting = make_role(self.event, "lifting", needed_count=5)
+        self.wang = make_person("Wang", birth_date=datetime.date(1980, 5, 5))
+        self.li = make_person("Li", birth_date=datetime.date(1985, 5, 5))
+
+    def signup(self, contact, role=None, **fields):
+        # Hours imply attendance — there is a database constraint saying so
+        # (participation_hours_only_when_attended), and every production path
+        # to hours goes through _mark_attended(). Fixtures that skip it are
+        # testing a row the system cannot produce.
+        if fields.get("hours") is not None:
+            fields.setdefault("status", Participation.Status.ATTENDED)
+        return Participation.objects.create(
+            contact=contact, event_role=role or self.lifting, **fields)
+
+    def report(self, events=None):
+        return ministry_report(
+            events if events is not None else Event.objects.filter(ministry=self.pantry))
+
+    def test_it_describes_only_the_events_it_was_given(self):
+        # ⭐ The whole scoping design rests on this: the report takes a queryset,
+        #    so a ministry admin's page and a foundation admin's page run one
+        #    code path and neither can widen past its own list.
+        other = make_event(ministry=self.tax)
+        self.signup(self.wang)
+        self.signup(self.li, role=make_role(other, "greeting"))
+        self.assertEqual(self.report()["figures"]["events"], 1)
+        self.assertEqual(self.report()["figures"]["signups"], 1)
+
+    def test_cancelled_signups_are_out_and_no_shows_are_in(self):
+        # They signed up either way, but one of them said they were not coming.
+        # Counting a withdrawal as a volunteer inflates every figure here.
+        self.signup(self.wang, status=Participation.Status.CANCELLED)
+        absent = self.signup(self.li)
+        mark_absent(absent)
+        figures = self.report()["figures"]
+        self.assertEqual(figures["signups"], 1)
+        self.assertEqual(figures["volunteers"], 1)
+
+    def test_hours_carry_what_they_were_counted_from(self):
+        # The total is biased low by whoever forgot to check people out, and
+        # the bias is not random. The two companion figures are what let a
+        # reader see that rather than trust a number.
+        self.signup(self.wang, hours=Decimal("3.00"))
+        self.signup(self.li)
+        figures = self.report()["figures"]
+        self.assertEqual(figures["hours"], Decimal("3.00"))
+        self.assertEqual(figures["hours_records"], 1)
+        self.assertEqual(figures["hours_missing"], 1)
+
+    def test_repeat_rate_counts_people_not_signups(self):
+        second = make_event(ministry=self.pantry, start_time=NOW - 20 * DAY,
+                            end_time=NOW - 20 * DAY + 2 * HOUR)
+        self.signup(self.wang)
+        self.signup(self.wang, role=make_role(second, "lifting"))
+        self.signup(self.li)
+        figures = self.report()["figures"]
+        self.assertEqual(figures["volunteers"], 2)
+        self.assertEqual(figures["repeat_volunteers"], 1)
+        self.assertEqual(figures["repeat_rate"], 50)
+
+    def test_rates_are_none_rather_than_zero_when_there_is_nothing_to_count(self):
+        # "None of the twelve" and "there were none" are different answers, and
+        # printing 0% for the second reads as a failure.
+        self.assertIsNone(self.report()["figures"]["repeat_rate"])
+
+    def test_fully_staffed_ignores_events_that_could_not_be_full(self):
+        # An event with no numbered role cannot be full. In the denominator it
+        # would drag the rate down for being unmeasurable, which reads on the
+        # page as a staffing problem.
+        make_event(ministry=self.pantry, name="No roles at all")
+        unlimited = make_event(ministry=self.pantry, name="Unlimited role")
+        make_role(unlimited, "greeting")
+        for _ in range(5):
+            self.signup(make_person("Filler"))
+        figures = self.report()["figures"]
+        self.assertEqual(figures["staffable_events"], 1)
+        self.assertEqual(figures["fully_staffed"], 1)
+        self.assertEqual(figures["fully_staffed_rate"], 100)
+
+    def test_an_understaffed_event_is_not_counted_as_full(self):
+        self.signup(self.wang)
+        self.assertEqual(self.report()["figures"]["fully_staffed"], 0)
+
+    def test_minors_without_consent_follows_the_same_rule_as_the_gates(self):
+        # consent_required_for() needs both halves: a minor AND an event that
+        # asked for consent. Asking it differently here would reassure somebody
+        # about a rule the report is not actually checking.
+        child = make_person("Chen", birth_date=local_now().date())
+        unknown = make_person("Zhou")
+        self.signup(child)
+        self.signup(unknown)
+        # Both of them: an unknown birth date takes the cautious branch, the
+        # same way Contact.is_minor's three states do.
+        self.assertEqual(self.report()["figures"]["minors_without_consent"], 2)
+
+        # The other half of the rule. An event where under-18s may sign up on
+        # their own has nothing missing, so nothing is flagged.
+        self.event.requires_guardian_consent = False
+        self.event.save()
+        self.assertEqual(self.report()["figures"]["minors_without_consent"], 0)
+
+    def test_an_adult_with_no_consent_is_not_flagged(self):
+        self.signup(self.wang)
+        self.assertEqual(self.report()["figures"]["minors_without_consent"], 0)
+
+    def test_a_consented_minor_is_not_flagged(self):
+        self.event.requires_guardian_consent = True
+        self.event.save()
+        child = make_person("Chen", birth_date=local_now().date())
+        self.signup(child, consent_at=local_now(), consent_given_by="A parent")
+        self.assertEqual(self.report()["figures"]["minors_without_consent"], 0)
+
+    def test_role_gap_does_not_multiply_the_wanted_count_by_the_signups(self):
+        # ⚠️ The trap this whole function is shaped around. Summing
+        #    needed_count in the same query that joins Participation repeats the
+        #    5 once per signup — a role wanting 5 with 3 people reports 15.
+        #    Nothing raises, and the ministry looks desperately short-staffed.
+        for surname in ("A", "B", "C"):
+            self.signup(make_person(surname))
+        bar = self.report()["charts"]["role_gap"].bars[0]
+        self.assertEqual(bar.needed, 5)
+        self.assertEqual(bar.signed, 3)
+        self.assertTrue(bar.short)
+
+    def test_role_gap_shows_a_role_nobody_signed_up_for(self):
+        # D19, arriving in a fourth place: that role has no Participation row to
+        # be found through, and it is the one worth looking at.
+        labels = [bar.label for bar in self.report()["charts"]["role_gap"].bars]
+        self.assertIn("Lifting", labels)
+
+    def test_paired_bars_share_one_scale(self):
+        # Scaled separately, both bars fill their row and every role looks
+        # exactly staffed.
+        self.signup(self.wang)
+        bar = self.report()["charts"]["role_gap"].bars[0]
+        self.assertEqual(bar.needed_pct, 100)
+        self.assertEqual(bar.signed_pct, 20)
+
+    def test_months_with_nothing_in_them_are_still_drawn(self):
+        # Skipping them is what a GROUP BY does, and in a chart it is a lie:
+        # January beside March says the ministry ran events in consecutive
+        # months. A quiet ministry has to look quiet.
+        make_event(ministry=self.pantry, start_time=NOW - 90 * DAY,
+                   end_time=NOW - 90 * DAY + HOUR)
+        bars = self.report()["charts"]["events_by_month"].bars
+        # Two events three months apart, so at least one month between them has
+        # nothing in it — and it has to appear, at zero.
+        self.assertGreaterEqual(len(bars), 3)
+        self.assertIn("0 events", [bar.caption for bar in bars])
+
+    def test_most_hours_does_not_put_the_unrecorded_people_first(self):
+        # ⚠️ Postgres sorts NULL first on a descending order, so the obvious
+        #    "-hours" tops a chart titled "Most hours" with everybody who has
+        #    none — the exact inversion of the claim.
+        self.signup(self.wang, hours=Decimal("2.00"))
+        self.signup(self.li)
+        bars = self.report()["charts"]["top_volunteers"].bars
+        self.assertEqual([bar.label for bar in bars], [self.wang.short_label])
+
+    def test_the_leaderboard_does_not_publish_contact_details(self):
+        # ⚠️ Contact.__str__ appends an email or phone to tell two people of the
+        #    same name apart — needed in a dropdown, where picking the wrong one
+        #    is a silent data error. Nothing is chosen from a chart, so on this
+        #    panel the address is simply published to whoever screenshots it.
+        wang = make_person("Wang", email="wang@example.invalid",
+                           birth_date=datetime.date(1980, 5, 5))
+        self.signup(wang, hours=Decimal("2.00"))
+        labels = [bar.label for bar in self.report()["charts"]["top_volunteers"].bars]
+        self.assertNotIn("wang@example.invalid", " ".join(labels))
+        self.assertIn("Wang", " ".join(labels))
+
+    def test_a_chart_with_fewer_than_three_bars_says_so(self):
+        # One bar is a number wearing a rectangle. The template falls back to a
+        # list when this is set.
+        self.signup(self.wang, hours=Decimal("2.00"))
+        self.assertTrue(self.report()["charts"]["top_volunteers"].sparse)
+
+    def test_an_ordered_queryset_does_not_split_every_group(self):
+        """⚠️ The one this suite missed, found in a screenshot instead.
+
+        The management list hands over `…order_by("-start_time")`, and an
+        explicit ordering **joins the GROUP BY** — so grouping by month also
+        grouped by the exact timestamp, one row per event, every count 1. The
+        page said eleven events in August beside a chart saying one.
+
+        Django drops `Meta.ordering` for aggregates but never an order_by()
+        somebody wrote, and every other test here builds its own unordered
+        queryset — which is precisely why they all passed.
+        """
+        for day in (2, 3, 4):
+            make_event(ministry=self.pantry, name=f"Same month {day}",
+                       start_time=NOW - day * DAY,
+                       end_time=NOW - day * DAY + HOUR)
+        ordered = Event.objects.filter(ministry=self.pantry).order_by("-start_time")
+        bars = ministry_report(ordered)["charts"]["events_by_month"].bars
+        self.assertIn("3 events", [bar.caption for bar in bars])
+        # The other four groupings ride on the same queryset.
+        report = ministry_report(ordered)
+        self.assertEqual(report["charts"]["role_gap"].bars[0].needed, 5)
+
+    def test_bars_are_scaled_against_the_largest_not_the_total(self):
+        for surname, hours in (("A", "1.00"), ("B", "3.00"), ("C", "4.00")):
+            self.signup(make_person(surname), hours=Decimal(hours))
+        bars = self.report()["charts"]["top_volunteers"].bars
+        self.assertEqual([bar.pct for bar in bars], [100, 75, 25])
 
 
 class AttendanceNeedsConsentTests(TestCase):
@@ -2452,11 +2733,14 @@ class ManageListStatusTests(PageTestCase):
     def url(self):
         return reverse("events:event_manage_list")
 
-    def test_the_times_are_shown(self):
+    def test_the_start_date_is_shown_and_the_end_is_not(self):
+        # 2026-08-05: Ministry and Ends gave up their columns to the report
+        # panel. Starts stayed, as a date — dropping it too would have left a
+        # list filtered to August with nothing on it saying August (D27).
         self.login(self.zhang)
         response = self.client.get(self.url())
         self.assertContains(response, "Starts")
-        self.assertContains(response, "Ends")
+        self.assertNotContains(response, "<th>Ends</th>")
 
     def test_status_can_be_changed_from_the_list(self):
         self.event.status = Event.Status.DRAFT
@@ -2500,6 +2784,141 @@ class ManageListStatusTests(PageTestCase):
         self.assertEqual(response.status_code, 403)
         theirs.refresh_from_db()
         self.assertEqual(theirs.status, Event.Status.DRAFT)
+
+
+class NoShowPageTests(PageTestCase):
+    """The button, and the two things it must not do."""
+
+    def setUp(self):
+        super().setUp()
+        self.row = Participation.objects.create(
+            contact=self.lisi.contact, event_role=self.role)
+
+    def url(self):
+        return reverse("events:event_attendance", args=[self.event.pk])
+
+    def post(self, **extra):
+        return self.client.post(
+            self.url(), {"participation": self.row.pk, "action": "absent", **extra})
+
+    def test_the_button_is_drawn_for_the_ministrys_own_admin(self):
+        self.login(self.zhang)
+        self.assertContains(self.client.get(self.url()), 'value="absent"')
+
+    def test_marking_absent_from_the_page(self):
+        self.login(self.zhang)
+        self.post()
+        self.row.refresh_from_db()
+        self.assertEqual(self.row.status, Participation.Status.ABSENT)
+
+    def test_the_read_only_tier_is_refused(self):
+        # ⚠️ Not drawing the button is interface. This is the boundary — a form
+        #    posted from anywhere at all arrives at the view the same shape.
+        admin = self.account("fadmin2", "方", birth_date=datetime.date(1980, 1, 1))
+        admin.groups.add(foundation_admin_group())
+        self.login(admin)
+        self.assertNotContains(self.client.get(self.url()), 'value="absent"')
+        self.assertEqual(self.post().status_code, 403)
+        self.row.refresh_from_db()
+        self.assertEqual(self.row.status, Participation.Status.REGISTERED)
+
+    def test_a_refusal_is_shown_rather_than_swallowed(self):
+        # A button that quietly does nothing reads as a broken page: the person
+        # clicks it again, then goes looking for the row somewhere else.
+        record_hours(self.row, Decimal("3.00"))
+        self.login(self.zhang)
+        response = self.client.post(
+            self.url(), {"participation": self.row.pk, "action": "absent"},
+            follow=True)
+        self.assertContains(response, "Clear the hours first")
+        self.row.refresh_from_db()
+        self.assertEqual(self.row.status, Participation.Status.ATTENDED)
+
+
+class ManageListReportPageTests(PageTestCase):
+    """The filter and the report panel on the management list (D27).
+
+    ⭐ The invariant under test throughout: **the panel describes the list next
+       to it**. Both tiers reach it, and neither can see a figure covering an
+       event its own list does not show.
+    """
+
+    def url(self):
+        return reverse("events:event_manage_list")
+
+    def foundation_admin(self):
+        admin = self.account("fadmin", "方", birth_date=datetime.date(1980, 1, 1))
+        admin.groups.add(foundation_admin_group())
+        return admin
+
+    def test_the_report_is_not_computed_until_it_is_asked_for(self):
+        # Thirteen figures are a dozen aggregate queries, and most of the time
+        # somebody changing a date is only reading the list.
+        self.login(self.zhang)
+        self.assertNotContains(self.client.get(self.url()), "Recorded hours")
+        self.assertContains(
+            self.client.get(self.url(), {"report": "1"}), "Recorded hours")
+
+    def test_changing_the_filter_without_asking_again_drops_the_report(self):
+        # A report computed for last month's filter, sitting beside this
+        # month's list, is worse than no report — the two read as one page.
+        self.login(self.zhang)
+        response = self.client.get(self.url(), {"ministry": self.pantry.pk})
+        self.assertNotContains(response, "Recorded hours")
+
+    def test_a_ministry_admin_only_ever_reports_on_their_own(self):
+        theirs = make_event(ministry=self.tax, owner=self.other_admin.contact,
+                            name="Somebody else's event")
+        make_role(theirs, "greeting")
+        self.login(self.zhang)
+        response = self.client.get(self.url(), {"report": "1"})
+        self.assertNotContains(response, "Somebody else&#x27;s event")
+        # One event in the list, so one event in the panel beside it.
+        self.assertEqual(response.context["report"]["figures"]["events"], 1)
+
+    def test_a_ministry_admin_is_only_offered_their_own_ministries(self):
+        # Offered every ministry, picking one and getting an empty list reads
+        # as a broken filter rather than as scope.
+        self.login(self.zhang)
+        response = self.client.get(self.url())
+        offered = response.context["period"].fields["ministry"].queryset
+        self.assertEqual(list(offered), [self.pantry])
+
+    def test_the_foundation_tier_reports_over_every_ministry(self):
+        make_event(ministry=self.tax, owner=self.other_admin.contact)
+        self.login(self.foundation_admin())
+        response = self.client.get(self.url(), {"report": "1"})
+        self.assertEqual(response.context["report"]["figures"]["events"], 2)
+        # And is offered all of them, because its list holds all of them.
+        offered = response.context["period"].fields["ministry"].queryset
+        self.assertEqual(list(offered), [self.pantry, self.tax])
+
+    def test_the_report_follows_the_ministry_filter(self):
+        make_event(ministry=self.tax, owner=self.other_admin.contact)
+        self.login(self.foundation_admin())
+        response = self.client.get(
+            self.url(), {"report": "1", "ministry": self.tax.pk})
+        self.assertEqual(response.context["report"]["figures"]["events"], 1)
+
+    def test_the_report_follows_the_date_window(self):
+        make_event(ministry=self.pantry, owner=self.zhang.contact,
+                   name="Long ago", start_time=NOW - 400 * DAY,
+                   end_time=NOW - 400 * DAY + HOUR)
+        self.login(self.zhang)
+        window = (local_now() - datetime.timedelta(days=7)).date()
+        response = self.client.get(
+            self.url(), {"report": "1", "start": window.isoformat()})
+        self.assertEqual(response.context["report"]["figures"]["events"], 1)
+
+    def test_the_htmx_fragment_carries_the_report_too(self):
+        # ⚠️ The filter's hx-target is #event-results, and the panel lives
+        #    inside it. Rendered outside, filtering would leave a stale report
+        #    on the page — and HTMX reports nothing when a target is missing.
+        self.login(self.zhang)
+        response = self.client.get(
+            self.url(), {"report": "1"}, headers={"HX-Request": "true"})
+        self.assertContains(response, 'id="event-results"')
+        self.assertContains(response, "Recorded hours")
 
 
 class MinorEmergencyContactTests(TestCase):

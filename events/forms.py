@@ -253,8 +253,19 @@ class EventPeriodForm(forms.Form):
         required=False, label="Ministry", empty_label="All ministries",
     )
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, ministries=None, **kwargs):
+        """`ministries` narrows the dropdown to a scope the page already has.
+
+        ⚠️ Interface only — it is not a permission. The pages that pass it have
+           already narrowed their **queryset**, so a forged ministry id in the
+           query string filters a list that never contained that ministry's
+           events and comes back empty. What this prevents is the other thing:
+           a ministry admin offered every ministry in the foundation, picking
+           one, and getting an empty list with nothing saying why (2026-08-05).
+        """
         super().__init__(*args, **kwargs)
+        if ministries is not None:
+            self.fields["ministry"].queryset = ministries
         # ⚠️ Ministry first (2026-08-05). Declared after the dates because it was
         #    added later, and declaration order is render order — so the box most
         #    people reach for first was sitting third. Which ministry you are

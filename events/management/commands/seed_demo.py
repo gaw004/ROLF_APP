@@ -32,7 +32,7 @@ from accounts.services import register_account
 from contact.models import Contact, EmergencyContact, RelationshipType
 from core.timeutils import local_now, local_today
 from events.models import Event, EventRole, EventType, Participation, ParticipationRole
-from events.services import check_in, check_out, record_hours
+from events.services import check_in, check_out, mark_absent, record_hours
 from org.models import Assignment, EmploymentType, Ministry, MinistryRole, Position
 from org.permissions import foundation_admin_group
 
@@ -372,6 +372,19 @@ class Command(BaseCommand):
         ("Thanksgiving meal prep", "pantry", 35, "Kitchen"),
         ("Winter shelter shift", "pantry", 47, ""),
         ("Spring cleaning day", "pantry", 61, "Back garden"),
+        ("Easter hamper packing", "pantry", 88, "Fellowship hall"),
+        ("Tax season overflow", "tax", 104, "Room 2B"),
+        ("New year store-room sort", "pantry", 132, "Church ground floor"),
+    ]
+
+    #: A pool of past volunteers, so the report has something to be a report of
+    #: (2026-08-05). Twelve is chosen to be more than the ten "Most hours"
+    #: shows — a leaderboard that lists everybody is not a leaderboard.
+    FILLER_VOLUNTEERS = [
+        ("Alice", "Adams"), ("Ben", "Baker"), ("Cai", "Chen"),
+        ("Dolo", "Diallo"), ("Elena", "Esposito"), ("Frank", "Fisher"),
+        ("Gloria", "Gomez"), ("Hana", "Haddad"), ("Idris", "Ibrahim"),
+        ("Jonas", "Jensen"), ("Kiran", "Kaur"), ("Luz", "Lopez"),
     ]
 
     def filler_events(self, now):
@@ -389,9 +402,10 @@ class Command(BaseCommand):
                     "status": Event.Status.OPEN,
                 },
             )
+        past = []
         for name, ministry, days, place in self.FILLER_PAST:
             owner = self.pantry_admin if ministry == "pantry" else self.tax_admin
-            Event.objects.get_or_create(
+            event, _ = Event.objects.get_or_create(
                 name=name,
                 defaults={
                     "event_type": self.distribution,
@@ -402,6 +416,61 @@ class Command(BaseCommand):
                     "status": Event.Status.COMPLETED,
                 },
             )
+            past.append(event)
+        self.filler_turnout(past)
+
+    def filler_turnout(self, events):
+        """Roles, signups and hours on the past scenery, so the report reports.
+
+        Without this the panel is honest and useless: nine signups across
+        twenty-three events makes every chart fall back to its "fewer than
+        three bars" text, and nobody can tell a working page from a broken one.
+
+        ⚠️ Deterministic, never random. The same index arithmetic the scroll
+           effect uses, and for the same reason: a demo that looks different
+           after every reseed cannot be walked through with somebody, and a
+           screenshot of it cannot be compared with anything.
+
+        ⚠️ Spread across two ministries, several months, and a mix of outcomes
+           on purpose — full roles and short ones, hours recorded and hours
+           missing, one no-show, and people who came back. A demo where every
+           figure is 100% exercises none of the branches that matter.
+        """
+        volunteers = [
+            Contact.objects.get_or_create(
+                legal_last_name=surname,
+                legal_first_name=given,
+                defaults={
+                    "contact_type": Contact.ContactType.INDIVIDUAL,
+                    "birth_date": datetime.date(1970 + index, 3, 12),
+                    "email": f"{surname.lower()}@example.invalid",
+                },
+            )[0]
+            for index, (given, surname) in enumerate(self.FILLER_VOLUNTEERS)
+        ]
+
+        for position, event in enumerate(events):
+            lifting = self.role(event, self.lifting, 4)
+            welcome = self.role(event, self.welcome, 2)
+            # A rotating window over the pool: consecutive events share most of
+            # their people, so "came more than once" is a real majority and the
+            # leaderboard has an order rather than a twelve-way tie.
+            turnout = 4 + position % 3
+            for offset in range(turnout):
+                who = volunteers[(position * 2 + offset) % len(volunteers)]
+                row = self.signup(who, lifting if offset % 3 else welcome)
+                if row.status != Participation.Status.REGISTERED:
+                    continue
+                if position == 1 and offset == 0:
+                    # One recorded absence, so the status is not a dead choice
+                    # in the demo and the attendance page shows all three states.
+                    mark_absent(row)
+                elif offset == turnout - 1 and position % 2 == 0:
+                    # Somebody nobody checked out. This is the whole reason the
+                    # hours total ships with "from N records" next to it.
+                    continue
+                else:
+                    record_hours(row, Decimal(2 + (offset + position) % 3))
 
     # --- helpers ---------------------------------------------------------
 

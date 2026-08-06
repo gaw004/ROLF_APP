@@ -1,16 +1,25 @@
 {% extends "core/base.html" %}
 {% block title %}Events I manage{% endblock %}
 
+{% comment %}
+⚠️ 这一页比正文的默认宽度宽：右边多一个报表面板，按默认宽度的话表格会被挤到
+   一直横向滚动。base.html 留了 main_width 这个 block 就是为了这种情况。
+{% endcomment %}
+{% block main_width %}max-w-[92rem]{% endblock %}
+
 {% block content %}
   {% comment %}
   管理侧唯一的入口页。草稿和已结束的都在：报表恰恰是活动结束之后才要看的，
   而草稿在志愿者那一侧按设计是不可见的（Event.VISIBLE_TO_VOLUNTEERS 不含 draft）。
-  {% endcomment %}
-  {% comment %}
+
   两种身份共用这一页（2026-08-05）：
     · ministry admin —— 自己那几个 ministry 的活动，可改状态、可进 Edit / Notify；
     · foundation tier —— **全部** ministry 的活动，只读。
   区别由视图算好的 can_manage 决定，模板不自己判权限。
+
+  ⭐ 报表也共用这一条路径：它拿到的是**这一页已经筛过的那个 queryset**，
+     所以 ministry admin 得到的是自己那几个 ministry 的报表，foundation admin
+     得到的是全基金会的 —— 两边没有第二套权限判断（D27）。
   {% endcomment %}
   <div class="mb-6 flex flex-wrap items-center justify-between gap-3">
     <h1 class="text-2xl font-semibold">
@@ -32,75 +41,8 @@
     </div>
   {% endif %}
 
-  {% if events %}
-    <div class="table-wrap">
-      <table>
-        <thead>
-          <tr>
-            <th>Event</th><th>Ministry</th><th>Starts</th><th>Ends</th>
-            <th>Status</th><th>Go to</th>
-          </tr>
-        </thead>
-        <tbody>
-          {% for event in events %}
-            <tr>
-              <td>
-                <a href="{% url 'events:event_detail' event.pk %}?from=manage"
-                   class="prose-link">{{ event.name }}</a>
-              </td>
-              <td>{{ event.ministry.name }}</td>
-              <td>{{ event.start_time }}</td>
-              <td>{{ event.end_time }}</td>
-              <td>
-                {% comment %}
-                状态在这里直接改：发布和收尾是最常做的两件事，各自只是一个选项。
-                ⚠️ **时间不在这里改** —— 挪时间要通知已报名的人，所以它走 Edit 页，
-                   那条路会把人送到通知页。两个字段，两种后果。
-                {% endcomment %}
-                {% if not can_manage %}
-                  {% include "core/components/badge.html" with label=event.get_status_display %}
-                {% else %}
-                <form method="post" class="flex items-center gap-2">
-                  {% csrf_token %}
-                  <input type="hidden" name="event" value="{{ event.pk }}">
-                  <select name="status"
-                          class="rounded-md border border-ink-300 bg-white px-2 py-1 text-sm text-ink-900 dark:border-ink-600 dark:bg-ink-800 dark:text-ink-50">
-                    {% for value, label in status_form.fields.status.choices %}
-                      <option value="{{ value }}" {% if value == event.status %}selected{% endif %}>{{ label }}</option>
-                    {% endfor %}
-                  </select>
-                  {% include "core/components/button.html" with label="Save" variant="secondary" %}
-                </form>
-                {% endif %}
-              </td>
-              <td>
-                {% comment %}
-                ⚠️ 只读身份这里只画三个链接。给他画 Edit / Notify 的话，点进去是
-                   403 —— 一个拒绝点它的人的链接，读起来是「站坏了」而不是
-                   「这一页不归你」。
-                {% endcomment %}
-                <div class="flex flex-wrap gap-x-2 gap-y-1 text-sm">
-                  {% if can_manage %}
-                    <a href="{% url 'events:event_update' event.pk %}" class="prose-link">Edit &amp; roles</a>
-                  {% endif %}
-                  <a href="{% url 'events:event_registrations' event.pk %}" class="prose-link">Signups</a>
-                  <a href="{% url 'events:event_attendance' event.pk %}" class="prose-link">Attendance</a>
-                  <a href="{% url 'events:event_report' event.pk %}" class="prose-link">Report</a>
-                  {% if can_manage %}
-                    <a href="{% url 'events:event_notify' event.pk %}" class="prose-link">Notify</a>
-                  {% endif %}
-                </div>
-              </td>
-            </tr>
-          {% endfor %}
-        </tbody>
-      </table>
-    </div>
-  {% else %}
-    {% if can_manage %}
-      {% include "core/components/empty.html" with message="You do not manage any events yet. If that looks wrong, your ministry admin grant may have expired — it has to be active today." action_label="Publish a new event" action_href=create_url %}
-    {% else %}
-      {% include "core/components/empty.html" with message="No events have been published by any ministry yet." %}
-    {% endif %}
-  {% endif %}
+  {% url 'events:event_manage_list' as manage_url %}
+  {% include "events/_period_filter.html" with action=manage_url report_button=1 %}
+
+  {% include "events/_event_manage_results.html" %}
 {% endblock %}

@@ -13,17 +13,24 @@ from decimal import Decimal
 
 from django.core.exceptions import ValidationError
 from django.db import transaction
-from django.db.models import Count, Sum
+from django.db.models import Count, F, Q, Sum
+from django.db.models.functions import TruncMonth
 from django.utils.text import slugify
 from PIL import Image as PILImage
 from PIL import ImageOps as PILImageOps
 
-from contact.models import Contact
+from contact.models import Contact, ContactQuerySet
 from core.notifications.base import EMAIL, SMS, Message, get_backend
 from core.timeutils import local_date_of, local_now
 from org.models import Assignment, Position
 
-from .models import Event, EventNotification, Participation, ParticipationRole
+from .models import (
+    Event,
+    EventNotification,
+    EventRole,
+    Participation,
+    ParticipationRole,
+)
 
 
 class ConsentRequired(ValidationError):
@@ -31,6 +38,15 @@ class ConsentRequired(ValidationError):
 
     A subclass rather than a bare ValidationError so a view can tell this apart
     from an ordinary form error and re-render with the consent section open.
+    """
+
+
+class TurnedUp(ValidationError):
+    """Refusing to mark somebody absent when the record says they were here.
+
+    Its own class for the same reason as ConsentRequired: the attendance page
+    has to show this one next to the person it concerns rather than as a
+    generic failure, because the fix is a different button.
     """
 
 
@@ -249,6 +265,56 @@ def record_hours(participation, hours):
     return participation
 
 
+def mark_absent(participation):
+    """They signed up and did not come.
+
+    ⚠️ This status existed in `Participation.Status` from the beginning and
+       **nothing ever wrote it**. That is worse than not having it: any
+       "no-show rate" computed before today would have been a hard zero on
+       every ministry, every period — a number that looks like good news, never
+       raises, and is never right. 2026-08-05.
+
+    ⚠️ Absence is a *recorded* fact, not the absence of a record. A row still
+       sitting at `registered` after the event means nobody looked; this means
+       somebody looked and they were not there. The report keeps the two apart
+       and says how many events were actually marked up — see `ministry_report`.
+
+    Refuses when the record already says they turned up, and never edits that
+    record to make room for itself:
+
+    · hours — the rule the foundation asked for (2026-08-05). "Did three hours"
+      and "did not come" cannot both be true, and clearing the hours to store
+      the absence would be a silent deletion of the one value in this system a
+      human is answerable for having typed.
+    · a check-in timestamp — the same contradiction one step earlier, and left
+      in place it would print a row reading "checked in 3:44 p.m. · No-show".
+
+    ⚠️ Known gap, stated rather than papered over: there is still no way to undo
+       a check-in clicked on the wrong row. There never was one, and this
+       function is deliberately not it — "undo my mistake" and "record that
+       they did not come" are different facts, and one button that did both
+       would make the second unreadable. phase-c.md carries it.
+
+    The way back is `check_in()` (or `record_hours()`), which both go through
+    `_mark_attended()` and so overwrite this status without needing to know it
+    exists — somebody who turns up an hour late is signed in as normal.
+    """
+    if participation.hours is not None:
+        raise TurnedUp({
+            "hours": "There are hours on this signup, so it cannot be marked as "
+                     "a no-show. Clear the hours first if they were entered by "
+                     "mistake.",
+        })
+    if participation.checked_in_at is not None:
+        raise TurnedUp({
+            "checked_in_at": "This signup was checked in, so it cannot be marked "
+                             "as a no-show.",
+        })
+    participation.status = Participation.Status.ABSENT
+    participation.save(update_fields=["status", "updated_at"])
+    return participation
+
+
 # --- Statistics: R1–R8 --------------------------------------------------
 # All of it here or on a QuerySet, none of it in a view. Changing the interface
 # is not hypothetical in this project — it is scheduled — and anything a view
@@ -341,6 +407,361 @@ def events_in_period(start, end, ministry=None):
         .annotate(role_count=Count("roles", distinct=True))
     )
     return events.filter(ministry=ministry) if ministry is not None else events
+
+
+# --- The ministry report (2026-08-05) ------------------------------------
+#
+# Thirteen figures over a **set of events**, where every earlier report in this
+# file answers about one. The chosen thirteen and the ones deliberately left out
+# are in D27; what follows is how they are computed and where each one can lie.
+#
+# ⭐ The single invariant, and the reason this takes a queryset rather than a
+#    ministry: **the report describes exactly the events in the list next to
+#    it.** Scoping, the ministry filter and the date window are already in that
+#    queryset, so a ministry admin and a foundation admin run the same code and
+#    neither needs a permission branch here. A `ministry_id` argument would have
+#    needed one, and a report that quietly widened past what its own page shows
+#    is the failure this shape rules out rather than tests for.
+
+
+@dataclass(frozen=True)
+class Bar:
+    """One row of a chart. `pct` is width, `caption` is the number in words."""
+
+    label: str
+    caption: str
+    pct: int
+
+
+@dataclass(frozen=True)
+class PairedBar:
+    """Wanted against got, drawn as two bars sharing one scale."""
+
+    label: str
+    needed: int
+    signed: int
+    needed_pct: int
+    signed_pct: int
+    short: bool
+
+
+@dataclass(frozen=True)
+class Chart:
+    """Bars plus the honesty flags the template needs to decide how to draw.
+
+    `sparse` — fewer than three bars. One bar is not a chart; it is a number
+    wearing a rectangle, and it reads as less information than the sentence it
+    replaced. The template falls back to a list.
+    """
+
+    title: str
+    bars: list
+    sparse: bool
+    note: str = ""
+
+
+def _bars(rows, *, formatter):
+    """Turn [(label, value)] into bars scaled against the largest one.
+
+    ⚠️ Scaled to the maximum, never to the total. A chart where the longest bar
+       stops a third of the way across is read as "a third of something", and
+       there is nothing on the page saying what.
+    """
+    rows = [(label, value) for label, value in rows if value is not None]
+    largest = max((value for _, value in rows), default=0)
+    return [
+        Bar(
+            label=label,
+            caption=formatter(value),
+            # int(), so a 0.4% bar is 0 rather than a hairline that reads as a
+            # rendering fault. The caption still carries the real number.
+            pct=int(100 * value / largest) if largest else 0,
+        )
+        for label, value in rows
+    ]
+
+
+def _chart(title, rows, *, formatter=str, note=""):
+    bars = _bars(rows, formatter=formatter)
+    return Chart(title=title, bars=bars, sparse=len(bars) < 3, note=note)
+
+
+def _months_between(first, last):
+    """Every month from first to last inclusive, gaps included.
+
+    ⚠️ Skipping the empty months is the default of a GROUP BY and it is a lie in
+       a chart: January and March drawn side by side say the ministry ran events
+       in consecutive months. A quiet ministry has to look quiet.
+    """
+    out, cursor = [], first
+    while cursor <= last:
+        out.append(cursor)
+        cursor = (cursor.replace(day=28) + datetime.timedelta(days=4)).replace(day=1)
+    return out
+
+
+def ministry_report(events):
+    """Everything the report panel shows, for one already-filtered event list.
+
+    Eight figures and five charts. Each of the three that can be misread carries
+    its own caveat out to the template rather than being silently rounded off:
+
+    ⚠️ `hours` is **hours that were recorded**, and it is biased low in a way
+       that is not random — it tracks which admin remembers to check people out.
+       `hours_records` and `hours_missing` go out with it so the page can say
+       what the total rests on. The foundation accepted this bias knowingly
+       (2026-08-05); what is not acceptable is printing the total alone.
+
+    ⚠️ `repeat_rate` is over the people in **this window**, not their whole
+       history. Somebody who came for years and once in August is a first-timer
+       here. That makes the figure answer "did this period build a habit",
+       which is the question worth asking of a period.
+
+    ⚠️ `fully_staffed_rate` counts only events that opened at least one role
+       with a number on it. An event that opened no roles, or only unlimited
+       ones, cannot be full — including it in the denominator would drag the
+       rate down for being unmeasurable, which reads as a staffing problem.
+    """
+    # Cancelled signups are out of every figure below: that person said they
+    # were not coming, and counting them as a volunteer inflates every number
+    # on this page. A no-show stays in — they signed up, which is the fact the
+    # signup figures are about.
+    parts = Participation.objects.filter(event_role__event__in=events).notifiable()
+
+    event_count = events.count()
+    totals = parts.aggregate(
+        signups=Count("pk"),
+        volunteers=Count("contact", distinct=True),
+        # ⚠️ `hours_total`, not `hours`. An alias that repeats a field name wins
+        #    over the field for every later argument in the same aggregate(),
+        #    so `hours=Sum("hours")` next to `Count("hours")` makes the second
+        #    one a count of the first — which Django refuses outright. It would
+        #    have been worse if it had not.
+        hours_total=Sum("hours"),
+        # Count over a nullable column counts the rows that have one: how many
+        # records the hours total is built from, not how many signups there are.
+        hours_records=Count("hours"),
+    )
+    hours = totals["hours_total"] or Decimal("0")
+    volunteers = totals["volunteers"]
+
+    repeat = (
+        parts.values("contact_id").annotate(n=Count("pk")).filter(n__gte=2).count()
+    )
+
+    # D3. Two id sets rather than one clever query: the "no role is short"
+    # condition is a NOT EXISTS over an annotated subquery, and the version of
+    # it that reads clearly is the one that is wrong. Sets of primary keys over
+    # a ministry's events are small — hundreds, not millions.
+    staffable = set(
+        events.filter(roles__needed_count__isnull=False).values_list("pk", flat=True)
+    )
+    short_events = set(
+        EventRole.objects.understaffed()
+        .filter(event__in=events)
+        .values_list("event_id", flat=True)
+    )
+    fully_staffed = len(staffable - short_events)
+
+    # G2. The same rule as consent_required_for(), asked of a queryset: the
+    # event demanded consent, the person is a minor **or has no date on file**,
+    # and no consent was ever recorded. Asking it differently here than the two
+    # gates ask it is how a report reassures somebody about a rule it is not
+    # actually checking.
+    minors_without_consent = parts.filter(
+        event_role__event__requires_guardian_consent=True,
+        consent_at__isnull=True,
+    ).filter(
+        Q(contact__birth_date__gt=ContactQuerySet.majority_threshold())
+        | Q(contact__birth_date__isnull=True)
+    ).count()
+
+    figures = {
+        "events": event_count,
+        "signups": totals["signups"],
+        "volunteers": volunteers,
+        "hours": hours,
+        "hours_records": totals["hours_records"],
+        "hours_missing": totals["signups"] - totals["hours_records"],
+        "hours_per_volunteer": (hours / volunteers) if volunteers else None,
+        "repeat_volunteers": repeat,
+        "repeat_rate": _percent(repeat, volunteers),
+        "fully_staffed": fully_staffed,
+        "staffable_events": len(staffable),
+        "fully_staffed_rate": _percent(fully_staffed, len(staffable)),
+        "minors_without_consent": minors_without_consent,
+    }
+    return {"figures": figures, "charts": _report_charts(events, parts)}
+
+
+def _percent(part, whole):
+    """An integer percentage, or None when the question does not apply.
+
+    None rather than 0: "none of the twelve" and "there were none to count" are
+    different answers, and 0% for the second reads as a failure.
+    """
+    return int(100 * part / whole) if whole else None
+
+
+def _report_charts(events, parts):
+    """The five charts, in the order the panel draws them.
+
+    ⚠️ All five are horizontal. Twelve vertical bars in a panel that is half a
+       screen wide are 20px each with "Aug 2026" underneath, and on a phone the
+       panel is the full width but the labels still are not. Horizontal puts
+       every label on its own line at its natural size, and the same component
+       draws all five — so no chart on this page can end up styled unlike its
+       neighbour. Months therefore read top to bottom, oldest first.
+    """
+    monthly = _monthly_series(events, parts)
+    return {
+        "events_by_month": _chart(
+            "Events by month",
+            [(label, count) for label, count, _ in monthly],
+            formatter=lambda n: f"{n} event{'' if n == 1 else 's'}",
+        ),
+        "hours_by_month": _chart(
+            "Recorded hours by month",
+            [(label, total) for label, _, total in monthly],
+            formatter=lambda h: f"{h:.2f} h",
+            note="Only hours somebody entered. Months where nobody was checked "
+                 "out read as zero.",
+        ),
+        "role_gap": _role_gap(events, parts),
+        "top_volunteers": _top_volunteers(parts),
+        "hours_by_role": _chart(
+            "Recorded hours by role",
+            list(
+                parts.exclude(hours__isnull=True)
+                .order_by()
+                .values_list("event_role__role__name")
+                .annotate(total=Sum("hours"))
+                .order_by("-total")
+            ),
+            formatter=lambda h: f"{h:.2f} h",
+        ),
+    }
+
+
+def _monthly_series(events, parts):
+    """[(label, event count, recorded hours)] with no month left out.
+
+    Two queries, merged here rather than joined in SQL. Joining Event to
+    Participation and asking for Count(events) in the same statement multiplies
+    the count by the number of signups — the classic multi-table aggregation
+    trap, and it produces a plausible number rather than an error.
+    """
+    # ⚠️ `.order_by()` with nothing in it, on both, and it is not tidying up.
+    #    An **explicit** ordering on the incoming queryset is added to the
+    #    GROUP BY — and the list this report describes arrives ordered by
+    #    start_time, so grouping by month also grouped by the exact timestamp:
+    #    one row per event, every count 1. Django only ignores `Meta.ordering`
+    #    here, never an order_by() somebody wrote.
+    #
+    #    Caught in a screenshot on 2026-08-05, not by a test: the list beside
+    #    the chart said eleven events in August and the chart said one. Twenty
+    #    passing tests had built their own unordered queryset, so none of them
+    #    ever saw it. There is a regression test now that orders it first.
+    by_month = {
+        row["month"].date(): row["n"]
+        for row in events.order_by().annotate(month=TruncMonth("start_time"))
+        .values("month").annotate(n=Count("pk"))
+    }
+    hours_by_month = {
+        row["month"].date(): row["total"] or Decimal("0")
+        for row in parts.order_by()
+        .annotate(month=TruncMonth("event_role__event__start_time"))
+        .values("month").annotate(total=Sum("hours"))
+    }
+    if not by_month:
+        return []
+    return [
+        (
+            month.strftime("%b %Y"),
+            by_month.get(month, 0),
+            hours_by_month.get(month, Decimal("0")),
+        )
+        for month in _months_between(min(by_month), max(by_month))
+    ]
+
+
+def _role_gap(events, parts):
+    """D1: how many each job asked for against how many signed up.
+
+    ⚠️ Two queries on purpose. `Sum("needed_count")` and a count of
+       participations in one statement join EventRole to Participation, and the
+       Sum is then repeated once per signup — a role wanting 5 with 3 people
+       reports wanting 15. Nothing raises; the number is simply wrong, and
+       wrong in the direction that makes the ministry look short-staffed.
+
+    ⚠️ Roles nobody signed up for have to be here — they have no Participation
+       row to be found through, and they are the ones worth looking at. That is
+       D19's line, arriving in a fourth place.
+    """
+    # `.order_by()` for the same reason as _monthly_series(): any ordering
+    # still on these querysets joins the GROUP BY and splits each role into one
+    # group per row.
+    needed = {
+        row["role__name"]: row["needed"] or 0
+        for row in EventRole.objects.filter(event__in=events)
+        .exclude(needed_count__isnull=True)
+        .order_by()
+        .values("role__name").annotate(needed=Sum("needed_count"))
+    }
+    signed = {
+        row["event_role__role__name"]: row["n"]
+        for row in parts.order_by()
+        .values("event_role__role__name").annotate(n=Count("pk"))
+    }
+    rows = sorted(needed.items(), key=lambda item: item[1], reverse=True)
+    largest = max((count for _, count in rows), default=0)
+    largest = max([largest] + [signed.get(name, 0) for name, _ in rows])
+    bars = [
+        PairedBar(
+            label=name,
+            needed=count,
+            signed=signed.get(name, 0),
+            needed_pct=int(100 * count / largest) if largest else 0,
+            signed_pct=int(100 * signed.get(name, 0) / largest) if largest else 0,
+            short=signed.get(name, 0) < count,
+        )
+        for name, count in rows
+    ]
+    return Chart(
+        title="Wanted against signed up, by role",
+        bars=bars,
+        sparse=len(bars) < 3,
+        note="Roles opened without a number are not here — they can never be short.",
+    )
+
+
+def _top_volunteers(parts, limit=10):
+    """C3: who did the most, by recorded hours then by number of events.
+
+    ⚠️ `nulls_last`. Postgres sorts NULL first on a descending order, so the
+       plain "-hours" puts everybody with no hours recorded at the top of a
+       chart titled "most hours" — the exact inversion of what it claims.
+    """
+    rows = list(
+        parts.order_by()
+        .values("contact_id")
+        .annotate(total=Sum("hours"), n=Count("pk"))
+        .order_by(F("total").desc(nulls_last=True), "-n")[:limit]
+    )
+    people = Contact.objects.in_bulk([row["contact_id"] for row in rows])
+    return _chart(
+        "Most hours",
+        [
+            # ⚠️ short_label, not str(). Contact.__str__ appends an email or a
+            #    phone number to tell two people of the same name apart, which
+            #    a dropdown needs and a leaderboard does not — nothing is
+            #    chosen from this chart, so the disclosure buys nothing.
+            (people[row["contact_id"]].short_label, row["total"])
+            for row in rows
+            if row["total"] is not None
+        ],
+        formatter=lambda h: f"{h:.2f} h",
+    )
 
 
 def set_status(event, status):

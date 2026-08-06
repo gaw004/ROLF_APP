@@ -337,6 +337,72 @@ class Command(BaseCommand):
             },
         )
 
+        self.filler_events(now)
+
+    #: Enough events that the two public lists actually scroll (2026-08-05).
+    #:
+    #: ⚠️ Created **after** the five above, so their ids stay 1–5. The C0.3
+    #:    acceptance checklist names them by id and by status; renumbering them
+    #:    would quietly invalidate that whole document.
+    #:
+    #: ⚠️ These carry no signups, no roles and no hours on purpose. Every one of
+    #:    the five above exists to demonstrate one specific rule (a draft nobody
+    #:    can see, a role with zero turnout, an employee who has since left);
+    #:    padding them with lookalikes makes the list longer and the fixtures
+    #:    harder to reason about. These are scenery.
+    FILLER_UPCOMING = [
+        ("Weekday pantry shift", "pantry", 1, "Church ground floor"),
+        ("Clothing drive sorting", "pantry", 2, "Fellowship hall"),
+        ("Community breakfast", "pantry", 4, "Kitchen"),
+        ("Neighbourhood clean-up", "pantry", 6, ""),
+        ("Backpack packing", "pantry", 8, "Fellowship hall"),
+        ("Winter coat collection", "pantry", 9, ""),
+        ("Tax filing drop-in", "tax", 10, "Room 2B"),
+        ("Benefits advice clinic", "tax", 12, "Room 2B"),
+        ("Senior lunch service", "pantry", 14, "Kitchen"),
+        ("Reading buddies", "pantry", 16, "Library corner"),
+        ("Tax help for students", "tax", 18, ""),
+        ("Garden working party", "pantry", 21, "Back garden"),
+    ]
+
+    FILLER_PAST = [
+        ("Autumn food drive", "pantry", 8, "Church ground floor"),
+        ("Free tax clinic", "tax", 14, "Room 2B"),
+        ("School supplies handout", "pantry", 21, "Fellowship hall"),
+        ("Thanksgiving meal prep", "pantry", 35, "Kitchen"),
+        ("Winter shelter shift", "pantry", 47, ""),
+        ("Spring cleaning day", "pantry", 61, "Back garden"),
+    ]
+
+    def filler_events(self, now):
+        """Scenery: enough rows that the lists are worth scrolling."""
+        for name, ministry, days, place in self.FILLER_UPCOMING:
+            owner = self.pantry_admin if ministry == "pantry" else self.tax_admin
+            Event.objects.get_or_create(
+                name=name,
+                defaults={
+                    "event_type": self.distribution,
+                    "ministry": self.pantry if ministry == "pantry" else self.tax,
+                    "start_time": now + days * DAY,
+                    "end_time": now + days * DAY + 3 * HOUR,
+                    "location": place, "owner": owner.contact,
+                    "status": Event.Status.OPEN,
+                },
+            )
+        for name, ministry, days, place in self.FILLER_PAST:
+            owner = self.pantry_admin if ministry == "pantry" else self.tax_admin
+            Event.objects.get_or_create(
+                name=name,
+                defaults={
+                    "event_type": self.distribution,
+                    "ministry": self.pantry if ministry == "pantry" else self.tax,
+                    "start_time": now - days * DAY,
+                    "end_time": now - days * DAY + 3 * HOUR,
+                    "location": place, "owner": owner.contact,
+                    "status": Event.Status.COMPLETED,
+                },
+            )
+
     # --- helpers ---------------------------------------------------------
 
     def role(self, event, participation_role, needed_count):

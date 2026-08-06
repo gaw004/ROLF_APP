@@ -2106,7 +2106,12 @@ class SeedDemoTests(TestCase):
                 MinistryRole.objects.values("ministry").distinct().count(), 2)
 
         with self.subTest("an employee who left after the event — R8's clock"):
-            past = Event.objects.filter(status=Event.Status.COMPLETED).first()
+            # ⚠️ Named, not `filter(status=COMPLETED).first()`. That version
+            #    assumed there was only ever one finished event, and it broke
+            #    the day seed_demo grew a dozen filler events for the scrolling
+            #    demo — `.first()` started returning scenery that was never
+            #    meant to carry this scenario.
+            past = Event.objects.filter(name="Last month's distribution").first()
             self.assertIsNotNone(past)
             self.assertTrue(
                 Assignment.objects.filter(

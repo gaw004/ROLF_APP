@@ -57,7 +57,9 @@ org/permissions.py，不是 MinistryRole —— 导航里再抄一份判断，�
 hx-headers 挂一次，所有 HTMX 请求都带上 CSRF —— 不要每个表单各写一遍。
 {% endcomment %}
 <body class="flex min-h-full flex-col bg-ink-50 text-ink-900 antialiased dark:bg-ink-950 dark:text-ink-100"
-      hx-headers='{"X-CSRFToken": "{{ csrf_token }}"}'>
+      hx-headers='{"X-CSRFToken": "{{ csrf_token }}"}'
+      x-data="{ menu: false, bar: false }"
+      x-on:keydown.escape.window="menu = false">
 
   {% comment %}
   跳到主内容。只在键盘 Tab 到它的时候才出现 —— 读屏和键盘用户不必每页先听
@@ -68,93 +70,23 @@ hx-headers 挂一次，所有 HTMX 请求都带上 CSRF —— 不要每个表�
     Skip to main content
   </a>
 
-  <header class="relative border-b border-ink-200 bg-white dark:border-ink-800 dark:bg-ink-900">
-    <nav class="mx-auto flex max-w-6xl items-center gap-4 px-4 py-3" x-data="{ open: false }">
-      {% comment %}
-      左上角的字样链回公开首页（2026-08-05）。原来链的是 /events/ ——
-      那时还没有首页可链。
-      {% endcomment %}
-      <a href="{% url 'home' %}"
-         class="shrink-0 text-lg font-semibold text-brand-700 dark:text-brand-300">ROLF</a>
+  {% comment %}
+  ⚠️ 和首页**同一条** bar、**同一个**菜单（2026-08-05 改）。原来这里是一条平铺
+     所有链接的导航条，左上角写着「ROLF」。改成共用组件的理由是衔接：
+     从首页点进活动列表时，字样、字号、字距、位置全都不动 ——
+     两份拷贝迟早会差一两个像素，而那一下跳动就是「不丝滑」的来源。
 
-      {% comment %}
-      窄屏把链接收进汉堡菜单。⚠️ 汉堡本身是一个 <button>，不是一个挂了
-      x-on:click 的 <div> —— 后者键盘按不到，而这是进入整个站的入口。
-      {% endcomment %}
-      <button type="button" x-on:click="open = !open"
-              class="ml-auto rounded-md p-2 text-ink-700 hover:bg-ink-100 sm:hidden dark:text-ink-200 dark:hover:bg-ink-800"
-              x-bind:aria-expanded="open ? 'true' : 'false'" aria-controls="site-nav">
-        <span class="sr-only">Menu</span>
-        <svg class="h-5 w-5" width="20" height="20" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-          <path d="M3 5h14v2H3V5zm0 4h14v2H3V9zm0 4h14v2H3v-2z"/>
-        </svg>
-      </button>
+  内页传 `solid`（一直白着，底下是内容不是照片，藏起来只会让导航变难找）
+  和 `themed`（右侧带主题切换和用户名）。
 
-      {% comment %}
-      ⚠️ 静态 class 里写的是 `hidden sm:flex`，Alpine 只在窄屏切换它。
-         这样**没有 JavaScript 时宽屏导航照常显示** —— 而窄屏用户拿不到菜单，
-         那是可接受的降级：D24 的口径只保写操作，导航是读。
-      {% endcomment %}
-      <div id="site-nav"
-           class="absolute left-0 right-0 top-full z-40 hidden flex-col gap-1 border-b border-ink-200 bg-white p-4 shadow-lg sm:static sm:ml-auto sm:flex sm:flex-row sm:items-center sm:gap-1 sm:border-0 sm:bg-transparent sm:p-0 sm:shadow-none dark:border-ink-800 dark:bg-ink-900"
-           x-bind:class="open ? 'flex' : 'hidden sm:flex'">
+  ⚠️ 吸顶。导航全收进菜单之后，bar 跟着内容滚走就意味着「在长列表底部想换页
+     得先滚回顶部」—— 而列表正要变长。
+  {% endcomment %}
+  <div class="sticky top-0 z-30">
+    {% include "core/components/_top_bar.html" with solid=1 themed=1 %}
+  </div>
 
-        {% include "core/components/_nav_link.html" with label="Events" to="events:event_list" %}
-        {% include "core/components/_nav_link.html" with label="Past events" to="events:past_events" %}
-
-        {% if user.is_authenticated %}
-          {% include "core/components/_nav_link.html" with label="My signups" to="events:my_participations" %}
-          {% include "core/components/_nav_link.html" with label="My profile" to="accounts:profile" %}
-          {% if is_ministry_admin %}
-            {% include "core/components/_nav_link.html" with label="Events I manage" to="events:event_manage_list" %}
-          {% elif can_see_all_events %}
-            {% comment %}
-            同一个页面，两种身份两个名字：ministry admin 看到的是自己那几个
-            ministry 的活动且能改，foundation tier 看到的是全部、只读。
-            {% endcomment %}
-            {% include "core/components/_nav_link.html" with label="All events" to="events:event_manage_list" %}
-          {% endif %}
-          {% if can_grant_ministry_admin %}
-            {% include "core/components/_nav_link.html" with label="Ministry admins" to="org:ministry_list" %}
-          {% endif %}
-          {% if user.is_staff %}
-            <a href="/admin/"
-               class="rounded-md px-3 py-2 text-sm text-ink-700 hover:bg-ink-100 dark:text-ink-200 dark:hover:bg-ink-800">Admin site</a>
-          {% endif %}
-        {% endif %}
-
-        <div class="mt-2 flex items-center gap-2 border-t border-ink-200 pt-2 sm:ml-2 sm:mt-0 sm:border-l sm:border-t-0 sm:pl-3 sm:pt-0 dark:border-ink-800">
-          {% comment %}
-          主题切换。Alpine 只碰 localStorage 和 <html> 上那个 class ——
-          纯 UI 状态，正好是 x- 属性允许管的东西。
-          {% endcomment %}
-          <button type="button" x-data="themeToggle" x-on:click="toggle()"
-                  class="rounded-md p-2 text-ink-700 hover:bg-ink-100 dark:text-ink-200 dark:hover:bg-ink-800">
-            <span class="sr-only">Switch between light and dark</span>
-            <svg class="h-5 w-5 dark:hidden" width="20" height="20" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-              <path d="M10 2a1 1 0 011 1v1a1 1 0 11-2 0V3a1 1 0 011-1zm0 12a4 4 0 100-8 4 4 0 000 8zm7-4a1 1 0 01-1 1h-1a1 1 0 110-2h1a1 1 0 011 1zM5 10a1 1 0 01-1 1H3a1 1 0 110-2h1a1 1 0 011 1zm10.07-5.07a1 1 0 010 1.41l-.71.71a1 1 0 11-1.41-1.41l.7-.71a1 1 0 011.42 0zM6.05 13.95a1 1 0 010 1.41l-.71.71a1 1 0 01-1.41-1.42l.7-.7a1 1 0 011.42 0zm9.02 2.12a1 1 0 01-1.42 0l-.7-.71a1 1 0 011.41-1.41l.71.7a1 1 0 010 1.42zM6.05 6.05a1 1 0 01-1.42 0l-.7-.71a1 1 0 011.41-1.41l.71.7a1 1 0 010 1.42zM10 16a1 1 0 011 1v1a1 1 0 11-2 0v-1a1 1 0 011-1z"/>
-            </svg>
-            <svg class="hidden h-5 w-5 dark:block" width="20" height="20" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-              <path d="M17.293 13.293A8 8 0 016.707 2.707a8.001 8.001 0 1010.586 10.586z"/>
-            </svg>
-          </button>
-
-          {% if user.is_authenticated %}
-            <span class="truncate text-sm text-ink-600 dark:text-ink-300">{{ user.get_username }}</span>
-            <form method="post" action="{% url 'accounts:logout' %}">
-              {% csrf_token %}
-              {% include "core/components/button.html" with label="Log out" variant="ghost" %}
-            </form>
-          {% else %}
-            {% url 'accounts:login' as login_url %}
-            {% url 'accounts:register' as register_url %}
-            {% include "core/components/button.html" with label="Log in" href=login_url variant="secondary" %}
-            {% include "core/components/button.html" with label="Register" href=register_url variant="primary" %}
-          {% endif %}
-        </div>
-      </div>
-    </nav>
-  </header>
+  {% include "core/components/_site_menu.html" %}
 
   <main id="main" class="mx-auto w-full flex-1 px-4 py-8 {% block main_width %}max-w-6xl{% endblock %}">
     {% comment %}

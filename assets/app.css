@@ -468,3 +468,67 @@
     100% { transform: translateY(-6px) scale(0.992); }
   }
 }
+
+@layer components {
+  /* --- 顶栏的第二种形态：内页（2026-08-05）-----------------------------------
+   *
+   * `.is-solid` = 一直白着。内页底下是内容不是照片，藏起来只会让导航变难找，
+   * 换不来任何东西 —— 首页那条之所以藏，是因为藏起来才看得到画面。
+   */
+  .home-bar.is-solid {
+    background-color: #fff;
+    border-bottom: 1px solid var(--color-ink-200);
+  }
+
+  .home-bar.is-solid .home-bar-item {
+    color: var(--color-brand-900);
+    text-shadow: none;
+  }
+
+  .home-bar.is-solid .home-bar-item:hover {
+    color: var(--color-brand-700);
+  }
+
+  /* ⚠️ 深色配色只有内页需要。首页不跟随深色模式（满屏照片 + 白字），
+   * 少了这一段的话深色模式下内页顶上会横着一条刺眼的白带。 */
+  .dark .home-bar.is-solid {
+    background-color: var(--color-ink-900);
+    border-bottom-color: var(--color-ink-800);
+  }
+
+  .dark .home-bar.is-solid .home-bar-item {
+    color: var(--color-brand-300);
+  }
+
+  .dark .home-bar.is-solid .home-bar-item:hover {
+    color: var(--color-brand-200);
+  }
+
+  /* --- 居中的字样 -----------------------------------------------------------
+   *
+   * ⚠️ 它是绝对定位的，所以**不会给左右两侧让位**。375px 上原来会换成两行
+   *    并压在 Menu 上 —— 首页从上线起就有这个 bug，铺到每一页之后会到处都是。
+   *
+   * 解药是收小而不是换行：`white-space: nowrap` 保证单行，窄屏把字号和字距
+   * 压到「Menu + 字样 + Log in」三者加起来仍然进得去 375px。
+   */
+  .home-bar-wordmark {
+    white-space: nowrap;
+    font-size: 0.6875rem;      /* 11px */
+    letter-spacing: 0.1em;
+  }
+
+  @media (min-width: 480px) {
+    .home-bar-wordmark {
+      font-size: 0.8125rem;
+      letter-spacing: 0.14em;
+    }
+  }
+
+  @media (min-width: 768px) {
+    .home-bar-wordmark {
+      font-size: 1.125rem;
+      letter-spacing: 0.18em;
+    }
+  }
+}

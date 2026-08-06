@@ -882,6 +882,10 @@ class ContrastGuardTests(TestCase):
         ("warning-fg-dark", "warning-bg-dark", 4.5, "深色下的 warning"),
         ("danger-fg-dark",  "danger-bg-dark",  4.5, "深色下的 danger"),
         ("info-fg-dark",    "info-bg-dark",    4.5, "深色下的 info"),
+        # 分类徽章（ministry 名）。⚠️ 它用的是 brand 而不是语义色 ——
+        # 一个不表示任何状态的标签借了「信息」那一档，读起来就有了语气。
+        ("brand-800", "brand-50",  4.5, "分类徽章，浅色下"),
+        ("brand-200", "brand-900", 4.5, "分类徽章，深色下"),
         # 焦点环只要看得见就行，按「大字号和图标」那档 3:1。
         ("brand-500", "white",   3.0, "焦点环，浅色下"),
         ("brand-500", "ink-950", 3.0, "焦点环，深色下"),
@@ -1158,6 +1162,15 @@ class DerivedPaletteTests(TestCase):
         (300, (16, 21, 26), 4.5, "the dark-mode link on ink-950"),
     ]
 
+    #: Pairs where **both** colours come out of the ramp, so both move with the
+    #: photograph. The ministry badge is the one that matters: it is a category
+    #: label, not a status, so it uses brand rather than borrowing a semantic
+    #: colour.
+    PUBLISHED_PAIRS = [
+        (800, 50, 4.5, "the category badge, light"),
+        (200, 900, 4.5, "the category badge, dark"),
+    ]
+
     def contrast(self, hex_colour, other):
         rgb = tuple(int(hex_colour.lstrip("#")[i:i + 2], 16) for i in (0, 2, 4))
         first, second = relative_luminance(rgb), relative_luminance(other)
@@ -1174,6 +1187,12 @@ class DerivedPaletteTests(TestCase):
                 self.assertIsNotNone(ramp, f"hue {hue} sat {saturation} produced nothing")
                 for step, against, minimum, what in self.PUBLISHED:
                     got = self.contrast(ramp[step], against)
+                    if got < minimum:
+                        failures.append(
+                            f"hue {hue} sat {saturation}: {what} = {got:.2f}, need {minimum}")
+                for front, back, minimum, what in self.PUBLISHED_PAIRS:
+                    rgb = tuple(int(ramp[back].lstrip("#")[i:i + 2], 16) for i in (0, 2, 4))
+                    got = self.contrast(ramp[front], rgb)
                     if got < minimum:
                         failures.append(
                             f"hue {hue} sat {saturation}: {what} = {got:.2f}, need {minimum}")

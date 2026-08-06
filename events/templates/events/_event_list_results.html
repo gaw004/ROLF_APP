@@ -58,7 +58,7 @@ event_list 的结果区。整页和 HTMX 片段渲染的是同一份 —— 视�
         <div class="flex flex-wrap items-baseline justify-between gap-2">
           <a href="{% url 'events:event_detail' event.pk %}"
              class="text-lg font-semibold prose-link">{{ event.name }}</a>
-          {% include "core/components/badge.html" with label=event.ministry.name tone="info" %}
+          {% include "core/components/badge.html" with label=event.ministry.name tone="brand" %}
         </div>
         <p class="mt-2 text-sm text-ink-600 dark:text-ink-300">
           {{ event.start_time }} &ndash; {{ event.end_time }}

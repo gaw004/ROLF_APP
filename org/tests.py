@@ -5,6 +5,7 @@ from django.apps import apps
 from django.contrib import admin
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import AnonymousUser, Group, Permission
+from django.core.management import call_command
 from django.core.exceptions import ValidationError
 from django.db import IntegrityError, connection, transaction
 from django.db.models import ProtectedError
@@ -800,6 +801,28 @@ class FoundationAdminGroupTests(TestCase):
         # is is_active=False — an ending is a date, not a deletion.
         granted = {p.codename for p in foundation_admin_group().permissions.all()}
         self.assertNotIn("delete_ministry", granted)
+
+    def test_a_migrate_is_what_keeps_the_group_true_in_production(self):
+        """⚠️ The second half of the same bug, and the half that mattered more.
+
+        Making `foundation_admin_group()` reconcile was not enough: the only
+        things that called it were `seed_demo` and the tests, and **neither runs
+        on a deployed site**. Adding a permission to the list therefore did
+        nothing at all in production — silently — and the only symptom was a
+        page missing from the admin index.
+
+        It is now wired to `post_migrate`, and `migrate` runs on every deploy.
+        This asserts the wiring, not the function: strip the group down, run
+        migrate, and it has to come back.
+        """
+        group, _ = Group.objects.get_or_create(name=FOUNDATION_ADMIN_GROUP)
+        group.permissions.clear()
+
+        call_command("migrate", verbosity=0)
+
+        granted = {p.codename for p in group.permissions.all()}
+        self.assertIn("add_ministry", granted)
+        self.assertIn("change_homepage", granted)
 
     def test_an_existing_group_is_brought_up_to_date(self):
         """The bug this whole class is about, as an assertion.

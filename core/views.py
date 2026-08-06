@@ -21,5 +21,11 @@ def home(request):
 
     ⚠️ The only public pages are this one, login and register. Everything else
        still requires a session — the boundary did not move, it grew by one.
+
+    ⚠️ `current()`, not `load()`. The latter is a get_or_create, and this is a
+       public page — putting a write on the busiest read path in the site means
+       every anonymous visitor takes a write lock on the same single row.
+       Only the admin creates it, which is the one place creating means
+       something.
     """
-    return render(request, "core/home.html", {"page": HomePage.load()})
+    return render(request, "core/home.html", {"page": HomePage.current()})

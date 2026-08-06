@@ -428,44 +428,32 @@
     transition-delay: calc(160ms + var(--i, 0) * 55ms);
   }
 
-  /* --- 滚动时的呼吸感 -------------------------------------------------------
+  /* --- 滚动时的惯性 ---------------------------------------------------------
    *
-   * 用在活动列表的每一项上。口径和取舍在 design-system.md 九、滚动。
+   * ⚠️ **2026-08-05 从纯 CSS 换成 JS**，原来那版整个删掉了。理由不是它坏了 ——
+   *    它按设计工作，只是**给不了要的东西**：`animation-timeline: view()`
+   *    知道的是元素在视口里的**位置**，而「拖拽的惯性」需要的是**速度**。
+   *    那是那个技术的边界，不是参数没调够。
    *
-   * ⚠️ 只动 transform，**绝不动间距，也不动透明度**。
+   *    实现挪到 assets/js/app.js 的 scrollInertia。这里只留两件 CSS 该管的事。
    *
-   *    不动间距：滚动中改 margin 会改变页面总高度，浏览器要不断重排、滚动位置
-   *    和手指打架 —— 结果不是呼吸感，是页面在抖。
-   *
-   *    不动透明度：这一条是**实测出来的**。第一版两端 opacity 降到 0.35，
-   *    结果在**没有滚动条的短页面上整列表一打开就是灰的** —— 时间轴退化了，
-   *    进度直接停在 100%，也就是那一帧。而演示数据只有两场活动，正是这种页面。
-   *    位移停在 ±6px 肉眼看不出来，透明度停在 0.35 一眼就是坏的。
-   *
-   * ⚠️ 纯 CSS 的滚动驱动动画，零 JS。Firefox 目前不支持 animation-timeline，
-   *    @supports 保证那里连规则都不会应用 —— 列表照常可用。
-   *
-   * ⚠️ prefers-reduced-motion 要**单独挡一层**，不能只靠文件顶上那条全局规则：
-   *    那条压的是 animation-duration，而滚动驱动动画的进度由滚动位置决定、
-   *    根本不看时长，压不住。
+   * ⚠️ 两套东西**不能并存**。它们会同时写同一个元素的 transform，
+   *    谁最后写谁赢，而那取决于帧的时序 —— 是必然出 bug 的写法。
    */
-  @supports (animation-timeline: view()) {
-    @media (prefers-reduced-motion: no-preference) {
-      .scroll-breathe {
-        animation: scroll-breathe linear both;
-        animation-timeline: view();
-        /* ⚠️ 一个区间，不是两个。第一版写成 `entry 0% cover 20%, cover 80%
-         * exit 100%` —— 逗号在这里是「给多个动画各配一个区间」的意思，
-         * 于是后半段被整个丢掉，而且没有任何报错。 */
-        animation-range: entry 0% exit 100%;
-      }
-    }
+  .scroll-breathe {
+    /* 告诉浏览器这个元素的 transform 会频繁变，让它提前提到合成层。
+     * ⚠️ 只加 transform，不加 opacity —— will-change 每多一个属性就多占一块
+     *    显存，而一页有十几张卡片。 */
+    will-change: transform;
   }
 
-  @keyframes scroll-breathe {
-    0%   { transform: translateY(6px) scale(0.992); }
-    50%  { transform: none; }
-    100% { transform: translateY(-6px) scale(0.992); }
+  /* ⚠️ 减少动效时整件事关掉。JS 那边也会读同一个 media query 并直接不启动 ——
+   * 两处都要有：这里保证即使脚本跑起来了也不会留下残余位移。 */
+  @media (prefers-reduced-motion: reduce) {
+    .scroll-breathe {
+      will-change: auto;
+      transform: none !important;
+    }
   }
 }
 
@@ -530,5 +518,55 @@
       font-size: 1.125rem;
       letter-spacing: 0.18em;
     }
+  }
+}
+
+@layer components {
+  /* --- 深色模式：半透明的黑，让背后的照片透出来（2026-08-05）---------------
+   *
+   * ⚠️ 只在 <html> 上同时有 .dark **和** .has-hero 时生效。没传照片的时候
+   *    背后是纯深色，半透明面板会让页面看起来像蒙了一层灰 —— 那时不透明的
+   *    ink-900 才是对的。这个开关由 base.html 按 site_hero_image 给。
+   *
+   * ⚠️ 不透明度是**量出来的**，不是挑好看的。0.72 是能让
+   *    ink-100 的正文在最亮的照片区域上仍然过 4.5:1 的最低值 ——
+   *    再透一点字就开始糊，而这件事只在某几张照片上发生，不报错。
+   *
+   * ⚠️ backdrop-filter 只加模糊不加变暗：变暗交给上面那句实心的半透明黑，
+   *    因为模糊在不支持 backdrop-filter 的浏览器上会被整个忽略，
+   *    而对比度不能依赖一个可以被忽略的东西。
+   */
+  .dark.has-hero .card {
+    background-color: rgb(0 0 0 / 0.72);
+    border-color: rgb(255 255 255 / 0.14);
+    backdrop-filter: blur(10px);
+  }
+
+  .dark.has-hero .table-wrap {
+    background-color: rgb(0 0 0 / 0.72);
+    border-color: rgb(255 255 255 / 0.14);
+    backdrop-filter: blur(10px);
+  }
+
+  .dark.has-hero .table-wrap th {
+    background-color: rgb(255 255 255 / 0.06);
+  }
+
+  .dark.has-hero .table-wrap td {
+    border-top-color: rgb(255 255 255 / 0.10);
+  }
+
+  .dark.has-hero .home-bar.is-solid {
+    background-color: rgb(0 0 0 / 0.62);
+    border-bottom-color: rgb(255 255 255 / 0.12);
+    backdrop-filter: blur(14px);
+  }
+
+  /* 表单控件也要透，否则一排实心方块浮在照片上 */
+  .dark.has-hero .field input:not([type="checkbox"]):not([type="radio"]),
+  .dark.has-hero .field select,
+  .dark.has-hero .field textarea {
+    background-color: rgb(0 0 0 / 0.45);
+    border-color: rgb(255 255 255 / 0.18);
   }
 }

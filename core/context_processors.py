@@ -16,6 +16,7 @@ set of ids, and can_grant_ministry_admin() is one group lookup. Both run per
 request because base.html draws the nav on every page.
 """
 
+from core.models import HomePage
 from org.permissions import (
     can_grant_ministry_admin,
     in_foundation_tier,
@@ -51,4 +52,32 @@ def navigation(request):
         #    rather than by any test.
         "can_see_all_events": bool(administered) or foundation,
         "can_grant_ministry_admin": can_grant_ministry_admin(user),
+    }
+
+
+def site_appearance(request):
+    """The front page's picture and the brand ramp derived from it.
+
+    Both are needed by the **shared shell**, so they are here rather than in
+    each view: the top bar is on every page, and in dark mode the background is
+    that picture.
+
+    ⚠️ One **read** query per request, on a single row that almost never
+       changes. `current()` rather than `load()` on purpose: the latter is a
+       get_or_create, which puts a write on the read path of every page in the
+       site. Two query-count tests caught that within a minute of it landing.
+
+    ⚠️ One query is cheap but not free, and it is the reason `brand_palette` is
+       stored on the row rather than computed: quantising a photograph per page
+       view would not be.
+
+    ⚠️ Returns the **image** only, never the video. A video behind every page
+       means every page decodes video, which on a phone is heat and battery for
+       something nobody is looking at. A page whose only hero is a video falls
+       back to the plain dark background.
+    """
+    page = HomePage.current()
+    return {
+        "site_hero_image": page.hero_image if page.hero_image else None,
+        "site_brand_palette": page.brand_palette or None,
     }

@@ -17,6 +17,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>River of Life Foundation</title>
   <link rel="stylesheet" href="{% static 'css/app.css' %}">
+  {% include "core/components/_appearance.html" %}
   {% comment %}
   ⚠️ 首页**不跟随深色模式**，也不读 localStorage.theme。它是一张满屏的照片
      加白字，深色版本没有意义 —— 而如果这里也切主题，那段内联脚本给 <html>

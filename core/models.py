@@ -111,6 +111,16 @@ class HomePage(models.Model):
         max_length=120, blank=True,
         help_text="Where it is from, shown underneath — e.g. Colossians 3:23–24.",
     )
+    #: Ten hex strings keyed by step, derived from hero_image. Empty = use the
+    #: built-in teal.
+    #:
+    #: ⚠️ Stored rather than computed per request. Quantising a photograph is
+    #:    tens of milliseconds, and this would otherwise run on **every page
+    #:    view of the whole site** — the colours are in the shared shell.
+    #:
+    #: ⚠️ Not editable by hand. It is derived, and a derived value somebody can
+    #:    also type is two answers to one question. Recomputed in save().
+    brand_palette = models.JSONField(default=dict, blank=True, editable=False)
 
     class Meta:
         verbose_name = "home page"
@@ -124,7 +134,27 @@ class HomePage(models.Model):
         #    created through the shell or a fixture, and then load() below picks
         #    one of them by chance.
         self.pk = self.SINGLETON_PK
+        self.refresh_palette()
         super().save(*args, **kwargs)
+
+    def refresh_palette(self):
+        """Re-derive the brand ramp from the current picture. Never raises.
+
+        ⚠️ A failure here must not stop somebody saving the page. The palette is
+           decoration; the verse and the picture are the content. So anything
+           that goes wrong — an unreadable file, a photograph with no usable
+           colour in it — clears the ramp and lets the built-in teal stand.
+        """
+        from .palette import dominant_colour, ramp_from
+
+        if not self.hero_image:
+            self.brand_palette = {}
+            return
+        try:
+            colour = dominant_colour(self.hero_image)
+            self.brand_palette = {str(k): v for k, v in (ramp_from(colour) or {}).items()}
+        except Exception:
+            self.brand_palette = {}
 
     def delete(self, *args, **kwargs):
         """Refused. The public front page cannot be "not there"."""
@@ -135,9 +165,24 @@ class HomePage(models.Model):
 
     @classmethod
     def load(cls):
-        """The one row, created on first use. Always answers."""
+        """The one row, created if it is not there. Always answers.
+
+        ⚠️ Writes. Use `current()` on read paths — see the warning there.
+        """
         instance, _ = cls.objects.get_or_create(pk=cls.SINGLETON_PK)
         return instance
+
+    @classmethod
+    def current(cls):
+        """The one row if it exists, otherwise an unsaved blank one. Never writes.
+
+        ⚠️ The read-path version, and the distinction is not pedantry: the
+           shared shell asks for this on **every page view of the whole site**,
+           and `load()` would put a `get_or_create` there — a write on the read
+           path, and one extra query the first time it runs. Two query-count
+           tests caught exactly that.
+        """
+        return cls.objects.filter(pk=cls.SINGLETON_PK).first() or cls()
 
     @property
     def hero(self):

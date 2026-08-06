@@ -5,6 +5,7 @@ keeps reaching for when a rule has to hold everywhere and no linter enforces it
 (migration guard, D16 time, D18 layering, D14 mappings, org-tree traversal).
 """
 
+import colorsys
 import datetime
 import re
 from pathlib import Path
@@ -20,6 +21,7 @@ from django.urls import reverse
 
 from core.constraints import CONSTRAINT_FIELD
 from core.models import HomePage
+from core.palette import ramp_from, relative_luminance
 from core.querysets import DateRangeQuerySet
 from core.timeutils import local_today
 
@@ -1131,3 +1133,100 @@ class HomePageSingletonTests(TestCase):
         self.assertEqual(page.hero[1], "image")
         page.hero_image = ""
         self.assertIsNone(page.hero)
+
+
+class DerivedPaletteTests(TestCase):
+    """The brand ramp is built from the front page's photograph (D26).
+
+    ⭐ **The one assertion that matters is the sweep.** A palette taken from an
+       arbitrary photograph is a palette nobody reviewed, so the guarantee
+       cannot be "we checked the teal one" — it has to hold for every hue and
+       every saturation a camera can produce.
+
+    It holds because `core/palette.py` pins the **relative luminance** of each
+    step to the value the hand-tuned teal had. Contrast is a function of
+    luminance alone, so every ratio in design-system.md's table survives
+    unchanged.
+    """
+
+    #: The three ratios design-system.md publishes, and what they are measured
+    #: against. Allowing 0.15 of slack: the generator lands on the target
+    #: luminance by bisection and 8-bit rounding moves it a hair.
+    PUBLISHED = [
+        (700, (255, 255, 255), 4.5, "link text on white"),
+        (600, (255, 255, 255), 4.5, "white on the primary button"),
+        (300, (16, 21, 26), 4.5, "the dark-mode link on ink-950"),
+    ]
+
+    def contrast(self, hex_colour, other):
+        rgb = tuple(int(hex_colour.lstrip("#")[i:i + 2], 16) for i in (0, 2, 4))
+        first, second = relative_luminance(rgb), relative_luminance(other)
+        lighter, darker = max(first, second), min(first, second)
+        return (lighter + 0.05) / (darker + 0.05)
+
+    def test_every_hue_and_saturation_still_meets_the_published_ratios(self):
+        """⭐ Twelve hues × four saturations. All of them, or the feature is unsafe."""
+        failures = []
+        for hue in range(0, 360, 30):
+            for saturation in (0.25, 0.45, 0.70, 0.95):
+                red, green, blue = colorsys.hls_to_rgb(hue / 360, 0.5, saturation)
+                ramp = ramp_from((round(red * 255), round(green * 255), round(blue * 255)))
+                self.assertIsNotNone(ramp, f"hue {hue} sat {saturation} produced nothing")
+                for step, against, minimum, what in self.PUBLISHED:
+                    got = self.contrast(ramp[step], against)
+                    if got < minimum:
+                        failures.append(
+                            f"hue {hue} sat {saturation}: {what} = {got:.2f}, need {minimum}")
+        self.assertEqual(failures, [], "\n".join(failures))
+
+    def test_a_grey_photograph_is_refused_rather_than_used(self):
+        """⚠️ Fog and snow have no hue worth taking.
+
+        A near-grey "brand" colour reads as broken rather than as restrained, so
+        the generator declines and the built-in teal stands.
+        """
+        self.assertIsNone(ramp_from((128, 128, 130)))
+
+    def test_the_ramp_keeps_the_photographs_hue(self):
+        # Otherwise it is not derived from anything and the feature is a lie.
+        ramp = ramp_from((196, 40, 44))            # a red barn
+        red, green, blue = (int(ramp[600].lstrip("#")[i:i + 2], 16) for i in (0, 2, 4))
+        self.assertGreater(red, green)
+        self.assertGreater(red, blue)
+
+    def test_a_muted_photograph_stays_muted(self):
+        """Saturation is capped by the tuned ramp, not replaced by it.
+
+        ⚠️ Taking the reference saturation outright would turn every photograph
+           into the same vivid ramp — the colour would come from the picture and
+           the character would not.
+        """
+        muted = ramp_from((120, 96, 84))
+        vivid = ramp_from((255, 90, 20))
+        self.assertLess(self.saturation_of(muted[600]), self.saturation_of(vivid[600]))
+
+    def saturation_of(self, hex_colour):
+        rgb = [int(hex_colour.lstrip("#")[i:i + 2], 16) / 255 for i in (0, 2, 4)]
+        return colorsys.rgb_to_hls(*rgb)[2]
+
+
+class AppearanceContextTests(TestCase):
+    """What the shared shell is told about the front page, on every request."""
+
+    def test_no_hero_means_no_override_and_no_background(self):
+        # A fresh production database. The built-in teal has to stand, and dark
+        # mode has to stay plain dark.
+        response = self.client.get(reverse("home"))
+        self.assertIsNone(response.context["site_brand_palette"])
+        self.assertIsNone(response.context["site_hero_image"])
+
+    def test_the_read_path_never_writes(self):
+        """⚠️ `current()`, not `load()`.
+
+        The shell asks for this on every page view of the whole site, and
+        `load()` is a get_or_create — a write on the read path. Two query-count
+        tests caught that within a minute of it landing; this states the rule
+        so it does not come back.
+        """
+        self.client.get(reverse("home"))
+        self.assertEqual(HomePage.objects.count(), 0)

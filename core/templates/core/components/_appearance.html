@@ -1,0 +1,22 @@
+{% comment %}
+把从首页照片里推出来的品牌色阶发到页面上。放在 <head>，两个外壳都 include。
+
+⚠️ 这是**唯一**一处运行时覆盖设计令牌的地方。`assets/app.css` 的 `@theme` 里那套
+   青蓝仍然是默认值，这里只是在有照片时把它盖掉 —— 没照片、照片没有可用色相
+   （雾、雪、纯灰）、或者提取失败时，这段整个不输出，内置那套原样生效。
+
+⚠️ 只覆盖 brand-*。语义色（success / warning / danger / info）**一个都不动** ——
+   红色必须是红色，一张绿色调的照片不能让「危险」变成绿的。
+
+⚠️ 对比度不靠这里保证，靠 core/palette.py 的构造：每一档的**相对亮度**被钉死成
+   原来那套量过的值，所以无论照片是什么颜色，link 文字仍然是 7.17:1、
+   白字配主按钮仍然是 5.21:1。改这里之前先读那个文件的开头。
+{% endcomment %}
+{% if site_brand_palette %}
+  <style>
+    :root {
+      {% for step, hex in site_brand_palette.items %}--color-brand-{{ step }}: {{ hex }};
+      {% endfor %}
+    }
+  </style>
+{% endif %}

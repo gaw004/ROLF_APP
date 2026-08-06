@@ -14,12 +14,13 @@ org/permissions.py，不是 MinistryRole —— 导航里再抄一份判断，�
   content     正文
   main_width  版心。默认 max-w-6xl；表单页用 max-w-2xl（长行读起来累）
 {% endcomment %}<!doctype html>
-<html lang="en" class="h-full">
+<html lang="en" class="h-full{% if site_hero_image %} has-hero{% endif %}">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}ROLF{% endblock %} · ROLF</title>
   <link rel="stylesheet" href="{% static 'css/app.css' %}">
+  {% include "core/components/_appearance.html" %}
   {% comment %}
   ⚠️ 深色模式那段脚本：**必须内联、必须在 <head> 里、必须在样式表之后**，
      三条缺一不可。放到外部 JS 或者 <body> 末尾，页面会先按浅色画一遍再跳成深色 ——
@@ -56,7 +57,7 @@ org/permissions.py，不是 MinistryRole —— 导航里再抄一份判断，�
 {% comment %}
 hx-headers 挂一次，所有 HTMX 请求都带上 CSRF —— 不要每个表单各写一遍。
 {% endcomment %}
-<body class="flex min-h-full flex-col bg-ink-50 text-ink-900 antialiased dark:bg-ink-950 dark:text-ink-100"
+<body class="flex min-h-full flex-col bg-ink-50 text-ink-900 antialiased dark:bg-transparent dark:text-ink-100"
       hx-headers='{"X-CSRFToken": "{{ csrf_token }}"}'
       x-data="{ menu: false, bar: false }"
       x-on:keydown.escape.window="menu = false">
@@ -65,6 +66,29 @@ hx-headers 挂一次，所有 HTMX 请求都带上 CSRF —— 不要每个表�
   跳到主内容。只在键盘 Tab 到它的时候才出现 —— 读屏和键盘用户不必每页先听
   一遍完整导航。
   {% endcomment %}
+  {% comment %}
+  深色模式下的背景：首页那张照片，压暗，铺满且**不随内容滚动**（fixed）。
+  浅色模式一个字不变。
+
+  ⚠️ 只有深色才有。浅色下页面已经是干净的浅灰底，铺一张照片只会让每一段文字
+     都变成「压在照片上的文字」—— 而那是要一处一处去保证对比度的东西。
+
+  ⚠️ 这一层在 -z-10，卡片和表格在它上面用半透明黑。所以照片是透出来的，
+     不是「贴在卡片背后」—— 后者会让每张卡片各自截取照片的一小块，
+     滚动时那些小块会跟着动，看起来像十几个各自为政的窗口。
+
+  ⚠️ 没有照片时这一段整个不输出，深色退回原来的纯深色底。
+     只传了视频没传图片时同样如此 —— 每页解码一段视频在手机上是发烫和耗电，
+     而没有人在看它。
+  {% endcomment %}
+  {% if site_hero_image %}
+    <div aria-hidden="true"
+         class="pointer-events-none fixed inset-0 -z-10 hidden bg-cover bg-center dark:block"
+         style="background-image: url('{{ site_hero_image.url }}')"></div>
+    <div aria-hidden="true"
+         class="pointer-events-none fixed inset-0 -z-10 hidden bg-ink-950/80 dark:block"></div>
+  {% endif %}
+
   <a href="#main"
      class="sr-only focus:not-sr-only focus:absolute focus:left-4 focus:top-4 focus:z-50 focus:rounded-md focus:bg-brand-600 focus:px-4 focus:py-2 focus:text-sm focus:text-white">
     Skip to main content

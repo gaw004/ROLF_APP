@@ -118,6 +118,9 @@ TEMPLATES = [
                 # Which management entrances the shared nav should draw. Asks
                 # org.permissions, never MinistryRole directly (D20).
                 'core.context_processors.navigation',
+                # The front page's picture and the brand ramp derived from it.
+                # Needed by the shared shell on every page (D25 / D26).
+                'core.context_processors.site_appearance',
             ],
         },
     },

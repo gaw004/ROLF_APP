@@ -21,6 +21,10 @@ urlpatterns = [
     # accident: the other order would try to read "new" as a primary key.
     # C0.2.4 — the entrance to everything below. `manage` before `<int:pk>`.
     path("events/manage/", views.event_manage_list, name="event_manage_list"),
+    # D27 — the full report, same filters, nothing truncated. `manage/report`
+    # before `manage/<int:pk>` would matter if the latter existed; it does not,
+    # and this comment is here so that adding it does not break this route.
+    path("events/manage/report/", views.ministry_report_page, name="ministry_report"),
     path("events/new/", views.event_create, name="event_create"),
     # C0.2.2 — the only way to move an event, and the only way to mark one
     # completed. Its absence is what left services.reschedule() unreachable.

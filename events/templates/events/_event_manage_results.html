@@ -2,8 +2,8 @@
 管理列表的结果区 —— 列表和报表一起。整页和 HTMX 片段渲染的是同一份。
 
 ⚠️ id 用 `event-results`，和志愿者两页一样：`_period_filter.html` 的 hx-target
-   写死是这个 id。这里换成别的名字，筛选在这一页上会静默地什么都不换 ——
-   HTMX 找不到目标时不报错。
+   和翻页组件写死是这个 id。这里换成别的名字，筛选和翻页在这一页上会静默地
+   什么都不换 —— HTMX 找不到目标时不报错。
 
 ⚠️ DOM 顺序是「报表在前、列表在后」，宽屏靠 lg:flex-row-reverse 把列表摆回左边。
    这样窄屏堆叠时报表自然在上（2026-08-05 拍板），不需要 order 工具类去打架。
@@ -12,10 +12,25 @@
    是 auto（「不许缩到比内容窄」），少了它整页会横向滚动 —— 和筛选栏当初
    375px 下那个 bug 是同一个（见 _period_filter.html）。
 {% endcomment %}
-<div id="event-results" class="flex flex-col gap-6 lg:flex-row-reverse lg:items-start">
+<div id="event-results" class="flex flex-col gap-6 lg:flex-row-reverse">
   {% if report %}
-    <div class="w-full shrink-0 lg:w-[24rem]">
-      {% include "events/_ministry_report.html" %}
+    {% comment %}
+    ⚠️ 这个外壳存在的唯一理由是**让面板不参与决定这一行有多高**（2026-08-05 拍板：
+       面板跟左边齐平）。做法是宽屏下把里面那张卡片绝对定位撑满外壳 ——
+       绝对定位的元素不贡献高度，于是这一行的高度只由左边的列表决定，
+       面板再高也只是自己内部滚动。
+
+    ⚠️ 外层的 flex 因此**不能有 `items-start`**：要靠默认的 stretch，
+       外壳才会被拉到和列表一样高。
+
+    ⚠️ `lg:min-h-[28rem]`：筛出三场活动时列表只有两百像素高，齐平就会把面板
+       压成一条缝，什么都看不见。所以「齐平」只在列表比它长时才生效。
+
+    ⚠️ 窄屏（lg 以下）整段不生效 —— 那时是上下堆叠，没有「齐平」这回事，
+       面板就是一张普通的卡片。
+    {% endcomment %}
+    <div class="relative w-full shrink-0 lg:w-[24rem] lg:min-h-[28rem]">
+      {% include "events/_report_panel.html" %}
     </div>
   {% endif %}
 
@@ -31,12 +46,19 @@
           <thead>
             <tr>
               {% comment %}
-              ⚠️ Ministry 和 Ends 两列拿掉了，给报表腾地方（2026-08-05 拍板）。
-                 Starts **留着**，但只留日期 —— 全拿掉的话，筛完「八月」之后
-                 页面上没有任何东西告诉你这些活动是八月的。
-                 ministry 仍然在筛选栏里，而且报表本来就是按它切的。
+              ⚠️ 有报表的时候才让出 Ministry 和 Ends 两列，**关掉报表它们就回来**
+                 （2026-08-05 拍板）。没有报表时这一页就是原来那一页，
+                 Starts 也带回时间 —— 「少了两列、第三列还是缩过的」比
+                 「完全恢复原样」难记，而这一页大多数时候是不开报表用的。
+
+              ⚠️ Starts 在开着报表时**留着**（只留日期）。三列全舍的话，
+                 筛完「八月」之后页面上没有任何东西告诉你这些活动是八月的。
               {% endcomment %}
-              <th>Event</th><th>Starts</th><th>Status</th><th>Go to</th>
+              <th>Event</th>
+              {% if not report %}<th>Ministry</th>{% endif %}
+              <th>Starts</th>
+              {% if not report %}<th>Ends</th>{% endif %}
+              <th>Status</th><th>Go to</th>
             </tr>
           </thead>
           <tbody>
@@ -46,7 +68,9 @@
                   <a href="{% url 'events:event_detail' event.pk %}?from=manage"
                      class="prose-link">{{ event.name }}</a>
                 </td>
-                <td>{{ event.start_time|date:"Y-m-d" }}</td>
+                {% if not report %}<td>{{ event.ministry.name }}</td>{% endif %}
+                <td>{% if report %}{{ event.start_time|date:"Y-m-d" }}{% else %}{{ event.start_time }}{% endif %}</td>
+                {% if not report %}<td>{{ event.end_time }}</td>{% endif %}
                 <td>
                   {% comment %}
                   状态在这里直接改：发布和收尾是最常做的两件事，各自只是一个选项。
@@ -92,6 +116,7 @@
           </tbody>
         </table>
       </div>
+      {% include "core/components/pagination.html" %}
     {% else %}
       {% if can_manage %}
         {% url 'events:event_create' as create_url %}

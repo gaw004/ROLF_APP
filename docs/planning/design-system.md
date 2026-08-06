@@ -573,3 +573,39 @@ Alpine 只管**纯客户端 UI 状态**：展开 / 收起、下拉开合、模�
 
 ⚠️ 缺人用 warning 不用 danger：danger 在全站的意思是「这里出问题了」，
 而人手不够是一条要看的信息，不是一次事故。签到页上「No-show」那个徽章同理。
+
+## 十三、翻页与打印（2026-08-05 新增）
+
+### 翻页
+
+`core/components/pagination.html`，三个活动列表共用。
+每页条数在 `events/views.py` 顶上：志愿者两页 **20**（卡片带图），管理列表 **50**
+（表格行矮）。
+
+⚠️ 链接用 Django 5.1 起内置的 `{% querystring %}` —— 它**保留当前所有查询参数**、
+只换 page。手写 `?page=2` 会把筛选丢掉，症状是「翻一页，筛选没了」。
+
+⚠️ `hx-swap="outerHTML show:#event-results:top"`：换完片段把视口拉回列表顶部。
+少了 `show:`，点 Next 之后人还停在上一页的半空中，看到的是新一页的中间。
+
+⚠️ 只有一页时整个不画。「Page 1 of 1」是纯噪音。
+也不画一二三四五那排页码 —— 真到了要跳第 17 页的规模，该加的是搜索。
+
+### 打印
+
+只服务一个页面：[完整版报表](decisions/D27-ministry-report.md#完整版报表页与-pdf)。
+「Save as PDF」调的是浏览器自己的打印对话框，所以 `@media print` 里写的
+**就是那份 PDF 的排版** —— 没有第二套要维护。
+
+| 规则 | 不写会怎样 |
+|---|---|
+| `html, body, main` 强制白底 | 屏幕上的 ink-50 印成整页一层灰墨，费墨且难看 |
+| `print-color-adjust: exact` | 浏览器默认「省」掉背景色，所有条形图变成空槽 —— 图还在，数据没了 |
+| 深色模式整套复位 | 半透明黑压在照片上是屏幕设计；印出来是一张几乎全黑、字还看不清的纸 |
+| `.no-print` / 顶栏 / 菜单 / messages 不印 | 纸上点不动，还占掉第一页三分之一 |
+| `.report-charts { display: block; column-count: 2 }` | ⚠️ `display: block` 不能省 —— 分栏属性对 grid 容器**完全无效且不报错**，实测第一页只放下一张图 |
+| `.print-break-before` | 活动清单从新的一页开始 |
+| `tr, li, section { break-inside: avoid }` | 表格行和图被切在两页中间 |
+
+⚠️ 要加新的「不该印」的东西，给它挂 `.no-print`，不要在打印块里点名 ——
+点名的那份清单会和模板走散。

@@ -17,6 +17,7 @@ Thin shells, every one of them. Three rules hold across the whole file:
 from django.contrib import messages
 from django.contrib.auth.decorators import login_required
 from django.core.exceptions import PermissionDenied, ValidationError
+from django.core.paginator import Paginator
 from django.db.models import Prefetch
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
@@ -119,6 +120,33 @@ def _back_link(request):
     return reverse("events:event_list"), "Events"
 
 
+#: How many events one page of each list holds (2026-08-05).
+#:
+#: Two different numbers because the rows are two different heights: the
+#: volunteer lists are cards with a thumbnail, the management list is a table
+#: row. Fifty cards is a very long page; fifty table rows is one screen and a
+#: bit, and the person reading that page is scanning across everything.
+EVENTS_PER_PAGE = 20
+MANAGED_EVENTS_PER_PAGE = 50
+
+
+def _page(request, events, per_page):
+    """One page of a filtered list, ordered so that paging cannot lie.
+
+    ⚠️ The ordering **must** end in a unique column. `-start_time` alone is not
+       unique — two events starting at the same minute have no defined order
+       between them, so Postgres may return them in a different order for
+       page 1 and page 2. The visible result is a row appearing twice, or one
+       vanishing entirely, and nothing anywhere reports it.
+
+    ⚠️ The caller keeps the unpaginated queryset. The report is computed from
+       **that**, not from this page: a figure that changed when you turned the
+       page would mean nothing at all (D27).
+    """
+    ordered = events.order_by(*events.query.order_by, "-pk")
+    return Paginator(ordered, per_page).get_page(request.GET.get("page"))
+
+
 def _my_contact(request):
     """The Contact behind the logged-in account, or None.
 
@@ -148,14 +176,16 @@ def event_list(request):
         .order_by("start_time")
     )
     events = period.narrow(events)
+    page = _page(request, events, EVENTS_PER_PAGE)
     return render(request, _template(
         request, "events/event_list.html", "events/_event_list_results.html"), {
-        "events": events,
+        "events": page,
+        "page": page,
         "period": period,
         # R1, in the plainest possible form: how many, in the window they asked
-        # for. Counted here rather than with {{ events|length }} so the template
-        # cannot quietly count a different set than the one it lists.
-        "total": events.count(),
+        # for. ⚠️ The whole filtered set, not this page — "20 events" under a
+        # filter that matched 180 would answer a question nobody asked.
+        "total": page.paginator.count,
     })
 
 
@@ -180,11 +210,13 @@ def past_events(request):
         .order_by("-start_time")
     )
     events = period.narrow(events)
+    page = _page(request, events, EVENTS_PER_PAGE)
     return render(request, _template(
         request, "events/past_events.html", "events/_past_events_results.html"), {
-        "events": events,
+        "events": page,
+        "page": page,
         "period": period,
-        "total": events.count(),
+        "total": page.paginator.count,
     })
 
 
@@ -311,6 +343,51 @@ def _managed_event(request, pk):
     return event
 
 
+def _scoped_events(request):
+    """The events this account may see on the management side, or a refusal.
+
+    Extracted 2026-08-05 because the full report page needs the same answer.
+    ⚠️ A second copy of "which events may this account see" is the one thing on
+       a report that could go wrong quietly — it is read once and believed, and
+       nobody checks a total against a list they are not allowed to see.
+
+    ⚠️ Somebody who is both — a foundation admin who also runs a ministry —
+       keeps the managing view of their own ministries rather than the read-only
+       view of everything. Losing the ability to publish an event because you
+       were also promoted would be a strange way to be rewarded.
+    """
+    administered = ministry_ids_administered_by(request.user)
+    # The foundation tier gets the same page over every ministry — read only.
+    # ⚠️ Without this it had no entrance at all: it holds no MinistryRole, so
+    #    nothing anywhere listed events for it to open. That is the same gap
+    #    C0.2 closed five times over — the pages existed and nothing pointed at
+    #    them.
+    foundation = in_foundation_tier(request.user)
+    if not administered and not foundation:
+        raise PermissionDenied(SCOPED_DENIAL)
+
+    events = Event.objects.all() if not administered else Event.objects.filter(
+        ministry_id__in=administered)
+    return (
+        events.select_related("ministry", "event_type").order_by("-start_time"),
+        administered,
+        foundation,
+    )
+
+
+def _offered_ministries(administered):
+    """What the filter's dropdown may offer this account.
+
+    ⚠️ Interface, not a permission — the queryset is already narrowed. What this
+       prevents is a ministry admin being offered every ministry in the
+       foundation, picking one, and getting an empty list with nothing saying why.
+    """
+    if not administered:
+        return None
+    return Ministry.objects.filter(
+        pk__in=administered, is_active=True).order_by("name")
+
+
 @login_required
 def event_manage_list(request):
     """Everything this account administers — including drafts and finished ones.
@@ -333,15 +410,7 @@ def event_manage_list(request):
        Thirteen figures are a dozen aggregate queries, and most of the time
        somebody changing a date is only reading the list.
     """
-    administered = ministry_ids_administered_by(request.user)
-    # The foundation tier gets the same page over every ministry — read only.
-    # ⚠️ Without this it had no entrance at all: it holds no MinistryRole, so
-    #    nothing anywhere listed events for it to open. That is the same gap
-    #    C0.2 closed five times over — the pages existed and nothing pointed at
-    #    them.
-    foundation = in_foundation_tier(request.user)
-    if not administered and not foundation:
-        raise PermissionDenied(SCOPED_DENIAL)
+    events, administered, foundation = _scoped_events(request)
 
     if request.method == "POST":
         # Status is editable straight from the list: publishing an event and
@@ -356,38 +425,70 @@ def event_manage_list(request):
             messages.success(request, f"“{event.name}” is now {event.get_status_display()}.")
         return redirect("events:event_manage_list")
 
-    events = Event.objects.all() if not administered else Event.objects.filter(
-        ministry_id__in=administered)
-    # ⚠️ Somebody who is both — a foundation admin who also runs a ministry —
-    #    keeps the managing view of their own ministries rather than the
-    #    read-only view of everything. Losing the ability to publish an event
-    #    because you were also promoted would be a strange way to be rewarded.
-    events = events.select_related("ministry", "event_type").order_by("-start_time")
-
-    # The dropdown offers what this account's list can actually contain. A
-    # ministry admin shown all sixty ministries, picking one and getting an
-    # empty list, would read that as a broken filter rather than as scope.
     period = EventPeriodForm(
-        request.GET or None,
-        ministries=None if not administered else Ministry.objects.filter(
-            pk__in=administered, is_active=True).order_by("name"),
-    )
+        request.GET or None, ministries=_offered_ministries(administered))
     events = period.narrow(events)
+    page = _page(request, events, MANAGED_EVENTS_PER_PAGE)
     return render(request, _template(
         request, "events/event_manage_list.html",
         "events/_event_manage_results.html"), {
-        "events": events,
-        "total": events.count(),
+        "events": page,
+        "page": page,
+        "total": page.paginator.count,
         "period": period,
         "can_manage": bool(administered),
         # ⚠️ Present only when asked for, and the template keys the whole panel
         #    off "is it there". `report=1` without it would draw an empty panel
         #    full of zeros, which is a different claim from "not run yet".
+        #
+        # ⚠️ Built from `events`, never from `page`. The report answers about
+        #    the filter, not about which page you happen to be on — a figure
+        #    that moved when you clicked Next would mean nothing (D27).
         "report": ministry_report(events) if request.GET.get("report") else None,
         # One unbound form, reused to draw every row's dropdown: the choices are
         # identical, and building one per event would be a form per row for no
         # gain.
         "status_form": EventStatusForm(),
+    })
+
+
+@login_required
+def ministry_report_page(request):
+    """The whole report, full width, with the event list printed under it.
+
+    The panel beside the management list is capped to the height of that list
+    and scrolls (2026-08-05 拍板) — so it needs somewhere to send you rather
+    than an expander for every chart. This is that place.
+
+    ⚠️ It shares `_scoped_events()` with the list page rather than repeating the
+       scoping. A second copy of "which events may this account see" is the one
+       thing on this page that could go wrong quietly: a report is read once and
+       believed, and nobody double-checks a total against a list they cannot see.
+
+    ⚠️ No pagination here, on purpose. This is the artefact somebody prints and
+       hands to a board — half of it is not an artefact. The print stylesheet
+       breaks the list onto its own page.
+
+    "Save as PDF" is the browser's own print dialog (D27). The costs are stated
+    there: it is two clicks rather than one, and it is worth it because the PDF
+    and the page are then the **same rendering** — there is no second layout to
+    keep in step, and swapping in a server-side renderer later changes only who
+    rasterises this HTML.
+    """
+    events, administered, foundation = _scoped_events(request)
+    period = EventPeriodForm(
+        request.GET or None, ministries=_offered_ministries(administered))
+    events = period.narrow(events)
+    return render(request, "events/ministry_report.html", {
+        "events": events.order_by("start_time", "pk"),
+        "total": events.count(),
+        "period": period,
+        "can_manage": bool(administered),
+        "scope": "Every ministry" if not administered else None,
+        # Arrived from the panel's "Save as PDF": open the print dialog on load,
+        # so that path is one click rather than two.
+        "autoprint": bool(request.GET.get("print")),
+        "report": ministry_report(events),
     })
 
 

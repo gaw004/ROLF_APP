@@ -1,0 +1,106 @@
+{% comment %}
+报表的正文：九个数字 + 五张图。**面板和完整版报表页共用这一份** ——
+两份拷贝迟早会有一个漏掉新加的指标，而漏掉的那一份不会报错，只是少了一格。
+
+⭐ 它描述的是这一次筛选选出来的**全部活动**，不是当前这一页（分页之后这一条
+   尤其重要）。视图把筛过的 queryset 直接交给 services.ministry_report()，
+   没有第二次筛选，也没有权限判断 —— ministry admin 和 foundation admin
+   走的是同一段代码。
+
+⚠️ 四个数字带着自己的注脚出来，因为它们各自会被读错，而读错的方向都是好消息：
+   · 工时是「**记过的**工时」，系统性偏低 —— 它跟着「哪个 admin 记得点签退」走，
+     不是随机误差。所以下面写着这个总数建立在多少条记录上、有多少条没记。
+   · 回头率算的是**这个时间段里**的人，不是他们的全部历史。
+   · 满员率的分母只含「至少开了一个带人数的工种」的活动 —— 一个没开工种的活动
+     没法「满」，算进分母只会让它因为量不出来而拉低比率。
+   · 缺勤率的分母只含「每条报名都处理过」的活动。⚠️ 用「有缺勤记录的活动」当
+     分母是错的：那样分母里每一场都至少有一个人没来，算出来的比率永远高。
+
+参数：report（services.ministry_report 的返回值）、columns（数字排几列，默认 2）。
+{% endcomment %}
+<dl class="mb-6 grid gap-x-4 gap-y-3 {{ columns|default:'grid-cols-2' }}">
+  <div>
+    <dt class="text-xs text-ink-600 dark:text-ink-300">Events</dt>
+    <dd class="text-xl font-semibold">{{ report.figures.events }}</dd>
+  </div>
+  <div>
+    <dt class="text-xs text-ink-600 dark:text-ink-300">Signups</dt>
+    <dd class="text-xl font-semibold">{{ report.figures.signups }}</dd>
+  </div>
+  <div>
+    <dt class="text-xs text-ink-600 dark:text-ink-300">Volunteers</dt>
+    <dd class="text-xl font-semibold">{{ report.figures.volunteers }}</dd>
+    <dd class="text-xs text-ink-600 dark:text-ink-300">different people</dd>
+  </div>
+  <div>
+    <dt class="text-xs text-ink-600 dark:text-ink-300">Recorded hours</dt>
+    <dd class="text-xl font-semibold">{{ report.figures.hours|floatformat:2 }}</dd>
+    {% comment %}
+    ⚠️ 这一行不是补充说明，是这个数字能不能用的前提。没有它，一个只记了三条
+       工时的月份和一个认真记满的月份长得一模一样。
+    {% endcomment %}
+    <dd class="text-xs text-ink-600 dark:text-ink-300">
+      from {{ report.figures.hours_records }} record{{ report.figures.hours_records|pluralize }};
+      {{ report.figures.hours_missing }} signup{{ report.figures.hours_missing|pluralize }} with none
+    </dd>
+  </div>
+  <div>
+    <dt class="text-xs text-ink-600 dark:text-ink-300">Hours per volunteer</dt>
+    <dd class="text-xl font-semibold">
+      {{ report.figures.hours_per_volunteer|floatformat:2|default_if_none:"—" }}
+    </dd>
+  </div>
+  <div>
+    <dt class="text-xs text-ink-600 dark:text-ink-300">Came more than once</dt>
+    <dd class="text-xl font-semibold">
+      {% if report.figures.repeat_rate is None %}—{% else %}{{ report.figures.repeat_rate }}%{% endif %}
+    </dd>
+    <dd class="text-xs text-ink-600 dark:text-ink-300">
+      {{ report.figures.repeat_volunteers }} of {{ report.figures.volunteers }}, in this period
+    </dd>
+  </div>
+  <div>
+    <dt class="text-xs text-ink-600 dark:text-ink-300">Fully staffed</dt>
+    <dd class="text-xl font-semibold">
+      {% if report.figures.fully_staffed_rate is None %}—{% else %}{{ report.figures.fully_staffed_rate }}%{% endif %}
+    </dd>
+    <dd class="text-xs text-ink-600 dark:text-ink-300">
+      {{ report.figures.fully_staffed }} of {{ report.figures.staffable_events }} events that asked for numbers
+    </dd>
+  </div>
+  <div>
+    <dt class="text-xs text-ink-600 dark:text-ink-300">Did not come</dt>
+    <dd class="text-xl font-semibold">
+      {% if report.figures.absence_rate is None %}—{% else %}{{ report.figures.absence_rate }}%{% endif %}
+    </dd>
+    {% comment %}
+    ⚠️ 这一行是这个数字唯一的诚实来源。没有它，一个没人记考勤的时间段会显示
+       0% 缺勤，和「真的没人缺席」长得一模一样。分母里的活动是**每条报名都
+       有了结果**的那些 —— 还挂着 registered 的行意思是没人处理过它。
+    {% endcomment %}
+    <dd class="text-xs text-ink-600 dark:text-ink-300">
+      {{ report.figures.absences }} of {{ report.figures.absence_signups }} signups,
+      across {{ report.figures.marked_up_events }} of {{ report.figures.events_with_signups }}
+      event{{ report.figures.events_with_signups|pluralize }} where every signup was marked up
+    </dd>
+  </div>
+  {% comment %}
+  ⚠️ 这一格**为 0 时也画出来**，而且只有它是红的。整张表别的数字答的是
+     「做得怎么样」，这一个答的是「有没有出事」—— 为 0 时藏起来的话，
+     「没有」和「没算」在页面上长得一模一样（同 P6 那个「联系不上」组的规矩）。
+  {% endcomment %}
+  <div>
+    <dt class="text-xs text-ink-600 dark:text-ink-300">Minors without consent</dt>
+    <dd class="text-xl font-semibold {% if report.figures.minors_without_consent %}text-danger-fg dark:text-danger-fg-dark{% endif %}">
+      {{ report.figures.minors_without_consent }}
+    </dd>
+  </div>
+</dl>
+
+<div class="report-charts {{ chart_columns }}">
+  {% include "events/_bar_chart.html" with chart=report.charts.events_by_month %}
+  {% include "events/_bar_chart.html" with chart=report.charts.hours_by_month %}
+  {% include "events/_paired_bar_chart.html" with chart=report.charts.role_gap %}
+  {% include "events/_bar_chart.html" with chart=report.charts.top_volunteers %}
+  {% include "events/_bar_chart.html" with chart=report.charts.hours_by_role %}
+</div>

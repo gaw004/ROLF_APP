@@ -527,6 +527,53 @@ class MinistryReportTests(TestCase):
         self.signup(self.wang, hours=Decimal("2.00"))
         self.assertTrue(self.report()["charts"]["top_volunteers"].sparse)
 
+    def test_absence_rate_counts_only_events_somebody_went_through(self):
+        """⚠️ The denominator is the whole difficulty, and the obvious version
+        of it is wrong in the direction of bad news.
+
+        "Events with a no-show on them" contains nothing **but** events with
+        absences, so the rate it produces can never be low. The question asked
+        instead is one the data can answer: is any signup still sitting at
+        `registered`?
+        """
+        # Event one: gone through. Two attended, one absent → 33%.
+        for surname in ("A", "B"):
+            self.signup(make_person(surname), hours=Decimal("2.00"))
+        mark_absent(self.signup(make_person("C")))
+
+        # Event two: nobody touched it. Must not dilute the rate.
+        untouched = make_event(ministry=self.pantry, name="Nobody marked this up")
+        role = make_role(untouched, "greeting")
+        for surname in ("D", "E", "F", "G"):
+            self.signup(make_person(surname), role=role)
+
+        figures = self.report()["figures"]
+        self.assertEqual(figures["absence_rate"], 33)
+        self.assertEqual(figures["marked_up_events"], 1)
+        self.assertEqual(figures["events_with_signups"], 2)
+
+    def test_an_event_where_everybody_turned_up_counts_as_gone_through(self):
+        # And contributes an honest 0%. This is the case the naive denominator
+        # ("events with an absence") would throw away — which is exactly why
+        # that version can never report a low rate.
+        for surname in ("A", "B"):
+            self.signup(make_person(surname), hours=Decimal("2.00"))
+        figures = self.report()["figures"]
+        self.assertEqual(figures["absence_rate"], 0)
+        self.assertEqual(figures["marked_up_events"], 1)
+
+    def test_events_with_no_signups_are_not_in_the_denominator(self):
+        # They cannot have an absence. Counting them would make a diligent
+        # ministry look careless — same reason fully_staffed excludes events
+        # that opened no numbered role.
+        make_event(ministry=self.pantry, name="Nobody signed up")
+        self.signup(self.wang, hours=Decimal("2.00"))
+        self.assertEqual(self.report()["figures"]["events_with_signups"], 1)
+
+    def test_absence_rate_is_none_when_nothing_was_marked_up(self):
+        self.signup(self.wang)
+        self.assertIsNone(self.report()["figures"]["absence_rate"])
+
     def test_an_ordered_queryset_does_not_split_every_group(self):
         """⚠️ The one this suite missed, found in a screenshot instead.
 
@@ -2733,14 +2780,23 @@ class ManageListStatusTests(PageTestCase):
     def url(self):
         return reverse("events:event_manage_list")
 
-    def test_the_start_date_is_shown_and_the_end_is_not(self):
-        # 2026-08-05: Ministry and Ends gave up their columns to the report
-        # panel. Starts stayed, as a date — dropping it too would have left a
-        # list filtered to August with nothing on it saying August (D27).
+    def test_all_six_columns_are_there_with_no_report(self):
+        # 2026-08-05: Ministry and Ends give up their columns **only while the
+        # report is open**. Closed, this is the page it always was — which is
+        # easier to remember than "two columns gone and a third one shortened".
         self.login(self.zhang)
         response = self.client.get(self.url())
-        self.assertContains(response, "Starts")
+        for column in ("Event", "Ministry", "Starts", "Ends", "Status"):
+            self.assertContains(response, f"<th>{column}</th>")
+
+    def test_two_columns_step_aside_for_the_report(self):
+        self.login(self.zhang)
+        response = self.client.get(self.url(), {"report": "1"})
+        self.assertNotContains(response, "<th>Ministry</th>")
         self.assertNotContains(response, "<th>Ends</th>")
+        # Starts stays: a list filtered to August with nothing on it saying
+        # August is the one thing dropping all three would have cost (D27).
+        self.assertContains(response, "<th>Starts</th>")
 
     def test_status_can_be_changed_from_the_list(self):
         self.event.status = Event.Status.DRAFT
@@ -2919,6 +2975,139 @@ class ManageListReportPageTests(PageTestCase):
             self.url(), {"report": "1"}, headers={"HX-Request": "true"})
         self.assertContains(response, 'id="event-results"')
         self.assertContains(response, "Recorded hours")
+
+
+class PaginationTests(PageTestCase):
+    """20 / 20 / 50, and the two ways paging can lie (2026-08-05)."""
+
+    def make_many(self, count, *, past=False, ministry=None):
+        for index in range(count):
+            offset = (index + 2) * DAY
+            make_event(
+                ministry=ministry or self.pantry, name=f"Filler {index}",
+                owner=self.zhang.contact,
+                start_time=NOW - offset if past else NOW + offset,
+                end_time=(NOW - offset if past else NOW + offset) + HOUR,
+                status=Event.Status.COMPLETED if past else Event.Status.OPEN,
+            )
+
+    def test_the_volunteer_list_holds_twenty(self):
+        self.make_many(25)
+        self.login(self.lisi)
+        response = self.client.get(reverse("events:event_list"))
+        self.assertEqual(len(response.context["events"]), 20)
+        # ⚠️ The count is the whole filtered set, not the page. "20 events"
+        #    under a filter that matched 26 answers a question nobody asked.
+        self.assertEqual(response.context["total"], 26)
+
+    def test_past_events_holds_twenty(self):
+        self.make_many(22, past=True)
+        self.login(self.lisi)
+        response = self.client.get(reverse("events:past_events"))
+        self.assertEqual(len(response.context["events"]), 20)
+
+    def test_the_management_list_holds_fifty(self):
+        self.make_many(55)
+        self.login(self.zhang)
+        response = self.client.get(reverse("events:event_manage_list"))
+        self.assertEqual(len(response.context["events"]), 50)
+
+    def test_no_event_is_repeated_or_skipped_across_pages(self):
+        """⚠️ Ordering by `-start_time` alone is not a total order.
+
+        Twenty-five events starting at the same instant have no defined order
+        between them, so Postgres may hand back a different sequence for page 1
+        and page 2 — a row appears twice, or vanishes, and nothing reports it.
+        The tiebreaker is `-pk`.
+        """
+        same_instant = NOW + 5 * DAY
+        for index in range(25):
+            make_event(ministry=self.pantry, name=f"Simultaneous {index}",
+                       owner=self.zhang.contact, start_time=same_instant,
+                       end_time=same_instant + HOUR)
+        self.login(self.lisi)
+        url = reverse("events:event_list")
+        seen = []
+        for page in (1, 2):
+            response = self.client.get(url, {"page": page})
+            seen += [event.pk for event in response.context["events"]]
+        self.assertEqual(len(seen), len(set(seen)))
+        self.assertEqual(len(seen), 26)
+
+    def test_paging_keeps_the_filter(self):
+        # ⚠️ The link is built by {% querystring %}, which preserves everything
+        #    else. Hand-writing "?page=2" drops the filter — and the symptom is
+        #    "I turned the page and my filter disappeared".
+        self.make_many(25, ministry=self.tax)
+        self.login(self.lisi)
+        response = self.client.get(
+            reverse("events:event_list"), {"ministry": self.tax.pk, "page": 2})
+        self.assertContains(response, f"ministry={self.tax.pk}")
+        for event in response.context["events"]:
+            self.assertEqual(event.ministry_id, self.tax.pk)
+
+    def test_the_report_covers_the_filter_not_the_page(self):
+        # ⭐ The invariant restated for pagination (D27). A figure that moved
+        #    when you clicked Next would mean nothing at all.
+        self.make_many(55)
+        self.login(self.zhang)
+        response = self.client.get(
+            reverse("events:event_manage_list"), {"report": "1", "page": 2})
+        self.assertEqual(len(response.context["events"]), 6)
+        self.assertEqual(response.context["report"]["figures"]["events"], 56)
+
+
+class FullReportPageTests(PageTestCase):
+    """The page the panel sends you to, and the artefact somebody prints."""
+
+    def url(self):
+        return reverse("events:ministry_report")
+
+    def test_it_is_not_paginated(self):
+        # Half an artefact is not an artefact.
+        for index in range(60):
+            make_event(ministry=self.pantry, name=f"Filler {index}",
+                       owner=self.zhang.contact,
+                       start_time=NOW + (index + 2) * DAY,
+                       end_time=NOW + (index + 2) * DAY + HOUR)
+        self.login(self.zhang)
+        response = self.client.get(self.url())
+        self.assertEqual(response.context["total"], 61)
+        self.assertEqual(len(response.context["events"]), 61)
+
+    def test_the_event_list_is_printed_under_the_figures(self):
+        # "一份文件自足" — the board reads what the numbers are about.
+        self.login(self.zhang)
+        self.assertContains(self.client.get(self.url()), self.event.name)
+
+    def test_it_says_what_it_covers(self):
+        # ⚠️ A printed report with no statement of its scope gets read as
+        #    "everything".
+        self.login(self.zhang)
+        response = self.client.get(self.url(), {"ministry": self.pantry.pk})
+        self.assertContains(response, "Food Pantry")
+
+    def test_it_is_scoped_the_same_way_the_list_is(self):
+        theirs = make_event(ministry=self.tax, owner=self.other_admin.contact,
+                            name="Somebody else's event")
+        self.login(self.zhang)
+        response = self.client.get(self.url())
+        self.assertNotContains(response, "Somebody else&#x27;s event")
+        self.assertEqual(response.context["report"]["figures"]["events"], 1)
+        self.assertNotIn(theirs, response.context["events"])
+
+    def test_a_plain_volunteer_is_refused(self):
+        self.login(self.lisi)
+        self.assertEqual(self.client.get(self.url()).status_code, 403)
+
+    def test_the_panel_links_to_it_carrying_the_filter(self):
+        # ⚠️ Without the query string the full report shows a *different*
+        #    filter's numbers, and looks exactly the same doing it.
+        self.login(self.zhang)
+        response = self.client.get(
+            reverse("events:event_manage_list"),
+            {"report": "1", "ministry": self.pantry.pk})
+        self.assertContains(response, f"{self.url()}?report=1&amp;ministry={self.pantry.pk}")
 
 
 class MinorEmergencyContactTests(TestCase):

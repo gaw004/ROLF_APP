@@ -570,3 +570,87 @@
     border-color: rgb(255 255 255 / 0.18);
   }
 }
+
+/* ---------------------------------------------------------------------------
+   打印（2026-08-05，D27）
+
+   只服务一个页面：完整版报表。「Save as PDF」调的是浏览器自己的打印对话框，
+   所以这里写的就是那份 PDF 的排版 —— 没有第二套要维护。
+
+   ⚠️ 深色模式在纸上必须关掉。半透明的黑压在照片上是屏幕上的设计；
+      打印出来是一张几乎全黑、耗掉半盒墨的纸，而且字还看不清。
+   ⚠️ 导航、菜单、按钮全部不印。纸上点不动它们，而它们会占掉第一页三分之一。
+--------------------------------------------------------------------------- */
+@media print {
+  /* 深色的一切在纸上归位。`!important` 在这里是对的：
+     这些规则要压过 .dark 那一整套，而它们只在打印时存在。 */
+  :root, .dark, .dark.has-hero {
+    background-image: none !important;
+  }
+
+  .dark body, .dark .card, .dark .table-wrap,
+  .dark.has-hero .card, .dark.has-hero .table-wrap {
+    background-color: #fff !important;
+    color: #000 !important;
+    backdrop-filter: none !important;
+    box-shadow: none !important;
+  }
+
+  .home-bar, .home-menu, .no-print, #messages {
+    display: none !important;
+  }
+
+  /* ⚠️ 版心底色也要变白。屏幕上 body 是 ink-50 那种很浅的灰，印在纸上就是
+     整页铺一层灰墨 —— 一份要交出去的报表不该长这样，而且费墨。 */
+  html, body, main {
+    background-color: #fff !important;
+  }
+
+  /* ⚠️ 图表在纸上排两栏，靠打印规则而不是 `md:grid-cols-2`。
+     A4 的打印视口够不到 md 那个断点（768px），于是每张图都独占一整行 ——
+     实测第一页只放下一张图，剩下大半页是空白。
+     这里不用 grid，用 columns：分栏会自己把图流到下一栏，
+     而 grid 的行高由最高那一格决定，短的图旁边会留一块空。 */
+  .report-charts {
+    /* ⚠️ `display: block` 不能省。这个容器在屏幕上是 grid，而 `column-count`
+       对 grid 容器**完全无效** —— 不报错，只是分栏不发生，实测第一页仍旧
+       只放下一张图、剩下大半页空白，和没加这条规则一模一样。 */
+    display: block !important;
+    column-count: 2;
+    column-gap: 12mm;
+  }
+
+  .report-charts > section {
+    break-inside: avoid;
+  }
+
+  /* 条形图的底色默认会被浏览器"省"掉，于是所有条子都变成空槽。
+     ⚠️ 没有这一句，打印出来的图是五组灰色的空白长条 —— 图还在，数据没了。 */
+  * {
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+
+  /* 表格不许跨页断在一行中间，而活动清单自己另起一页。 */
+  .print-break-before {
+    break-before: page;
+  }
+
+  tr, li, section {
+    break-inside: avoid;
+  }
+
+  .table-wrap {
+    overflow: visible !important;
+    border: 0 !important;
+  }
+
+  main {
+    max-width: none !important;
+    padding: 0 !important;
+  }
+
+  @page {
+    margin: 14mm;
+  }
+}

@@ -1,0 +1,46 @@
+{% comment %}
+翻页。三个活动列表共用（2026-08-05）。
+
+⚠️ `{% querystring %}` 是 Django 5.1 起的内置标签，它**保留当前所有查询参数**、
+   只换 page。手写 `?page=2` 会把筛选条件、以及管理列表上的 `report=1` 全部丢掉 ——
+   表现是「翻一页，筛选没了」。
+
+⚠️ 一页装不下时才画。只有一页的时候画一条「Page 1 of 1」是纯噪音。
+
+⚠️ 不画一二三四五那排页码。试点期一共几十场活动，一排数字占的地方比它省的多；
+   真到了需要跳到第 17 页的规模，那时该加的是搜索，不是更多页码。
+
+⭐ HTMX 是快路，链接本身是**完整可用的 GET** —— 关掉 JS 照样翻页（D24）。
+   `show:#event-results:top` 让换完片段之后视口回到列表顶部，
+   否则你点了 Next，人还停在上一页的半空中，看到的是新一页的中间。
+
+参数：page（Django 的 Page 对象）。
+{% endcomment %}
+{% if page.paginator.num_pages > 1 %}
+  <nav class="mt-6 flex flex-wrap items-center justify-between gap-3 text-sm"
+       aria-label="Pagination">
+    {% if page.has_previous %}
+      <a href="{% querystring page=page.previous_page_number %}"
+         hx-get="{% querystring page=page.previous_page_number %}"
+         hx-target="#event-results" hx-swap="outerHTML show:#event-results:top"
+         hx-push-url="true"
+         class="prose-link">&larr; Previous</a>
+    {% else %}
+      <span class="text-ink-400 dark:text-ink-500">&larr; Previous</span>
+    {% endif %}
+
+    <span class="text-ink-600 dark:text-ink-300">
+      Page {{ page.number }} of {{ page.paginator.num_pages }}
+    </span>
+
+    {% if page.has_next %}
+      <a href="{% querystring page=page.next_page_number %}"
+         hx-get="{% querystring page=page.next_page_number %}"
+         hx-target="#event-results" hx-swap="outerHTML show:#event-results:top"
+         hx-push-url="true"
+         class="prose-link">Next &rarr;</a>
+    {% else %}
+      <span class="text-ink-400 dark:text-ink-500">Next &rarr;</span>
+    {% endif %}
+  </nav>
+{% endif %}

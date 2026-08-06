@@ -33,4 +33,5 @@ past_events 的结果区。和 _event_list_results.html 分开写，因为这一
       <li>{% include "core/components/empty.html" with message="No events finished in this period." %}</li>
     {% endfor %}
   </ul>
+  {% include "core/components/pagination.html" %}
 </div>

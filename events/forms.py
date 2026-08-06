@@ -296,6 +296,28 @@ class EventPeriodForm(forms.Form):
             day_start(end + datetime.timedelta(days=1)) if end else None,
         )
 
+    def description(self):
+        """One English line saying what this filter selected.
+
+        Lives here because the form is what knows — the full report page prints
+        it under the heading, and a printed report with no statement of what it
+        covers is a page of numbers somebody will read as "everything".
+        """
+        if not self.is_valid():
+            return "All ministries · all dates"
+        ministry = self.cleaned_data.get("ministry")
+        start, end = self.cleaned_data.get("start"), self.cleaned_data.get("end")
+        who = ministry.name if ministry else "All ministries"
+        if start and end:
+            when = f"{start:%d %b %Y} – {end:%d %b %Y}"
+        elif start:
+            when = f"from {start:%d %b %Y}"
+        elif end:
+            when = f"until {end:%d %b %Y}"
+        else:
+            when = "all dates"
+        return f"{who} · {when}"
+
     def narrow(self, events):
         """Apply whichever boxes were filled in.
 

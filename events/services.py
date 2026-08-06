@@ -576,6 +576,8 @@ def ministry_report(events):
         | Q(contact__birth_date__isnull=True)
     ).count()
 
+    absence = _absence(events, parts)
+
     figures = {
         "events": event_count,
         "signups": totals["signups"],
@@ -590,8 +592,53 @@ def ministry_report(events):
         "staffable_events": len(staffable),
         "fully_staffed_rate": _percent(fully_staffed, len(staffable)),
         "minors_without_consent": minors_without_consent,
+        **absence,
     }
     return {"figures": figures, "charts": _report_charts(events, parts)}
+
+
+def _absence(events, parts):
+    """How often people signed up and did not come — over the events somebody
+    actually went through.
+
+    ⚠️ The whole difficulty is the denominator, and the obvious version of it is
+       wrong in the direction of bad news. "Events somebody marked up" cannot be
+       asked directly: the only positive evidence of marking is an absence
+       existing, so a denominator of "events with at least one no-show" contains
+       nothing **but** events with absences, and the rate it produces can never
+       be low. That is as dishonest as printing no caveat at all, just pointed
+       the other way.
+
+    So the question asked here is the one the data can answer:
+    **is any signup on this event still sitting at `registered`?** A row left
+    there after the event means nobody went through the list. Ten people all
+    checked in, nobody absent, qualifies — and contributes an honest 0%.
+
+    ⚠️ Events with no signups at all are out of the denominator. They cannot
+       have an absence, and counting them would make a diligent ministry look
+       careless — the same reason `fully_staffed` excludes events that opened no
+       numbered role.
+    """
+    with_signups = set(parts.values_list("event_role__event_id", flat=True))
+    still_registered = set(
+        parts.filter(status=Participation.Status.REGISTERED)
+        .values_list("event_role__event_id", flat=True)
+    )
+    marked_up = with_signups - still_registered
+
+    counted = parts.filter(event_role__event_id__in=marked_up).aggregate(
+        signups=Count("pk"),
+        absences=Count("pk", filter=Q(status=Participation.Status.ABSENT)),
+    )
+    return {
+        "absences": counted["absences"],
+        "absence_signups": counted["signups"],
+        "absence_rate": _percent(counted["absences"], counted["signups"]),
+        # The two halves of the caption. Without them the rate is a number with
+        # no idea how much of the period it speaks for.
+        "marked_up_events": len(marked_up),
+        "events_with_signups": len(with_signups),
+    }
 
 
 def _percent(part, whole):

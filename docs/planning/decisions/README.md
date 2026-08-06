@@ -40,7 +40,7 @@
 | [**D25**](D25-public-front-page.md) | `/` 是公开门面页，不是角色调度器 | 推翻 C3.1 的设计；公开/登录的分界线动了一格；首页内容归 foundation tier 改；白字压在用户上传的照片上，对比度只能自己造<br>↳ [推翻了什么](D25-public-front-page.md#推翻了什么) · [媒体文件](D25-public-front-page.md#媒体文件和活动图片同一条规矩不同一套参数) |
 | [**D26**](D26-palette-from-the-hero.md) | 品牌色从首页照片推出来 | 只取色相和饱和度、**钉住相对亮度**，于是对比度对任何照片都精确成立；守卫改成测生成器而不是测色值；深色模式改成半透明黑压在压暗的照片上<br>↳ [为什么是钉相对亮度](D26-palette-from-the-hero.md#为什么是钉相对亮度而不是调明暗) · [深色模式](D26-palette-from-the-hero.md#深色模式半透明的黑压在压暗的照片上) |
 
-| [**D27**](D27-ministry-report.md) | 管理列表旁的 ministry 报表；absent 终于有了写入路径 | 报表收的是**筛过的 queryset** 而不是 ministry id，于是两种身份共用一段代码、报表不可能比页面宽；十三个指标里三个带着自己的注脚；五张图全是 CSS 横条，没引图表库<br>↳ [唯一的不变量](D27-ministry-report.md#-唯一的不变量报表描述的是旁边那个列表) · [两个不报错的错](D27-ministry-report.md#踩到的两个坑都是不报错的错) |
+| [**D27**](D27-ministry-report.md) | 管理列表旁的 ministry 报表；absent 终于有了写入路径 | 报表收的是**筛过的 queryset** 而不是 ministry id，于是两种身份共用一段代码、报表不可能比页面宽；十四个指标里四个带着自己的注脚，缺勤率的分母专门讲了一节；五张图全是 CSS 横条，没引图表库；面板跟列表齐平，完整版可打印成 PDF；三个列表分页<br>↳ [唯一的不变量](D27-ministry-report.md#-唯一的不变量报表描述的是这一次筛选) · [缺勤率的分母](D27-ministry-report.md#缺勤率分母是这一条里唯一难的地方同日追加) · [三个不报错的错](D27-ministry-report.md#踩到的三个坑都是不报错的错) |
 
 ## 加一条新决策时
 

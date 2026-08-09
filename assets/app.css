@@ -639,34 +639,62 @@
 
   /* --- 弹窗 ---------------------------------------------------------------
    * 结构在 core/components/modal.html。全站一份。 */
-  .modal-backdrop {
-    position: fixed;
-    inset: 0;
-    z-index: 50;
-    display: flex;
-    /* ⚠️ `align-items: flex-start` 加 padding，不是 `center`。窄屏上键盘弹起来
-     *    之后视口只剩一半高，居中的面板会把标题顶出屏幕外，而人正在填的框在
-     *    最下面。从顶部往下排，面板自己滚。 */
-    align-items: flex-start;
-    justify-content: center;
-    overflow-y: auto;
-    padding: 1.5rem 1rem;
-    background-color: rgb(0 0 0 / 0.55);
-  }
-
-  .modal-panel {
+  /* --- 弹窗（2026-08-09 改成原生 <dialog>）---------------------------------
+   *
+   * 🔴 **这一层唯一的硬要求：它必须在 top layer 里。**
+   *
+   *    原来是 `position: fixed; inset: 0` 的一个 div。而 `fixed` **不保证**相对
+   *    视口 —— 祖先只要有 `transform` / `filter` / `contain` / `backdrop-filter`
+   *    中的任何一个，它就成了包含块，`inset: 0` 铺满的是**那个祖先**。
+   *
+   *    这不是假想：`.dark.has-hero .card` 有 `backdrop-filter`（玻璃质感），
+   *    而改密码弹窗就写在 profile 的那张卡片里 —— 深色模式下它被关进卡片，
+   *    表单下半截直接被裁掉。浅色模式没有那条规则，所以一切正常。
+   *    「有时候才出问题」的全部来源就是这个。
+   *
+   *    ⚠️ 换 `z-index` 没有用，换更大的 `z-index` 也没有用 —— 这跟层叠顺序
+   *       无关，是**包含块**被换掉了。
+   *
+   *    `dialog.showModal()` 打开的元素进 top layer，而 top layer 的包含块**永远
+   *    是视口**，任何祖先都够不着它。所以这里不是「再小心一点」，是让这一类
+   *    bug 在结构上不可能发生。规矩写在 design-system.md「覆盖层」那一节。
+   *
+   * ⚠️ 遮罩是 `::backdrop`，不是自己画的一层 div —— 它同样由 top layer 渲染，
+   *    盖得住页面上任何东西，不需要参与 z-index 的军备竞赛。
+   *
+   * ⚠️ `<dialog>` 不带 `open` 属性时 UA 样式就是 `display: none`，所以这里
+   *    **不需要 x-cloak**，也不会有一闪。
+   */
+  .modal {
     width: 100%;
     max-width: 28rem;
+    border: 0;
     border-radius: 0.75rem;
     background-color: #fff;
     padding: 1.5rem;
     color: var(--color-ink-900);
+
+    /* ⚠️ `margin-top` 固定、`margin-bottom: auto`，不是上下都 auto（居中）。
+     *    窄屏上键盘弹起来之后视口只剩一半高，居中的面板会把标题顶出屏幕外，
+     *    而人正在填的框在最下面。从顶部往下排。（原来靠外层 flex 容器的
+     *    `align-items: flex-start` 做，现在没有那层容器了。） */
+    margin: 1.5rem auto auto;
+    max-height: calc(100dvh - 3rem);
+    overflow-y: auto;
+  }
+
+  .modal::backdrop {
+    background-color: rgb(0 0 0 / 0.55);
   }
 
   /* ⚠️ 深色模式下**不透**背景照片。卡片可以半透明压在照片上（D26），
    *    弹窗不行：它上面是一张要逐字读的表单，而照片里任何一块亮色云团
-   *    都会把某一行字的对比度打到 4.5 以下，而是哪一行取决于用户滚到哪里。 */
-  .dark .modal-panel {
+   *    都会把某一行字的对比度打到 4.5 以下，而是哪一行取决于用户滚到哪里。
+   *
+   * ⚠️ 选择器是 `.dark .modal` —— 而 `<dialog>` 进 top layer 之后**仍然是
+   *    DOM 树里原来的位置**（只是渲染层变了），所以祖先选择器照常命中。
+   *    这一点值得写下来：top layer 换的是「画在哪」，不是「在树上的哪」。 */
+  .dark .modal {
     background-color: var(--color-ink-900);
     color: var(--color-ink-50);
   }
@@ -1614,22 +1642,50 @@
 }
 
 @layer components {
-  /* --- Memories 的悬浮窗（2026-08-06）--------------------------------------
+  /* --- Memories 的悬浮窗（2026-08-06，2026-08-09 改成原生 <dialog>）---------
    *
-   * ⚠️ 不复用 `modal.html` / `.modal-panel`。那个是「一张卡片里放一段表单」，
+   * ⚠️ 不复用 `modal.html` / `.modal`。那个是「一张卡片里放一段表单」，
    *    有内边距、有标题行、有白底 —— 而这里要的是一张照片浮在压暗的页面上，
-   *    卡片的每一件事都在跟它作对。两者共用的只有 Esc 关闭和点遮罩关闭这两条
-   *    交互约定，那是写在这份文档里的约定，不是可以共用的 DOM。 */
+   *    卡片的每一件事都在跟它作对。两者共用的是**打开的机制**（top layer），
+   *    不是 DOM，也不是外观。
+   *
+   * 🔴 **它原来是 `position: fixed` 的一个 div，而那是坏的 —— 只是看不出来。**
+   *    `.dark.has-hero .wall` 有 `backdrop-filter`（那层玻璃），而悬浮窗就写在
+   *    `.wall` 里面，于是它的包含块是 `.wall` 而不是视口。
+   *
+   *    ⚠️ 它**看起来**一直是对的，纯属巧合：`.wall` 正好是 `height: 100dvh` 且
+   *       满宽，两个盒子恰好重合。量出来是这样的 —— 把 `.wall` 临时改成
+   *       600×400，悬浮窗立刻跟着变成 600×400。
+   *
+   *    ⚠️ 所以这是一颗定时炸弹，而不是一个 bug：给 `.wall` 加个页头、加点
+   *       padding、或者哪天不再是 100dvh，悬浮窗就会**悄悄**跟着缩水；
+   *       而 `.wall` 还带着 `overflow: hidden`，它迟早会被裁。
+   *
+   *    现在走 `showModal()` 进 top layer，包含块永远是视口，`.wall` 怎么变都够不着。
+   */
   .wall-lightbox {
-    position: fixed;
-    inset: 0;
-    z-index: 50;
+    /* ⚠️ UA 样式给 `dialog:modal` 的就是 `position: fixed`，而这里它是**安全的**：
+     *    top layer 的包含块是视口本身，不再由祖先决定。同一个属性，
+     *    在 top layer 里和在普通流里是两件事。 */
+    width: 100vw;
+    max-width: 100vw;
+    height: 100dvh;
+    max-height: 100dvh;
+    margin: 0;
+    border: 0;
     display: flex;
     align-items: center;
     justify-content: center;
     padding: 3.5rem 1rem;
     /* 两档都用同一层黑。浅色模式下也是黑的 —— 这一层的作用是把周围压掉让照片
-     * 站出来，而不是「页面背景的深色版」。 */
+     * 站出来，而不是「页面背景的深色版」。
+     * ⚠️ 画在元素自己身上而不是 `::backdrop`：这一层要**接点击**（点空白处关窗），
+     *    而 `::backdrop` 是伪元素，收不到事件。`::backdrop` 那边只补一层同色的黑，
+     *    盖住视口比 100dvh 高的那几像素（手机地址栏）。 */
+    background-color: rgb(0 0 0 / 0.82);
+  }
+
+  .wall-lightbox::backdrop {
     background-color: rgb(0 0 0 / 0.82);
   }
 

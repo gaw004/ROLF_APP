@@ -43,6 +43,82 @@ Alpine.data("themeToggle", () => ({
 }));
 
 // ---------------------------------------------------------------------------
+// x-dialog —— 把一个 Alpine 布尔接到原生 <dialog> 上（2026-08-09）
+//
+// 用法：`<dialog x-dialog="open">`，`open` 是外层 x-data 里的布尔。
+//
+// 🔴 **全站所有覆盖层都必须经过这里，而这是一条结构性的要求，不是风格偏好。**
+//
+//    覆盖层原来是 `position: fixed; inset: 0` 的 div。而 `fixed` **不保证**相对
+//    视口：祖先只要有 `transform` / `filter` / `contain` / `backdrop-filter`
+//    中的任何一个，它就成了包含块，`inset: 0` 铺满的是那个祖先。
+//    深色模式下 `.card` 和 `.wall` 都有 `backdrop-filter`（玻璃质感），
+//    于是**两个覆盖层都中招**：改密码弹窗被关进卡片里（看得见）、
+//    Memories 悬浮窗被关进 `.wall` 里（看不见，因为 `.wall` 恰好是满屏）。
+//
+//    ⚠️ 加 z-index 没有用。这跟层叠顺序无关，是包含块被换掉了。
+//
+//    `showModal()` 把元素放进 **top layer**，它的包含块永远是视口。
+//    这是浏览器提供的唯一一个「祖先绝对够不着」的位置。
+//
+// ⚠️ **只用 `showModal()`，绝不用 `show()`，也绝不写 `open` 属性。**
+//    后两者都只是把元素显示出来、**留在原地不进 top layer** —— 也就是把上面
+//    那个 bug 原样请回来，而且现场看起来是对的（元素确实显示了）。
+//    守卫测试盯着这一条，因为它是唯一一处「写错了也不报错」的地方。
+//
+// ⚠️ 双向同步，两个方向都必须有：
+//      状态 → dialog   打开/关闭；
+//      dialog → 状态   Esc 和 `close()` 是浏览器自己触发的，不写回去的话
+//                      Alpine 那个布尔会停在 true，于是**第二次点按钮打不开**
+//                      （状态没变，effect 不跑）。
+//
+// ⚠️ `close` 事件里先把 `syncing` 立起来，避免写回状态又触发 effect 再调一次
+//    `close()` —— 那会在关闭时多跑一圈，虽然无害，但下一个人读到会以为是 bug。
+Alpine.directive(
+  "dialog",
+  (el, { expression }, { effect, evaluateLater, cleanup }) => {
+    const isOpen = evaluateLater(expression);
+    const setClosed = evaluateLater(`${expression} = false`);
+    let syncing = false;
+
+    effect(() => {
+      isOpen((open) => {
+        if (syncing) return;
+        if (open && !el.open) {
+          el.showModal();
+        } else if (!open && el.open) {
+          syncing = true;
+          el.close();
+          syncing = false;
+        }
+      });
+    });
+
+    // Esc、以及任何调用了 close() 的地方。
+    const onClose = () => {
+      syncing = true;
+      setClosed();
+      syncing = false;
+    };
+
+    // 点遮罩关闭。⚠️ 判 `event.target === el`，不是 `.self` 那类修饰符：
+    //    `::backdrop` 是伪元素、收不到事件，点在遮罩上时事件的 target 是
+    //    dialog 元素**本身**。判等于是唯一能区分「点在遮罩上」和「点在内容上」
+    //    的写法 —— 少了这一判，点输入框就会把弹窗关掉（同一个坑改版前也记着）。
+    const onClick = (event) => {
+      if (event.target === el) el.close();
+    };
+
+    el.addEventListener("close", onClose);
+    el.addEventListener("click", onClick);
+    cleanup(() => {
+      el.removeEventListener("close", onClose);
+      el.removeEventListener("click", onClick);
+    });
+  },
+);
+
+// ---------------------------------------------------------------------------
 // 密码框的「看一眼」（2026-08-06）
 //
 // 挂在 core/components/field.html 上，按 widget 的 input_type 自动生效 ——
@@ -105,9 +181,6 @@ Alpine.data("wall", () => ({
   //    同一个数字的第二个家，迟早和真的那个对不上。
   lingerRate: 0.4,
   lingering: false,
-  // 打开之前焦点在哪。关掉之后要放回去 —— 不放回去的话，键盘用户关掉窗口后
-  // 焦点回到 <body>，再按 Tab 是从整页开头重新走一遍。
-  returnTo: null,
 
   init() {
     const source = document.getElementById("wall-sequence");
@@ -141,19 +214,19 @@ Alpine.data("wall", () => ({
     }
   },
 
+  // ⚠️ 这两个方法**只管状态**了（2026-08-09）。焦点的三件事全部交回浏览器：
+  //    打开时送进窗口（模板上的 `autofocus`）、Tab 关在里面、关掉后复位到
+  //    原来那个元素 —— 都是模态 `<dialog>` 自带的。
+  //    ⚠️ 其中「关掉后复位」以前**根本没做**：键盘用户关掉窗口后焦点回到
+  //       <body>，再按 Tab 是从整页开头重新走一遍。
   show(index) {
     if (!this.photos.length) return;
-    this.returnTo = document.activeElement;
     this.index = index;
     this.open = true;
-    // $nextTick：这一刻窗口还没画出来，querySelector 找不到那个按钮。
-    this.$nextTick(() => this.$refs.close?.focus());
   },
 
   close() {
     this.open = false;
-    this.returnTo?.focus?.();
-    this.returnTo = null;
   },
 
   step(delta) {
@@ -166,22 +239,6 @@ Alpine.data("wall", () => ({
 
   get current() {
     return this.photos[this.index] || {};
-  },
-
-  // Tab 关在窗口里。⚠️ 少了这一条，键盘用户按 Tab 会走到窗口**后面**那面墙上，
-  // 屏幕上盖着一个他已经离开、却又关不掉的对话框。
-  trap(event) {
-    const focusable = this.$refs.dialog?.querySelectorAll("button");
-    if (!focusable?.length) return;
-    const first = focusable[0];
-    const last = focusable[focusable.length - 1];
-    if (event.shiftKey && document.activeElement === first) {
-      event.preventDefault();
-      last.focus();
-    } else if (!event.shiftKey && document.activeElement === last) {
-      event.preventDefault();
-      first.focus();
-    }
   },
 }));
 

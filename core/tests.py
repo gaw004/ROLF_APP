@@ -2740,3 +2740,187 @@ class SharedFragmentGuardTests(TestCase):
             with self.subTest(fragment=name):
                 self.assertIn("{% comment %}", self.markup(path))
                 self.assertIn("⚠️", self.markup(path))
+
+
+class OverlaysLiveInTheTopLayerGuardTests(TestCase):
+    """Lint-as-test: every overlay opens with dialog.showModal() (2026-08-09).
+
+    🔴 The rule and the whole reason for it:
+
+        `position: fixed` does **not** mean "relative to the viewport". If any
+        ancestor has `transform`, `filter`, `contain` or `backdrop-filter`, that
+        ancestor becomes the containing block and `inset: 0` fills **it**.
+
+    This is not hypothetical — it had already happened twice, and neither
+    instance was caught by a test or by review:
+
+      · `modal.html` sat inside `.card`, and `.dark.has-hero .card` carries
+        `backdrop-filter` for the glass look. In dark mode the change-password
+        dialog was trapped inside the Login Information card with its form
+        clipped. Light mode was fine, so it read as "sometimes".
+      · `wall-lightbox` sat inside `.wall`, which also carries `backdrop-filter`.
+        That one **looked** correct purely by coincidence — `.wall` happens to be
+        `100dvh` and full width — while being one padding change away from
+        silently shrinking, with `overflow: hidden` waiting to clip it.
+
+    ⚠️ The second one is why "just don't nest overlays in filtered elements" is
+       not an acceptable fix: it was wrong for three days while looking right,
+       and the call site was innocent — the offending CSS lives in another file
+       and applies only in one theme.
+
+    `showModal()` puts the element in the **top layer**, whose containing block
+    is always the viewport. That is the only position in the platform no
+    ancestor can reach, which is why it is a rule here rather than a preference.
+    """
+
+    TEMPLATE_DIRS = [Path("core") / "templates", Path("events") / "templates",
+                     Path("accounts") / "templates", Path("org") / "templates",
+                     Path("gallery") / "templates", Path("contact") / "templates"]
+
+    #: The one full-viewport overlay that is deliberately **not** a <dialog>.
+    #:
+    #: ⚠️ It is exempt because of a condition, not because it is old: the menu is
+    #:    a direct child of <body>, so its only ancestors are <body> and <html> —
+    #:    and `test_nothing_turns_html_or_body_into_a_containing_block` below
+    #:    pins the thing that would break it. An exception whose safety condition
+    #:    is itself guarded is not a hole; an unguarded one is.
+    #:
+    #: ⚠️ It is a sliding nav drawer with an entrance transition, and converting
+    #:    it would risk that animation for no bug that exists today. If a third
+    #:    overlay ever wants the same exemption, convert this one instead.
+    MENU_EXEMPTION = "core/templates/core/components/_site_menu.html"
+
+    # `fixed inset-0` / `fixed inset-y-0` followed by a NON-negative z-index.
+    # ⚠️ The sign matters: `_hero_backdrop.html` is `fixed inset-0 -z-10`, a
+    #    background painted *under* the content. It is not an overlay and must
+    #    not trip this.
+    FULLSCREEN_OVERLAY = re.compile(r"fixed\s+inset-(?:0|y-0)[^\"']*?\sz-\d")
+
+    def templates(self):
+        for base in self.TEMPLATE_DIRS:
+            root = Path(settings.BASE_DIR) / base
+            if not root.exists():
+                continue
+            for path in sorted(root.rglob("*.html")):
+                yield path, path.read_text()
+
+    def body(self, markup):
+        return re.sub(r"\{%\s*comment\s*%\}.*?\{%\s*endcomment\s*%\}", "",
+                      markup, flags=re.S)
+
+    def test_the_two_overlays_are_dialogs_driven_by_x_dialog(self):
+        for path, needle in [
+            (Path("core") / "templates" / "core" / "components" / "modal.html",
+             "modal"),
+            (Path("gallery") / "templates" / "gallery" / "wall.html",
+             "wall-lightbox"),
+        ]:
+            with self.subTest(path=str(path)):
+                markup = (Path(settings.BASE_DIR) / path).read_text()
+                # The class must sit on a <dialog> tag, not a <div>.
+                self.assertRegex(
+                    markup, rf"<dialog[^>]*class=\"{needle}\"",
+                    f"the {needle} overlay is not a <dialog> — it will be "
+                    "captured by any filtered ancestor")
+                self.assertIn(
+                    "x-dialog=", markup,
+                    "this overlay does not go through the x-dialog directive, "
+                    "so nothing guarantees it is opened with showModal()")
+
+    def test_no_dialog_is_opened_with_the_open_attribute(self):
+        """⚠️ The sharpest trap in this whole area, because it *looks* right.
+
+        `<dialog open>` displays the element **in place** — it does not enter the
+        top layer. So it renders, it is visible, and it is captured by exactly
+        the ancestors `showModal()` would have escaped. A reviewer sees a
+        `<dialog>` and moves on.
+        """
+        offenders = []
+        for path, markup in self.templates():
+            for tag in re.findall(r"<dialog[^>]*>", self.body(markup)):
+                # ⚠️ Strip every attribute **value** before looking for a bare
+                #    `open`. Without this the guard fails on its own subject:
+                #    the lightbox is `x-dialog="open"` — the Alpine boolean is
+                #    named `open` — and a plain \bopen\b matches inside that
+                #    string. A guard that cannot tell an attribute name from an
+                #    attribute value reports the correct code as broken.
+                names_only = re.sub(r"=\s*(\"[^\"]*\"|'[^']*')", "=", tag)
+                if re.search(r"\bopen\b", names_only):
+                    offenders.append(str(path.relative_to(settings.BASE_DIR)))
+        self.assertEqual(
+            offenders, [],
+            "a <dialog> carries the `open` attribute; that renders it in place "
+            "instead of the top layer. Open it with showModal():\n"
+            + "\n".join(offenders))
+
+    def test_the_javascript_only_ever_calls_showmodal(self):
+        source = (Path(settings.BASE_DIR) / "assets" / "js" / "app.js").read_text()
+        code = re.sub(r"//[^\n]*", "", source)
+        self.assertIn("showModal()", code,
+                      "nothing opens a dialog into the top layer any more")
+        # ⚠️ `this.open` is excluded on purpose and it is not a loophole: the
+        #    lightbox's Alpine state is *called* `open` (`this.open = true` in
+        #    show()), which is a plain boolean on a component, not a dialog
+        #    element. Matching it flagged correct code. What must stay banned is
+        #    assigning `.open` on an **element** reference — `dlg.open = true`.
+        for pattern, why in [
+            (r"\.show\(\)",
+             "dialog.show() is non-modal and stays out of the top layer"),
+            (r"setAttribute\(\s*[\"']open[\"']",
+             "the open attribute does not enter the top layer"),
+            (r"(?<!this)\.open\s*=\s*true",
+             "assigning .open on an element does not enter the top layer"),
+        ]:
+            with self.subTest(pattern=pattern):
+                self.assertIsNone(
+                    re.search(pattern, code),
+                    f"{why} — found {pattern!r} in assets/js/app.js")
+
+    def test_no_new_fullscreen_overlay_avoids_dialog(self):
+        """Any future overlay has to be a <dialog>; this is what says so."""
+        found = set()
+        for path, markup in self.templates():
+            body = self.body(markup)
+            for line in body.split("\n"):
+                if self.FULLSCREEN_OVERLAY.search(line) and "<dialog" not in line:
+                    found.add(str(path.relative_to(settings.BASE_DIR)))
+        self.assertEqual(
+            found, {self.MENU_EXEMPTION},
+            "a full-viewport overlay is being drawn with `fixed inset-0` on "
+            "something that is not a <dialog>. It will be captured by any "
+            "ancestor carrying transform/filter/contain/backdrop-filter — which "
+            "in this codebase means any `.card` or `.wall` in dark mode. Use "
+            "core/components/modal.html, or open your own <dialog> with "
+            "x-dialog.")
+
+    def test_nothing_turns_html_or_body_into_a_containing_block(self):
+        """The condition that keeps the site menu's exemption honest.
+
+        ⚠️ The menu is safe only because <body> and <html> are plain. The day
+        somebody puts a `filter` or a `transform` on either — a page-wide dim, a
+        "shake on error" effect, a zoom — the menu silently starts positioning
+        against it, and this test is the only thing standing there.
+        """
+        css = (Path(settings.BASE_DIR) / "assets" / "app.css").read_text()
+        css = re.sub(r"/\*.*?\*/", "", css, flags=re.S)
+        dangerous = re.compile(
+            r"^\s*(?:backdrop-filter|transform|filter|contain|perspective)\s*:")
+        offenders = []
+        # Every rule whose selector targets html/body/:root as the subject.
+        for match in re.finditer(r"([^{}]+)\{([^{}]*)\}", css):
+            selector, block = match.group(1).strip(), match.group(2)
+            subject = selector.split(",")[-1].strip().split()[-1] if selector.split() else ""
+            if subject not in ("html", "body", ":root"):
+                continue
+            for line in block.split(";"):
+                if dangerous.match(line + ":") or dangerous.match(line):
+                    prop = line.strip().split(":")[0]
+                    if prop in ("backdrop-filter", "transform", "filter",
+                                "contain", "perspective"):
+                        offenders.append(f"{selector.strip()} → {prop}")
+        self.assertEqual(
+            offenders, [],
+            "html/body gained a property that creates a containing block for "
+            "fixed descendants. The site menu positions against the viewport "
+            "only while this is not true — convert it to a <dialog> first:\n"
+            + "\n".join(offenders))

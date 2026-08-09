@@ -1,0 +1,105 @@
+{% extends "core/base.html" %}
+{% block title %}Check-in QR{% endblock %}
+{% block main_width %}max-w-2xl{% endblock %}
+
+{% comment %}
+架在 iPad 上的那一页。整页只有一个二维码、一个模式开关、一条倒计时。
+
+⚠️ 模式**纯手动**。`default_mode` 由服务端在打开页面的那一刻算一次（活动中点之前
+   是 in，之后是 out），此后再也不动。自动跳的后果是：活动进行到一半，
+   正在排队签到的那几个人突然全部变成签退，而屏幕上没有任何东西提示模式变了。
+
+⚠️ 每一个 data-* 都是从服务端来的，JS 一个 URL 都不拼 —— 同
+   AssetPathsComeFromTemplatesGuardTests 的教训：在 JS 里拼出来的地址开发时
+   完美、部署后静默 404。这里更糟一层，因为拼错的结果是一个**扫得动、
+   但哪儿也去不了**的二维码。
+
+⚠️ 这一页需要 JS 才能工作，而这不违反 D24 的渐进增强口径 ——
+   那一条只管**写操作**，这一页一个字都不写库。
+{% endcomment %}
+
+{% block content %}
+  <h1 class="text-2xl font-semibold">{{ event.name }}</h1>
+  <p class="mt-1 text-sm text-ink-600 dark:text-ink-300">
+    {{ event.start_time }} – {{ event.end_time|time }}
+  </p>
+
+  {% if closed_message %}
+    {% comment %}
+    时间窗外 / 草稿 / 已取消。⚠️ 这句话由服务端出，不由模板拼 ——
+    「活动前两小时开」这句话里的两小时和 tokens.py 里的常量必须是同一个，
+    模板复述一遍就是规则的第二份拷贝。
+    {% endcomment %}
+    <div class="card mt-6">
+      <p>{{ closed_message }}</p>
+    </div>
+    {% url 'events:event_attendance' event.pk as attendance_url %}
+    <div class="mt-6">
+      {% include "core/components/button.html" with label="Attendance page" href=attendance_url variant="secondary" %}
+    </div>
+  {% else %}
+    <div class="mt-6"
+         data-checkin-display
+         data-token-url="{{ token_url }}"
+         data-mode="{{ default_mode }}">
+
+      {% comment %}
+      ⚠️ 选中态写成 `aria-pressed:` 变体，class 名字实打实写在这里 ——
+         **不是**由 JS 去 classList.toggle("bg-brand-600")。
+         Tailwind 是扫源码生成 CSS 的，只出现在 JS 字符串里的 class **不会被生成**，
+         而结果是一个「开发时你以为写了、线上那条规则根本不存在」的样式。
+         第一版就是这么写的，`border-brand-600` 在产物里一条都没有。
+         同 AssetPathsComeFromTemplatesGuardTests 那条守卫的教训：
+         **JS 只改状态，样式的名字必须留在模板里。**
+      {% endcomment %}
+      <div class="flex gap-2" role="group" aria-label="Check-in direction">
+        <button type="button" data-checkin-mode="in"
+                aria-pressed="false"
+                class="flex-1 rounded-md border border-ink-300 px-4 py-3 text-lg font-semibold
+                       aria-pressed:border-brand-600 aria-pressed:bg-brand-600
+                       aria-pressed:text-white dark:border-ink-600">
+          Check in
+        </button>
+        <button type="button" data-checkin-mode="out"
+                aria-pressed="false"
+                class="flex-1 rounded-md border border-ink-300 px-4 py-3 text-lg font-semibold
+                       aria-pressed:border-brand-600 aria-pressed:bg-brand-600
+                       aria-pressed:text-white dark:border-ink-600">
+          Check out
+        </button>
+      </div>
+
+      <div class="card mt-4 flex flex-col items-center gap-4 py-8">
+        <canvas data-checkin-canvas width="320" height="320"
+                class="max-w-full rounded-md bg-white"></canvas>
+
+        {% comment %}
+        ⚠️ 失败时这一条盖住二维码，而不是留着它。留着的话失败会静默地转移到
+           志愿者身上 —— 他扫了、失败了、以为是自己手机的问题。
+           这是四条对策里唯一反直觉的一条。
+        {% endcomment %}
+        <p data-checkin-error hidden
+           class="rounded-md bg-ink-100 px-4 py-3 text-center dark:bg-ink-800"></p>
+
+        <div class="w-full">
+          <p class="text-center text-sm text-ink-600 dark:text-ink-300">
+            <span data-checkin-countdown>—</span>
+          </p>
+          <div class="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-ink-200 dark:bg-ink-700">
+            <div data-checkin-bar class="h-full w-0 bg-brand-600 transition-[width] duration-200"></div>
+          </div>
+        </div>
+      </div>
+
+      <p class="mt-4 text-center text-sm text-ink-600 dark:text-ink-300">
+        Volunteers scan this with their phone camera. The code changes every few
+        seconds, so a photo of it stops working almost immediately.
+      </p>
+    </div>
+
+    <div class="mt-6">
+      {% url 'events:event_attendance' event.pk as attendance_url %}
+      {% include "core/components/button.html" with label="Attendance page" href=attendance_url variant="ghost" %}
+    </div>
+  {% endif %}
+{% endblock %}

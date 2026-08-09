@@ -553,12 +553,17 @@ preload 更是单向门 —— 退出要等月级。
   另一个每天跑 `python manage.py purge_event_images`，删掉已结束活动的图片。
   ⚠️ 它**是** management command 而备份**不是**，两者不矛盾：备份必须在应用起不来
   的时候照样能跑，而这一个要问 ORM「哪些活动结束了」——没有不依赖 Django 的版本；
-- ⚠️ `STORAGES["default"]` 要指向对象存储。Render 的磁盘每次部署都会清空，
-  留着默认的本地文件存储的话，图片**不是活动结束时消失，是下次部署时消失** ——
-  而那是随机的，看起来像 bug 不像设计；
+- ✅ **`STORAGES` 已经接上 R2**（2026-08-06 做完，`config/settings/prod.py`）。
+  三个别名各指一个桶，划分和理由在 [C3.6](#c36-备份--恢复演练) 那张表。
+  ⚠️ 少了这一步的表现是：Render 的磁盘每次部署都会清空，图片
+  **不是活动结束时消失，是下次部署时消失** —— 而那是随机的，看起来像 bug 不像设计。
+  ⚠️ `prod.py` 缺任何一个 R2 变量就**拒绝启动**，故意的：另一种做法（退回本地磁盘）
+  正是上面那种静默失败；
 - 环境变量：`DJANGO_SETTINGS_MODULE=config.settings.prod`、
   **新生成的** `DJANGO_SECRET_KEY`、`DJANGO_ALLOWED_HOSTS`、SES 的 SMTP 四项、
-  `NOTIFICATION_BACKEND`、`SENTRY_DSN`、R2 的 endpoint 和密钥
+  `NOTIFICATION_BACKEND`、`SENTRY_DSN`、R2 的七项
+  （`R2_ENDPOINT_URL`、`R2_ACCESS_KEY_ID`、`R2_SECRET_ACCESS_KEY`、
+  三个桶名、`R2_PUBLIC_BASE_HOST` —— 名字和逐条说明在 `.env.example`）
   （`DATABASE_URL` 由 Render 注入）；
 - **先用 `xxx.onrender.com` 跑通**，挂自定义域名留到 C5
   （域名本身在 [C3.0](#c30-域名--ses--最先做因为它靠别人) 就买好了，那是给发信用的）；
@@ -603,13 +608,31 @@ R2 和 Sentry（都在免费额度内）—— 合计**每月十几美元量级*
 - 一个 shell 脚本：`pg_dump` → 上传 R2（**不写成 management command**，
   理由见 [`phase-c.md` 的备份落点](phase-c.md#备份脚本的落点)）；
 - Render Cron Job 每天跑一次；
-- ⚠️ **活动图片要另开一个桶，不能和备份共用**（2026-08-05 新增）。
-  备份桶按上一条是**私有**的、装着未成年人的全量明文；活动图片要给**每个登录的
-  志愿者**看得见。一个桶满足不了这两条，而合并的诱惑正是「反正都是 R2」。
-- ⚠️ **图片桶不能开版本控制。** 开了的话
+- ⚠️ **四个桶，不是两个**（2026-08-05 定了前两个，2026-08-06 加到四个）。
+  每一个桶是「谁能读」和「删得掉吗」两个问题的一组答案，而**一个桶装不下两组答案** ——
+  合并的诱惑一直是那句「反正都是 R2」。开通那天照这张表建：
+
+  | 桶 | 环境变量 | 谁能读 | 版本控制 |
+  |---|---|---|---|
+  | 备份 | 脚本自己的（不经过 Django） | 私有 | — |
+  | 活动图片 | `R2_BUCKET_EVENT_IMAGES` | 私有，签名 URL | ⚠️ **关** |
+  | memories | `R2_BUCKET_MEMORIES` | 私有，签名 URL | ⚠️ **开** |
+  | 首页素材 | `R2_BUCKET_PUBLIC` | 公开 | — |
+
+- ⚠️ **活动图片桶不能开版本控制。** 开了的话
   [`purge_event_images`](#c35-部署到-render) 的「删除」只是加一个删除标记，
   旧版本还在 —— 而**控制台上看确实显示已删除**。
   「活动结束后图片不再存在于任何地方」这条要求，会以一种看起来已经满足的方式落空；
+- ⚠️ **memories 桶必须开版本控制 —— 和上一条正相反，这就是它得单开一个桶的全部理由。**
+  照片墙上的照片是全系统唯一**既不能重建、又不在 `pg_dump` 里**的东西：
+  库能从 dump 恢复，活动图片本来就该消失，只有这些误删一次就永久没了。
+  桶的版本控制是它唯一的安全网；
+- ⚠️ **首页素材桶是公开的，而且必须是。** 首页是全站唯一不需要登录的页面，
+  给公开内容签发限时 URL 是自相矛盾的，还会让那个 hero 视频（每个访客都要下完整份）
+  在 CDN 上一次都缓存不住。
+  ⚠️ 反过来，**另外两个桶必须是私有的**：它们靠 Django 签发的一小时期限 URL 提供，
+  而那正是 `@login_required` 在照片上生效的方式。公开桶会让登录闸门只挡住页面 ——
+  照片 URL 一旦流出就是永久公开的，而画面里有未成年人；
 - **桶必须是私有的**，密钥只给写权限，开服务端加密。
   ⚠️ dump 里是**未成年人的姓名、生日、住址、紧急联系电话、家长邮箱**的全量明文。
   一个默认公开的桶就是一次全库泄露 —— 而它比删库更难发现：
@@ -649,9 +672,76 @@ R2 和 Sentry（都在免费额度内）—— 合计**每月十几美元量级*
 - `django-axes` 管登录爆破；
 - 密码重置加一条 per-IP 节流。
 
-**注册暂不加验证码**（2026-08-03 定）：试点只有一个 ministry、人数可数，
-垃圾账号真出现了肉眼就看得见。⚠️ 这条**只在试点期成立** ——
+**注册限流已经做了**（2026-08-06）：`django-ratelimit`，per-IP 和全站两个桶，
+额度走环境变量。做法和「为什么额度定得松」在 `core/ratelimit.py` 里。
+部署时**必须同时确认两件事**，两件都属于「不做也不报错」那一类：
+
+| 要确认的 | 不做会怎样 |
+|---|---|
+| `prod.py` 里 `TRUST_PROXY_CLIENT_IP = True`（已经写进去了，别删） | Render 在反代后面，`REMOTE_ADDR` 是代理 —— 全世界共用一个桶，这一小时头 20 次注册用光所有人的额度 |
+| cache 表存在（`core/0004` 迁移会建，所以跑过 `migrate` 就有了） | `django-ratelimit` 在 cache 里计数，表不在就是注册页报错 |
+
+⚠️ **不要把 cache 换成 Django 默认的本地内存**。gunicorn 多 worker 时那是各数一份，
+额度悄悄变成 worker 数倍，而且不报错。要换就换 Redis，别退回默认值。
+
+**注册的邮箱验证仍然没有做**（2026-08-03 定，2026-08-06 复核）：
+限流挡的是脚本批量灌库，**挡不住有人用不属于自己的地址手工注册**。
+邮箱验证依赖真实发信，所以按「依赖上线后才存在的东西现在不做」推迟 ——
+它要和「改 email 的重新验证」一起做，见 [C3.11](#c311-邮箱验证注册--改-email)。
+⚠️ 这条**只在试点期成立** ——
 重看条件写进 [`phase-c.md` 的已知缺口](phase-c.md#五已知缺口与处置)：公开放开注册之前必须补。
+
+### C3.11 邮箱验证（注册 + 改 email）
+
+2026-08-06 新增，**排在 [C3.3](#c33-真实发信) 之后**，因为它整件事都依赖真实发信。
+
+⚠️ **它一定要排在 C3.3 验证通过之后，不能并行。** 失败模式很难看：账号建出来是未激活的，
+而激活邮件发不出去 —— 于是注册被整个锁死，且每个人看到的都是「注册成功，去收邮件」。
+
+两半，必须一起做：
+
+1. **注册**：`is_active=False` 建账号 → 发激活链接 → 点了才能登录。
+   - 链接用 Django 自带的 `default_token_generator`（和密码重置同一套 `uidb64/token`），
+     **不要自己发明 token**：那一套自带过期（`PASSWORD_RESET_TIMEOUT`），不用新建表；
+   - 登录页要为「地址存在但没激活」单独说一句话 + 一个「重发激活邮件」入口（也要限流）。
+     ⚠️ 不加这句话的话，`ModelBackend` 对未激活账号返回的是通用错误，
+     人看到的是「邮箱或密码不对」，而他的密码是对的 —— 于是他会一遍遍重置密码；
+   - 一条清理命令删「N 天未激活」的账号。⚠️ 它建的 `Contact` 也要删，
+     但**只能删「从未激活 + 没有任何 Participation / MinistryRole / Assignment」的那些**，
+     否则会删到真人。反射的写法照 `contact/services.py::merge_contacts()` 反过来用，
+     默认 `--dry-run`。
+2. **改 email**：加 `pending_email` 字段 + 第二套确认流程，确认之前登录名不变。
+   ⚠️ 只做第一半是留一道现成的绕路：注册时验证了地址，然后随手改成任意地址。
+
+**验证**：用一个**不属于你自己的**邮箱注册 → 收到激活邮件 → 点了才能登录；
+未激活时登录，页面明确说「去收邮件」而不是「密码不对」。
+
+### C3.12 Google 预填要的那个 Client ID（你做的部分）
+
+2026-08-06 新增。注册页上「Continue with Google」的代码**已经写完了**，
+按钮在没配 `GOOGLE_OAUTH_CLIENT_ID` 时不渲染 —— 所以现在缺的只是这一个值。
+⚠️ **和注册 AWS 账号一起做**（同一次坐下来办完外部账号的事）。
+
+它只填三个框：Google 交出 email / first name / last name，密码仍然自己设，
+建出来的账号是普通密码账号。**不是「用 Google 登录」**，见 `accounts/google.py`。
+
+你要做的：
+
+1. Google Cloud Console → 建一个项目（或用现成的）；
+2. APIs & Services → **OAuth consent screen**：External，填应用名和支持邮箱；
+3. APIs & Services → Credentials → Create credentials → **OAuth client ID** →
+   Application type = **Web application**；
+4. **Authorized JavaScript origins** 填 `http://localhost:8000`（本机），
+   上线后把正式来源加进去；
+   ⚠️ **Authorized redirect URIs 不用填** —— 这个流程不做 code 交换；
+5. 把 Client ID 填进 `.env` 的 `GOOGLE_OAUTH_CLIENT_ID`，线上填进环境变量。
+
+⚠️ **只要 Client ID，不要 client secret。** 这个流程里没有任何需要 secret 的一步，
+而把 secret 放进环境变量是给自己多一个要保管的东西。
+
+**验证**（要在浏览器里做，测试替不了）：注册页出现 Google 按钮 → 点 → 选账号 →
+回到注册页，email / first name / last name 三个框**已经填好** → 设个密码 → 注册成功。
+⚠️ 再确认一遍数据库里那个账号是**普通密码账号**：`has_usable_password()` 是 True。
 
 ### C3.10 一页隐私说明
 
@@ -707,6 +797,130 @@ R2 和 Sentry（都在免费额度内）—— 合计**每月十几美元量级*
 
 ---
 
+## C6 · 现场扫码自助签到
+
+**决策全文在 [D28](decisions/D28-qr-checkin.md)。** 这一节只讲照着做的顺序，
+不重复「为什么」——每一步后面标的是 D28 里对应的那一节。
+
+它解决的是一件具体的事：**一场一百人的活动，让一个 admin 点四十次签到、
+四十次签退，不会被真的执行**，而不执行的后果是 D27 那张报表的已记录工时和
+缺勤率同时失真，且失真方向跟着「哪个 admin 比较负责」走。
+
+⚠️ 动手前先读 D28 的[唯一的不变量](decisions/D28-qr-checkin.md#-唯一的不变量这是一个减少录入的工具不是一个防作弊的机制)。
+这个功能**不承诺任何一行是真的** —— 权威仍然是 admin 的 attendance 页。
+把它当成防作弊机制去实现，会在几个地方做出相反的取舍
+（尤其是 [token 一次性化](decisions/D28-qr-checkin.md#三token-一次性化是一个-bug不是一个加固)那一条，
+照原需求写会让一百人的队伍里九十九个人打不上卡）。
+
+### C6.1 `events/tokens.py` —— 纯函数，先写这一层
+
+无 DB、无 request、无 settings 读取（除了 `SECRET_KEY` 经由 `salted_hmac`）。
+
+```python
+issue(event_id, mode, *, at=None) -> str
+verify(token, *, at=None) -> (event_id, mode)   # 失败抛自己的异常
+window_is_open(event, *, at=None) -> bool       # start-2h ~ end+4h
+```
+
+⚠️ `at=None` 不是可选的写法，是这一层的**全部理由**。本项目所有跟时间有关的写路径
+都注入时钟（`check_in(participation, *, at=None)`、`upcoming(now=None)`），
+`TimestampSigner` 因为注不进时钟才被否决 ——
+见 [D28 为什么不用 TimestampSigner](decisions/D28-qr-checkin.md#为什么不用-timestampsigner)。
+写成读 `local_now()` 的版本，测「刚好 90 秒」和「刚好 91 秒」就得 mock，
+而这一层存在的意义就是不用 mock。
+
+⚠️ `key_salt="events.checkin"` 不能省，理由同上一节末尾。
+
+⚠️ 放 `tokens.py` 而不是 `views.py`：`ViewsAreThinGuardTests` 禁止 views.py 出现
+`local_now(`，会直接红。
+
+**这一步的测试（不碰 DB，`SimpleTestCase` 就够）**：
+
+| | |
+|---|---|
+| 签发再验证 | 拿回同一个 `(event_id, mode)` |
+| 89 秒 / 91 秒 | 边界两侧各一条，注入时钟，不 mock |
+| 改一个字符 | 拒绝 |
+| 换 `event_id` 重签 | 拒绝（签名覆盖了它） |
+| 换 `mode` 重签 | 拒绝 |
+| 时间窗 | `start-2h` 前一分钟拒、后一分钟过；`end+4h` 同理 |
+
+### C6.2 `checked_in_method` —— 一次迁移
+
+`Participation` 加一列，`blank=True`，**没有 default**
+（[为什么不给 default](decisions/D28-qr-checkin.md#四checked_in_method一次迁移一列出事时想看的那一列)）。
+
+`check_in()` / `check_out()` / `record_hours()` 三个都接 `method=` 参数，默认 `ADMIN`。
+⚠️ **三个都要接**：`_mark_attended()` 的注释里已经写过「一个规则三个入口一个守卫，
+等于两条绕路」，来源字段是同一个形状。
+
+测试：三条写路径各自记下正确的来源；空字符串的老行不被读成 admin。
+
+### C6.3 session 凭据 + 两个志愿者页面
+
+```
+GET  /events/checkin/<token>/     验签 → 写 session → login_required 跳转
+GET  /events/checkin/confirm/     读凭据 → （多工种则让他选）→ 显示确认
+POST /events/checkin/confirm/     transaction.atomic() + select_for_update()
+                                  → check_in() / check_out()
+                                  → redirect My Signups + 一条 success
+```
+
+⚠️ **确认页的表单里不带 token。** POST 校验的是 session 凭据。带上 token 会诱使人
+重新验一次，那就把 90 秒的窗口套回到「打完密码之后」，
+[两段式](decisions/D28-qr-checkin.md#为什么-②-和-③-一定要分开两个理由各自都是硬的)就白分了。
+
+⚠️ 凭据的读写规则（10 分钟、绑 event 和 mode）放 `services.py`，不放视图 ——
+它是业务规则。
+
+⚠️ 锁里面**不许有任何 I/O**，也**不许**用 `.update()` 绕过 `full_clean()` 和
+simple-history（会不留 history 行，而那是 `undo_attendance()` 敢删 hours 的前提）。
+
+**这一步的测试**：
+
+| 情况 | 断言 |
+|---|---|
+| 未登录扫码 | 跳登录，`next` 指向确认页；登录回来仍能完成 |
+| token 过期 | 拒绝，页面指向「重扫屏幕上的码」 |
+| 凭据过了 10 分钟 | 拒绝 |
+| 没报名这场活动 | 拒绝 + 报名链接，**且库里没有新建 Participation** |
+| 未成年缺同意 | `ConsentRequired` 渲染成一句人话，**不是 500** |
+| 连打两次 | 幂等：`checked_in_at` 不变，history 只多一行 |
+| mode 和状态对不上 | 「你 9:03 已经签到了」/「先签到」 |
+| 已 cancelled 的报名 | 拒绝 |
+| 一人两工种 | 出选择页；选完只有那一行被打 |
+| 签退 | 写 `hours`，且 `checked_in_method` 是 `self_qr` |
+
+⚠️ 单元测试里**测不了真并发**（sqlite 上 `select_for_update` 近乎无操作）。
+所以这里断言的是幂等，真并发走 C6.5。
+
+### C6.4 admin 的平板页
+
+`npm i qrcode` → `assets/js/` 一个新模块（**不是 Alpine** —— 它有网络和定时器）。
+
+⚠️ 二维码里的 URL **从服务端来，JS 不拼** —— 同
+`AssetPathsComeFromTemplatesGuardTests` 的教训。
+
+⚠️ [`setInterval` 单独用当天一定翻车](decisions/D28-qr-checkin.md#setinterval-单独用当天一定翻车)。
+四条对策缺一不可，其中最反直觉的一条：**fetch 失败时要把二维码盖掉**。
+留着它，失败会静默转移到志愿者身上。
+
+测试：token 端点对非 `can_manage` 的账号 403（**这是整个方案最关键的一条** ——
+不检查的话任何志愿者在家里就能给自己发码）；时间窗外拒签；draft / cancelled 拒签；
+响应里带 `expires_at`；限流生效。
+
+### C6.5 入口、My Signups、压测
+
+- `/events/manage/` 的 Go to 列加 **Check-in QR**（`can_manage` 才画 ——
+  同一列里已经有「只读身份不画 Edit / Notify」的规矩）；attendance 页顶部也放一个；
+- `my_participations.html` **合并成一列 `Attendance`**，
+  [不能再加两列](decisions/D28-qr-checkin.md#my-signups-那张表不能再加两列)；
+- staging 打 200 个并发 POST：同一个人只产生一次 `check_in`、p95 延迟、零 500；
+- ⚠️ 顺带核对 `gunicorn workers × threads` 对 Render Postgres 连接上限的算式 ——
+  [一百人真可能撞到的墙是连接数，不是 CPU](decisions/D28-qr-checkin.md#真正要处理的四件事)。
+
+---
+
 ## 验收
 
 - [ ] ⭐ **14 条需求每一条都能从某个链接点得到** —— 不是「service 写好了」，
@@ -723,7 +937,12 @@ R2 和 Sentry（都在免费额度内）—— 合计**每月十几美元量级*
       [`phase-c.md`](phase-c.md#样式的落点css-只许出现在两个地方)）
 - [ ] 把所有 `x-` 属性删掉、关掉 JavaScript，**每个写操作仍然能完成**
       （判据见 [D24](decisions/D24-htmx-alpine-tailwind.md#渐进增强的口径只管写操作)）
-- [ ] **备份恢复演练三样都做过**；R2 的桶**确认是私有的**
+- [ ] **备份恢复演练三样都做过**；R2 的四个桶**逐个确认过读权限和版本控制**
+      —— 备份 / 活动图片 / memories 三个私有，首页素材公开；
+      活动图片桶版本控制**关**，memories 桶版本控制**开**。
+      ⚠️ 这四项没有一项能靠代码或测试验出来，只能在 R2 控制台上看，
+      而其中两项弄反的表现都是「一切正常」：图片桶开了版本控制的话删除是假的，
+      memories 桶没开的话误删一次就永久没了
 - [ ] ⭐ **越权实测**：A ministry 的 admin 打 B ministry 三个 URL 全 403；
       志愿者打 `/admin/` 得 403。**且 403 页面上读得到为什么**
 - [ ] 线上完成一次「注册 → 收密码重置邮件 → 改密 → 登录」，

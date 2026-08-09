@@ -105,6 +105,14 @@
                     {% endif %}
                     <a href="{% url 'events:event_registrations' event.pk %}" class="prose-link">Signups</a>
                     <a href="{% url 'events:event_attendance' event.pk %}" class="prose-link">Attendance</a>
+                    {% comment %}
+                    ⚠️ 和 Edit / Notify 同一条规矩：只读身份不画。这一页开的是
+                       打卡码，能打开它的人等于能给全场发卡 —— 它的权限和
+                       「改这场活动」是同一个，不是「看这场活动」。
+                    {% endcomment %}
+                    {% if can_manage %}
+                      <a href="{% url 'events:checkin_display' event.pk %}" class="prose-link">Check-in QR</a>
+                    {% endif %}
                     <a href="{% url 'events:event_report' event.pk %}" class="prose-link">Report</a>
                     {% if can_manage %}
                       <a href="{% url 'events:event_notify' event.pk %}" class="prose-link">Notify</a>

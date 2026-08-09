@@ -1,10 +1,10 @@
 {% extends "core/base.html" %}
-{% block title %}Notify volunteers — {{ event.name }}{% endblock %}
+{% block title %}Notify Volunteers — {{ event.name }}{% endblock %}
 
 {% block content %}
   {% include "events/_event_nav.html" with current="notify" %}
 
-  <h1 class="text-2xl font-semibold">Notify volunteers</h1>
+  <h1 class="text-2xl font-semibold">Notify Volunteers</h1>
   <p class="mt-1 text-sm text-ink-600 dark:text-ink-300">{{ event.name }}</p>
 
   {% if previous %}
@@ -12,7 +12,7 @@
     ⚠️ 这一段是**唯一**挡在「网络卡了一下」和「两封一模一样的通知」之间的东西 ——
        没有队列，也没有幂等键。所以它显著，不是一行小字。
     {% endcomment %}
-    <div class="card mt-6 border-warning-fg/30 bg-warning-bg dark:border-warning-fg-dark/30 dark:bg-warning-bg-dark">
+    <div class="card mt-6 border border-warning-fg/30 bg-warning-bg dark:border-warning-fg-dark/30 dark:bg-warning-bg-dark">
       <p class="text-sm font-medium text-warning-fg dark:text-warning-fg-dark">
         Already notified {{ previous|length }} time{{ previous|length|pluralize }}
       </p>
@@ -67,7 +67,13 @@
        3 个联系不上的人，正是本项目反复判过刑的那种静默失败 ——
        通知平台答得了「这封信送到了吗」，答不了「这个人根本没有地址」。
     {% endcomment %}
-    <section class="card {% if unreachable %}border-danger-fg/40 bg-danger-bg dark:border-danger-fg-dark/40 dark:bg-danger-bg-dark{% endif %}">
+    {% comment %}
+    ⚠️ `border` 在 `{% if %}` **里面**（2026-08-06）。卡片本身已经没有边框了，
+       而 Tailwind 的 `border-<色>` 只给颜色 —— 所以红框的宽度要在这里显式给出，
+       并且只在真的有人联系不上时才给：没有人的时候这一块就是一张普通卡片。
+       少了这个 `border`，上面那句「这一组必须显著」会**静默失效**。
+    {% endcomment %}
+    <section class="card {% if unreachable %}border border-danger-fg/40 bg-danger-bg dark:border-danger-fg-dark/40 dark:bg-danger-bg-dark{% endif %}">
       <h2 class="text-sm font-semibold {% if unreachable %}text-danger-fg dark:text-danger-fg-dark{% endif %}">
         Cannot be reached ({{ unreachable|length }})
       </h2>

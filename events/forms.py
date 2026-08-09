@@ -9,8 +9,10 @@ import datetime
 
 from django import forms
 from django.conf import settings
+from django.db.models import Q
 
 from contact.models import EmergencyContact, RelationshipType
+from core.limits import LONG_TEXT, PHONE, SEARCH
 from core.timeutils import day_start
 from org.models import Ministry
 from org.permissions import ministry_ids_administered_by
@@ -49,7 +51,12 @@ class SignUpForm(forms.Form):
     #    paperwork and leaves P6 with no address to send anything to, so the
     #    signup would go in already guaranteed to be unreachable.
     consent_email = forms.EmailField(required=False, label="Guardian's email")
-    consent_phone = forms.CharField(required=False, label="Guardian's phone")
+    # ⚠️ max_length is not decoration here: a plain CharField has **no** upper
+    #    bound at all, and this one is copied into Participation.consent_phone,
+    #    which is varchar(200). Without it an overlong number passes validation
+    #    and fails at the INSERT — a 500 on the ordinary signup path.
+    consent_phone = forms.CharField(
+        required=False, max_length=PHONE, label="Guardian's phone")
     # Declared last because it is asked last: it applies to **both** paths
     # through this form — the emergency-contact shortcut still has to say how
     # consent was given — so it sits after the branch rather than inside it.
@@ -235,6 +242,25 @@ class EventPeriodForm(forms.Form):
     have open at all", and the two together.
     """
 
+    # ⚠️ Matches the name **or** the location, and the second half is the point:
+    #    somebody looking for "the one in the kitchen" remembers where it was, not
+    #    what it was called. One OR over two indexed-enough columns; the pilot has
+    #    tens of events, so there is nothing to optimise yet.
+    #
+    # ⚠️ Deliberately **not** the ministry's name. There is a ministry dropdown two
+    #    boxes along, and a search that also matched it would empty the whole of
+    #    Food Pantry onto the page for the word "food" — which reads as the search
+    #    having been ignored.
+    #
+    # ⚠️ The label says what it matches. A placeholder would have said the same
+    #    thing and then disappeared the moment somebody started typing.
+    q = forms.CharField(
+        required=False, max_length=SEARCH, label="Search by name or location",
+        # `type="search"` is semantic, not styling — it is what gives a phone the
+        # right keyboard and the browser its own clear button. Same exception
+        # `type="date"` gets under phase-c.md's placement rules.
+        widget=forms.TextInput(attrs={"type": "search"}),
+    )
     start = forms.DateField(
         required=False, label="From",
         widget=forms.DateInput(attrs={"type": "date"}),
@@ -270,7 +296,11 @@ class EventPeriodForm(forms.Form):
         #    added later, and declaration order is render order — so the box most
         #    people reach for first was sitting third. Which ministry you are
         #    looking at narrows the list far more than a date range does.
-        self.order_fields(["ministry", "start", "end"])
+        #
+        # ⚠️ `q` first (2026-08-06). Somebody who already knows which event they
+        #    want types its name; scanning a dropdown is what you do when you do
+        #    not know. The narrower action goes first.
+        self.order_fields(["q", "ministry", "start", "end"])
 
     def clean(self):
         cleaned = super().clean()
@@ -316,7 +346,15 @@ class EventPeriodForm(forms.Form):
             when = f"until {end:%d %b %Y}"
         else:
             when = "all dates"
-        return f"{who} · {when}"
+        parts = [who, when]
+        # ⚠️ The search term has to appear here. This line is printed under the
+        #    heading of the full report and on the paper it becomes — and a report
+        #    that does not state what it covers gets read as "everything". A
+        #    search is the easiest of the three filters to forget you left on.
+        search = (self.cleaned_data.get("q") or "").strip()
+        if search:
+            parts.append(f"matching “{search}”")
+        return " · ".join(parts)
 
     def narrow(self, events):
         """Apply whichever boxes were filled in.
@@ -334,6 +372,14 @@ class EventPeriodForm(forms.Form):
         ministry = self.cleaned_data.get("ministry") if self.is_valid() else None
         if ministry is not None:
             events = events.filter(ministry=ministry)
+        search = (self.cleaned_data.get("q") or "").strip() if self.is_valid() else ""
+        if search:
+            # ⚠️ `.strip()` above, and it matters more than it looks: a trailing
+            #    space from a phone's autocorrect would make `icontains` match
+            #    nothing at all, and the page would come back empty with the box
+            #    apparently holding a perfectly good word.
+            events = events.filter(
+                Q(name__icontains=search) | Q(location__icontains=search))
         return events
 
 
@@ -424,7 +470,11 @@ class NotifyForm(forms.Form):
     """
 
     reason = forms.ChoiceField(label="Reason")
-    message = forms.CharField(widget=forms.Textarea, label="Message")
+    # Same constant as EventNotification.message, from core/limits.py. A plain
+    # Form gets nothing from the model, so this is the only thing standing
+    # between a pasted document and the column it is written to.
+    message = forms.CharField(
+        widget=forms.Textarea, max_length=LONG_TEXT, label="Message")
 
     def __init__(self, *args, **kwargs):
         # Imported here rather than at module level to keep the import graph of

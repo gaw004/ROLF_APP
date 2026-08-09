@@ -1,5 +1,5 @@
 {% extends "core/base.html" %}
-{% block title %}Page not found{% endblock %}
+{% block title %}Page Not Found{% endblock %}
 {% block main_width %}max-w-2xl{% endblock %}
 
 {% block content %}
@@ -9,7 +9,7 @@
      地址的人听。403 那边显示它是因为那段文案是我们自己写的、专门给人读的；
      这里不是。
   {% endcomment %}
-  <h1 class="text-2xl font-semibold">Page not found</h1>
+  <h1 class="text-2xl font-semibold">Page Not Found</h1>
 
   <p class="mt-4 text-sm text-ink-600 dark:text-ink-300">
     That address does not exist. It may have been mistyped, or the thing it pointed at
@@ -20,6 +20,6 @@
     {% url 'events:event_list' as events_url %}
     {% url 'events:past_events' as past_url %}
     {% include "core/components/button.html" with label="Events" href=events_url variant="primary" %}
-    {% include "core/components/button.html" with label="Past events" href=past_url variant="secondary" %}
+    {% include "core/components/button.html" with label="Past Events" href=past_url variant="secondary" %}
   </div>
 {% endblock %}

@@ -15,6 +15,7 @@ from django.core.exceptions import ValidationError
 from django.db import transaction
 from django.db.models import Count, F, Q, Sum
 from django.db.models.functions import TruncMonth
+from django.utils import timezone
 from django.utils.text import slugify
 from PIL import Image as PILImage
 from PIL import ImageOps as PILImageOps
@@ -24,6 +25,7 @@ from core.notifications.base import EMAIL, SMS, Message, get_backend
 from core.timeutils import local_date_of, local_now
 from org.models import Assignment, Position
 
+from . import tokens
 from .models import (
     Event,
     EventNotification,
@@ -212,20 +214,49 @@ def cancel(participation):
     return participation
 
 
-def check_in(participation, *, at=None):
+def _record_method(participation, method):
+    """Note how this row's attendance was established, if nothing has yet. D28.
+
+    ⚠️ First write wins. The question the column answers is "did the volunteer
+       fill this in, or did I?", so an admin correcting the hours an hour later
+       must not rewrite the answer to "I did". That correction is recorded in
+       the history table; this field is the origin.
+
+    ⚠️ All three routes to attended call this, for the reason written out on
+       _mark_attended(): a rule with three entrances and one guard is a rule
+       with two ways round it. Here the cost of missing one is quieter — the
+       column would simply be empty, which reads as "an old row" and is false.
+    """
+    if not participation.checked_in_method:
+        participation.checked_in_method = method
+
+
+def check_in(participation, *, at=None, method=Participation.CheckInMethod.ADMIN):
     """They turned up. Records the time and moves status to attended.
 
     Refuses a minor with no consent on the row — see _mark_attended().
+
+    `method` says who did the recording. It defaults to ADMIN because that is
+    what every existing caller means; the QR page passes SELF_QR. See D28.
     """
     participation.checked_in_at = at or local_now()
+    _record_method(participation, method)
     _mark_attended(participation)
     participation.full_clean(exclude=["registered_at"])
     participation.save()
     return participation
 
 
-def check_out(participation, *, at=None):
+def check_out(participation, *, at=None, method=Participation.CheckInMethod.ADMIN):
     """They left. Records the time and *writes* the elapsed hours.
+
+    ⚠️ Self-service check-out therefore **writes an authoritative number**. A
+       volunteer who taps this by mistake five minutes in leaves 0.08 in a
+       column a human is answerable for, and mark_absent() will refuse that row
+       from then on. Accepted in D28 with its eyes open: the bias runs the same
+       direction as the one it replaces (an admin who forgets to tap check-out),
+       the confirmation page names the number before writing it, and the history
+       table keeps the old value.
 
     ⚠️ Writes, does not derive. Once somebody has corrected hours by hand, that
        value stands — do not recompute it from the timestamps and overwrite it.
@@ -246,23 +277,303 @@ def check_out(participation, *, at=None):
         participation.hours = Decimal(elapsed.total_seconds()) / Decimal(3600)
         participation.hours = participation.hours.quantize(Decimal("0.01"))
     if participation.hours is not None:
+        _record_method(participation, method)
         _mark_attended(participation)
     participation.full_clean(exclude=["registered_at"])
     participation.save()
     return participation
 
 
-def record_hours(participation, hours):
+def record_hours(participation, hours, *, method=Participation.CheckInMethod.ADMIN):
     """Enter hours by hand — the paper sign-in sheet, with no timestamps.
 
     Goes through the same field as check_out() because there is only one
     authoritative value; what differs is where the number came from.
+
+    ⚠️ This is a third route to attended that never passes through check_in(),
+       which is why it records the method too: a row entered from paper has no
+       timestamps at all, and leaving the column empty would file it under
+       "predates the feature".
     """
     participation.hours = hours
+    _record_method(participation, method)
     _mark_attended(participation)
     participation.full_clean(exclude=["registered_at"])
     participation.save()
     return participation
+
+
+# --- D28: the QR scan, from proof-of-presence to one written row ------------
+
+#: Where the proof of presence is kept between the scan and the confirmation.
+#  A key, not a cookie name — the view puts the value in request.session.
+CHECKIN_CREDENTIAL_KEY = "events.checkin_credential"
+
+#: How long the proof survives. Long enough to type a password on a phone,
+#  which is the whole reason it exists: the token's 90 seconds constrain the
+#  scan and nothing else. D28「为什么 ② 和 ③ 一定要分开」.
+CREDENTIAL_MAX_AGE = datetime.timedelta(minutes=10)
+
+
+class CredentialExpired(ValidationError):
+    """The proof of presence is gone or too old. Scan again."""
+
+
+def issue_credential(event_id, mode, *, at=None):
+    """A plain dict recording that somebody stood in front of the screen.
+
+    ⚠️ Returned rather than written, because nothing in this module may know
+       what a request is (see the module docstring). The view is what puts it
+       into the session — and a plain dict is also what the session can hold,
+       since sessions are serialised as JSON.
+    """
+    return {
+        "event": event_id,
+        "mode": mode,
+        "at": (at or local_now()).timestamp(),
+    }
+
+
+def read_credential(data, *, at=None):
+    """(event_id, mode) from a stored credential, or raise CredentialExpired."""
+    try:
+        event_id, mode, issued_at = data["event"], data["mode"], float(data["at"])
+    except (TypeError, KeyError, ValueError) as error:
+        raise CredentialExpired(_CREDENTIAL_MESSAGE) from error
+    age = (at or local_now()).timestamp() - issued_at
+    if age < 0 or age > CREDENTIAL_MAX_AGE.total_seconds():
+        raise CredentialExpired(_CREDENTIAL_MESSAGE)
+    return event_id, mode
+
+
+_CREDENTIAL_MESSAGE = (
+    "That check-in has timed out. Scan the code on the screen again."
+)
+
+
+@dataclass(frozen=True)
+class ScanTargets:
+    """This person's rows at this event, sorted by what the scan can do to them.
+
+    Three lists rather than one, because the three lead to three different
+    sentences on the phone, and a view that had to work them out from a flat
+    queryset would be doing the deciding — which is what D18 puts here.
+    """
+
+    #: Rows this scan would change.
+    pending: list
+    #: Rows the scan would repeat — "you checked in at 9:03".
+    done: list
+    #: Rows that cannot be checked out because they were never checked in.
+    needs_check_in: list
+
+    @property
+    def any_signup(self):
+        """Are they signed up for this event at all? The first question asked."""
+        return bool(self.pending or self.done or self.needs_check_in)
+
+
+def scan_targets(contact, event, mode):
+    """Sort this contact's live signups at `event` into what the scan can do.
+
+    ⚠️ Cancelled rows are excluded, not listed as "done". Somebody who pulled
+       out and then scanned should be told they are not signed up — the row
+       exists only so that the notification history has something to point at.
+
+    ⚠️ One person may legitimately hold several rows at one event (they signed
+       up to lift *and* to run the welcome desk — D19 allows it), which is why
+       this returns lists rather than a row. Picking one of several is the
+       volunteer's call, not this function's: the other two options both invent
+       a number. See D28「五、一个人报了两个工种」.
+    """
+    rows = list(
+        Participation.objects
+        .filter(contact=contact, event_role__event=event)
+        .notifiable()
+        .select_related("event_role__role", "event_role__event")
+        .order_by("event_role__role__name")
+    )
+    pending, done, needs_check_in = [], [], []
+    for row in rows:
+        if mode == tokens.CHECK_IN:
+            (done if row.checked_in_at else pending).append(row)
+        elif row.checked_out_at:
+            done.append(row)
+        elif row.checked_in_at:
+            pending.append(row)
+        else:
+            needs_check_in.append(row)
+    return ScanTargets(pending=pending, done=done, needs_check_in=needs_check_in)
+
+
+def apply_scan(participation_pk, *, contact, event_id, mode, at=None):
+    """Write one scanned check-in or check-out. Atomic, and safe to repeat.
+
+    Returns (participation, changed). `changed` is False when the row was
+    already in the state the scan asks for — a second tap, a browser retry, or
+    the same person scanning on two devices. That is not an error and must not
+    be reported as one: the page says "you checked in at 9:03" and everybody
+    involved is happy.
+
+    ⚠️ The row is locked and then **re-read inside the lock**. Checking the
+       state before taking the lock is the same as not taking it: two requests
+       both read "not checked in", both proceed, and the second overwrites the
+       first's timestamp. Contention is only ever between duplicate requests for
+       the same person — different volunteers never touch the same row — so the
+       lock costs nothing at a hundred-person event. D28「八、并发」.
+
+    ⚠️ `of=("self",)` is not a micro-optimisation. Without it the FOR UPDATE
+       covers every table pulled in by select_related, which includes the
+       **event** — and locking the event row would serialise the entire queue
+       behind whoever scanned first. That is the one way this feature could
+       actually be made to fall over by a hundred people arriving at once.
+
+    ⚠️ Nothing in here may do I/O. A transaction held open while waiting on a
+       network is how a connection pool is exhausted, and the connection limit
+       is the real ceiling on this feature (D28「真正要处理的四件事」).
+
+    ⚠️ The scope is the belt: the lookup is narrowed to this contact and this
+       event, so a primary key from somebody else's row cannot be posted into
+       this function at all.
+    """
+    with transaction.atomic():
+        participation = (
+            Participation.objects
+            .select_for_update(of=("self",))
+            .filter(contact=contact, event_role__event_id=event_id)
+            .notifiable()
+            .select_related("event_role__event", "event_role__role", "contact")
+            .get(pk=participation_pk)
+        )
+        method = Participation.CheckInMethod.SELF_QR
+        if mode == tokens.CHECK_IN:
+            if participation.checked_in_at:
+                return participation, False
+            check_in(participation, at=at, method=method)
+        else:
+            if participation.checked_out_at or participation.checked_in_at is None:
+                return participation, False
+            check_out(participation, at=at, method=method)
+    return participation, True
+
+
+def default_checkin_mode(event, *, at=None):
+    """Which way round the iPad should start when the page is opened.
+
+    Before the midpoint of the event, people are arriving; after it, they are
+    leaving. ⚠️ Read **once**, at page load, and never again — the display does
+    not follow this as the afternoon goes on. An iPad that switched itself would
+    turn the queue standing in front of it into check-outs, with nothing on the
+    screen having changed to say so.
+    """
+    midpoint = event.start_time + (event.end_time - event.start_time) / 2
+    return tokens.CHECK_IN if (at or local_now()) < midpoint else tokens.CHECK_OUT
+
+
+def checkin_result_message(participation, mode, changed):
+    """The sentence that lands on My Signups after a scan.
+
+    ⚠️ A repeat is phrased as a statement of fact, not as a failure. The most
+       common way to arrive here twice is a slow page and an impatient thumb,
+       and an error would send that person off to find an admin over something
+       that already worked.
+    """
+    if mode == tokens.CHECK_IN:
+        when = timezone.localtime(participation.checked_in_at)
+        if changed:
+            return f"Checked in at {when:%-I:%M %p}."
+        return f"You already checked in at {when:%-I:%M %p}."
+    when = timezone.localtime(participation.checked_out_at)
+    if not changed:
+        return f"You already checked out at {when:%-I:%M %p}."
+    return (f"Checked out at {when:%-I:%M %p} — "
+            f"{participation.hours} hours recorded.")
+
+
+def undo_attendance(participation):
+    """Somebody clicked check-in on the wrong row. Put it back as it was.
+
+    Clears both timestamps and the hours, and moves the row back to registered.
+    Returns True if anything actually changed, so the caller can tell a real
+    undo from a second click on the same button.
+
+    ⚠️ **This deletes hours, and that is the whole difficulty.** `check_out()`
+       writes hours from the clock *only when hours is None*, so an existing
+       value may have come from the clock or from a person typing it — and
+       nothing in the table records which. There is therefore no version of
+       this function that keeps "the ones a human typed": it cannot see them.
+
+       What makes deleting them acceptable rather than reckless is two things,
+       and both have to stay true:
+
+         · the button asks first, **naming the number it is about to remove**
+           (events/templates/events/_attendance_row.html);
+         · `Participation` carries `HistoricalRecords`, so the old value and
+           who removed it are recoverable from the history table.
+
+    ⚠️ It is not optional to clear the hours either, which is worth stating so
+       that nobody "improves" this by keeping them: the constraint
+       `participation_hours_only_when_attended` means a row with hours **must**
+       be attended. "Registered, 3 hours" cannot be stored at all.
+
+    ⚠️ Only `attended` goes back to `registered`. A cancelled row that also
+       carries a check-in is a real state (they signed in, then pulled out),
+       and moving it to registered would erase the second fact to undo the
+       first. Same reasoning as `cancel()` being a status change rather than a
+       delete.
+
+    ⚠️ Deliberately **not** folded into `mark_absent()`. "Undo my mistake" and
+       "record that they did not come" are different facts, and one button
+       doing both would make the second unreadable — the no-show rate would
+       quietly count every mis-click. That was decided when mark_absent() was
+       written (2026-08-05, phase-c.md's known-gaps table) and this function is
+       the fix that entry names.
+    """
+    if (participation.checked_in_at is None
+            and participation.checked_out_at is None
+            and participation.hours is None):
+        return False
+
+    participation.checked_in_at = None
+    participation.checked_out_at = None
+    participation.hours = None
+    # ⚠️ Cleared with the rest. Left behind it would say "a volunteer recorded
+    #    this" about a row that now records nothing — and the next write, which
+    #    is first-write-wins, would then be unable to say who really filled it
+    #    in. This field describes an attendance record, so it goes when the
+    #    attendance record goes.
+    participation.checked_in_method = ""
+    if participation.status == Participation.Status.ATTENDED:
+        participation.status = Participation.Status.REGISTERED
+    participation.full_clean(exclude=["registered_at"])
+    participation.save()
+    return True
+
+
+def clear_hours(participation):
+    """Remove an hours figure without touching anything else. Safe to call twice.
+
+    ⚠️ **Empty is not zero, and that is why this exists.** Until now hours could
+       be set to 0 but never back to nothing, because the form field is a
+       required number. Those are different facts and the attendance page
+       already draws them differently: 0 means somebody looked and recorded
+       that no time was worked; empty means nobody has recorded anything yet.
+       Without this, a figure typed by mistake could only ever be *corrected*
+       to a wrong-but-plausible 0.
+
+    ⚠️ The status is left alone, deliberately. "They turned up" and "they worked
+       N hours" are two assertions, and a row reading attended with no hours is
+       an ordinary state — somebody checked in and the hours have not been
+       worked out yet. Reverting the status here would delete the first fact in
+       order to undo the second. Clearing everything at once is
+       `undo_attendance()`, and it is a different button on purpose.
+    """
+    if participation.hours is None:
+        return False
+    participation.hours = None
+    participation.full_clean(exclude=["registered_at"])
+    participation.save()
+    return True
 
 
 def mark_absent(participation):
@@ -289,11 +600,12 @@ def mark_absent(participation):
     · a check-in timestamp — the same contradiction one step earlier, and left
       in place it would print a row reading "checked in 3:44 p.m. · No-show".
 
-    ⚠️ Known gap, stated rather than papered over: there is still no way to undo
-       a check-in clicked on the wrong row. There never was one, and this
-       function is deliberately not it — "undo my mistake" and "record that
-       they did not come" are different facts, and one button that did both
-       would make the second unreadable. phase-c.md carries it.
+    ⚠️ Undoing a check-in clicked on the wrong row is `undo_attendance()`, and
+       it is deliberately **not** this function — "undo my mistake" and "record
+       that they did not come" are different facts, and one button doing both
+       would make the second unreadable: every mis-click would land in the
+       no-show rate. That separation was the reason this gap stayed open from
+       2026-08-05 until undo_attendance() closed it.
 
     The way back is `check_in()` (or `record_hours()`), which both go through
     `_mark_attended()` and so overwrite this status without needing to know it

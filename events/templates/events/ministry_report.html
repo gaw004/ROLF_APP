@@ -20,14 +20,16 @@
     {% url 'events:event_manage_list' as manage_url %}
     <a href="{{ manage_url }}{% querystring %}" class="prose-link text-sm">&larr; Back to the list</a>
     {% comment %}
-    ⚠️ 唯一一处 onclick。它不属于 Alpine 管的那类状态（D24 说 Alpine 只管
-       展开/收起/选中/主题），也不是写操作 —— 它是「把当前这一页交给浏览器打印」，
-       没有服务端对应物可言。关掉 JS 的话，浏览器菜单里的打印照样能用。
+    「把这一页交给浏览器打印」。没有服务端对应物可言，所以它不是写操作；
+    关掉 JS 的话，浏览器菜单里的打印照样能用。
+
+    ⚠️ **2026-08-06 改成走 button.html 的 `prints` 参数。** 原来这里是手抄的一串
+       class 加一个原生 `onclick` —— 于是全站按钮改成药丸形那一次**漏掉了它**，
+       整个站只剩这一个方角按钮。那正是「模板里不许手抄 class 串」这条规矩防的事，
+       而它当初是用「这里需要一个 onclick」绕开的。改完之后 Alpine 接手那次点击，
+       和其它带确认框的按钮同一层。
     {% endcomment %}
-    <button type="button" onclick="window.print()"
-            class="rounded-md bg-brand-600 px-4 py-2 text-sm font-medium text-white hover:bg-brand-700">
-      Save as PDF
-    </button>
+    {% include "core/components/button.html" with label="Save as PDF" variant="primary" type="button" prints=1 %}
   </div>
 
   {% if autoprint %}
@@ -43,7 +45,7 @@
   {% endif %}
 
   <header class="mb-8">
-    <h1 class="text-2xl font-semibold">Volunteering report</h1>
+    <h1 class="text-2xl font-semibold">Volunteering Report</h1>
     {% comment %}
     ⚠️ 这一行在打印出来的纸上尤其重要：一份没写清楚自己覆盖什么范围的报表，
        会被读成「全部」。

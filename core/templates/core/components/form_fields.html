@@ -2,18 +2,13 @@
 整张表单的字段，逐个走 field.html。取代模板里的 {{ form.as_p }} ——
 as_p 出来的标签结构我们控制不了，错误也会跑到字段上方去。
 
-⚠️ non_field_errors 单独渲染在最前面。它们是「这几个字段合起来不对」那一类
-   （比如报名页的「邮箱或电话至少填一个」），不属于任何一个字段，
-   漏掉的话用户看到的是一次没有任何解释的失败。
+⚠️ non_field_errors 单独渲染在最前面，走 `_non_field_errors.html` ——
+   报名页的未成年人分支用不了本组件，但要显示同一段东西，所以那五行是片段
+   而不是写在这里。
 
 参数：form。
 {% endcomment %}
-{% if form.non_field_errors %}
-  <div role="alert"
-       class="rounded-md border border-danger-fg/30 bg-danger-bg p-3 text-sm text-danger-fg dark:border-danger-fg-dark/30 dark:bg-danger-bg-dark dark:text-danger-fg-dark">
-    {% for error in form.non_field_errors %}<p>{{ error }}</p>{% endfor %}
-  </div>
-{% endif %}
+{% include "core/components/_non_field_errors.html" %}
 {% for field in form %}
   {% if field.is_hidden %}{{ field }}{% else %}{% include "core/components/field.html" %}{% endif %}
 {% endfor %}

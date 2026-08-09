@@ -6,6 +6,15 @@ Thin shells, every one of them. Three rules hold across the whole file:
    with {% if %} still sent it to the browser; filtering it out means it was
    never fetched. Same for "mine": the queryset is narrowed to the logged-in
    contact, so somebody else's id in the URL can only 404.
+
+   ⚠️ `event_detail` is the one deliberate exception (2026-08-06), and it is
+      worth stating precisely so the next reader does not "fix" it: that page
+      **must** serve a row the volunteer predicate excludes, because a draft's
+      preview is the whole point. What the exception does not move is *where*
+      the decision is made — it is still the view, before render, and the
+      refusal is still 404. The rule this docstring is protecting is "no
+      {% if %} in a template stands between a viewer and data the response
+      already carries", and that still holds.
 2. The permission check is the first thing each protected view does, and the
    check itself is one call into org.permissions — there is a grep guard on
    that.
@@ -19,8 +28,10 @@ from django.contrib.auth.decorators import login_required
 from django.core.exceptions import PermissionDenied, ValidationError
 from django.core.paginator import Paginator
 from django.db.models import Prefetch
+from django.http import Http404, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
+from django_ratelimit.decorators import ratelimit
 
 from org.models import Ministry
 from org.permissions import (
@@ -42,12 +53,30 @@ from .forms import (
     SignUpForm,
 )
 from .models import Event, EventNotification, EventRole, Participation
+from .tokens import (
+    CHECK_IN,
+    MODES,
+    InvalidCheckInToken,
+    issue_with_expiry,
+    verify as verify_checkin_token,
+    window_is_open,
+    window_message,
+)
 from .services import (
+    CHECKIN_CREDENTIAL_KEY,
     ConsentRequired,
+    CredentialExpired,
     TurnedUp,
+    apply_scan,
     cancel,
+    checkin_result_message,
+    default_checkin_mode,
+    issue_credential,
+    read_credential,
+    scan_targets,
     check_in,
     check_out,
+    clear_hours,
     confirm_signup,
     default_message,
     event_summary,
@@ -61,6 +90,7 @@ from .services import (
     resolve_recipients,
     set_status,
     sign_up,
+    undo_attendance,
 )
 
 
@@ -107,15 +137,15 @@ def _back_link(request):
     """
     marker = request.GET.get("from")
     if marker == "mine":
-        return reverse("events:my_participations"), "My signups"
+        return reverse("events:my_participations"), "My Signups"
     if marker == "past":
-        return reverse("events:past_events"), "Past events"
+        return reverse("events:past_events"), "Past Events"
     if marker == "manage":
         administers_any = bool(ministry_ids_administered_by(request.user))
         if administers_any or in_foundation_tier(request.user):
             # Same label the navigation uses for this account, so the two do
             # not name one page two different things.
-            label = "Events I manage" if administers_any else "All events"
+            label = "Events I Manage" if administers_any else "All Events"
             return reverse("events:event_manage_list"), label
     return reverse("events:event_list"), "Events"
 
@@ -227,11 +257,43 @@ def event_detail(request, pk):
     ⚠️ Written as status == OPEN this page would 404 the moment an event filled
        up — for exactly the people who had signed up, and for P6's "can't make
        the new time? cancel here" link, which is sent to precisely them.
+
+    2026-08-06 — and one way past that predicate: **preview**. An event nobody
+    has published yet 404'd for everybody, its own ministry's admin included,
+    which made every draft's name on the management list a link that refuses the
+    person who clicked it. It was also the odd one out: registrations,
+    attendance, the report, the edit page and the notice page have all opened on
+    a draft the whole time. Only this page did not, and nothing said why.
+
+    ⭐ Same page, not a second one. The point of a preview is to read what the
+       volunteers will read, so a preview that had its own template would be
+       answering a different question by the second time somebody edited one of
+       them. What `preview` adds is a banner and an inert signup button; nothing
+       else on the page is drawn from it.
+
+    ⚠️ The refusal stays **404, not 403**. To somebody with no business here a
+       draft must not exist — a 403 says "there is an event at this id and it is
+       not for you", which is exactly the sentence a draft is supposed to
+       withhold. So the outcome for a volunteer is byte-for-byte what it was.
+
+    ⚠️ `can_view_event_records`, the read check — not `can_manage_event`. The
+       foundation tier can already open this event's signups, attendance and
+       report; letting the *event page* be the one thing it cannot see would
+       make the narrower rule the confusing one, and it would be a rule no
+       reader could guess from the other five pages.
+
+    ⚠️ Keyed on membership of VISIBLE_TO_VOLUNTEERS, never on `== DRAFT`. The
+       set is the model's answer to "who may a volunteer see", listed in full
+       for the reason written above it (events/models.py) — and the day somebody
+       adds `postponed` to it, a branch spelled `== DRAFT` would quietly publish
+       that event to everybody while this comment still claimed otherwise.
     """
     event = get_object_or_404(
-        Event.objects.visible_to_volunteers().select_related("ministry", "event_type"),
-        pk=pk,
-    )
+        Event.objects.select_related("ministry", "event_type"), pk=pk)
+    preview = event.status not in Event.VISIBLE_TO_VOLUNTEERS
+    if preview and not can_view_event_records(request.user, event):
+        # Deliberately indistinguishable from "no such event" — see above.
+        raise Http404("No event matches the given query.")
     contact = _my_contact(request)
     mine = Participation.objects.none()
     if contact is not None:
@@ -245,6 +307,10 @@ def event_detail(request, pk):
         "mine": mine,
         "can_sign_up": event.status in Event.OPEN_FOR_SIGNUP,
         "can_manage": can_manage_event(request.user, event),
+        # ⚠️ False on every published event, so the banner is not something a
+        #    template has to remember to switch off. It is only ever true for a
+        #    viewer who already passed the check above.
+        "preview": preview,
         "back_url": back_url,
         "back_label": back_label,
     })
@@ -355,7 +421,30 @@ def _scoped_events(request):
        keeps the managing view of their own ministries rather than the read-only
        view of everything. Losing the ability to publish an event because you
        were also promoted would be a strange way to be rewarded.
+
+    ⚠️ `?scope=all` (2026-08-06) is how that person reaches the other view, and it
+       **does not widen anybody's authority**. It is available only to the
+       foundation tier, and it answers by handing back an empty `administered` —
+       so `can_manage` is False, the page draws itself read-only, and every write
+       on it still goes through `_managed_event()`, which asks
+       permissions.py about the actual account and not about this parameter.
+       A ministry admin who adds it to the URL gets nothing: they are not in the
+       tier, so the branch is not taken.
+
+       The 2026-08-05 decision above is not reversed by it. That decision was
+       about which view somebody gets **by default**, and the default is
+       unchanged; what was missing was any way at all to ask for the other one,
+       which left the read-only authority the foundation tier already holds with
+       no entrance for half the people who hold it (revisions.md).
     """
+    if request.GET.get("scope") == "all" and in_foundation_tier(request.user):
+        return (
+            Event.objects.all()
+            .select_related("ministry", "event_type").order_by("-start_time"),
+            set(),
+            True,
+        )
+
     administered = ministry_ids_administered_by(request.user)
     # The foundation tier gets the same page over every ministry — read only.
     # ⚠️ Without this it had no entrance at all: it holds no MinistryRole, so
@@ -373,6 +462,16 @@ def _scoped_events(request):
         administered,
         foundation,
     )
+
+
+def _looking_foundation_wide(request, administered):
+    """Did `_scoped_events()` hand back the whole foundation, read only?
+
+    Asked of the **outcome** (`administered` came back empty) rather than of the
+    query string alone, so a ministry admin who types `?scope=all` does not get a
+    page that behaves as if the parameter had been honoured. It was not.
+    """
+    return request.GET.get("scope") == "all" and not administered
 
 
 def _offered_ministries(administered):
@@ -437,6 +536,12 @@ def event_manage_list(request):
         "total": page.paginator.count,
         "period": period,
         "can_manage": bool(administered),
+        # ⚠️ Passed to the filter so it survives a Filter or a Clear. A
+        #    method="get" form replaces the whole query string with its own
+        #    fields, so without it the foundation-wide page silently narrows back
+        #    to the person's own ministries on the first click — and the list
+        #    still looks perfectly normal, just shorter.
+        "scope_param": "all" if _looking_foundation_wide(request, administered) else None,
         # ⚠️ Present only when asked for, and the template keys the whole panel
         #    off "is it there". `report=1` without it would draw an empty panel
         #    full of zeros, which is a different claim from "not run yet".
@@ -715,6 +820,16 @@ def event_attendance(request, pk):
                 # The paper-sheet path: no timestamps, just a number. Same
                 # field, because there is only one authoritative value.
                 record_hours(participation, hours_form.cleaned_data["hours"])
+        elif action == "undo":
+            # ⚠️ Its own action, never folded into "absent". "I clicked the
+            #    wrong row" and "they did not come" are different facts, and
+            #    one button doing both would put every mis-click into the
+            #    no-show rate. See services.undo_attendance.
+            undo_attendance(participation)
+        elif action == "clear_hours":
+            # ⚠️ Empty is not zero. Until this existed, an hours figure typed by
+            #    mistake could only be corrected to a wrong-but-plausible 0.
+            clear_hours(participation)
         # ⭐ HTMX swaps just this person's row; the plain form path redirects, as
         #    it always did. This is the page the rule was written for — checking
         #    forty people in one at a time reloads the whole table forty times.
@@ -813,4 +928,180 @@ def event_notify(request, pk):
         # "Last notified 5 minutes ago" is the only thing standing between a
         # shaky connection and two identical notices (D22, cost 3).
         "previous": event.notifications.all()[:5],
+    })
+
+
+# --- D28: the QR check-in ------------------------------------------------
+#
+# ⭐ The whole point of this pair of views is that "you were standing in front
+#    of the screen" and "you are logged in as Maria" are two separate questions.
+#    The scan answers the first inside 90 seconds and hands the answer to the
+#    session; the login answers the second at whatever speed a phone keyboard
+#    allows. Merging them back into one view — the obvious simplification —
+#    reintroduces the failure D28 was written to remove: every volunteer's first
+#    ever check-in ends with an expired token and a walk back to the iPad.
+
+
+def checkin_scan(request, token):
+    """The URL inside the QR code. Verifies presence, then gets out of the way.
+
+    ⚠️ Deliberately **not** @login_required, and that is not a hole: it writes
+       nothing. It turns a token into a session credential and redirects, and
+       the credential names an event and a direction, not a person. Who that
+       person is gets decided by the login the redirect leads to.
+
+    ⚠️ A GET, and it must therefore stay free of writes to the database. Link
+       previewers in messaging apps, browser prefetch and corporate URL scanners
+       all fetch this address without a human touching it — the original design
+       recorded attendance here, which means forwarding the link into any chat
+       window would check somebody in.
+    """
+    try:
+        event_id, mode = verify_checkin_token(token)
+    except InvalidCheckInToken as error:
+        return render(request, "events/checkin_refused.html", {
+            "reason": "; ".join(error.messages),
+        }, status=400)
+
+    request.session[CHECKIN_CREDENTIAL_KEY] = issue_credential(event_id, mode)
+    return redirect("events:checkin_confirm")
+
+
+@login_required
+@ratelimit(key="user", rate="30/m", method="POST", block=False)
+def checkin_confirm(request):
+    """What the volunteer actually taps. One row, one write, safe to repeat.
+
+    ⚠️ The credential is read from the session, never from the form. Putting the
+       token in a hidden field is the tempting shortcut, and it quietly undoes
+       the split above: the 90-second window would then have to survive the
+       login, which is the thing it was moved out of the way of.
+    """
+    contact = _my_contact(request)
+    try:
+        event_id, mode = read_credential(request.session.get(CHECKIN_CREDENTIAL_KEY))
+    except CredentialExpired as error:
+        return render(request, "events/checkin_refused.html", {
+            "reason": "; ".join(error.messages),
+        }, status=400)
+
+    event = get_object_or_404(
+        Event.objects.visible_to_volunteers().select_related("ministry"), pk=event_id)
+    targets = scan_targets(contact, event, mode) if contact else None
+
+    if targets is None or not targets.any_signup:
+        return render(request, "events/checkin_refused.html", {
+            "event": event,
+            "reason": "You are not signed up for this event.",
+            # ⚠️ A link, never a signup. Creating the row here would walk past
+            #    sign_up()'s two gates, and the state on the other side of them
+            #    is a minor recorded as present with nobody to call.
+            "action_url": reverse("events:event_signup", args=[event.pk]),
+            "action_label": "Sign up for this event",
+        }, status=400)
+
+    if request.method == "POST":
+        if getattr(request, "limited", False):
+            return render(request, "events/checkin_refused.html", {
+                "event": event,
+                "reason": "That was a lot of taps. Wait a moment and try again.",
+            }, status=429)
+        chosen = request.POST.get("participation")
+        # Membership of these lists is the authorisation: both are already
+        # narrowed to this contact and this event.
+        #
+        # ⚠️ `done` is in the set on purpose, and leaving it out was a real bug
+        #    caught by its test. The commonest second POST comes from a page
+        #    that was already open when the first one succeeded — a slow network
+        #    and an impatient thumb — and by then the row has moved from pending
+        #    to done. Accepting only pending answers that person with a 404,
+        #    which reads as "the site is broken" at the exact moment their
+        #    check-in has in fact worked. apply_scan() reports it as changed=False
+        #    and the page says "you already checked in at 9:03".
+        #
+        # ⚠️ `needs_check_in` stays out. Those rows would also be a no-op, but
+        #    the honest answer for them is "check in first", not "you already
+        #    checked out".
+        allowed = {str(row.pk): row for row in targets.pending + targets.done}
+        if chosen not in allowed:
+            raise Http404
+        try:
+            participation, changed = apply_scan(
+                chosen, contact=contact, event_id=event.pk, mode=mode)
+        except ConsentRequired as error:
+            # ⚠️ Shown, not swallowed, and not a 500. The person this refusal
+            #    concerns is standing in a hall holding a phone, and the fix is
+            #    on their profile page — so say which fix.
+            return render(request, "events/checkin_refused.html", {
+                "event": event,
+                "reason": "; ".join(
+                    message for group in error.message_dict.values() for message in group
+                ),
+                "action_url": reverse("accounts:profile"),
+                "action_label": "Go to my profile",
+            }, status=400)
+        del request.session[CHECKIN_CREDENTIAL_KEY]
+        messages.success(request, checkin_result_message(participation, mode, changed))
+        return redirect("events:my_participations")
+
+    return render(request, "events/checkin_confirm.html", {
+        "event": event,
+        "mode": mode,
+        "checking_in": mode == CHECK_IN,
+        "targets": targets,
+        # One row is the ordinary case and gets no question; several is rare and
+        # is the only case where anybody is asked anything (D28 五).
+        "only": targets.pending[0] if len(targets.pending) == 1 else None,
+    })
+
+
+@login_required
+def checkin_display(request, pk):
+    """The page that lives on the iPad. Draws nothing itself — the JS does.
+
+    Read-only as far as the database is concerned, so the permission is the
+    manage one purely because of what it grants access to: whoever can open this
+    page can mint check-in codes for everybody at the event.
+    """
+    event = _managed_event(request, pk)
+    return render(request, "events/checkin_display.html", {
+        "event": event,
+        "can_manage": True,
+        # ⚠️ Computed here, once, at page load — never re-derived in the
+        #    browser. An iPad that flipped from Check in to Check out on its own
+        #    halfway through would turn the queue in front of it into check-outs
+        #    with nothing on screen saying so. From here on the admin decides.
+        "default_mode": default_checkin_mode(event),
+        "closed_message": window_message(event),
+        "token_url": reverse("events:checkin_token", args=[event.pk]),
+    })
+
+
+@login_required
+@ratelimit(key="user", rate="60/m", block=False)
+def checkin_token(request, pk):
+    """A fresh code for the display. JSON, and the one endpoint that must not leak.
+
+    ⚠️ This permission check **is** the scheme. Without it any signed-in
+       volunteer fetches a live token from their sofa and books themselves in;
+       every rotating-code measure above it becomes decoration. It is the first
+       statement in the function for that reason.
+    """
+    event = _managed_event(request, pk)
+    if getattr(request, "limited", False):
+        return JsonResponse({"error": "Too many requests."}, status=429)
+    mode = request.GET.get("mode")
+    if mode not in MODES:
+        raise Http404
+    if not window_is_open(event):
+        return JsonResponse({"error": window_message(event)}, status=409)
+    token, expires_at = issue_with_expiry(event.pk, mode)
+    return JsonResponse({
+        # ⚠️ The whole URL is assembled here and the browser only draws it.
+        #    A script that built this address from parts would be a second
+        #    definition of the route, and the QR is the one place where being
+        #    subtly wrong produces a code that scans perfectly and goes nowhere.
+        "url": request.build_absolute_uri(
+            reverse("events:checkin_scan", args=[token])),
+        "expires_at": expires_at,
     })

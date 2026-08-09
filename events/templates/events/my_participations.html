@@ -1,14 +1,21 @@
 {% extends "core/base.html" %}
-{% block title %}My signups{% endblock %}
+{% block title %}My Signups{% endblock %}
+{% comment %}
+版心和 Events / Past Events / 活动详情同一个值（2026-08-06）。
+⚠️ 代价如实说：这一页是一张六列表格，收窄到 896px 之后桌面上就可能开始横向滚动。
+   它包在 `.table-wrap` 里，所以滚的是表格自己，不会把整页撑宽 —— 那一条是
+   375px 那个 bug 留下的规矩。
+{% endcomment %}
+{% block main_width %}max-w-4xl{% endblock %}
 
 {% block content %}
-  <h1 class="mb-6 text-2xl font-semibold">My signups</h1>
+  <h1 class="mb-6 text-2xl font-semibold">My Signups</h1>
 
   {% if participations %}
     <div class="table-wrap">
       <table>
         <thead>
-          <tr><th>Event</th><th>Starts</th><th>Role</th><th>Status</th><th>Hours</th><th></th></tr>
+          <tr><th>Event</th><th>Starts</th><th>Role</th><th>Status</th><th>Attendance</th><th>Hours</th><th></th></tr>
         </thead>
         <tbody>
           {% for row in participations %}
@@ -31,6 +38,21 @@
                   {% include "core/components/badge.html" with label=row.get_status_display tone="info" %}
                 {% else %}
                   {% include "core/components/badge.html" with label=row.get_status_display %}
+                {% endif %}
+              </td>
+              {% comment %}
+              签到和签退**合成一列**（D28）。这张表已经六列，模板顶上那条宽度
+              警告说的就是它 —— 再加两列，桌面上也开始横向滚动。
+              ⚠️ 「两个时间两列」在这一页上已经被否决过一次（Starts / Ends），
+                 理由一模一样。这是第二次，所以写进了 D28 而不是只留在这里。
+              {% endcomment %}
+              <td class="whitespace-nowrap">
+                {% if row.checked_out_at %}
+                  {{ row.checked_in_at|time }} &rarr; {{ row.checked_out_at|time }}
+                {% elif row.checked_in_at %}
+                  In {{ row.checked_in_at|time }}
+                {% else %}
+                  —
                 {% endif %}
               </td>
               <td>{{ row.hours|default_if_none:"—" }}</td>

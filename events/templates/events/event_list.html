@@ -1,12 +1,22 @@
 {% extends "core/base.html" %}
 {% block title %}Events{% endblock %}
 
+{% comment %}
+版心比默认的 max-w-6xl 窄（2026-08-06）。⚠️ 这不是排版偏好 —— 深色模式下背景是
+首页那张照片，而版心顶到 1152px 时两侧几乎不剩地方，照片等于没有。
+
+⚠️ 三页必须**用同一个值**：Events、Past Events、活动详情。
+   少改一页，从列表点进详情时整块内容会往外一弹 —— 那正是这个项目一直在防的
+   「衔接不丝滑」。管理侧和表单页各有自己的宽度，不受这条影响。
+{% endcomment %}
+{% block main_width %}max-w-4xl{% endblock %}
+
 {% block content %}
   {% comment %}
   这一页只列 open_for_signup() + 未开始的。筛选发生在查询里，不是在这里用
   {% if %} 藏起来 —— 模板里不显示 ≠ 数据没发出去。
   {% endcomment %}
-  <h1 class="mb-6 text-2xl font-semibold">Events open for signup</h1>
+  <h1 class="mb-6 text-2xl font-semibold">Events Open for Signup</h1>
 
   {% url 'events:event_list' as here %}
   {% include "events/_period_filter.html" with action=here %}
@@ -15,4 +25,19 @@
   <p class="mt-8 text-sm">
     <a href="{% url 'events:past_events' %}" class="prose-link">Looking for something that already happened?</a>
   </p>
+
+  {% comment %}
+  飘着的羽毛（2026-08-06）。志愿者那三页里**只有这一页有**，公开首页另有一份。
+
+  ⚠️ 放在 content 的最后，是为了让它待在 `#event-results` **外面** —— HTMX 筛选
+     会把那一块整个换掉，容器要是在里面，每筛一次羽毛就被连根拔掉重来。
+     （它是 fixed，所以 DOM 位置不影响布局，只影响这一件事。）
+
+  ⚠️ 不传 `on_photo`：这一页浅色时底是 ink-50、深色时才压照片，
+     而深色那一档由 `.dark .feather` 自己管。首页不跟随深色模式，所以那边要传。
+
+  ⚠️ Past Events 和活动详情页上没有（2026-08-06 定）。那两页和这一页共用版心是
+     为了跳转时不弹，而羽毛是叠在上层的独立一层，少了它不会让内容位移。
+  {% endcomment %}
+  {% include "core/components/_feather_sky.html" %}
 {% endblock %}

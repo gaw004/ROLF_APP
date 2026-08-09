@@ -16,12 +16,117 @@ set of ids, and can_grant_ministry_admin() is one group lookup. Both run per
 request because base.html draws the nav on every page.
 """
 
+from django.contrib.auth.models import AnonymousUser
+from django.urls import reverse
+
 from core.models import HomePage
 from org.permissions import (
     can_grant_ministry_admin,
     in_foundation_tier,
     ministry_ids_administered_by,
 )
+
+
+def _link(label, url_name, query=""):
+    return {"label": label, "url": reverse(url_name) + query}
+
+
+def _menu_for(user, administered, foundation):
+    """The site menu, in order, as data. Rendered by _site_menu.html.
+
+    ⚠️ **Built here rather than as branches in the template**, and the reason is
+       the entrance animation. Each entry's transition-delay is computed from a
+       `--i` the template supplies, and those numbers were written by hand —
+       which works exactly as long as the list is flat. With three conditional
+       sections it stops working: whichever section is hidden leaves a hole in
+       the numbering, one entry waits an extra beat for nothing, and the
+       staggered entrance the whole effect exists for goes lumpy. Nothing errors,
+       and it is invisible until you watch the right account open the menu.
+       Generated here, `forloop.counter0` is the number and there is no hole to
+       leave.
+
+    ⚠️ The two admin sections are **labelled by tier**, because one person can
+       hold both and the two mean different things: a ministry admin publishes
+       and edits their own ministry's events, while the foundation tier appoints
+       ministry admins and may read every ministry's records. Somebody who is
+       both needs to see which hat each page belongs to.
+
+    ⚠️ `Events I Manage` and `All Events` are the same view, and the foundation
+       one carries `?scope=all` deliberately — see events/views._scoped_events.
+       Somebody who is both keeps the managing view of their own ministries by
+       default, so without the parameter the foundation-wide entry would land on
+       a page showing only their own ministries while the label said "All".
+
+    Headings are entries too, rather than a nested structure: a flat list is what
+    lets one loop number every item, which is the whole point (above).
+    """
+    if not user.is_authenticated:
+        return [
+            _link("Events", "events:event_list"),
+            _link("Past Events", "events:past_events"),
+            _link("Log In", "accounts:login"),
+            _link("Register", "accounts:register"),
+        ]
+
+    menu = [
+        _link("Events", "events:event_list"),
+        _link("Past Events", "events:past_events"),
+        _link("My Signups", "events:my_participations"),
+        _link("My Profile", "accounts:profile"),
+    ]
+
+    if administered:
+        menu += [
+            {"heading": "Ministry Admin"},
+            # No "New event" entry: event_manage_list already carries a
+            # "Publish a new event" button, gated on the same permission. A
+            # second entrance means the same condition written in two places,
+            # and those two eventually disagree.
+            _link("Events I Manage", "events:event_manage_list"),
+            # ⚠️ The **manage** page, not the wall. The wall's entrance is the
+            #    feather (the drifting ones, and the still one in the top bar),
+            #    and putting a second door to it in the menu would give away the
+            #    one thing that page is built around — you find it by noticing
+            #    something. This entry is here for the opposite reason: without
+            #    it, the upload page is reachable only by typing its URL, which
+            #    is precisely the shape of the five gaps this module exists to
+            #    close.
+            _link("Memories Photos", "gallery:manage"),
+        ]
+
+    if foundation:
+        menu += [
+            {"heading": "Foundation Admin"},
+            _link("All Events", "events:event_manage_list", "?scope=all"),
+        ]
+        # ⚠️ Only when they are not already a ministry admin, so that somebody
+        #    holding both tiers gets one entry rather than two identical ones.
+        #    Unlike `Events I Manage` / `All Events` — which carry different
+        #    query strings and land on genuinely different lists — this is the
+        #    same URL either way; the page itself widens for the foundation
+        #    tier. Two entries pointing at one page reads as a bug.
+        if not administered:
+            menu.append(_link("Memories Photos", "gallery:manage"))
+        if can_grant_ministry_admin(user):
+            menu.append(_link("Ministry Admins", "org:ministry_list"))
+
+    if user.is_staff:
+        # ⚠️ Its own section, and not folded into either tier above. `is_staff`
+        #    is a different axis: it says "may open the Django admin", which is
+        #    neither of the two ministry-scoped tiers and is held by neither by
+        #    default. Filing it under "Foundation admin" would state something
+        #    untrue about who has it.
+        # ⚠️ `new_tab` — the only entry in this menu that gets it, and the only
+        #    one that leaves this interface. Somebody opens the Django admin to
+        #    look something up or fix a row **while** they are in the middle of
+        #    whatever brought them here; replacing the tab throws that away and
+        #    the way back is the browser's Back button through a page that may
+        #    have been a POST. Every other entry is a page of this site, and
+        #    opening those in new tabs would just accumulate them.
+        menu += [{"heading": "Staff"},
+                 {"label": "Admin Site", "url": "/admin/", "new_tab": True}]
+
+    return menu
 
 
 def navigation(request):
@@ -33,11 +138,13 @@ def navigation(request):
             "can_grant_ministry_admin": False,
             "is_ministry_admin": False,
             "can_see_all_events": False,
+            "site_menu": _menu_for(AnonymousUser(), set(), False),
         }
 
     administered = ministry_ids_administered_by(user)
     foundation = in_foundation_tier(user)
     return {
+        "site_menu": _menu_for(user, administered, foundation),
         # A set of ids, not a queryset: the nav only asks "any?", and handing
         # templates a queryset invites somebody to iterate it into a menu and
         # add a query to every page in the project.

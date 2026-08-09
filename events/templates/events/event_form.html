@@ -1,5 +1,5 @@
 {% extends "core/base.html" %}
-{% block title %}{% if event %}Edit event{% else %}Publish an event{% endif %}{% endblock %}
+{% block title %}{% if event %}Edit Event{% else %}Publish an Event{% endif %}{% endblock %}
 {% block main_width %}max-w-2xl{% endblock %}
 
 {% block content %}
@@ -17,11 +17,11 @@
   {% if event %}{% include "events/_event_nav.html" with current="edit" %}{% endif %}
 
   <h1 class="text-2xl font-semibold">
-    {% if event %}Edit “{{ event.name }}”{% else %}Publish an event{% endif %}
+    {% if event %}Edit “{{ event.name }}”{% else %}Publish an Event{% endif %}
   </h1>
 
   {% if event %}
-    <div class="card mt-4 border-info-fg/30 bg-info-bg dark:border-info-fg-dark/30 dark:bg-info-bg-dark">
+    <div class="card mt-4 border border-info-fg/30 bg-info-bg dark:border-info-fg-dark/30 dark:bg-info-bg-dark">
       <p class="text-sm text-info-fg dark:text-info-fg-dark">
         Changing the start or end time sends you straight to the notice page —
         everyone who signed up needs to hear about it.

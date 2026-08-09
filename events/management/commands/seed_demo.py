@@ -40,6 +40,44 @@ HOUR = datetime.timedelta(hours=1)
 DAY = datetime.timedelta(days=1)
 PASSWORD = "demo-password-not-a-secret"
 
+#: The demo logins, keyed by the part each one plays in the acceptance walk,
+#: with the address it logs in with and the sentence printed for it.
+#:
+#: ⚠️ One dictionary, read three times: the accounts are created from it, the
+#:    credentials printed at the end are generated from it, and
+#:    events/tests.py's walk logs in through it. The printed list used to be
+#:    maintained by hand next to the code that made the accounts — so the day
+#:    the login name changed, the command cheerfully printed seven credentials
+#:    that no longer existed, and the walk stopped at step one.
+#:
+#: ⚠️ Roles, not names, are the keys. The acceptance checklist says "play the
+#:    pantry admin"; it does not care what address that person has.
+DEMO_ACCOUNTS = {
+    "foundation_admin": (
+        "boss@example.invalid",
+        "the foundation-wide group; appoints ministry admins (P5)"),
+    "pantry_admin": (
+        "zhangsan@example.invalid", "administers Food Pantry"),
+    "tax_admin": (
+        "chensi@example.invalid",
+        "administers Tax Help (use this one to try over-reach)"),
+    "volunteer_adult": (
+        "lisi@example.invalid", "an ordinary volunteer"),
+    "volunteer_minor": (
+        "xiaoming@example.invalid",
+        "under 18; signing up needs a guardian's consent"),
+    "volunteer_unknown": (
+        "wang@example.invalid", "no date of birth; treated as a minor"),
+    "volunteer_minor2": (
+        "zhaoxiaoyu@example.invalid",
+        "under 18, reachable only through her emergency contact"),
+}
+
+
+def demo_login(role):
+    """The address the given demo role logs in with."""
+    return DEMO_ACCOUNTS[role][0]
+
 
 class Command(BaseCommand):
     help = "Create a demo foundation: ministries, posts, accounts, events, signups."
@@ -67,16 +105,15 @@ class Command(BaseCommand):
             return
         self.stdout.write(self.style.SUCCESS("\nDemo data ready. Accounts (password "
                                              f"'{PASSWORD}'):"))
-        for line in [
-            "  foundation_admin  — the foundation-wide group; appoints ministry admins (P5)",
-            "  pantry_admin      — administers Food Pantry",
-            "  tax_admin         — administers Tax Help (use this one to try over-reach)",
-            "  volunteer_adult   — an ordinary volunteer",
-            "  volunteer_minor   — under 18; signing up needs a guardian's consent",
-            "  volunteer_unknown — no date of birth; treated as a minor",
-            "  volunteer_silent  — no email and no phone; lands in “cannot be reached”",
-        ]:
-            self.stdout.write(line)
+        # ⚠️ Log in with the **address**, not a handle (2026-08-06), and printed
+        #    from the same dictionary the accounts were made from — see
+        #    DEMO_ACCOUNTS for why that matters.
+        width = max(len(address) for address, _ in DEMO_ACCOUNTS.values())
+        for address, what in DEMO_ACCOUNTS.values():
+            self.stdout.write(f"  {address:<{width}} — {what}")
+        self.stdout.write(
+            "  Sam Noreach has no login at all — no email, no phone. That is the "
+            "person who lands in “cannot be reached” on the notice page.")
 
     # --- the pieces ------------------------------------------------------
 
@@ -137,19 +174,27 @@ class Command(BaseCommand):
             },
         )
 
-    def account(self, username, last_name, first_name="", **contact_fields):
-        user = get_user_model().objects.filter(username=username).first()
+    def account(self, email, last_name, first_name="", **contact_fields):
+        """One demo login, keyed by its address — which is its login name (D 2026-08-06).
+
+        ⚠️ Every account therefore **has** to have an address, which is why the
+           "cannot be reached" demo person below is a Contact and not an account
+           any more. That is not a workaround: somebody with no email and no
+           phone did not sign themselves up, so they are exactly the sort of
+           person a ministry admin writes down on the day.
+        """
+        user = get_user_model().objects.filter(email__iexact=email).first()
         if user:
             return user
         return register_account(
-            username=username, password=PASSWORD,
+            email=email, password=PASSWORD,
             legal_last_name=last_name, legal_first_name=first_name,
             **contact_fields,
         )
 
     def accounts(self):
         self.boss = self.account(
-            "foundation_admin", "Boss", "Terry", email="boss@example.invalid",
+            demo_login("foundation_admin"), "Boss", "Terry",
             birth_date=datetime.date(1975, 4, 4))
         # Staff, because the acceptance walk reads R1–R3 off the admin
         # changelist. The scoped pages still refuse them — a global group is
@@ -159,10 +204,10 @@ class Command(BaseCommand):
         self.boss.groups.add(foundation_admin_group())
 
         self.pantry_admin = self.account(
-            "pantry_admin", "Zhang", "San", email="zhangsan@example.invalid",
+            demo_login("pantry_admin"), "Zhang", "San",
             birth_date=datetime.date(1982, 6, 1))
         self.tax_admin = self.account(
-            "tax_admin", "Chen", "Si", email="chensi@example.invalid",
+            demo_login("tax_admin"), "Chen", "Si",
             birth_date=datetime.date(1979, 9, 9))
         # Two ministries, two admins. One of each cannot demonstrate scoping:
         # "she can see her own" passes just as well with no scoping at all.
@@ -178,15 +223,15 @@ class Command(BaseCommand):
         )
 
         self.adult = self.account(
-            "volunteer_adult", "Li", "Si", email="lisi@example.invalid",
+            demo_login("volunteer_adult"), "Li", "Si",
             phone="+14085550101", birth_date=datetime.date(1990, 2, 2))
         self.minor = self.account(
-            "volunteer_minor", "Xiao", "Ming", email="xiaoming@example.invalid",
+            demo_login("volunteer_minor"), "Xiao", "Ming",
             birth_date=local_today() - datetime.timedelta(days=365 * 15))
         # Unknown birth date: the cautious branch of the three-state. Signing
         # up asks for consent, and notifications go to the guardian.
         self.unknown = self.account(
-            "volunteer_unknown", "Wang", "Unknown", email="wang@example.invalid",
+            demo_login("volunteer_unknown"), "Wang", "Unknown",
             birth_date=None)
         # ⚠️ Both of these need somebody to call: sign_up() refuses a minor —
         #    and an unknown birth date counts as one — with no emergency
@@ -203,8 +248,20 @@ class Command(BaseCommand):
         # Neither an email nor a phone. Without this person the "cannot be
         # reached" group on the notification page is always empty, which looks
         # like a pass and verifies nothing.
-        self.silent = self.account("volunteer_silent", "Noreach", "Sam",
-                                   birth_date=datetime.date(1988, 3, 3))
+        #
+        # ⚠️ A Contact with **no login**, since 2026-08-06 — it used to be an
+        #    account called volunteer_silent. An account is now identified by its
+        #    email address, so an account with no address cannot exist, and this
+        #    person is truer as a Contact anyway: no email and no phone describes
+        #    somebody a ministry admin wrote down on the day, not somebody who
+        #    filled in a registration form. P6's third group is reached through
+        #    Participation → Contact and never through User, so the branch this
+        #    person exists to demonstrate is untouched.
+        self.silent = Contact.objects.get_or_create(
+            legal_last_name="Noreach", legal_first_name="Sam",
+            defaults={"contact_type": Contact.ContactType.INDIVIDUAL,
+                      "birth_date": datetime.date(1988, 3, 3)},
+        )[0]
         # A second minor whose only route to a guardian is the emergency
         # contact, with no consent address of her own — so she exercises the
         # fallback branch of resolve_recipients().
@@ -215,7 +272,7 @@ class Command(BaseCommand):
         #    contact.tests.EmergencyContactReachabilityTests 覆盖得到它 ——
         #    演示数据不再制造一个模型自己会拒绝的行。
         self.minor_emergency = self.account(
-            "volunteer_minor2", "Zhao", "Xiaoyu",
+            demo_login("volunteer_minor2"), "Zhao", "Xiaoyu",
             birth_date=local_today() - datetime.timedelta(days=365 * 16))
         EmergencyContact.objects.get_or_create(
             person=self.minor_emergency.contact, name="Zhao's mother", phone="+14085550188",

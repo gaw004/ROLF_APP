@@ -9,12 +9,29 @@ button.html 挑好变体之后落地的那一层。分成两个文件是为了�
 
 ⚠️ Alpine 没加载出来时按钮**照常提交**，只是少了确认框。这是有意的降级：
    确认框防的是手滑，不是越权 —— 越权由服务端挡，那一层不依赖任何 JS。
+
+⚠️ `opens` 只能配 `href` 用，而且**必须**配 `href`（2026-08-06）。它的全部意思是
+   「有 JS 时开这个弹窗，没 JS 时就正常跳到 href 那一页」—— 所以 href 指的那一页
+   得真的存在、真的能完成同一件事。一个 `x-on:click` 挂在没有 href 的按钮上，
+   在 Alpine 没加载出来时是一个**点了没反应**的死按钮。
+
+⚠️ `opens` 和 `confirm` 不能同时给：两者都要写 x-on:click，而「先确认再开弹窗」
+   本身也说不通 —— 弹窗里那个提交按钮才是该确认的地方。
+
+⚠️ `disabled` 只落在下面 `<button>` 那一支。上面那一支是 `<a>`，而 `<a>` 根本
+   没有 disabled 属性 —— 同时给 href 和 disabled 的话，这里不会报任何错，
+   渲染出来是一个**看着灰、点了照样跳**的链接。理由和用法写在 button.html。
+   基础 class 串里的 `disabled:opacity-50 disabled:pointer-events-none`
+   就是给这一支用的。
 {% endcomment %}
 {% if href %}
   <a href="{{ href }}" class="{{ cls }}{% if full %} w-full{% endif %}"
+     {% if opens %}x-on:click.prevent="{{ opens }} = true"{% endif %}
      {% if confirm %}x-on:click="if (!window.confirm('{{ confirm|escapejs }}')) $event.preventDefault()"{% endif %}>{{ label }}</a>
 {% else %}
   <button type="{{ type|default:'submit' }}" class="{{ cls }}{% if full %} w-full{% endif %}"
+          {% if disabled %}disabled{% endif %}
           {% if name %}name="{{ name }}" value="{{ value }}"{% endif %}
+          {% if prints %}x-on:click="window.print()"{% endif %}
           {% if confirm %}x-on:click="if (!window.confirm('{{ confirm|escapejs }}')) $event.preventDefault()"{% endif %}>{{ label }}</button>
 {% endif %}

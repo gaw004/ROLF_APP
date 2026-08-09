@@ -94,8 +94,11 @@
 >   [D10](decisions/D10-person-role-position-assignment.md) /
 >   [D11](decisions/D11-position-and-assignment.md) /
 >   [D15](decisions/D15-relationship-carriers.md) 这四条 —— 它们决定了"一条信息该放进哪张表"。
-> - **已经在写代码的人**：日常查的是 [`phase-b.md`](phase-b.md)（实现要点）和
->   [`02-roadmap.md`](02-roadmap.md)（实施步骤）。
+> - **已经在写代码的人**：日常查的是 [`phase-c.md`](phase-c.md)（判据 + 落点规矩）和
+>   [`03-roadmap.md`](03-roadmap.md) / [`04-roadmap.md`](04-roadmap.md)（实施步骤）。
+>   ⚠️ 本行原来指向 phase-b.md / 02-roadmap.md，那是 Phase B 开工时写的，
+>   Phase C 开工后一直没改 —— 而本文档开头那张表早就把它们标成了「查历史」，
+>   于是同一份文件里两处打架（2026-08-09 对齐）。
 
 ### 常见问题 → 去哪找
 
@@ -103,7 +106,7 @@
 |---|---|
 | 现在到底该做什么？ | [零、当前优先级](#零当前优先级2026-07-29-定) —— 14 条需求 + 逐条覆盖对账 |
 | 这件事该不该做？ | 判据：**它是不是那 14 条的前置条件**。不是就不做，见[零](#零当前优先级2026-07-29-定) |
-| 下一步具体做什么？ | [六、下一步](#六下一步)，然后照 [`02-roadmap.md`](02-roadmap.md) 的 B6 起 |
+| 下一步具体做什么？ | [六、下一步](#六下一步)，然后照 [`03-roadmap.md`](03-roadmap.md)（前端那一段在 [`04-roadmap.md`](04-roadmap.md)）|
 | 「食物银行的 admin」在数据库里怎么表达？ | [D20](decisions/D20-ministry-role.md) —— Django Group 顶不上，为什么 |
 | 「这场活动开了几个工种」为什么不能数报名？ | [D19](decisions/D19-event-role.md) —— 和 D11 的「空缺编制」是同一个病 |
 | 活动改时间了，通知谁？ | [D22](decisions/D22-event-notifications.md) —— **未成年人通知家长**；联系不上的人必须自己算 |
@@ -127,11 +130,15 @@
 **完整索引在 [`decisions/README.md`](decisions/README.md)**（每条一句话结论 + 它回答的问题）。
 一条决策一个文件，编号是稳定引用。
 
-### Phase B 实现要点索引
+### 实现要点索引
 
-**在 [`phase-b.md`](phase-b.md) 开头**。开工期间日常翻的就是那一份 ——
+**当前（Phase C）在 [`phase-c.md`](phase-c.md) 开头** —— 判据、落点规矩
+（样式写哪、JS 写哪、什么该翻）、验收口径、已知缺口。开工期间日常翻的是那一份。
+
+**Phase B 的在 [`phase-b.md`](phase-b.md) 开头**，已完成但没过期：
 `.active()` 与时间口径、约束清单、`on_delete` 表、R8 那条查询、可见性、
-签到与 `hours`、必须写的测试、验收清单，全部在那里。
+签到与 `hours`、必须写的测试、验收清单，全部在那里 —— 查表的形状和它为什么
+带那些约束，仍然去那一份。
 
 ---
 

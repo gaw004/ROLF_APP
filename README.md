@@ -4,22 +4,34 @@ A volunteer- and resource-management web application for a non-profit foundation
 who the people are, what posts they hold, what they turn up to, and what money
 comes in.
 
-A single Django application with the Django admin as its interface — no separate
-frontend, no paid SaaS, no microservices. Everything lives in one ordinary
-Postgres database that a `pg_dump` can carry away whole.
+A single Django application — no separate frontend project, no paid SaaS, no
+microservices. Everything lives in one ordinary Postgres database that a
+`pg_dump` can carry away whole.
+
+It has **two** interfaces, and the split is deliberate: the Django admin for
+staff, and ordinary Django templates (Tailwind + HTMX + Alpine, no React) for
+everyone outside it. Volunteers must not be able to reach the admin at all —
+see [D21](docs/planning/decisions/D21-self-service-and-permissions.md) for why
+that stopped being a "later" problem, and
+[D24](docs/planning/decisions/D24-htmx-alpine-tailwind.md) for what each of the
+three front-end layers is allowed to do.
 
 **Start here:** [`docs/planning/goal.md`](docs/planning/goal.md) — the entry point
 and the index: what we are building, the current priority, and where everything
 else lives. From there:
 
 - [`docs/planning/decisions/`](docs/planning/decisions/README.md) — every
-  significant decision and why it was made, one file per decision (D1–D22).
+  significant decision and why it was made, one file per decision (D1–D29).
   **Code comments that say "see goal.md D9" mean D9 in there** — the numbers are
   the stable reference.
-- [`docs/planning/phase-b.md`](docs/planning/phase-b.md) — the models and
-  implementation notes for the phase in progress, and
-  [`docs/planning/02-roadmap.md`](docs/planning/02-roadmap.md) — its step-by-step
-  plan.
+- [`docs/planning/phase-c.md`](docs/planning/phase-c.md) — the criteria, the
+  where-does-this-code-go rules and the known gaps for the phase in progress;
+  [`03-roadmap.md`](docs/planning/03-roadmap.md) is its step-by-step plan and
+  [`04-roadmap.md`](docs/planning/04-roadmap.md) the front-end half of it.
+- [`docs/planning/phase-b.md`](docs/planning/phase-b.md) and
+  [`02-roadmap.md`](docs/planning/02-roadmap.md) — the models and the steps for
+  Phase B, **finished**. Still the place to look up what a table is for and why
+  it carries the constraints it does.
 - [`docs/planning/progress.md`](docs/planning/progress.md),
   [`deferred.md`](docs/planning/deferred.md),
   [`revisions.md`](docs/planning/revisions.md) — what is done, what is
@@ -69,9 +81,12 @@ Build the schema and an admin account:
 
 ```bash
 python manage.py migrate          # also seeds ~7,900 ISO 639-3 languages
-python manage.py createsuperuser
+python manage.py createsuperuser  # asks for an email address, not a username
 python manage.py runserver
 ```
+
+The login name **is** the email address; there is no separate username. That is
+why `createsuperuser` asks for one and will not proceed without it.
 
 Then build something to click through:
 
@@ -79,12 +94,13 @@ Then build something to click through:
 python manage.py seed_demo        # refuses to run with DEBUG off; --force overrides
 ```
 
-It prints the accounts it made and their shared password. There are seven, and
-the awkward ones are deliberate: a volunteer with no email and no phone, one
-with no birth date on file, a minor reachable only through an emergency
-contact, and an event role nobody signed up for. Those are the branches the
-acceptance walk checks, and they are the ones that quietly do not exist if you
-build the data by hand.
+It prints the accounts it made and their shared password — log in with the
+address it prints. There are seven, and the awkward cases are deliberate:
+somebody with no birth date on file, a minor reachable only through an emergency
+contact, a person with no email and no phone at all (who is therefore a contact
+with **no login** — an account is its email address), and an event role nobody
+signed up for. Those are the branches the acceptance walk checks, and they are
+the ones that quietly do not exist if you build the data by hand.
 
 Two interfaces now, and the split matters:
 

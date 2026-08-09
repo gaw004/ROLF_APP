@@ -34,6 +34,17 @@
     </a>
 
     <div class="relative z-10 ml-auto flex shrink-0 items-center gap-2 text-sm">
+      {% comment %}
+      ⚠️ 这里**没有** Memories 的入口，这是 2026-08-07 拍板拿掉的，不是漏了。
+
+         曾经在这个位置放过一枚静止的小羽毛，作为飘着的羽毛之外的第二条路。
+         拿掉它的理由是那一页的入口就该只有一个、而且要靠自己发现。
+
+      ⚠️ **代价是明确的，写在这里免得以后当成 bug 修**：飘着的那层是
+         `aria-hidden`、键盘到不了，而且 `prefers-reduced-motion` 下整层
+         `display: none`。所以键盘用户、读屏用户，以及开了减少动效的人，
+         **进不去 Memories，也不会知道它存在**。这是知情的取舍。
+      {% endcomment %}
       {% if themed %}
         {% comment %}
         主题切换留在 bar 上，不进菜单（2026-08-05 拍板）——
@@ -50,7 +61,13 @@
           </svg>
         </button>
         {% if user.is_authenticated %}
-          <span class="home-bar-item hidden max-w-[10rem] truncate md:inline">{{ user.get_username }}</span>
+          {% comment %}
+          ⚠️ 名字，不是登录名（2026-08-06）。原来这里是 `user.get_username`，
+             而登录名从那天起变成了 email —— 于是每一页的页眉上都会横着一串
+             三十来个字符的私人邮箱地址，包括在活动现场投出来的那块屏幕上。
+             `display_name` 的取值顺序在 accounts/models.py 里。
+          {% endcomment %}
+          <span class="home-bar-item hidden max-w-[10rem] truncate md:inline">{{ user.display_name }}</span>
         {% endif %}
       {% endif %}
 

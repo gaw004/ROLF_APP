@@ -1,6 +1,9 @@
 from django.core.validators import FileExtensionValidator
 from django.db import IntegrityError, models
 
+from core.limits import LONG_TEXT
+from core.storages import public_storage
+
 
 class TimeStampedModel(models.Model):
     """Abstract base: adds created/updated timestamps to any model that inherits it."""
@@ -88,15 +91,20 @@ class HomePage(models.Model):
 
     MEDIA_DIR = "home"
 
+    # ⚠️ The **public** bucket, named explicitly, unlike every other upload in
+    #    the project. This page is the one thing here that needs no login, so
+    #    these two files are public by definition — and a signed URL for public
+    #    content buys nothing while costing the CDN cache on the biggest file
+    #    the site serves. Decided 2026-08-06 with the rest of the R2 split.
     hero_image = models.ImageField(
-        upload_to=MEDIA_DIR, blank=True,
+        upload_to=MEDIA_DIR, blank=True, storage=public_storage,
         help_text="Full-screen background. Landscape, at least 2000px wide.",
     )
     # ⚠️ FileField rather than a video-specific field: Django has no VideoField,
     #    and nothing here transcodes. What arrives is what is served, so the size
     #    of the file somebody uploads is the size every visitor downloads.
     hero_video = models.FileField(
-        upload_to=MEDIA_DIR, blank=True,
+        upload_to=MEDIA_DIR, blank=True, storage=public_storage,
         validators=[FileExtensionValidator(["mp4", "webm"])],
         help_text="Optional, and used instead of the image when set. It plays "
                   "muted and on a loop — browsers refuse to autoplay sound, and "
@@ -104,7 +112,7 @@ class HomePage(models.Model):
                   "Keep it under 10 MB: every visitor downloads all of it.",
     )
     verse_text = models.TextField(
-        blank=True,
+        blank=True, max_length=LONG_TEXT,
         help_text="The passage itself. Shown first, in large type.",
     )
     verse_reference = models.CharField(

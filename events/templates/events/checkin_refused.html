@@ -1,0 +1,47 @@
+{% extends "core/base.html" %}
+{% block title %}Check-in{% endblock %}
+{% block main_width %}max-w-md{% endblock %}
+
+{% comment %}
+拒绝页，四种情况共用一份（码过期 / 凭据超时 / 没报名 / 未成年缺同意）。
+
+⚠️ 这一页是在教堂大厅里、用手机、在别人排队等着的时候读的。所以它只有三样东西：
+   一句话说明发生了什么、一个能立刻做的动作、一条兜底（去找现场管理员）。
+   不加图、不加 HTMX —— 现场的 wifi 会比数据库先跪，这一页必须最轻。
+
+⚠️ 版心 max-w-md，比站上任何一页都窄。它只在手机上被看到，而窄版心在手机上
+   读起来和 max-w-2xl 没有区别 —— 但万一有人在桌面上打开，一行不会拉到 800px 宽。
+{% endcomment %}
+
+{% block content %}
+  <h1 class="text-2xl font-semibold">Check-in</h1>
+
+  {% if event %}
+    <p class="mt-1 text-sm text-ink-600 dark:text-ink-300">{{ event.name }}</p>
+  {% endif %}
+
+  <div class="card mt-6">
+    <p>{{ reason }}</p>
+  </div>
+
+  <div class="mt-6 flex flex-wrap gap-2">
+    {% comment %}
+    ⚠️ primary：拒绝页上这个按钮是「那你现在该做什么」的答案（去报名 / 去补资料）。
+       画成和 My Signups 一样重，等于让一个被拦下来的人自己去猜下一步。
+    {% endcomment %}
+    {% if action_url %}
+      {% include "core/components/button.html" with label=action_label href=action_url variant="primary" %}
+    {% endif %}
+    {% url 'events:my_participations' as mine_url %}
+    {% include "core/components/button.html" with label="My Signups" href=mine_url variant="ghost" %}
+  </div>
+
+  {% comment %}
+  兜底那一句。它必须在，因为这一页上的所有失败都有同一条出路：
+  admin 的签到页一直都能手工记 —— 那条路比这个功能早存在，也不依赖它。
+  {% endcomment %}
+  <p class="mt-6 text-sm text-ink-600 dark:text-ink-300">
+    If you are at the event and this keeps happening, ask the organiser to
+    record your attendance.
+  </p>
+{% endblock %}

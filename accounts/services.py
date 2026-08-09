@@ -12,10 +12,17 @@ from contact.models import Contact
 
 @transaction.atomic
 def register_account(
-    *, username, password, email="", legal_first_name="", legal_last_name="",
+    *, email, password, legal_first_name="", legal_last_name="",
     phone="", birth_date=None, **contact_fields,
 ):
     """Create a login and the Contact behind it, together. Returns the User.
+
+    ⚠️ `email` is the login name (2026-08-06) and therefore required, where it
+       used to be an optional extra beside `username`. The Contact gets the same
+       address: they are one value, and the day they are two is the day somebody
+       changes their address in "My profile" and their password reset keeps going
+       to the old one. See accounts/models.py for why the *column* is not
+       duplicated either.
 
     ⚠️ One transaction, and it matters. Half a registration — a User with no
        Contact — is worse than none: the person can log in, every page that
@@ -43,11 +50,37 @@ def register_account(
         **contact_fields,
     )
     user = get_user_model().objects.create_user(
-        username=username,
         email=email,
         password=password,
         first_name=legal_first_name,
         last_name=legal_last_name,
         contact=contact,
     )
+    return user
+
+
+def set_login_email(user, email):
+    """Point an account at a new address — login name and contact record together.
+
+    The one function that knows this is two rows, so that no caller has to
+    remember it is. `User.email` is what the person types at the login box and
+    what a password reset is sent to; `Contact.email` is what P6 notifies and
+    what the signup confirmation goes to. They are the same address, and the
+    failure mode of letting them drift is invisible: the profile page shows the
+    new address, the reset email goes to the old one, and nothing anywhere
+    reports a difference.
+
+    ⚠️ Normalised through the manager, so the stored value matches what
+       `get_by_natural_key()` will look for.
+    """
+    # ⚠️ `get_user_model()` and not `type(user)`: a view hands this
+    #    `request.user`, which is a SimpleLazyObject, and `type()` of that is the
+    #    wrapper rather than the model. It has no manager, so the normalisation
+    #    step turned into an AttributeError on the ordinary save path.
+    user.email = get_user_model().objects.normalize_email(email)
+    user.save(update_fields=["email"])
+    contact = user.contact
+    if contact is not None and contact.email != user.email:
+        contact.email = user.email
+        contact.save(update_fields=["email"])
     return user

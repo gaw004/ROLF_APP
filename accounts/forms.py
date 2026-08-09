@@ -2,10 +2,13 @@
 
 from django import forms
 from django.contrib.auth import get_user_model, password_validation
+from django.contrib.auth.forms import PasswordChangeForm
 from django.core.exceptions import ValidationError
+from django.core.validators import MaxLengthValidator
 from phonenumber_field.formfields import PhoneNumberField
 
 from contact.models import Contact, EmergencyContact, RelationshipType
+from core.limits import EMAIL, PASSWORD
 
 
 class RegistrationForm(forms.Form):
@@ -23,9 +26,21 @@ class RegistrationForm(forms.Form):
        grants are covered automatically.
     """
 
-    username = forms.CharField(max_length=150, label="Username")
-    email = forms.EmailField(label="Email")
-    password = forms.CharField(widget=forms.PasswordInput, label="Password")
+    # ⚠️ There is no username box (2026-08-06). The address *is* the login name,
+    #    so asking for a second handle was asking somebody to invent and remember
+    #    a thing that identified nothing.
+    # ⚠️ forms.EmailField has **no default max_length**, and User.email is
+    #    varchar(254). Without this a 400-character address passed validation
+    #    and blew up at the INSERT — a 500 on the most ordinary path in the
+    #    project, and one that looked like a database problem rather than an
+    #    unvalidated form.
+    email = forms.EmailField(max_length=EMAIL, label="Email")
+    # ⚠️ Capped for a different reason than the rest: nothing long is *stored*
+    #    (a hash is 78 bytes whatever went in), but hashing is deliberately
+    #    slow, so the submitted length is CPU we spend before we store
+    #    anything. See core/limits.py.
+    password = forms.CharField(
+        widget=forms.PasswordInput, max_length=PASSWORD, label="Password")
     legal_last_name = forms.CharField(max_length=100, label="Last name")
     legal_first_name = forms.CharField(max_length=100, required=False, label="First name")
     phone = PhoneNumberField(region="US", required=False, label="Phone")
@@ -40,11 +55,26 @@ class RegistrationForm(forms.Form):
         widget=forms.DateInput(attrs={"type": "date"}),
     )
 
-    def clean_username(self):
-        username = self.cleaned_data["username"]
-        if get_user_model().objects.filter(username__iexact=username).exists():
-            raise ValidationError("That username is already taken.")
-        return username
+    def clean_email(self):
+        """One account per address, checked case-insensitively.
+
+        ⚠️ `iexact`, matching the `user_email_taken` constraint and
+           `UserManager.get_by_natural_key()`. An exact check here would let
+           "Mei@x.com" through when "mei@x.com" exists — the constraint would
+           then refuse the INSERT, and the person would get a 500 instead of a
+           sentence under the box.
+
+        ⚠️ This does tell an anonymous visitor that a given address has an
+           account here. Accepted: the alternative is a registration form that
+           swallows the address and reports success, leaving somebody waiting for
+           an account that was never made.
+        """
+        email = self.cleaned_data["email"].strip().lower()
+        if get_user_model().objects.filter(email__iexact=email).exists():
+            raise ValidationError(
+                "An account with that email address already exists. "
+                "Log in instead, or use a different address.")
+        return email
 
     def clean_password(self):
         # Django's configured validators, so the rules are the ones in settings
@@ -52,6 +82,38 @@ class RegistrationForm(forms.Form):
         password = self.cleaned_data["password"]
         password_validation.validate_password(password)
         return password
+
+
+class VolunteerPasswordChangeForm(PasswordChangeForm):
+    """Django's own change form, relabelled and capped.
+
+    Subclassed rather than used directly for two reasons, neither cosmetic:
+
+    ⚠️ Django's labels are "Old password", "New password" and "New password
+       confirmation". The third one is the problem — it reads as a fourth thing
+       to think about rather than as "type it again", which is the single most
+       common place a change-password form goes wrong.
+
+    ⚠️ `SetPasswordForm`'s new-password fields carry **no max_length**, so
+       without this a submitted megabyte would be hashed. Same reasoning as
+       RegistrationForm, same constant. The old-password field is capped too:
+       it is hashed as well, to compare against the stored hash.
+
+    The validators, the "your two entries differ" check and the old-password
+    check are all Django's. None of that is re-implemented here.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        labels = {
+            "old_password": "Current password",
+            "new_password1": "New password",
+            "new_password2": "Confirm new password",
+        }
+        for name, label in labels.items():
+            self.fields[name].label = label
+            self.fields[name].max_length = PASSWORD
+            self.fields[name].validators.append(MaxLengthValidator(PASSWORD))
 
 
 class ProfileForm(forms.ModelForm):
@@ -102,10 +164,18 @@ class ProfileForm(forms.ModelForm):
                 "Leave this blank and signups will ask for a guardian's consent, "
                 "because we cannot tell whether you are under 18."
             ),
-            "email": "Used for password resets and for notices about your events.",
+            "email": (
+                "This is also the address you log in with. Changing it here "
+                "changes your login."
+            ),
         }
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, user, **kwargs):
+        # `user` is explicit rather than reached for through `instance.user`,
+        # matching every other form in this project — and because that reverse
+        # accessor raises when a Contact has no login, which is the normal state
+        # for somebody a ministry admin wrote down on the day.
+        self.user = user
         super().__init__(*args, **kwargs)
         # ⚠️ Required here, and deliberately not by a database constraint.
         #    Contact.email stays blank=True at the model level because the same
@@ -122,6 +192,39 @@ class ProfileForm(forms.ModelForm):
         for name in ["address_street", "address_city", "address_state",
                      "address_postal_code", "address_country"]:
             self.fields[name].required = False
+
+    def clean_email(self):
+        """The address is the login name, so it has to stay unique across accounts.
+
+        ⚠️ Two Contacts may share an address and always could — a family with one
+           inbox, an organisation and its coordinator — so this is checked
+           against **User**, not Contact. Excluding this person's own account is
+           the whole trick: without the exclude, saving the page without touching
+           the email box would report that the address is taken, by themselves.
+        """
+        email = self.cleaned_data["email"].strip().lower()
+        clash = get_user_model().objects.filter(email__iexact=email)
+        if self.user is not None:
+            clash = clash.exclude(pk=self.user.pk)
+        if clash.exists():
+            raise ValidationError(
+                "Another account already uses that email address. "
+                "Since it is also your login name, two accounts cannot share it.")
+        return email
+
+    def save(self, commit=True):
+        """Save the person, then point their login at the same address.
+
+        Two rows, one value — see services.set_login_email() for why this is not
+        left to the caller. The same shape as EventRoleForm.save(), which creates
+        the vocabulary entry before the row that points at it.
+        """
+        contact = super().save(commit=commit)
+        if commit and self.user is not None:
+            from .services import set_login_email
+
+            set_login_email(self.user, contact.email)
+        return contact
 
     # contact_type is deliberately absent: this form edits a person, and
     # offering "organisation" here would break the name constraints in a way

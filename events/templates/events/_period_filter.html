@@ -8,11 +8,48 @@
 参数：
   action        表单要打的 URL
   report_button 真值 → 多一个「Generate report」按钮（只有管理列表用）
+  scope         可选。给了就随表单一起提交（隐藏字段），并且带进「Clear」
+
+⚠️ `scope` 必须是**隐藏字段**，不能只写在 action 的查询串里。`method="get"` 的表单
+   提交时浏览器会把 action 上的查询串**整个丢掉**，换成表单自己序列化出来的那一份 ——
+   于是「全基金会」这一页一按 Filter 就悄悄退回成「我管的那几个 ministry」，
+   而列表看起来完全正常（只是少了别人的活动）。
+   翻页不受影响，那边走 `{% templatetag openblock %} querystring {% templatetag closeblock %}`，它保留全部参数。
 {% endcomment %}
 <form method="get" action="{{ action }}"
       hx-get="{{ action }}" hx-target="#event-results" hx-swap="outerHTML"
       hx-push-url="true" hx-indicator="#filter-busy"
-      class="card mb-6 flex flex-wrap items-end gap-4">
+      class="card mb-6">
+  {% if scope %}<input type="hidden" name="scope" value="{{ scope }}">{% endif %}
+  {% comment %}
+  ⚠️ `w-fit max-w-full` 是搜索框宽度的**全部机关**（2026-08-06）。
+
+     要的效果是「搜索框右边缘和下面那行控件的右边缘对齐」，而那个宽度**每页不一样**：
+     管理列表多一个 `Generate report` 按钮，实测两页差 148px。写死一个像素值必然
+     在其中一页上不对。
+
+     `width: fit-content` 让这个包装器按**最宽的那个子元素**定宽 —— 也就是控件行 ——
+     于是里面的搜索框 `w-full` 正好等于控件行的宽度。没有一个像素被写下来，
+     按钮文案改了也自动跟着变。
+
+  ⚠️ `max-w-full` 不能少：`fit-content` 取的是 max-content，而控件行**不换行时**
+     比窄屏的卡片宽。不加这一条，375px 上整页会横向滚动 —— 和这一行当初那个
+     bug 是同一个成因（见下面 min-w-0 那段）。
+  {% endcomment %}
+  <div class="flex w-fit max-w-full flex-col gap-4">
+  {% comment %}
+  搜索框自己一整行（2026-08-06）。`basis-full` 而不是 `w-full` —— 这是 flex 行里
+  「占满一行并把后面的挤到下一行」的写法，`w-full` 在 `flex-wrap` 下也能达到同样
+  效果，但 basis 说的是意图（我要一整条），宽度只是它的结果。
+
+  ⚠️ 它在**第一位**：已经知道要找哪场活动的人直接打名字，扫下拉框是不知道时才做的事。
+     顺序在 `EventPeriodForm.order_fields` 里，这里只负责给它一整行。
+
+  ⚠️ 输入框由 Form 渲染，不是手写的 —— 手写的 `<input type="search">` 会被
+     `core.tests.TextInputsComeFromFormsGuardTests` 拦下，而那条守卫存在的理由
+     正是长度上限只在 form 层生效。
+  {% endcomment %}
+  <div>{% include "core/components/field.html" with field=period.q %}</div>
   {% comment %}
   ⚠️ `w-full sm:w-auto` + `min-w-0`，两个都不能少。
 
@@ -22,6 +59,7 @@
      而在宽屏上一切正常。
      `min-w-0` 解除那条下限，`w-full` 让它们在窄屏上直接各占一行。
   {% endcomment %}
+  <div class="flex flex-wrap items-end gap-4">
   <div class="w-full min-w-0 sm:w-auto">{% include "core/components/field.html" with field=period.ministry %}</div>
   <div class="w-full min-w-0 sm:w-auto">{% include "core/components/field.html" with field=period.start %}</div>
   <div class="w-full min-w-0 sm:w-auto">{% include "core/components/field.html" with field=period.end %}</div>
@@ -41,14 +79,25 @@
       {% endcomment %}
       {% include "core/components/button.html" with label="Generate report" variant="secondary" name="report" value="1" %}
     {% endif %}
-    {% include "core/components/button.html" with label="Clear" href=action variant="ghost" %}
+    {% comment %}
+    ⚠️ 「Clear」清掉的是筛选条件，**不是「我在看谁的活动」**。所以 scope 要留着 ——
+       不留的话在「全基金会」那一页上点 Clear 会跳回「我管的那几个」，
+       而按钮上写的是 Clear。
+    {% endcomment %}
+    {% if scope %}
+      {% include "core/components/button.html" with label="Clear" href=action|add:"?scope="|add:scope variant="ghost" %}
+    {% else %}
+      {% include "core/components/button.html" with label="Clear" href=action variant="ghost" %}
+    {% endif %}
     {% comment %}
     加载态。⚠️ 没有加载态的按钮用户会点第二次 —— 这一个是读操作所以点两次无害，
     但同一条规矩下面签到那几个按钮点第二次是有后果的，写法要一致。
     {% endcomment %}
     <span id="filter-busy" class="htmx-indicator text-xs text-ink-600 dark:text-ink-300">Loading…</span>
   </div>
+  </div>
   {% for error in period.non_field_errors %}
-    <p class="w-full text-xs font-medium text-danger-fg dark:text-danger-fg-dark">{{ error }}</p>
+    <p class="text-xs font-medium text-danger-fg dark:text-danger-fg-dark">{{ error }}</p>
   {% endfor %}
+  </div>
 </form>

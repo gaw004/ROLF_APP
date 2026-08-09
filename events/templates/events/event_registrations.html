@@ -28,11 +28,7 @@
           {% for row in role.participations.all %}
             <li class="flex flex-wrap items-center justify-between gap-2 border-t border-ink-200 py-2 dark:border-ink-700">
               <span>{{ row.contact }}</span>
-              {% if row.status == "registered" %}
-                {% include "core/components/badge.html" with label=row.get_status_display tone="success" %}
-              {% else %}
-                {% include "core/components/badge.html" with label=row.get_status_display %}
-              {% endif %}
+              {% include "events/_status_badge.html" %}
             </li>
           {% empty %}
             <li class="border-t border-ink-200 py-2 text-ink-600 dark:border-ink-700 dark:text-ink-300">

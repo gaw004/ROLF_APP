@@ -49,7 +49,19 @@
      或者忘了签退），而没记过是一件还没做的事。截图验收时就是这么发现的 ——
      seed 数据里有人 3:44 签到、3:45 签退，状态写着 Attended，工时那格却是「—」。
   {% endcomment %}
-  <td>{{ row.checked_in_at|default_if_none:"—" }}</td>
+  <td>
+    {{ row.checked_in_at|default_if_none:"—" }}
+    {% comment %}
+    ⚠️ D28：自助打卡这个洞**堵不上** —— 现场有个活人实时转发链接，
+       任何轮换机制都拦不住。所以缓解不是去堵，是让它在这一页上**看得见**：
+       admin 一眼看出哪几行不是他填的。看不见的问题没有人能处理。
+    ⚠️ 空值不画。空表示「这一行早于这个功能」，和「admin 录的」是两件事，
+       而把它画成 "recorded by an admin" 就是在替一件没人查证过的事打包票。
+    {% endcomment %}
+    {% if row.checked_in_method == "self_qr" %}
+      <span class="block text-xs text-ink-600 dark:text-ink-300">self check-in</span>
+    {% endif %}
+  </td>
   <td>{{ row.checked_out_at|default_if_none:"—" }}</td>
   <td class="font-medium">{{ row.hours|default_if_none:"—" }}</td>
   <td>
@@ -88,6 +100,28 @@
       已记工时或已签到的行按了会被拒绝，理由回在 messages 里。
       {% endcomment %}
       {% include "core/components/button.html" with label="No-show" variant="secondary" name="action" value="absent" %}
+      {% comment %}
+      撤销（2026-08-08 补上）。⚠️ 这个缺口从 2026-08-05 起就记在 phase-c.md 的
+      已知缺口表里，当时写的就是「那时加的是一个明确的 Undo check-in，
+      **不是把它塞进 No-show**」—— 因为「我点错了行」和「他没来」是两件不同的
+      事实，一个按钮同时干这两件会让缺勤率把每一次手滑都算进去。
+
+      ⚠️ **没东西可撤时不画。** 一个按下去什么都不发生的按钮，人会以为页面卡了，
+         然后再按一次。服务端那边也是幂等的（undo_attendance 返回 False），
+         但那是兜底，不是这里不画的理由。
+
+      ⚠️ **二次确认里写出要删的那个数字。** 撤销会连工时一起删掉 ——
+         而工时是这个系统里唯一一个人要负责的值，且库里分不清它是签退算出来的
+         还是人手打的。所以确认句子必须具体到「3.00 hours」，
+         不能只说「确定吗」。删掉之后仍然查得回来：Participation 挂着历史记录。
+      {% endcomment %}
+      {% if row.checked_in_at or row.checked_out_at or row.hours is not None %}
+        {% if row.hours is not None %}
+          {% include "core/components/button.html" with label="Undo" variant="ghost" name="action" value="undo" confirm="This clears the check-in, the check-out and the hours recorded on this row. It can be looked up afterwards in the history, but the page will show nothing." %}
+        {% else %}
+          {% include "core/components/button.html" with label="Undo" variant="ghost" name="action" value="undo" confirm="This clears the check-in and check-out times on this row." %}
+        {% endif %}
+      {% endif %}
       <span id="busy-{{ row.pk }}" class="htmx-indicator text-xs text-ink-600 dark:text-ink-300">Saving…</span>
     </form>
 
@@ -113,6 +147,20 @@
              value="{{ row.hours|default_if_none:scheduled_hours }}"
              class="w-24 rounded-md border border-ink-300 bg-white px-2 py-1 text-sm text-ink-900 dark:border-ink-600 dark:bg-ink-800 dark:text-ink-50">
       {% include "core/components/button.html" with label="Enter hours" variant="ghost" name="action" value="hours" %}
+      {% comment %}
+      ⚠️ **清空 ≠ 填 0**（2026-08-08 补上）。在这之前工时只能改成 0 —— 而这一页
+         上面那条注释自己写着：0 小时是一条要解释的记录（人来了又走了，或者忘了
+         签退），没记过是一件还没做的事。少了这个按钮，一个填错的数只能被「订正」
+         成一个同样错、但看起来很合理的 0。
+
+      ⚠️ 只清工时，**不动状态**。「他来了」和「他干了 N 小时」是两个断言，
+         一行写着 Attended 而工时是空的，是个正常状态（签到了，工时还没算）。
+         顺手把状态也退回去，等于为了撤销第二件事而删掉第一件。
+         要整行归零那是旁边的 Undo。
+      {% endcomment %}
+      {% if row.hours is not None %}
+        {% include "core/components/button.html" with label="Clear" variant="ghost" name="action" value="clear_hours" confirm="This removes the hours from this row and leaves it with none recorded. Zero hours and no hours are different things." %}
+      {% endif %}
     </form>
     {% endif %}
   </td>

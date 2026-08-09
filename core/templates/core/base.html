@@ -19,38 +19,28 @@ org/permissions.py，不是 MinistryRole —— 导航里再抄一份判断，�
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}ROLF{% endblock %} · ROLF</title>
+  {% comment %}
+  标签页图标（2026-08-06 加）。在此之前**根本没有** —— 浏览器去要 /favicon.ico
+  拿到 404，标签页上显示的是它自带的地球。
+
+  ⚠️ 小尺寸用的是**只有波纹**的那一版，不是整张 logo。两者都从
+     `event-default.webp`（基金会 logo）生成，但 16/32px 下 logo 里那两行字
+     会完全糊掉 —— 实测三种裁法之后选的是「两个波峰」：整条波纹是 4:1 的比例，
+     塞进方形之后三条线细到并成一团。
+  ⚠️ 180px 的 apple-touch-icon 用**整张 logo** —— 加到主屏幕那个尺寸上字是看得清的，
+     而那时候人要认的是「哪个基金会」，不是一个抽象符号。
+  {% endcomment %}
+  <link rel="icon" type="image/png" sizes="16x16" href="{% static 'core/img/favicon-16.png' %}">
+  <link rel="icon" type="image/png" sizes="32x32" href="{% static 'core/img/favicon-32.png' %}">
+  <link rel="icon" type="image/png" sizes="48x48" href="{% static 'core/img/favicon-48.png' %}">
+  <link rel="apple-touch-icon" sizes="180x180" href="{% static 'core/img/apple-touch-icon.png' %}">
   <link rel="stylesheet" href="{% static 'css/app.css' %}">
   {% include "core/components/_appearance.html" %}
   {% comment %}
-  ⚠️ 深色模式那段脚本：**必须内联、必须在 <head> 里、必须在样式表之后**，
-     三条缺一不可。放到外部 JS 或者 <body> 末尾，页面会先按浅色画一遍再跳成深色 ——
-     那一下闪白是「廉价感」最大的单一来源，而且**它在本机开发时几乎看不出来**
-     （缓存命中太快），只有真实网络下才明显。
-
-  ⚠️ 这里的 key 和规则必须和 assets/js/app.js 的 themeToggle 一致。
-     两处读同一个 localStorage.theme，只是时机不同：这里管「进来时是什么」，
-     那边管「点了按钮之后变成什么」。分叉的表现是刷新一下主题就跳回去。
-
-  ⚠️ 隐私模式下 localStorage 会直接抛异常，所以整段包在 try 里：
-     一个主题偏好读不到，不该把整个页面带下去。
-
-  ⚠️ 这段脚本里的注释写英文，不写中文 —— 它虽然不显示给人看，但它**进了
-     发给浏览器的 HTML**，而界面语言守卫的口径是「模板里注释块之外没有汉字」。
-     给 <script> 开个例外就是给守卫开个洞，而洞会被用来放真正给人看的文案。
+  进来时是浅色还是深色。⚠️ 抽成组件了（2026-08-06）—— Memories 页是第二个
+  使用者，理由和三条硬要求都写在片段里面。
   {% endcomment %}
-  <script>
-    (function () {
-      try {
-        var saved = localStorage.getItem("theme");
-        var dark = saved ? saved === "dark"
-                         : window.matchMedia("(prefers-color-scheme: dark)").matches;
-        document.documentElement.classList.toggle("dark", dark);
-      } catch (e) {
-        /* See the template comment above: a blocked localStorage must not
-           take the page down with it. */
-      }
-    })();
-  </script>
+  {% include "core/components/_theme_boot.html" %}
   <script defer src="{% static 'js/app.js' %}"></script>
 </head>
 
@@ -67,27 +57,11 @@ hx-headers 挂一次，所有 HTMX 请求都带上 CSRF —— 不要每个表�
   一遍完整导航。
   {% endcomment %}
   {% comment %}
-  深色模式下的背景：首页那张照片，压暗，铺满且**不随内容滚动**（fixed）。
-  浅色模式一个字不变。
-
-  ⚠️ 只有深色才有。浅色下页面已经是干净的浅灰底，铺一张照片只会让每一段文字
-     都变成「压在照片上的文字」—— 而那是要一处一处去保证对比度的东西。
-
-  ⚠️ 这一层在 -z-10，卡片和表格在它上面用半透明黑。所以照片是透出来的，
-     不是「贴在卡片背后」—— 后者会让每张卡片各自截取照片的一小块，
-     滚动时那些小块会跟着动，看起来像十几个各自为政的窗口。
-
-  ⚠️ 没有照片时这一段整个不输出，深色退回原来的纯深色底。
-     只传了视频没传图片时同样如此 —— 每页解码一段视频在手机上是发烫和耗电，
-     而没有人在看它。
+  深色模式下的整页背景：首页那张照片，压暗，铺满且不随内容滚动。
+  ⚠️ 数值、层级、以及它在对比度上的取舍全部写在 `_hero_backdrop.html` 里 ——
+     Memories 那一页不继承本模板，用的是同一份片段，这里不抄第二遍。
   {% endcomment %}
-  {% if site_hero_image %}
-    <div aria-hidden="true"
-         class="pointer-events-none fixed inset-0 -z-10 hidden bg-cover bg-center dark:block"
-         style="background-image: url('{{ site_hero_image.url }}')"></div>
-    <div aria-hidden="true"
-         class="pointer-events-none fixed inset-0 -z-10 hidden bg-ink-950/80 dark:block"></div>
-  {% endif %}
+  {% include "core/components/_hero_backdrop.html" %}
 
   <a href="#main"
      class="sr-only focus:not-sr-only focus:absolute focus:left-4 focus:top-4 focus:z-50 focus:rounded-md focus:bg-brand-600 focus:px-4 focus:py-2 focus:text-sm focus:text-white">

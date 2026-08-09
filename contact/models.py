@@ -8,6 +8,7 @@ from django_countries.fields import CountryField
 from simple_history.models import HistoricalRecords
 
 from core.constraints import ConstraintErrorFieldMixin
+from core.limits import LONG_TEXT
 from core.models import ImmutableCodeMixin, TimeStampedModel
 from core.timeutils import local_today
 
@@ -245,7 +246,7 @@ class Contact(ConstraintErrorFieldMixin, TimeStampedModel):
 
     # --- Status & bookkeeping ---
     is_active = models.BooleanField(default=True, db_index=True)
-    notes = models.TextField(blank=True)
+    notes = models.TextField(blank=True, max_length=LONG_TEXT)
     # created_at / updated_at come from TimeStampedModel
 
     # Who changed what, and when. Dictionary tables like Language do not need
@@ -398,11 +399,7 @@ class Contact(ConstraintErrorFieldMixin, TimeStampedModel):
            in dropdowns and log entries. Acceptable for a small foundation, but
            it is a real disclosure, not a free win.
         """
-        if self.contact_type == self.ContactType.ORGANIZATION:
-            base = self.organization_name or "(unnamed organization)"
-        else:
-            full = f"{self.legal_first_name} {self.legal_last_name}".strip()
-            base = self.preferred_name or full or "(unnamed contact)"
+        base = self.plain_name
         # The organization branch gets the same treatment: two chapters of one
         # charity are as easy to confuse as two people.
         if self.email:
@@ -427,12 +424,25 @@ class Contact(ConstraintErrorFieldMixin, TimeStampedModel):
            names in a leaderboard read as one person listed twice, and the id
            costs nobody anything.
         """
+        return f"{self.plain_name} #{self.pk}" if self.pk else self.plain_name
+
+    @property
+    def plain_name(self):
+        """What this contact is called, and nothing else.
+
+        ⚠️ **No disambiguation of any kind** — no email, no id. That makes it the
+           wrong thing for a dropdown (see `__str__`) and the right thing for
+           the one place a name is simply being spoken to its owner: the top bar
+           greeting the person who is logged in. They know which 王强 they are.
+
+        Extracted 2026-08-06 because it was the third caller that needed it, and
+        the two that already existed each held their own copy of "preferred name
+        if there is one, otherwise the legal names, otherwise say so".
+        """
         if self.contact_type == self.ContactType.ORGANIZATION:
-            base = self.organization_name or "(unnamed organization)"
-        else:
-            full = f"{self.legal_first_name} {self.legal_last_name}".strip()
-            base = self.preferred_name or full or "(unnamed contact)"
-        return f"{base} #{self.pk}" if self.pk else base
+            return self.organization_name or "(unnamed organization)"
+        full = f"{self.legal_first_name} {self.legal_last_name}".strip()
+        return self.preferred_name or full or "(unnamed contact)"
 
 
 class RelationshipType(ImmutableCodeMixin, ConstraintErrorFieldMixin, models.Model):

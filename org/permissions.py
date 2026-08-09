@@ -146,6 +146,41 @@ def can_view_event_records(user, event) -> bool:
     return administers(user, event.ministry_id) or in_foundation_tier(user)
 
 
+def can_upload_gallery_photo(user, ministry) -> bool:
+    """Put a photo on the Memories wall, attributed to `ministry`.
+
+    `ministry` None means foundation-wide, and **only the foundation tier may
+    pass it**. That is D20's test applied literally: "a photo that speaks for
+    the whole foundation" contains no "of some ministry", so it belongs to the
+    global tier. A ministry admin publishes their ministry's memories; they do
+    not publish the foundation's.
+    """
+    if ministry is None:
+        return in_foundation_tier(user)
+    return administers(user, ministry) or in_foundation_tier(user)
+
+
+def can_delete_gallery_photo(user, photo) -> bool:
+    """Take a photo back off the wall.
+
+    ⚠️ Deliberately wider than uploading: the foundation tier may delete
+       anything, including a ministry's own. Somebody has to be able to take
+       down a photo of a child whose family has asked for it to go, at an hour
+       when that ministry's admin is not reachable — and that request does not
+       wait for a duty roster.
+
+    ⚠️ And deliberately **not** a read check. There is no "may they see it"
+       function here because the wall is one page behind @login_required with
+       no per-photo visibility; adding a per-photo read rule would be inventing
+       a boundary the interface does not have.
+    """
+    if photo is None:
+        return False
+    if in_foundation_tier(user):
+        return True
+    return photo.ministry_id is not None and administers(user, photo.ministry_id)
+
+
 #: What the global tier may do, as app_label.codename. Global permissions are
 #: the right shape here precisely because none of these sentences contains "of
 #: some ministry" — which is the test for whether something belongs in a Group

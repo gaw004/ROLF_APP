@@ -45,6 +45,7 @@
 @source "../contact/templates";
 @source "../core/templates";
 @source "../events/templates";
+@source "../gallery/templates";
 @source "../org/templates";
 
 
@@ -106,11 +107,66 @@
   --color-info-fg-dark:    #93c5fd;
   --color-info-bg-dark:    #16244d;
 
-  /* 系统字体栈，不引 web font。一个内部工具为几十 KB 的字体文件付一次首屏延迟，
-   * 换不来东西。 */
-  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+  /* Jost 打头，后面仍然是原来那条系统栈（2026-08-06 改，见文件末尾的 @font-face）。
+   *
+   * ⚠️ **系统栈一个都不许删掉**，尽管 Jost 是自托管的、按理说一定会加载出来。
+   *    两个真实场景会用到后面那些名字：① 字体请求失败或还没到（`font-display: swap`
+   *    的那一瞬）；② **Jost 里根本没有的字** —— 中文人名、日文、韩文。
+   *    这个系统装的是人的真实姓名，而它们不都是拉丁字母；少了 "Noto Sans"
+   *    那一档，一个中文名会掉到浏览器最后的兜底字体上。
+   *
+   * ⚠️ 这条推翻了原来写在这里的「不引 web font」。理由和代价记在
+   *    revisions.md：换来的是整套设计在所有平台上长得一样，
+   *    付出的是首屏多两个 43KB 的请求（自托管、同域、可长缓存）。
+   *    ⚠️ **Futura 本体不能用** —— 它是商业字体，我们没有 webfont 授权。
+   *    Jost 是专门做成 Futura 那个调子的 OFL 字体，这是合法的那条路。 */
+  --font-sans: "Jost", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
                "Helvetica Neue", Arial, "Noto Sans", sans-serif,
                "Apple Color Emoji", "Segoe UI Emoji";
+}
+
+/* --- Jost（自托管）---------------------------------------------------------
+ *
+ * ⚠️ **一个文件覆盖全部字重**，所以 `font-weight` 写的是一个**区间**而不是一个值。
+ *    这不是猜的：实测下载到的文件和 Google 给 `wght@100..900` 的响应**字节完全相同**
+ *    （单独请求 400 会拿到一个 9.2KB 的静态实例，而这个是 26KB 的可变字体）。
+ *    写成 `font-weight: 400` 的话，`font-semibold`（600）会变成浏览器**伪造**的粗体 ——
+ *    而伪粗体和真 600 在小字号上很难分辨，属于「看起来没问题」的那类错。
+ *
+ * ⚠️ 两个 subset 各一条，靠 `unicode-range` 分流：只有页面上真的出现带附加符号的
+ *    字母（José、Nguyễn）时浏览器才会去下 latin-ext 那 17KB。
+ *    ⚠️ 覆盖不到的字（中文、日文、韩文）走 --font-sans 里后面那条系统栈，
+ *    这是设计如此，不是缺口。
+ *
+ * ⚠️ 路径是**相对于构建产物** `static/css/app.css` 的，所以 `../core/fonts/`。
+ *    这一条不能随手改：生产用 ManifestStaticFilesStorage，它会解析 CSS 里的
+ *    `url()` 并去 STATIC_ROOT 里找那个文件，**找不到就让 collectstatic 整个失败** ——
+ *    也就是让部署停在那里。这正是 `@import "tailwindcss"` 逼着源文件搬出
+ *    `static/` 的同一个机制（见 prod.py）。改完请真的跑一次 collectstatic。
+ *
+ * ⚠️ `font-display: swap`：先用系统栈把字画出来，字体到了再换。
+ *    换成 `block` 会让首屏有一段**空白文字**，而那比换一次字难看得多。
+ */
+@font-face {
+  font-family: "Jost";
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url("../core/fonts/jost-latin.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA,
+                 U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122,
+                 U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+@font-face {
+  font-family: "Jost";
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url("../core/fonts/jost-latin-ext.woff2") format("woff2");
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF,
+                 U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF,
+                 U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
 }
 
 /* x-cloak：Alpine 接手之前先把元素藏起来，否则模态和下拉会在加载瞬间闪一下。
@@ -122,6 +178,36 @@
 
 /* 键盘可达性的两条底线，写在这里而不是每个组件各写一遍。 */
 @layer base {
+  /* --- 告诉浏览器这一页是浅色还是深色（2026-08-06 加）--------------------
+   *
+   * ⭐ 这一行解决的是「下拉菜单展开之后像是另一个网站」。**那个弹出列表不是网页
+   *    画的，是操作系统画的** —— CSS 碰不到它的背景、高亮和圆角，`<option>` 上设
+   *    颜色在 macOS 上完全被忽略。在此之前这个项目从没设过 `color-scheme`，
+   *    于是浏览器不知道页面是深色的，就让系统按浅色画那个列表 ——
+   *    白面板压在深色页面上，正是那张截图里的样子。
+   *
+   * ⚠️ 它管的不只是下拉列表：日期输入框的日历图标和弹出的日历、滚动条、
+   *    以及根画布的默认底色都跟着走。深色模式下日期那个图标原来是深色压深底，
+   *    几乎看不见。
+   *
+   * ⚠️ **它给不了的东西也要说清楚**：高亮仍然是系统强调色（那个蓝），圆角仍然是
+   *    系统的。要完全掌控只能自绘一整套 listbox —— 代价是一整套 ARIA、
+   *    手机上失去系统选择器、无 JS 时控件是死的，以及给 7079 个选项的语言下拉
+   *    再做一个带搜索的变体。2026-08-06 定：先不做。
+   *
+   * ⚠️ 跟着 `.dark` 走，不跟着 `prefers-color-scheme` 走 —— 主题是用户可以手动
+   *    覆盖的（见文件开头 `@custom-variant dark`），而 `color-scheme` 必须和
+   *    页面**实际**呈现的那一套一致，不是和系统偏好一致。首页不加 `.dark`，
+   *    所以它拿到的是 light，这是对的：那一页是照片加白字，不跟随深色模式。
+   */
+  html {
+    color-scheme: light;
+  }
+
+  html.dark {
+    color-scheme: dark;
+  }
+
   /* 焦点环统一。⚠️ 不许在模板里用 outline-none 关掉它而不给替代 ——
    * 键盘用户和读屏用户靠它，而它是最容易在「觉得难看」时被删掉的东西。 */
   :focus-visible {
@@ -175,6 +261,28 @@
     color: var(--color-ink-500);
   }
 
+  /* 勾选框和单选钮跟着主题色走（2026-08-07）。
+   *
+   * ⚠️ 挂在 `input` 上而不是 `.field` 里面 —— 这是全站唯一一处**故意**不收在
+   *    `.field` 后代选择器下的规则。理由：Django 的 widget 渲染的控件在 `.field`
+   *    里，而扫码打卡的工种选择是模板里手写的，不在 `.field` 里。写两遍就会分叉。
+   *
+   * ⚠️ 用 `accent-color` 而不是 `appearance:none` 自绘。原生控件的键盘操作、
+   *    读屏播报、以及手机上的点击热区都是白拿的，而重画它们要把这三样全部重做 ——
+   *    和上面 `.field select` 不自绘箭头是同一条判据。
+   *
+   * ⚠️ 深色模式换成亮一档的 brand-500。brand-600 压在深色底上，选中和没选中
+   *    隔一米远看是同一个灰点 —— 而这个控件的全部作用就是让人看出选了哪个。 */
+  input[type="checkbox"],
+  input[type="radio"] {
+    accent-color: var(--color-brand-600);
+  }
+
+  .dark input[type="checkbox"],
+  .dark input[type="radio"] {
+    accent-color: var(--color-brand-500);
+  }
+
   .field select {
     /* ⚠️ 不用 appearance:none 换自绘箭头。原生下拉在手机上调起的是系统选择器，
      * 那比任何自绘控件都好用，而重画它要付的代价是键盘和读屏的一整套重做。 */
@@ -207,6 +315,383 @@
     border-color: var(--color-danger-fg-dark);
   }
 
+  /* --- 活动列表的一行（2026-08-06 重做）----------------------------------
+   *
+   * ⭐ **图片是不是正方形，从「量出来的巧合」变成了「结构上必然」。**
+   *    上一版把图片壳的宽度写死成 110px，那是「带地点的卡片」量出来的自然高度 ——
+   *    于是没填地点的卡片（90px）配的图是 110×90，而这件事没有任何办法修，
+   *    因为两类卡片高度本来就不同。
+   *    这一版反过来：**先把行高定死，图片壳的宽度取同一个变量**。
+   *    于是所有卡片等高、所有图片正方，而且换字体、换字号都不会破。
+   *
+   * ⚠️ 高度是**推出来的，不是量出来的**，这一点是它经得起换字体的原因：
+   *      卡片上下内边距  2rem
+   *    + 标题一行        1.75rem   （text-lg 的 line-height，Tailwind 写死的）
+   *    + 标题与详情间距  0.5rem
+   *    + 详情两行        2.5rem    （text-sm 的 line-height × 2）
+   *    = 6.75rem，取 7rem 留一点余量。
+   *    ⚠️ Tailwind 的 text-* 把 line-height **显式**写出来了，所以这些数字
+   *    和字体本身无关 —— Jost 只改字形，不改行盒高度。这就是为什么这里可以
+   *    算而不必量。
+   *
+   * ⚠️ 只在 sm 以上定死高度。窄屏上缩略图是固定的 64×64（**本来就是正方形**），
+   *    卡片自然高 —— 而窄屏上 badge 会折到标题下面一行，定死高度会把它裁掉。
+   *
+   * ⚠️ `overflow: hidden` 是兜底，不是主要手段。真正让内容装得下的是标题只占
+   *    一行（模板里的 `truncate`）。没有它，一个长活动名换行就把图片撑成非方的。
+   */
+  /* 两个高度，不是一个。
+   *
+   * ⚠️ 窄屏那个值大一档，因为窄屏上活动名允许占**两行**（模板里
+   *    `line-clamp-2 sm:line-clamp-1`）。为什么两边不一样：截断的唯一用处是
+   *    保住宽屏那张正方形图 —— 而窄屏的缩略图是固定 64×64，本来就是方的，
+   *    所以在窄屏上截断只损失信息、什么也换不来。实测 390px 下一律一行会切掉
+   *    16 个活动里 13 个的名字，而那正是志愿者最常用手机看的一页。
+   *
+   * ⚠️ 但**窄屏也要定死高度**，否则「两行标题的卡比别人高一截」——
+   *    那正是这次要修的那个毛病换了个成因（原来是 location，现在是标题）。
+   *    定死之后名字短的卡下面空一点，和 location 那一行本来就要接受的余白同理。
+   */
+  .event-row {
+    --event-row-height: 10rem;
+  }
+
+  @media (width >= 40rem) {
+    .event-row {
+      --event-row-height: 7rem;
+      /* 缩略图的边长。⚠️ **一个变量供宽和高两处用** —— 见下面 `.event-row-thumb`
+       *    那段：正方形必须是结构上的，不能是「同一个字面量写了两遍」。 */
+      --event-row-thumb: 5.25rem;
+    }
+  }
+
+  /* ⚠️ 缩略图的**两个尺寸都写在这里**，模板上一个 `w-16` / `sm:w-28` 都不许有。
+   *    第一版把窄屏的 `h-16 w-16` 留在模板上，结果宽屏下图片是 64×112 ——
+   *    **Tailwind 的工具类在 `utilities` 层，优先级高于这里的 `components` 层**，
+   *    所以 `w-16` 把下面那条 `width: var(--event-row-height)` 直接压掉了。
+   *    浏览器里量出来才发现的：CSS 没报错，图只是不方。
+   *    收进来之后「宽 = 高」这件事只有一个所有者。 */
+  /* 逐个入场（2026-08-06）：和菜单条目同一个节奏，55ms 一档。
+   *
+   * 🔴 **用 `translate`，不许用 `transform`。** 这些 `<li>` 上同时挂着
+   *    `scroll-breathe`，而滚动惯性那段 JS 每一帧往它们写 `style.transform`。
+   *    两个东西写同一个属性就是这个文件下面那条注释判过刑的写法：
+   *    「谁最后写谁赢，而那取决于帧的时序 —— 是必然出 bug 的写法」。
+   *    `translate` 是**独立的属性**，和 `transform` **叠加**而不是互相覆盖 ——
+   *    于是入场和滚动惯性可以同时存在，各写各的通道。
+   *
+   * ⚠️ 用 `animation` 而不是 `transition`：菜单那一套是靠 `.is-open` 状态类驱动的
+   *    （菜单会开会关），而卡片没有开关状态，要的是「一进页面就播一次」。
+   *    附带好处：HTMX 换片段时插进来的是全新节点，动画**自动重播** ——
+   *    点了 Filter 之后卡片逐个重新浮现，读起来就是「新的结果到了」，零额外代码。
+   *
+   * ⚠️ `both` 填充不能省：没有它，卡片在延迟走完之前是**最终状态**，
+   *    于是先看到一整页卡片、再突然全部消失重新浮现。
+   *
+   * ⚠️ 延迟**封顶在第 10 张**（`min(var(--i), 9)`）。一页 20 张，不封顶的话第 20 张
+   *    要等 1.05s —— 而第 10 张之后的卡片本来就在屏幕外，累加的延迟只会让
+   *    一进页面就往下滚的人看到一片还在淡入的空白。
+   */
+  /* 🔴 **动画挂在「行」的两个子元素上，不能挂在「行」自己身上。**
+   *
+   *    2026-08-06 第三版，修的是一个我自己上一版造成的 bug：活动卡片的玻璃
+   *    （`backdrop-filter`）**从加上入场动画那一刻起就完全失效了**，而且不是
+   *    「动画期间失效」，是从此一直失效。
+   *
+   *    棋盘图实测隔离出来的机制 —— 祖先元素上：
+   *      overflow: hidden          → 子元素的 backdrop-filter ✅ 生效
+   *      固定高度                   → ✅ 生效
+   *      只动 translate 的动画       → ✅ 生效
+   *      **动过 opacity 的动画**     → ❌ 永久失效（哪怕已结束、fill: both）
+   *
+   *    上一版为了避开和 `scroll-breathe` 的 transform 冲突特意换成 `translate`，
+   *    却没想到同一个关键帧里的 `opacity` 本身就是杀手 —— 它让那个 `<li>` 变成
+   *    一个 backdrop root，于是里面的卡片再也采样不到照片。
+   *
+   *    ⚠️ 而动画挂在**卡片自己**身上是安全的（同一批实测），因为
+   *       backdrop-filter 在元素自己的 opacity 之前生效。所以两个子元素各自
+   *       播同一条动画、同一个延迟 —— 看起来和挂在父元素上一模一样。
+   *
+   *    ⚠️ `--i` 写在 `<li>` 上，靠**继承**传给这两个子元素。所以模板不用改两处。
+   *
+   *    ⚠️ 往期活动那一页的 `<li>` **本身就是** `.card`，动画和玻璃在同一个元素上，
+   *       所以那一页从来没坏过 —— 这正好是这个诊断的旁证。
+   */
+  .event-row > .card,
+  .event-row > .event-row-thumb {
+    animation: event-row-in 1260ms cubic-bezier(0.32, 0.72, 0, 1) both;
+    animation-delay: calc(min(var(--i, 0), 9) * 55ms);
+  }
+
+  /* 往期活动：`<li>` 自己就是卡片，所以动画直接挂它。 */
+  .event-row-past {
+    animation: event-row-in 1260ms cubic-bezier(0.32, 0.72, 0, 1) both;
+    animation-delay: calc(min(var(--i, 0), 9) * 55ms);
+  }
+
+  @keyframes event-row-in {
+    from {
+      opacity: 0;
+      translate: 0 12px;
+    }
+    to {
+      opacity: 1;
+      translate: none;
+    }
+  }
+
+  /* ⚠️ 这里**必须把延迟也清掉**，而不是只靠文件开头那条全局的
+   *    `animation-duration: 0.01ms !important` —— 那一条只压时长，**不压延迟**。
+   *    只有它的话，减少动效的用户会看到卡片隐身最多半秒、然后瞬间出现，
+   *    也就是把一个柔和的入场变成了一次闪现。`animation: none` 是简写，
+   *    会把 delay 一起复位。 */
+  @media (prefers-reduced-motion: reduce) {
+    .event-row > .card,
+    .event-row > .event-row-thumb,
+    .event-row-past {
+      animation: none;
+      opacity: 1;
+      translate: none;
+    }
+  }
+
+  .event-row-thumb {
+    width: 4rem;
+    height: 4rem;
+    align-self: flex-start;
+  }
+
+  /* 🔴 **裁剪落在卡片上，不落在行上**（2026-08-06 修）。
+   *
+   *    行高是定死的，所以需要有人裁掉超出去的内容 —— 但这件事**不能交给行**：
+   *    量出来的几何是卡片的上、下、右三边和行**完全重合**（行 864×112 @ x=528，
+   *    卡片 756×112 @ x=636，右边缘都是 1392）。于是行的 `overflow: hidden` 把卡片的
+   *    落影在这三边**整条切掉**，只剩左边那道 gap 里透出来一点。
+   *    更难看的是圆角：裁剪线横穿圆角弧线，落在弧线外、行框内的那部分阴影留了下来，
+   *    在每个角上变成一个**深色的尖角**。浅色模式下尤其明显 ——
+   *    用户就是这么发现的（「转角有深色的尖尖」）。
+   *
+   * ⚠️ 元素**自己**的 `overflow` 不裁自己的阴影，只有**祖先**的会。所以把这一条从行
+   *    挪到卡片上，两件事同时成立：内容照旧被裁在固定行高里，阴影完整画出来。
+   *    ⚠️ 这和玻璃那两次是同一个形状：**这条声明写在哪个元素上，决定了它伤到什么** ——
+   *    而看这条声明本身永远看不出来。
+   *
+   * ⚠️ 往期活动那一页**不受影响也不需要改**：那里 `<li>` 本身就是卡片，
+   *    所以 `overflow` 一直是挂在卡片上的。它的那一条在下面 `.event-row-past` 里。
+   */
+  .event-row {
+    height: var(--event-row-height);
+  }
+
+  .event-row > .card {
+    overflow: hidden;
+  }
+
+  @media (width >= 40rem) {
+
+    /* 宽 = 高 = **同一个变量**，所以这两者不可能分叉 —— 而它们一分叉，图片就不再
+     * 是正方形，而那是一眼看不出来的那种不对（这一段已经因此改过三次，见
+     * design-system.md 里那张「行高和图片」的表）。
+     *
+     * ⚠️ **比行高小一圈**（2026-08-06）：84px 对 112px 的行高 = 75%，照给的参考图
+     *    量的（那张图里缩略图是卡片高度的 74%）。
+     *    ⚠️ 缩小那一版一度把宽高写成了**两个 5.25rem 字面量**，正方形于是从
+     *    「结构上必然」退回成「两个数字碰巧一样」。变量补回来了 ——
+     *    这一条正是这段注释一开始就写着的那件事，而它还是被绕过了一次。
+     *    ⚠️ 不再用 `align-self: stretch` + 行高 —— 那是「和卡片等高」的做法，
+     *    现在要的是「比卡片矮一圈并居中」。 */
+    .event-row-thumb {
+      width: var(--event-row-thumb);
+      height: var(--event-row-thumb);
+      align-self: center;
+    }
+  }
+
+  /* 往期活动那一行多一条正文（ministry 名单独一行），所以高一档：
+   * 2 + 1.75 + 0.5 + 3 × 1.25 = 8rem。那一页没有图片，所以这个值只需要统一。
+   *
+   * ⚠️ 裁剪写在这里，和 Events 页那条（`.event-row > .card`）是**同一件事的两种落法**：
+   *    要裁的始终是「卡片」。这一页 `<li>` 就是卡片，所以挂它自己；
+   *    Events 页卡片是行的子元素，所以挂子元素。挂错的后果见上面那段。 */
+  .event-row-past {
+    --event-row-height: 8rem;
+    overflow: hidden;
+  }
+
+  /* 铺满整行的链接层（2026-08-06）。
+   *
+   * ⚠️ 整行可点，但**整行不是一个 <a>**。把标题、badge、时间全包进一个链接里，
+   *    读屏软件念出来是一长串「Saturday distribution Food Pantry 8 月 7 日
+   *    9:36 至 12:36 教会一楼，链接」。这一层的可访问名只有活动名（模板里那个
+   *    sr-only），所以一行仍然只有一个链接、名字仍然只是活动名。
+   *
+   * ⚠️ 它盖在图片上面也是有意的 —— 「点图片也能进详情」就是这么来的。
+   *
+   * ⚠️ 代价如实说：盖了一层之后卡片里的文字**不好选中**了。
+   *    这是所有「整块可点」写法共同的代价，主动接受。
+   */
+  .event-row-link {
+    position: absolute;
+    inset: 0;
+    z-index: 1;
+    border-radius: 0.5rem;
+  }
+
+  /* 活动名。**默认没有下划线**，鼠标进入整行时从左画进来，离开时向右滑走。
+   *
+   * ⚠️ 两个状态的 `transform-origin` **不一样**，这就是「进来从左、出去向右」的
+   *    全部机关：hover 时从 left 长出来，回到默认态时缩回 right。
+   *    两边写同一个 origin 的话，出去的方向会和进来的方向相反（原地缩回左边）。
+   *
+   * ⚠️ 触发的是 `.event-row:hover`，不是 `.event-name:hover` —— 整行都可点，
+   *    只有指针压在那几个字上才亮的话，这张卡看起来「大部分地方不能点」。
+   *
+   * ⚠️ `:focus-within` 也要触发。键盘用户 Tab 到那个链接层时得到的是同一个提示，
+   *    否则这个效果对他们根本不存在。
+   */
+  .event-name {
+    position: relative;
+    color: var(--color-brand-700);
+    text-decoration: none;
+  }
+
+  .dark .event-name {
+    color: var(--color-brand-300);
+  }
+
+  .event-name::after {
+    content: "";
+    position: absolute;
+    left: 0;
+    right: 0;
+    /* ⚠️ `bottom: 0`, **not** a negative offset, and this is the one line in this
+     *    block that is not obvious. `.event-name` carries `line-clamp-*`, which
+     *    sets `overflow: hidden` — so anything positioned outside its padding box
+     *    is clipped and **never painted at all**. The first version used
+     *    `bottom: -0.125rem` and the underline simply did not exist; nothing
+     *    errored, the computed style said `visibility: visible`, `height: 1px`,
+     *    the right colour — and there was nothing on screen.
+     *
+     *    Sitting at `bottom: 0` costs nothing visually: the line box is 1.75rem
+     *    while the glyphs occupy about 1.5rem of it, so the bottom edge is
+     *    already ~2px below the descenders — the same gap the negative offset was
+     *    reaching for. */
+    bottom: 0;
+    height: 1px;
+    background-color: currentColor;
+    transform: scaleX(0);
+    transform-origin: right;
+    transition: transform 280ms cubic-bezier(0.32, 0.72, 0, 1);
+  }
+
+  .event-row:hover .event-name::after,
+  .event-row:focus-within .event-name::after {
+    transform: scaleX(1);
+    transform-origin: left;
+  }
+
+  /* ⚠️ 关掉动画，不是关掉下划线 —— 提示本身要留着，只是不再滑。 */
+  @media (prefers-reduced-motion: reduce) {
+    .event-name::after {
+      transition: none;
+    }
+  }
+
+  /* --- 密码框的「看一眼」按钮（2026-08-06）--------------------------------
+   * 结构在 core/components/field.html 里，按 widget 的 input_type 自动生效，
+   * 所以注册 / 登录 / 改密码三页共用一份。 */
+  .field-password {
+    position: relative;
+  }
+
+  /* ⚠️ 给输入框右边留出按钮的位置。不留的话长密码会滚到按钮底下 ——
+   *    上面 `.field input` 那条把 padding 写死成 0.75rem，这里覆盖右侧一边。 */
+  .field-password input {
+    padding-right: 2.75rem;
+  }
+
+  .field-password-toggle {
+    position: absolute;
+    /* ⚠️ 不用 `top: 50%` 居中：上面的 `.field input` 有 `margin-top: 0.25rem`，
+     *    而这个按钮的定位父级是整个 .field-password（含那 4px），
+     *    于是按 50% 算会比输入框的中线高 2px —— 一眼看不出来，但和右边框
+     *    对不齐的时候就是「差一点」的来源。所以从输入框自己的上下边界算。 */
+    top: 0.25rem;
+    bottom: 0;
+    right: 0;
+    display: flex;
+    align-items: center;
+    padding-inline: 0.75rem;
+    color: var(--color-ink-600);
+  }
+
+  .field-password-toggle:hover {
+    color: var(--color-ink-900);
+  }
+
+  .dark .field-password-toggle {
+    color: var(--color-ink-300);
+  }
+
+  .dark .field-password-toggle:hover {
+    color: var(--color-ink-50);
+  }
+
+  /* --- 弹窗 ---------------------------------------------------------------
+   * 结构在 core/components/modal.html。全站一份。 */
+  .modal-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 50;
+    display: flex;
+    /* ⚠️ `align-items: flex-start` 加 padding，不是 `center`。窄屏上键盘弹起来
+     *    之后视口只剩一半高，居中的面板会把标题顶出屏幕外，而人正在填的框在
+     *    最下面。从顶部往下排，面板自己滚。 */
+    align-items: flex-start;
+    justify-content: center;
+    overflow-y: auto;
+    padding: 1.5rem 1rem;
+    background-color: rgb(0 0 0 / 0.55);
+  }
+
+  .modal-panel {
+    width: 100%;
+    max-width: 28rem;
+    border-radius: 0.75rem;
+    background-color: #fff;
+    padding: 1.5rem;
+    color: var(--color-ink-900);
+  }
+
+  /* ⚠️ 深色模式下**不透**背景照片。卡片可以半透明压在照片上（D26），
+   *    弹窗不行：它上面是一张要逐字读的表单，而照片里任何一块亮色云团
+   *    都会把某一行字的对比度打到 4.5 以下，而是哪一行取决于用户滚到哪里。 */
+  .dark .modal-panel {
+    background-color: var(--color-ink-900);
+    color: var(--color-ink-50);
+  }
+
+  /* --- 只读的一行值（Login information 那两行）---------------------------
+   * ⚠️ 长得像输入框但**不是** input，所以它没有 name、进不了任何表单 ——
+   *    「看起来能改其实不能改」比「明显不能改」更让人困惑，所以旁边必须有一句话
+   *    说去哪里改。那句话在 profile.html 里。 */
+  .readonly-value {
+    margin-top: 0.25rem;
+    border-radius: 0.375rem;
+    border: 1px solid var(--color-ink-200);
+    background-color: var(--color-ink-50);
+    padding: 0.625rem 0.75rem;
+    font-size: 0.875rem;
+    color: var(--color-ink-800);
+    overflow-wrap: anywhere;
+  }
+
+  .dark .readonly-value {
+    border-color: var(--color-ink-700);
+    background-color: var(--color-ink-800);
+    color: var(--color-ink-100);
+  }
+
   /* --- 表格容器 -----------------------------------------------------------
    * ⚠️ 表格一律包在这里面。不包的话窄屏上**整页**横向滚动，导航跟着跑出去 ——
    *    375px 是硬要求，而管理侧那几张表有七八列。 */
@@ -224,7 +709,10 @@
      * 给读屏用的 `<label class="sr-only">Hours for …</label>`。
      * 加上这一行之后 632 → 375。 */
     position: relative;
-    border-radius: 0.5rem;
+    /* ⚠️ 圆角必须和 `.card` **同一个值**（2026-08-06 从 0.5rem 跟着改到 0.75rem）。
+     *    管理页上这个容器和报表那张卡片是并排的 —— 差一档的圆角是那种「单独看
+     *    都没问题、放在一起就是业余感」的不齐，正是这份设计规范开头那条判据。 */
+    border-radius: 0.75rem;
     border: 1px solid var(--color-ink-200);
   }
 
@@ -267,16 +755,43 @@
   /* --- 卡片 ---------------------------------------------------------------
    * ⚠️ 深色下靠边框分层，不靠阴影 —— 阴影在深色底上几乎看不见，
    *    只写 shadow-* 不写边框的卡片在深色下会糊成一片。 */
+  /* ⚠️ **没有边框**（2026-08-06 改）。原来是 1px 的 ink-200 线。
+   *
+   * ⚠️ 去掉线条之后必须把阴影加强一档，这不是审美选择：浅色模式下卡片是白底、
+   *    页面底是 ink-50，两者几乎同色 —— 原来那层 `0 1px 2px / 5%` 的阴影
+   *    几乎看不见，只靠它的话卡片会**基本消失**，一页上好几块内容糊成一片。
+   *    现在这一组是「一层近的轮廓 + 一层远的扩散」，柔和但确实看得出边界。
+   *
+   * ⚠️ 深色模式**不靠阴影**（黑底上的黑阴影看不见），靠 ink-900 对 ink-950 的
+   *    色差；压在照片上时靠 40% 的半透明黑加一道方向性亮边。
+   *    所以那两个分支只是不再设 border-color。
+   *
+   * ⚠️ `.table-wrap` **保留**它自己的边框（2026-08-06 拍板）—— 表格的行线需要一个
+   *    外框来收口。但**圆角和玻璃材质要跟着卡片走**（同日补齐）：它只是「边框由谁
+   *    画」和卡片不同，不是另一种材质。两者在管理页上是并排的。
+   *
+   * ⚠️ 那些「卡片 + 彩色边」的警示框（生日提示、只读提示等）现在在模板里各自
+   *    显式写了 `border` —— Tailwind 的 `border-<色>` 只给颜色，宽度原来是这里给的。
+   *    它们的轮廓不是装饰：那条线在说「这一行和周围的页面不一样」。 */
   .card {
-    border-radius: 0.5rem;
-    border: 1px solid var(--color-ink-200);
+    /* 圆角 0.75rem（2026-08-06 从 0.5rem 加大）。 */
+    border-radius: 0.75rem;
     background-color: #fff;
     padding: 1rem;
-    box-shadow: 0 1px 2px 0 rgb(0 0 0 / 0.05);
+    /* ⚠️ `position: relative` 不是排版需要，是**亮边那个 `::after` 环的定位父级**
+     *    （见下面 .dark.has-hero 那一段）。
+     *    ⚠️ 报表面板那张卡片带 `lg:absolute`，工具类在 utilities 层会盖掉这一行 ——
+     *    那是对的，它本来就要绝对定位。 */
+    position: relative;
+    /* 阴影加重到约 4 倍（2026-08-06）：一层远的扩散负责「悬浮」，一层近的负责
+     * 「贴着页面的那道边界」。只有近的那层时卡片是「平贴」，只有远的那层时
+     * 边界会糊掉。 */
+    box-shadow:
+      0 10px 30px -8px rgb(0 0 0 / 0.28),
+      0 2px 8px -2px rgb(0 0 0 / 0.14);
   }
 
   .dark .card {
-    border-color: var(--color-ink-700);
     background-color: var(--color-ink-900);
     box-shadow: none;
   }
@@ -401,10 +916,41 @@
   /* --- 首页的左侧菜单 -------------------------------------------------------
    * ⚠️ 面板用 translate 移出视口，不用 display:none —— 后者会让里面的链接对
    *    读屏软件**不存在**，而它们是这一页唯一的导航。 */
+  /* ⚠️ 底色写在这里而**不是**模板上的 `bg-white`。Tailwind 的工具类在
+   *    `@layer utilities`，层的优先级高于选择器具体度 —— 留着 `bg-white`
+   *    的话，下面那两条深色规则再具体也盖不过它。实测表现是深色下面板还是白的，
+   *    而字已经按深色改成了浅色：**一整块白底浅字，几乎读不出来**。
+   *    同一个坑 button.html 那边也记着。 */
   .home-menu {
+    background-color: #fff;
     transform: translateX(-100%);
     visibility: hidden;
     transition: transform 420ms cubic-bezier(0.32, 0.72, 0, 1), visibility 420ms;
+  }
+
+  /* --- 深色下的面板底色（2026-08-08 改，同日第二次）--------------------------
+   *
+   * ⚠️ **和吸顶 bar 一模一样，包括它有两副样子这件事。** 那条 bar 在深色下是：
+   *
+   *      没传首页大图  →  实心 `--color-ink-900`
+   *      传了          →  `rgb(0 0 0 / 0.62)` + 14px 模糊
+   *
+   * ⚠️ 第一版只抄了上面那一档，结果是**面板泛蓝**：`--color-ink-*` 是一条固定的
+   *    冷灰阶，**只有 `--color-brand-*` 跟着首页照片走**。所以 ink-900 永远带蓝调，
+   *    主题色是紫的也一样 —— 而同一个部署上的那条 bar 是中性黑玻璃，两者放在
+   *    一起看就是「菜单发蓝」。抄错一档不会报错，只会让两块本该同色的东西不同色。
+   *
+   * ⚠️ `backdrop-filter` 在这里是活的：`.home-menu` 自己有 `transform`，
+   *    但杀掉后代玻璃的是**祖先**的 `opacity` 动画，不是自身的 transform
+   *    （见「backdrop-filter 会被祖先杀掉」那一节）。面板里那些条目的淡入
+   *    是**后代**，同样不影响它。 */
+  .dark .home-menu {
+    background-color: var(--color-ink-900);
+  }
+
+  .dark.has-hero .home-menu {
+    background-color: rgb(0 0 0 / 0.62);
+    backdrop-filter: blur(14px);
   }
 
   .home-menu.is-open {
@@ -426,6 +972,115 @@
     transform: none;
     /* 面板滑到一半再开始，条目才像是「跟着进来的」而不是和面板一起出现。 */
     transition-delay: calc(160ms + var(--i, 0) * 55ms);
+  }
+
+  /* 首页经文的入场（2026-08-06）：从下方 24px 升到位，同时由透变实。
+   *
+   * ⚠️ 纯 CSS `animation`，不是 `transition` —— 没有状态变化可以驱动它，
+   *    要的是「页面一出现就播一次」，而这正是 animation 和 transition 的分界。
+   *    于是刷新一次就重播一次，不需要任何 JS。
+   *
+   * ⚠️ `both` 填充模式不能省。少了它，元素在动画开始**之前**是最终状态 ——
+   *    于是首帧会闪一下完整的字，然后才跳回起点开始升。那一闪比没有动画更糟。
+   *
+   * ⚠️ 只动 `opacity` 和 `transform`，两者都在合成层上，不触发重排。
+   *    改 `top` 或 `margin` 会让这块字每帧都重新布局，在手机上是可见的卡顿。
+   *
+   * ⚠️ 出处那一行晚 180ms，和菜单逐项入场同一套语汇（那边是 55ms 一档）。
+   *    两行同时到位会显得像一整块图片飘进来，错开一点才像「先读到经文，
+   *    再看到它出自哪里」。
+   */
+  /* ⚠️ **行程是 40vh，而且两行用同一个值**（2026-08-06 第二版：原来是 24px）。
+   *
+   *    40vh 是**量过之后取的余量值**，不是估的：813px 高的视口上，经文那一行
+   *    静止时顶边在 542px，要整块落到屏幕外需要位移 271px = 33.4vh。
+   *    先写的 32vh 差 11px —— 文字在起点仍有一丝在屏内（那一刻不透明度是 0，
+   *    所以看不出来，但注释会变成假话）。40vh 覆盖常见视口和常见经文长度。
+   *    ⚠️ 极矮的视口（比如 500px）配一段很长的经文时仍可能露出一点；
+   *    那一刻它是全透明的，所以后果只是行程比 100% 少一点，看不见。
+   *
+   *    ⚠️ 为什么不写 `calc(14vh + 100%)`（那才是「各自刚好出屏」）：`100%` 指的是
+   *    **元素自己的高度**，而经文两三行、出处一行，两者高度不同 —— 于是它们的位移
+   *    不一样，升的过程里两行之间的间距会变，看起来像在展开而不是在一起飘。
+   *    同一个 vh 值让它们整块平移。
+   *
+   * ⚠️ **透明度在 95% 就走完，位移走到 100%。** 两者同时结束的话，大半段行程里
+   *    字是看不见的 —— 「从底部升上来」那一段就白费了。
+   *    ⚠️ 2026-08-06 两次调过：55% → 85% → **95%**。这个百分比比看起来敏感，
+   *    因为**缓动是分段作用的** —— 不透明度在 `0%..95%` 这一段里跑完整条
+   *    easeOutQuad 曲线，不是线性推进。55% 的时候字在一半行程就几乎全实了；
+   *    95% 让它几乎一路都在变实，最后那十几个像素才完全清晰。
+   *    实测的曲线记在 design-system.md，下次要调不必重新量。
+   *
+   * ⚠️ 缓动用的是很轻的 ease-out（easeOutQuad），不是 expo-out。后者把大部分位移
+   *    挤在头几百毫秒，读起来是「窜上来然后停住」；云要的是接近匀速、末尾轻轻收住。
+   */
+  @keyframes home-verse-rise {
+    from {
+      opacity: 0;
+      transform: translateY(40vh);
+    }
+    95% {
+      opacity: 1;
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
+
+  .home-verse {
+    animation: home-verse-rise 3600ms cubic-bezier(0.25, 0.46, 0.45, 0.94) both;
+  }
+
+  .home-verse-ref {
+    /* 600ms，跟着 3.6s 的时长一起放大 —— 原来 900ms 配 180ms，同一个比例。
+     * 不放大的话在三秒半的动画里这点错位根本看不出来。 */
+    animation: home-verse-rise 3600ms cubic-bezier(0.25, 0.46, 0.45, 0.94) 600ms both;
+  }
+
+  /* ⚠️ 关掉动画之后**必须把两个属性都写回来**。只写 `animation: none` 的话，
+   *    带 `both` 的动画不再应用，元素回到样式表里的值 —— 那恰好是可见的，
+   *    所以这里其实是保险：把「看得见」写成明确的声明，而不是依赖默认值。 */
+  @media (prefers-reduced-motion: reduce) {
+    .home-verse,
+    .home-verse-ref {
+      animation: none;
+      opacity: 1;
+      transform: none;
+    }
+  }
+
+  /* 管理侧的小标题（2026-08-06）。它上面那条线就是「admin 和非 admin 的分界」。
+   *
+   * ⚠️ 它也带 .home-menu-link，所以逐个入场那一套一视同仁地作用在它身上 ——
+   *    小标题不跟着进场，而它下面的链接进场，看起来是标题「掉队」了。
+   *
+   * ⚠️ 字号比链接小、字距拉开、全大写：它是**分类**不是可点的东西，
+   *    而菜单里所有一样大的字都会被当成链接去点。 */
+  .home-menu-heading {
+    margin-top: 1.5rem;
+    border-top: 1px solid var(--color-ink-200);
+    padding-top: 1.25rem;
+    font-size: 0.6875rem;
+    font-weight: 600;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    /* ink-600 而不是 ink-500 —— 后者在白底上只有 4.34:1，过不了 4.5 那条线。 */
+    color: var(--color-ink-600);
+  }
+
+  /* 深色下的小标题和它那道分界线（2026-08-08，面板底改成 ink-900 那次）。
+   *
+   * ⚠️ 颜色不是重挑的，是**照搬内页深色已经在用的那一对**：base.html 的页脚就是
+   *    `ink-900` 底配 `ink-300` 字。对比度是量过的，不该在这里重新猜一个。
+   *    （ink-400 在 ink-900 上也过得去，约 6.9:1，但没有理由多引入一档。）
+   *
+   * ⚠️ 那道上边框也要跟着变。留着 ink-200 的话，深色面板上会横着一条很亮的线 ——
+   *    它比它分隔的两组内容还显眼，看起来像画错了。 */
+  .dark .home-menu-heading {
+    border-top-color: var(--color-ink-700);
+    color: var(--color-ink-300);
   }
 
   /* --- 滚动时的惯性 ---------------------------------------------------------
@@ -454,6 +1109,584 @@
       will-change: auto;
       transform: none !important;
     }
+  }
+}
+
+@layer components {
+  /* --- 飘着的羽毛（2026-08-06 新增）------------------------------------------
+   *
+   * 只在 /events/ 那一页。素材是七片白羽毛，实现在 assets/js/app.js 的 feathers。
+   *
+   * ⚠️ **position: fixed，不是 absolute。** 它要相对视口飘，不相对文档 ——
+   *    absolute 的话滚动时羽毛跟着内容一起走，看起来是贴在纸上的贴纸，
+   *    而不是飘在页面前面的东西。
+   *
+   * ⚠️ **z-index 卡在 20**，也就是内容之上、顶栏（z-30）和菜单（z-40 / z-50）之下。
+   *    高过顶栏的话，一片羽毛会飘到 sticky 导航栏和展开的菜单前面 ——
+   *    那一刻它不再像装饰，像页面出了故障。
+   *
+   * ⚠️ **pointer-events: none 是硬要求，不是优化。** 这一层盖在整个视口上，
+   *    少了它，报名按钮会时不时点不动 —— 而那种 bug 只在羽毛正好飘过去的
+   *    那两秒里存在，谁也复现不出来。
+   */
+  .feather-sky {
+    position: fixed;
+    inset: 0;
+    z-index: 20;
+    overflow: hidden;
+    pointer-events: none;
+  }
+
+  /* ⚠️ 一片羽毛在**任何**背景上都要看得见，而它自己是白的（2026-08-06 定，
+   *    看过浅色 / 纯白卡片 / 深色三种底上的实拍图之后）：
+   *
+   *    · 深色模式 —— 白羽毛压在压暗过的照片上，本来就清楚；
+   *    · 浅色模式 —— 页面底是 ink-50、卡片是纯白，白羽毛几乎隐形。
+   *
+   *    解法是**只加投影，不压暗**。压暗（试过 70%）确实更清楚，代价是浅色模式下
+   *    它变成一片灰羽毛 —— 两个模式里就不再是同一样东西了。投影按 alpha 通道
+   *    算，所以它勾的是羽毛真正的轮廓，连羽枝的毛边都跟着走。
+   *
+   * ⚠️ filter 写在图片上而不是容器上：容器是全屏的，给它加 filter 会让浏览器
+   *    为整个视口开一块离屏缓冲，每帧重画一次。 */
+  /* ⚠️ **点得动的只有羽毛自己，容器仍然是 `pointer-events: none`。**
+   *    （2026-08-06 加，羽毛成为 Memories 的入口那天。）
+   *
+   *    上面那条注释写着「少了 pointer-events: none，报名按钮会时不时点不动，
+   *    而那种 bug 只在羽毛飘过去的那两秒里存在」——那个坑**没有被重新打开**：
+   *    盖住整个视口的是容器，它照旧不接事件；接事件的是几十像素大的羽毛图片
+   *    本身，而它挡住按钮的概率和它自己一样小。
+   *
+   * ⚠️ 事件仍然冒泡到容器上（`pointer-events: none` 不阻止冒泡），
+   *    所以 app.js 里那个委托的点击处理器挂在容器上就够了。
+   *
+   * ⚠️ 这些羽毛**不是键盘可达的**，而且整层是 `aria-hidden`，在
+   *    `prefers-reduced-motion` 下更是整层 `display: none`。
+   *    **2026-08-07 起这是进 Memories 的唯一一条路** —— 顶栏那枚静止的羽毛
+   *    被拿掉了，为的是那一页只有一个入口、而且要靠自己发现。
+   *    代价随之确定：键盘用户、读屏用户、开了减少动效的人进不去那一页，
+   *    也不会知道它存在。这是知情的取舍，不是待修的缺口。 */
+  .feather {
+    pointer-events: auto;
+    cursor: pointer;
+    position: absolute;
+    top: 0;
+    left: 0;
+    /* 长边 50px（≈ 鼠标指针的 2.5 倍）。每片羽毛的宽高比不同，所以只约束长边，
+     * 让另一边自己跟着走 —— 真的羽毛本来就不一样大。
+     * ⚠️ JS 会按这个值随机上下浮动，具体范围在那边。 */
+    width: auto;
+    height: auto;
+    filter: drop-shadow(0 1px 2px rgb(15 23 42 / 0.35));
+    /* 只提 transform：opacity 也频繁变，但每多一个属性就多占一块显存，
+     * 而 transform 才是决定它走不走合成层的那一个。 */
+    will-change: transform;
+  }
+
+  /* 深色模式下投影换成一层更散、更暗的 —— 压暗过的照片上，1px 的硬边影子
+   * 看不出来，散开的那层才把羽毛从背景里托起来。 */
+  .dark .feather,
+  .feather-sky--on-photo .feather {
+    filter: drop-shadow(0 2px 6px rgb(0 0 0 / 0.55));
+  }
+
+  /* --- 首页那一层（2026-08-06）--------------------------------------------
+   *
+   * ⚠️ 首页**不跟随深色模式**（满屏照片 + 白字，`<html>` 上永远没有 `.dark`），
+   *    所以上面那条 `.dark .feather` 在首页上一次都不会命中 —— 而首页的背景
+   *    恰恰是压暗过的照片，正是最需要那层散影的地方。这个修饰类就是为这一件事
+   *    存在的：它说的是**背后是什么**（一张暗照片），不是**主题是什么**。
+   *
+   * ⚠️ z-index 15，不是 20。首页的层次和内页不一样：经文在 `z-10`、顶栏在
+   *    `z-20`、菜单在 `z-40`/`z-50`，而且外面那个 `relative` 容器没有 z-index，
+   *    **不成栈上下文**，所以这些数字全都在根上下文里直接比。照搬内页的 20 会
+   *    和顶栏打平，然后靠 DOM 顺序决定谁在上面 —— 也就是羽毛会飘到导航前面。
+   */
+  .feather-sky--on-photo {
+    z-index: 15;
+  }
+
+  /* ⚠️ 减少动效下整件事不存在。JS 那边读同一个 media query 直接不启动，
+   *    这里是第二道 —— 和 .scroll-breathe 一样的两层写法。
+   *    ⚠️ 用 display: none 而不是 visibility：这一层是全屏的，留着它不画
+   *       仍然是一个合成层。 */
+  @media (prefers-reduced-motion: reduce) {
+    .feather-sky {
+      display: none;
+    }
+  }
+
+  /* 打印时不要。一片飘在纸上的羽毛不是内容。 */
+  @media print {
+    .feather-sky {
+      display: none;
+    }
+  }
+}
+
+@layer components {
+  /* ==========================================================================
+   * Memories：一条等高的照片带（2026-08-06 新增，2026-08-07 按新参考图重做）
+   *
+   * 版面比例、hover 的两件事、以及每个数字是从哪张参考图上量出来的，
+   * 全部写在 design-system.md 的「十五、Memories」。这里只解释**为什么这些
+   * CSS 长这样**。
+   *
+   * ⚠️ 上一版是「两行反向漂移 + 标题压在正中 + 随机高度 + 按比例裁切重构」。
+   *    那一整套 2026-08-07 换掉了 —— 现在是**一条带子、等高、自然宽度、
+   *    一刀不裁**。相关的 CSS 是删掉的，不是留着不用。
+   *
+   * 这一页不继承 base.html 的外壳（没有顶栏、没有页脚、没有版心），
+   * 理由和首页一样：它要的是整屏的画面。但它**跟随深色模式**，所以它
+   * include 了 _theme_boot.html，而首页没有。
+   * ==========================================================================
+   *
+   * ⚠️ **底色照抄吸顶 bar，连它的两种形态一起抄**（2026-08-08，此前深色是纯黑）。
+   *    那条 bar 在深色下有两副样子，取决于基金会传没传首页大图：
+   *
+   *      没传（`<html>` 上没有 .has-hero）  →  实心 `--color-ink-900`
+   *      传了（有 .has-hero）              →  `rgb(0 0 0 / 0.62)` + 14px 模糊，
+   *                                           压在那张首页大图上
+   *
+   *    所以这里也写两条，而不是挑其中一条抄。抄错一条的表现是
+   *    「有的部署上对，有的部署上不对」，而两种部署都不会报错。
+   *
+   * ⚠️ 上一版写着纯黑，理由是「任何色相都会渗进照片暗部」。那条理由仍然成立，
+   *    代价照旧存在（半透明黑压在一张照片上，暗部会带上背景的调子）——
+   *    2026-08-08 知情选择了和全站一致，而不是这一页单独干净。 */
+  .wall-page {
+    background-color: #fff;
+    color: var(--color-ink-900);
+  }
+
+  .dark .wall-page {
+    background-color: var(--color-ink-900);
+    color: var(--color-ink-100);
+  }
+
+  /* ⚠️ 玻璃挂在 `.wall` 上，不是 `<body>` 上。首页大图那一层是 `<body>` 的子元素
+   *    （`-z-10`），也就是画在 body 的**背景之上** —— 给 body 加
+   *    `backdrop-filter` 采样不到它。挂在 `.wall` 上才在它上面。
+   *
+   * ⚠️ `.wall-track` 上的动画只动 `transform`，所以它**不会**杀掉这层玻璃。
+   *    祖先动 `opacity` 才会，而且是永久失效、静默的 ——
+   *    design-system.md「backdrop-filter 会被祖先杀掉」那一节收过三次学费。
+   *    往这条带子上加任何淡入动画之前，先读那一节。 */
+  .dark.has-hero .wall {
+    background-color: rgb(0 0 0 / 0.62);
+    backdrop-filter: blur(14px);
+  }
+
+  /* ⚠️ `100dvh` 而不是 `100vh`。手机上地址栏收起/展开会改变 vh，于是整条带子
+   *    会上下跳一下 —— 而这一页没有滚动条可言，那一跳看起来纯粹像故障。 */
+  .wall {
+    position: relative;
+    display: flex;
+    height: 100dvh;
+    flex-direction: column;
+    overflow: hidden;
+
+    /* 一条带子的高度，也是那个统一缩放比的分子（见 .wall-photo img）。
+     *
+     * ⚠️ **从 44dvh 降到 26dvh，因为现在有三条**（2026-08-08）。
+     *    三条 44dvh 是 132dvh —— 一页装不下。26×3 加上两道缝是 82dvh，
+     *    余下的给上下留白和右下角那个标题。
+     *
+     * ⚠️ 它同时是**版面的分母**：照片画成 `带高 × --rel`，所以改这个数会
+     *    改变页面上每一张照片的大小，不只是带子的高度。
+     *
+     * ⚠️ 用 `dvh` 而不是 `%`：`%` 要靠父级有确定高度，而这一层的高度本身
+     *    就是 `100dvh`，绕一圈没有好处。 */
+    --strip-h: 26dvh;
+    /* ⚠️ **一个值，两个方向**（2026-08-08）。同一条带子里两张照片之间的横缝，
+     *    和上下两条带子之间的竖缝，用的是同一个自定义属性 —— 拍板口径是
+     *    「带子填满时，上下的距离和左右的距离一样」。
+     *
+     *    写成两个碰巧相等的数字也能达到今天的效果，但改横缝的人不会想到去改竖缝，
+     *    而那时候等式已经悄悄不成立了 —— 没有任何东西会说一声。
+     *
+     * ⚠️ 看到的竖缝**通常比这个数大，而且每一对都不一样**：照片在带高里是垂直
+     *    居中的，而大部分照片填不满带高，所以实际间距是
+     *    `这个值 + 上面那张的下留白 + 下面那张的上留白`。
+     *    只有上下两张都正好填满带高时才正好等于它。这是等高对齐换来的，
+     *    不是没对齐。 */
+    --photo-gap: 14px;
+    --wall-pad: clamp(1.25rem, 6.9vw, 9rem);
+
+    /* 一个「带高单位」的内容走完需要多少秒。⚠️ 速度定在这里而不是定总时长：
+     * 总时长由服务端按这条带子的实际总宽算出来（--wall-span），所以墙上是
+     * 12 张还是 60 张，看起来都是同一个速度。写死总时长的话，
+     * 照片越多跑得越快 —— 基金会每加一批照片，这一页就更急躁一点。 */
+    --wall-speed: 11s;
+  }
+
+  /* --- 标题 -----------------------------------------------------------------
+   * ⚠️ **右下角，绝对定位**（2026-08-08 改，原来是页面上方占 41.5% 的一整条）。
+   *    绝对定位在这里不是偷懒 —— 它正是「视觉位置在右下、阅读顺序在最前」
+   *    这件事唯一干净的做法：`<header>` 在 DOM 里排在照片**前面**，
+   *    所以读屏和键盘先遇到它，而屏幕上它在角落里。
+   *
+   * ⚠️ `text-align: right`：这个词的右边缘要和 `--wall-pad` 对齐，
+   *    否则它在角落里会看起来是浮着的而不是靠着的。 */
+  .wall-head {
+    position: absolute;
+    right: var(--wall-pad);
+    bottom: clamp(1.25rem, 4dvh, 3rem);
+    z-index: 5;
+    text-align: right;
+  }
+
+  /* ⚠️ **字号是量出来的。** 参考图标题的大写字高 79px，画面 2000 × 1148 ——
+   *    字号约 110px，也就是 **5.5vw**。`MEMORIES` 八个大写字母在 Jost 下
+   *    大约是 `0.68 × 字号` 一个，合计约页宽的 30%，与参考图那一行的 35% 同量级。
+   *
+   * ⚠️ 字体是全站的 Jost。2026-08-07 之前这里自托过一套手写体，为一个词多下
+   *    一个字体文件 —— 一页里唯一一处特殊字体，是「这一页不属于这个站」的
+   *    最快来源。
+   *
+   * ⚠️ `line-height: 1` 加 `text-wrap: balance`：窄屏上这个词会换行，
+   *    默认行距会让两行之间豁开一道口子。 */
+  /* ⚠️ **细，而且窄。** Jost 是可变字重，200 这一档是细笔画的几何体。
+   *
+   * ⚠️ 字号从 5.5vw 降到 1.6vw（2026-08-08：「title 变小些」）—— 它从一个标题
+   *    变成了角落里的一个署名，而这一档小字号正是细字重开始变吃力的地方，
+   *    所以字距**从 -0.02em 反过来放到 +0.22em**：大字号靠收紧显瘦，
+   *    小字号收紧只会糊成一团，靠散开才显瘦。同一个「瘦窄」，两种做法。 */
+  .wall-title {
+    margin: 0;
+    font-size: clamp(0.875rem, 1.6vw, 1.5rem);
+    font-weight: 200;
+    line-height: 1;
+    letter-spacing: 0.22em;
+    /* 字距在最后一个字母右边也加了一格，右对齐时它会把词推离边缘。 */
+    margin-right: -0.22em;
+  }
+
+  /* 三条带子叠在一起，整体垂直居中。⚠️ 居中而不是贴顶：照片不够时
+   * strips_for() 只给一条或两条，贴顶的话页面下半边会空掉一大片。 */
+  .wall-strips {
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+    justify-content: center;
+    gap: var(--photo-gap);
+    min-height: 0;
+  }
+
+  /* --- 照片带 ---------------------------------------------------------------
+   *
+   * ⚠️ `overflow: hidden` 在这一层，不在轨道上。轨道有一万多像素宽，
+   *    少了这一条，整个 <body> 会横向滚动。
+   *
+   * ⚠️ 高度就是 `--strip-h`，不多留任何东西（2026-08-08 拿掉图注之后）。
+   *    在那之前这里是 `--strip-h + --caption-h`，因为图注是
+   *    `position: absolute; top: 100%` 挂在照片下面的，而 `overflow: hidden`
+   *    是**两个方向一起**的（CSS 不允许一轴 hidden 另一轴 visible，
+   *    另一轴会被强制成 auto）—— 少留那一条，图注就被整齐地裁掉，
+   *    而页面看起来完全正常，只是一行字都没有。那个坑实测撞到过一次，
+   *    记在这里是因为**下一个往这条带子里加任何超出照片的东西的人会再撞一次**。 */
+  .wall-strip {
+    position: relative;
+    flex: 0 0 var(--strip-h);
+    overflow: hidden;
+  }
+
+  /* ⚠️ N 份一模一样的照片并排，整条轨道平移 `-100% / N` —— 正好是一份的宽度，
+   *    所以下一份接上来的那一帧和这一份的开头逐像素相同，看不出接缝。
+   *    N 由服务端写进 `--wall-sets`。
+   *
+   * ⚠️ **N 不是固定的 2。** 一份如果比窗口还窄（照片很少的时候），平移到头时
+   *    会有一条空白横穿页面 —— 而「照片很少」正是基金会刚开始用的状态。
+   *    判据在 gallery/services.py 的 MIN_STRIP_SPAN / repeats_for()。
+   *    ⚠️ 所以这里**不能写死 `-50%`**：写死的话 N=3 时每轮会跳过半份内容。
+   *
+   * ⚠️ `width: max-content` 是必需的。不写的话轨道被父级宽度约束，
+   *    照片会被压扁而不是排成一长条。
+   *
+   * ⚠️ 这里**故意没有** `will-change: transform`。这条轨道满载时上万像素宽，
+   *    而它的动画从页面打开就在跑、永远不停 —— 浏览器无论如何都会在第一帧
+   *    把它交给合成器，`will-change` 买不到任何东西，只是让那一大块常驻显存的
+   *    提示多挂一份。羽毛那边写了是另一回事：那些元素只有几十像素，而且是
+   *    不断新建和销毁的。 */
+  .wall-track,
+  .wall-set {
+    display: flex;
+    /* ⚠️ 照片的高度，**不是** .wall-strip 的高度 —— 那一层还多带着图注那一条。 */
+    height: var(--strip-h);
+    /* 照片之间的缝。透出来的是页面底色，所以浅色模式下是一条白缝、
+     * 深色模式下是一条黑缝，两边都不用另写规则。
+     *
+     * ⚠️ 14px 是从 2px 放宽来的（2026-08-08）。2px 那条「很细很细的分割线」是配
+     *    **齐平贴边**的照片的 —— 那时候相邻两张严丝合缝，细缝就是分界。现在每张
+     *    照片有圆角、有投影、高矮还不一样，2px 会让相邻的圆角几乎咬在一起、
+     *    两张的投影互相糊进对方，「悬浮感」正好被这一点空间不足抵消掉。
+     *    **圆角、投影、缝宽是一套**：要退回 2px，另外两个也得一起去掉。
+     *
+     * ⚠️ 轨道和每一份**必须是同一个值**，否则两份之间的缝比份内的宽，
+     *    接缝处每一轮会顿挫一次，很难指认。写成一条规则就是为了这个。
+     *
+     * ⚠️ 上下两条带子之间用的**也是这一个值**，见 `.wall` 上的 `--photo-gap`。 */
+    gap: var(--photo-gap);
+  }
+
+  .wall-track {
+    width: max-content;
+    animation: wall-drift-left var(--wall-duration, 200s) linear infinite;
+    /* ⚠️ **负的** delay，也就是「从中途开始播」，不是「延迟开始」。
+     *    三条带子同速同向，少了这一条，每条都会以一张贴着左边缘的照片开场，
+     *    三条读起来是一整块在滑而不是三条各自在走。0.37 是个无理一点的数：
+     *    用 1/3 的话三条的相位在每一轮都会重新对齐一次。 */
+    animation-delay: calc(var(--wall-duration, 200s) * -0.37 * var(--strip-index, 0));
+  }
+
+  /* 一份的宽度 = 整条轨道的 1/N。⚠️ `calc()` 里的 `-100%` 指的是**元素自己**的
+   * 宽度（transform 的百分比一向如此），这里正是想要的那一个。 */
+  @keyframes wall-drift-left {
+    from { transform: translate3d(0, 0, 0); }
+    to   { transform: translate3d(calc(-100% / var(--wall-sets, 2)), 0, 0); }
+  }
+
+  /* ⚠️ 悬浮窗打开时带子停住。不停的话，关掉窗口回到页面上，刚才点的那张已经
+   *    走到别处去了 —— 人会以为自己看错了。停的是动画不是元素，所以关掉之后
+   *    从原地继续，而不是跳回起点。
+   *
+   * ⚠️ 「停下来」和「慢很多倍」是两件事，用两套机制：这里是
+   *    `animation-play-state`，而 hover 的减速走 Web Animations 的
+   *    `playbackRate`（见 app.js）。⚠️ 减速**不能**靠改 `animation-duration` ——
+   *    改时长会让浏览器按新时长重算当前进度，带子会当场跳一大段。 */
+  .wall-track.is-paused {
+    animation-play-state: paused;
+  }
+
+  /* 一张照片的**位置**。⚠️ 它占满整条带子的高度，但照片本身不一定 ——
+   * 照片在里面垂直居中，所以高矮不齐的照片是「在一条线上流动、中心对齐」的。
+   *
+   * ⚠️ 宽度 = 带高 × `--rel` × `--ar`，两个数都由服务端逐张写在 style 上。
+   *    它们是**数据**不是样式（和首页把 hero 图的 URL 写进 background-image
+   *    同一类），怎么把这两个数变成尺寸才是样式，那在下面。 */
+  .wall-photo {
+    position: relative;
+    display: flex;
+    align-items: center;
+    flex: none;
+    height: var(--strip-h);
+    width: calc(var(--strip-h) * var(--rel) * var(--ar));
+    padding: 0;
+    border: 0;
+    background: none;
+    cursor: pointer;
+  }
+
+  /* ⚠️ **不等高，不裁切，也不放大**（2026-08-08 改）。
+   *
+   *    每张照片画成 `带高 × --rel`，而 `--rel` 是这张照片**自己存下来的高度**
+   *    除以 GALLERY_THUMB_MAX_EDGE。因为没有一张缩略图比那个常量还高，
+   *    这个系数对页面上每一张都是同一个 —— 也就是**一个统一的缩放比**，
+   *    和第一张参考图左上角那个 `SCALE 0.10` 是一回事。
+   *    尺寸之所以有差别，是因为**照片本身有差别**。
+   *
+   * ⚠️ 上一版是每张都拉到带高，那意味着把比带子矮的照片**放大** ——
+   *    一张 400px 的扫描件放到 340 CSS px，在 2 倍屏上要 680 个真实像素而只有
+   *    400 个。那就是「有些照片为了做成等高的照片都糊了」。
+   *    现在这个系数**永远 ≤ 1**，照片只会被画得比存的小，不可能糊。
+   *
+   * ⚠️ 没有 `object-fit`。容器的宽高比就是图片的宽高比，它没有任何东西可做，
+   *    而留着它会让人以为这里存在裁切。 */
+  .wall-photo img {
+    display: block;
+    height: calc(var(--strip-h) * var(--rel));
+    width: 100%;
+    /* 一点圆角 + 一层很淡的投影，让照片像浮在纸上而不是印在纸上（2026-08-08）。
+     * ⚠️ 圆角给的是 `<img>` 而不是外面那个格子：格子比照片高（照片在里面居中），
+     *    圆在格子上会在照片上下各画出一段看不见的弧。 */
+    border-radius: 0.5rem;
+    box-shadow: 0 2px 6px rgb(15 23 42 / 0.10), 0 12px 28px rgb(15 23 42 / 0.10);
+    /* 鼠标停上去时**这一张**缩一圈，四周露出底色。参考图上量到的是 0.90。 */
+    transition: transform 320ms cubic-bezier(0.22, 1, 0.36, 1);
+  }
+
+  /* --- 深色下的「悬浮感」是**一圈亮边**，不是投影（2026-08-08 修正）---------
+   *
+   * ⚠️ 上一版这里同时留着白边**和**一层 `0 12px 28px rgb(0 0 0 / 0.55)` 的黑投影，
+   *    而那正好是这条注释自己否定过的做法。黑投影压在深色底上不产生「浮起」，
+   *    只在照片四周糊出一圈比背景更脏的暗带 —— 用户看出来的，
+   *    原话是「gallery 的照片有奇怪的阴影」。
+   *
+   * ⚠️ 深色下托起一个物体靠的是**它自己的边缘更亮**，不是它背后更暗：背后已经很暗了，
+   *    再暗一点没有信息。所以这里只留那一圈亮边，并且比原来稍微提一点（0.10 → 0.16）
+   *    —— 少了那层投影之后，边缘要独自承担全部的分离感。
+   *
+   * ⚠️ 留一道**很紧**的接触影（4px 模糊、负扩散），它贴在照片下沿，
+   *    起的是「贴在纸上」那一点点重量。不能再大了：一超出圆角的范围，
+   *    上面那圈脏带就会回来。 */
+  .dark .wall-photo img {
+    box-shadow: 0 0 0 1px rgb(255 255 255 / 0.16),
+                0 2px 4px -2px rgb(0 0 0 / 0.6);
+  }
+
+  .wall-photo:hover img,
+  .wall-photo:focus-visible img {
+    transform: scale(0.9);
+  }
+
+  /* 焦点环画在照片外面。画在里面的话，深色照片上那一圈几乎看不见 ——
+   * 而键盘用户正是靠它知道自己在哪。 */
+  .wall-photo:focus-visible {
+    outline: 2px solid var(--color-brand-600);
+    outline-offset: 4px;
+  }
+
+  .wall-back {
+    position: absolute;
+    left: var(--wall-pad);
+    top: 1.25rem;
+    z-index: 20;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 0.875rem;
+    letter-spacing: 0.05em;
+    color: inherit;
+  }
+
+  .wall-empty {
+    padding: 2rem var(--wall-pad);
+    font-size: 0.875rem;
+    color: var(--color-ink-500);
+  }
+
+  .dark .wall-empty {
+    color: var(--color-ink-400);
+  }
+
+  /* --- 减少动效：不动，改成手推 ---------------------------------------------
+   *
+   * ⚠️ 动画停掉之后**必须给一条别的路看完整条带子**，否则这些人只能看到
+   *    第一屏那几张，剩下的永远在视口外面 —— 那不是「少了个动效」，是内容没了。
+   *    所以这里把带子改成可以横向滚动的，并且把那些克隆藏起来：不动的时候，
+   *    同一张照片挨着自己出现两次是说不通的。
+   *
+   * ⚠️ hover 缩放也一起关掉。那是「动效」的一种，而这个 media query 说的正是
+   *    「别动」。 */
+  @media (prefers-reduced-motion: reduce) {
+    .wall-track {
+      animation: none;
+      width: auto;
+    }
+
+    .wall-strip {
+      overflow-x: auto;
+      scrollbar-width: thin;
+    }
+
+    .wall-set--clone {
+      display: none;
+    }
+
+    .wall-photo img {
+      transition: none;
+    }
+
+    .wall-photo:hover img,
+    .wall-photo:focus-visible img {
+      transform: none;
+    }
+  }
+
+  /* --- 窄屏 -----------------------------------------------------------------
+   * 带子矮一些，标题区让出更多位置 —— 竖屏上 41.5% 的留白太奢侈了。 */
+  @media (max-width: 640px) {
+    .wall {
+      --strip-h: 34dvh;
+    }
+
+    .wall-head {
+      flex-basis: 32%;
+    }
+  }
+
+  /* 打印时这一页没有意义：带子是靠动画存在的，纸上只会印出第一屏那几张。 */
+  @media print {
+    .wall {
+      display: none;
+    }
+  }
+}
+
+@layer components {
+  /* --- Memories 的悬浮窗（2026-08-06）--------------------------------------
+   *
+   * ⚠️ 不复用 `modal.html` / `.modal-panel`。那个是「一张卡片里放一段表单」，
+   *    有内边距、有标题行、有白底 —— 而这里要的是一张照片浮在压暗的页面上，
+   *    卡片的每一件事都在跟它作对。两者共用的只有 Esc 关闭和点遮罩关闭这两条
+   *    交互约定，那是写在这份文档里的约定，不是可以共用的 DOM。 */
+  .wall-lightbox {
+    position: fixed;
+    inset: 0;
+    z-index: 50;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 3.5rem 1rem;
+    /* 两档都用同一层黑。浅色模式下也是黑的 —— 这一层的作用是把周围压掉让照片
+     * 站出来，而不是「页面背景的深色版」。 */
+    background-color: rgb(0 0 0 / 0.82);
+  }
+
+  .wall-lightbox-figure {
+    display: flex;
+    max-height: 100%;
+    max-width: min(92vw, 1400px);
+    flex-direction: column;
+    align-items: center;
+    gap: 0.875rem;
+  }
+
+  /* ⚠️ `min-height: 0` 在这里是必需的，不是保险。flex 子项的默认
+   *    `min-height: auto` 会让图片把容器顶出屏幕 —— 横幅照片在窄窗口上会
+   *    超出视口顶部，而那正好是没有滚动条的一层。 */
+  .wall-lightbox-figure img {
+    min-height: 0;
+    max-height: 100%;
+    max-width: 100%;
+    object-fit: contain;
+  }
+
+  .wall-lightbox-caption {
+    flex: none;
+    font-size: 0.8125rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    /* 很淡。它是一句注脚，不该跟照片抢。压在纯黑上仍有 5.4:1。 */
+    color: rgb(255 255 255 / 0.62);
+  }
+
+  .wall-lightbox-nav {
+    position: absolute;
+    top: 50%;
+    transform: translateY(-50%);
+    display: inline-flex;
+    height: 3rem;
+    width: 3rem;
+    align-items: center;
+    justify-content: center;
+    border-radius: 9999px;
+    color: #fff;
+    background-color: rgb(255 255 255 / 0.12);
+  }
+
+  .wall-lightbox-nav:hover {
+    background-color: rgb(255 255 255 / 0.22);
+  }
+
+  .wall-lightbox-nav--prev { left: 1rem; }
+  .wall-lightbox-nav--next { right: 1rem; }
+  .wall-lightbox-close { position: absolute; right: 1rem; top: 1rem; }
+
+  .wall-lightbox-nav:focus-visible,
+  .wall-lightbox-close:focus-visible {
+    outline: 2px solid #fff;
+    outline-offset: 2px;
   }
 }
 
@@ -521,6 +1754,24 @@
   }
 }
 
+/* --- 首页那张照片在深色模式下怎么变暗 ------------------------------------------
+ *
+ * 🔴 **压暗不在这个文件里。** 它是模板层的两层渐变，写在
+ *    `core/templates/core/components/_hero_scrim.html`，首页和内页共用同一份。
+ *    理由、数值和它在对比度上的取舍都在那份片段的注释里。
+ *
+ * ⚠️ 这里留一句，是因为这一处试过三种做法，而**第三种是绕回来的**：
+ *      ① 平铺 68% 的 ink-950     加常数 → 抬高黑点 → 高光阴影糊成一团
+ *      ② 照片自己的 filter       乘系数 → 质感和颜色都保住，对比度也过得很宽
+ *                                （最坏照片 6.68:1）—— 但**压得太暗，不好看**
+ *      ③ 和首页同一份两层渐变     现在这个。好看，代价是对比度上的取舍
+ *    ② 那一版实测的数字（分离 +64%、饱和度 +91%）是对的，它输在**观感**上 ——
+ *    值得记住：一个在每项指标上都更好的方案，仍然可以是错的方案。
+ *
+ * ⚠️ 所以**不要再往这里加 `filter`**。要调压暗强度，改那份片段里的渐变 ——
+ *    改在这里的话首页和内页会当场分叉，而这次的要求就是「两处一样」。
+ */
+
 @layer components {
   /* --- 深色模式：半透明的黑，让背后的照片透出来（2026-08-05）---------------
    *
@@ -528,24 +1779,114 @@
    *    背后是纯深色，半透明面板会让页面看起来像蒙了一层灰 —— 那时不透明的
    *    ink-900 才是对的。这个开关由 base.html 按 site_hero_image 给。
    *
-   * ⚠️ 不透明度是**量出来的**，不是挑好看的。0.72 是能让
-   *    ink-100 的正文在最亮的照片区域上仍然过 4.5:1 的最低值 ——
-   *    再透一点字就开始糊，而这件事只在某几张照片上发生，不报错。
+   * 🔴 **2026-08-06 更正一条量错的注释。** 这里原来写着「0.72 是能让 ink-100 的正文
+   *    在最亮的照片区域上仍然过 4.5:1 的**最低值**」。拿真实的 hero 照片重新量过：
+   *    **0.72 实际给出 16.26:1**，离 4.5 有巨大余量。那个数应该是在 base.html 那层
+   *    全页遮罩存在**之前**量的 —— 加上遮罩之后，照片先被压掉 80%，卡片再压 72%，
+   *    最后只有 5.6% 的照片能到卡片表面。
    *
-   * ⚠️ backdrop-filter 只加模糊不加变暗：变暗交给上面那句实心的半透明黑，
+   *    代价是看得见的：卡片表面的亮度范围只有 **0.36 个百分点**，也就是照片的结构
+   *    一点都透不过来 —— 它不是玻璃，是一块纯黑。
+   *
+   * ⚠️ 所以三个数一起调（2026-08-06）：遮罩 0.80 → 0.68、卡片 0.72 → 0.40、
+   *    模糊 10px → 3px。实测卡片表面结构从 0.36pp 升到 3.36pp（约 9 倍），
+   *    而卡内正文仍有 10.24:1、卡外文字 6.03:1。
+   *    ⚠️ **主要旋钮是遮罩，不是卡片** —— 遮罩不动的话，卡片再透也没东西可看
+   *    （只能到 1.32pp）。
+   *
+   * ⚠️ 模糊几乎不影响对比度（实测 0.78pp vs 0.79pp），所以「少一点模糊」这件事
+   *    代价为零。变暗仍然全部交给上面那句实心的半透明黑 ——
    *    因为模糊在不支持 backdrop-filter 的浏览器上会被整个忽略，
    *    而对比度不能依赖一个可以被忽略的东西。
    */
-  .dark.has-hero .card {
-    background-color: rgb(0 0 0 / 0.72);
-    border-color: rgb(255 255 255 / 0.14);
-    backdrop-filter: blur(10px);
+  /* ⚠️ `:not(.border)` 把**警示框排除在外**（2026-08-06）。它复用上一批立下的标记：
+   *    警示框都是「.card + 显式的 border + 彩色边」。它们不该是玻璃 ——
+   *    一条要人注意的提示，透出照片就等于把它降级成装饰。
+   *    ⚠️ 代价如实说：以后某张卡片如果为了别的理由加了 `border`，它会失去玻璃效果。
+   *
+   * ⚠️ 亮边**不许用 border**。卡片行高是定死的（`.event-row` 那一段），加 1px 真边框
+   *    会把内容盒缩掉 2px 并可能裁掉文字，而且深浅两个模式的盒子尺寸会差 1px。
+   *    它现在是下面那个 `::after` 覆盖层（原来是 inset box-shadow —— 换掉的理由
+   *    是「要有方向」，同样不参与布局）。
+   */
+  .dark.has-hero .card:not(.border) {
+    background-color: rgb(0 0 0 / 0.4);
+    /* ⚠️ `saturate` 是让它读起来像**玻璃**而不是**烟熏塑料**的那一半
+     *    （2026-08-06 加）。真玻璃会把颜色集中，只有 blur + 黑纱的话颜色是被抽掉的。
+     *    Apple 那套材质同样是 blur + 饱和度提升。 */
+    backdrop-filter: blur(3px) saturate(1.35);
+    /* 方向性高光：玻璃接光是不均匀的，一整面同一个色调读起来是一块塑料板。
+     * ⚠️ 用 `background-image` 而不是伪元素 —— 渐变画在 background-color 之上、
+     *    内容之下，正好是需要的层序，而且把 `::after` 留给亮边环。 */
+    background-image: linear-gradient(
+      140deg, rgb(255 255 255 / 0.07), rgb(255 255 255 / 0) 42%);
+    /* 深色下的「悬浮」不能靠黑影（黑影压在暗背景上看不见），靠的是
+     * **卡片外围一圈更暗的晕** —— 在照片亮的地方非常有效。 */
+    box-shadow: 0 14px 34px -10px rgb(0 0 0 / 0.55);
   }
 
+  /* 亮边（2026-08-06）。要的效果是两条：**看得清**，而且**亮度跟着背景走**。
+   * 半透明的白自带第二条 —— 它合成在卡片表面之上，表面亮它就亮。实测同一条边
+   * 在照片暗处 81、亮处 145（0–255）。
+   *
+   * 🔴 **这里原本写的是 `backdrop-filter: brightness(2.4)`，那条路是错的，两重错。**
+   *
+   *    ① 它在这个位置**根本不生效**。卡片自己有 `backdrop-filter`，所以卡片
+   *       就是最近的 backdrop root；环在这个 root 之内，它的「背景」是**空的**，
+   *       于是 `brightness()` 乘在「什么都没有」上，合成出来是**暗的**。
+   *       隔离实测（同一张渐变背景、同一个环）：
+   *         卡片有 backdrop-filter → 边比卡内暗 12（暗端）／暗 46（亮端）
+   *         卡片没有 backdrop-filter → 边比卡内亮 44（暗端）／亮 138（亮端）
+   *       嵌套的 backdrop-filter 不叠加。这和入场动画那次是**同一类**问题：
+   *       `backdrop-filter` 的行为由祖先决定，光看这条规则本身永远看不出毛病。
+   *
+   *    ② 就算生效，乘法也是错的材质。乘法边在照片暗处 = 暗 × 2.4 ≈ 还是暗，
+   *       边**消失**；而这条边存在的理由正是「原来那条压根看不清」。
+   *       半透白在暗处反而更显（+49 vs 亮处 +31），正好补在需要它的地方。
+   *
+   * ⚠️ 试过 mix-blend-mode（screen / overlay / soft-light / plus-lighter）都能跑，
+   *    但绝对亮度的走向和纯半透白一样，而它们多引入一条「和谁混合取决于祖先的
+   *    层叠上下文」的规则。同样的效果不换来任何东西，就不换。
+   *
+   * ⚠️ 方向性：140deg 起于左上，和卡片表面那道高光**同一个方向**。玻璃的边不是
+   *    一圈等亮的白线 —— 一圈等亮读起来是描边，不是接光。
+   *
+   * ⚠️ 只留 1px 的环靠 `mask-composite: exclude`：两张一样的遮罩，一张裁到
+   *    content-box（被 1px 的 padding 缩进），一张裁到 border-box，相减剩一圈。
+   *    ⚠️ 不能用 `border` —— 卡片行高是定死的，1px 真边框会缩小内容盒并可能裁字。
+   */
+  .dark.has-hero .card:not(.border)::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    padding: 1px;
+    border-radius: inherit;
+    pointer-events: none;
+    background-image: linear-gradient(
+      140deg,
+      rgb(255 255 255 / 0.30),
+      rgb(255 255 255 / 0.08) 48%,
+      rgb(255 255 255 / 0.16));
+    mask-image: linear-gradient(#000 0 0), linear-gradient(#000 0 0);
+    mask-clip: content-box, border-box;
+    mask-composite: exclude;
+  }
+
+  /* ⚠️ 材质要和卡片**同一套**（2026-08-06 补齐）：原来这里只有 blur，没有 saturate、
+   *    没有方向性高光、没有亮边，于是它在管理页上和紧挨着的报表卡片是**两种材质**。
+   *    在截图上是一眼看得出来的，而在代码里两条规则各自看都没问题 ——
+   *    「同一屏出现两种卡片」这条判据只有把两处规则**并排读**才发现。
+   *
+   * ⚠️ 亮边这里由它**自己的 border 承担**（表格保留边框是刻意的，行线需要外框收口），
+   *    所以不给它加 `::after` 环 —— 两条 1px 的线叠在一起是 2px。
+   *    亮度和方向对齐卡片那道环的起点值。 */
   .dark.has-hero .table-wrap {
-    background-color: rgb(0 0 0 / 0.72);
-    border-color: rgb(255 255 255 / 0.14);
-    backdrop-filter: blur(10px);
+    background-color: rgb(0 0 0 / 0.4);
+    border-color: rgb(255 255 255 / 0.22);
+    backdrop-filter: blur(3px) saturate(1.35);
+    background-image: linear-gradient(
+      140deg, rgb(255 255 255 / 0.07), rgb(255 255 255 / 0) 42%);
+    box-shadow: 0 14px 34px -10px rgb(0 0 0 / 0.55);
   }
 
   .dark.has-hero .table-wrap th {
@@ -654,3 +1995,60 @@
     margin: 14mm;
   }
 }
+
+/* --- 深色 + 照片下的玻璃按钮（2026-08-06）--------------------------------------
+ *
+ * 🔴 **这一段故意写在 `@layer components` 外面。** Tailwind 的工具类在
+ *    `@layer utilities`，而按钮的底色是工具类给的（`bg-brand-600` 等）——
+ *    写在 components 层里会被它压掉。**未分层的作者样式胜过所有层**，所以这里
+ *    是唯一正确的位置。⚠️ 这正是「模板上的 `w-16` 压掉了 CSS 里的宽度」那次
+ *    踩过的同一个坑，换了个场合。
+ *
+ * ⚠️ **只在深色 + 有照片时**。浅色模式下按钮背后是白卡片压白页面 —— 没有东西可透，
+ *    「玻璃」只会得到一个更淡的按钮，而更淡的按钮对比度更差。
+ *
+ * 🔴 **primary 不做玻璃**（2026-08-06 拍板，而它一度做了，是个上线了的缺陷）。
+ *
+ *    做过的那一版是 `background-color: rgb(31 117 148 / 0.75)` + 保留原来的字色。
+ *    两个独立的错，都出在**「我量的不是这个按钮」**：
+ *
+ *    ① 那串 `rgb(31 117 148)` 是 app.css 里 brand-600 的**字面量**。而品牌色是
+ *       D26 从首页照片推出来的、由 `_appearance.html` 写成 `--color-brand-*` 的 ——
+ *       写死字面量等于把按钮**从主题色里摘出来**。当前那张照片推出的是暖沙棕
+ *       (#806856)，而按钮还是默认的青 (#1f7594)：**深色下所有按钮退回默认色**，
+ *       而浅色下是对的，所以只在一个模式里错。
+ *       ⚠️ 通则：**玻璃规则里一个品牌色字面量都不许有**，要用就走
+ *          `color-mix(in srgb, var(--color-brand-N) X%, transparent)`。守卫在
+ *          core.tests.GlassMaterialContrastTests。
+ *
+ *    ② 我给它算的对比度是**白字**配 brand-600@0.75 = 6.51:1。但这个按钮在深色下
+ *       根本不是白字 —— button.html 写的是 `dark:text-ink-950`（近黑），因为深色下
+ *       实心底是更亮的 brand-500。真实的数是 **2.71:1**，差 4.5 一大截。
+ *       ⚠️ 量错的方式值得记：我量了「一个 primary 按钮该有的颜色」，
+ *          而不是「这一个 primary 按钮的颜色」。前者是脑子里的模型，后者要去读
+ *          computed style。
+ *
+ *    修法选了「不做玻璃」而不是「改成白字」（白字能到 6.75:1，也是可行的一条）：
+ *    一屏最多一个 primary，它的全部作用是告诉人「你最可能要做的是这件事」，
+ *    而这件事不该有任何可读性上的余量问题。代价如实说：并排时它是唯一实心的那个。
+ */
+.dark.has-hero .btn-secondary {
+  background-color: rgb(255 255 255 / 0.1);
+  backdrop-filter: blur(3px) saturate(1.2);
+  box-shadow: inset 0 0 0 1px rgb(255 255 255 / 0.22);
+  color: var(--color-ink-50);
+}
+
+.dark.has-hero .btn-secondary:hover {
+  background-color: rgb(255 255 255 / 0.16);
+}
+
+/* ghost 平时无底，所以玻璃只在 hover 时出现 —— 它本来的语义就是「安静的第三选择」。 */
+.dark.has-hero .btn-ghost:hover {
+  background-color: rgb(255 255 255 / 0.1);
+  backdrop-filter: blur(3px);
+}
+
+/* ⚠️ danger 不做玻璃。它是破坏性动作的按钮，而半透明会让它的红色**取决于背后
+ *    是什么** —— 一个警示色不能是可变的。同 `:not(.border)` 把警示框排除在外的
+ *    那条理由。 */

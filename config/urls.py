@@ -35,6 +35,11 @@ urlpatterns = [
     path('', include('accounts.urls')),
     path('', include('events.urls')),
     path('', include('org.urls')),
+    # ⚠️ Prefixed, unlike the four above. Those all mount at the root because
+    #    their paths are already distinct nouns ("events/", "login/"); this one
+    #    owns a whole small area including its own manage page, and "memories/"
+    #    is the thing people will type.
+    path('memories/', include('gallery.urls')),
 ]
 
 # ⚠️ Development only, and django.conf.urls.static.static() enforces that by

@@ -4,7 +4,7 @@
 {% block content %}
   {% include "events/_event_nav.html" with current="attendance" %}
 
-  <h1 class="text-2xl font-semibold">Attendance and hours</h1>
+  <h1 class="text-2xl font-semibold">Attendance and Hours</h1>
   <p class="mt-1 text-sm text-ink-600 dark:text-ink-300">{{ event.name }}</p>
 
   <div class="card mt-4">
@@ -14,6 +14,16 @@
       the same: the hours are the authoritative value, and check-in and check-out are
       only one way of collecting them.
     </p>
+    {% comment %}
+    ⚠️ 这个入口放在这里，是因为**这一页才是活动当天开着的那一页**。
+       它只对能改这场活动的人画，理由和管理列表里那一行一样。
+    {% endcomment %}
+    {% if can_manage %}
+      <div class="mt-4">
+        {% url 'events:checkin_display' event.pk as qr_url %}
+        {% include "core/components/button.html" with label="Show check-in QR" href=qr_url variant="secondary" %}
+      </div>
+    {% endif %}
   </div>
 
   {% if participations %}

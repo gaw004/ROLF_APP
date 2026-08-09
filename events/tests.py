@@ -5,11 +5,17 @@ filled three still has five. Every other test in this file could go; that one
 could not, because it is「空缺编制」moved to a different table (goal.md D19).
 """
 
+import base64
 import datetime
 import io
+import json
 import os
+import re
 import tempfile
 from decimal import Decimal
+from pathlib import Path
+
+from django.conf import settings
 
 from django.contrib.auth import get_user_model
 from django.core.management import call_command
@@ -19,7 +25,7 @@ from django.db import IntegrityError, connection, transaction
 from django.db.models import ProtectedError
 from django.core.files.base import ContentFile
 from django.core.files.uploadedfile import SimpleUploadedFile
-from django.test import TestCase, override_settings
+from django.test import SimpleTestCase, TestCase, override_settings
 from PIL import Image as PILImage
 from django.utils import formats, timezone
 from django.test.utils import CaptureQueriesContext
@@ -28,6 +34,7 @@ from django.utils.timezone import localtime
 
 from accounts.services import register_account
 from contact.models import Contact, EmergencyContact, RelationshipType
+from core.limits import LONG_TEXT, SEARCH
 from core.notifications.locmem import LocmemBackend
 from core.timeutils import (
     day_start,
@@ -40,7 +47,10 @@ from core.timeutils import (
 from org.models import Assignment, Ministry, MinistryRole, Position
 from org.permissions import foundation_admin_group
 
-from .forms import EventForm, SignUpForm
+from .management.commands.seed_demo import demo_login
+
+from . import tokens
+from .forms import EventForm, EventPeriodForm, SignUpForm
 from .models import (
     Event,
     EventNotification,
@@ -50,11 +60,18 @@ from .models import (
     ParticipationRole,
 )
 from .services import (
+    CHECKIN_CREDENTIAL_KEY,
+    CREDENTIAL_MAX_AGE,
     ConsentRequired,
+    CredentialExpired,
+    apply_scan,
     TurnedUp,
+    cancel,
     check_in,
     check_out,
+    clear_hours,
     confirm_signup,
+    default_checkin_mode,
     default_message,
     event_summary,
     events_in_period,
@@ -63,9 +80,13 @@ from .services import (
     ministry_staff_participation,
     notify_event_change,
     record_hours,
+    issue_credential,
+    read_credential,
     resolve_recipients,
+    scan_targets,
     scheduled_hours,
     sign_up,
+    undo_attendance,
 )
 
 NOW = local_now()
@@ -1033,13 +1054,14 @@ class PageTestCase(TestCase):
         self.event = make_event(ministry=self.pantry, owner=self.zhang.contact)
         self.role = make_role(self.event, "lifting", needed_count=2)
 
-    def account(self, username, last_name, **contact_fields):
-        # An email by default: without one the person is legitimately
-        # unreachable, which is a real state but not the one most of these
-        # tests are about.
-        contact_fields.setdefault("email", f"{username}@example.com")
+    def account(self, handle, last_name, **contact_fields):
+        # `handle` only makes up an address; the login name **is** the address
+        # (2026-08-06). An email by default because without one the person is
+        # legitimately unreachable, which is a real state but not the one most of
+        # these tests are about.
+        contact_fields.setdefault("email", f"{handle}@example.com")
         return register_account(
-            username=username, password="a-good-long-password",
+            password="a-good-long-password",
             legal_last_name=last_name, **contact_fields,
         )
 
@@ -1223,7 +1245,7 @@ class MinistryAdminPageTests(PageTestCase):
     def test_a_superuser_has_no_ministry_scope_either(self):
         # No back door. A superuser has the admin; these pages are scoped, and
         # exempting them here would be a hole straight through D20.
-        root = get_user_model().objects.create_superuser(username="root", password="x")
+        root = get_user_model().objects.create_superuser(email="root@example.com", password="x")
         self.login(root)
         response = self.client.get(reverse("events:event_roles", args=[self.event.pk]))
         self.assertEqual(response.status_code, 403)
@@ -1421,6 +1443,76 @@ class PeriodFilterPageTests(PageTestCase):
             "start": self.day(NOW), "end": self.day(self.event.start_time),
         })
         self.assertEqual(response.context["total"], 1)
+
+    # --- the search box (2026-08-06) ---------------------------------------
+
+    def search(self, term, url_name="events:event_list"):
+        self.login(self.lisi)
+        return self.client.get(reverse(url_name), {"q": term})
+
+    def test_it_matches_the_event_name(self):
+        self.assertEqual(self.search("saturday").context["total"], 1)
+        self.assertEqual(self.search("nothing like it").context["total"], 0)
+
+    def test_it_matches_the_location_too(self):
+        """⭐ The half of this that is not obvious, and the reason it exists.
+
+        Somebody looking for "the one in the kitchen" remembers where it was, not
+        what it was called.
+        """
+        self.event.location = "Church kitchen"
+        self.event.save(update_fields=["location"])
+        self.assertEqual(self.search("kitchen").context["total"], 1)
+
+    def test_it_ignores_case(self):
+        self.assertEqual(self.search("SATURDAY").context["total"], 1)
+
+    def test_it_ignores_surrounding_space(self):
+        # ⚠️ A trailing space off a phone's autocorrect would make `icontains`
+        #    match nothing, and the page would come back empty with a perfectly
+        #    good word sitting in the box.
+        self.assertEqual(self.search("  saturday  ").context["total"], 1)
+
+    def test_an_empty_box_narrows_nothing(self):
+        self.assertEqual(self.search("").context["total"], 1)
+
+    def test_it_does_not_match_the_ministry_name(self):
+        """⚠️ Deliberate. There is a ministry dropdown two boxes along, and a
+           search that also matched it would empty the whole of Food Pantry onto
+           the page for the word "food" — which reads as the search having been
+           ignored rather than as a wide match.
+        """
+        self.assertEqual(self.search("pantry").context["total"], 0)
+
+    def test_the_search_term_is_named_in_the_filter_description(self):
+        """⚠️ That line is printed under the heading of the full report, and on
+           the paper it becomes. A report that does not say what it covers gets
+           read as "everything", and a search is the easiest of the three filters
+           to leave on by accident.
+        """
+        form = EventPeriodForm({"q": "kitchen"})
+        self.assertTrue(form.is_valid())
+        self.assertIn("kitchen", form.description())
+
+    def test_it_survives_into_the_full_report(self):
+        self.login(self.zhang)
+        response = self.client.get(reverse("events:ministry_report"), {"q": "saturday"})
+        self.assertContains(response, "saturday")
+
+    def test_a_search_longer_than_the_cap_is_a_form_error_not_a_crash(self):
+        form = EventPeriodForm({"q": "x" * (SEARCH + 1)})
+        self.assertFalse(form.is_valid())
+        self.assertIn("q", form.errors)
+
+    def test_the_box_is_on_the_page_and_comes_from_the_form(self):
+        # Hand-written search inputs are refused by a guard in core/tests.py —
+        # the cap only exists at the form layer.
+        for name in ["events:event_list", "events:past_events"]:
+            with self.subTest(page=name):
+                self.login(self.lisi)
+                response = self.client.get(reverse(name))
+                self.assertContains(response, 'name="q"')
+                self.assertContains(response, "Search by name or location")
 
     def test_past_events_are_listed_and_counted(self):
         self.login(self.lisi)
@@ -1627,13 +1719,13 @@ class DetailPageBackLinkTests(PageTestCase):
         self.login(self.zhang)
         response = self.client.get(self.url())
         self.assertContains(response, "&larr; Events")
-        self.assertNotContains(response, "&larr; Events I manage")
+        self.assertNotContains(response, "&larr; Events I Manage")
 
     def test_arriving_from_the_management_list_goes_back_to_it(self):
         self.login(self.zhang)
         response = self.client.get(self.url("manage"))
         self.assertContains(response, reverse("events:event_manage_list"))
-        self.assertContains(response, "&larr; Events I manage")
+        self.assertContains(response, "&larr; Events I Manage")
 
     def test_arriving_from_past_events_goes_back_to_past_events(self):
         # Otherwise somebody three pages into the history is dropped into the
@@ -1641,7 +1733,7 @@ class DetailPageBackLinkTests(PageTestCase):
         self.login(self.lisi)
         response = self.client.get(self.url("past"))
         self.assertContains(response, reverse("events:past_events"))
-        self.assertContains(response, "&larr; Past events")
+        self.assertContains(response, "&larr; Past Events")
 
     def test_a_volunteer_handed_a_manage_marker_is_not_sent_somewhere_they_are_refused(self):
         """⚠️ The marker is honoured only if the page is actually reachable.
@@ -1655,19 +1747,19 @@ class DetailPageBackLinkTests(PageTestCase):
         self.assertContains(response, "&larr; Events")
 
     def test_the_foundation_tier_gets_the_label_its_navigation_uses(self):
-        # The same page is called "All events" for this tier, and one page
+        # The same page is called "All Events" for this tier, and one page
         # should not have two names.
         boss = self.account("boss", "Boss", birth_date=datetime.date(1975, 1, 1))
         boss.groups.add(foundation_admin_group())
         self.login(type(boss).objects.get(pk=boss.pk))
         response = self.client.get(self.url("manage"))
-        self.assertContains(response, "&larr; All events")
+        self.assertContains(response, "&larr; All Events")
 
     def test_arriving_from_my_signups_goes_back_to_my_signups(self):
         self.login(self.lisi)
         response = self.client.get(self.url("mine"))
         self.assertContains(response, reverse("events:my_participations"))
-        self.assertContains(response, "&larr; My signups")
+        self.assertContains(response, "&larr; My Signups")
 
     def test_an_unknown_marker_falls_back_rather_than_breaking(self):
         # ⚠️ The marker is a key into a table in the view, never a URL. Anything
@@ -1676,6 +1768,302 @@ class DetailPageBackLinkTests(PageTestCase):
         response = self.client.get(self.url("https://example.com/evil"))
         self.assertNotContains(response, "example.com")
         self.assertContains(response, "&larr; Events")
+
+
+class DraftPreviewTests(PageTestCase):
+    """2026-08-06: an unpublished event opens for the people who may publish it.
+
+    The bug, in one sentence: `event_detail` looked up through
+    `visible_to_volunteers()` and nothing else, so a draft 404'd for **everybody**
+    — including the ministry admin who wrote it, and including the management
+    list, where every draft's name is a link to exactly this page.
+
+    ⭐ The regression this class exists to hold is
+       `test_the_link_on_the_management_list_actually_opens`. The rest describe
+       the shape of the preview; that one is the reported failure.
+
+    ⚠️ It is a widening of who may see an unpublished event, so half of these
+       tests are the other direction — a volunteer, and an admin of a different
+       ministry, must still get 404 and not 403. 403 would confirm that
+       something exists at that id, which is the one fact a draft withholds.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.draft = make_event(
+            ministry=self.pantry, owner=self.zhang.contact,
+            name="Christmas hamper packing", status=Event.Status.DRAFT)
+        make_role(self.draft, "packing", needed_count=4)
+        self.url = reverse("events:event_detail", args=[self.draft.pk])
+
+    def foundation_account(self):
+        boss = self.account("boss", "Boss", birth_date=datetime.date(1975, 1, 1))
+        boss.groups.add(foundation_admin_group())
+        # Re-read: group membership is cached on the instance that added it.
+        return type(boss).objects.get(pk=boss.pk)
+
+    # --- who gets in -------------------------------------------------------
+
+    def test_the_owning_ministrys_admin_can_open_it(self):
+        self.login(self.zhang)
+        response = self.client.get(self.url)
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, self.draft.name)
+        self.assertTrue(response.context["preview"])
+
+    def test_the_foundation_tier_can_open_any_ministrys_draft(self):
+        # Same predicate as the signups / attendance / report pages, which have
+        # opened on drafts for this tier all along. Making the event page the
+        # one exception would be a rule nobody could guess from the other five.
+        other = make_event(ministry=self.tax, owner=self.other_admin.contact,
+                           name="Tax draft", status=Event.Status.DRAFT)
+        self.login(self.foundation_account())
+        response = self.client.get(reverse("events:event_detail", args=[other.pk]))
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.context["preview"])
+
+    def test_a_volunteer_still_gets_404(self):
+        self.login(self.lisi)
+        self.assertEqual(self.client.get(self.url).status_code, 404)
+
+    def test_an_admin_of_a_different_ministry_gets_404_and_not_403(self):
+        """⚠️ 404, deliberately. The number is the assertion.
+
+        403 answers a question the volunteer side is not entitled to ask: it
+        says an event exists at this id. For anybody outside the ministry an
+        unpublished event must be indistinguishable from no event at all — which
+        is byte-for-byte what this URL did before drafts could be previewed.
+        """
+        self.login(self.other_admin)
+        self.assertEqual(self.client.get(self.url).status_code, 404)
+
+    def test_the_link_on_the_management_list_actually_opens(self):
+        """⭐ The reported bug, walked end to end.
+
+        The list renders every event's name as a link to the detail page. Before
+        this change every draft on it was a link that 404'd — and it was the only
+        broken link on a page whose whole purpose is to be the entrance to the
+        drafts (C0.2.4).
+        """
+        self.login(self.zhang)
+        listing = self.client.get(reverse("events:event_manage_list"))
+        target = f'{self.url}?from=manage'
+        self.assertContains(listing, target)
+        self.assertEqual(self.client.get(target).status_code, 200)
+
+    # --- what the preview says ---------------------------------------------
+
+    def test_it_says_it_is_a_preview_and_names_the_status(self):
+        # The colour is decoration; the words carry it. Both are asserted
+        # because the banner's whole job is to stop somebody reading the page as
+        # if it were live.
+        self.login(self.zhang)
+        response = self.client.get(self.url)
+        self.assertContains(response, "Preview — not published")
+        self.assertContains(response, "Draft")
+
+    def test_a_published_event_carries_no_banner(self):
+        self.login(self.zhang)
+        response = self.client.get(
+            reverse("events:event_detail", args=[self.event.pk]))
+        self.assertFalse(response.context["preview"])
+        self.assertNotContains(response, "Preview — not published")
+
+    def test_the_banner_points_at_the_page_where_the_status_is_changed(self):
+        self.login(self.zhang)
+        response = self.client.get(self.url)
+        self.assertContains(response, reverse("events:event_update", args=[self.draft.pk]))
+
+    def test_the_read_only_tier_is_not_offered_the_edit_link(self):
+        # ⚠️ Edit is a 403 for this tier. A link that refuses whoever clicks it
+        #    reads as a broken site, not as a page that is not for them — the
+        #    same rule _event_nav.html follows.
+        self.login(self.foundation_account())
+        response = self.client.get(self.url)
+        self.assertContains(response, "Preview — not published")
+        self.assertNotContains(
+            response, reverse("events:event_update", args=[self.draft.pk]))
+
+    # --- the signup button --------------------------------------------------
+
+    def test_the_signup_button_is_drawn_but_disabled(self):
+        """The point of a preview is to show what will be there, inert.
+
+        ⚠️ Matched as an **attribute on the tag**, not as the substring
+           "disabled" anywhere on the page. The button component's class string
+           carries `disabled:opacity-50 disabled:pointer-events-none` — Tailwind
+           variants that style a disabled button and do not make one. A plain
+           `assertContains(response, "disabled")` passes with the attribute
+           deleted, which is the entire failure this test is here to catch.
+
+        ⚠️ `disabled` is presentation either way. The refusal that counts is on
+           the signup view, and it is asserted separately below.
+        """
+        self.login(self.zhang)
+        response = self.client.get(self.url)
+        page = response.content.decode()
+        self.assertRegex(page, r"<button[^>]*\sdisabled[\s>]")
+        self.assertIn("Sign up", page)
+        self.assertIn("Volunteers will see this button once you publish", page)
+
+    def test_the_preview_offers_no_working_signup_link(self):
+        self.login(self.zhang)
+        response = self.client.get(self.url)
+        self.assertNotContains(
+            response, reverse("events:event_signup", args=[self.draft.pk]))
+
+    def test_signing_up_on_a_draft_is_still_refused_at_the_view(self):
+        """⭐ The boundary, and the reason the button above may be cosmetic.
+
+        Posting straight at the URL skips every button on every page, which is
+        what a form posted from anywhere at all does.
+        """
+        self.login(self.zhang)
+        role = self.draft.roles.first()
+        response = self.client.post(
+            reverse("events:event_signup", args=[self.draft.pk]),
+            {"event_role": role.pk})
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(Participation.objects.filter(event_role=role).count(), 0)
+
+    # --- the predicate it is keyed on ---------------------------------------
+
+    def test_every_status_a_volunteer_may_see_renders_without_a_banner(self):
+        """⚠️ Keyed on VISIBLE_TO_VOLUNTEERS, never on `== DRAFT`.
+
+        Four statuses, one loop. Spelled as a comparison against DRAFT, the day
+        somebody adds a status to that frozenset the new one would be published
+        to everybody with no banner and nothing saying so.
+        """
+        self.login(self.zhang)
+        for status in Event.VISIBLE_TO_VOLUNTEERS:
+            with self.subTest(status=status):
+                self.draft.status = status
+                self.draft.save()
+                response = self.client.get(self.url)
+                self.assertEqual(response.status_code, 200)
+                self.assertFalse(response.context["preview"])
+
+
+class FeatherLayerTests(PageTestCase):
+    """2026-08-06: one or two white feathers drift across the volunteer event list.
+
+    Decoration, so almost nothing about it is testable from the server — how it
+    moves lives in a rAF loop. What *is* testable is the half that fails
+    silently, and all four of those failures look like "the feathers just
+    stopped appearing", with no error anywhere:
+
+      · the layer missing from the page;
+      · a URL in it pointing at a file that is not there;
+      · a file on disk that nothing points at;
+      · the layer sitting inside the block HTMX swaps.
+    """
+
+    ASSET_DIR = Path(settings.BASE_DIR) / "core" / "static" / "core" / "img"
+
+    def layer(self, response):
+        """The `data-feathers` attribute of the drifting layer, or None."""
+        found = re.search(
+            r'class="feather-sky[^"]*"[^>]*data-feathers="([^"]*)"',
+            response.content.decode())
+        return found.group(1) if found else None
+
+    def urls(self, response):
+        raw = self.layer(response)
+        return [u for u in (raw or "").split(",") if u]
+
+    def get_list(self, **extra):
+        self.login(self.lisi)
+        return self.client.get(reverse("events:event_list"), **extra)
+
+    def test_the_events_page_carries_the_layer(self):
+        response = self.get_list()
+        self.assertIsNotNone(self.layer(response))
+        # ⚠️ It holds no words at all, so it must be out of the accessibility
+        #    tree — otherwise a screen reader interrupts to announce nothing.
+        self.assertContains(response, 'class="feather-sky" aria-hidden="true"')
+
+    def test_the_public_home_page_carries_it_too(self):
+        # 2026-08-06: the second of the two pages that have it. Anonymous —
+        # the home page is public, and the layer must not depend on a login.
+        response = self.client.get(reverse("home"))
+        self.assertIsNotNone(self.layer(response))
+
+    def test_the_home_page_asks_for_the_on_photo_variant(self):
+        """⚠️ The home page never gets `.dark`, and its backdrop is a photo.
+
+        It deliberately does not follow dark mode (a full-bleed photo with white
+        text has no dark version), so `<html>` never carries `.dark` there and
+        the `.dark .feather` rule cannot fire. Without this modifier the home
+        page would get the hard 1px shadow meant for a near-white page, which on
+        a darkened photo is very close to no shadow at all.
+        """
+        response = self.client.get(reverse("home"))
+        self.assertContains(response, "feather-sky--on-photo")
+        # And the events page must *not* have it: there the backdrop is ink-50
+        # in light mode, and dark mode is handled by `.dark`.
+        self.assertNotContains(self.get_list(), "feather-sky--on-photo")
+
+    def test_both_pages_list_exactly_the_same_assets(self):
+        """One component, so the two lists cannot drift apart.
+
+        ⚠️ This is the whole reason the markup was pulled into
+           `core/components/_feather_sky.html`. With a copy in each template,
+           adding an eighth feather means remembering two places, and forgetting
+           one raises nothing — one page would simply never show that shape.
+        """
+        self.assertEqual(
+            self.urls(self.get_list()),
+            self.urls(self.client.get(reverse("home"))),
+        )
+
+    def test_every_asset_on_disk_is_listed_and_every_listing_exists(self):
+        """⭐ Both directions, because each one fails the same silent way.
+
+        ⚠️ The URLs are built by `{% static %}` in the template rather than
+           assembled in JavaScript, and that is not a style preference: in
+           production static files are served by
+           CompressedManifestStaticFilesStorage, which puts a content hash in
+           every filename. A path built from an index in JS resolves in
+           development and 404s on every one of them after deploy — with no
+           error in the console, because a broken `new Image().src` is silent.
+           `core.tests.AssetPathsComeFromTemplatesGuardTests` holds that line;
+           this test holds the two lists in step.
+        """
+        on_disk = sorted(p.name for p in self.ASSET_DIR.glob("feather-*.webp"))
+        self.assertTrue(on_disk, "no feather assets found — did they get deleted?")
+
+        listed = self.urls(self.get_list())
+        # Basenames, because the production names carry a hash the test cannot
+        # predict; what matters is that the two sets describe the same files.
+        self.assertEqual(len(listed), len(on_disk))
+        for url in listed:
+            self.assertTrue(url.startswith(settings.STATIC_URL), url)
+            name = url.rsplit("/", 1)[-1]
+            self.assertIn(name, on_disk)
+
+    def test_the_layer_survives_a_filter(self):
+        """⚠️ It has to live outside `#event-results`.
+
+        The period filter swaps that block through HTMX. With the layer inside
+        it, every filter would tear the feathers out by the roots and the JS
+        would never put them back — and the page would look completely normal.
+        """
+        fragment = self.get_list(HTTP_HX_REQUEST="true")
+        self.assertIsNone(
+            self.layer(fragment),
+            "the swapped fragment carries the layer, so filtering will destroy it")
+
+    def test_the_other_pages_do_not_have_it(self):
+        # 2026-08-06: this page only. Asserted rather than assumed, because the
+        # layer is fixed-position — dropped into a base template by mistake it
+        # would show up everywhere including the attendance and report pages.
+        self.login(self.lisi)
+        for name in ["past_events", "my_participations"]:
+            with self.subTest(page=name):
+                self.assertIsNone(self.layer(self.client.get(reverse(f"events:{name}"))))
+        detail = self.client.get(reverse("events:event_detail", args=[self.event.pk]))
+        self.assertIsNone(self.layer(detail))
 
 
 class MinistryWebsiteLinkTests(PageTestCase):
@@ -2092,7 +2480,7 @@ class NotificationTests(TestCase):
         self.pantry = Ministry.objects.create(code="food_pantry", name="Food Pantry")
         self.event = make_event(ministry=self.pantry)
         self.role = make_role(self.event, "lifting")
-        self.sender = get_user_model().objects.create_user(username="zhang", password="x")
+        self.sender = get_user_model().objects.create_user(email="zhang@example.com", password="x")
         self.parent_of = RelationshipType.objects.get(code="parent")
 
     def minor(self, last_name="小明", **fields):
@@ -2313,6 +2701,20 @@ class NotificationPageTests(PageTestCase):
         # page that could fail without anybody noticing.
         self.assertContains(response, "Cannot be reached")
 
+    def test_a_message_past_the_cap_is_a_form_error_and_sends_nothing(self):
+        # ⚠️ The assertion that matters is the second one. A form error is
+        #    cosmetic if the notice went out anyway — and this is the one page
+        #    in the project whose side effect reaches every volunteer's inbox,
+        #    so "refused" has to mean "nobody was written to".
+        Participation.objects.create(contact=self.lisi.contact, event_role=self.role)
+        self.login(self.zhang)
+        response = self.client.post(
+            reverse("events:event_notify", args=[self.event.pk]),
+            {"reason": EventNotification.Reason.TIME_CHANGED,
+             "message": "x" * (LONG_TEXT + 1)})
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(EventNotification.objects.exists())
+
 
 class PeriodReportTests(TestCase):
     """R1 / R2 / R3 — and the timezone trap that sits under all three."""
@@ -2479,8 +2881,12 @@ class AcceptanceWalkTests(TestCase):
     def setUpTestData(cls):
         call_command("seed_demo", verbosity=0)
 
-    def as_role(self, username):
-        self.assertTrue(self.client.login(username=username, password=self.PASSWORD))
+    def as_role(self, role):
+        # Logs in by address, looked up from seed_demo's own dictionary rather
+        # than written out here — see DEMO_ACCOUNTS for why a second copy of
+        # these addresses is the thing that breaks this walk.
+        self.assertTrue(
+            self.client.login(email=demo_login(role), password=self.PASSWORD))
 
     def open_event(self):
         return Event.objects.get(name="Saturday distribution")
@@ -2501,7 +2907,7 @@ class AcceptanceWalkTests(TestCase):
         url = reverse("org:ministry_admins", args=[pantry.pk])
         self.client.post(url, {"contact": newcomer.pk})
         grant = MinistryRole.objects.get(contact=newcomer, ministry=pantry)
-        self.assertEqual(grant.granted_by.username, "foundation_admin")
+        self.assertEqual(grant.granted_by.email, demo_login("foundation_admin"))
 
         self.client.post(url, {"revoke": grant.pk})
         grant.refresh_from_db()
@@ -2889,6 +3295,220 @@ class NoShowPageTests(PageTestCase):
         self.assertContains(response, "Clear the hours first")
         self.row.refresh_from_db()
         self.assertEqual(self.row.status, Participation.Status.ATTENDED)
+
+
+class UndoAttendanceTests(TestCase):
+    """Undoing a check-in clicked on the wrong row.
+
+    ⚠️ This gap was open, and **written down as open**, from 2026-08-05 until
+       2026-08-08: mark_absent()'s docstring named it and phase-c.md's
+       known-gaps table carried it, both saying the fix would be an explicit
+       Undo rather than a second job for the No-show button. This class is that
+       fix, so it also guards the separation.
+    """
+
+    def setUp(self):
+        self.event = make_event()
+        self.role = make_role(self.event, "lifting")
+        self.wang = make_person("Wang", birth_date=datetime.date(1980, 5, 5))
+        self.participation = Participation.objects.create(
+            contact=self.wang, event_role=self.role)
+
+    def test_a_checked_in_row_goes_all_the_way_back(self):
+        check_in(self.participation)
+        self.assertTrue(undo_attendance(self.participation))
+        self.participation.refresh_from_db()
+        self.assertIsNone(self.participation.checked_in_at)
+        self.assertEqual(self.participation.status, Participation.Status.REGISTERED)
+
+    def test_a_checked_out_row_loses_both_timestamps_and_the_hours(self):
+        """⚠️ The hours have to go, and it is not a choice: the constraint
+        `participation_hours_only_when_attended` means a row carrying hours
+        **must** be attended, so "registered, 3 hours" cannot be stored at all.
+        Any version of undo that kept them would have to leave the row saying
+        somebody attended."""
+        check_in(self.participation)
+        check_out(self.participation)
+        self.participation.refresh_from_db()
+        self.assertIsNotNone(self.participation.hours)
+
+        undo_attendance(self.participation)
+        self.participation.refresh_from_db()
+        self.assertIsNone(self.participation.checked_in_at)
+        self.assertIsNone(self.participation.checked_out_at)
+        self.assertIsNone(self.participation.hours)
+        self.assertEqual(self.participation.status, Participation.Status.REGISTERED)
+
+    def test_the_deleted_hours_are_recoverable_from_the_history(self):
+        """⚠️ This is half of what makes deleting the hours acceptable rather
+        than reckless — the other half is that the button names the number
+        before removing it. Nothing in the table records whether an hours
+        figure came from the clock or from a person, so undo cannot spare the
+        hand-typed ones; it can only make sure they are not *gone*."""
+        record_hours(self.participation, Decimal("3.00"))
+        undo_attendance(self.participation)
+        past = [h.hours for h in self.participation.history.all()]
+        self.assertIn(Decimal("3.00"), past)
+
+    def test_a_cancelled_row_keeps_its_status(self):
+        """⚠️ Only `attended` goes back to `registered`. Somebody who signed in
+        and then pulled out is a real state, and moving that row to registered
+        would erase the second fact in order to undo the first — the same
+        reasoning that makes cancel() a status change rather than a delete."""
+        check_in(self.participation)
+        cancel(self.participation)
+        undo_attendance(self.participation)
+        self.participation.refresh_from_db()
+        self.assertIsNone(self.participation.checked_in_at)
+        self.assertEqual(self.participation.status, Participation.Status.CANCELLED)
+
+    def test_undoing_a_row_with_nothing_on_it_changes_nothing(self):
+        # Safe to call twice, and says so — the caller can tell a real undo
+        # from a second click.
+        self.assertFalse(undo_attendance(self.participation))
+
+    def test_it_is_not_mark_absent(self):
+        """⚠️ The separation the whole gap was left open for. "I clicked the
+        wrong row" and "they did not come" are different facts; one button
+        doing both would put every mis-click into the no-show rate, which is a
+        number nobody can audit afterwards."""
+        check_in(self.participation)
+        undo_attendance(self.participation)
+        self.participation.refresh_from_db()
+        self.assertNotEqual(self.participation.status, Participation.Status.ABSENT)
+
+    def test_after_undoing_the_row_can_be_marked_absent(self):
+        """The two do compose, in the order that makes sense: undo the mistake,
+        then record what actually happened. mark_absent() refuses a row with a
+        check-in on it, so before undo existed this was simply unreachable."""
+        check_in(self.participation)
+        undo_attendance(self.participation)
+        mark_absent(self.participation)
+        self.participation.refresh_from_db()
+        self.assertEqual(self.participation.status, Participation.Status.ABSENT)
+
+
+class ClearHoursTests(TestCase):
+    """Removing an hours figure without touching anything else.
+
+    ⚠️ Empty is not zero, and until 2026-08-08 only zero was reachable: the
+       form field is a required number. The attendance page already draws the
+       two differently — 0 means somebody looked and recorded that no time was
+       worked, "—" means nobody has recorded anything — so a figure typed by
+       mistake could only ever be corrected to a wrong-but-plausible 0.
+    """
+
+    def setUp(self):
+        self.event = make_event()
+        self.role = make_role(self.event, "lifting")
+        self.wang = make_person("Wang", birth_date=datetime.date(1980, 5, 5))
+        self.participation = Participation.objects.create(
+            contact=self.wang, event_role=self.role)
+
+    def test_hours_go_back_to_nothing_rather_than_to_zero(self):
+        record_hours(self.participation, Decimal("3.00"))
+        self.assertTrue(clear_hours(self.participation))
+        self.participation.refresh_from_db()
+        self.assertIsNone(self.participation.hours)
+
+    def test_the_status_is_left_alone(self):
+        """⚠️ "They turned up" and "they worked N hours" are two assertions.
+        A row reading attended with no hours is ordinary — somebody checked in
+        and the hours are not worked out yet. Reverting the status here would
+        delete the first fact in order to undo the second; clearing everything
+        at once is undo_attendance(), and it is a different button on purpose.
+        """
+        check_in(self.participation)
+        check_out(self.participation)
+        clear_hours(self.participation)
+        self.participation.refresh_from_db()
+        self.assertEqual(self.participation.status, Participation.Status.ATTENDED)
+        self.assertIsNotNone(self.participation.checked_in_at)
+
+    def test_clearing_twice_changes_nothing(self):
+        self.assertFalse(clear_hours(self.participation))
+
+
+class UndoFromThePageTests(PageTestCase):
+    """The two new buttons, and who may press them."""
+
+    def setUp(self):
+        super().setUp()
+        self.row = Participation.objects.create(
+            contact=self.lisi.contact, event_role=self.role)
+
+    def url(self):
+        return reverse("events:event_attendance", args=[self.event.pk])
+
+    def post(self, action):
+        return self.client.post(
+            self.url(), {"participation": self.row.pk, "action": action})
+
+    def test_undo_is_not_offered_on_a_row_with_nothing_to_undo(self):
+        """⚠️ A button that does nothing when pressed reads as a broken page —
+        the person presses it again, then goes looking for the row elsewhere.
+        The service is idempotent as well, but that is the backstop, not the
+        reason this is hidden."""
+        self.login(self.zhang)
+        self.assertNotContains(self.client.get(self.url()), 'value="undo"')
+
+    def test_undo_appears_once_somebody_is_checked_in(self):
+        check_in(self.row)
+        self.login(self.zhang)
+        self.assertContains(self.client.get(self.url()), 'value="undo"')
+
+    def test_undoing_from_the_page(self):
+        check_in(self.row)
+        self.login(self.zhang)
+        self.post("undo")
+        self.row.refresh_from_db()
+        self.assertIsNone(self.row.checked_in_at)
+        self.assertEqual(self.row.status, Participation.Status.REGISTERED)
+
+    def test_the_confirmation_names_the_hours_it_is_about_to_delete(self):
+        """⚠️ Not "are you sure". Undo removes the hours, and hours are the one
+        authoritative value in this system a human is answerable for having
+        typed — the sentence has to say that is what is happening."""
+        check_in(self.row)
+        check_out(self.row)
+        self.login(self.zhang)
+        page = self.client.get(self.url()).content.decode()
+        self.assertIn("hours recorded on this row", page)
+
+    def test_clear_hours_is_offered_only_when_there_are_hours(self):
+        self.login(self.zhang)
+        self.assertNotContains(self.client.get(self.url()), 'value="clear_hours"')
+        record_hours(self.row, Decimal("3.00"))
+        self.assertContains(self.client.get(self.url()), 'value="clear_hours"')
+
+    def test_clearing_hours_from_the_page(self):
+        record_hours(self.row, Decimal("3.00"))
+        self.login(self.zhang)
+        self.post("clear_hours")
+        self.row.refresh_from_db()
+        self.assertIsNone(self.row.hours)
+
+    def test_the_read_only_tier_is_refused_both(self):
+        """⚠️ Not drawing the buttons is interface. This is the boundary — a
+        form posted from anywhere at all arrives at the view the same shape."""
+        check_in(self.row)
+        admin = self.account("fadmin3", "方", birth_date=datetime.date(1980, 1, 1))
+        admin.groups.add(foundation_admin_group())
+        self.login(admin)
+        page = self.client.get(self.url()).content.decode()
+        self.assertNotIn('value="undo"', page)
+        for action in ("undo", "clear_hours"):
+            with self.subTest(action=action):
+                self.assertEqual(self.post(action).status_code, 403)
+        self.row.refresh_from_db()
+        self.assertIsNotNone(self.row.checked_in_at)
+
+    def test_a_volunteer_cannot_undo_their_own_row(self):
+        check_in(self.row)
+        self.login(self.lisi)
+        self.assertEqual(self.post("undo").status_code, 403)
+        self.row.refresh_from_db()
+        self.assertIsNotNone(self.row.checked_in_at)
 
 
 class ManageListReportPageTests(PageTestCase):
@@ -3387,7 +4007,7 @@ class FoundationTierReadOnlyTests(PageTestCase):
         response = self.client.get(reverse("events:event_manage_list"))
         self.assertContains(response, "Tax one")
         self.assertContains(response, self.event.name)
-        self.assertContains(response, "All events")
+        self.assertContains(response, "All Events")
         self.assertFalse(response.context["can_manage"])
 
     # --- may not write, anywhere -------------------------------------------
@@ -3459,7 +4079,7 @@ class FoundationTierReadOnlyTests(PageTestCase):
         self.login(type(self.zhang).objects.get(pk=self.zhang.pk))
         response = self.client.get(reverse("events:event_manage_list"))
         self.assertTrue(response.context["can_manage"])
-        self.assertContains(response, "Events I manage")
+        self.assertContains(response, "Events I Manage")
 
     def test_the_navigation_actually_offers_the_page(self):
         """⚠️ The seventh time this project has built a page nothing linked to.
@@ -3474,13 +4094,83 @@ class FoundationTierReadOnlyTests(PageTestCase):
         self.login(self.boss)
         page = self.client.get(reverse("events:event_list")).content.decode()
         self.assertIn(reverse("events:event_manage_list"), page)
-        self.assertIn("All events", page)
+        self.assertIn("All Events", page)
+
+    # --- ?scope=all: the other view, for somebody who holds both hats --------
+
+    def both_hats(self):
+        """zhang administers the pantry **and** is in the foundation group."""
+        self.zhang.groups.add(foundation_admin_group())
+        user = type(self.zhang).objects.get(pk=self.zhang.pk)
+        self.login(user)
+        return user
+
+    def someone_elses_event(self):
+        """An event belonging to a ministry zhang does not administer."""
+        return make_event(ministry=self.tax, owner=self.other_admin.contact,
+                          name="Tax clinic nobody here runs")
+
+    def test_scope_all_shows_another_ministrys_events_to_somebody_with_both_hats(self):
+        """⭐ The gap this closed: the foundation-wide **read** authority they
+        already held had no entrance for them at all, because the default view
+        (rightly) keeps their own ministries editable.
+        """
+        theirs = self.someone_elses_event()
+        self.both_hats()
+        response = self.client.get(reverse("events:event_manage_list"), {"scope": "all"})
+        self.assertContains(response, theirs.name)
+        self.assertFalse(response.context["can_manage"])
+
+    def test_scope_all_does_not_hand_over_a_single_write(self):
+        """⚠️ The whole safety of this parameter. Read widens; write does not.
+
+        The POST is on another ministry's event, from the page that is now
+        allowed to *show* it.
+        """
+        theirs = self.someone_elses_event()
+        self.both_hats()
+        response = self.client.post(
+            f"{reverse('events:event_manage_list')}?scope=all",
+            {"event": theirs.pk, "status": Event.Status.CANCELLED})
+        self.assertEqual(response.status_code, 403)
+        theirs.refresh_from_db()
+        self.assertNotEqual(theirs.status, Event.Status.CANCELLED)
+
+    def test_scope_all_is_ignored_for_somebody_not_in_the_tier(self):
+        # A plain ministry admin typing the parameter gets their own ministries,
+        # editable, exactly as before — not everybody's.
+        theirs = self.someone_elses_event()
+        self.login(self.zhang)
+        response = self.client.get(reverse("events:event_manage_list"), {"scope": "all"})
+        self.assertTrue(response.context["can_manage"])
+        self.assertNotContains(response, theirs.name)
+
+    def test_the_filter_carries_the_scope_so_it_survives_a_click(self):
+        """⚠️ A method="get" form throws away the action's query string and sends
+        its own fields instead. Without a hidden field the page silently narrows
+        back to their own ministries on the first Filter — and the list looks
+        completely normal, only shorter.
+        """
+        self.both_hats()
+        page = self.client.get(
+            reverse("events:event_manage_list"), {"scope": "all"}).content.decode()
+        self.assertIn('name="scope" value="all"', page)
+
+    def test_the_full_report_stays_foundation_wide(self):
+        # It shares _scoped_events(), and the panel links to it with the whole
+        # query string — so a report that quietly covered a different set of
+        # events than the list it was opened from would be the one figure nobody
+        # could check.
+        theirs = self.someone_elses_event()
+        self.both_hats()
+        response = self.client.get(reverse("events:ministry_report"), {"scope": "all"})
+        self.assertContains(response, theirs.name)
 
     def test_a_ministry_admin_still_sees_the_managing_label(self):
         self.login(self.zhang)
         page = self.client.get(reverse("events:event_list")).content.decode()
-        self.assertIn("Events I manage", page)
-        self.assertNotIn("All events", page)
+        self.assertIn("Events I Manage", page)
+        self.assertNotIn("All Events", page)
 
     def test_a_plain_volunteer_is_offered_neither(self):
         self.login(self.lisi)
@@ -3689,6 +4379,74 @@ class EventImagePurgeTests(PageTestCase):
 
 
 @override_settings(MEDIA_ROOT=tempfile.mkdtemp())
+class EventRowTests(PageTestCase):
+    """The list rows: the whole row is one link, and every row is the same height.
+
+    ⚠️ The geometry itself (112×112 thumbnails, equal row heights) is CSS and is
+       verified in a browser, not here — a Django test cannot measure a box. What
+       *can* be pinned here is everything the CSS depends on: that the row carries
+       the class the height is attached to, that a missing location still renders a
+       line (or the row would come out short inside a fixed height), and that the
+       name is not an `<a>` any more.
+    """
+
+    def rows_html(self, url_name, **params):
+        self.login(self.lisi)
+        return self.client.get(reverse(url_name), params).content.decode()
+
+    def test_the_whole_row_is_a_link_to_the_event(self):
+        html = self.rows_html("events:event_list")
+        self.assertIn("event-row-link", html)
+        self.assertIn(reverse("events:event_detail", args=[self.event.pk]), html)
+
+    def test_there_is_exactly_one_link_per_row(self):
+        """⭐ The accessibility claim behind the stretched link.
+
+        Wrapping the whole card in an `<a>` would have been simpler and would put
+        the title, the ministry badge and the times inside one link — which a
+        screen reader then reads out as a single run-on name. One link whose
+        accessible name is only the event's name is the point of doing it this way.
+        """
+        html = self.rows_html("events:event_list")
+        row = re.search(r'<li class="event-row.*?</li>', html, re.S).group(0)
+        self.assertEqual(row.count("<a "), 1)
+        # And its name is the event's name, carried by the sr-only span.
+        self.assertRegex(row, r'class="event-row-link">\s*<span class="sr-only">')
+
+    def test_the_event_name_is_no_longer_a_link_of_its_own(self):
+        html = self.rows_html("events:event_list")
+        row = re.search(r'<li class="event-row.*?</li>', html, re.S).group(0)
+        self.assertNotRegex(row, r'<a[^>]*>\s*' + re.escape(self.event.name))
+
+    def test_a_row_carries_the_class_its_height_hangs_off(self):
+        # If this class is ever renamed in the template and not in app.css, every
+        # row silently goes back to its natural height and the thumbnails stop
+        # being square. Nothing errors.
+        self.assertIn('class="event-row', self.rows_html("events:event_list"))
+
+    def test_an_event_with_no_location_still_fills_the_line(self):
+        """⚠️ The whole reason the rows can share one fixed height.
+
+        A blank location used to make that row one line shorter. Inside a fixed
+        height the row no longer shrinks — the *text* does, leaving a gap — so the
+        line is filled with something true instead.
+        """
+        self.event.location = ""
+        self.event.save(update_fields=["location"])
+        self.assertIn("Location to be announced",
+                      self.rows_html("events:event_list"))
+
+    def test_past_events_rows_get_the_same_treatment(self):
+        make_event(
+            ministry=self.pantry, owner=self.zhang.contact, name="Over and done",
+            status=Event.Status.COMPLETED, location="",
+            start_time=NOW - 2 * DAY, end_time=NOW - 2 * DAY + HOUR)
+        html = self.rows_html("events:past_events")
+        self.assertIn("event-row-past", html)
+        self.assertIn("event-row-link", html)
+        self.assertIn("No location was recorded", html)
+
+
 class EventImageDisplayTests(PageTestCase):
     """Where the picture appears, and where it deliberately does not."""
 
@@ -3724,3 +4482,664 @@ class EventImageDisplayTests(PageTestCase):
         self.assertNotContains(
             self.client.get(reverse("events:event_detail", args=[self.event.pk])),
             "event-thumb")
+
+
+# --- D28: the QR check-in -------------------------------------------------
+
+
+class CheckInTokenTests(SimpleTestCase):
+    """The token, on its own. No database, no request, no mocked clock.
+
+    ⭐ These are the tests the module was shaped for. `TimestampSigner` would
+       have done the same job with less code, and was rejected because its clock
+       cannot be injected — which would have made the two boundary tests below
+       reach for a mock. If a future change makes these tests need one, the
+       change has undone the reason this module exists.
+    """
+
+    def test_a_fresh_token_gives_back_what_was_signed(self):
+        token = tokens.issue(12, tokens.CHECK_IN)
+        self.assertEqual(tokens.verify(token), (12, tokens.CHECK_IN))
+
+    def test_it_is_still_valid_one_second_before_the_limit(self):
+        at = local_now()
+        token = tokens.issue(12, tokens.CHECK_IN, at=at)
+        later = at + datetime.timedelta(seconds=tokens.MAX_AGE_SECONDS - 1)
+        self.assertEqual(tokens.verify(token, at=later), (12, tokens.CHECK_IN))
+
+    def test_it_is_refused_one_second_after_the_limit(self):
+        at = local_now()
+        token = tokens.issue(12, tokens.CHECK_IN, at=at)
+        later = at + datetime.timedelta(seconds=tokens.MAX_AGE_SECONDS + 1)
+        with self.assertRaises(tokens.InvalidCheckInToken):
+            tokens.verify(token, at=later)
+
+    def test_every_token_lives_exactly_as_long_as_every_other(self):
+        # The whole reason the instant of issue travels inside the payload. With
+        # time buckets the remaining life depends on where in the bucket the
+        # scan landed — one volunteer gets 89 seconds and the next a tenth of a
+        # second — which is the symptom the original design added a tolerance to
+        # paper over. Issue at three unrelated moments; all three die at 90.
+        for offset in (0, 7, 29):
+            at = local_now() + datetime.timedelta(seconds=offset)
+            token = tokens.issue(12, tokens.CHECK_IN, at=at)
+            edge = at + datetime.timedelta(seconds=tokens.MAX_AGE_SECONDS)
+            with self.subTest(offset=offset):
+                self.assertEqual(tokens.verify(token, at=edge), (12, tokens.CHECK_IN))
+                with self.assertRaises(tokens.InvalidCheckInToken):
+                    tokens.verify(token, at=edge + datetime.timedelta(seconds=2))
+
+    def test_a_token_stamped_in_the_future_is_refused(self):
+        # Not a clock-skew case to be tolerated: this process signed it, so a
+        # future stamp means the payload is not what we think it is.
+        at = local_now()
+        token = tokens.issue(12, tokens.CHECK_IN, at=at + datetime.timedelta(minutes=5))
+        with self.assertRaises(tokens.InvalidCheckInToken):
+            tokens.verify(token, at=at)
+
+    def test_a_rewritten_payload_is_refused(self):
+        # The interesting forgery: keep the signature, change what it covers.
+        # ⚠️ Tested by re-encoding a payload rather than by flipping characters
+        #    at random offsets — base64's final character carries only two
+        #    significant bits, so several of its values decode to identical
+        #    bytes and "every character matters" is simply not true of the
+        #    encoding. Asserting it would be asserting something false about
+        #    base64 while believing it said something about the HMAC.
+        encoded, _, signature = tokens.issue(12, tokens.CHECK_IN).partition(".")
+        payload = base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4)).decode()
+        forged = payload.replace("12:", "99:", 1)
+        rewritten = base64.urlsafe_b64encode(forged.encode()).decode().rstrip("=")
+        with self.assertRaises(tokens.InvalidCheckInToken):
+            tokens.verify(f"{rewritten}.{signature}")
+
+    def test_a_rewritten_signature_is_refused(self):
+        encoded, _, signature = tokens.issue(12, tokens.CHECK_IN).partition(".")
+        for index in (0, len(signature) // 2, len(signature) - 1):
+            swapped = "a" if signature[index] != "a" else "b"
+            forged = signature[:index] + swapped + signature[index + 1:]
+            with self.subTest(index=index), self.assertRaises(tokens.InvalidCheckInToken):
+                tokens.verify(f"{encoded}.{forged}")
+
+    def test_a_token_for_one_event_cannot_be_read_as_another(self):
+        # The event id is inside the signature and nowhere else — which is the
+        # reason the URL does not repeat it. Two sources for one fact is a whole
+        # class of "which one wins" bugs that this shape simply does not have.
+        self.assertNotEqual(
+            tokens.issue(12, tokens.CHECK_IN), tokens.issue(13, tokens.CHECK_IN))
+        self.assertEqual(tokens.verify(tokens.issue(13, tokens.CHECK_IN))[0], 13)
+
+    def test_the_direction_is_signed_too(self):
+        # Otherwise a volunteer holding a check-in code could edit the URL into
+        # a check-out and write their own hours.
+        self.assertEqual(
+            tokens.verify(tokens.issue(12, tokens.CHECK_OUT))[1], tokens.CHECK_OUT)
+        self.assertNotEqual(
+            tokens.issue(12, tokens.CHECK_IN), tokens.issue(12, tokens.CHECK_OUT))
+
+    def test_rubbish_is_refused_rather_than_raising_something_else(self):
+        # These arrive from a URL, so "not a token at all" is an ordinary input
+        # and has to come back as the same refusal a stale one does.
+        for rubbish in ["", "abc", "....", "a.b", "%%%.%%%", None]:
+            with self.subTest(rubbish=rubbish), self.assertRaises(
+                    tokens.InvalidCheckInToken):
+                tokens.verify(rubbish)
+
+    def test_the_expiry_handed_to_the_browser_is_an_absolute_instant(self):
+        # ⚠️ Absolute, never "valid for N seconds". An iPad's timers are
+        #    throttled the moment it sleeps, so a page counting down from its own
+        #    clock wakes believing a dead code is fresh — and a dead QR looks
+        #    exactly like a live one.
+        at = local_now()
+        token, expires_at = tokens.issue_with_expiry(12, tokens.CHECK_IN, at=at)
+        self.assertEqual(tokens.verify(token, at=at), (12, tokens.CHECK_IN))
+        self.assertEqual(
+            expires_at, int(at.timestamp()) + tokens.MAX_AGE_SECONDS)
+
+    def test_an_unknown_direction_is_a_programming_error_not_a_refusal(self):
+        with self.assertRaises(ValueError):
+            tokens.issue(12, "sideways")
+
+
+class CheckInWindowTests(TestCase):
+    """When the display may hand out codes at all.
+
+    ⚠️ This exists for a tab left open on an office screen. Without it that page
+       is a permanently valid clock-in machine that looks entirely normal.
+    """
+
+    def setUp(self):
+        self.event = make_event()
+
+    def test_it_is_open_during_the_event(self):
+        self.assertTrue(tokens.window_is_open(
+            self.event, at=self.event.start_time + HOUR))
+
+    def test_it_is_shut_more_than_two_hours_before_the_start(self):
+        just_early = self.event.start_time - tokens.WINDOW_BEFORE - datetime.timedelta(minutes=1)
+        just_late = self.event.start_time - tokens.WINDOW_BEFORE + datetime.timedelta(minutes=1)
+        self.assertFalse(tokens.window_is_open(self.event, at=just_early))
+        self.assertTrue(tokens.window_is_open(self.event, at=just_late))
+
+    def test_it_is_shut_more_than_four_hours_after_the_end(self):
+        inside = self.event.end_time + tokens.WINDOW_AFTER - datetime.timedelta(minutes=1)
+        outside = self.event.end_time + tokens.WINDOW_AFTER + datetime.timedelta(minutes=1)
+        self.assertTrue(tokens.window_is_open(self.event, at=inside))
+        self.assertFalse(tokens.window_is_open(self.event, at=outside))
+
+    def test_a_draft_or_cancelled_event_never_opens(self):
+        # A route that manufactures attendance for an event nobody published, or
+        # one that is off, should not exist at any hour of the day.
+        during = self.event.start_time + HOUR
+        for status in (Event.Status.DRAFT, Event.Status.CANCELLED):
+            self.event.status = status
+            with self.subTest(status=status):
+                self.assertFalse(tokens.window_is_open(self.event, at=during))
+
+    def test_the_explanation_comes_from_the_same_two_constants(self):
+        # ⚠️ Not from the template. "Opens two hours before" written in markup is
+        #    a second copy of a rule, free to drift from the one enforced above.
+        early = self.event.start_time - tokens.WINDOW_BEFORE - HOUR
+        late = self.event.end_time + tokens.WINDOW_AFTER + HOUR
+        self.assertIn("opens", tokens.window_message(self.event, at=early).lower())
+        self.assertIn("closed", tokens.window_message(self.event, at=late).lower())
+        self.assertIsNone(
+            tokens.window_message(self.event, at=self.event.start_time + HOUR))
+
+
+class CheckInMethodTests(TestCase):
+    """Which of the three write paths recorded the attendance (D28)."""
+
+    def setUp(self):
+        self.event = make_event()
+        self.role = make_role(self.event, "lifting")
+        self.person = make_person("Wang", birth_date=datetime.date(1990, 1, 1))
+        self.participation = sign_up(contact=self.person, event_role=self.role)
+
+    def test_an_old_row_is_empty_rather_than_claimed_for_an_admin(self):
+        # ⚠️ No default on the column, deliberately. A default of "admin" would
+        #    back-date a claim onto every historical row — vouching for something
+        #    nobody checked.
+        self.assertEqual(self.participation.checked_in_method, "")
+
+    def test_each_of_the_three_routes_records_its_own_source(self):
+        # All three, because _mark_attended() already had to learn that a rule
+        # with three entrances and one guard is a rule with two ways round it.
+        cases = [
+            (lambda p: check_in(p, method=Participation.CheckInMethod.SELF_QR),
+             Participation.CheckInMethod.SELF_QR),
+            (lambda p: record_hours(p, Decimal("2.00")),
+             Participation.CheckInMethod.ADMIN),
+        ]
+        for act, expected in cases:
+            person = make_person(f"P{expected}", birth_date=datetime.date(1990, 1, 1))
+            row = sign_up(contact=person, event_role=self.role)
+            with self.subTest(expected=expected):
+                self.assertEqual(act(row).checked_in_method, expected)
+
+        # check_out() only establishes attendance when it ends up with hours.
+        row = sign_up(
+            contact=make_person("Out", birth_date=datetime.date(1990, 1, 1)),
+            event_role=self.role)
+        check_in(row, at=local_now() - HOUR, method=Participation.CheckInMethod.SELF_QR)
+        check_out(row, method=Participation.CheckInMethod.SELF_QR)
+        self.assertEqual(row.checked_in_method, Participation.CheckInMethod.SELF_QR)
+
+    def test_an_admin_correcting_the_hours_does_not_rewrite_who_filled_it_in(self):
+        # ⚠️ First write wins. The question the column answers is "did the
+        #    volunteer fill this in, or did I?" — and the answer must survive the
+        #    admin touching the row afterwards, which is the ordinary case.
+        check_in(self.participation, method=Participation.CheckInMethod.SELF_QR)
+        record_hours(self.participation, Decimal("4.00"))
+        self.assertEqual(
+            self.participation.checked_in_method, Participation.CheckInMethod.SELF_QR)
+
+    def test_undoing_the_attendance_clears_it_with_everything_else(self):
+        # Left behind it would say "a volunteer recorded this" about a row that
+        # now records nothing, and first-write-wins would then be stuck with it.
+        check_in(self.participation, method=Participation.CheckInMethod.SELF_QR)
+        undo_attendance(self.participation)
+        self.assertEqual(self.participation.checked_in_method, "")
+
+
+class CheckInCredentialTests(TestCase):
+    """The proof of presence that outlives the token. D28's two-stage split."""
+
+    def test_it_survives_long_enough_to_type_a_password(self):
+        at = local_now()
+        credential = issue_credential(7, tokens.CHECK_IN, at=at)
+        still_fine = at + CREDENTIAL_MAX_AGE - datetime.timedelta(seconds=1)
+        self.assertEqual(
+            read_credential(credential, at=still_fine), (7, tokens.CHECK_IN))
+
+    def test_it_does_not_survive_for_ever(self):
+        at = local_now()
+        credential = issue_credential(7, tokens.CHECK_IN, at=at)
+        with self.assertRaises(CredentialExpired):
+            read_credential(credential, at=at + CREDENTIAL_MAX_AGE + HOUR)
+
+    def test_a_missing_or_malformed_credential_reads_as_expired(self):
+        for rubbish in [None, {}, {"event": 7}, {"event": 7, "mode": "in", "at": "x"}]:
+            with self.subTest(rubbish=rubbish), self.assertRaises(CredentialExpired):
+                read_credential(rubbish)
+
+    def test_it_is_json_serialisable_because_a_session_has_to_hold_it(self):
+        # Sessions are serialised as JSON by default. A datetime here would blow
+        # up at the moment of the redirect — i.e. on every single scan.
+        json.dumps(issue_credential(7, tokens.CHECK_IN))
+
+
+class ScanTargetsTests(TestCase):
+    """Which of somebody's rows a scan applies to, and which it would repeat."""
+
+    def setUp(self):
+        self.event = make_event()
+        self.lifting = make_role(self.event, "lifting")
+        self.desk = make_role(self.event, "desk", name="Welcome desk")
+        self.person = make_person("Wang", birth_date=datetime.date(1990, 1, 1))
+
+    def test_a_signup_is_pending_for_check_in_and_done_once_checked_in(self):
+        row = sign_up(contact=self.person, event_role=self.lifting)
+        targets = scan_targets(self.person, self.event, tokens.CHECK_IN)
+        self.assertEqual(targets.pending, [row])
+        check_in(row)
+        self.assertEqual(
+            scan_targets(self.person, self.event, tokens.CHECK_IN).done, [row])
+
+    def test_checking_out_needs_a_check_in_first_and_says_so_separately(self):
+        # Its own list, not "pending": the sentence on the phone is different
+        # ("ask the organiser to switch the screen"), and so is the fix.
+        row = sign_up(contact=self.person, event_role=self.lifting)
+        targets = scan_targets(self.person, self.event, tokens.CHECK_OUT)
+        self.assertEqual(targets.needs_check_in, [row])
+        self.assertEqual(targets.pending, [])
+
+    def test_a_cancelled_signup_is_not_a_signup(self):
+        # ⚠️ Excluded, not listed as done. The row survives only so the
+        #    notification history has something to point at; somebody who pulled
+        #    out and then scanned should be told they are not signed up.
+        row = sign_up(contact=self.person, event_role=self.lifting)
+        cancel(row)
+        self.assertFalse(scan_targets(self.person, self.event, tokens.CHECK_IN).any_signup)
+
+    def test_two_roles_at_one_event_produce_two_pending_rows(self):
+        # D19 allows it, so the scan has to answer for it — and the answer is to
+        # ask, because both alternatives invent a number (D28 五).
+        sign_up(contact=self.person, event_role=self.lifting)
+        sign_up(contact=self.person, event_role=self.desk)
+        self.assertEqual(
+            len(scan_targets(self.person, self.event, tokens.CHECK_IN).pending), 2)
+
+
+class ApplyScanTests(TestCase):
+    """The write itself: locked, scoped, and safe to repeat."""
+
+    def setUp(self):
+        self.event = make_event()
+        self.role = make_role(self.event, "lifting")
+        self.person = make_person("Wang", birth_date=datetime.date(1990, 1, 1))
+        self.other = make_person("Chen", birth_date=datetime.date(1990, 1, 1))
+        self.row = sign_up(contact=self.person, event_role=self.role)
+
+    def test_a_second_identical_scan_changes_nothing_and_is_not_an_error(self):
+        # ⭐ The idempotence this feature rests on. The commonest way to arrive
+        #    here twice is a slow page and an impatient thumb; reporting the
+        #    second tap as a failure sends that person off to find an admin over
+        #    something that already worked.
+        _, changed = apply_scan(
+            self.row.pk, contact=self.person, event_id=self.event.pk,
+            mode=tokens.CHECK_IN)
+        self.assertTrue(changed)
+        self.row.refresh_from_db()
+        first_time = self.row.checked_in_at
+
+        row, changed_again = apply_scan(
+            self.row.pk, contact=self.person, event_id=self.event.pk,
+            mode=tokens.CHECK_IN)
+        self.assertFalse(changed_again)
+        self.assertEqual(row.checked_in_at, first_time)
+
+    def test_a_repeat_leaves_no_second_history_row(self):
+        # The visible half of the test above. A no-op that still writes would
+        # put a meaningless revision into the one table this project relies on
+        # to recover a value somebody deleted.
+        apply_scan(self.row.pk, contact=self.person, event_id=self.event.pk,
+                   mode=tokens.CHECK_IN)
+        before = self.row.history.count()
+        apply_scan(self.row.pk, contact=self.person, event_id=self.event.pk,
+                   mode=tokens.CHECK_IN)
+        self.assertEqual(self.row.history.count(), before)
+
+    def test_somebody_elses_row_cannot_be_reached_by_primary_key(self):
+        # The scope is the belt: the lookup is narrowed to this contact and this
+        # event before the primary key is applied at all.
+        theirs = sign_up(contact=self.other, event_role=self.role)
+        with self.assertRaises(Participation.DoesNotExist):
+            apply_scan(theirs.pk, contact=self.person, event_id=self.event.pk,
+                       mode=tokens.CHECK_IN)
+
+    def test_checking_out_writes_the_hours_and_the_source(self):
+        check_in(self.row, at=local_now() - 2 * HOUR,
+                 method=Participation.CheckInMethod.SELF_QR)
+        row, changed = apply_scan(
+            self.row.pk, contact=self.person, event_id=self.event.pk,
+            mode=tokens.CHECK_OUT)
+        self.assertTrue(changed)
+        self.assertEqual(row.hours, Decimal("2.00"))
+        self.assertEqual(row.checked_in_method, Participation.CheckInMethod.SELF_QR)
+
+    def test_checking_out_without_checking_in_does_nothing(self):
+        _, changed = apply_scan(
+            self.row.pk, contact=self.person, event_id=self.event.pk,
+            mode=tokens.CHECK_OUT)
+        self.assertFalse(changed)
+        self.row.refresh_from_db()
+        self.assertIsNone(self.row.checked_out_at)
+
+
+class DefaultCheckInModeTests(TestCase):
+    """What the iPad starts on — read once, at page load, and never again."""
+
+    def setUp(self):
+        self.event = make_event()
+
+    def test_before_the_midpoint_it_starts_on_check_in(self):
+        just_started = self.event.start_time + datetime.timedelta(minutes=1)
+        self.assertEqual(
+            default_checkin_mode(self.event, at=just_started), tokens.CHECK_IN)
+
+    def test_after_the_midpoint_it_starts_on_check_out(self):
+        nearly_over = self.event.end_time - datetime.timedelta(minutes=1)
+        self.assertEqual(
+            default_checkin_mode(self.event, at=nearly_over), tokens.CHECK_OUT)
+
+
+class CheckInPageTests(PageTestCase):
+    """The two halves of a scan, hit as URLs.
+
+    ⭐ The acceptance point for the whole feature is the first test: a volunteer
+       who is not logged in on their phone — which is most of them, the first
+       time — still gets checked in, and the token's 90 seconds are not spent
+       waiting for them to type a password.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.event.start_time = local_now() - HOUR
+        self.event.end_time = local_now() + 2 * HOUR
+        self.event.save()
+        self.participation = sign_up(contact=self.lisi.contact, event_role=self.role)
+
+    def scan_url(self, mode=tokens.CHECK_IN, event=None, at=None):
+        token = tokens.issue((event or self.event).pk, mode, at=at)
+        return reverse("events:checkin_scan", args=[token])
+
+    def test_a_volunteer_not_yet_logged_in_can_still_check_in(self):
+        # Scan first, log in second. The credential carries "somebody was at
+        # this screen"; the login decides who that somebody is.
+        response = self.client.get(self.scan_url())
+        self.assertRedirects(
+            response, reverse("events:checkin_confirm"),
+            target_status_code=302)
+
+        confirm = reverse("events:checkin_confirm")
+        self.assertRedirects(
+            self.client.get(confirm), f"{reverse('accounts:login')}?next={confirm}")
+
+        # ⚠️ login() rotates the session key but keeps its contents, which is
+        #    what makes this whole design work. If that ever stopped being true
+        #    the feature would break silently for every logged-out volunteer.
+        self.login(self.lisi)
+        self.assertContains(self.client.get(confirm), "Check in")
+        self.client.post(confirm, {"participation": self.participation.pk})
+
+        self.participation.refresh_from_db()
+        self.assertIsNotNone(self.participation.checked_in_at)
+        self.assertEqual(
+            self.participation.checked_in_method,
+            Participation.CheckInMethod.SELF_QR)
+
+    def test_the_scan_itself_writes_nothing(self):
+        # ⚠️ A GET, so link previewers in messaging apps, browser prefetch and
+        #    corporate URL scanners all fetch it without a human touching it.
+        #    The original design recorded attendance here, which means forwarding
+        #    the link into any chat window would have checked somebody in.
+        self.client.get(self.scan_url())
+        self.participation.refresh_from_db()
+        self.assertIsNone(self.participation.checked_in_at)
+
+    def test_an_expired_code_is_refused_with_something_to_do_about_it(self):
+        stale = self.scan_url(at=local_now() - datetime.timedelta(minutes=5))
+        response = self.client.get(stale)
+        self.assertEqual(response.status_code, 400)
+        self.assertContains(response, "expired", status_code=400)
+
+    def test_the_word_confirm_is_not_read_as_a_token(self):
+        # The URL ordering. The other way round, /events/checkin/confirm/ would
+        # match the token pattern and every volunteer would be told their code
+        # had expired.
+        self.login(self.lisi)
+        self.client.get(self.scan_url())
+        self.assertEqual(self.client.get(reverse("events:checkin_confirm")).status_code, 200)
+
+    def test_somebody_who_never_signed_up_is_offered_the_signup_page(self):
+        # ⚠️ Offered, never signed up on their behalf. Creating the row here
+        #    would walk past sign_up()'s two gates, and on the other side of them
+        #    is a minor recorded as present with nobody to call.
+        self.login(self.zhang)
+        self.client.get(self.scan_url())
+        response = self.client.get(reverse("events:checkin_confirm"))
+        self.assertContains(response, "not signed up", status_code=400)
+        self.assertContains(
+            response, reverse("events:event_signup", args=[self.event.pk]),
+            status_code=400)
+        self.assertFalse(
+            Participation.objects.filter(contact=self.zhang.contact).exists())
+
+    def test_a_minor_with_no_consent_gets_a_sentence_and_not_a_500(self):
+        # The gate already exists in _mark_attended(); what is new is that the
+        # person it refuses is standing in a hall holding a phone.
+        minor = self.account(
+            "min", "Min", birth_date=local_today() - datetime.timedelta(days=365 * 15))
+        give_emergency_contact(minor.contact)
+        row = Participation.objects.create(
+            event_role=self.role, contact=minor.contact, registered_at=local_now())
+        self.login(minor)
+        self.client.get(self.scan_url())
+        response = self.client.post(
+            reverse("events:checkin_confirm"), {"participation": row.pk})
+        self.assertEqual(response.status_code, 400)
+        self.assertContains(response, "consent", status_code=400)
+        row.refresh_from_db()
+        self.assertIsNone(row.checked_in_at)
+
+    def test_two_roles_produce_a_choice_and_only_the_chosen_row_is_written(self):
+        desk = make_role(self.event, "desk", name="Welcome desk")
+        second = sign_up(contact=self.lisi.contact, event_role=desk)
+        self.login(self.lisi)
+        self.client.get(self.scan_url())
+
+        response = self.client.get(reverse("events:checkin_confirm"))
+        self.assertContains(response, "more than one role")
+
+        self.client.post(
+            reverse("events:checkin_confirm"), {"participation": second.pk})
+        self.participation.refresh_from_db()
+        second.refresh_from_db()
+        self.assertIsNone(self.participation.checked_in_at)
+        self.assertIsNotNone(second.checked_in_at)
+
+    def test_a_row_belonging_to_somebody_else_cannot_be_posted(self):
+        # Interface keeps nobody out — a form posted from anywhere at all
+        # arrives at this view with the same shape.
+        theirs = sign_up(contact=self.zhang.contact, event_role=self.role)
+        self.login(self.lisi)
+        self.client.get(self.scan_url())
+        self.assertEqual(
+            self.client.post(
+                reverse("events:checkin_confirm"), {"participation": theirs.pk}
+            ).status_code, 404)
+
+    def test_a_second_tap_reports_the_time_rather_than_an_error(self):
+        self.login(self.lisi)
+        self.client.get(self.scan_url())
+        self.client.post(reverse("events:checkin_confirm"),
+                         {"participation": self.participation.pk})
+        self.participation.refresh_from_db()
+        first = self.participation.checked_in_at
+
+        self.client.get(self.scan_url())
+        response = self.client.post(
+            reverse("events:checkin_confirm"),
+            {"participation": self.participation.pk}, follow=True)
+        self.assertContains(response, "already checked in")
+        self.participation.refresh_from_db()
+        self.assertEqual(self.participation.checked_in_at, first)
+
+    def test_checking_out_lands_on_my_signups_with_the_hours(self):
+        check_in(self.participation, at=local_now() - 2 * HOUR)
+        self.login(self.lisi)
+        self.client.get(self.scan_url(mode=tokens.CHECK_OUT))
+        response = self.client.post(
+            reverse("events:checkin_confirm"),
+            {"participation": self.participation.pk}, follow=True)
+        self.assertRedirects(response, reverse("events:my_participations"))
+        self.assertContains(response, "hours recorded")
+
+    def test_checking_out_before_checking_in_says_what_to_ask_for(self):
+        self.login(self.lisi)
+        self.client.get(self.scan_url(mode=tokens.CHECK_OUT))
+        self.assertContains(
+            self.client.get(reverse("events:checkin_confirm")), "not checked in yet")
+
+    def test_the_credential_does_not_outlive_its_ten_minutes(self):
+        self.login(self.lisi)
+        self.client.get(self.scan_url())
+        session = self.client.session
+        session[CHECKIN_CREDENTIAL_KEY] = issue_credential(
+            self.event.pk, tokens.CHECK_IN, at=local_now() - CREDENTIAL_MAX_AGE - HOUR)
+        session.save()
+        self.assertEqual(
+            self.client.get(reverse("events:checkin_confirm")).status_code, 400)
+
+    def test_arriving_at_the_confirmation_page_without_scanning_is_refused(self):
+        self.login(self.lisi)
+        self.assertEqual(
+            self.client.get(reverse("events:checkin_confirm")).status_code, 400)
+
+    def test_my_signups_shows_the_times_in_one_column(self):
+        check_in(self.participation, at=local_now() - 2 * HOUR)
+        check_out(self.participation)
+        self.login(self.lisi)
+        response = self.client.get(reverse("events:my_participations"))
+        self.assertContains(response, "Attendance")
+        self.assertContains(
+            response, formats.time_format(localtime(self.participation.checked_out_at)))
+
+
+class CheckInDisplayTests(PageTestCase):
+    """The iPad page and the endpoint behind it."""
+
+    def setUp(self):
+        super().setUp()
+        self.event.start_time = local_now() - HOUR
+        self.event.end_time = local_now() + 2 * HOUR
+        self.event.save()
+        self.token_url = reverse("events:checkin_token", args=[self.event.pk])
+
+    def test_a_volunteer_cannot_fetch_a_code_from_their_sofa(self):
+        # ⭐ This check **is** the scheme. Without it every rotating-code measure
+        #    above it is decoration: any signed-in account could pull a live
+        #    token and book itself in from anywhere.
+        self.login(self.lisi)
+        self.assertEqual(
+            self.client.get(self.token_url, {"mode": "in"}).status_code, 403)
+        self.assertEqual(
+            self.client.get(
+                reverse("events:checkin_display", args=[self.event.pk])).status_code,
+            403)
+
+    def test_an_admin_of_another_ministry_is_refused_too(self):
+        self.login(self.other_admin)
+        self.assertEqual(
+            self.client.get(self.token_url, {"mode": "in"}).status_code, 403)
+
+    def test_the_code_it_hands_out_is_a_whole_url_that_verifies(self):
+        # ⚠️ Assembled on the server. A script building this address from parts
+        #    would be a second definition of the route, and the QR is the one
+        #    place where being subtly wrong produces a code that scans perfectly
+        #    and goes nowhere.
+        self.login(self.zhang)
+        payload = self.client.get(self.token_url, {"mode": "in"}).json()
+        self.assertIn(payload["url"], payload["url"])
+        token = payload["url"].rstrip("/").rsplit("/", 1)[-1]
+        self.assertEqual(tokens.verify(token), (self.event.pk, tokens.CHECK_IN))
+        self.assertGreater(payload["expires_at"], local_now().timestamp())
+
+    def test_outside_the_window_it_refuses_and_explains(self):
+        self.event.start_time = local_now() + DAY
+        self.event.end_time = local_now() + DAY + 3 * HOUR
+        self.event.save()
+        self.login(self.zhang)
+        response = self.client.get(self.token_url, {"mode": "in"})
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("opens", response.json()["error"].lower())
+
+    def test_a_draft_event_hands_out_nothing(self):
+        self.event.status = Event.Status.DRAFT
+        self.event.save()
+        self.login(self.zhang)
+        self.assertEqual(
+            self.client.get(self.token_url, {"mode": "in"}).status_code, 409)
+
+    def test_an_unknown_direction_is_refused(self):
+        self.login(self.zhang)
+        self.assertEqual(
+            self.client.get(self.token_url, {"mode": "sideways"}).status_code, 404)
+
+    def test_the_page_carries_the_endpoint_and_the_starting_direction(self):
+        # Both from the server: the JS reads them out of data attributes and
+        # assembles no URL of its own.
+        self.login(self.zhang)
+        response = self.client.get(
+            reverse("events:checkin_display", args=[self.event.pk]))
+        self.assertContains(response, f'data-token-url="{self.token_url}"')
+        self.assertContains(response, 'data-mode="')
+
+    def test_the_attendance_page_marks_the_rows_the_volunteer_filled_in(self):
+        # ⭐ D28's mitigation, and the only one there is. The forwarding hole
+        #    cannot be closed — a live accomplice on site defeats any rotation —
+        #    so what the design buys instead is that an admin can **see** which
+        #    rows he did not fill in. A problem nobody can see is a problem
+        #    nobody handles, which is why this is a test and not a nicety.
+        row = sign_up(contact=self.lisi.contact, event_role=self.role)
+        check_in(row, method=Participation.CheckInMethod.SELF_QR)
+        self.login(self.zhang)
+        page = reverse("events:event_attendance", args=[self.event.pk])
+        self.assertContains(self.client.get(page), "self check-in")
+
+    def test_a_row_an_admin_filled_in_carries_no_marking_at_all(self):
+        # ⚠️ The other half, and the one that keeps the first honest. An empty
+        #    column means "this row predates the feature", which is a different
+        #    fact from "an admin recorded it" — printing a label on every row
+        #    would vouch for something nobody checked, and would also make the
+        #    self ones stop standing out, which was the entire point.
+        row = sign_up(contact=self.lisi.contact, event_role=self.role)
+        check_in(row)
+        self.login(self.zhang)
+        page = reverse("events:event_attendance", args=[self.event.pk])
+        self.assertNotContains(self.client.get(page), "self check-in")
+
+    def test_the_management_list_shows_the_link_only_to_who_may_use_it(self):
+        # Same rule as Edit and Notify on that row: a link that refuses the
+        # person who clicked it reads as a broken site.
+        qr_link = reverse("events:checkin_display", args=[self.event.pk])
+        self.login(self.zhang)
+        self.assertContains(
+            self.client.get(reverse("events:event_manage_list")), qr_link)
+
+        self.lisi.is_staff = False
+        self.lisi.save()
+        foundation_admin_group().user_set.add(self.lisi)
+        self.login(self.lisi)
+        self.assertNotContains(
+            self.client.get(reverse("events:event_manage_list")), qr_link)

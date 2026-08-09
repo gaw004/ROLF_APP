@@ -472,7 +472,7 @@ class StaffingTests(TestCase):
         for number in range(10):
             make_position(f"post{number}", f"Post {number}", self.ministry)
         self.client.force_login(
-            get_user_model().objects.create_superuser(username="staff", password="x"))
+            get_user_model().objects.create_superuser(email="staff@example.com", password="x"))
         url = reverse("admin:org_position_changelist")
 
         with CaptureQueriesContext(connection) as captured:
@@ -675,7 +675,7 @@ class MinistryRoleTests(TestCase):
     def test_deleting_the_granting_user_keeps_the_grant(self):
         # SET_NULL. CASCADE here would revoke a batch of people's authority
         # because somebody's account was closed.
-        granter = get_user_model().objects.create_user(username="boss", password="x")
+        granter = get_user_model().objects.create_user(email="boss@example.com", password="x")
         grant = self.grant(granted_by=granter)
         granter.delete()
         grant.refresh_from_db()
@@ -697,7 +697,7 @@ class PermissionTests(TestCase):
         self.tax = make_ministry(code="tax_help", name="Tax Help")
         self.zhang = make_person("Zhang")
         self.user = get_user_model().objects.create_user(
-            username="zhang", password="x", contact=self.zhang)
+            email="zhang@example.com", password="x", contact=self.zhang)
         MinistryRole.objects.create(contact=self.zhang, ministry=self.pantry)
 
     def make_event(self, ministry):
@@ -738,7 +738,7 @@ class PermissionTests(TestCase):
     def test_a_user_with_no_grants_is_denied_everything(self):
         # Deny by default, never "allowed unless forbidden".
         stranger = get_user_model().objects.create_user(
-            username="stranger", password="x", contact=make_person("Stranger"))
+            email="stranger@example.com", password="x", contact=make_person("Stranger"))
         self.assertFalse(can_publish_event(stranger, self.pantry))
         self.assertFalse(can_view_event_records(stranger, self.make_event(self.pantry)))
         self.assertFalse(can_grant_ministry_admin(stranger))
@@ -747,14 +747,14 @@ class PermissionTests(TestCase):
         # A normal state, not an error: MinistryRole hangs off Contact while the
         # entry point is a User, and User.contact must stay nullable (D12/D21).
         # Raising here would 500 every protected view for such an account.
-        technical = get_user_model().objects.create_user(username="tech", password="x")
+        technical = get_user_model().objects.create_user(email="tech@example.com", password="x")
         self.assertEqual(ministry_ids_administered_by(technical), set())
         self.assertFalse(can_publish_event(technical, self.pantry))
 
     def test_a_superuser_gets_no_ministry_scope_either(self):
         # No exemption. One here would be a hole straight through the scoping
         # that D20 exists to create; a superuser has the admin already.
-        root = get_user_model().objects.create_superuser(username="root", password="x")
+        root = get_user_model().objects.create_superuser(email="root@example.com", password="x")
         self.assertFalse(can_publish_event(root, self.pantry))
         self.assertFalse(can_grant_ministry_admin(root))
 

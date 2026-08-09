@@ -1,0 +1,36 @@
+{% extends "core/base.html" %}
+{% block title %}Too Many Sign-ups Just Now{% endblock %}
+{% block main_width %}max-w-2xl{% endblock %}
+
+{% block content %}
+  {% comment %}
+  注册被限流时的页面（429）。
+
+  ⚠️ 这一页的读者**没有账号**，所以它必须自己把出路说完 —— 没有「联系我们」
+     的登录后页面可以指，也没有客服工单系统。三句话：发生了什么、多久之后能再试、
+     以及如果他确实是本人该找谁。一个裸 403 在这里等于把人赶走。
+
+  ⚠️ 不说具体额度（「20 次/小时」）。说了等于告诉写脚本的人该把速率调到多少，
+     而对一个真人来说这个数字帮不上任何忙 —— 他要知道的是「等一小时」。
+  {% endcomment %}
+  <h1 class="text-2xl font-semibold">Too Many Sign-ups Just Now</h1>
+
+  <div class="card mt-6 border border-warning-fg/30 bg-warning-bg dark:border-warning-fg-dark/30 dark:bg-warning-bg-dark">
+    <p class="text-sm text-warning-fg dark:text-warning-fg-dark">
+      A lot of accounts have been created from this network in the last hour, so
+      we have paused new sign-ups from here for a while. Nothing you typed was
+      saved.
+    </p>
+  </div>
+
+  <p class="mt-6 text-sm text-ink-700 dark:text-ink-200">
+    Try again in an hour. If several of you are signing up together at an event,
+    ask whoever is running it to get in touch with the foundation — they can add
+    you directly, and they can have this limit lifted for the evening.
+  </p>
+
+  <p class="mt-6 text-sm text-ink-600 dark:text-ink-300">
+    Already have an account?
+    <a href="{% url 'accounts:login' %}" class="prose-link">Log in</a>
+  </p>
+{% endblock %}

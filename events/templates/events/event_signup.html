@@ -1,9 +1,9 @@
 {% extends "core/base.html" %}
-{% block title %}Sign up — {{ event.name }}{% endblock %}
+{% block title %}Sign Up — {{ event.name }}{% endblock %}
 {% block main_width %}max-w-2xl{% endblock %}
 
 {% block content %}
-  <h1 class="text-2xl font-semibold">Sign up</h1>
+  <h1 class="text-2xl font-semibold">Sign Up</h1>
   <p class="mt-1 text-sm text-ink-600 dark:text-ink-300">{{ event.name }}</p>
 
   {% if needs_consent %}
@@ -11,7 +11,7 @@
     ⚠️ 「邮箱或电话至少填一个」那句提示**不能丢**。丢了不报错，只是用户不知道
        为什么提交被拒 —— 而这个分支是整个志愿者路径上唯一的长表单。
     {% endcomment %}
-    <div class="card mt-6 border-warning-fg/30 bg-warning-bg dark:border-warning-fg-dark/30 dark:bg-warning-bg-dark">
+    <div class="card mt-6 border border-warning-fg/30 bg-warning-bg dark:border-warning-fg-dark/30 dark:bg-warning-bg-dark">
       <h2 class="text-lg font-semibold text-warning-fg dark:text-warning-fg-dark">
         This signup needs a guardian's consent
       </h2>
@@ -34,12 +34,11 @@
       {% comment %}成年人：同意那一段整段是 HiddenInput，交给通用渲染就行。{% endcomment %}
       {% include "core/components/form_fields.html" %}
     {% else %}
-      {% if form.non_field_errors %}
-        <div role="alert"
-             class="rounded-md border border-danger-fg/30 bg-danger-bg p-3 text-sm text-danger-fg dark:border-danger-fg-dark/30 dark:bg-danger-bg-dark dark:text-danger-fg-dark">
-          {% for error in form.non_field_errors %}<p>{{ error }}</p>{% endfor %}
-        </div>
-      {% endif %}
+      {% comment %}
+      ⚠️ 这一支拆开渲染字段（下面要套 fieldset），用不了 form_fields.html，
+         但整体错误要和别处**长得一样**，所以走同一个片段。
+      {% endcomment %}
+      {% include "core/components/_non_field_errors.html" %}
 
       {% comment %}
       选了紧急联系人之后，手填的那四格变灰不可填。

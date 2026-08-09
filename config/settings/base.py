@@ -65,6 +65,9 @@ INSTALLED_APPS = [
     'org',
     # events depends on both: Event -> Ministry, Participation -> Contact.
     'events',
+    # gallery depends on org (GalleryPhoto -> Ministry) and accounts
+    # (-> uploaded_by). Nothing depends on gallery, which is why it is last.
+    'gallery',
 ]
 
 # Set before the first migrate, while no user table exists yet — swapping this
@@ -169,6 +172,72 @@ NOVU_WORKFLOW = env("NOVU_WORKFLOW", "event-change")
 #    same thing is a second copy that nothing reads until the day it disagrees.
 LOGIN_URL = "/login/"
 
+# --- Google sign-in (prefill only) -------------------------------------------
+# The OAuth client id for the "Continue with Google" button on the registration
+# page. It fills three boxes in and grants nothing — see accounts/google.py.
+#
+# ⚠️ Empty by default, and empty means **the button is not drawn**. A deployment
+#    without a client id must not show a control that fails when pressed.
+#
+# ⚠️ The client id is not a secret (it is in the page source by design), and this
+#    flow needs no client *secret* at all — there is no code exchange, only a
+#    signed identity token that the server verifies.
+GOOGLE_OAUTH_CLIENT_ID = env("GOOGLE_OAUTH_CLIENT_ID", "")
+
+
+# --- Rate limiting ----------------------------------------------------------
+# Registration is the only write an anonymous stranger can do, and it writes two
+# rows each time. See core/ratelimit.py for what this buys and what it does not.
+#
+# ⚠️ The numbers are **generous on purpose**, and the reason is a real scenario
+#    rather than caution: forty volunteers signing up on a church hall's wifi at
+#    an onboarding evening are one IP address. A tight per-IP limit would refuse
+#    most of them and look exactly like a broken site. A script, meanwhile, wants
+#    thousands — so twenty an hour separates the two cases perfectly well, and
+#    anything tighter only breaks the good one.
+#
+# ⚠️ Both are environment variables so that a signup drive can raise them
+#    without a deploy, and core/ratelimit.py reads them per request rather than
+#    at import so the change takes effect on restart alone.
+REGISTRATION_RATELIMIT_PER_IP = env("REGISTRATION_RATELIMIT_PER_IP", "20/h")
+REGISTRATION_RATELIMIT_SITE = env("REGISTRATION_RATELIMIT_SITE", "100/h")
+
+# Where the client's address comes from. See core/ratelimit.py::client_ip — the
+# short version is that REMOTE_ADDR is the proxy in production, and trusting the
+# whole X-Forwarded-For header is worse than not limiting at all.
+RATELIMIT_IP_META_KEY = "core.ratelimit.client_ip"
+
+# ⚠️ Off here, on in prod.py. A development machine has no proxy in front of it,
+#    and a machine that trusts X-Forwarded-For with nothing in front of it will
+#    believe whatever a caller puts there.
+TRUST_PROXY_CLIENT_IP = env("TRUST_PROXY_CLIENT_IP", "False").lower() in {"1", "true", "yes"}
+
+
+# --- Caches -----------------------------------------------------------------
+# ⚠️ A **database** cache, and this is the one decision here that is not
+#    incidental. django-ratelimit counts in the cache, and Django's default cache
+#    is per-process local memory — so under gunicorn with four workers the limit
+#    is counted four times over and is quietly worth four times what it says.
+#    Nothing errors; the limit simply does not hold. A database cache is shared
+#    by every worker, needs no second service, and the write volume here is one
+#    row per registration attempt.
+#
+# ⚠️ The table is created by a **migration** (core/0004), not by a deploy step
+#    calling `createcachetable`. A step that can be forgotten, whose only symptom
+#    is a rate limit that raises on the registration page, is a step that will be
+#    forgotten. Renaming the table below without a new migration would leave the
+#    same hole.
+#
+# Redis instead is a Phase C3.4/C3.5 question and a change of two lines; nothing
+# here depends on which backend it is.
+CACHES = {
+    "default": {
+        "BACKEND": "django.core.cache.backends.db.DatabaseCache",
+        "LOCATION": "django_cache",
+    }
+}
+
+
 AUTH_PASSWORD_VALIDATORS = [
     {'NAME': 'django.contrib.auth.password_validation.UserAttributeSimilarityValidator'},
     {'NAME': 'django.contrib.auth.password_validation.MinimumLengthValidator'},
@@ -209,29 +278,62 @@ STATICFILES_DIRS = [BASE_DIR / 'static']
 
 
 # --- Uploaded files ---------------------------------------------------------
-# Event images, and nothing else so far.
+# Three kinds now: event images, gallery photos (Memories) and the front page's
+# picture/video. They have **three different lifecycles**, which is why they end
+# up in three different buckets rather than one — see STORAGES below.
 #
 # ⚠️ These deliberately do **not** live in the database. The backup is a
 #    pg_dump (C3.6), so anything in a column is in every backup forever — and
-#    the requirement for these is the opposite: they go away when the event
-#    ends and are in no backup at all. A BinaryField would have made that
+#    the requirement for event images is the opposite: they go away when the
+#    event ends and are in no backup at all. A BinaryField would have made that
 #    impossible to honour.
 #
 # ⚠️ The local filesystem is right for development and **wrong for Render**,
-#    whose disk is wiped on every deploy. Production points STORAGES["default"]
-#    at an object store (C3.5/C3.6). Until that is configured, "not in any
-#    backup" is a promise rather than a verified fact — said plainly because
-#    the local setup cannot demonstrate it either way.
-#
-# ⚠️ The image bucket must be a **different** bucket from the backup one. The
-#    backup bucket is private and full of minors' data; these have to be
-#    readable by every signed-in volunteer. One bucket cannot be both.
+#    whose disk is wiped on every deploy. prod.py points all three aliases at
+#    Cloudflare R2 (C3.5, 2026-08-06).
 MEDIA_URL = 'media/'
 MEDIA_ROOT = BASE_DIR / 'media'
 
 # The largest upload accepted before it is resized. Anything past this is
 # refused by the form rather than streamed to disk first.
 EVENT_IMAGE_MAX_UPLOAD_BYTES = 10 * 1024 * 1024
+
+
+# --- Where each kind of upload is stored -------------------------------------
+# ⚠️ **Four aliases, and the split is a requirement rather than tidiness.**
+#    Each one is a different answer to "who may read this" and "may a delete be
+#    undone", and no single bucket can hold two different answers. Decided
+#    2026-08-06 alongside the Memories page; the reasoning per alias:
+#
+#      default    Event images. Private — every signed-in volunteer may see
+#                 them, nobody else. ⚠️ Its bucket must have **versioning off**:
+#                 with it on, purge_event_images' delete is only a marker and
+#                 the old version is still there, while the console cheerfully
+#                 shows the object as deleted. "Gone after the event" would fail
+#                 in a way that looks like it succeeded.
+#
+#      memories   Gallery photos. Private, and its bucket **has versioning on**
+#                 — the exact opposite of `default`, which is the whole reason
+#                 it cannot share that bucket. These are the only files in the
+#                 system that can be neither regenerated nor restored from the
+#                 pg_dump, so an accidental delete is permanent without it.
+#
+#      public     The front page's picture and video. **Public**, because that
+#                 page is the one thing here that needs no login. Signing a URL
+#                 for content that is public by definition buys nothing and
+#                 costs the CDN cache on the largest file the site serves.
+#
+#      staticfiles  Built CSS/JS. Not an upload at all; whitenoise, from the repo.
+#
+# ⚠️ Development and the test suite keep all four on the local filesystem, so a
+#    test run reaches no network and needs no credentials. Only prod.py swaps
+#    them. Anything reading `storages["memories"]` therefore works in both.
+STORAGES = {
+    "default": {"BACKEND": "django.core.files.storage.FileSystemStorage"},
+    "memories": {"BACKEND": "django.core.files.storage.FileSystemStorage"},
+    "public": {"BACKEND": "django.core.files.storage.FileSystemStorage"},
+    "staticfiles": {"BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage"},
+}
 
 
 # --- Models -----------------------------------------------------------------

@@ -54,18 +54,17 @@
     {% endif %}
 
     {% comment %}
-    ⚠️ 两层压暗，不是装饰，是**可读性的唯一保障**。
+    两层压暗，不是装饰，是**可读性的唯一保障**。
 
-       白字压在一张没见过的照片上，遇到浅色区域就会完全读不出来 ——
-       而这张照片是基金会自己传的，内容不可预知。第一版只有一层温和的渐变，
-       拿一张带白色云团的测试图一试，经文中间那两行直接糊掉了。
+    白字压在一张没见过的照片上，遇到浅色区域就会完全读不出来 ——
+    而这张照片是基金会自己传的，内容不可预知。第一版只有一层温和的渐变，
+    拿一张带白色云团的测试图一试，经文中间那两行直接糊掉了。
 
-       所以：一层全屏的轻压暗（顶栏那几个字要读得清），
-       外加一层**集中在下三分之一**的强压暗（经文在那里）。
-       宁可照片暗一点，也不能有一行读不出来的字。
+    ⚠️ 具体那两层和它们的取舍**都写在片段里**，这里不抄第二份 ——
+       2026-08-06 起内页的背景照片也用同一份，而「两处一样」只有靠共用
+       才维持得住。所有 class 串和数值都在 `_hero_scrim.html`。
     {% endcomment %}
-    <div class="absolute inset-0 bg-gradient-to-b from-black/45 via-black/15 to-black/40"></div>
-    <div class="absolute inset-x-0 bottom-0 h-2/3 bg-gradient-to-t from-black/75 via-black/45 to-transparent"></div>
+    {% include "core/components/_hero_scrim.html" %}
 
     {% comment %}
     --- 顶栏 ---
@@ -85,16 +84,21 @@
     --- 经文 ---
     照 LV 那张截图排：正文在上、出处在下，整体居中偏下。
     ⚠️ 经文在前、章节在后（2026-08-05 定），和引用惯例一致。
+
+    入场（2026-08-06 加）：**从下方 24px 升到位，同时由透变实**，出处那一行晚 180ms。
+    ⚠️ 动画挂在**两个 `<p>` 各自身上**，不是挂在外面那个容器上 ——
+       挂容器的话两行只能一起动，错开 180ms 那件事就做不到了。
+    ⚠️ 几何和 reduced-motion 的退化都在 app.css 的 `.home-verse`，不在这里。
     {% endcomment %}
     {% if page.verse_text or page.verse_reference %}
       <div class="pointer-events-none absolute inset-x-0 bottom-[14vh] z-10 px-6 text-center">
         {% if page.verse_text %}
-          <p class="mx-auto max-w-3xl text-balance text-lg font-light leading-relaxed text-white [text-shadow:0_2px_12px_rgb(0_0_0/0.55)] sm:text-2xl">
+          <p class="home-verse mx-auto max-w-3xl text-balance text-lg font-light leading-relaxed text-white [text-shadow:0_2px_12px_rgb(0_0_0/0.55)] sm:text-2xl">
             {{ page.verse_text }}
           </p>
         {% endif %}
         {% if page.verse_reference %}
-          <p class="mt-6 text-xs tracking-[0.25em] text-white/85 [text-shadow:0_2px_10px_rgb(0_0_0/0.55)]">
+          <p class="home-verse-ref mt-6 text-xs tracking-[0.25em] text-white/85 [text-shadow:0_2px_10px_rgb(0_0_0/0.55)]">
             {{ page.verse_reference|upper }}
           </p>
         {% endif %}
@@ -108,5 +112,19 @@
     {% include "core/components/_site_menu.html" %}
 
   </div>
+
+  {% comment %}
+  飘着的羽毛（2026-08-06）。和 /events/ 共用同一个组件和同一段 JS。
+
+  ⚠️ 放在那个 `relative` 容器**外面**，是为了少一层可能出意外的祖先 ——
+     `position: fixed` 会被任何带 transform / filter / will-change 的祖先接管成
+     相对那个祖先定位，而那个容器里将来加什么谁也说不准。它是 fixed，
+     所以放在这里和放在里面看起来完全一样。
+
+  ⚠️ 传 `on_photo`：首页背后永远是一张压暗的照片，而首页**不跟随深色模式**，
+     `<html>` 上永远没有 `.dark` —— 靠深色模式那条规则的话，
+     首页会拿到给浅色页准备的那档硬边投影，压在暗照片上基本看不见。
+  {% endcomment %}
+  {% include "core/components/_feather_sky.html" with on_photo=True %}
 </body>
 </html>

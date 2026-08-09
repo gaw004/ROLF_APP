@@ -1,9 +1,0 @@
-{% comment %}
-首页菜单面板里的一项。参数：label、to（URL name）、i（第几项，从 0 开始）。
-
-`--i` 是这一项的序号，CSS 用它算 transition-delay —— 逐个入场那件事在样式表里，
-不在 JS 里。⚠️ 用 CSS 变量而不是给每一项写死一个延迟值：加一项的时候只要序号
-往下排，不用回来改样式。
-{% endcomment %}
-<a href="{% url to %}" style="--i: {{ i }}"
-   class="home-menu-link border-b border-ink-100 py-4 text-lg text-ink-900 hover:text-brand-700">{{ label }}</a>

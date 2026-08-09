@@ -26,50 +26,73 @@ event_list 的结果区。整页和 HTMX 片段渲染的是同一份 —— 视�
          已上传的图重新处理一遍。
       {% endcomment %}
       {% comment %}
-      ⚠️ 图**拉伸到卡片的自然高度**，不反过来把卡片撑高（2026-08-05 第三版）。
+      ⚠️ **2026-08-06 第四版：行高定死，图片壳的宽度取同一个变量**，于是所有卡片
+         等高、所有图片正方。上一版是反过来的（图跟着卡片的自然高度，宽度写死
+         110px），代价是没填地点的卡片配一张 110×90 的扁图 —— 那个代价现在没有了。
+         几何和为什么它经得起换字体，全写在 app.css 的 `.event-row` 那一段。
 
-         实测：一行详情的卡片自然高 90px，带地点那种 110px —— 本来就不一样。
-         上一版给整行加了 min-h-28，把矮的那张也撑到 112，等于改了「加图之前
-         每个活动占多高」这件事。这一版把最小高度去掉了。
+      ⚠️ 壳仍然是必需的：`self-stretch` 让它拿到行高，而它自己的内容高度是 0
+         （唯一的子元素绝对定位了），所以它不参与行高计算。把 self-stretch 直接
+         写在 <img> 上试过，整行会被图片的固有高度撑成 600px，方向正好反。
 
-      ⚠️ 壳是必需的，不是包着好看：`self-stretch` + `h-auto` 让它拿到行高
-         （也就是卡片的高度），而它自己的内容高度是 0 —— 唯一的子元素绝对定位了 ——
-         所以它不参与行高的计算。直接把 self-stretch 写在 <img> 上试过，
-         整行会被图片的固有高度撑成 600px，方向正好反。
+      ⚠️ 窄屏仍然是固定的 64×64 —— **那本来就是正方形**，而且窄屏上用等高方块会
+         吃掉近一半屏宽。
 
-      ⚠️ 宽度只能写死。CSS 没法让宽度跟着「兄弟元素决定的高度」走 ——
-         flex 行里主轴先于交叉轴解析，试过 aspect-ratio，壳的宽度直接塌成 0。
-         宽度取 **110px**（2026-08-05 改，原来是 96）：那是**带地点**那种卡片的
-         自然高度，所以那一类的图正好是正方形。
-      ⚠️ 代价是不带地点的卡片（90px 高）配的图变成 110 × 90，明显偏扁。
-         主动选的这一边 —— 两类卡片高度不同，不可能都是正方形。
-
-      圆角照你给的那张参考图量的：青色方块边长 572px、圆角 130px = **22.7%**，
-      和苹果图标那个约 22% 的比例对得上。按宽度算：96 × 22.5% ≈ 22px，
-      64 × 22.5% ≈ 14px。
+      圆角照参考图量的：青色方块边长 572px、圆角 130px = 22.7%，和苹果图标那个
+      约 22% 的比例对得上。84 × 22.5% ≈ 19px，64 × 22.5% ≈ 14px。
       {% endcomment %}
-      <li class="scroll-breathe flex items-stretch gap-6">
-        <div class="relative h-16 w-16 shrink-0 self-start sm:h-auto sm:w-[110px] sm:self-stretch">
-          <img class="event-thumb absolute inset-0 h-full w-full rounded-[14px] object-cover sm:rounded-[22px]"
+      {% comment %}
+      ⚠️ `--i` 是这一张卡的序号，逐个入场的延迟由它算（在 app.css 里，不在 JS 里）。
+         和菜单那一套用同一个变量名和同一个节奏。
+      {% endcomment %}
+      <li class="event-row scroll-breathe relative flex items-stretch gap-6"
+          style="--i: {{ forloop.counter0 }}">
+        {% comment %}
+        ⚠️ 这个 div 上**没有尺寸工具类**，是故意的。尺寸全在 app.css 的
+           `.event-row-thumb` 里 —— 因为 Tailwind 的 `w-16` 在 utilities 层，
+           会压掉那条 `width: var(--event-row-height)`，于是宽屏下图变成 64×112。
+           踩过一次，浏览器里量出来的。
+        {% endcomment %}
+        <div class="event-row-thumb relative shrink-0">
+          <img class="event-thumb absolute inset-0 h-full w-full rounded-[14px] object-cover sm:rounded-[19px]"
                src="{% if event.image %}{{ event.image.url }}{% else %}{% static 'core/img/event-default.webp' %}{% endif %}"
                alt="" loading="lazy" decoding="async">
         </div>
-        <div class="card min-w-0 flex-1">
-        <div class="flex flex-wrap items-baseline justify-between gap-2">
-          <a href="{% url 'events:event_detail' event.pk %}"
-             class="text-lg font-semibold prose-link">{{ event.name }}</a>
-          {% include "core/components/badge.html" with label=event.ministry.name tone="brand" %}
+        <div class="card flex min-w-0 flex-1 flex-col justify-center">
+          <div class="flex items-baseline justify-between gap-3">
+            {% comment %}
+            ⚠️ 活动名是 `<span>` 而不是 `<a>`（2026-08-06）：整行的链接是下面那一层，
+               一行只该有一个链接。
+
+            ⚠️ **窄屏两行，宽屏一行**，而不是一律一行。截断的唯一理由是保住宽屏那张
+               正方形图（行高定死，名字换行就把它撑破）—— 而**窄屏的缩略图是固定的
+               64×64，本来就是方的**，所以那里截断什么也换不来。
+               实测：390px 下一律一行会让 16 个活动里 13 个的名字被切掉，
+               而那一页正是志愿者最常用手机看的一页。
+            {% endcomment %}
+            <span class="event-name line-clamp-2 text-lg font-semibold sm:line-clamp-1">{{ event.name }}</span>
+            <span class="shrink-0">
+              {% include "core/components/badge.html" with label=event.ministry.name tone="brand" %}
+            </span>
+          </div>
+          <p class="mt-2 text-sm text-ink-600 dark:text-ink-300">
+            {{ event.start_time }} &ndash; {{ event.end_time }}
+            {% comment %}
+            ⚠️ 没填地点也**照样占一行**。留空的话这张卡矮一行，而行高是定死的 ——
+               矮下来的是文字、不是卡片，看起来就是下面空一块。说一句真话比留白好，
+               而且「地点还没定」对正在决定要不要报名的人是有用的信息。
+            {% endcomment %}
+            <br>{% if event.location %}{{ event.location }}{% else %}<span class="italic">Location to be announced</span>{% endif %}
+          </p>
         </div>
-        <p class="mt-2 text-sm text-ink-600 dark:text-ink-300">
-          {{ event.start_time }} &ndash; {{ event.end_time }}
-          {% if event.location %}<br>{{ event.location }}{% endif %}
-        </p>
-        </div>
+        <a href="{% url 'events:event_detail' event.pk %}" class="event-row-link">
+          <span class="sr-only">{{ event.name }}</span>
+        </a>
       </li>
     {% empty %}
       <li>
         {% url 'events:past_events' as past_url %}
-        {% include "core/components/empty.html" with message="Nothing is open for signup in this period. Try a wider date range, or look at what has already happened." action_label="Past events" action_href=past_url %}
+        {% include "core/components/empty.html" with message="Nothing is open for signup in this period. Try a wider date range, or look at what has already happened." action_label="Past Events" action_href=past_url %}
       </li>
     {% endfor %}
   </ul>

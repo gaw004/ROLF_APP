@@ -455,3 +455,112 @@ C2 改文案时红了两条，都不是代码坏了：
 
 改法是把它提成一个 annotation（`is_short`），`understaffed()` 反过来 filter 它。
 模板只问 `{% if role.is_short %}`，一处定义，两处使用。
+
+### C6.4 · 在 JS 里 toggle 一个 Tailwind class，那条 class 根本不存在
+
+iPad 那一页的 Check in / Check out 两个按钮，选中态第一版是这么写的：
+
+```js
+button.classList.toggle("bg-brand-600", on);
+button.classList.toggle("border-brand-600", on);
+```
+
+产物里 `border-brand-600` **一条规则都没有**：
+
+```
+$ grep -c "\.border-brand-600" static/css/app.css
+0
+```
+
+Tailwind 是**扫源码文本**生成 CSS 的。模板里出现过的 class 才会被生成，
+只活在 JS 字符串里的不会。`bg-brand-600` 侥幸有，是因为**别的模板**用过它 ——
+于是这个 bug 的表现是「三条里两条生效、一条不生效」，
+比三条全不生效难看出得多。
+
+⚠️ **而它不报错。** `classList.toggle` 加一个不存在的 class 是完全合法的操作，
+页面照常渲染、测试照常绿，只是那个按钮少了一圈边框 ——
+而「少一圈边框」没有任何人会去写测试。
+
+改法不是把 class 塞进 safelist，是**让 JS 别碰 class**：
+
+```html
+<button aria-pressed="false"
+        class="… aria-pressed:border-brand-600 aria-pressed:bg-brand-600 …">
+```
+```js
+button.setAttribute("aria-pressed", on ? "true" : "false");
+```
+
+class 的名字回到模板里（扫得到），JS 只改状态。
+
+> **一般形式，和 `AssetPathsComeFromTemplatesGuardTests` 那条守卫同源**：
+> **凡是构建期需要「看见」的字符串 —— 静态文件路径、Tailwind class ——
+> 都不能在 JS 里拼或藏。** 它们在开发时都工作，在产物里都消失，
+> 而两种消失都不报错。
+>
+> 上一条守卫是路径，这一条是 class 名。**下一次遇到「构建工具扫源码」的东西，
+> 先问一句：它扫得到我写的这个地方吗？**
+
+### C6.4 · 三个数字互相矛盾，而每一个单独看都合法
+
+iPad 那一页的倒计时，第一版是这么写的：
+
+```js
+countdown.textContent = `New code in ${Math.ceil(left / 1000)}s`;
+bar.style.width = `${Math.min(100, (left / REFRESH_MS) * 100)}%`;
+```
+
+而 `left` 是从服务端给的 `expires_at`（90 秒有效期）算出来的，`REFRESH_MS` 是 20 秒。
+于是屏幕上：
+
+| | |
+|---|---|
+| 文案说的 | 「还有 82 秒换新码」 —— 而实际 20 秒就换 |
+| 进度条量的 | `82/20 = 410%`，被 `Math.min` 夹到 100% |
+| 进度条画出来的 | 一根**七十秒纹丝不动**的满条 |
+
+**一句话说着一个数、量着另一个数、画出来第三个数。** 三个都不报错。
+
+⚠️ 这是**看屏幕才看出来的**，测试一条都没红 —— 因为每一个断言单独写出来都是对的：
+`expires_at` 是对的、`REFRESH_MS` 是对的、`Math.min` 也是对的。
+错的是把两个不同的量当成了同一个，而没有任何一条单元测试的形状能表达这件事。
+
+改法是不再引入第二个量：`lifetimeMs = expires_at - 收到它的时刻`，
+文案改成 `Code expires in Xs`。这样量的是**「屏幕上这张码还能不能用」**，
+而不是页面自己的实现细节。
+
+> **顺带修好了一个更要紧的东西。** 因为倒计时现在读的是绝对时刻，
+> iPad 息晚回来它会直接归零 —— 于是可以在归零时**把二维码盖掉**。
+> 而「死掉的码和活的长得一模一样」正是这个功能当天最可能出的事故，
+> 原来那个按自己节奏走的计时器**永远不会归零**，也就永远没有机会发现它。
+
+### C6.3 · 组件的默认 variant 是 secondary，而我在最该用 primary 的地方没写
+
+`core/components/button.html` 的默认变体是 **secondary**（白底描边）。
+扫码确认页的「Check in」是这一屏唯一要做的事，第一版没传 `variant`，
+于是它画得和旁边的「My Signups」一样重。
+
+⚠️ 同样是**看截图才看出来的**。`assertContains(response, "Check in")` 是绿的 ——
+按钮在，字也对，只是它没告诉任何人该按哪个。
+
+`button.html` 顶上那条「一屏最多一个 primary」的注释，防的是**多**写；
+这一次犯的是**少**写，而那条注释没提，因为默认值本身就是「不显眼」——
+而这一条值得单独记：**默认值安全，不等于默认值正确。**
+
+同一轮把拒绝页那个「去报名 / 去补资料」的按钮也改成了 primary：
+一个被拦下来的人最需要的就是「那我现在该做什么」。
+
+### C6.3 · 全站第一个手写的 radio，于是它是蓝的
+
+工种选择页是全站唯一一处模板里手写 `<input type="radio">` 的地方
+（别处的表单控件都由 Django 的 widget 渲染）。结果它用的是浏览器默认的**蓝色**，
+而全站主题色是紫的 —— 页面上唯一一个蓝东西，恰好是那一屏要人去点的那个。
+
+修法是往 `assets/app.css` 加一条 `accent-color`，
+⚠️ 挂在 `input[type=radio]` 上而**不是** `.field` 的后代 ——
+这是全站唯一一处故意不收进 `.field` 的规则，因为手写的那个 radio 不在 `.field` 里，
+而写两遍就会分叉。深色模式换 `brand-500`：`brand-600` 压在深色底上，
+选中和没选中隔一米看是同一个灰点。
+
+⚠️ 用 `accent-color` 而不是 `appearance:none` 自绘 —— 原生控件的键盘操作、
+读屏播报和手机上的点击热区都是白拿的。同 `.field select` 不自绘箭头那条判据。

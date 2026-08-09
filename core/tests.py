@@ -7,6 +7,7 @@ keeps reaching for when a rule has to hold everywhere and no linter enforces it
 
 import colorsys
 import datetime
+import os
 import re
 from pathlib import Path
 from unittest import mock
@@ -14,12 +15,14 @@ from unittest import mock
 from django.apps import apps
 from django.conf import settings
 from django.contrib.auth import get_user_model
+from django.contrib.staticfiles import finders
 from django.core.management import call_command
-from django.db import IntegrityError
+from django.db import IntegrityError, models
 from django.test import TestCase
 from django.urls import reverse
 
 from core.constraints import CONSTRAINT_FIELD
+from core.limits import LONG_TEXT
 from core.models import HomePage
 from core.palette import ramp_from, relative_luminance
 from core.querysets import DateRangeQuerySet
@@ -799,7 +802,7 @@ class ErrorPageTests(TestCase):
     def test_the_403_page_prints_the_reason_it_was_refused(self):
         from org.permissions import SCOPED_DENIAL
 
-        user = get_user_model().objects.create_user(username="nobody", password="x")
+        user = get_user_model().objects.create_user(email="nobody@example.com", password="x")
         self.client.force_login(user)
         response = self.client.get(reverse("events:event_create"))
         self.assertEqual(response.status_code, 403)
@@ -1043,6 +1046,1328 @@ class AlpineStaysUiOnlyGuardTests(TestCase):
             "maths belong on the server:\n" + "\n".join(offenders))
 
 
+class AssetPathsComeFromTemplatesGuardTests(TestCase):
+    """Lint-as-test: no static file path is ever written in JavaScript (2026-08-06).
+
+    Production serves static files through
+    `whitenoise.storage.CompressedManifestStaticFilesStorage`, which puts a
+    content hash into every filename — `feather-1.webp` is served as
+    `feather-1.<hash>.webp`. Only `{% static %}` knows the hashed name, and only
+    the template can call it.
+
+    ⚠️ This is on the list of failures this project keeps convicting itself for:
+       a path assembled in JS resolves perfectly in development and **404s on
+       every request after deploy**, with nothing in the console, because a
+       failed `new Image().src` raises nothing and logs nothing. The visible
+       symptom is a feature that silently stopped existing.
+
+    So the URLs travel from the template into a data attribute, and the script
+    only ever reads them back out. Written as an extension test rather than as
+    "no feather paths", because the trap belongs to static files in general —
+    the next person to hardcode one will not be doing it to a feather.
+
+    ⚠️ Comments are stripped first: this file's own explanation names the very
+       filenames it forbids, and so does the code it guards.
+    """
+
+    #: Any file extension that would only ever appear in an asset path.
+    ASSET = re.compile(r"\.(?:webp|png|jpe?g|svg|gif|avif|woff2?)\b", re.I)
+    LINE_COMMENT = re.compile(r"//.*$", re.M)
+    BLOCK_COMMENT = re.compile(r"/\*.*?\*/", re.S)
+
+    def test_no_javascript_source_hardcodes_an_asset_path(self):
+        root = Path(settings.BASE_DIR) / "assets" / "js"
+        offenders = []
+        for path in sorted(root.rglob("*.js")):
+            source = self.BLOCK_COMMENT.sub("", path.read_text())
+            source = self.LINE_COMMENT.sub("", source)
+            for number, line in enumerate(source.splitlines(), 1):
+                if self.ASSET.search(line):
+                    relative = path.relative_to(settings.BASE_DIR)
+                    offenders.append(f"{relative}:{number}: {line.strip()}")
+        self.assertEqual(
+            offenders,
+            [],
+            "Production hashes static filenames, so only {% static %} knows "
+            "them. Pass the URL in from the template:\n" + "\n".join(offenders),
+        )
+
+
+# Tags may wrap onto a second line, so these are matched against the whole
+# file rather than line by line; the line number is counted back from the offset.
+TEXTAREA_TAG = re.compile(r"<textarea\b", re.I)
+INPUT_TAG = re.compile(r"<input\b[^>]*>", re.I | re.S)
+INPUT_TYPE = re.compile(r'\btype\s*=\s*"([^"]*)"', re.I)
+#: Input types somebody types **prose** into. Deliberately an allowlist: `type`
+#: is optional in HTML and defaults to text, so "anything not on the exempt
+#: list" would be the wrong default — it flags nothing when the attribute is
+#: missing, which is exactly the case that matters.
+TYPED_TEXT_INPUTS = {"", "text", "email", "search", "url", "tel", "password"}
+
+
+class SelfHostedFontTests(TestCase):
+    """Jost is served by us, and every part of that has to hold together.
+
+    ⚠️ The failure this class exists for is a **deploy** failure, not a wrong
+       pixel. Production uses ManifestStaticFilesStorage, which parses `url()`
+       out of every collected stylesheet and looks the target up in STATIC_ROOT —
+       a path that does not resolve makes `collectstatic` raise and the deploy
+       stop. That is the same mechanism that forced the CSS sources out of
+       `static/` in the first place (see prod.py), so it has bitten this project
+       once already.
+    """
+
+    FONT_DIR = "core/static/core/fonts"
+
+    def test_the_font_files_are_in_the_repository(self):
+        root = Path(settings.BASE_DIR) / self.FONT_DIR
+        for name in ["jost-latin.woff2", "jost-latin-ext.woff2"]:
+            with self.subTest(file=name):
+                self.assertTrue((root / name).exists(), f"{name} is missing")
+
+    def test_the_licence_ships_with_the_font(self):
+        # ⚠️ Jost is OFL, and the OFL requires the licence to travel with the
+        #    font. Self-hosting a typeface without its licence text is the one
+        #    part of this that is not a matter of taste.
+        licence = Path(settings.BASE_DIR) / self.FONT_DIR / "OFL.txt"
+        self.assertTrue(licence.exists(), "OFL.txt is missing next to the font")
+        self.assertIn("SIL Open Font License", licence.read_text())
+
+    def test_every_font_url_in_the_built_css_resolves(self):
+        # ⭐ The deploy check, done here rather than at deploy time. Each url() is
+        #    resolved the way ManifestStaticFilesStorage will resolve it:
+        #    relative to the stylesheet's own place in the collected tree.
+        built = Path(settings.BASE_DIR) / "static" / "css" / "app.css"
+        if not built.exists():
+            self.skipTest("static/css/app.css is a build product; run npm run build")
+        broken = []
+        for url in re.findall(r"url\(\s*[\"']?([^\"')]+)", built.read_text()):
+            if url.startswith(("data:", "http:", "https:", "//")):
+                continue
+            # The stylesheet is collected to STATIC_ROOT/css/app.css, so a
+            # relative url() is resolved from STATIC_ROOT/css/ — which is exactly
+            # what normpath("css/" + url) gives.
+            target = os.path.normpath(os.path.join("css", url.split("?")[0]))
+            if finders.find(target) is None:
+                broken.append(f"{url} → {target}")
+        self.assertEqual(
+            broken, [],
+            "url() targets that collectstatic will not find — this is a failed "
+            "deploy, not a missing picture:\n" + "\n".join(broken))
+
+    def test_the_stack_still_falls_back_to_a_font_with_cjk(self):
+        # ⚠️ Jost has no CJK at all, and this system stores people's real names.
+        #    Dropping the system stack after it would send a Chinese name to
+        #    whatever the browser picks last.
+        source = (Path(settings.BASE_DIR) / "assets" / "app.css").read_text()
+        stack = re.search(r"--font-sans:(.*?);", source, re.S).group(1)
+        self.assertIn("Jost", stack)
+        self.assertIn("Noto Sans", stack)
+
+
+class HoverUnderlineTests(TestCase):
+    """The event-name underline is painted inside a **clipped** box.
+
+    ⚠️ This exists because of a failure that produced no error of any kind. The
+       underline is an `::after` on an element that carries `line-clamp-*`, and
+       that utility sets `overflow: hidden`. The first version positioned the line
+       at `bottom: -0.125rem` — outside the padding box, so it was clipped and
+       never painted. Every signal said it was fine: the rule was in the served
+       stylesheet, the selector matched, and the computed style reported
+       `visibility: visible`, `height: 1px` and the right colour. There was simply
+       nothing on the screen.
+
+       So the rule these tests encode is: **as long as the name is clamped, the
+       underline may not sit outside it.** Both halves are asserted, because
+       either one alone is meaningless — a negative offset is fine on an unclipped
+       element, and clamping is fine as long as nothing hangs outside.
+    """
+
+    def stylesheet(self):
+        return (Path(settings.BASE_DIR) / "assets" / "app.css").read_text()
+
+    def after_block(self):
+        match = re.search(r"\.event-name::after\s*\{(.*?)\n  \}", self.stylesheet(), re.S)
+        self.assertIsNotNone(match, ".event-name::after is gone from app.css")
+        # Comments carry the words "bottom: -0.125rem" as a warning; strip them.
+        return re.sub(r"/\*.*?\*/", "", match.group(1), flags=re.S)
+
+    def test_the_underline_never_hangs_outside_the_clipped_box(self):
+        offsets = re.findall(r"\b(top|bottom|left|right)\s*:\s*(-[\d.]+\w*)",
+                             self.after_block())
+        self.assertEqual(
+            offsets, [],
+            "The name is clamped, so `overflow: hidden` applies and a negative "
+            "offset means the underline is clipped away — visible in no way, and "
+            "reported by nothing:\n" + str(offsets))
+
+    def test_the_name_is_still_the_clamped_element(self):
+        # The reason the rule above exists. If the clamp ever moves off this
+        # element, a negative offset becomes harmless again and this pair of tests
+        # should be revisited rather than worked around.
+        for template in ["events/_event_list_results.html",
+                         "events/_past_events_results.html"]:
+            with self.subTest(template=template):
+                markup = (Path(settings.BASE_DIR) / "events" / "templates" / template).read_text()
+                name_element = re.search(r'<span class="event-name[^"]*"', markup)
+                self.assertIsNotNone(name_element, f"no .event-name in {template}")
+                self.assertIn("line-clamp", name_element.group(0))
+
+    def test_hovering_the_row_is_what_reveals_it(self):
+        # ⚠️ `.event-row:hover`, not `.event-name:hover`. The whole row is one link,
+        #    so an underline that only lit up under the text would make the rest of
+        #    the row look unclickable.
+        css = self.stylesheet()
+        self.assertIn(".event-row:hover .event-name::after", css)
+        self.assertIn(".event-row:focus-within .event-name::after", css)
+
+    def test_it_grows_from_the_left_and_retracts_to_the_right(self):
+        # The two transform-origins are the entire mechanism: one on the resting
+        # rule, the other on the hover rule. Equal origins would make it retract
+        # the way it arrived.
+        resting = self.after_block()
+        hover = re.search(
+            r"\.event-row:hover \.event-name::after,\s*"
+            r"\.event-row:focus-within \.event-name::after \{(.*?)\}",
+            self.stylesheet(), re.S).group(1)
+        self.assertIn("transform-origin: right", resting)
+        self.assertIn("transform-origin: left", hover)
+
+
+class HomeVerseEntranceTests(TestCase):
+    """The verse rises into place on load (2026-08-06).
+
+    ⚠️ A CSS `animation`, not a `transition`: there is no state change to drive a
+       transition, and what is wanted is "play once when the page appears" —
+       which is exactly the line between the two. So it replays on refresh with
+       no JavaScript involved.
+    """
+
+    def stylesheet(self):
+        return (Path(settings.BASE_DIR) / "assets" / "app.css").read_text()
+
+    def test_both_lines_carry_the_animation(self):
+        # ⚠️ The verse block is only rendered when there is a verse. A fresh
+        #    database has none, so without this the assertion would be checking
+        #    an empty page and passing for the wrong reason.
+        page_row = HomePage.load()
+        page_row.verse_text = "Whatever you do, work at it with all your heart."
+        page_row.verse_reference = "Colossians 3:23"
+        page_row.save(update_fields=["verse_text", "verse_reference"])
+        page = self.client.get(reverse("home")).content.decode()
+        # Two classes, not one on the container: the reference line comes in
+        # 180ms later, and a container can only move as a block.
+        self.assertIn("home-verse", page)
+        self.assertIn("home-verse-ref", page)
+
+    def test_the_animation_fills_backwards(self):
+        # ⚠️ Without `both`, the element sits at its *final* state until the
+        #    animation starts — so the first frame flashes the finished text and
+        #    then jumps back to the start. That flash is worse than no animation.
+        css = self.stylesheet()
+        block = re.search(r"\.home-verse \{(.*?)\}", css, re.S).group(1)
+        self.assertIn("both", block)
+
+    def test_it_only_animates_opacity_and_transform(self):
+        # Anything else (top, margin, height) relayouts the block every frame,
+        # which is visible stutter on a phone.
+        keyframes = re.search(r"@keyframes home-verse-rise \{(.*?)\n  \}",
+                              self.stylesheet(), re.S).group(1)
+        properties = set(re.findall(r"^\s*([a-z-]+):", keyframes, re.M))
+        self.assertEqual(properties, {"opacity", "transform"})
+
+    def test_reduced_motion_still_shows_the_text(self):
+        """⭐ The one that matters. Turning the animation off must not turn the
+        text off — and with a backwards-filling animation, "off" is not the same
+        as "back to normal", so both properties are written back explicitly.
+        """
+        css = self.stylesheet()
+        block = re.search(
+            r"@media \(prefers-reduced-motion: reduce\) \{\s*\.home-verse,\s*"
+            r"\.home-verse-ref \{(.*?)\}", css, re.S)
+        self.assertIsNotNone(block, "no reduced-motion fallback for the verse")
+        self.assertIn("opacity: 1", block.group(1))
+        self.assertIn("transform: none", block.group(1))
+
+
+def _composite(top, alpha, bottom):
+    """`top` at `alpha` over `bottom`, both #rrggbb, result #rrggbb."""
+    def channels(colour):
+        colour = colour.lstrip("#")
+        return [int(colour[i:i + 2], 16) for i in (0, 2, 4)]
+    mixed = [round(t * alpha + b * (1 - alpha))
+             for t, b in zip(channels(top), channels(bottom))]
+    return "#" + "".join(f"{c:02x}" for c in mixed)
+
+
+class GlassMaterialContrastTests(TestCase):
+    """The dark-mode background and glass, and what they cost in contrast.
+
+    🔴 **This class changed shape on 2026-08-06 and the change is a loss.** It used
+       to check the whole stack against a **pure white photograph** — the worst
+       possible upload — and everything passed with room to spare. It can no longer
+       promise that, because the darkening was deliberately made lighter for how it
+       looks, and "looks right" won over "provably safe on any photo".
+
+       What it can still do, and now does:
+         · pin the scrim so nobody weakens it further by accident;
+         · pin the two figures that were knowingly accepted, so a regression trips;
+         · keep the structural rules that have each already been broken once.
+
+    ⚠️ The three darkenings this one spot has had, because the third is a step back
+       to something like the first and that is easy to mistake for a mistake:
+         ① flat `ink-950 / 0.68`     — additive, crushed the photo's tones
+         ② the photo's own `filter`  — multiplicative, kept the texture, contrast
+                                       passed everywhere (worst photo 6.68:1),
+                                       **but looked too dark**
+         ③ the home page's scrim     — current. Looks right; the numbers below are
+                                       the price.
+       ② was better on every measurement and still lost. Worth remembering that a
+       change which improves every metric can still be the wrong change.
+    """
+
+    #: The two text colours that end up on those two surfaces.
+    OUTSIDE_CARD_TEXT = "ink-50"    # page headings, counts, section intros
+    INSIDE_CARD_TEXT = "ink-100"    # body text on a card
+
+    #: What was accepted on 2026-08-06, measured against a **pure white** photo at
+    #: the brightest point of the scrim (33% down). Both are below AA.
+    #: ⚠️ These are not targets. They are a record of a decision, so that making
+    #:    things worse is a test failure rather than a silent drift.
+    ACCEPTED_WORST_OUTSIDE = 1.73
+    ACCEPTED_WORST_INSIDE = 4.11
+
+    #: And on the photo actually uploaded today, same point.
+    CURRENT_PHOTO_OUTSIDE = 4.03
+
+    def scrim(self):
+        """The two gradient layers, as [[stop alphas], [stop alphas]].
+
+        Parsed out of the shared component so that changing the markup is what
+        this test sees. ⚠️ Read from **one** file on purpose — the whole reason the
+        scrim became a component is that the home page and the inner pages have to
+        stay identical, and two copies of a gradient drift.
+        """
+        markup = (Path(settings.BASE_DIR) / "core" / "templates" / "core"
+                  / "components" / "_hero_scrim.html").read_text()
+        layers = []
+        for line in markup.splitlines():
+            if "bg-gradient-to-" not in line:
+                continue
+            stops = re.findall(r"(?:from|via|to)-black/(\d+)", line)
+            if "to-transparent" in line:
+                stops.append("0")
+            layers.append([int(one) / 100 for one in stops])
+        self.assertEqual(len(layers), 2,
+                         "the scrim no longer has exactly two layers")
+        return layers
+
+    def background_under(self, photo, position):
+        """The page background at `position` (0 top, 1 bottom) over a grey `photo`.
+
+        ⚠️ Both layers are black, so they **multiply**: each one keeps `1 - alpha`
+           of what is under it. Adding the alphas instead would overstate the
+           darkening badly at the bottom (0.40 + 0.75 is not 0.85 of black).
+        """
+        full, lower = self.scrim()
+
+        def along(stops, t):
+            # Evenly spaced stops, linear between them — what the browser does for
+            # `from-* via-* to-*` with no explicit positions.
+            span = 1 / (len(stops) - 1)
+            index = min(int(t / span), len(stops) - 2)
+            local = (t - index * span) / span
+            return stops[index] + (stops[index + 1] - stops[index]) * local
+
+        alpha_full = along(full, position)
+        # The second layer covers the bottom two thirds and runs bottom-to-top,
+        # so its stop list is reversed relative to screen order.
+        if position < 1 / 3:
+            alpha_lower = 0.0
+        else:
+            alpha_lower = along(list(reversed(lower)), (position - 1 / 3) / (2 / 3))
+
+        value = photo * (1 - alpha_full) * (1 - alpha_lower)
+        return "#" + f"{max(0, min(255, round(value * 255))):02x}" * 3
+
+    def card_alpha(self):
+        """How much black the card lays over that."""
+        found = re.search(
+            r"background-color:\s*rgb\(0 0 0 / ([\d.]+)\)",
+            self.declarations(".dark.has-hero .card:not(.border)"))
+        self.assertIsNotNone(found, "the glass no longer sets a translucent black")
+        return float(found.group(1))
+
+    def declarations(self, selector):
+        """One rule's declarations, **with its comments stripped**.
+
+        🔴 The stripping is not tidiness. `test_the_blur_is_not_what_keeps_the_text
+           _readable` asserts the glass rule contains `background-color`, and the
+           rule's own comment contains the words "background-color" — so deleting
+           the actual declaration left that guard green. Found by breaking it on
+           purpose. Every one of these greps has to read the CSS, not the prose
+           about the CSS.
+        """
+        css = re.sub(r"/\*.*?\*/", "",
+                     (Path(settings.BASE_DIR) / "assets" / "app.css").read_text(),
+                     flags=re.S)
+        block = re.search(re.escape(selector) + r" \{(.*?)\n  \}", css, re.S)
+        self.assertIsNotNone(block, f"`{selector}` is gone from app.css")
+        return block.group(1)
+
+    def worst_point(self, photo=1.0):
+        """(position, outside ratio, inside ratio) where the scrim is thinnest."""
+        palette = _theme_colors()
+        readings = []
+        for step in range(101):
+            position = step / 100
+            page = self.background_under(photo, position)
+            surface = _composite("#000000", self.card_alpha(), page)
+            readings.append((
+                position,
+                contrast_ratio(palette[self.OUTSIDE_CARD_TEXT], page),
+                contrast_ratio(palette[self.INSIDE_CARD_TEXT], surface),
+            ))
+        return min(readings, key=lambda one: one[1])
+
+    def test_the_accepted_worst_case_does_not_get_worse(self):
+        """⚠️ Not an AA check — **both of these numbers fail AA**, by decision.
+
+        The point is that they were 1.73:1 and 4.11:1 when that decision was made,
+        and anything that lowers them further is a change nobody chose. A thinner
+        scrim, a more transparent card, or a lighter body-text colour all show up
+        here.
+        """
+        position, outside, inside = self.worst_point()
+        self.assertGreaterEqual(
+            outside, self.ACCEPTED_WORST_OUTSIDE - 0.01,
+            f"At {position:.0%} down, a white photograph now leaves text that is "
+            f"not on a card at {outside:.2f}:1, below the {self.ACCEPTED_WORST_OUTSIDE}:1 "
+            f"that was accepted. Nothing about the scrim was supposed to get "
+            f"weaker — see _hero_scrim.html.")
+        self.assertGreaterEqual(
+            inside, self.ACCEPTED_WORST_INSIDE - 0.01,
+            f"Body text on a card is down to {inside:.2f}:1 under a white "
+            f"photograph, below the {self.ACCEPTED_WORST_INSIDE}:1 on record. The card's "
+            f"own black is the second half of this — raise it rather than the scrim "
+            f"if the cards are what changed.")
+
+    def test_the_gap_is_recorded_where_somebody_will_look(self):
+        """⚠️ A guard that only lives in a test file protects the code and nobody's
+        expectations. The person who swaps the front-page photo will not run this
+        suite; they will read the known gaps.
+        """
+        for path, needle in [
+            (Path("docs") / "planning" / "phase-c.md", "hero"),
+            (Path("core") / "templates" / "core" / "components" / "_hero_scrim.html",
+             "4.02"),
+        ]:
+            with self.subTest(path=str(path)):
+                text = (Path(settings.BASE_DIR) / path).read_text()
+                self.assertIn(needle.lower(), text.lower())
+
+    # Every template directory an {% include %} in this app could resolve against.
+    _TEMPLATE_ROOTS = ("core/templates", "events/templates", "gallery/templates",
+                       "accounts/templates", "org/templates", "contact/templates")
+
+    def _reaches_scrim(self, path, seen=None):
+        """Does this template reach _hero_scrim.html, directly or through includes?
+
+        ⚠️ Follows the chain rather than looking for the literal string. The
+        backdrop was pulled out into its own fragment on 2026-08-09, which put
+        one {% include %} between base.html and the scrim — and a guard that
+        only greps the top file reads that refactor as "the scrim was removed".
+        """
+        seen = seen if seen is not None else set()
+        if path in seen:
+            return False
+        seen.add(path)
+        full = Path(settings.BASE_DIR) / path
+        if not full.exists():
+            return False
+        markup = full.read_text()
+        if "core/components/_hero_scrim.html" in markup:
+            return True
+        for name in re.findall(r"""\{%\s*include\s+["']([^"']+)["']""", markup):
+            for root in self._TEMPLATE_ROOTS:
+                if self._reaches_scrim(Path(root) / name, seen):
+                    return True
+        return False
+
+    def test_the_scrim_is_shared_and_not_copied(self):
+        """⚠️ The requirement was "the same intensity as the home page". Two copies
+        of a gradient are the one way to guarantee that stops being true.
+
+        ⚠️ `wall.html` is in this list as of 2026-08-09. It was the one page that
+        actually held a second copy — and it said so in its own comment ("两处要是
+        分叉了…") while this guard, which exists to catch exactly that, never
+        looked at it. A guard that omits the known offender is decoration.
+        """
+        for path in [Path("core") / "templates" / "core" / "home.html",
+                     Path("core") / "templates" / "core" / "base.html",
+                     Path("gallery") / "templates" / "gallery" / "wall.html"]:
+            with self.subTest(path=str(path)):
+                markup = (Path(settings.BASE_DIR) / path).read_text()
+                self.assertTrue(self._reaches_scrim(path),
+                                "this page does not use the shared scrim")
+                body = re.sub(r"\{%\s*comment\s*%\}.*?\{%\s*endcomment\s*%\}",
+                              "", markup, flags=re.S)
+                self.assertNotIn(
+                    "bg-gradient-to-b from-black", body,
+                    "this page hand-writes the scrim gradients instead of "
+                    "including the component, so the two will drift apart")
+
+    def test_the_dark_backdrop_is_shared_and_not_copied(self):
+        """The layer *under* the scrim — the fixed, darkened photo itself.
+
+        ⚠️ Same failure as the scrim and a real one: base.html and wall.html held
+        it verbatim twice, so "内页和 Memories 的深色底不一样" was one edit away
+        at all times, with both copies looking correct on their own.
+        """
+        for path in [Path("core") / "templates" / "core" / "base.html",
+                     Path("gallery") / "templates" / "gallery" / "wall.html"]:
+            with self.subTest(path=str(path)):
+                markup = (Path(settings.BASE_DIR) / path).read_text()
+                self.assertIn("core/components/_hero_backdrop.html", markup,
+                              "this page does not use the shared dark backdrop")
+                body = re.sub(r"\{%\s*comment\s*%\}.*?\{%\s*endcomment\s*%\}",
+                              "", markup, flags=re.S)
+                self.assertNotIn(
+                    "site_hero_image.url", body,
+                    "this page hand-writes the backdrop instead of including "
+                    "the fragment, so the two will drift apart")
+
+    def test_nothing_darkens_the_photo_with_a_filter_any_more(self):
+        # ⚠️ Reintroducing one would double up with the scrim: the page would go
+        #    very dark and the fix would look like "the scrim is too strong".
+        css = re.sub(r"/\*.*?\*/", "",
+                     (Path(settings.BASE_DIR) / "assets" / "app.css").read_text(),
+                     flags=re.S)
+        self.assertNotIn("site-hero-photo", css,
+                         "the photo is being filtered in CSS again; the darkening "
+                         "belongs to _hero_scrim.html and only there")
+
+    def test_the_blur_is_not_what_keeps_the_text_readable(self):
+        """⚠️ `backdrop-filter` is ignored outright by browsers that do not
+        support it, so the contrast may not depend on it. Darkening is the solid
+        translucent black; the blur is only there to look like glass.
+        """
+        self.assertIn(
+            "background-color",
+            self.declarations(".dark.has-hero .card:not(.border)"),
+            "the glass leans on backdrop-filter alone for its darkening")
+
+    def hairline(self):
+        """The `::after` that draws the 1px lit edge."""
+        return self.declarations(".dark.has-hero .card:not(.border)::after")
+
+    def test_the_hairline_does_not_change_the_box(self):
+        """⚠️ An absolutely-positioned overlay, never a `border`. The event rows
+        have a fixed height, so a 1px border would shrink the content box by 2px
+        and could clip the text — and the box would differ between light and dark
+        by a pixel.
+        """
+        self.assertIn("position: absolute", self.hairline())
+        for selector in [".dark.has-hero .card:not(.border)",
+                         ".dark.has-hero .card:not(.border)::after"]:
+            self.assertNotRegex(self.declarations(selector), r"\n\s*border:")
+
+    def test_the_hairline_does_not_nest_a_backdrop_filter_inside_the_glass(self):
+        """🔴 The edge was first written as `backdrop-filter: brightness(2.4)`, so
+        that it would sample the photo and be bright where the photo was bright.
+        **It cannot work in this position, and it failed silently.**
+
+        The card has its own `backdrop-filter`, which makes the card a *backdrop
+        root*. The edge sits inside that root, so its backdrop is **empty** —
+        `brightness()` multiplied nothing, and the edge came out **darker** than
+        the card. Measured, on the same gradient and the same ring:
+
+            card with backdrop-filter    → edge 12 darker (dim end), 46 (bright end)
+            card without backdrop-filter → edge 44 brighter,          138
+
+        ⚠️ This is the second time a `backdrop-filter` has been defeated by an
+           ancestor rather than by its own declaration (the first was an `opacity`
+           keyframe — see EventRowEntranceTests). Both were invisible in the
+           stylesheet and both needed a screenshot to find. That is the reason
+           this guard is written as a **ban** rather than as a check that it works:
+           there is no way to tell from the CSS alone that it does.
+
+        ⚠️ And the multiplication was the wrong material anyway: dark photo × 2.4
+           is still dark, so the edge would vanish exactly where it was already
+           invisible — which is the complaint that started this. A translucent
+           white still tracks the backdrop in absolute brightness (81 over the
+           dim parts of the photo, 145 over the bright ones) and stays visible on
+           both.
+        """
+        block = self.hairline()
+        self.assertNotIn(
+            "backdrop-filter", block,
+            "the card's lit edge is inside the card's own backdrop root, so a "
+            "backdrop-filter there samples nothing and comes out darker, not "
+            "brighter. Use a translucent white instead.")
+        self.assertRegex(
+            block, r"rgb\(255 255 255 / [\d.]+\)",
+            "the lit edge is no longer a translucent white, so it has nothing "
+            "left that makes it follow the brightness of the photo behind it")
+
+    def test_no_glass_rule_hardcodes_a_brand_colour(self):
+        """🔴 This shipped. The glass primary button was written as
+        `background-color: rgb(31 117 148 / 0.75)` — the literal value of
+        `--color-brand-600` in this stylesheet.
+
+        But the brand palette is **derived from the front-page photo** (D26) and
+        written as `--color-brand-*` by `_appearance.html`. A literal takes the
+        button out of the theme: with a photo that derives warm sand (#806856),
+        every button in dark mode went back to the default teal (#1f7594) — and
+        light mode stayed correct, so it was wrong in exactly one mode.
+
+        ⚠️ Alpha over a custom property needs
+           `color-mix(in srgb, var(--color-brand-N) X%, transparent)`, not a
+           hand-expanded `rgb()`.
+        """
+        css = re.sub(r"/\*.*?\*/", "",
+                     (Path(settings.BASE_DIR) / "assets" / "app.css").read_text(),
+                     flags=re.S)
+        palette = _theme_colors()
+        brand = {name: value for name, value in palette.items()
+                 if name.startswith("brand-")}
+        glass = "\n".join(body for selector, body
+                           in re.findall(r"([^{}]+?)\{([^{}]*?)\}", css, re.S)
+                           if "has-hero" in selector)
+        for name, hex_value in brand.items():
+            channels = tuple(int(hex_value.lstrip("#")[i:i + 2], 16) for i in (0, 2, 4))
+            for literal in (hex_value, "rgb(%d %d %d" % channels,
+                            "rgb(%d, %d, %d" % channels):
+                with self.subTest(token=name, literal=literal):
+                    self.assertNotIn(
+                        literal, glass,
+                        f"a dark-mode rule hardcodes {name} as `{literal}`, which "
+                        f"takes it out of the palette derived from the photo. Use "
+                        f"color-mix() over var(--color-{name}).")
+
+    def test_the_primary_button_is_not_glass(self):
+        """🔴 It was, and at **2.71:1**.
+
+        The contrast I checked before shipping it was *white* text on that glass
+        (6.51:1). This button does not use white text in dark mode — button.html
+        sets `dark:text-ink-950`, near-black, because the solid dark-mode fill is
+        the lighter `brand-500`. I measured the colour a primary button ought to
+        have rather than the colour this one has.
+
+        ⚠️ Changing it to white text would also have worked (6.75:1). It is solid
+           instead because a primary button is the one thing on the screen telling
+           somebody what to do, and it should not have a readability margin worth
+           discussing.
+        """
+        css = re.sub(r"/\*.*?\*/", "",
+                     (Path(settings.BASE_DIR) / "assets" / "app.css").read_text(),
+                     flags=re.S)
+        for selector, body in re.findall(r"([^{}]+?)\{([^{}]*?)\}", css, re.S):
+            if "has-hero" not in selector or "btn-primary" not in selector:
+                continue
+            with self.subTest(selector=selector.strip()):
+                self.assertNotIn(
+                    "backdrop-filter", body,
+                    "the primary button is glass again. Its dark-mode text is "
+                    "ink-950, so a translucent fill puts it near 2.7:1.")
+
+    def test_alert_boxes_are_not_glass(self):
+        # A notice that shows the photograph through it has been demoted to
+        # decoration. They are excluded by the `border` marker the alert boxes
+        # already carry — see BorderlessCardTests.
+        # ⚠️ Via declarations(), so the comments are gone: this file *talks* about
+        #    `:not(.border)` in several places, and a grep over the raw text would
+        #    be satisfied by the prose long after the rule itself had changed.
+        self.declarations(".dark.has-hero .card:not(.border)")
+        self.declarations(".dark.has-hero .card:not(.border)::after")
+
+
+class CardShadowIsNotClippedTests(TestCase):
+    """Nothing above a card may clip, because the shadow is outside the card.
+
+    🔴 The bug: `.event-row` had `overflow: hidden` to keep content inside the fixed
+       row height. Measured geometry says why that was wrong —
+
+           row   864 x 112 at x=528  → right edge 1392
+           card  756 x 112 at x=636  → right edge 1392
+
+       the card's top, bottom and right edges **coincide with the row's**. So the
+       row clipped the card's drop shadow on three sides, leaving it only in the
+       gap on the left. Worse at the corners: the clip line cuts across the corner
+       curve, so the shadow that falls outside the rounded corner but inside the
+       row box survives as a **dark wedge** on each corner. Measured below the
+       card: 248/248/248 (the page colour — no shadow at all) before, 201/212/222
+       after.
+
+    ⚠️ An element's own `overflow` does not clip its own `box-shadow`; only an
+       **ancestor's** does. So the fix is to move the clip down onto the card,
+       which keeps the content clipped and lets the shadow paint.
+
+    ⭐ Third time this shape has cost something: **which element a declaration sits
+       on decides what it breaks, and reading the declaration never shows it.** The
+       other two were `backdrop-filter` (killed by an ancestor's opacity animation,
+       then by the card being its own backdrop root).
+
+    ⚠️ Past Events is the same rule with the opposite placement — there the `<li>`
+       **is** the card, so the clip belongs on it. Both are checked below.
+    """
+
+    def rules(self):
+        css = re.sub(r"/\*.*?\*/", "",
+                     (Path(settings.BASE_DIR) / "assets" / "app.css").read_text(),
+                     flags=re.S)
+        return re.findall(r"([^{}]+?)\{([^{}]*?)\}", css, re.S)
+
+    def declarations_for(self, selector):
+        return "\n".join(body for sel, body in self.rules()
+                          if selector in {one.strip() for one in sel.split(",")})
+
+    def test_the_row_does_not_clip_the_card_it_contains(self):
+        self.assertNotRegex(
+            self.declarations_for(".event-row"), r"overflow:\s*hidden",
+            "`.event-row` is the card's ancestor and its box coincides with the "
+            "card's on three sides, so clipping here cuts the card's shadow off "
+            "and leaves a dark wedge on every corner. Put the clip on "
+            "`.event-row > .card` instead.")
+
+    def test_something_still_clips_the_fixed_height(self):
+        # ⚠️ The pair matters: dropping the clip entirely would let a long title
+        #    spill out of the fixed row height, which is the thing the row height
+        #    exists to prevent.
+        for selector in [".event-row > .card", ".event-row-past"]:
+            with self.subTest(selector=selector):
+                self.assertRegex(
+                    self.declarations_for(selector), r"overflow:\s*hidden",
+                    f"nothing clips `{selector}` any more, so content longer than "
+                    f"the fixed row height will spill out of it")
+
+
+class EventThumbnailIsStructurallySquareTests(TestCase):
+    """The thumbnail's width and height must come from **one** variable.
+
+    🔴 This geometry has been wrong three separate times, always the same way: the
+       image stopped being square, and nobody noticed by looking — it took
+       measuring in a browser. Once the width came from a Tailwind utility that
+       silently beat the stylesheet (64×112). Once it was pinned to the card's
+       natural height, which had two values. Once it was pinned to the other one.
+
+    🔴 And then it happened a **fourth** time, in the change that shrank the
+       thumbnail: `width` and `height` were both rewritten as the literal
+       `5.25rem`. That looks fine and is square today, but "two numbers that
+       happen to match" is precisely the state the variable existed to leave
+       behind — and this test did not exist to catch it.
+
+    ⚠️ So the guard is not "is it square". It is **"is squareness structural"** —
+       one custom property feeding both sides, which cannot diverge.
+    """
+
+    def declarations(self, selector):
+        """Every declaration for `selector`, from **all** of its rules.
+
+        ⚠️ `.event-row-thumb` has more than one rule (the radius and the overflow
+           live apart from the sizes, and the sizes are inside a media query), so
+           a `re.search` for the first block reads a rule that never mentions
+           width. The stylesheet already records this exact mistake happening to
+           `.event-row`; making it again one file over is why this reads all of
+           them and concatenates.
+        ⚠️ Comments stripped first — a comment contains no braces, so a `[^{}]`
+           selector pattern otherwise swallows the whole comment above the rule.
+        """
+        css = re.sub(r"/\*.*?\*/", "",
+                     (Path(settings.BASE_DIR) / "assets" / "app.css").read_text(),
+                     flags=re.S)
+        blocks = [body for sel, body in re.findall(r"([^{}]+?)\{([^{}]*?)\}", css, re.S)
+                  if selector in {one.strip() for one in sel.split(",")}]
+        self.assertTrue(blocks, f"`{selector}` is gone from app.css")
+        return "\n".join(blocks)
+
+    def test_both_sides_read_the_same_variable(self):
+        block = self.declarations(".event-row-thumb")
+        sides = dict(re.findall(r"(width|height):\s*([^;]+);", block))
+        self.assertEqual(set(sides), {"width", "height"},
+                         "the thumbnail no longer sets both of its sides here")
+        variables = {re.search(r"var\((--[\w-]+)\)", value) for value in sides.values()}
+        self.assertNotIn(
+            None, variables,
+            f"The thumbnail's sides are written as literals ({sides}), so nothing "
+            f"stops them from drifting apart. Square has to come from one "
+            f"variable used twice — that is what this rule's comment promises.")
+        self.assertEqual(
+            len({found.group(1) for found in variables}), 1,
+            f"width and height read two *different* variables ({sides}), which is "
+            f"the same failure as two literals with an extra step")
+
+    def test_the_template_sets_no_size_of_its_own(self):
+        # ⚠️ Tailwind's utilities layer beats the components layer, so a stray
+        #    `w-16` in the template silently wins over this stylesheet. That is
+        #    exactly how the 64×112 version happened.
+        markup = (Path(settings.BASE_DIR) / "events" / "templates" / "events"
+                  / "_event_list_results.html").read_text()
+        thumb = re.search(r'class="([^"]*event-row-thumb[^"]*)"', markup)
+        self.assertIsNotNone(thumb, "the thumbnail lost its `event-row-thumb` hook")
+        for utility in re.findall(r"(?:^|\s)((?:sm:)?[wh]-\S+)", thumb.group(1)):
+            self.fail(
+                f"`{utility}` sizes the thumbnail from the template. Tailwind's "
+                f"utilities layer outranks the components layer, so this wins over "
+                f"app.css and the image stops being square — move it into the "
+                f"stylesheet with the rest of the geometry.")
+
+
+class EventRowEntranceTests(TestCase):
+    """Cards come in one after another, like the menu items (2026-08-06).
+
+    🔴 The reason this class exists is one line in the stylesheet: the entrance
+       must animate `translate`, **never** `transform`. These same `<li>` elements
+       carry `scroll-breathe`, and the scroll-inertia JS writes
+       `style.transform` on them every frame. Two things writing one property is
+       the pattern app.css already convicted once — "whoever writes last wins, and
+       that depends on frame timing". `translate` is a separate property that
+       *composes* with `transform`, so the two coexist instead of fighting.
+
+       Measured rather than assumed: with the entrance at its start (translate
+       12px) and an inline `transform` of 7px applied at the same time, the row
+       ends up displaced by both, and finishing the entrance moves it exactly
+       12px while the 7px stays.
+    """
+
+    def stylesheet(self):
+        return (Path(settings.BASE_DIR) / "assets" / "app.css").read_text()
+
+    def keyframes(self):
+        return re.search(r"@keyframes event-row-in \{(.*?)\n  \}",
+                         self.stylesheet(), re.S).group(1)
+
+    def rules(self):
+        """(selector, body) for every rule, comments removed.
+
+        ⚠️ Comments **must** come out first. A CSS comment contains no braces, so
+           a `[^{}]*` selector pattern happily swallows the whole 30-line comment
+           block above a rule — which is how the first version of this reported a
+           paragraph of Chinese prose as a selector.
+        """
+        css = re.sub(r"/\*.*?\*/", "", self.stylesheet(), flags=re.S)
+        return re.findall(r"([^{}]+?)\{([^{}]*?)\}", css, re.S)
+
+    def entrance_rules(self):
+        """Every rule that applies the entrance, as (selector, body).
+
+        ⚠️ Matched by "the body mentions `event-row-in`" rather than by a
+           hard-coded selector. The selector has already moved once (off the row
+           and onto its children, see the test below) and a guard keyed to the old
+           one goes quietly vacuous instead of failing.
+        """
+        found = [(selector, body) for selector, body in self.rules()
+                 if "event-row-in" in body and "animation" in body]
+        self.assertTrue(found, "nothing applies the entrance animation any more")
+        return found
+
+    def entrance_selectors(self):
+        return {one.strip()
+                for selector, _ in self.entrance_rules()
+                for one in selector.split(",") if one.strip()}
+
+    def entrance_blocks(self):
+        return [body for _, body in self.entrance_rules()]
+
+    def test_the_animation_is_not_on_an_ancestor_of_the_glass(self):
+        """🔴 The bug this exists for: **the entrance silently switched the glass
+        off on the whole Events page**, and neither rule looked wrong.
+
+        `event-row-in` fades `opacity`. An element with an animated `opacity`
+        becomes a *backdrop root*, which permanently disables `backdrop-filter` on
+        everything inside it — not just during the animation. So while the
+        animation sat on the `<li class="event-row">`, the `.card` inside it had a
+        `backdrop-filter` that never did anything. Proved by rendering with
+        `backdrop-filter: none` forced: **0 pixels changed**. After moving the
+        animation onto the card itself: 27,294 pixels changed.
+
+        ⚠️ The card animating its *own* opacity is fine — `backdrop-filter`
+           applies before the element's own opacity. It is only *ancestors* that
+           destroy it. That distinction is the whole rule, and it is the reason
+           the fix was "move it down one level" rather than "drop the fade".
+
+        ⚠️ Past Events is not affected and must not be "fixed" to match: there the
+           `<li>` **is** the card, so the animation is already on the glass itself.
+        """
+        for selector in self.entrance_selectors():
+            with self.subTest(selector=selector):
+                self.assertNotEqual(
+                    selector, ".event-row",
+                    "The entrance fades opacity, and an animated opacity on the row "
+                    "makes it a backdrop root — which kills the `backdrop-filter` on "
+                    "the card inside it for good. Put the animation on "
+                    "`.event-row > .card` and `.event-row > .event-row-thumb`.")
+
+    def test_the_entrance_never_touches_transform(self):
+        properties = set(re.findall(r"^\s*([a-z-]+):", self.keyframes(), re.M))
+        self.assertNotIn(
+            "transform", properties,
+            "The scroll-inertia JS writes `transform` on these same rows. Use "
+            "`translate`, which composes with it instead of overwriting it.")
+        self.assertEqual(properties, {"opacity", "translate"})
+
+    def test_the_rows_still_carry_the_scroll_inertia_class(self):
+        # The reason the rule above exists. If `scroll-breathe` ever leaves these
+        # rows, `transform` becomes free again and this pair should be revisited
+        # rather than worked around.
+        for template in ["events/_event_list_results.html",
+                         "events/_past_events_results.html"]:
+            with self.subTest(template=template):
+                markup = (Path(settings.BASE_DIR) / "events" / "templates"
+                          / template).read_text()
+                row = re.search(r'<li class="event-row[^"]*"', markup).group(0)
+                self.assertIn("scroll-breathe", row)
+
+    def test_every_row_is_numbered(self):
+        # Without `--i` the whole list shares one delay and arrives as a block.
+        for template in ["events/_event_list_results.html",
+                         "events/_past_events_results.html"]:
+            with self.subTest(template=template):
+                markup = (Path(settings.BASE_DIR) / "events" / "templates"
+                          / template).read_text()
+                self.assertIn("--i: {{ forloop.counter0 }}", markup)
+
+    def test_the_delay_is_capped(self):
+        """⚠️ A page holds 20 cards. Uncapped, the last waits 1.05s — and every
+        card past the tenth is off screen anyway, so the only thing the extra
+        delay buys is a screenful of still-fading blanks for somebody who scrolls
+        straight down.
+        """
+        self.assertTrue(
+            any(re.search(r"animation-delay:\s*calc\(min\(", b)
+                for b in self.entrance_blocks()),
+            "the entrance delay is not capped — a 20-card page would end with a "
+            "1.05s wait on cards that are off screen anyway")
+
+    def test_reduced_motion_clears_the_delay_and_not_just_the_duration(self):
+        """⭐ The subtle one. The global reduced-motion reset in this file caps
+        `animation-duration`, but **not** `animation-delay` — so on its own it
+        would leave a card invisible for up to half a second and then flash it
+        into place. That is a worse experience than the animation it was meant to
+        remove. `animation: none` is the shorthand, so it resets the delay too.
+        """
+        # ⚠️ Keyed to "a reduced-motion block that names the same elements the
+        #    entrance is applied to", not to a literal selector — the selector has
+        #    moved once already.
+        css = re.sub(r"/\*.*?\*/", "", self.stylesheet(), flags=re.S)
+        reset = set()
+        for selector, body in re.findall(
+                r"@media \(prefers-reduced-motion: reduce\) \{\s*([^{}]+?)\{([^{}]*?)\}",
+                css, re.S):
+            # ⚠️ Only the rows. There are other reduced-motion resets in this file
+            #    and they legitimately reset `transform` instead of `translate` —
+            #    the row pair is the one that has to use `translate`, because
+            #    `scroll-breathe` owns `transform` on these elements.
+            if "event-row" not in selector or "animation: none" not in body:
+                continue
+            self.assertIn("opacity: 1", body)
+            self.assertIn("translate: none", body)
+            reset.update(one.strip() for one in selector.split(",") if one.strip())
+        self.assertTrue(
+            reset,
+            "the reduced-motion fallback caps the duration but never resets the "
+            "delay — a card would stay invisible for up to half a second and then "
+            "flash into place, which is worse than the animation it removes")
+        # ⚠️ **Every** selector the entrance is applied to has to be in that reset.
+        #    Missing one leaves that one element blank-then-flashing while the rest
+        #    of the row is already in place — and the thumbnail was very nearly
+        #    exactly that, because it only became a separate animated element when
+        #    the animation moved off the row.
+        self.assertLessEqual(self.entrance_selectors(), reset)
+
+
+class NativeControlsFollowTheThemeTests(TestCase):
+    """`color-scheme`, which is the only handle we have on the OS's own popups.
+
+    ⚠️ A `<select>`'s open list is drawn by the operating system, not the page —
+       CSS cannot reach its background, its highlight or its corners, and
+       `<option>` colours are ignored outright on macOS. What `color-scheme` does
+       is tell the browser which way the page is painted, so the OS draws that
+       popup (and the date picker, and the scrollbars) to match instead of
+       defaulting to light on a dark page.
+
+    ⚠️ Keyed off `.dark`, not `prefers-color-scheme`: the theme here is manually
+       overridable, and this has to agree with what the page **actually** looks
+       like rather than with the system preference.
+    """
+
+    def stylesheet(self):
+        return (Path(settings.BASE_DIR) / "assets" / "app.css").read_text()
+
+    def test_both_directions_are_declared(self):
+        css = self.stylesheet()
+        self.assertRegex(css, r"html \{[^}]*color-scheme:\s*light")
+        self.assertRegex(css, r"html\.dark \{[^}]*color-scheme:\s*dark")
+
+    def test_it_does_not_follow_the_system_preference_directly(self):
+        # A `@media (prefers-color-scheme: dark) { color-scheme: dark }` would
+        # disagree with the page whenever somebody used the theme toggle.
+        css = self.stylesheet()
+        for block in re.findall(r"@media \(prefers-color-scheme[^{]*\{(.*?)\n  \}", css, re.S):
+            self.assertNotIn("color-scheme", block)
+
+
+class BorderlessCardTests(TestCase):
+    """Cards have no border line (2026-08-06). Two things had to move with that.
+
+    ⚠️ The shadow **must** get stronger at the same time, and this is not taste: a
+       white card on an `ink-50` page is nearly the same colour, so with the old
+       `0 1px 2px / 5%` shadow and no line the cards would simply stop reading as
+       objects — several blocks of content on one page merging into a wash.
+
+    ⚠️ And the alert boxes were `.card` plus a `border-<colour>` utility, which
+       sets colour only: their **width** came from `.card`. Removing it took their
+       outline away too, so each of them now carries an explicit `border`. That is
+       the regression this class is really guarding — a new alert box copied from
+       the old pattern would come out with no outline at all, and nothing would say
+       so.
+    """
+
+    def stylesheet(self):
+        return (Path(settings.BASE_DIR) / "assets" / "app.css").read_text()
+
+    def card_block(self):
+        return re.search(r"\n  \.card \{(.*?)\n  \}", self.stylesheet(), re.S).group(1)
+
+    def test_the_card_has_no_border(self):
+        self.assertNotRegex(self.card_block(), r"\bborder(-width)?\s*:")
+
+    def test_the_card_still_casts_a_shadow_in_light_mode(self):
+        # Without the border, this is the only thing separating a white card from
+        # a near-white page.
+        self.assertIn("box-shadow", self.card_block())
+
+    def test_the_table_container_keeps_its_border(self):
+        # Decided explicitly, and the opposite of the cards: a table's row lines
+        # need an outer frame to close them off.
+        block = re.search(r"\.table-wrap \{(.*?)\n  \}", self.stylesheet(), re.S).group(1)
+        self.assertIn("border:", block)
+
+    def test_every_coloured_alert_box_states_its_own_border_width(self):
+        offenders = []
+        for relative, source in project_template_files():
+            for number, line in enumerate(_blank_out_comments(source).splitlines(), 1):
+                for classes in re.findall(r'class="(card[^"]*)"', line):
+                    coloured = re.search(r"\bborder-(warning|danger|info|success)", classes)
+                    # ⚠️ Not `\sborder\s`: these class strings contain template tags,
+                    #    so a bare `border` can sit directly after `%}` with no
+                    #    space. The first version of this guard used whitespace as
+                    #    the boundary and reported a box that was already correct.
+                    bare = re.search(r"(?<![\w-])border(?![\w-])", classes)
+                    if coloured and not bare:
+                        offenders.append(f"{relative}:{number}: {classes[:70]}")
+        self.assertEqual(
+            offenders, [],
+            "`border-<colour>` sets the colour only — the width used to come from "
+            "`.card`, and cards no longer have one. Add a bare `border`, or this "
+            "box has no outline at all:\n" + "\n".join(offenders))
+
+
+class FilterSearchAlignmentTests(TestCase):
+    """The search box lines up with the row of controls under it, structurally.
+
+    ⚠️ It cannot be a fixed width. "Level with Clear" is a different number on
+       each page — measured at 642px on Events and 790px on the management list,
+       because that page has an extra `Generate report` button. A pixel value
+       would be wrong on one of them, and wrong again the next time a button
+       label changes.
+
+       `width: fit-content` on a column wrapper sizes it to its widest child (the
+       controls row), so the search stretches to exactly that. Nothing is written
+       down, and it follows the buttons on its own.
+    """
+
+    def markup(self):
+        return (Path(settings.BASE_DIR) / "events" / "templates" / "events"
+                / "_period_filter.html").read_text()
+
+    def test_the_wrapper_sizes_itself_to_the_controls_row(self):
+        self.assertIn("w-fit", self.markup())
+
+    def test_the_wrapper_cannot_push_the_page_sideways(self):
+        # ⚠️ `fit-content` resolves to max-content, and the controls row unwrapped
+        #    is wider than a phone. Without this cap the whole page scrolls
+        #    sideways at 375px — the same bug this row caused once before.
+        wrapper = re.search(r'class="flex w-fit ([^"]*)"', self.markup()).group(0)
+        self.assertIn("max-w-full", wrapper)
+
+    def test_the_search_box_does_not_span_the_whole_card(self):
+        # `basis-full` was the first attempt and it reached the card's edge.
+        markup = _blank_out_comments(self.markup())
+        search_line = next(line for line in markup.splitlines() if "period.q" in line)
+        self.assertNotIn("basis-full", search_line)
+        self.assertNotIn("w-full", search_line)
+
+
+class ReportPanelExitsTests(TestCase):
+    """The panel's two exits sit in its title row, outside the scrolling area.
+
+    ⚠️ The rule they obey has not changed since 2026-08-05: an exit you can only
+       reach by scrolling to the bottom of a scrolling panel is not an exit. They
+       moved from a bar under the panel to the title row — still outside the
+       scroller, and now nearer where the eye lands.
+    """
+
+    def panel(self):
+        return (Path(settings.BASE_DIR) / "events" / "templates" / "events"
+                / "_report_panel.html").read_text()
+
+    def test_the_exits_come_before_the_scrolling_area(self):
+        markup = self.panel()
+        exits = markup.index("View full report")
+        scroller = markup.index("overflow-y-auto")
+        self.assertLess(
+            exits, scroller,
+            "The exits are inside or after the scrolling area — an exit you have "
+            "to scroll to find is not an exit.")
+
+    def test_they_are_in_the_same_row_as_the_heading(self):
+        markup = self.panel()
+        heading = markup.index(">Report</h2>")
+        exits = markup.index("View full report")
+        between = markup[heading:exits]
+        # Nothing but the wrapper div for the links may sit between them.
+        self.assertNotIn("</div>", between.replace('<div class="flex shrink-0', ""))
+
+    def test_the_labels_cannot_wrap_mid_phrase(self):
+        # The panel is a fixed 24rem on wide screens. "View full report →"
+        # breaking after "full" would read as two separate links.
+        markup = self.panel()
+        for label in ["View full report", "Save as PDF"]:
+            with self.subTest(label=label):
+                anchor = markup[markup.index("prose-link", markup.index(label) - 200):]
+                self.assertIn("whitespace-nowrap", anchor[:40])
+
+
+class FaviconTests(TestCase):
+    """There was no favicon at all until 2026-08-06 — the tab showed a globe."""
+
+    def test_the_icons_exist_and_are_square(self):
+        from PIL import Image
+
+        root = Path(settings.BASE_DIR) / "core" / "static" / "core" / "img"
+        expected = {"favicon-16.png": 16, "favicon-32.png": 32,
+                    "favicon-48.png": 48, "apple-touch-icon.png": 180}
+        for name, size in expected.items():
+            with self.subTest(icon=name):
+                path = root / name
+                self.assertTrue(path.exists(), f"{name} is missing")
+                self.assertEqual(Image.open(path).size, (size, size))
+
+    def test_every_page_declares_them(self):
+        # Declared in base.html, so one assertion covers the whole site.
+        response = self.client.get(reverse("accounts:login"))
+        for name in ["favicon-32.png", "apple-touch-icon.png"]:
+            self.assertContains(response, name)
+
+
+class SiteMenuTests(TestCase):
+    """The menu's entries and its two admin headings (2026-08-06).
+
+    ⚠️ Built as data in core/context_processors.py rather than as branches in the
+       template, because the entrance animation numbers each entry and a hidden
+       branch used to leave a hole in the numbering. These tests read the data,
+       so a section added without a heading, or a heading shown to the wrong
+       account, fails here rather than being noticed in a screenshot.
+    """
+
+    def menu(self, user=None):
+        # ⚠️ Two different pages, because the login page **redirects** a signed-in
+        #    visitor away and a redirect carries no context at all. Anything that
+        #    renders for the account in question will do; the menu is on every
+        #    page by construction, which is the thing being relied on.
+        if user is None:
+            return self.client.get(reverse("accounts:login")).context["site_menu"]
+        self.client.force_login(user)
+        return self.client.get(reverse("accounts:profile")).context["site_menu"]
+
+    def labels(self, menu):
+        return [item.get("label") or item.get("heading") for item in menu]
+
+    def headings(self, menu):
+        return [item["heading"] for item in menu if item.get("heading")]
+
+    def volunteer(self):
+        from accounts.services import register_account
+
+        return register_account(
+            email="mei@example.com", password="a-good-long-password",
+            legal_last_name="Mei")
+
+    def test_a_stranger_sees_only_the_public_entries(self):
+        self.assertEqual(
+            self.labels(self.menu()),
+            ["Events", "Past Events", "Log In", "Register"])
+
+    def test_an_ordinary_volunteer_gets_no_admin_heading(self):
+        # ⭐ The one that matters most: a heading called "Ministry admin" drawn
+        #    for somebody who is not one tells them a page exists that will 403.
+        self.assertEqual(self.headings(self.menu(self.volunteer())), [])
+
+    def test_a_ministry_admin_gets_the_ministry_heading_only(self):
+        from org.models import Ministry, MinistryRole
+
+        user = self.volunteer()
+        pantry = Ministry.objects.create(code="food_pantry", name="Food Pantry")
+        MinistryRole.objects.create(contact=user.contact, ministry=pantry)
+        menu = self.menu(user)
+        self.assertEqual(self.headings(menu), ["Ministry Admin"])
+        self.assertIn("Events I Manage", self.labels(menu))
+
+    def test_a_foundation_admin_gets_the_foundation_heading_only(self):
+        from org.permissions import foundation_admin_group
+
+        user = self.volunteer()
+        user.groups.add(foundation_admin_group())
+        menu = self.menu(get_user_model().objects.get(pk=user.pk))
+        self.assertEqual(self.headings(menu), ["Foundation Admin"])
+        self.assertIn("All Events", self.labels(menu))
+        self.assertIn("Ministry Admins", self.labels(menu))
+
+    def test_somebody_with_both_hats_gets_both_headings_in_order(self):
+        # ⭐ The whole reason the headings exist: one person, two kinds of
+        #    authority, and the pages under each mean different things.
+        from org.models import Ministry, MinistryRole
+        from org.permissions import foundation_admin_group
+
+        user = self.volunteer()
+        pantry = Ministry.objects.create(code="food_pantry", name="Food Pantry")
+        MinistryRole.objects.create(contact=user.contact, ministry=pantry)
+        user.groups.add(foundation_admin_group())
+        menu = self.menu(get_user_model().objects.get(pk=user.pk))
+        self.assertEqual(self.headings(menu), ["Ministry Admin", "Foundation Admin"])
+
+    def test_the_foundation_entry_asks_for_the_foundation_wide_view(self):
+        # ⚠️ Without ?scope=all, somebody who also runs a ministry would follow a
+        #    link labelled "All Events" onto a page showing only their own.
+        from org.permissions import foundation_admin_group
+
+        user = self.volunteer()
+        user.groups.add(foundation_admin_group())
+        menu = self.menu(get_user_model().objects.get(pk=user.pk))
+        entry = next(i for i in menu if i.get("label") == "All Events")
+        self.assertIn("scope=all", entry["url"])
+
+    def test_the_admin_site_is_its_own_section_not_a_tier(self):
+        # is_staff is a different axis from the two ministry tiers, so filing it
+        # under either would state something untrue about who holds it.
+        user = self.volunteer()
+        user.is_staff = True
+        user.save(update_fields=["is_staff"])
+        menu = self.menu(user)
+        self.assertEqual(self.headings(menu), ["Staff"])
+        self.assertIn("Admin Site", self.labels(menu))
+
+    def test_every_entry_is_numbered_without_a_gap(self):
+        # ⚠️ The reason this moved out of the template. `--i` drives each entry's
+        #    transition-delay, and a hidden branch used to skip a number: one
+        #    entry waits an extra beat for nothing and the stagger goes lumpy.
+        #    Nothing errors, which is why it is asserted rather than watched.
+        from org.permissions import foundation_admin_group
+
+        user = self.volunteer()
+        user.groups.add(foundation_admin_group())
+        user.is_staff = True
+        user.save(update_fields=["is_staff"])
+        self.client.force_login(get_user_model().objects.get(pk=user.pk))
+        page = self.client.get(reverse("accounts:profile")).content.decode()
+        numbers = [int(n) for n in re.findall(r"--i: (\d+)", page)]
+        self.assertEqual(numbers, list(range(len(numbers))))
+
+
+class TextInputsComeFromFormsGuardTests(TestCase):
+    """Free-text boxes go through a Form, so core/limits.py is enough.
+
+    ⚠️ This guard is what makes that sentence true rather than true-for-now.
+       The caps in core/limits.py are declared on models and forms; a
+       ``<textarea>`` written straight into a template has no cap at all,
+       accepts a pasted document, and **nothing about it looks wrong** — the
+       page renders, the value saves, and the column quietly holds a megabyte.
+       There is no error to notice, which is the only kind of gap worth a guard.
+
+    ⚠️ Scoped to boxes somebody types **text** into, and that scope is the whole
+       claim. `type="number"` is exempt because its bound is not a length:
+       _attendance_row.html hand-writes one (deliberately — one input per row
+       beats a form per row) and `HoursForm.hours` is what refuses 9999999,
+       through `max_digits`. Widening this guard to cover it would be asking a
+       length rule to police an arithmetic one, and the fix it demanded would
+       make that page worse.
+    """
+
+    def test_no_hand_written_text_inputs(self):
+        offenders = []
+        for relative, source in project_template_files():
+            blanked = _blank_out_comments(source)
+            found = [(m.start(), "<textarea>") for m in TEXTAREA_TAG.finditer(blanked)]
+            for match in INPUT_TAG.finditer(blanked):
+                kind = INPUT_TYPE.search(match.group(0))
+                kind = kind.group(1).strip().lower() if kind else ""
+                if kind in TYPED_TEXT_INPUTS:
+                    found.append((match.start(), f'<input type="{kind}">'))
+            for offset, what in sorted(found):
+                line = blanked.count("\n", 0, offset) + 1
+                offenders.append(f"{relative}:{line}: {what}")
+        self.assertEqual(
+            offenders, [],
+            "Free-text boxes are rendered by a Form so that core/limits.py "
+            "applies to them. Put the field on the form rather than in the "
+            "template:\n" + "\n".join(offenders))
+
+
+class TextLengthLimitTests(TestCase):
+    """The caps in core/limits.py, checked where they are actually enforced.
+
+    ⚠️ Checked through **forms**, not through ``full_clean()``. A
+       ``TextField(max_length=…)`` adds no model validator in Django 5.2 and
+       the Postgres column stays ``text`` — the cap arrives via
+       ``TextField.formfield()``. A test that asserted on the model would pass
+       against a cap that no submitted page respects, or fail against one that
+       every page does. core/limits.py's docstring spells the layers out.
+    """
+
+    def test_the_event_form_refuses_a_description_past_the_cap(self):
+        from events.forms import EventForm
+
+        form = EventForm(user=get_user_model()(), data={"description": "x" * (LONG_TEXT + 1)})
+        self.assertIn("description", form.errors)
+
+    def test_the_event_form_accepts_a_description_at_the_cap(self):
+        # The boundary in the other direction: a cap that is off by one is a cap
+        # that refuses the longest legitimate value, and nobody would guess why.
+        from events.forms import EventForm
+
+        form = EventForm(user=get_user_model()(), data={"description": "x" * LONG_TEXT})
+        self.assertNotIn("description", form.errors)
+
+    def test_the_notify_form_and_its_column_agree(self):
+        # ⭐ The one pair that could drift: NotifyForm is a plain Form, so its
+        #    cap is a second declaration of the same number.
+        from events.forms import NotifyForm
+        from events.models import EventNotification
+
+        self.assertEqual(
+            NotifyForm().fields["message"].max_length,
+            EventNotification._meta.get_field("message").max_length)
+
+    def test_every_text_field_we_wrote_has_a_cap(self):
+        # Walked rather than listed, so a TextField added tomorrow is covered.
+        # Historical models are excluded: simple-history copies the field it was
+        # given, so a cap on the original is a cap on the copy.
+        offenders = []
+        for model in apps.get_models():
+            if model._meta.app_label not in OUR_APPS:
+                continue
+            if model.__name__.startswith("Historical"):
+                continue
+            for field in model._meta.get_fields():
+                if isinstance(field, models.TextField) and field.max_length is None:
+                    offenders.append(f"{model._meta.label}.{field.name}")
+        self.assertEqual(
+            offenders, [],
+            "An uncapped text box accepts a pasted document. Give it a cap from "
+            "core/limits.py:\n" + "\n".join(offenders))
+
+
 class HomePageTests(TestCase):
     """The public front page (D25).
 
@@ -1060,7 +2385,7 @@ class HomePageTests(TestCase):
     def test_a_signed_in_visitor_sees_the_same_page(self):
         # Not a router: everybody gets the picture. What changes is one word in
         # the corner and which entries the menu offers.
-        user = get_user_model().objects.create_user(username="v", password="x")
+        user = get_user_model().objects.create_user(email="v@example.com", password="x")
         self.client.force_login(user)
         response = self.client.get(reverse("home"))
         self.assertEqual(response.status_code, 200)
@@ -1072,7 +2397,7 @@ class HomePageTests(TestCase):
         self.assertIn(reverse("accounts:register"), page)
 
     def test_the_menu_offers_the_volunteer_pages_once_signed_in(self):
-        user = get_user_model().objects.create_user(username="v", password="x")
+        user = get_user_model().objects.create_user(email="v@example.com", password="x")
         self.client.force_login(user)
         page = self.client.get(reverse("home")).content.decode()
         self.assertIn(reverse("events:my_participations"), page)
@@ -1096,7 +2421,7 @@ class HomePageTests(TestCase):
         self.assertEqual(self.client.get(reverse("home")).status_code, 200)
 
     def test_the_logo_in_the_app_shell_points_here(self):
-        user = get_user_model().objects.create_user(username="v", password="x")
+        user = get_user_model().objects.create_user(email="v@example.com", password="x")
         self.client.force_login(user)
         page = self.client.get(reverse("events:event_list")).content.decode()
         self.assertIn(f'href="{reverse("home")}"', page)
@@ -1249,3 +2574,169 @@ class AppearanceContextTests(TestCase):
         """
         self.client.get(reverse("home"))
         self.assertEqual(HomePage.objects.count(), 0)
+
+class SiteMenuShapeTests(TestCase):
+    """Two things about the menu that are easy to get wrong and never raise."""
+
+    def setUp(self):
+        # ⚠️ `is_staff`, not a ministry role: the Admin Site entry hangs off
+        #    that axis alone, and it is neither of the two ministry tiers.
+        self.user = get_user_model().objects.create_user(
+            email="staff@example.com", password="a-good-long-password",
+            is_staff=True)
+        self.client.force_login(self.user)
+
+    def test_the_admin_site_opens_in_a_new_tab(self):
+        """⚠️ The only entry in this menu that leaves this interface, and the
+        only one that gets `target`. Somebody opens the Django admin to look
+        something up **while** in the middle of whatever brought them here;
+        replacing the tab throws that away, and the way back is the browser's
+        Back button through a page that may have been a POST.
+        """
+        page = self.client.get(reverse("home")).content.decode()
+        entry = page[page.index('href="/admin/"'):]
+        self.assertIn('target="_blank"', entry[:200])
+        self.assertIn('rel="noopener"', entry[:200])
+
+    def test_no_other_menu_entry_opens_in_a_new_tab(self):
+        """The rest are pages of this site. Opening those in new tabs would
+        just accumulate them, and a link that behaves differently from its
+        neighbours for no visible reason is worse than either behaviour."""
+        page = self.client.get(reverse("home")).content.decode()
+        menu = page[page.index('class="home-menu'):]
+        self.assertEqual(menu.count('target="_blank"'), 1)
+
+    def test_the_menu_panel_has_a_dark_pair_for_everything_it_paints(self):
+        """⚠️ 2026-08-08: the panel was a hardcoded `bg-white`, so in dark mode
+        it was one white slab. Changing the background is not enough on its own
+        — the text, the hover colour, the dividers and the headings all had to
+        gain a dark step with it, and **missing any one of them shows up as
+        "this bit is hard to read", never as an error**.
+        """
+        page = self.client.get(reverse("home")).content.decode()
+        # ⚠️ Sliced from the panel's opening tag, not from `aria-label` —
+        #    `class` is written before it, so anchoring on the label would cut
+        #    off most of what this test reads.
+        menu = page[page.index('class="home-menu'):]
+        # ⚠️ The panel's own background is **not** in this list: it moved into
+        #    the stylesheet, and the test below says why it had to.
+        for expected in ["dark:text-ink-300",    # the close button
+                         "dark:text-ink-100",    # the links
+                         "dark:border-ink-700"]:  # the dividers under them
+            with self.subTest(rule=expected):
+                self.assertIn(expected, menu)
+
+    def test_the_headings_and_their_rule_have_a_dark_step_too(self):
+        """The heading colour and the line above it live in app.css rather than
+        on the tag, so they are checked there. ⚠️ Leaving the rule at ink-200
+        would draw a bright line across a dark panel — more prominent than the
+        two groups it separates."""
+        css = Path("assets/app.css").read_text()
+        block = css[css.index("  .dark .home-menu-heading {"):]
+        self.assertIn("border-top-color: var(--color-ink-700);", block[:220])
+        self.assertIn("color: var(--color-ink-300);", block[:220])
+
+    def test_the_front_page_needs_no_exception_for_any_of_this(self):
+        """⚠️ Worth pinning down because it looks like an oversight. The front
+        page never carries `.dark` — it is a full-bleed photograph with white
+        type and deliberately does not follow the theme — so every `dark:` step
+        above simply never matches there, and the menu stays white on that page
+        without a single rule saying so."""
+        page = self.client.get(reverse("home")).content.decode()
+        self.assertIn('<html lang="en" class="h-full">', page)
+
+
+class SharedFragmentGuardTests(TestCase):
+    """Fragments that exist because the same markup was written twice.
+
+    ⚠️ These are all the same shape of bug and it is worth naming: a second copy
+    never *breaks*. Both copies render, both look right in isolation, and the
+    failure only appears later as "these two pages look slightly different" —
+    with nothing in any diff pointing at the cause. Every fragment guarded here
+    was a real copy that had already been sitting in the tree, and in two cases
+    the copy carried a comment predicting exactly this.
+    """
+
+    def markup(self, path):
+        return (Path(settings.BASE_DIR) / path).read_text()
+
+    def body(self, path):
+        """The template with its {% comment %} blocks stripped.
+
+        ⚠️ Necessary, not tidiness: the comments in this project quote the very
+        markup they are warning about, so a naive `assertNotIn` fails on the
+        warning rather than on the offence.
+        """
+        return re.sub(r"\{%\s*comment\s*%\}.*?\{%\s*endcomment\s*%\}",
+                      "", self.markup(path), flags=re.S)
+
+    SIGNUP_LISTS = [
+        Path("events") / "templates" / "events" / "event_detail.html",
+        Path("events") / "templates" / "events" / "event_registrations.html",
+    ]
+
+    def test_the_signup_lists_share_one_status_badge(self):
+        for path in self.SIGNUP_LISTS:
+            with self.subTest(path=str(path)):
+                self.assertIn("events/_status_badge.html", self.markup(path),
+                              "this list hand-rolls the status badge again")
+                self.assertNotIn(
+                    'row.get_status_display tone="success"', self.body(path),
+                    "this page decides the badge tone itself instead of going "
+                    "through the fragment, so the two lists will drift apart")
+
+    def test_the_other_two_status_mappings_stay_separate(self):
+        """⚠️ The inverse guard, and the more important one. Three pages map
+        status to a tone and **all three differ on purpose** — the colour answers
+        whatever that page is asking ("did they sign up" / "did they turn up" /
+        "what should I do next"). Consolidating them is the obvious-looking
+        cleanup, and its result is that a no-show shows up green on the
+        attendance page. See the comment in _status_badge.html.
+        """
+        attendance = self.body(
+            Path("events") / "templates" / "events" / "_attendance_row.html")
+        self.assertIn('row.status == "attended"', attendance)
+        self.assertIn('tone="warning"', attendance)
+        self.assertNotIn("events/_status_badge.html", attendance)
+
+        mine = self.body(
+            Path("events") / "templates" / "events" / "my_participations.html")
+        self.assertIn('tone="info"', mine)
+        self.assertNotIn("events/_status_badge.html", mine)
+
+    NON_FIELD_ERROR_CALLERS = [
+        Path("core") / "templates" / "core" / "components" / "form_fields.html",
+        Path("events") / "templates" / "events" / "event_signup.html",
+    ]
+
+    def test_non_field_errors_are_drawn_by_one_fragment(self):
+        """⚠️ The signup page cannot use form_fields.html — its consent branch
+        splits the fields into a <fieldset> — so it copied the error box. Two
+        boxes drift, and the drift shows up on the one screen a volunteer sees
+        only when something has already gone wrong.
+        """
+        for path in self.NON_FIELD_ERROR_CALLERS:
+            with self.subTest(path=str(path)):
+                self.assertIn("core/components/_non_field_errors.html",
+                              self.markup(path))
+                self.assertNotIn(
+                    "form.non_field_errors", self.body(path),
+                    "this template renders the non-field errors itself instead "
+                    "of including the fragment")
+
+    def test_every_shared_fragment_says_why_it_exists(self):
+        """⚠️ A fragment pulled out of two copies is indistinguishable from one
+        that was always a component — until somebody inlines it back "because it
+        is only used twice". The reason has to survive in the file.
+        """
+        for name, path in [
+            ("_hero_backdrop", Path("core") / "templates" / "core" /
+             "components" / "_hero_backdrop.html"),
+            ("_non_field_errors", Path("core") / "templates" / "core" /
+             "components" / "_non_field_errors.html"),
+            ("_status_badge", Path("events") / "templates" / "events" /
+             "_status_badge.html"),
+        ]:
+            with self.subTest(fragment=name):
+                self.assertIn("{% comment %}", self.markup(path))
+                self.assertIn("⚠️", self.markup(path))

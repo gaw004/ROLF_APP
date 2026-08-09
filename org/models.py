@@ -15,6 +15,7 @@ from simple_history.models import HistoricalRecords
 
 from contact.models import Contact
 from core.constraints import ConstraintErrorFieldMixin
+from core.limits import LONG_TEXT
 from core.models import ImmutableCodeMixin, TimeStampedModel
 from core.querysets import DateRangeMixin, DateRangeQuerySet, in_effect_on
 
@@ -40,7 +41,7 @@ class Ministry(ImmutableCodeMixin, ConstraintErrorFieldMixin, TimeStampedModel):
         help_text="Stable identifier used by code. Lowercase, cannot be changed later.",
     )
     name = models.CharField(max_length=100)
-    description = models.TextField(blank=True)
+    description = models.TextField(blank=True, max_length=LONG_TEXT)
     # Optional, and optional is the whole design (2026-08-05). Where a ministry
     # has a page of its own, its name becomes a link on the event page; where it
     # does not, the name is plain text and nothing is drawn.
@@ -267,7 +268,7 @@ class Position(ImmutableCodeMixin, ConstraintErrorFieldMixin, TimeStampedModel):
         default=True,
         help_text="Whether the post still exists. Nothing to do with anybody holding it.",
     )
-    description = models.TextField(blank=True)
+    description = models.TextField(blank=True, max_length=LONG_TEXT)
 
     # Org chart changes are exactly the thing somebody asks about a year later.
     history = HistoricalRecords()

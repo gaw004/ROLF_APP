@@ -1,0 +1,36 @@
+{% comment %}
+一条报名记录的状态标签（2026-08-09 抽出来）。
+
+⚠️ 抽的是**「哪个状态该配哪个语气」这条判断**，不是那几行 HTML。原来
+   `event_detail.html` 和 `event_registrations.html` 各写了一遍同样的
+   if/else；两处都对，但下次加一档状态（比如 `waitlisted`）时，
+   改一处、漏一处的表现是「同一个人在两个页面上颜色不一样」——
+   不报错，而且各自看都正常。
+
+⚠️ **这一份是「报名名单」那两页的口径**，不是全站唯一的一份。全站一共三套，
+   而三套不一样是**有意的** —— 语气跟着「这一页在问什么」走：
+
+     这一份（`event_detail` 的「你报了什么」·`event_registrations`）
+                              registered=success，其余中性 —— 在问「报上了没」
+     `_attendance_row.html`   attended=success，absent=warning —— 在问「来了没」
+     `my_participations.html` registered=success，attended=info —— 志愿者自己的
+                              列表，未来的那条才是要他行动的
+
+   ⚠️ 所以**不要**把另外两处也并到这里来。并了之后签到页上「已报名」会变成
+      绿的，而那一页上绿色的意思是「人来了」—— 一个没到场的人显示成绿色。
+      要动口径先去 D27 / D28 定，别在模板里就地发明。
+
+⚠️ 其余状态一律走中性档，`cancelled` 和 `absent` 都不配 danger：它们是如实的
+   记录，不是事故，而 danger 在全站的意思是「这里出问题了」（同
+   `_attendance_row.html` 里那句注释）。
+
+⚠️ 文字一律走 `get_status_display`，不在这里拼 —— label 的英文口径归模型管，
+   模板拼一遍就等于把它抄成了第二份（同 badge.html 的注释）。
+
+参数：row（一条 Participation，需要 .status 和 .get_status_display）。
+{% endcomment %}
+{% if row.status == "registered" %}
+  {% include "core/components/badge.html" with label=row.get_status_display tone="success" %}
+{% else %}
+  {% include "core/components/badge.html" with label=row.get_status_display %}
+{% endif %}

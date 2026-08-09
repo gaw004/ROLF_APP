@@ -15,7 +15,7 @@
   {% endcomment %}
   <a href="{% url 'events:event_manage_list' %}"
      class="rounded-md px-2 py-1 text-ink-600 hover:bg-ink-100 dark:text-ink-300 dark:hover:bg-ink-800">&larr;
-    {% if can_manage %}Events I manage{% else %}All events{% endif %}</a>
+    {% if can_manage %}Events I Manage{% else %}All Events{% endif %}</a>
   <span class="px-1 text-ink-300 dark:text-ink-600">|</span>
   {% comment %}
   ⚠️ 「Roles」那一格 2026-08-04 去掉了 —— 工种已经并进 Edit 页。
@@ -28,7 +28,7 @@
      拒绝点它的人的链接，读起来是「站坏了」而不是「这一页不归你」。
   {% endcomment %}
   {% if can_manage %}
-    {% include "events/_event_nav_link.html" with label="Edit &amp; roles" to="events:event_update" name="edit" %}
+    {% include "events/_event_nav_link.html" with label="Edit &amp; Roles" to="events:event_update" name="edit" %}
   {% endif %}
   {% include "events/_event_nav_link.html" with label="Signups" to="events:event_registrations" name="registrations" %}
   {% include "events/_event_nav_link.html" with label="Attendance" to="events:event_attendance" name="attendance" %}

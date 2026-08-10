@@ -2924,3 +2924,79 @@ class OverlaysLiveInTheTopLayerGuardTests(TestCase):
             "fixed descendants. The site menu positions against the viewport "
             "only while this is not true — convert it to a <dialog> first:\n"
             + "\n".join(offenders))
+
+
+class DialogsStayHiddenWhenClosedGuardTests(TestCase):
+    """Lint-as-test: no author rule may override the UA's `display: none`.
+
+    🔴 A `<dialog>` hides itself through the UA stylesheet's
+    `dialog:not([open]) { display: none }`. **Author styles beat the UA
+    stylesheet**, so a single `display: flex` on the overlay's own class pins it
+    open forever.
+
+    ⚠️ This is not hypothetical. It shipped on 2026-08-09, in the very commit
+       that moved the overlays to `<dialog>`: `display: flex` was carried over
+       verbatim from the `position: fixed` version (where it did the centring),
+       without noticing it had picked up a second job on a `<dialog>`. The
+       Memories wall vanished behind a permanently-open lightbox.
+
+    ⚠️ And the verification at the time did not cover it: the browser check
+       opened the overlay and measured it (correct), and never asked whether it
+       was invisible while closed. **A check that only exercises the open state
+       is blind to this entire class of bug** — which is why the rule is now
+       here, where it costs nothing to run.
+    """
+
+    #: Properties that override the UA's `display: none` when set unconditionally.
+    #: `display` is the whole story; the others are listed because they are the
+    #: near misses somebody will reach for next.
+    RISKY = ("display", "visibility", "opacity")
+
+    def test_overlay_classes_scope_their_display_to_open(self):
+        css = (Path(settings.BASE_DIR) / "assets" / "app.css").read_text()
+        css = re.sub(r"/\*.*?\*/", "", css, flags=re.S)
+
+        # The classes that sit on a <dialog>. Kept in one place so a third
+        # overlay has to be added here consciously.
+        overlay_classes = ["modal", "wall-lightbox"]
+
+        offenders = []
+        for match in re.finditer(r"([^{}]+)\{([^{}]*)\}", css):
+            selector, block = match.group(1).strip(), match.group(2)
+            for name in overlay_classes:
+                # Does this rule target the overlay itself (not a descendant)?
+                targets = any(
+                    part.strip().endswith(f".{name}")
+                    for part in selector.split(","))
+                if not targets or "[open]" in selector or ":modal" in selector:
+                    continue
+                for declaration in block.split(";"):
+                    prop = declaration.split(":")[0].strip()
+                    if prop in self.RISKY:
+                        offenders.append(
+                            f"{selector.strip()} → {prop} "
+                            f"(scope it to .{name}[open])")
+        self.assertEqual(
+            offenders, [],
+            "an author rule sets `display`/`visibility`/`opacity` on a <dialog> "
+            "unconditionally. Author styles beat the UA stylesheet's "
+            "`dialog:not([open]) { display: none }`, so the overlay will be "
+            "visible even when closed:\n" + "\n".join(offenders))
+
+    def test_the_wall_lightbox_still_gets_its_layout_when_open(self):
+        """⚠️ The other half. Scoping to `[open]` fixes the bug and would also
+        "fix" it by deleting the centring entirely — the photo would sit in the
+        top-left corner and nothing would fail. Pin what the open state owes.
+        """
+        css = re.sub(r"/\*.*?\*/", "",
+                     (Path(settings.BASE_DIR) / "assets" / "app.css").read_text(),
+                     flags=re.S)
+        match = re.search(r"\.wall-lightbox\[open\]\s*\{([^}]*)\}", css)
+        self.assertIsNotNone(
+            match, "the lightbox has no [open] rule, so it never becomes a "
+                   "flex container and the photo will not be centred")
+        block = match.group(1)
+        for declaration in ("display: flex", "align-items: center",
+                            "justify-content: center"):
+            with self.subTest(declaration=declaration):
+                self.assertIn(declaration, block)

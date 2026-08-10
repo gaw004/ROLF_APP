@@ -1673,9 +1673,6 @@
     max-height: 100dvh;
     margin: 0;
     border: 0;
-    display: flex;
-    align-items: center;
-    justify-content: center;
     padding: 3.5rem 1rem;
     /* 两档都用同一层黑。浅色模式下也是黑的 —— 这一层的作用是把周围压掉让照片
      * 站出来，而不是「页面背景的深色版」。
@@ -1683,6 +1680,30 @@
      *    而 `::backdrop` 是伪元素，收不到事件。`::backdrop` 那边只补一层同色的黑，
      *    盖住视口比 100dvh 高的那几像素（手机地址栏）。 */
     background-color: rgb(0 0 0 / 0.82);
+  }
+
+  /* 🔴 **`display` 必须挂在 `[open]` 上，不能挂在 `.wall-lightbox` 上。**
+   *
+   *    `<dialog>` 藏起来靠的是 UA 样式表里的 `dialog:not([open]) { display: none }`,
+   *    而**作者样式的优先级高于 UA 样式** —— 在类选择器上写一句 `display: flex`
+   *    就把那条规则盖掉了，于是窗口**永远显示**。
+   *
+   *    ⚠️ 这不是假设，是 2026-08-09 当天改完就踩的：`display: flex` 是从
+   *       `position: fixed` 那一版原样搬过来的（那一版需要它做居中），搬的时候
+   *       没意识到它在 `<dialog>` 上多了一份职责。表现是**照片墙整个不见了**,
+   *       一进 Memories 就是一张大图糊在脸上 —— 带子还在，只是被这一层盖住了。
+   *
+   *    ⚠️ 而它**测不出来**：那天验的是「打开之后位置对不对」（对的），
+   *       没验「关着的时候看不看得见」。一个只验开、不验关的检查，
+   *       对这一类回归完全无感。守卫补在
+   *       `OverlaysLiveInTheTopLayerGuardTests` 里。
+   *
+   * ⚠️ `showModal()` 会把 `open` 属性加上去，所以 `[open]` 是它真正的开关状态，
+   *    不是一个需要额外维护的 class。 */
+  .wall-lightbox[open] {
+    display: flex;
+    align-items: center;
+    justify-content: center;
   }
 
   .wall-lightbox::backdrop {

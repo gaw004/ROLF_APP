@@ -3212,14 +3212,138 @@ class RenderBlueprintGuardTests(TestCase):
             "nothing runs migrations any more: they left build.sh and no "
             "preDeployCommand picked them up")
 
-    def test_build_sh_is_executable(self):
-        """render.yaml invokes it as `./build.sh`.
+    def test_the_shell_scripts_are_executable(self):
+        """render.yaml invokes build.sh as `./build.sh`; the backup image CMDs
+        into backup.sh.
 
         Without the mode bit committed, every build stops at "permission
         denied" — on the platform, never on the machine where the file was
         written, because creating a file and running it locally are the same
         act there.
         """
-        self.assertTrue(
-            os.access(Path(settings.BASE_DIR) / "build.sh", os.X_OK),
-            "build.sh has lost its executable bit (git tracks it as 100755)")
+        for relative in ("build.sh", "scripts/backup/backup.sh"):
+            with self.subTest(script=relative):
+                self.assertTrue(
+                    os.access(Path(settings.BASE_DIR) / relative, os.X_OK),
+                    f"{relative} has lost its executable bit "
+                    f"(git tracks it as 100755)")
+
+    # --- C3.6, the backup cron ------------------------------------------------
+
+    @property
+    def backup_script(self):
+        """⚠️ Comments stripped, for the reason `_without_comments` was written
+        — and this is the second time that reason has come up.
+
+        The script's own prose explains the rules these tests enforce: "do not
+        write `pg_dump | aws s3 cp -`", "this is not a Django management
+        command". Scanning the raw text makes a guard that fails on the
+        sentence describing the thing it forbids, which is both wrong and
+        maddening: the fix would be to delete the explanation.
+        """
+        return _without_comments(
+            (Path(settings.BASE_DIR) / "scripts" / "backup" / "backup.sh"
+             ).read_text(encoding="utf-8"))
+
+    def test_the_blueprint_points_at_a_dockerfile_that_is_really_there(self):
+        """⚠️ This failure does not happen in this repository.
+
+        A blueprint naming a missing dockerfilePath fails no test and no build
+        — it fails the **sync**, which happens once, in a browser, possibly
+        months from now, with an error that names a path rather than a reason.
+        render.yaml sat in exactly that state between C3.5 and C3.6, and the
+        only thing recording it was a warning in its own header.
+        """
+        for key in ("dockerfilePath", "dockerContext"):
+            declared = re.search(rf"^\s*{key}:\s*(\S+)", self.blueprint, flags=re.M)
+            self.assertIsNotNone(declared, f"no {key} in render.yaml")
+            path = Path(settings.BASE_DIR) / declared.group(1).lstrip("./")
+            with self.subTest(key=key):
+                self.assertTrue(
+                    path.exists(),
+                    f"render.yaml's {key} points at {declared.group(1)}, which "
+                    f"does not exist — the blueprint will not sync")
+
+    def test_the_backup_image_pins_the_major_version_ci_runs(self):
+        """⚠️ The mismatch that is discovered on the day it matters.
+
+        pg_dump refuses outright when its client is older than the server, so
+        the image this cron runs is the piece most likely to drift away from
+        the database. The number lives in three places — this image, ci.yml,
+        and the production database — and this is the one nobody can see from
+        a dashboard.
+        """
+        dockerfile = (Path(settings.BASE_DIR) / "scripts" / "backup" / "Dockerfile"
+                      ).read_text(encoding="utf-8")
+        in_image = re.search(r"^FROM postgres:(\d+)", dockerfile, flags=re.M)
+        self.assertIsNotNone(in_image, "the backup image is not built FROM postgres")
+        in_ci = re.search(r"image:\s*postgres:(\d+)", self.ci_workflow)
+        self.assertEqual(
+            in_image.group(1), in_ci.group(1),
+            "the pg_dump taking the backups and the Postgres the tests run "
+            "against are different major versions")
+
+    def test_the_backup_cron_is_given_every_variable_the_script_demands(self):
+        """The Django services' check, in the shape a shell script needs.
+
+        ⚠️ Of every service here this one's failure is the least visible: a job
+           that dies at 2am with nobody watching, and whose absence looks
+           exactly like a quiet night. Adding a variable to the script and
+           forgetting the blueprint is a one-line commit away.
+        """
+        demanded = set(re.findall(
+            r'^:\s*"\$\{([A-Z0-9_]+):\?', self.backup_script, flags=re.M))
+        self.assertNotEqual(
+            demanded, set(), "backup.sh no longer checks its inputs up front")
+        declared = set(re.findall(
+            r"^\s*- key:\s*(\S+)", self.services["rolf-backup"], flags=re.M))
+        self.assertEqual(
+            demanded - declared, set(),
+            f"backup.sh refuses to start without these and the blueprint does "
+            f"not supply them: {sorted(demanded - declared)}")
+
+    def test_the_backup_needs_nothing_from_django(self):
+        """The landing rule from phase-c.md, made executable.
+
+        Backups have to run **on the day the application cannot start** — which
+        is the day the settings, the dependencies or the migrations are what is
+        broken. The moment this script reaches for any of that it inherits all
+        of those failure modes, and it inherits them quietly: it keeps working
+        right up until the day it is needed.
+        """
+        for forbidden in ("manage.py", "django"):
+            with self.subTest(token=forbidden):
+                self.assertNotIn(
+                    forbidden, self.backup_script.lower(),
+                    "the backup script has picked up a dependency on Django")
+
+    def test_the_dump_is_a_file_on_disk_before_any_of_it_is_uploaded(self):
+        """⚠️ `pg_dump | aws s3 cp -` is the tempting one-liner, and it is wrong.
+
+        Streaming saves a temporary file and costs the only chance to look at
+        the archive. Worse: a pg_dump that dies halfway leaves a **truncated
+        object already in the bucket** — the cron goes red, but that object is
+        now the newest one there, and a restore would reach for exactly it.
+        """
+        self.assertNotIn(
+            "| aws", self.backup_script,
+            "the dump is being piped straight into the uploader; it has to land "
+            "on disk and be checked first")
+        self.assertIn(
+            "pg_restore --list", self.backup_script,
+            "nothing proves the archive is readable before it is uploaded")
+
+    def test_the_backup_script_can_delete_nothing(self):
+        """Expiry belongs to the bucket's lifecycle rule, not to this file.
+
+        ⚠️ A code path that deletes backups and a code path that writes them,
+           living in one file, is one wrong condition away from the deletion
+           running against what the other half just uploaded. The key this cron
+           holds does not need delete permission either.
+        """
+        for forbidden in ("s3 rm", "delete-object", "rb s3://"):
+            with self.subTest(command=forbidden):
+                self.assertNotIn(
+                    forbidden, self.backup_script,
+                    "the backup script has grown a way to delete objects — "
+                    "expiring old dumps is the bucket lifecycle rule's job")

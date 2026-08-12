@@ -1,0 +1,4 @@
+{% comment %}_event_nav.html 的一格。参数：label、to（URL name）、name（和 current 比对）。{% endcomment %}
+<a href="{% url to event.pk %}"
+   class="rounded-md px-2 py-1 {% if current == name %}bg-brand-50 font-medium text-brand-700 dark:bg-ink-800 dark:text-brand-300{% else %}text-ink-700 hover:bg-ink-100 dark:text-ink-200 dark:hover:bg-ink-800{% endif %}"
+   {% if current == name %}aria-current="page"{% endif %}>{{ label }}</a>

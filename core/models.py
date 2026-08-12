@@ -1,4 +1,8 @@
-from django.db import models
+from django.core.validators import FileExtensionValidator
+from django.db import IntegrityError, models
+
+from core.limits import LONG_TEXT
+from core.storages import public_storage
 
 
 class TimeStampedModel(models.Model):
@@ -59,3 +63,145 @@ class ImmutableCodeMixin:
             f'Code cannot be changed once created (it is "{stored}"). '
             "Code is what the rest of the system matches on."
         )
+
+
+class HomePage(models.Model):
+    """The public front page: one picture (or one video) and one verse.
+
+    A **singleton** — `HomePage.load()` is the only way anything reads it, and it
+    always answers, creating the row on first use. There is no list of home
+    pages to choose between, and a model that can hold two rows eventually holds
+    two rows, after which "which one is live" becomes a question somebody has to
+    answer at 11pm.
+
+    ⚠️ Who may edit it is `foundation_admin`, and that is enforced by Django's
+       `change_homepage` permission granted to that group in
+       org/permissions.py — not by anything here. A ministry admin publishes
+       events; the face of the foundation is a foundation-wide decision, which
+       is D20's test for which tier a thing belongs to.
+
+    ⚠️ The media is **not in any backup**, same as event images and for the same
+       reason: `pg_dump` covers columns, and these are files. One picture and one
+       verse is a minute of work to restore by hand, so the trade is accepted
+       rather than solved. The verse itself *is* a column and *is* backed up.
+    """
+
+    #: Nothing anywhere refers to a second row, and this is what keeps that true.
+    SINGLETON_PK = 1
+
+    MEDIA_DIR = "home"
+
+    # ⚠️ The **public** bucket, named explicitly, unlike every other upload in
+    #    the project. This page is the one thing here that needs no login, so
+    #    these two files are public by definition — and a signed URL for public
+    #    content buys nothing while costing the CDN cache on the biggest file
+    #    the site serves. Decided 2026-08-06 with the rest of the R2 split.
+    hero_image = models.ImageField(
+        upload_to=MEDIA_DIR, blank=True, storage=public_storage,
+        help_text="Full-screen background. Landscape, at least 2000px wide.",
+    )
+    # ⚠️ FileField rather than a video-specific field: Django has no VideoField,
+    #    and nothing here transcodes. What arrives is what is served, so the size
+    #    of the file somebody uploads is the size every visitor downloads.
+    hero_video = models.FileField(
+        upload_to=MEDIA_DIR, blank=True, storage=public_storage,
+        validators=[FileExtensionValidator(["mp4", "webm"])],
+        help_text="Optional, and used instead of the image when set. It plays "
+                  "muted and on a loop — browsers refuse to autoplay sound, and "
+                  "a page that made noise on arrival would be worse anyway. "
+                  "Keep it under 10 MB: every visitor downloads all of it.",
+    )
+    verse_text = models.TextField(
+        blank=True, max_length=LONG_TEXT,
+        help_text="The passage itself. Shown first, in large type.",
+    )
+    verse_reference = models.CharField(
+        max_length=120, blank=True,
+        help_text="Where it is from, shown underneath — e.g. Colossians 3:23–24.",
+    )
+    #: Ten hex strings keyed by step, derived from hero_image. Empty = use the
+    #: built-in teal.
+    #:
+    #: ⚠️ Stored rather than computed per request. Quantising a photograph is
+    #:    tens of milliseconds, and this would otherwise run on **every page
+    #:    view of the whole site** — the colours are in the shared shell.
+    #:
+    #: ⚠️ Not editable by hand. It is derived, and a derived value somebody can
+    #:    also type is two answers to one question. Recomputed in save().
+    brand_palette = models.JSONField(default=dict, blank=True, editable=False)
+
+    class Meta:
+        verbose_name = "home page"
+        verbose_name_plural = "home page"
+
+    def __str__(self):
+        return "Home page"
+
+    def save(self, *args, **kwargs):
+        # ⚠️ Forced, not merely defaulted. Without this a second row can be
+        #    created through the shell or a fixture, and then load() below picks
+        #    one of them by chance.
+        self.pk = self.SINGLETON_PK
+        self.refresh_palette()
+        super().save(*args, **kwargs)
+
+    def refresh_palette(self):
+        """Re-derive the brand ramp from the current picture. Never raises.
+
+        ⚠️ A failure here must not stop somebody saving the page. The palette is
+           decoration; the verse and the picture are the content. So anything
+           that goes wrong — an unreadable file, a photograph with no usable
+           colour in it — clears the ramp and lets the built-in teal stand.
+        """
+        from .palette import dominant_colour, ramp_from
+
+        if not self.hero_image:
+            self.brand_palette = {}
+            return
+        try:
+            colour = dominant_colour(self.hero_image)
+            self.brand_palette = {str(k): v for k, v in (ramp_from(colour) or {}).items()}
+        except Exception:
+            self.brand_palette = {}
+
+    def delete(self, *args, **kwargs):
+        """Refused. The public front page cannot be "not there"."""
+        raise IntegrityError(
+            "The home page is a singleton and cannot be deleted. Clear its "
+            "fields instead — the page then falls back to the built-in logo."
+        )
+
+    @classmethod
+    def load(cls):
+        """The one row, created if it is not there. Always answers.
+
+        ⚠️ Writes. Use `current()` on read paths — see the warning there.
+        """
+        instance, _ = cls.objects.get_or_create(pk=cls.SINGLETON_PK)
+        return instance
+
+    @classmethod
+    def current(cls):
+        """The one row if it exists, otherwise an unsaved blank one. Never writes.
+
+        ⚠️ The read-path version, and the distinction is not pedantry: the
+           shared shell asks for this on **every page view of the whole site**,
+           and `load()` would put a `get_or_create` there — a write on the read
+           path, and one extra query the first time it runs. Two query-count
+           tests caught exactly that.
+        """
+        return cls.objects.filter(pk=cls.SINGLETON_PK).first() or cls()
+
+    @property
+    def hero(self):
+        """(file, kind) for whatever should fill the screen, or None.
+
+        ⚠️ Video wins when both are set. The alternative — showing both, or
+           picking by upload date — gives a page whose appearance depends on
+           something nobody can see from the form.
+        """
+        if self.hero_video:
+            return self.hero_video, "video"
+        if self.hero_image:
+            return self.hero_image, "image"
+        return None

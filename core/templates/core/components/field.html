@@ -1,0 +1,69 @@
+{% comment %}
+一个表单字段：标签、控件、帮助文字、错误。
+
+⚠️ **错误文案在字段下方，不在页面顶部。** 顶部的错误在长表单上会滚出屏幕，
+   用户看得到「提交失败」却看不到自己错在哪 —— 报名页那个未成年同意分支正是长表单。
+
+⚠️ **控件本身的样式不在这里，也不在 forms.py 的 widget attrs 里。**
+   phase-c.md 的样式落点规矩：CSS 只许出现在样式表和模板 class 上，
+   `forms.py` 的 widget attrs 只放 type="date" 这类**语义**属性。
+   所以 input / select / textarea 的外观由 assets/app.css 里 `.field` 的后代选择器管 ——
+   这样换掉整套样式不需要动任何一个 Form 类。
+
+参数：field（一个 bound field）。
+{% endcomment %}
+<div class="field {% if field.errors %}field-invalid{% endif %}">
+  {% if field.field.widget.input_type == "checkbox" %}
+    <div class="flex items-start gap-2">
+      {{ field }}
+      <label for="{{ field.id_for_label }}" class="text-sm text-ink-800 dark:text-ink-100">
+        {{ field.label }}
+      </label>
+    </div>
+  {% else %}
+    <label for="{{ field.id_for_label }}"
+           class="block text-sm font-medium text-ink-800 dark:text-ink-100">
+      {{ field.label }}{% if field.field.required %}<span class="text-danger-fg dark:text-danger-fg-dark" aria-hidden="true"> *</span>{% endif %}
+    </label>
+    {% if field.field.widget.input_type == "password" %}
+      {% comment %}
+      密码框右侧的「看一眼」按钮（2026-08-06）。
+
+      ⚠️ 做在这里而不是某一页上，所以注册 / 登录 / 改密码三处**同一个实现**。
+         抄三遍的下场是其中一个的图标方向反了，而那一个看起来完全正常。
+
+      ⚠️ 按钮是 `type="button"`。默认值是 submit —— 少写这一个属性，点「看一眼」
+         就等于提交表单，而在登录页上那会用一个半打完的密码去尝试登录。
+
+      ⚠️ 没有 Alpine 时这个按钮不出现（`x-cloak` + CSS），而不是出现了点着没反应。
+         密码框本身照常可用 —— 看不见明文从来不影响提交。
+      {% endcomment %}
+      <div class="field-password" x-data="passwordReveal">
+        {{ field }}
+        <button type="button" x-cloak x-on:click="toggle()"
+                x-bind:aria-pressed="shown ? 'true' : 'false'"
+                class="field-password-toggle">
+          <span class="sr-only" x-show="!shown">Show password</span>
+          <span class="sr-only" x-show="shown">Hide password</span>
+          <svg x-show="!shown" width="18" height="18" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+            <path d="M10 4c-3.5 0-6.5 2.2-8 6 1.5 3.8 4.5 6 8 6s6.5-2.2 8-6c-1.5-3.8-4.5-6-8-6zm0 10a4 4 0 110-8 4 4 0 010 8zm0-2a2 2 0 100-4 2 2 0 000 4z"/>
+          </svg>
+          <svg x-show="shown" width="18" height="18" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+            <path d="M2.3 3.4 3.7 2l14 14-1.4 1.4-2.5-2.5A9.3 9.3 0 0110 16c-3.5 0-6.5-2.2-8-6a11 11 0 013.3-4.4L2.3 3.4zm4.4 4.4A2 2 0 0010 12a2 2 0 001.6-.8l-1.5-1.5a.5.5 0 01-.1 0 2 2 0 01-2-2 .5.5 0 010-.1L6.7 7.8zM10 4c3.5 0 6.5 2.2 8 6a11 11 0 01-2 3l-1.5-1.4A9 9 0 0015.8 10A7 7 0 0010 6a7 7 0 00-1.2.1L7.3 4.6C8.2 4.2 9.1 4 10 4z"/>
+          </svg>
+        </button>
+      </div>
+    {% else %}
+      {{ field }}
+    {% endif %}
+  {% endif %}
+
+  {% if field.help_text %}
+    {% comment %}ink-600 而不是 ink-500 —— 后者在白底上只有 4.34:1，过不了 4.5 那条线。{% endcomment %}
+    <p class="mt-1 text-xs text-ink-600 dark:text-ink-300">{{ field.help_text }}</p>
+  {% endif %}
+
+  {% for error in field.errors %}
+    <p class="mt-1 text-xs font-medium text-danger-fg dark:text-danger-fg-dark">{{ error }}</p>
+  {% endfor %}
+</div>

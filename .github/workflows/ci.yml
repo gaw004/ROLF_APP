@@ -1,0 +1,131 @@
+# C0.5.3 第二层 —— 强制。守卫不过就红灯，禁止合并。
+#
+# 这一道才是底线。本项目的记录里反复出现同一件事：**只写在验收清单里的规则跨不过
+# 下一轮**（`views.py` 不许有 `Sum` 那条、`admin.py` 四个钩子那条，都是先只写在
+# 清单里、后来才补成守卫的）。在这个 workflow 之前，那 12 条 grep 守卫只在有人
+# 主动跑 `manage.py test` 时才生效 —— 也就是「记得跑」的时候才生效。
+#
+# ⚠️ 红灯禁止合并这件事**不在这个文件里** —— 它是 GitHub 上的分支保护规则。
+#    这个 workflow 只负责变红；「变红了就不许合」要去仓库 Settings → Branches
+#    把下面那个 job 名字设成 required status check。少了那一步，这份文件的作用
+#    只是「在 PR 页面上显示一个红叉，然后照样能点合并」。
+#
+# C1.3 会把前端构建接进这同一个 workflow（npm run build 之后再跑这几条）。
+# 现在就建好它不是提前投资，是少建一次。
+
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+
+concurrency:
+  # 同一个分支连推两次时，把上一次还在跑的取消掉。省的是 CI 时间，
+  # 但真正的理由是：两个结果同时挂在 PR 上，人看的永远是先跑完的那个。
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  guards:
+    name: guards
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        # ⚠️ major 版本跟本机对齐（18）。跨大版本的差异不会在这里报错，
+        #    只会让 CI 绿而本机红（或者反过来），而那种不一致查起来最贵。
+        #    C3.5 对生产库有同一条要求，理由在那边写得更细（pg_dump 跨版本会拒绝导出）。
+        image: postgres:18
+        env:
+          POSTGRES_USER: rolf
+          POSTGRES_PASSWORD: rolf
+          POSTGRES_DB: rolf_ci
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      # 一次性的、只在这个 job 里存在的 key。base.py 要求 SECRET_KEY 必须有值
+      # （没有就拒绝启动），而 CI 里不存在「真的秘密」—— 生产那个由 Render 生成，
+      # 从来不进文件，见 phase-c.md 的部署配置落点。
+      DJANGO_SECRET_KEY: ci-only-not-a-secret
+      DATABASE_URL: postgres://rolf:rolf@localhost:5432/rolf_ci
+      DJANGO_SETTINGS_MODULE: config.settings.dev
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          # 和本机一样。C3.5 还要再查一次 Render 支持到哪个版本 ——
+          # 那是唯一一件「到部署那步才发现就已经太晚」的事。
+          python-version: "3.14"
+          cache: pip
+
+      # C1.3 —— 前端接进同一个 workflow。
+      # ⚠️ 必须在跑测试之前构建：static/css/app.css 和 static/js/app.js 不进
+      #    git（见 .gitignore 里的理由），而 prod.py 的 ManifestStaticFilesStorage
+      #    要求每个 {% static %} 引到的文件真的存在。少了这一步，任何一条
+      #    collectstatic 相关的检查都会在 CI 上红而在本机绿。
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Build the front end
+        run: |
+          npm ci
+          npm run build
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      # 四条按「跑得越快越靠前」排：ruff 几秒、check 一秒、makemigrations 一秒，
+      # 全套测试半分钟。前三条任何一条红了，第四条的结果都不用看。
+      - name: ruff
+        run: ruff check .
+
+      - name: django check
+        run: python manage.py check
+
+      - name: no missing migrations
+        # 和 core.tests.NoMissingMigrationsTests 是同一件事，故意留两份：
+        # 测试那份保证「跑测试的人」看得见，这一份保证即使测试整个挂掉也还有人问。
+        run: python manage.py makemigrations --check --dry-run
+
+      - name: tests
+        run: python manage.py test
+
+      # ⚠️ 用 **prod** 的 settings 跑，不是 dev。dev 用的是普通存储，什么都不检查；
+      #    真正会失败的是 prod 的 CompressedManifestStaticFilesStorage —— 它解析
+      #    每个 CSS 里的 @import 和 url()，解析不了就 MissingFileError，
+      #    而那一刻是**部署当天**。这一步把那一刻提前到 PR 上。
+      #    （这条守卫的由来：C1.1 把 Tailwind 源文件放进 static/ 会踩的正是它。）
+      - name: collectstatic with the production storage
+        env:
+          DJANGO_SETTINGS_MODULE: config.settings.prod
+          DJANGO_ALLOWED_HOSTS: example.com
+          # ⚠️ 假值，七个都是。C3.5 给 prod.py 接上 R2 之后，它在 import 期就
+          #    `required=True` 地读这七个变量 —— 而这一步只设了上面两个，于是
+          #    **这一整步从那天起就是红的**，红在「缺环境变量」上，而不是它本来
+          #    要守的那件事上。2026-08-09 的仓库体检翻出来的。
+          #
+          # ⚠️ 值是假的没关系，因为 collectstatic **一个字节都不往 R2 传**：
+          #    静态文件走 staticfiles 那个 alias（whitenoise，本地磁盘），
+          #    另外三个 alias 在这一步只是被**构造**出来，没有人调用它们。
+          #    真要连上去反而错了 —— CI 不该有生产桶的凭据。
+          #
+          # ⚠️ 所以域名一律用 .invalid（RFC 2606 保证解析不到）：万一哪天真的
+          #    有人在这一步发了请求，它会**当场失败**，而不是悄悄打到某个真站点。
+          R2_ENDPOINT_URL: https://ci.example.invalid
+          R2_ACCESS_KEY_ID: ci-only-not-a-secret
+          R2_SECRET_ACCESS_KEY: ci-only-not-a-secret
+          R2_BUCKET_EVENT_IMAGES: ci-event-images
+          R2_BUCKET_MEMORIES: ci-memories
+          R2_BUCKET_PUBLIC: ci-public
+          R2_PUBLIC_BASE_HOST: ci-static.example.invalid
+        run: python manage.py collectstatic --noinput

@@ -1,0 +1,51 @@
+{% comment %}
+列表旁边那块面板。⚠️ 它**不装下全部内容** —— 宽屏下高度跟左边的列表齐平，
+超出的部分自己滚（2026-08-05 拍板）。
+
+⭐ 所以底部那两个出口不是装饰，是这个设计成立的前提。原来的方案是每张图加一个
+   「Show all」，被这个换掉了：面板不必装下全部，因为**完整版就在一个链接之外**。
+
+⚠️ 卡片在宽屏下绝对定位撑满外壳（外壳在 _event_manage_results.html 里）。
+   绝对定位的元素不贡献高度 —— 这就是「面板再高也不撑开这一行」的实现。
+   窄屏下这一段不生效，它就是一张普通卡片，从上往下读。
+
+⚠️ 出口和滚动区是**分开的两块**：出口必须一直在视野里。滚到底才看得见的出口，
+   等于没有出口 —— 而看不到出口的滚动面板，正是我一开始反对图内滚动的理由。
+
+⚠️ **2026-08-06：两个出口从底部横条移到标题行的最右边。** 这条规矩没有变，
+   反而更稳了 —— 标题行和原来那条横条一样在滚动区**外面**（`shrink-0`），
+   而挪到顶上之后它离视线落点更近，也少了一条分隔线。
+{% endcomment %}
+<div class="card flex flex-col overflow-hidden lg:absolute lg:inset-0">
+  {% comment %}
+  ⚠️ `items-baseline`，不是 `items-center`：标题是 text-lg、两个出口是 text-sm，
+     按盒子居中会让它们看起来比标题高一点点 —— 而基线对齐是文字并排时唯一
+     不会「差一点」的对法。
+  ⚠️ 出口那一组 `shrink-0`：面板固定 24rem，宽度不富裕，让它们优先于标题保住
+     整行（标题只有一个词，挤不坏）。
+  {% endcomment %}
+  <div class="mb-4 flex shrink-0 items-baseline justify-between gap-3">
+    <h2 class="text-lg font-semibold">Report</h2>
+    <div class="flex shrink-0 items-baseline gap-3 text-sm">
+      {% comment %}
+      ⚠️ 带着当前全部查询参数跳过去（`{% querystring %}` 保留筛选），
+         否则点开完整版会看到一份**不同筛选**的报表 —— 而它和你刚才看的那份
+         长得一模一样，没有任何东西提示你条件变了。
+      ⚠️ page 显式清掉：完整版不分页，带着 page=3 过去没有意义。
+      {% endcomment %}
+      <a href="{% url 'events:ministry_report' %}{% querystring page=None %}"
+         class="prose-link whitespace-nowrap">View full report &rarr;</a>
+      {% comment %}
+      ⚠️ 「Save as PDF」在这里**不是**直接打印这一页。这一页印出来是「列表 + 一块
+         被截断的滚动面板」，不是任何人想要的东西。它跳到完整版并带上 `print=1`，
+         那一页打开就调打印对话框 —— 从面板到 PDF 一次点击，而印出来的是完整的那份。
+      {% endcomment %}
+      <a href="{% url 'events:ministry_report' %}{% querystring page=None print=1 %}"
+         class="prose-link whitespace-nowrap">Save as PDF</a>
+    </div>
+  </div>
+
+  <div class="min-h-0 flex-1 overflow-y-auto pr-1">
+    {% include "events/_report_body.html" %}
+  </div>
+</div>

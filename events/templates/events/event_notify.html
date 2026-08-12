@@ -1,68 +1,105 @@
 {% extends "core/base.html" %}
-{% block title %}Notify volunteers — {{ event.name }}{% endblock %}
+{% block title %}Notify Volunteers — {{ event.name }}{% endblock %}
 
 {% block content %}
-  <h1>{{ event.name }} — notify volunteers</h1>
+  {% include "events/_event_nav.html" with current="notify" %}
+
+  <h1 class="text-2xl font-semibold">Notify Volunteers</h1>
+  <p class="mt-1 text-sm text-ink-600 dark:text-ink-300">{{ event.name }}</p>
 
   {% if previous %}
-    <p>
-      This event has been notified {{ previous|length }} time{{ previous|length|pluralize }};
-      most recently {{ previous.0.sent_at }}
-      ({{ previous.0.get_reason_display }}, reaching {{ previous.0.recipients.count }}).
-    </p>
-    <p><small>
-      That line is the only thing standing between a shaky connection and two
-      identical notices — there is no queue and no idempotency key, so read it
-      before sending.
-    </small></p>
+    {% comment %}
+    ⚠️ 这一段是**唯一**挡在「网络卡了一下」和「两封一模一样的通知」之间的东西 ——
+       没有队列，也没有幂等键。所以它显著，不是一行小字。
+    {% endcomment %}
+    <div class="card mt-6 border border-warning-fg/30 bg-warning-bg dark:border-warning-fg-dark/30 dark:bg-warning-bg-dark">
+      <p class="text-sm font-medium text-warning-fg dark:text-warning-fg-dark">
+        Already notified {{ previous|length }} time{{ previous|length|pluralize }}
+      </p>
+      <p class="mt-1 text-sm text-warning-fg dark:text-warning-fg-dark">
+        Most recently {{ previous.0.sent_at }} ({{ previous.0.get_reason_display }},
+        reaching {{ previous.0.recipients.count }}). There is no queue and no
+        idempotency key, so read that line before sending again.
+      </p>
+    </div>
   {% endif %}
 
-  <h2>Going to the volunteer ({{ recipients|length }})</h2>
-  <ul>
-    {% for row in recipients %}
-      <li>{{ row.participation.contact }} — {{ row.to }} ({{ row.channel }})</li>
-    {% empty %}
-      <li>None.</li>
-    {% endfor %}
-  </ul>
+  <div class="mt-6 grid gap-4 lg:grid-cols-3">
+    <section class="card">
+      <h2 class="text-sm font-semibold">
+        Going to the volunteer ({{ recipients|length }})
+      </h2>
+      <ul class="mt-3 space-y-2 text-sm">
+        {% for row in recipients %}
+          <li class="border-t border-ink-200 pt-2 dark:border-ink-700">
+            <div class="font-medium">{{ row.participation.contact }}</div>
+            <div class="text-xs text-ink-600 dark:text-ink-300">{{ row.to }} &middot; {{ row.channel }}</div>
+          </li>
+        {% empty %}
+          <li class="text-ink-600 dark:text-ink-300">None.</li>
+        {% endfor %}
+      </ul>
+    </section>
 
-  <h2>Going to a guardian instead ({{ guardian_recipients|length }})</h2>
-  {% comment %}
-  未成年人（以及生日未知的人）通知家长，不通知本人 —— 15 岁的志愿者可能根本
-  没有自己的手机，发给他等于没发。
-  {% endcomment %}
-  <ul>
-    {% for row in guardian_recipients %}
-      <li>{{ row.participation.contact }}’s guardian — {{ row.to }} ({{ row.channel }})</li>
-    {% empty %}
-      <li>None.</li>
-    {% endfor %}
-  </ul>
+    <section class="card">
+      {% comment %}
+      未成年人（以及生日未知的人）通知家长，不通知本人 —— 15 岁的志愿者可能根本
+      没有自己的手机，发给他等于没发。这里显示的是家长的邮箱/电话，
+      D22 有意为之；换个 ministry 的账号打同一个 URL 必须是 403。
+      {% endcomment %}
+      <h2 class="text-sm font-semibold">
+        Going to a guardian instead ({{ guardian_recipients|length }})
+      </h2>
+      <ul class="mt-3 space-y-2 text-sm">
+        {% for row in guardian_recipients %}
+          <li class="border-t border-ink-200 pt-2 dark:border-ink-700">
+            <div class="font-medium">{{ row.participation.contact }}’s guardian</div>
+            <div class="text-xs text-ink-600 dark:text-ink-300">{{ row.to }} &middot; {{ row.channel }}</div>
+          </li>
+        {% empty %}
+          <li class="text-ink-600 dark:text-ink-300">None.</li>
+        {% endfor %}
+      </ul>
+    </section>
 
-  <h2>Cannot be reached ({{ unreachable|length }})</h2>
-  {% comment %}
-  这一组即使是空的也要显示。一个绿色的「已通知 27 人」盖住 3 个联系不上的人，
-  正是本项目反复判过刑的那种静默失败 —— 通知平台答得了「这封信送到了吗」，
-  答不了「这个人根本没有地址」。
-  {% endcomment %}
-  <ul>
-    {% for row in unreachable %}
-      <li>{{ row.participation.contact }} — {{ row.why }}</li>
-    {% empty %}
-      <li>Nobody — everyone signed up has an address.</li>
-    {% endfor %}
-  </ul>
+    {% comment %}
+    ⭐ 这一组即使是空的也要显示，而且必须显著。一个绿色的「已通知 27 人」盖住
+       3 个联系不上的人，正是本项目反复判过刑的那种静默失败 ——
+       通知平台答得了「这封信送到了吗」，答不了「这个人根本没有地址」。
+    {% endcomment %}
+    {% comment %}
+    ⚠️ `border` 在 `{% if %}` **里面**（2026-08-06）。卡片本身已经没有边框了，
+       而 Tailwind 的 `border-<色>` 只给颜色 —— 所以红框的宽度要在这里显式给出，
+       并且只在真的有人联系不上时才给：没有人的时候这一块就是一张普通卡片。
+       少了这个 `border`，上面那句「这一组必须显著」会**静默失效**。
+    {% endcomment %}
+    <section class="card {% if unreachable %}border border-danger-fg/40 bg-danger-bg dark:border-danger-fg-dark/40 dark:bg-danger-bg-dark{% endif %}">
+      <h2 class="text-sm font-semibold {% if unreachable %}text-danger-fg dark:text-danger-fg-dark{% endif %}">
+        Cannot be reached ({{ unreachable|length }})
+      </h2>
+      <ul class="mt-3 space-y-2 text-sm">
+        {% for row in unreachable %}
+          <li class="border-t border-danger-fg/20 pt-2 text-danger-fg dark:border-danger-fg-dark/20 dark:text-danger-fg-dark">
+            <div class="font-medium">{{ row.participation.contact }}</div>
+            <div class="text-xs">{{ row.why }}</div>
+          </li>
+        {% empty %}
+          <li class="text-ink-600 dark:text-ink-300">Nobody — everyone signed up has an address.</li>
+        {% endfor %}
+      </ul>
+    </section>
+  </div>
 
-  <h2>Message</h2>
-  <p><small>
-    Stored exactly as written. Editing the event afterwards never changes what
-    this notice said, and the default wording contains no minor’s name.
-  </small></p>
-  <form method="post">
+  <form method="post" class="card mt-8">
     {% csrf_token %}
-    {{ form.as_p }}
-    <button type="submit">Send</button>
+    <h2 class="text-lg font-semibold">Message</h2>
+    <p class="mb-4 mt-1 text-xs text-ink-600 dark:text-ink-300">
+      Stored exactly as written. Editing the event afterwards never changes what this
+      notice said, and the default wording contains no minor’s name.
+    </p>
+    {% include "core/components/form_fields.html" %}
+    <div class="mt-6">
+      {% include "core/components/button.html" with label="Send" variant="primary" confirm="Send this notice now? It cannot be recalled." %}
+    </div>
   </form>
-
-  <p><a href="{% url 'events:event_roles' event.pk %}">← Back to roles</a></p>
 {% endblock %}

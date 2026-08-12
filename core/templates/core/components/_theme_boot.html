@@ -1,0 +1,34 @@
+{% comment %}
+进来时是浅色还是深色。**必须内联、必须在 <head> 里、必须在样式表之后**，
+三条缺一不可 —— 放到外部 JS 或者 <body> 末尾，页面会先按浅色画一遍再跳成深色，
+那一下闪白是「廉价感」最大的单一来源，而且**它在本机开发时几乎看不出来**
+（缓存命中太快），只有真实网络下才明显。
+
+⚠️ 抽成组件是因为**它有第二个使用者了**（2026-08-06，Memories 页）。
+   这段脚本和 assets/js/app.js 的 themeToggle 读同一个 localStorage.theme，
+   只是时机不同：这里管「进来时是什么」，那边管「点了按钮之后变成什么」。
+   本来就是两处要对齐的东西，再抄第三份就是三处 —— 而分叉的表现是
+   「刷新一下主题就跳回去」，没有任何报错。
+
+⚠️ 首页**不** include 这个。它是满屏照片配白字，不跟随深色模式：给 <html>
+   加上 .dark 之后，顶栏那套「白字 / 深蓝字」的规则会全部翻转。
+
+⚠️ 隐私模式下 localStorage 会直接抛异常，所以整段包在 try 里：
+   一个主题偏好读不到，不该把整个页面带下去。
+
+⚠️ 这段脚本里的注释写英文，不写中文 —— 它虽然不显示给人看，但它**进了
+   发给浏览器的 HTML**，而界面语言守卫的口径是「模板里注释块之外没有汉字」。
+   给 <script> 开个例外就是给守卫开个洞，而洞会被用来放真正给人看的文案。
+{% endcomment %}<script>
+  (function () {
+    try {
+      var saved = localStorage.getItem("theme");
+      var dark = saved ? saved === "dark"
+                       : window.matchMedia("(prefers-color-scheme: dark)").matches;
+      document.documentElement.classList.toggle("dark", dark);
+    } catch (e) {
+      /* See the template comment above: a blocked localStorage must not
+         take the page down with it. */
+    }
+  })();
+</script>

@@ -9,5 +9,17 @@ db.sqlite3
 /media/
 /staticfiles/
 node_modules/
+
+# C1.2 —— 前端构建产物**不进主分支**。
+#
+# 理由不是「产物不该进 git」这条通则，是一件一定会发生的事：改完样式忘记重跑
+# npm run build。它的表现是**线上样式停在上一版，而且没有任何报错** ——
+# 你在本机看到的是新的（本机跑过 build），线上是旧的，两边都不报错。
+#
+# 交给 CI 就不存在「忘记」：.github/workflows/deploy-branch.yml 构建之后把产物
+# 推到 deploy 分支，Render 盯的是那个分支。
+# ⚠️ 所以 clone 下来之后要先 `npm ci && npm run build`，否则页面是裸的。
+/static/css/
+/static/js/
 docs/planning/diagrams/src/package*.json
 docs/planning/diagrams/src/.build-preview.html

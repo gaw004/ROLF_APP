@@ -2,65 +2,55 @@
 {% block title %}Attendance — {{ event.name }}{% endblock %}
 
 {% block content %}
-  <h1>{{ event.name }} — attendance and hours</h1>
-  <p>
-    <a href="{% url 'events:event_roles' event.pk %}">← Back to roles</a> ·
-    <a href="{% url 'events:event_manage_list' %}">Events I manage</a>
-  </p>
-  <p>
-    Checking somebody out fills their hours in. Anyone entered afterwards from a
-    paper sheet has no timestamps — type the hours straight in and they count
-    just the same: the hours are the authoritative value, and check-in and
-    check-out are only one way of collecting them.
-  </p>
+  {% include "events/_event_nav.html" with current="attendance" %}
 
-  <table border="1" cellpadding="4">
-    <tr>
-      <th>Person</th><th>Role</th><th>Status</th><th>In</th><th>Out</th>
-      <th>Hours</th><th>Actions</th>
-    </tr>
-    {% for row in participations %}
-      <tr>
-        <td>
-          {{ row.contact }}
-          {% if row.contact.is_minor is None %}
-            <br><small>No date of birth — treated as under 18</small>
-          {% elif row.contact.is_minor %}
-            <br><small>Under 18</small>
-          {% endif %}
-          {% for emergency in row.contact.emergency_contacts.all %}
-            <br><small>Emergency contact: {{ emergency.name }} {{ emergency.phone }}</small>
-          {% endfor %}
-        </td>
-        <td>{{ row.event_role.role.name }}</td>
-        <td>{{ row.get_status_display }}</td>
-        <td>{{ row.checked_in_at|default:"—" }}</td>
-        <td>{{ row.checked_out_at|default:"—" }}</td>
-        <td>{{ row.hours|default:"—" }}</td>
-        <td>
-          <form method="post">
-            {% csrf_token %}
-            <input type="hidden" name="participation" value="{{ row.pk }}">
-            <button type="submit" name="action" value="check_in">Check in</button>
-            <button type="submit" name="action" value="check_out">Check out</button>
-          </form>
-          <form method="post">
-            {% csrf_token %}
-            <input type="hidden" name="participation" value="{{ row.pk }}">
-            {{ hours_form.hours }}
-            <button type="submit" name="action" value="hours">Enter hours</button>
-          </form>
-        </td>
-      </tr>
-    {% empty %}
-      <tr><td colspan="7">Nobody has signed up yet.</td></tr>
-    {% endfor %}
-  </table>
+  <h1 class="text-2xl font-semibold">Attendance and Hours</h1>
+  <p class="mt-1 text-sm text-ink-600 dark:text-ink-300">{{ event.name }}</p>
 
-  <p><small>
-    The emergency number above is <strong>the one to ring if something happens
-    on the day</strong>. Telling a guardian about a change beforehand goes to
-    the consent email or phone collected at signup — see the notice page.
-    Emergency contacts have no email address.
-  </small></p>
+  <div class="card mt-4">
+    <p class="text-sm text-ink-800 dark:text-ink-100">
+      Checking somebody out fills their hours in. Anyone entered afterwards from a
+      paper sheet has no timestamps — type the hours straight in and they count just
+      the same: the hours are the authoritative value, and check-in and check-out are
+      only one way of collecting them.
+    </p>
+    {% comment %}
+    ⚠️ 这个入口放在这里，是因为**这一页才是活动当天开着的那一页**。
+       它只对能改这场活动的人画，理由和管理列表里那一行一样。
+    {% endcomment %}
+    {% if can_manage %}
+      <div class="mt-4">
+        {% url 'events:checkin_display' event.pk as qr_url %}
+        {% include "core/components/button.html" with label="Show check-in QR" href=qr_url variant="secondary" %}
+      </div>
+    {% endif %}
+  </div>
+
+  {% if participations %}
+    <div class="table-wrap mt-6">
+      <table>
+        <thead>
+          <tr>
+            <th>Person</th><th>Role</th><th>Status</th><th>In</th><th>Out</th>
+            <th>Hours</th><th>Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in participations %}{% include "events/_attendance_row.html" %}{% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% else %}
+    <div class="mt-6">
+      {% url 'events:event_roles' event.pk as roles_url %}
+      {% include "core/components/empty.html" with message="Nobody has signed up yet. If the event is still a draft, volunteers cannot see it at all." action_label="Open roles" action_href=roles_url %}
+    </div>
+  {% endif %}
+
+  <p class="mt-6 text-xs text-ink-600 dark:text-ink-300">
+    The emergency number above is <strong>the one to ring if something happens on the
+    day</strong>. Telling a guardian about a change beforehand goes to the consent
+    email or phone collected at signup, and falls back to the emergency contact — see
+    the notice page.
+  </p>
 {% endblock %}

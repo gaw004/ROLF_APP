@@ -1,0 +1,27 @@
+{% comment %}
+状态标签。
+
+⚠️ **必须带文字，颜色只是装饰。** 判据是「把 app.css 删掉页面仍然可用」——
+   而「靠绿色和灰色区分已报名 / 未报名」删掉样式之后什么都不剩。
+   那不是样式，那是内容。所以这个组件永远渲染 {{ label }}，没有只有颜色的分支。
+
+参数：
+  label  必填，显示出来的字（用 get_*_display，别自己拼）
+  tone   brand / success / warning / danger / info / neutral，默认 neutral
+
+⚠️ `brand` 这一档是给**分类**用的（ministry 名之类），不是给状态用的。
+   它跟着首页照片推出来的主题色走（D26）。
+
+   ⚠️ 别拿语义色当分类色用 —— ministry 名原来借的是 `info`，那是我随手挑的，
+      而它一旦被当成「信息」读，一个不表示任何状态的标签就有了语气。
+      分类归 brand，状态归四个语义色，两边不许串。
+{% endcomment %}
+{% spaceless %}
+<span class="inline-flex items-center rounded-md px-2 py-0.5 text-xs font-medium
+  {% if tone == 'brand' %}bg-brand-50 text-brand-800 dark:bg-brand-900 dark:text-brand-200
+  {% elif tone == 'success' %}bg-success-bg text-success-fg dark:bg-success-bg-dark dark:text-success-fg-dark
+  {% elif tone == 'warning' %}bg-warning-bg text-warning-fg dark:bg-warning-bg-dark dark:text-warning-fg-dark
+  {% elif tone == 'danger' %}bg-danger-bg text-danger-fg dark:bg-danger-bg-dark dark:text-danger-fg-dark
+  {% elif tone == 'info' %}bg-info-bg text-info-fg dark:bg-info-bg-dark dark:text-info-fg-dark
+  {% else %}bg-ink-100 text-ink-700 dark:bg-ink-800 dark:text-ink-200{% endif %}">{{ label }}</span>
+{% endspaceless %}

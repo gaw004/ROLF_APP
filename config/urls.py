@@ -14,10 +14,17 @@ Including another URLconf
     1. Import the include() function: from django.urls import include, path
     2. Add a URL to urlpatterns:  path('blog/', include('blog.urls'))
 """
+from django.conf import settings
+from django.conf.urls.static import static
 from django.contrib import admin
 from django.urls import include, path
 
+from core.views import home
+
 urlpatterns = [
+    # The public front page. ⚠️ No login_required: this is the one page a link
+    # shared with a stranger has to open. See D25.
+    path('', home, name='home'),
     path('admin/', admin.site.urls),
     # Staff-only pages pushed out of the admin by D18's shape trigger
     # (the contact merge page).
@@ -28,4 +35,16 @@ urlpatterns = [
     path('', include('accounts.urls')),
     path('', include('events.urls')),
     path('', include('org.urls')),
+    # ⚠️ Prefixed, unlike the four above. Those all mount at the root because
+    #    their paths are already distinct nouns ("events/", "login/"); this one
+    #    owns a whole small area including its own manage page, and "memories/"
+    #    is the thing people will type.
+    path('memories/', include('gallery.urls')),
 ]
+
+# ⚠️ Development only, and django.conf.urls.static.static() enforces that by
+#    returning nothing when DEBUG is off. In production these files are served
+#    by the object store, not by Django — serving user uploads through the
+#    application is both slow and the shape of problem this project has no
+#    reason to take on.
+urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)

@@ -1,0 +1,79 @@
+{% extends "core/base.html" %}
+{% block title %}Memories{% endblock %}
+
+{% block content %}
+  {% comment %}
+  往 Memories 墙上放照片，以及把照片拿下来。ministry admin 和 foundation admin
+  共用这一页 —— 差别全在视图和表单里（谁的下拉里有哪些 ministry、能不能留空、
+  列表里出现哪些照片），模板不做任何权限判断。
+
+  ⚠️ 列表是**查询里就窄好的**，不是模板 {% templatetag openblock %} if {% templatetag closeblock %} 藏出来的。
+     藏出来的那种，别人 ministry 的照片仍然进了发给浏览器的 HTML。
+  {% endcomment %}
+
+  <div class="flex flex-wrap items-baseline justify-between gap-3">
+    <h1 class="text-2xl font-semibold">Memories</h1>
+    {% url 'gallery:wall' as wall_url %}
+    {% include "core/components/button.html" with label="See the wall" href=wall_url variant="ghost" %}
+  </div>
+
+  <p class="mt-2 max-w-2xl text-sm text-ink-600 dark:text-ink-300">
+    Photos here are shown to everyone who is signed in. Sixty of them are on the
+    wall on any given day, drawn afresh each morning — nothing is deleted by
+    falling off it. A photo already on the wall is skipped rather than added
+    twice.
+  </p>
+
+  {% comment %}
+  ⚠️ enctype 不能少。没有它，浏览器把表单当 urlencoded 发，文件**只发文件名** ——
+     表单照样通过验证、记录照样保存，就是没有照片。整条路上没有任何报错。
+     event_form.html 上写着同一句，因为这是同一个坑。
+  {% endcomment %}
+  <form method="post" enctype="multipart/form-data" class="card mt-6">
+    {% csrf_token %}
+    {% include "core/components/form_fields.html" %}
+    <div class="mt-6">
+      {% include "core/components/button.html" with label="Add to Memories" variant="primary" %}
+    </div>
+    {% comment %}
+    ⚠️ 一次最多十张，上限写在 gallery/forms.py 的 MAX_PHOTOS_PER_UPLOAD 上，
+       这里不重复那个数字 —— 字段的 help_text 是从那个常量生成的。
+       两处各写一遍的话，改上限的人只会改到其中一处。
+    {% endcomment %}
+  </form>
+
+  <h2 class="mt-10 text-lg font-semibold">
+    Photos you can take down
+    <span class="text-sm font-normal text-ink-500 dark:text-ink-400">({{ photos|length }})</span>
+  </h2>
+
+  {% if photos %}
+    <ul class="mt-4 grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4">
+      {% for photo in photos %}
+        <li class="card p-3">
+          {% comment %}
+          缩略图，不是大图。这一页可能列出几百张，而大图是给悬浮窗用的。
+          ⚠️ 宽高照旧写上：少了它们，这个网格会在图片逐张到达时一路重排。
+          {% endcomment %}
+          <img src="{{ photo.thumb.url }}" alt="{{ photo.caption }}"
+               width="{{ photo.thumb_width }}" height="{{ photo.thumb_height }}"
+               loading="lazy" decoding="async"
+               class="aspect-square w-full rounded-md object-cover">
+          <p class="mt-2 truncate text-xs text-ink-600 dark:text-ink-300">{{ photo.caption }}</p>
+          {% comment %}
+          ⚠️ POST，不是一条 GET 链接。GET 删除会被每一个预取器和爬虫触发，
+             而这两个文件是全系统唯一没有备份能捞回来的东西。
+          ⚠️ confirm 是必须的（button.html 对破坏性动作的要求），而且这里的
+             删除是真删 —— 文件和记录一起走。
+          {% endcomment %}
+          <form method="post" action="{% url 'gallery:delete' photo.pk %}" class="mt-2">
+            {% csrf_token %}
+            {% include "core/components/button.html" with label="Remove" variant="danger" full=1 confirm="Remove this photo from Memories? The file is deleted for good." %}
+          </form>
+        </li>
+      {% endfor %}
+    </ul>
+  {% else %}
+    {% include "core/components/empty.html" with message="No photos yet. The first one you add is on the wall tomorrow morning — and today, if the wall is not already full." %}
+  {% endif %}
+{% endblock %}

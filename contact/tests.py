@@ -193,6 +193,7 @@ class SeededRelationshipTypeTests(TestCase):
             contact_type=Contact.ContactType.INDIVIDUAL, legal_last_name="Alice")
         kin = EmergencyContact.objects.create(
             person=person, name="Wang Xiuying", phone="+14085550101",
+            email="wang@example.com",
             relationship_type=RelationshipType.objects.get(code="parent"))
         kin.full_clean()
 
@@ -675,7 +676,7 @@ class MergeContactsTests(TestCase):
             person=self.drop, name="王秀英", phone="+14085550188",
             relationship_type=self.parent_of)
         get_user_model().objects.create_user(
-            username="dropuser", password="x", contact=self.drop)
+            email="dropuser@example.com", password="x", contact=self.drop)
 
         merge_contacts(self.keep, self.drop)
 
@@ -696,8 +697,8 @@ class MergeContactsTests(TestCase):
 
     def test_merge_refuses_when_both_contacts_have_a_user(self):
         User = get_user_model()
-        User.objects.create_user(username="keepuser", password="x", contact=self.keep)
-        User.objects.create_user(username="dropuser", password="x", contact=self.drop)
+        User.objects.create_user(email="keepuser@example.com", password="x", contact=self.keep)
+        User.objects.create_user(email="dropuser@example.com", password="x", contact=self.drop)
         with self.assertRaises(MergeConflict):
             merge_contacts(self.keep, self.drop)
 
@@ -716,8 +717,8 @@ class MergeContactsTests(TestCase):
 
     def test_a_refused_merge_changes_nothing(self):
         User = get_user_model()
-        User.objects.create_user(username="keepuser", password="x", contact=self.keep)
-        User.objects.create_user(username="dropuser", password="x", contact=self.drop)
+        User.objects.create_user(email="keepuser@example.com", password="x", contact=self.keep)
+        User.objects.create_user(email="dropuser@example.com", password="x", contact=self.drop)
         EmergencyContact.objects.create(
             person=self.drop, name="王秀英", phone="+14085550188",
             relationship_type=self.parent_of)
@@ -773,7 +774,7 @@ class MergePageTests(TestCase):
 
     def login(self):
         self.client.force_login(
-            get_user_model().objects.create_superuser(username="staff", password="x"))
+            get_user_model().objects.create_superuser(email="staff@example.com", password="x"))
 
     def test_the_merge_page_requires_a_staff_login(self):
         response = self.client.get(self.url)
@@ -824,7 +825,7 @@ class ChangelistCostTests(TestCase):
 
     def setUp(self):
         self.client.force_login(
-            get_user_model().objects.create_superuser(username="staff", password="x"))
+            get_user_model().objects.create_superuser(email="staff@example.com", password="x"))
         self.url = reverse("admin:contact_contact_changelist")
 
     def populate(self, count):
@@ -852,7 +853,11 @@ class ChangelistCostTests(TestCase):
             contact_type=Contact.ContactType.INDIVIDUAL,
             legal_last_name="Name0", phone="+14085550000")
         page = self.client.get(self.url).content.decode()
-        self.assertEqual(page.count("合并掉"), 2)
+        # ⚠️ Counts the merge URL, not the link text. C2.5 translated the label
+        #    and this assertion went to zero — it was testing the wording, not
+        #    the pairing. The query string is what the link has to carry for a
+        #    merge to be reachable at all, and it does not move with the copy.
+        self.assertEqual(page.count("?keep="), 2)
 
 
 class MinorTests(TestCase):
@@ -947,7 +952,7 @@ class ContactHistoryTests(TestCase):
         # The middleware is what covers every *other* request path — see
         # test_saving_during_a_non_admin_request_records_the_user.
         User = get_user_model()
-        editor = User.objects.create_superuser(username="editor", password="x")
+        editor = User.objects.create_superuser(email="editor@example.com", password="x")
         self.client.force_login(editor)
 
         response = self.client.post(
@@ -1024,7 +1029,8 @@ class ContactHistoryMiddlewareTests(TestCase):
             contact_type=Contact.ContactType.INDIVIDUAL,
             legal_last_name="Nguyen",
         )
-        self.user = get_user_model().objects.create_user(username="coordinator", password="x")
+        self.user = get_user_model().objects.create_user(
+            email="coordinator@example.com", password="x")
 
     def test_saving_during_a_non_admin_request_records_the_user(self):
         # This is what the middleware is for: the HTMX pages of Phase C and any
@@ -1040,3 +1046,54 @@ class ContactHistoryMiddlewareTests(TestCase):
             "simple_history.middleware.HistoryRequestMiddleware",
             settings.MIDDLEWARE,
         )
+
+
+class EmergencyContactReachabilityTests(TestCase):
+    """2026-08-05: the emergency contact carries an email, and P6 prefers it.
+
+    ⚠️ Required rather than optional, and the reason is money: this address is
+       P6's fallback when a minor has no consent address on file, and until now
+       that fallback could only send SMS because the table had no email column.
+
+    ⚠️ The cost is recorded in phase-c.md's known gaps: a guardian who left only
+       a phone number on a paper sign-in sheet **cannot be recorded at all**.
+    """
+
+    def make(self, **fields):
+        person = Contact.objects.create(
+            contact_type=Contact.ContactType.INDIVIDUAL, legal_last_name="Alice")
+        defaults = {
+            "person": person, "name": "Wang Xiuying", "phone": "+14085550101",
+            "email": "wang@example.com",
+            "relationship_type": RelationshipType.objects.get(code="parent"),
+        }
+        return EmergencyContact.objects.create(**{**defaults, **fields})
+
+    def test_email_is_preferred_over_the_phone_number(self):
+        self.assertEqual(self.make().reachable_at, ("wang@example.com", "email"))
+
+    def test_the_phone_is_still_the_fallback(self):
+        """Written for the row that predates the column, and for the way back.
+
+        ⚠️ Rows created before this field existed carry an empty string (the
+           migration's one-off default), and phase-c.md's known gap says the
+           retreat from "required" is to make it blank again. Both cases land
+           here, so both are asserted rather than assumed.
+        """
+        self.assertEqual(
+            self.make(email="").reachable_at, ("+14085550101", "sms"))
+
+    def test_a_row_with_neither_is_unreachable_rather_than_an_error(self):
+        kin = self.make(email="")
+        kin.phone = ""
+        self.assertIsNone(kin.reachable_at)
+
+    def test_the_email_is_required_now(self):
+        person = Contact.objects.create(
+            contact_type=Contact.ContactType.INDIVIDUAL, legal_last_name="Bob")
+        kin = EmergencyContact(
+            person=person, name="Somebody", phone="+14085550102",
+            relationship_type=RelationshipType.objects.get(code="parent"))
+        with self.assertRaises(ValidationError) as caught:
+            kin.full_clean()
+        self.assertIn("email", caught.exception.message_dict)

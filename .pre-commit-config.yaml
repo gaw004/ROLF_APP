@@ -1,0 +1,56 @@
+# C0.5.3 第一层 —— 本地。`git commit` 时闪电跑一遍守卫（实测约 2 秒）。
+#
+# 这一层是**方便**，不是底线。有人赶进度 `--no-verify` 就跳过去了，所以真正
+# 拦得住的是第二层：.github/workflows/ci.yml，红灯禁止合并。两层都要有的理由是
+# 它们治的是两件事 —— 本地这层让你在写的时候就知道破了规矩（此时改起来是一分钟），
+# CI 那层保证破了规矩的东西进不了主分支（此时改起来是一次 revert）。
+#
+# 装一次：
+#     pip install -r requirements-dev.txt
+#     pre-commit install
+#
+# ⚠️ 跑的是 `core.tests` 整个模块，不是列出来的几个守卫类。
+#    core/tests.py 的开头写着「Project-wide guards. These live in core because
+#    they police every app.」—— 按模块跑，**新加的守卫当天就自动被跑到**；
+#    按类名列，新加的那条要等有人记得回来改这个文件。这个项目已经反复吃过
+#    「只写在清单里的规则跨不过下一轮」的亏。
+#
+# ⚠️ language: system —— 命令在当前 shell 的 PATH 里找。仓库带 .envrc（direnv），
+#    进目录就激活 .venv；没装 direnv 的话先 `source .venv/bin/activate` 再 commit。
+
+repos:
+  - repo: local
+    hooks:
+      - id: guards
+        name: guards (core.tests)
+        # ⚠️ **不用 `--keepdb`**，尽管它更快。实测差别只有 1 秒（2.0s → 3.0s），
+        #    而它留下的 test_rolf_dev 会让下一次普通的 `manage.py test` 停在
+        #    「要不要删掉这个测试库」的交互提问上 —— 每天要撞很多次的那种坑，
+        #    换来的是一秒。
+        # --noinput：pre-commit 没有 tty，任何交互提问在这里都是 EOFError，
+        #    而它报出来的样子完全不像「守卫没过」。
+        entry: python manage.py test --noinput core.tests
+        language: system
+        pass_filenames: false
+        always_run: true
+
+      - id: ruff
+        name: ruff
+        # 用 requirements-dev.txt 里 pin 住的那个 ruff，不用 pre-commit 自己拉的
+        # 镜像仓库 —— 否则本地、pre-commit、CI 会跑三个不同版本的 ruff，而它们
+        # 对同一份代码给三个答案。
+        entry: ruff check --force-exclude
+        language: system
+        types_or: [python, pyi]
+        require_serial: true
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      # 只留会静默坏事的那几条。格式化类的一律不加：这个仓库的注释里有大量
+      # 手工对齐的表格和说明，自动格式化会把它们重排，而 diff 里看不出是谁干的。
+      - id: check-merge-conflict
+      - id: check-yaml
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+        exclude: '\.md$'  # Markdown 的行尾两空格是换行，删了会改变渲染结果

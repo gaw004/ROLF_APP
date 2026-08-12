@@ -6,19 +6,33 @@ imports the same functions unchanged.
 """
 
 import datetime
+import io
+import uuid
 from dataclasses import dataclass
 from decimal import Decimal
 
 from django.core.exceptions import ValidationError
 from django.db import transaction
-from django.db.models import Count, Sum
+from django.db.models import Count, F, Q, Sum
+from django.db.models.functions import TruncMonth
+from django.utils import timezone
+from django.utils.text import slugify
+from PIL import Image as PILImage
+from PIL import ImageOps as PILImageOps
 
-from contact.models import Contact
+from contact.models import Contact, ContactQuerySet
 from core.notifications.base import EMAIL, SMS, Message, get_backend
 from core.timeutils import local_date_of, local_now
 from org.models import Assignment, Position
 
-from .models import EventNotification, Participation
+from . import tokens
+from .models import (
+    Event,
+    EventNotification,
+    EventRole,
+    Participation,
+    ParticipationRole,
+)
 
 
 class ConsentRequired(ValidationError):
@@ -26,6 +40,15 @@ class ConsentRequired(ValidationError):
 
     A subclass rather than a bare ValidationError so a view can tell this apart
     from an ordinary form error and re-render with the consent section open.
+    """
+
+
+class TurnedUp(ValidationError):
+    """Refusing to mark somebody absent when the record says they were here.
+
+    Its own class for the same reason as ConsentRequired: the attendance page
+    has to show this one next to the person it concerns rather than as a
+    generic failure, because the fix is a different button.
     """
 
 
@@ -191,20 +214,49 @@ def cancel(participation):
     return participation
 
 
-def check_in(participation, *, at=None):
+def _record_method(participation, method):
+    """Note how this row's attendance was established, if nothing has yet. D28.
+
+    ⚠️ First write wins. The question the column answers is "did the volunteer
+       fill this in, or did I?", so an admin correcting the hours an hour later
+       must not rewrite the answer to "I did". That correction is recorded in
+       the history table; this field is the origin.
+
+    ⚠️ All three routes to attended call this, for the reason written out on
+       _mark_attended(): a rule with three entrances and one guard is a rule
+       with two ways round it. Here the cost of missing one is quieter — the
+       column would simply be empty, which reads as "an old row" and is false.
+    """
+    if not participation.checked_in_method:
+        participation.checked_in_method = method
+
+
+def check_in(participation, *, at=None, method=Participation.CheckInMethod.ADMIN):
     """They turned up. Records the time and moves status to attended.
 
     Refuses a minor with no consent on the row — see _mark_attended().
+
+    `method` says who did the recording. It defaults to ADMIN because that is
+    what every existing caller means; the QR page passes SELF_QR. See D28.
     """
     participation.checked_in_at = at or local_now()
+    _record_method(participation, method)
     _mark_attended(participation)
     participation.full_clean(exclude=["registered_at"])
     participation.save()
     return participation
 
 
-def check_out(participation, *, at=None):
+def check_out(participation, *, at=None, method=Participation.CheckInMethod.ADMIN):
     """They left. Records the time and *writes* the elapsed hours.
+
+    ⚠️ Self-service check-out therefore **writes an authoritative number**. A
+       volunteer who taps this by mistake five minutes in leaves 0.08 in a
+       column a human is answerable for, and mark_absent() will refuse that row
+       from then on. Accepted in D28 with its eyes open: the bias runs the same
+       direction as the one it replaces (an admin who forgets to tap check-out),
+       the confirmation page names the number before writing it, and the history
+       table keeps the old value.
 
     ⚠️ Writes, does not derive. Once somebody has corrected hours by hand, that
        value stands — do not recompute it from the timestamps and overwrite it.
@@ -225,22 +277,353 @@ def check_out(participation, *, at=None):
         participation.hours = Decimal(elapsed.total_seconds()) / Decimal(3600)
         participation.hours = participation.hours.quantize(Decimal("0.01"))
     if participation.hours is not None:
+        _record_method(participation, method)
         _mark_attended(participation)
     participation.full_clean(exclude=["registered_at"])
     participation.save()
     return participation
 
 
-def record_hours(participation, hours):
+def record_hours(participation, hours, *, method=Participation.CheckInMethod.ADMIN):
     """Enter hours by hand — the paper sign-in sheet, with no timestamps.
 
     Goes through the same field as check_out() because there is only one
     authoritative value; what differs is where the number came from.
+
+    ⚠️ This is a third route to attended that never passes through check_in(),
+       which is why it records the method too: a row entered from paper has no
+       timestamps at all, and leaving the column empty would file it under
+       "predates the feature".
     """
     participation.hours = hours
+    _record_method(participation, method)
     _mark_attended(participation)
     participation.full_clean(exclude=["registered_at"])
     participation.save()
+    return participation
+
+
+# --- D28: the QR scan, from proof-of-presence to one written row ------------
+
+#: Where the proof of presence is kept between the scan and the confirmation.
+#  A key, not a cookie name — the view puts the value in request.session.
+CHECKIN_CREDENTIAL_KEY = "events.checkin_credential"
+
+#: How long the proof survives. Long enough to type a password on a phone,
+#  which is the whole reason it exists: the token's 90 seconds constrain the
+#  scan and nothing else. D28「为什么 ② 和 ③ 一定要分开」.
+CREDENTIAL_MAX_AGE = datetime.timedelta(minutes=10)
+
+
+class CredentialExpired(ValidationError):
+    """The proof of presence is gone or too old. Scan again."""
+
+
+def issue_credential(event_id, mode, *, at=None):
+    """A plain dict recording that somebody stood in front of the screen.
+
+    ⚠️ Returned rather than written, because nothing in this module may know
+       what a request is (see the module docstring). The view is what puts it
+       into the session — and a plain dict is also what the session can hold,
+       since sessions are serialised as JSON.
+    """
+    return {
+        "event": event_id,
+        "mode": mode,
+        "at": (at or local_now()).timestamp(),
+    }
+
+
+def read_credential(data, *, at=None):
+    """(event_id, mode) from a stored credential, or raise CredentialExpired."""
+    try:
+        event_id, mode, issued_at = data["event"], data["mode"], float(data["at"])
+    except (TypeError, KeyError, ValueError) as error:
+        raise CredentialExpired(_CREDENTIAL_MESSAGE) from error
+    age = (at or local_now()).timestamp() - issued_at
+    if age < 0 or age > CREDENTIAL_MAX_AGE.total_seconds():
+        raise CredentialExpired(_CREDENTIAL_MESSAGE)
+    return event_id, mode
+
+
+_CREDENTIAL_MESSAGE = (
+    "That check-in has timed out. Scan the code on the screen again."
+)
+
+
+@dataclass(frozen=True)
+class ScanTargets:
+    """This person's rows at this event, sorted by what the scan can do to them.
+
+    Three lists rather than one, because the three lead to three different
+    sentences on the phone, and a view that had to work them out from a flat
+    queryset would be doing the deciding — which is what D18 puts here.
+    """
+
+    #: Rows this scan would change.
+    pending: list
+    #: Rows the scan would repeat — "you checked in at 9:03".
+    done: list
+    #: Rows that cannot be checked out because they were never checked in.
+    needs_check_in: list
+
+    @property
+    def any_signup(self):
+        """Are they signed up for this event at all? The first question asked."""
+        return bool(self.pending or self.done or self.needs_check_in)
+
+
+def scan_targets(contact, event, mode):
+    """Sort this contact's live signups at `event` into what the scan can do.
+
+    ⚠️ Cancelled rows are excluded, not listed as "done". Somebody who pulled
+       out and then scanned should be told they are not signed up — the row
+       exists only so that the notification history has something to point at.
+
+    ⚠️ One person may legitimately hold several rows at one event (they signed
+       up to lift *and* to run the welcome desk — D19 allows it), which is why
+       this returns lists rather than a row. Picking one of several is the
+       volunteer's call, not this function's: the other two options both invent
+       a number. See D28「五、一个人报了两个工种」.
+    """
+    rows = list(
+        Participation.objects
+        .filter(contact=contact, event_role__event=event)
+        .notifiable()
+        .select_related("event_role__role", "event_role__event")
+        .order_by("event_role__role__name")
+    )
+    pending, done, needs_check_in = [], [], []
+    for row in rows:
+        if mode == tokens.CHECK_IN:
+            (done if row.checked_in_at else pending).append(row)
+        elif row.checked_out_at:
+            done.append(row)
+        elif row.checked_in_at:
+            pending.append(row)
+        else:
+            needs_check_in.append(row)
+    return ScanTargets(pending=pending, done=done, needs_check_in=needs_check_in)
+
+
+def apply_scan(participation_pk, *, contact, event_id, mode, at=None):
+    """Write one scanned check-in or check-out. Atomic, and safe to repeat.
+
+    Returns (participation, changed). `changed` is False when the row was
+    already in the state the scan asks for — a second tap, a browser retry, or
+    the same person scanning on two devices. That is not an error and must not
+    be reported as one: the page says "you checked in at 9:03" and everybody
+    involved is happy.
+
+    ⚠️ The row is locked and then **re-read inside the lock**. Checking the
+       state before taking the lock is the same as not taking it: two requests
+       both read "not checked in", both proceed, and the second overwrites the
+       first's timestamp. Contention is only ever between duplicate requests for
+       the same person — different volunteers never touch the same row — so the
+       lock costs nothing at a hundred-person event. D28「八、并发」.
+
+    ⚠️ `of=("self",)` is not a micro-optimisation. Without it the FOR UPDATE
+       covers every table pulled in by select_related, which includes the
+       **event** — and locking the event row would serialise the entire queue
+       behind whoever scanned first. That is the one way this feature could
+       actually be made to fall over by a hundred people arriving at once.
+
+    ⚠️ Nothing in here may do I/O. A transaction held open while waiting on a
+       network is how a connection pool is exhausted, and the connection limit
+       is the real ceiling on this feature (D28「真正要处理的四件事」).
+
+    ⚠️ The scope is the belt: the lookup is narrowed to this contact and this
+       event, so a primary key from somebody else's row cannot be posted into
+       this function at all.
+    """
+    with transaction.atomic():
+        participation = (
+            Participation.objects
+            .select_for_update(of=("self",))
+            .filter(contact=contact, event_role__event_id=event_id)
+            .notifiable()
+            .select_related("event_role__event", "event_role__role", "contact")
+            .get(pk=participation_pk)
+        )
+        method = Participation.CheckInMethod.SELF_QR
+        if mode == tokens.CHECK_IN:
+            if participation.checked_in_at:
+                return participation, False
+            check_in(participation, at=at, method=method)
+        else:
+            if participation.checked_out_at or participation.checked_in_at is None:
+                return participation, False
+            check_out(participation, at=at, method=method)
+    return participation, True
+
+
+def default_checkin_mode(event, *, at=None):
+    """Which way round the iPad should start when the page is opened.
+
+    Before the midpoint of the event, people are arriving; after it, they are
+    leaving. ⚠️ Read **once**, at page load, and never again — the display does
+    not follow this as the afternoon goes on. An iPad that switched itself would
+    turn the queue standing in front of it into check-outs, with nothing on the
+    screen having changed to say so.
+    """
+    midpoint = event.start_time + (event.end_time - event.start_time) / 2
+    return tokens.CHECK_IN if (at or local_now()) < midpoint else tokens.CHECK_OUT
+
+
+def checkin_result_message(participation, mode, changed):
+    """The sentence that lands on My Signups after a scan.
+
+    ⚠️ A repeat is phrased as a statement of fact, not as a failure. The most
+       common way to arrive here twice is a slow page and an impatient thumb,
+       and an error would send that person off to find an admin over something
+       that already worked.
+    """
+    if mode == tokens.CHECK_IN:
+        when = timezone.localtime(participation.checked_in_at)
+        if changed:
+            return f"Checked in at {when:%-I:%M %p}."
+        return f"You already checked in at {when:%-I:%M %p}."
+    when = timezone.localtime(participation.checked_out_at)
+    if not changed:
+        return f"You already checked out at {when:%-I:%M %p}."
+    return (f"Checked out at {when:%-I:%M %p} — "
+            f"{participation.hours} hours recorded.")
+
+
+def undo_attendance(participation):
+    """Somebody clicked check-in on the wrong row. Put it back as it was.
+
+    Clears both timestamps and the hours, and moves the row back to registered.
+    Returns True if anything actually changed, so the caller can tell a real
+    undo from a second click on the same button.
+
+    ⚠️ **This deletes hours, and that is the whole difficulty.** `check_out()`
+       writes hours from the clock *only when hours is None*, so an existing
+       value may have come from the clock or from a person typing it — and
+       nothing in the table records which. There is therefore no version of
+       this function that keeps "the ones a human typed": it cannot see them.
+
+       What makes deleting them acceptable rather than reckless is two things,
+       and both have to stay true:
+
+         · the button asks first, **naming the number it is about to remove**
+           (events/templates/events/_attendance_row.html);
+         · `Participation` carries `HistoricalRecords`, so the old value and
+           who removed it are recoverable from the history table.
+
+    ⚠️ It is not optional to clear the hours either, which is worth stating so
+       that nobody "improves" this by keeping them: the constraint
+       `participation_hours_only_when_attended` means a row with hours **must**
+       be attended. "Registered, 3 hours" cannot be stored at all.
+
+    ⚠️ Only `attended` goes back to `registered`. A cancelled row that also
+       carries a check-in is a real state (they signed in, then pulled out),
+       and moving it to registered would erase the second fact to undo the
+       first. Same reasoning as `cancel()` being a status change rather than a
+       delete.
+
+    ⚠️ Deliberately **not** folded into `mark_absent()`. "Undo my mistake" and
+       "record that they did not come" are different facts, and one button
+       doing both would make the second unreadable — the no-show rate would
+       quietly count every mis-click. That was decided when mark_absent() was
+       written (2026-08-05, phase-c.md's known-gaps table) and this function is
+       the fix that entry names.
+    """
+    if (participation.checked_in_at is None
+            and participation.checked_out_at is None
+            and participation.hours is None):
+        return False
+
+    participation.checked_in_at = None
+    participation.checked_out_at = None
+    participation.hours = None
+    # ⚠️ Cleared with the rest. Left behind it would say "a volunteer recorded
+    #    this" about a row that now records nothing — and the next write, which
+    #    is first-write-wins, would then be unable to say who really filled it
+    #    in. This field describes an attendance record, so it goes when the
+    #    attendance record goes.
+    participation.checked_in_method = ""
+    if participation.status == Participation.Status.ATTENDED:
+        participation.status = Participation.Status.REGISTERED
+    participation.full_clean(exclude=["registered_at"])
+    participation.save()
+    return True
+
+
+def clear_hours(participation):
+    """Remove an hours figure without touching anything else. Safe to call twice.
+
+    ⚠️ **Empty is not zero, and that is why this exists.** Until now hours could
+       be set to 0 but never back to nothing, because the form field is a
+       required number. Those are different facts and the attendance page
+       already draws them differently: 0 means somebody looked and recorded
+       that no time was worked; empty means nobody has recorded anything yet.
+       Without this, a figure typed by mistake could only ever be *corrected*
+       to a wrong-but-plausible 0.
+
+    ⚠️ The status is left alone, deliberately. "They turned up" and "they worked
+       N hours" are two assertions, and a row reading attended with no hours is
+       an ordinary state — somebody checked in and the hours have not been
+       worked out yet. Reverting the status here would delete the first fact in
+       order to undo the second. Clearing everything at once is
+       `undo_attendance()`, and it is a different button on purpose.
+    """
+    if participation.hours is None:
+        return False
+    participation.hours = None
+    participation.full_clean(exclude=["registered_at"])
+    participation.save()
+    return True
+
+
+def mark_absent(participation):
+    """They signed up and did not come.
+
+    ⚠️ This status existed in `Participation.Status` from the beginning and
+       **nothing ever wrote it**. That is worse than not having it: any
+       "no-show rate" computed before today would have been a hard zero on
+       every ministry, every period — a number that looks like good news, never
+       raises, and is never right. 2026-08-05.
+
+    ⚠️ Absence is a *recorded* fact, not the absence of a record. A row still
+       sitting at `registered` after the event means nobody looked; this means
+       somebody looked and they were not there. The report keeps the two apart
+       and says how many events were actually marked up — see `ministry_report`.
+
+    Refuses when the record already says they turned up, and never edits that
+    record to make room for itself:
+
+    · hours — the rule the foundation asked for (2026-08-05). "Did three hours"
+      and "did not come" cannot both be true, and clearing the hours to store
+      the absence would be a silent deletion of the one value in this system a
+      human is answerable for having typed.
+    · a check-in timestamp — the same contradiction one step earlier, and left
+      in place it would print a row reading "checked in 3:44 p.m. · No-show".
+
+    ⚠️ Undoing a check-in clicked on the wrong row is `undo_attendance()`, and
+       it is deliberately **not** this function — "undo my mistake" and "record
+       that they did not come" are different facts, and one button doing both
+       would make the second unreadable: every mis-click would land in the
+       no-show rate. That separation was the reason this gap stayed open from
+       2026-08-05 until undo_attendance() closed it.
+
+    The way back is `check_in()` (or `record_hours()`), which both go through
+    `_mark_attended()` and so overwrite this status without needing to know it
+    exists — somebody who turns up an hour late is signed in as normal.
+    """
+    if participation.hours is not None:
+        raise TurnedUp({
+            "hours": "There are hours on this signup, so it cannot be marked as "
+                     "a no-show. Clear the hours first if they were entered by "
+                     "mistake.",
+        })
+    if participation.checked_in_at is not None:
+        raise TurnedUp({
+            "checked_in_at": "This signup was checked in, so it cannot be marked "
+                             "as a no-show.",
+        })
+    participation.status = Participation.Status.ABSENT
+    participation.save(update_fields=["status", "updated_at"])
     return participation
 
 
@@ -338,6 +721,408 @@ def events_in_period(start, end, ministry=None):
     return events.filter(ministry=ministry) if ministry is not None else events
 
 
+# --- The ministry report (2026-08-05) ------------------------------------
+#
+# Thirteen figures over a **set of events**, where every earlier report in this
+# file answers about one. The chosen thirteen and the ones deliberately left out
+# are in D27; what follows is how they are computed and where each one can lie.
+#
+# ⭐ The single invariant, and the reason this takes a queryset rather than a
+#    ministry: **the report describes exactly the events in the list next to
+#    it.** Scoping, the ministry filter and the date window are already in that
+#    queryset, so a ministry admin and a foundation admin run the same code and
+#    neither needs a permission branch here. A `ministry_id` argument would have
+#    needed one, and a report that quietly widened past what its own page shows
+#    is the failure this shape rules out rather than tests for.
+
+
+@dataclass(frozen=True)
+class Bar:
+    """One row of a chart. `pct` is width, `caption` is the number in words."""
+
+    label: str
+    caption: str
+    pct: int
+
+
+@dataclass(frozen=True)
+class PairedBar:
+    """Wanted against got, drawn as two bars sharing one scale."""
+
+    label: str
+    needed: int
+    signed: int
+    needed_pct: int
+    signed_pct: int
+    short: bool
+
+
+@dataclass(frozen=True)
+class Chart:
+    """Bars plus the honesty flags the template needs to decide how to draw.
+
+    `sparse` — fewer than three bars. One bar is not a chart; it is a number
+    wearing a rectangle, and it reads as less information than the sentence it
+    replaced. The template falls back to a list.
+    """
+
+    title: str
+    bars: list
+    sparse: bool
+    note: str = ""
+
+
+def _bars(rows, *, formatter):
+    """Turn [(label, value)] into bars scaled against the largest one.
+
+    ⚠️ Scaled to the maximum, never to the total. A chart where the longest bar
+       stops a third of the way across is read as "a third of something", and
+       there is nothing on the page saying what.
+    """
+    rows = [(label, value) for label, value in rows if value is not None]
+    largest = max((value for _, value in rows), default=0)
+    return [
+        Bar(
+            label=label,
+            caption=formatter(value),
+            # int(), so a 0.4% bar is 0 rather than a hairline that reads as a
+            # rendering fault. The caption still carries the real number.
+            pct=int(100 * value / largest) if largest else 0,
+        )
+        for label, value in rows
+    ]
+
+
+def _chart(title, rows, *, formatter=str, note=""):
+    bars = _bars(rows, formatter=formatter)
+    return Chart(title=title, bars=bars, sparse=len(bars) < 3, note=note)
+
+
+def _months_between(first, last):
+    """Every month from first to last inclusive, gaps included.
+
+    ⚠️ Skipping the empty months is the default of a GROUP BY and it is a lie in
+       a chart: January and March drawn side by side say the ministry ran events
+       in consecutive months. A quiet ministry has to look quiet.
+    """
+    out, cursor = [], first
+    while cursor <= last:
+        out.append(cursor)
+        cursor = (cursor.replace(day=28) + datetime.timedelta(days=4)).replace(day=1)
+    return out
+
+
+def ministry_report(events):
+    """Everything the report panel shows, for one already-filtered event list.
+
+    Eight figures and five charts. Each of the three that can be misread carries
+    its own caveat out to the template rather than being silently rounded off:
+
+    ⚠️ `hours` is **hours that were recorded**, and it is biased low in a way
+       that is not random — it tracks which admin remembers to check people out.
+       `hours_records` and `hours_missing` go out with it so the page can say
+       what the total rests on. The foundation accepted this bias knowingly
+       (2026-08-05); what is not acceptable is printing the total alone.
+
+    ⚠️ `repeat_rate` is over the people in **this window**, not their whole
+       history. Somebody who came for years and once in August is a first-timer
+       here. That makes the figure answer "did this period build a habit",
+       which is the question worth asking of a period.
+
+    ⚠️ `fully_staffed_rate` counts only events that opened at least one role
+       with a number on it. An event that opened no roles, or only unlimited
+       ones, cannot be full — including it in the denominator would drag the
+       rate down for being unmeasurable, which reads as a staffing problem.
+    """
+    # Cancelled signups are out of every figure below: that person said they
+    # were not coming, and counting them as a volunteer inflates every number
+    # on this page. A no-show stays in — they signed up, which is the fact the
+    # signup figures are about.
+    parts = Participation.objects.filter(event_role__event__in=events).notifiable()
+
+    event_count = events.count()
+    totals = parts.aggregate(
+        signups=Count("pk"),
+        volunteers=Count("contact", distinct=True),
+        # ⚠️ `hours_total`, not `hours`. An alias that repeats a field name wins
+        #    over the field for every later argument in the same aggregate(),
+        #    so `hours=Sum("hours")` next to `Count("hours")` makes the second
+        #    one a count of the first — which Django refuses outright. It would
+        #    have been worse if it had not.
+        hours_total=Sum("hours"),
+        # Count over a nullable column counts the rows that have one: how many
+        # records the hours total is built from, not how many signups there are.
+        hours_records=Count("hours"),
+    )
+    hours = totals["hours_total"] or Decimal("0")
+    volunteers = totals["volunteers"]
+
+    repeat = (
+        parts.values("contact_id").annotate(n=Count("pk")).filter(n__gte=2).count()
+    )
+
+    # D3. Two id sets rather than one clever query: the "no role is short"
+    # condition is a NOT EXISTS over an annotated subquery, and the version of
+    # it that reads clearly is the one that is wrong. Sets of primary keys over
+    # a ministry's events are small — hundreds, not millions.
+    staffable = set(
+        events.filter(roles__needed_count__isnull=False).values_list("pk", flat=True)
+    )
+    short_events = set(
+        EventRole.objects.understaffed()
+        .filter(event__in=events)
+        .values_list("event_id", flat=True)
+    )
+    fully_staffed = len(staffable - short_events)
+
+    # G2. The same rule as consent_required_for(), asked of a queryset: the
+    # event demanded consent, the person is a minor **or has no date on file**,
+    # and no consent was ever recorded. Asking it differently here than the two
+    # gates ask it is how a report reassures somebody about a rule it is not
+    # actually checking.
+    minors_without_consent = parts.filter(
+        event_role__event__requires_guardian_consent=True,
+        consent_at__isnull=True,
+    ).filter(
+        Q(contact__birth_date__gt=ContactQuerySet.majority_threshold())
+        | Q(contact__birth_date__isnull=True)
+    ).count()
+
+    absence = _absence(events, parts)
+
+    figures = {
+        "events": event_count,
+        "signups": totals["signups"],
+        "volunteers": volunteers,
+        "hours": hours,
+        "hours_records": totals["hours_records"],
+        "hours_missing": totals["signups"] - totals["hours_records"],
+        "hours_per_volunteer": (hours / volunteers) if volunteers else None,
+        "repeat_volunteers": repeat,
+        "repeat_rate": _percent(repeat, volunteers),
+        "fully_staffed": fully_staffed,
+        "staffable_events": len(staffable),
+        "fully_staffed_rate": _percent(fully_staffed, len(staffable)),
+        "minors_without_consent": minors_without_consent,
+        **absence,
+    }
+    return {"figures": figures, "charts": _report_charts(events, parts)}
+
+
+def _absence(events, parts):
+    """How often people signed up and did not come — over the events somebody
+    actually went through.
+
+    ⚠️ The whole difficulty is the denominator, and the obvious version of it is
+       wrong in the direction of bad news. "Events somebody marked up" cannot be
+       asked directly: the only positive evidence of marking is an absence
+       existing, so a denominator of "events with at least one no-show" contains
+       nothing **but** events with absences, and the rate it produces can never
+       be low. That is as dishonest as printing no caveat at all, just pointed
+       the other way.
+
+    So the question asked here is the one the data can answer:
+    **is any signup on this event still sitting at `registered`?** A row left
+    there after the event means nobody went through the list. Ten people all
+    checked in, nobody absent, qualifies — and contributes an honest 0%.
+
+    ⚠️ Events with no signups at all are out of the denominator. They cannot
+       have an absence, and counting them would make a diligent ministry look
+       careless — the same reason `fully_staffed` excludes events that opened no
+       numbered role.
+    """
+    with_signups = set(parts.values_list("event_role__event_id", flat=True))
+    still_registered = set(
+        parts.filter(status=Participation.Status.REGISTERED)
+        .values_list("event_role__event_id", flat=True)
+    )
+    marked_up = with_signups - still_registered
+
+    counted = parts.filter(event_role__event_id__in=marked_up).aggregate(
+        signups=Count("pk"),
+        absences=Count("pk", filter=Q(status=Participation.Status.ABSENT)),
+    )
+    return {
+        "absences": counted["absences"],
+        "absence_signups": counted["signups"],
+        "absence_rate": _percent(counted["absences"], counted["signups"]),
+        # The two halves of the caption. Without them the rate is a number with
+        # no idea how much of the period it speaks for.
+        "marked_up_events": len(marked_up),
+        "events_with_signups": len(with_signups),
+    }
+
+
+def _percent(part, whole):
+    """An integer percentage, or None when the question does not apply.
+
+    None rather than 0: "none of the twelve" and "there were none to count" are
+    different answers, and 0% for the second reads as a failure.
+    """
+    return int(100 * part / whole) if whole else None
+
+
+def _report_charts(events, parts):
+    """The five charts, in the order the panel draws them.
+
+    ⚠️ All five are horizontal. Twelve vertical bars in a panel that is half a
+       screen wide are 20px each with "Aug 2026" underneath, and on a phone the
+       panel is the full width but the labels still are not. Horizontal puts
+       every label on its own line at its natural size, and the same component
+       draws all five — so no chart on this page can end up styled unlike its
+       neighbour. Months therefore read top to bottom, oldest first.
+    """
+    monthly = _monthly_series(events, parts)
+    return {
+        "events_by_month": _chart(
+            "Events by month",
+            [(label, count) for label, count, _ in monthly],
+            formatter=lambda n: f"{n} event{'' if n == 1 else 's'}",
+        ),
+        "hours_by_month": _chart(
+            "Recorded hours by month",
+            [(label, total) for label, _, total in monthly],
+            formatter=lambda h: f"{h:.2f} h",
+            note="Only hours somebody entered. Months where nobody was checked "
+                 "out read as zero.",
+        ),
+        "role_gap": _role_gap(events, parts),
+        "top_volunteers": _top_volunteers(parts),
+        "hours_by_role": _chart(
+            "Recorded hours by role",
+            list(
+                parts.exclude(hours__isnull=True)
+                .order_by()
+                .values_list("event_role__role__name")
+                .annotate(total=Sum("hours"))
+                .order_by("-total")
+            ),
+            formatter=lambda h: f"{h:.2f} h",
+        ),
+    }
+
+
+def _monthly_series(events, parts):
+    """[(label, event count, recorded hours)] with no month left out.
+
+    Two queries, merged here rather than joined in SQL. Joining Event to
+    Participation and asking for Count(events) in the same statement multiplies
+    the count by the number of signups — the classic multi-table aggregation
+    trap, and it produces a plausible number rather than an error.
+    """
+    # ⚠️ `.order_by()` with nothing in it, on both, and it is not tidying up.
+    #    An **explicit** ordering on the incoming queryset is added to the
+    #    GROUP BY — and the list this report describes arrives ordered by
+    #    start_time, so grouping by month also grouped by the exact timestamp:
+    #    one row per event, every count 1. Django only ignores `Meta.ordering`
+    #    here, never an order_by() somebody wrote.
+    #
+    #    Caught in a screenshot on 2026-08-05, not by a test: the list beside
+    #    the chart said eleven events in August and the chart said one. Twenty
+    #    passing tests had built their own unordered queryset, so none of them
+    #    ever saw it. There is a regression test now that orders it first.
+    by_month = {
+        row["month"].date(): row["n"]
+        for row in events.order_by().annotate(month=TruncMonth("start_time"))
+        .values("month").annotate(n=Count("pk"))
+    }
+    hours_by_month = {
+        row["month"].date(): row["total"] or Decimal("0")
+        for row in parts.order_by()
+        .annotate(month=TruncMonth("event_role__event__start_time"))
+        .values("month").annotate(total=Sum("hours"))
+    }
+    if not by_month:
+        return []
+    return [
+        (
+            month.strftime("%b %Y"),
+            by_month.get(month, 0),
+            hours_by_month.get(month, Decimal("0")),
+        )
+        for month in _months_between(min(by_month), max(by_month))
+    ]
+
+
+def _role_gap(events, parts):
+    """D1: how many each job asked for against how many signed up.
+
+    ⚠️ Two queries on purpose. `Sum("needed_count")` and a count of
+       participations in one statement join EventRole to Participation, and the
+       Sum is then repeated once per signup — a role wanting 5 with 3 people
+       reports wanting 15. Nothing raises; the number is simply wrong, and
+       wrong in the direction that makes the ministry look short-staffed.
+
+    ⚠️ Roles nobody signed up for have to be here — they have no Participation
+       row to be found through, and they are the ones worth looking at. That is
+       D19's line, arriving in a fourth place.
+    """
+    # `.order_by()` for the same reason as _monthly_series(): any ordering
+    # still on these querysets joins the GROUP BY and splits each role into one
+    # group per row.
+    needed = {
+        row["role__name"]: row["needed"] or 0
+        for row in EventRole.objects.filter(event__in=events)
+        .exclude(needed_count__isnull=True)
+        .order_by()
+        .values("role__name").annotate(needed=Sum("needed_count"))
+    }
+    signed = {
+        row["event_role__role__name"]: row["n"]
+        for row in parts.order_by()
+        .values("event_role__role__name").annotate(n=Count("pk"))
+    }
+    rows = sorted(needed.items(), key=lambda item: item[1], reverse=True)
+    largest = max((count for _, count in rows), default=0)
+    largest = max([largest] + [signed.get(name, 0) for name, _ in rows])
+    bars = [
+        PairedBar(
+            label=name,
+            needed=count,
+            signed=signed.get(name, 0),
+            needed_pct=int(100 * count / largest) if largest else 0,
+            signed_pct=int(100 * signed.get(name, 0) / largest) if largest else 0,
+            short=signed.get(name, 0) < count,
+        )
+        for name, count in rows
+    ]
+    return Chart(
+        title="Wanted against signed up, by role",
+        bars=bars,
+        sparse=len(bars) < 3,
+        note="Roles opened without a number are not here — they can never be short.",
+    )
+
+
+def _top_volunteers(parts, limit=10):
+    """C3: who did the most, by recorded hours then by number of events.
+
+    ⚠️ `nulls_last`. Postgres sorts NULL first on a descending order, so the
+       plain "-hours" puts everybody with no hours recorded at the top of a
+       chart titled "most hours" — the exact inversion of what it claims.
+    """
+    rows = list(
+        parts.order_by()
+        .values("contact_id")
+        .annotate(total=Sum("hours"), n=Count("pk"))
+        .order_by(F("total").desc(nulls_last=True), "-n")[:limit]
+    )
+    people = Contact.objects.in_bulk([row["contact_id"] for row in rows])
+    return _chart(
+        "Most hours",
+        [
+            # ⚠️ short_label, not str(). Contact.__str__ appends an email or a
+            #    phone number to tell two people of the same name apart, which
+            #    a dropdown needs and a leaderboard does not — nothing is
+            #    chosen from this chart, so the disclosure buys nothing.
+            (people[row["contact_id"]].short_label, row["total"])
+            for row in rows
+            if row["total"] is not None
+        ],
+        formatter=lambda h: f"{h:.2f} h",
+    )
+
+
 def set_status(event, status):
     """Publish, close, or cancel an event — the one field the manage list edits inline.
 
@@ -376,6 +1161,162 @@ def reschedule(event, *, start_time, end_time):
 def duration_hours(delta: datetime.timedelta) -> Decimal:
     """A timedelta as hours, two decimal places — for display only."""
     return (Decimal(delta.total_seconds()) / Decimal(3600)).quantize(Decimal("0.01"))
+
+
+def scheduled_hours(event) -> Decimal:
+    """How long this event is supposed to run, in hours.
+
+    ⚠️ Lives here rather than in a view or a template because it is date
+       arithmetic, and there is a grep guard on exactly that: a view that
+       computes gets rewritten along with the templates (D18), and "how long"
+       is a question the reports already answer from this same function.
+
+    ⚠️ This is the **scheduled** length, never what anybody actually did.
+       check_out() writes real elapsed time into Participation.hours, and the
+       two must not be confused: an event scheduled for six hours that somebody
+       left after two has one answer here and a different one there.
+    """
+    return duration_hours(event.end_time - event.start_time)
+
+
+# --- Event pictures --------------------------------------------------------
+# Storage is the whole design constraint here: the picture has to be small, it
+# has to disappear when the event is over, and it must never end up in a
+# backup. Everything below serves one of those three.
+
+#: Longest edge kept. Sized from the display, not from the source: the thumbnail
+#: is at most ~140 CSS px, so this leaves headroom for a 4x display and for the
+#: picture being shown larger later, while still turning a 4 MB phone photo into
+#: something under 100 KB.
+EVENT_IMAGE_MAX_EDGE = 900
+EVENT_IMAGE_QUALITY = 82
+
+
+def normalise_event_image(uploaded):
+    """Re-encode an upload into a small, safe WebP. Returns a Django File.
+
+    ⚠️ Everything here is a decision about **bytes**, never about how the
+       picture looks. Tone, saturation and opacity are styling and live in
+       app.css — see design-system.md. Baking a look into the stored file would
+       put a design decision somewhere no stylesheet can reach and make
+       changing it a re-processing job over every image ever uploaded.
+
+    Four things happen, and three of them are not optional:
+
+      1. ⚠️ `exif_transpose` **before** anything else. A phone photo records
+         "this is sideways" in EXIF rather than rotating the pixels; strip the
+         EXIF first and every portrait photo comes out on its side. Silently —
+         the file is valid, it is just wrong.
+      2. ⚠️ EXIF is then dropped, and the reason is privacy rather than size:
+         phone photos carry GPS coordinates. A picture taken at a volunteer's
+         house would publish their address to everybody who can see the event.
+      3. Resized down (never up) and re-encoded as WebP.
+      4. ⚠️ Opening it with Pillow **is** the validation. A file that is not a
+         raster image cannot survive this, which is what keeps SVG out — an SVG
+         can carry script, and it would be served from this site's own origin.
+
+    Raises ValidationError for anything that is not a usable image, so the form
+    can put the complaint next to the field.
+    """
+    from django.core.files.base import ContentFile
+
+    try:
+        with PILImage.open(uploaded) as source:
+            upright = PILImageOps.exif_transpose(source)
+            # RGBA is kept where it exists — WebP carries alpha, and flattening
+            # a logo onto white would put a white box on a dark page.
+            upright = upright.convert("RGBA" if "A" in upright.getbands() else "RGB")
+            upright.thumbnail(
+                (EVENT_IMAGE_MAX_EDGE, EVENT_IMAGE_MAX_EDGE), PILImage.LANCZOS)
+            buffer = io.BytesIO()
+            # No exif= argument, so none is written. Stated rather than assumed,
+            # because "Pillow does not copy it by default" is the kind of
+            # default that changes.
+            upright.save(buffer, "WEBP", quality=EVENT_IMAGE_QUALITY, method=6)
+    except ValidationError:
+        raise
+    except Exception as error:
+        raise ValidationError(
+            "That file could not be read as an image. JPEG, PNG and WebP work; "
+            "SVG and PDF do not."
+        ) from error
+
+    return ContentFile(buffer.getvalue(), name=f"{uuid.uuid4().hex}.webp")
+
+
+def events_with_images_to_purge(now=None):
+    """Finished events still holding a picture.
+
+    ⚠️ Judged on `end_time`, not on `status`. Marking an event completed is a
+       human action somebody forgets, and a picture that only disappears when
+       somebody remembers is a picture that stays.
+    """
+    return Event.objects.filter(end_time__lt=now or local_now()).exclude(image="")
+
+
+def purge_event_image(event):
+    """Delete one event's picture and forget it. Safe to call twice.
+
+    ⚠️ The field is cleared as well as the file. Leaving the name behind gives a
+       row that points at nothing, and the page then renders a broken image
+       rather than the default — worse than either.
+    """
+    if not event.image:
+        return False
+    event.image.delete(save=False)
+    event.image = ""
+    event.save(update_fields=["image"])
+    return True
+
+
+# --- Opening a job that does not exist in the vocabulary yet ---------------
+# 2026-08-04: ministry admins are not staff, so the admin site is closed to
+# them and a job nobody had thought of before used to be a dead end.
+
+
+def matching_participation_role(name):
+    """An existing role whose name is the same once case and padding are gone.
+
+    ⚠️ **Only exact-after-normalising matches.** "lifting" finds "Lifting", and
+       " Lifting " finds it too — but "Heavy lifting" is a different string and
+       this will not catch it. That limit is real and is the price of letting
+       ministry admins add to a shared vocabulary at all: the check stops the
+       accidental duplicate, not the synonym.
+
+       It matters because ParticipationRole is the grouping dimension for R5
+       and R7. Two rows meaning one job do not raise anything; they just split
+       one column of the report into two, and both halves look plausible.
+    """
+    cleaned = (name or "").strip()
+    if not cleaned:
+        return None
+    return ParticipationRole.objects.filter(name__iexact=cleaned).first()
+
+
+def create_participation_role(name):
+    """Add a job to the shared vocabulary. Returns the new ParticipationRole.
+
+    ⚠️ `code` is generated from the name and is **immutable afterwards**
+       (ImmutableCodeMixin) — the rest of the codebase matches on it, so
+       renaming one silently stops lookups returning rows. The display name
+       stays editable in the admin; the code does not.
+
+    ⚠️ Uniqueness of the code is enforced by a database constraint, not by the
+       suffix loop below. The loop is there to produce a *usable* code on the
+       ordinary path; two admins submitting the same new name at the same
+       instant is settled by the constraint, which is the only thing bulk paths
+       also have to obey (D9).
+    """
+    cleaned = (name or "").strip()
+    base = slugify(cleaned)[:40] or "role"
+    code, suffix = base, 2
+    while ParticipationRole.objects.filter(code__iexact=code).exists():
+        code = f"{base}-{suffix}"
+        suffix += 1
+    role = ParticipationRole(code=code, name=cleaned)
+    role.full_clean()
+    role.save()
+    return role
 
 
 # --- P6: telling people the event changed --------------------------------
@@ -475,10 +1416,12 @@ def resolve_recipients(event):
         if contact.is_minor in (True, None):
             guardian = participation.guardian_address
             if guardian is None:
-                # The emergency contact is the fallback, and it is phone-only
-                # because that table has no email column at all.
+                # The emergency contact is the fallback. Its own reachable_at
+                # decides the channel — email first, then phone — so a guardian
+                # reached about a change of time and a guardian reached about a
+                # confirmation get the same treatment.
                 emergency = next(iter(contact.emergency_contacts.all()), None)
-                guardian = (str(emergency.phone), SMS) if emergency else None
+                guardian = emergency.reachable_at if emergency else None
             if guardian is None:
                 unreachable.append(Unreachable(
                     participation=participation,
@@ -545,7 +1488,7 @@ def confirm_signup(participation, *, backend=None):
         guardian = participation.guardian_address
         if guardian is None:
             emergency = next(iter(contact.emergency_contacts.all()), None)
-            guardian = (str(emergency.phone), SMS) if emergency else None
+            guardian = emergency.reachable_at if emergency else None
         if guardian is not None and guardian not in to:
             to.append(guardian)
 

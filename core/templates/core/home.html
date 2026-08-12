@@ -1,0 +1,130 @@
+{% load static %}{% comment %}
+公开首页。**不继承 base.html** —— 那是应用内部的外壳（导航条、消息区、页脚），
+而这一页要的是整屏的画面。两者共用的只有 app.css 和 app.js。
+
+⚠️ 这一页替换了 03-roadmap.md 的 C3.1 原计划（按角色分流的调度页），
+   改口的理由记在 D25 里，不是悄悄改的。
+
+结构：
+  · 满幅的图或视频（视频优先，由 HomePage.hero 决定）
+  · 顶栏：Menu 在左、字样在中、login/logout 在右。**平时透明、字是白的**；
+    鼠标移到页面上端时白色 bar 从虚到实淡入，字从白变成主题深蓝
+  · 左侧菜单面板：点 Menu 滑出，背景压暗，条目自上而下逐个入场
+{% endcomment %}<!doctype html>
+<html lang="en" class="h-full">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>River of Life Foundation</title>
+  <link rel="stylesheet" href="{% static 'css/app.css' %}">
+  {% include "core/components/_appearance.html" %}
+  {% comment %}
+  ⚠️ 首页**不跟随深色模式**，也不读 localStorage.theme。它是一张满屏的照片
+     加白字，深色版本没有意义 —— 而如果这里也切主题，那段内联脚本给 <html>
+     加上 .dark 之后，顶栏那套「白字 / 深蓝字」的规则会全部翻转。
+  {% endcomment %}
+  <script defer src="{% static 'js/app.js' %}"></script>
+</head>
+
+<body class="h-full overflow-hidden bg-ink-950">
+  {% comment %}
+  整页一个 Alpine 作用域：`menu` 管左侧面板，`bar` 管顶栏浮不浮出来。
+  两个都是纯 UI 状态，符合 D24 对 x- 属性的口径。
+
+  ⚠️ Esc 关菜单。一个只能用鼠标点关闭的模态，对键盘用户是个死胡同。
+  {% endcomment %}
+  <div class="relative h-full w-full" x-data="{ menu: false, bar: false }"
+       x-on:keydown.escape.window="menu = false">
+
+    {% comment %}
+    --- 背景：视频优先，其次图片，都没有就用基金会的 logo ---
+    ⚠️ 视频必须 muted 才能自动播放 —— 浏览器一律拒绝带声音的自动播放，
+       而这不是可以绕过的限制，是设计上就该如此：一个打开就出声的页面更糟。
+       playsinline 是为了 iOS：少了它，视频会被强制全屏接管整个屏幕。
+    {% endcomment %}
+    {% if page.hero_video %}
+      <video class="absolute inset-0 h-full w-full object-cover"
+             src="{{ page.hero_video.url }}"
+             autoplay muted loop playsinline preload="metadata"
+             aria-hidden="true"></video>
+    {% else %}
+      <img class="absolute inset-0 h-full w-full object-cover"
+           src="{% if page.hero_image %}{{ page.hero_image.url }}{% else %}{% static 'core/img/event-default.webp' %}{% endif %}"
+           alt="" fetchpriority="high">
+    {% endif %}
+
+    {% comment %}
+    两层压暗，不是装饰，是**可读性的唯一保障**。
+
+    白字压在一张没见过的照片上，遇到浅色区域就会完全读不出来 ——
+    而这张照片是基金会自己传的，内容不可预知。第一版只有一层温和的渐变，
+    拿一张带白色云团的测试图一试，经文中间那两行直接糊掉了。
+
+    ⚠️ 具体那两层和它们的取舍**都写在片段里**，这里不抄第二份 ——
+       2026-08-06 起内页的背景照片也用同一份，而「两处一样」只有靠共用
+       才维持得住。所有 class 串和数值都在 `_hero_scrim.html`。
+    {% endcomment %}
+    {% include "core/components/_hero_scrim.html" %}
+
+    {% comment %}
+    --- 顶栏 ---
+    和内页共用同一个组件（core/components/_top_bar.html）。首页**不传 solid**，
+    所以它平时透明、鼠标碰到页面上端才淡入；也**不传 themed**，因为首页不跟随
+    深色模式。
+
+    ⚠️ 感应区是顶部一条 96px 高的透明带，不是顶栏自己 —— 顶栏平时是透明的，
+       鼠标要先能碰到它才谈得上浮出来。
+    {% endcomment %}
+    <div class="absolute inset-x-0 top-0 z-20"
+         x-on:mouseenter="bar = true" x-on:mouseleave="bar = false">
+      {% include "core/components/_top_bar.html" %}
+    </div>
+
+    {% comment %}
+    --- 经文 ---
+    照 LV 那张截图排：正文在上、出处在下，整体居中偏下。
+    ⚠️ 经文在前、章节在后（2026-08-05 定），和引用惯例一致。
+
+    入场（2026-08-06 加）：**从下方 24px 升到位，同时由透变实**，出处那一行晚 180ms。
+    ⚠️ 动画挂在**两个 `<p>` 各自身上**，不是挂在外面那个容器上 ——
+       挂容器的话两行只能一起动，错开 180ms 那件事就做不到了。
+    ⚠️ 几何和 reduced-motion 的退化都在 app.css 的 `.home-verse`，不在这里。
+    {% endcomment %}
+    {% if page.verse_text or page.verse_reference %}
+      <div class="pointer-events-none absolute inset-x-0 bottom-[14vh] z-10 px-6 text-center">
+        {% if page.verse_text %}
+          <p class="home-verse mx-auto max-w-3xl text-balance text-lg font-light leading-relaxed text-white [text-shadow:0_2px_12px_rgb(0_0_0/0.55)] sm:text-2xl">
+            {{ page.verse_text }}
+          </p>
+        {% endif %}
+        {% if page.verse_reference %}
+          <p class="home-verse-ref mt-6 text-xs tracking-[0.25em] text-white/85 [text-shadow:0_2px_10px_rgb(0_0_0/0.55)]">
+            {{ page.verse_reference|upper }}
+          </p>
+        {% endif %}
+      </div>
+    {% endif %}
+
+    {% comment %}
+    --- 左侧菜单 ---
+    和内页共用（core/components/_site_menu.html）。
+    {% endcomment %}
+    {% include "core/components/_site_menu.html" %}
+
+  </div>
+
+  {% comment %}
+  飘着的羽毛（2026-08-06）。和 /events/ 共用同一个组件和同一段 JS。
+
+  ⚠️ 放在那个 `relative` 容器**外面**，是为了少一层可能出意外的祖先 ——
+     `position: fixed` 会被任何带 transform / filter / will-change 的祖先接管成
+     相对那个祖先定位，而那个容器里将来加什么谁也说不准。它是 fixed，
+     所以放在这里和放在里面看起来完全一样。
+
+  ⚠️ 传 `on_photo`：首页背后永远是一张压暗的照片，而首页**不跟随深色模式**，
+     `<html>` 上永远没有 `.dark` —— 靠深色模式那条规则的话，
+     首页会拿到给浅色页准备的那档硬边投影，压在暗照片上基本看不见。
+  {% endcomment %}
+  {% include "core/components/_feather_sky.html" with on_photo=True %}
+</body>
+</html>

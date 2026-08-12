@@ -1,0 +1,86 @@
+{% extends "core/base.html" %}
+{% block title %}Report — {{ period.description }}{% endblock %}
+{% block main_width %}max-w-6xl{% endblock %}
+
+{% block content %}
+  {% comment %}
+  完整版报表（D27）。面板装不下的东西在这里，一样不少，而且末尾附活动清单 ——
+  用户要的是「董事会看的那种：这个季度我们办了这些活动，数据如下，一份文件自足」。
+
+  ⭐ 数字和图和面板**共用 `_report_body.html`**，只是排得开一些。
+     两份拷贝迟早有一份漏掉新指标，而漏掉的那一份不会报错，只是少一格。
+
+  ⚠️ 这一页**不分页**。它是要被打印、被交出去的东西，而半份东西不是东西。
+
+  ⚠️ 打印用浏览器自己的对话框（「另存为 PDF」），不是服务端生成的 PDF。
+     代价如实说：比一键下载多一次点击。换来的是 **PDF 和网页是同一份渲染** ——
+     没有第二套排版要维护，以后真要换服务端渲染器，改的也只是谁来光栅化这份 HTML。
+  {% endcomment %}
+  <div class="no-print mb-6 flex flex-wrap items-center justify-between gap-3">
+    {% url 'events:event_manage_list' as manage_url %}
+    <a href="{{ manage_url }}{% querystring %}" class="prose-link text-sm">&larr; Back to the list</a>
+    {% comment %}
+    「把这一页交给浏览器打印」。没有服务端对应物可言，所以它不是写操作；
+    关掉 JS 的话，浏览器菜单里的打印照样能用。
+
+    ⚠️ **2026-08-06 改成走 button.html 的 `prints` 参数。** 原来这里是手抄的一串
+       class 加一个原生 `onclick` —— 于是全站按钮改成药丸形那一次**漏掉了它**，
+       整个站只剩这一个方角按钮。那正是「模板里不许手抄 class 串」这条规矩防的事，
+       而它当初是用「这里需要一个 onclick」绕开的。改完之后 Alpine 接手那次点击，
+       和其它带确认框的按钮同一层。
+    {% endcomment %}
+    {% include "core/components/button.html" with label="Save as PDF" variant="primary" type="button" prints=1 %}
+  </div>
+
+  {% if autoprint %}
+    {% comment %}
+    面板上那个「Save as PDF」跳过来时带 `print=1`，于是这一页一打开就弹打印框 ——
+    从面板到 PDF 一次点击。
+
+    ⚠️ 放在 body 里而不是 head：要等报表画完再打印，否则对话框里预览的是半张页。
+    ⚠️ 关掉 JS 的话它只是不弹框 —— 页面本身完全正常，上面那个按钮和浏览器菜单
+       里的打印都还在。这是 D24 渐进增强的口径：JS 只加速，不承担唯一路径。
+    {% endcomment %}
+    <script>window.addEventListener("load", () => window.print());</script>
+  {% endif %}
+
+  <header class="mb-8">
+    <h1 class="text-2xl font-semibold">Volunteering Report</h1>
+    {% comment %}
+    ⚠️ 这一行在打印出来的纸上尤其重要：一份没写清楚自己覆盖什么范围的报表，
+       会被读成「全部」。
+    {% endcomment %}
+    <p class="mt-1 text-sm text-ink-600 dark:text-ink-300">{{ period.description }}</p>
+    <p class="text-sm text-ink-600 dark:text-ink-300">
+      River of Life Foundation · {{ total }} event{{ total|pluralize }}
+    </p>
+  </header>
+
+  {% include "events/_report_body.html" with columns="grid-cols-2 sm:grid-cols-4" chart_columns="grid gap-x-10 md:grid-cols-2" %}
+
+  <section class="print-break-before mt-10">
+    <h2 class="mb-3 text-lg font-semibold">The events in this report</h2>
+    {% if events %}
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>Event</th><th>Ministry</th><th>Starts</th><th>Ends</th><th>Status</th></tr>
+          </thead>
+          <tbody>
+            {% for event in events %}
+              <tr>
+                <td>{{ event.name }}</td>
+                <td>{{ event.ministry.name }}</td>
+                <td>{{ event.start_time }}</td>
+                <td>{{ event.end_time }}</td>
+                <td>{{ event.get_status_display }}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% else %}
+      {% include "core/components/empty.html" with message="No events match this filter." %}
+    {% endif %}
+  </section>
+{% endblock %}

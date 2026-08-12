@@ -1,0 +1,39 @@
+{% extends "core/base.html" %}
+{% block title %}Not Allowed{% endblock %}
+{% block main_width %}max-w-2xl{% endblock %}
+
+{% block content %}
+  {% comment %}
+  这个模板存在的唯一理由是 {{ exception }} 那一行。
+
+  在它之前，PermissionDenied(SCOPED_DENIAL) 传出去的那段文案一个字都不会显示 ——
+  Django 找不到 403.html 就返回一个 details 为空的裸页面。于是 org/permissions.py
+  写在 SCOPED_DENIAL 里的那句「superuser 没有 ministry scope，去换个带 MinistryRole
+  的账号」，以及 org/views.py 的 FOUNDATION_ONLY、core/middleware.py 那段提示语，
+  三处解释全部落在地上。
+
+  而这些解释就是缓解措施本身：读不到「为什么」的下一个人，改的是检查，不是账号。
+  {% endcomment %}
+  <h1 class="text-2xl font-semibold">Not Allowed</h1>
+
+  <div class="card mt-6 border border-danger-fg/30 bg-danger-bg dark:border-danger-fg-dark/30 dark:bg-danger-bg-dark">
+    {% if exception %}
+      <p class="text-sm text-danger-fg dark:text-danger-fg-dark">{{ exception }}</p>
+    {% else %}
+      <p class="text-sm text-danger-fg dark:text-danger-fg-dark">
+        This account does not have permission to open that page.
+      </p>
+    {% endif %}
+  </div>
+
+  <p class="mt-6 text-sm text-ink-600 dark:text-ink-300">
+    If you think this is wrong, it is almost always the account rather than the page:
+    these pages are granted per ministry, and the grant has to be active today. Ask
+    whoever appointed your ministry's admins.
+  </p>
+
+  <div class="mt-6">
+    {% url 'events:event_list' as home_url %}
+    {% include "core/components/button.html" with label="Back to events" href=home_url variant="primary" %}
+  </div>
+{% endblock %}

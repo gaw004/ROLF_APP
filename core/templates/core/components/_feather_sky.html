@@ -1,0 +1,38 @@
+{% load static %}{% comment %}
+飘着的羽毛那一层（2026-08-06）。动的部分在 assets/js/app.js 最后那段 IIFE，
+样式在 app.css 的 `.feather-sky` / `.feather`。
+
+参数：
+  on_photo  真值 → 背后是一张压暗的照片（首页）。换一档更散的投影，
+            并把 z-index 降到 15。⚠️ 说的是**背后是什么**，不是主题是什么 ——
+            首页不跟随深色模式，所以 `.dark` 那条规则在那里一次都不会命中。
+
+⚠️ **抽成组件是为了那七个 URL 只写一遍。** 两页各抄一份的话，
+   加一片羽毛就得记得改两个地方，而漏掉一个不会报任何错 ——
+   表现只是其中一页永远少一种羽毛，谁也不会发现。
+
+⚠️ `aria-hidden="true"`，图片各自 `alt=""`：这一层从头到尾没有一个字的内容，
+   读屏软件读到它只会打断正在读的东西。装饰就该在无障碍树里不存在。
+
+⚠️ 七个 URL 逐个用 {% templatetag openblock %} static {% templatetag closeblock %} 生成，**不在 JS 里按序号拼**。
+   生产的静态文件走 CompressedManifestStaticFilesStorage，文件名带内容哈希 ——
+   JS 拼路径的话开发环境完全正常，上线后七张图全部 404 而且不报错，
+   表现只是羽毛再也不出现。守卫在 core.tests.AssetPathsComeFromTemplatesGuardTests。
+   逗号分隔是安全的：这些文件名里没有逗号。
+
+⚠️ 它是 position: fixed，所以放在 DOM 的哪里都不影响布局 —— 但**别放进任何会被
+   HTMX 换掉的块里**（活动列表那一页的 #event-results 就是），否则每筛一次
+   羽毛就被连根拔掉。
+
+⚠️ **点一片羽毛会进 Memories**（2026-08-06 起）。URL 从这里的 `data-memories-url`
+   走，不在 JS 里写死 —— 反解路由是 Django 的事，而打包产物里写死一条路径的话，
+   改路由的那天不会有任何东西报错。
+
+⚠️ 这一层仍然是 `aria-hidden` 且键盘到不了，**这是知情的取舍，不是漏掉的**。
+   三类人看不到也点不到任何一片羽毛：键盘用户、读屏用户，以及开了「减少动效」
+   的人（那个 media query 下整层 display: none）。他们走的是顶栏上那枚静止的
+   羽毛，见 `_top_bar.html`。**那一枚是无障碍路径的全部**，拿掉它，
+   这三类人就再也进不去 Memories，而页面上不会有任何迹象。
+{% endcomment %}<div class="feather-sky{% if on_photo %} feather-sky--on-photo{% endif %}" aria-hidden="true"
+     data-memories-url="{% url 'gallery:wall' %}"
+     data-feathers="{% spaceless %}{% static 'core/img/feather-1.webp' %},{% static 'core/img/feather-2.webp' %},{% static 'core/img/feather-3.webp' %},{% static 'core/img/feather-4.webp' %},{% static 'core/img/feather-5.webp' %},{% static 'core/img/feather-6.webp' %},{% static 'core/img/feather-7.webp' %}{% endspaceless %}"></div>

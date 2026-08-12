@@ -1,0 +1,199 @@
+{% load static %}{% comment %}
+Memories —— 羽毛后面那条照片带（2026-08-06 新增，2026-08-07 按新参考图重做）。
+
+一整页：左上角一个返回，上方是标题，下方是一条**等高、自然宽度**的照片带，
+缓慢向左滑，每张下面一行小字。
+
+⚠️ 上一版是「两行反向漂移 + 标题压在正中 + 随机高度 + 裁切重构」，
+   2026-08-07 整个换掉了。相关的常量、函数和测试是**删掉**的，不是留着不用 ——
+   `gallery/services.py` 的模块注释里写了理由。
+
+**不继承 `base.html`**，和首页同一个理由：那是应用内部的外壳（顶栏、消息区、
+页脚、版心），而这一页要的是整屏的画面。
+
+⚠️ 但它**跟随深色模式**，首页不跟随。所以它 include 了 `_theme_boot.html` ——
+   那段脚本必须内联、必须在 <head> 里、必须在样式表之后，三条硬要求写在片段里面。
+
+版面比例、hover 的两件事、以及各处数字是从哪张图上量出来的，
+全部在 design-system.md 的「十五、Memories」。
+{% endcomment %}<!doctype html>
+{% comment %}
+⚠️ `has-hero` 和 base.html 上那一份**必须一致**。深色下的玻璃规则全都是
+   `.dark.has-hero ...` 选出来的 —— 少了这个类，下面那张首页大图照样会画出来，
+   但压在它上面的 62% 黑不会，于是照片以近乎原样的强度透过来，
+   整页看起来又花又亮。**而这既不报错，也不像是漏了一个 class**。
+   实测撞到过一次：先加了图层，忘了加这个类。
+{% endcomment %}<html lang="en" class="h-full{% if site_hero_image %} has-hero{% endif %}">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Memories · ROLF</title>
+  <link rel="icon" type="image/png" sizes="32x32" href="{% static 'core/img/favicon-32.png' %}">
+  <link rel="stylesheet" href="{% static 'css/app.css' %}">
+  {% include "core/components/_appearance.html" %}
+  {% include "core/components/_theme_boot.html" %}
+  <script defer src="{% static 'js/app.js' %}"></script>
+</head>
+
+<body class="wall-page h-full overflow-hidden">
+  {% comment %}
+  深色模式下垫在最底下的那张首页大图（2026-08-08 加，2026-08-09 抽成片段）。
+
+  ⚠️ **加它是为了让这一页的深色底和吸顶 bar 真的一样。** 那条 bar 在有首页大图时
+     是 `rgb(0 0 0 / 0.62)` + 模糊，而它压着的正是这一层。少了这一层，同样的
+     62% 黑压在白画布上，出来是一片中灰 —— 数值抄对了，看起来完全不是一回事。
+
+  ⚠️ 用的是 `base.html` 用的**同一份片段**。这一页不继承 base.html，所以原来这
+     四行是抄的第二份 —— 抄的时候注释里就写了「两处要是分叉了，表现是内页和
+     Memories 的深色底不一样」。那句话是对的，所以现在不抄了。
+  {% endcomment %}
+  {% include "core/components/_hero_backdrop.html" %}
+
+  {% comment %}
+  ⚠️ 一个 Alpine 作用域罩住整页，因为**照片带和悬浮窗要互相知道**：窗口开着的时候
+     带子要停住，否则关掉窗口回到页面上，刚才点的那张已经走到别处去了。
+  {% endcomment %}
+  <div x-data="wall" class="wall">
+
+    {% comment %}
+    左上角的返回。⚠️ `history.back()`，不是一个写死的目的地 ——
+    这一页可以从首页的羽毛进来，也可以从活动列表的羽毛进来。
+
+    ⚠️ `href` 是首页，`x-on:click.prevent` 才是 history.back()。也就是说
+       Alpine 没加载出来时它仍然是一条能用的链接，而不是一个死掉的按钮。
+       直接打开这个 URL（没有历史可回）时，`history.length` 那一判也会退回首页。
+    {% endcomment %}
+    <a href="{% url 'home' %}" class="wall-back"
+       x-on:click.prevent="window.history.length > 1 ? window.history.back() : (window.location.href = $el.href)">
+      <svg width="16" height="16" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+        <path d="M12.3 4.3 6.6 10l5.7 5.7 1.1-1.1L8.8 10l4.6-4.6z"/>
+      </svg>
+      Back
+    </a>
+
+    {% comment %}
+    标题（2026-08-08 缩小并挪到右下角：「title 变小些，换到页面右下角的位置」）。
+
+    ⚠️ **在 DOM 里排在照片前面，靠 CSS 定位到右下角。** 视觉位置在右下，
+       阅读顺序在最前 —— 读屏用户和键盘用户按 DOM 顺序走，让他们先听完几十张
+       照片再听到这一页叫什么，是本末倒置。绝对定位正好让这两件事可以分开。
+
+    ⚠️ 文案仍然是那一个词 `MEMORIES`。参考图那两行字和右边那段说明是**它自己的
+       文案**，照抄过来等于替基金会编一段它没说过的话 —— 这个项目为
+       「编一个看起来合理的名字」付过一次学费（见 base.html 页脚那条注释）。
+
+    ⚠️ `<h1>`：这一页只有这一个标题，读屏用户需要一个能落脚的地方。
+    {% endcomment %}
+    <header class="wall-head">
+      <h1 class="wall-title">MEMORIES</h1>
+    </header>
+
+    {% comment %}
+    --- 三条照片带 -----------------------------------------------------------
+    每一条的内部规则在 `_wall_strip.html` 里，三条共用那一份。
+
+    ⚠️ 条数由**服务端**决定，不是这里写死三个 include：照片不够时 strips_for()
+       会少给几条，而一条空带子是一道看起来像加载失败的空白横杠 ——
+       而「照片不够」正是基金会刚开始用的状态。
+    {% endcomment %}
+    <div class="wall-strips">
+      {% for strip in strips %}
+        {% include "gallery/_wall_strip.html" with strip=strip %}
+      {% endfor %}
+    </div>
+
+    {% if not strips %}
+      {% comment %}
+      一张照片都没有的时候。⚠️ 空着的话这一页就是一片纯色加一个标题，
+      看起来像加载失败 —— 而它其实只是还没有人传过东西。
+      {% endcomment %}
+      <p class="wall-empty">
+        Nothing here yet. Ministry admins add photos from
+        <a href="{% url 'gallery:manage' %}" class="underline">the Memories page</a>.
+      </p>
+    {% endif %}
+
+    {% comment %}
+    --- 悬浮窗 -------------------------------------------------------------
+
+    ⚠️ 不复用 `core/components/modal.html`。那个是「一张卡片里放一段表单」——
+       有内边距、标题行、白底，每一件事都在跟一张浮在暗底上的照片作对。
+       两者共用的是**打开的机制**（`x-dialog` → top layer），不是 DOM，也不是外观。
+
+    🔴 **`<dialog>` + `x-dialog`，2026-08-09 从 `position: fixed` 的 div 改过来。**
+       原来那版是坏的，只是**看不出来**：`.dark.has-hero .wall` 有
+       `backdrop-filter`，于是这个窗口的包含块是 `.wall` 而不是视口 ——
+       它一直显示正确纯属巧合，因为 `.wall` 恰好是 `100dvh` 且满宽。
+       给 `.wall` 加个页头或一点 padding，它就会悄悄跟着缩水，
+       而 `.wall` 还带着 `overflow: hidden`。理由写在 app.css 那一段。
+
+    ⚠️ 点遮罩关闭在 `x-dialog` 里统一处理（判 `event.target === dialog`），
+       这里不写 `x-on:click.self` —— 两个覆盖层用同一套判断，不各写一份。
+
+    ⚠️ 左右键挂在 dialog 自己身上，不再挂 window，也不再需要 `open &&` 判断：
+       模态 dialog 打开时焦点必然在它里面，关上时它根本收不到键盘事件。
+       原来那两个 `open &&` 防的正是「关着的时候按左右键仍然在改 index」。
+
+    ⚠️ 这几条**全部删掉了，因为浏览器做得更对**：Esc 关闭、Tab 关在窗口里
+       （`trap()`）、关掉后焦点复位（`returnTo`）、背景不可点。
+       前两条原来是手写的，后两条原来**没有**。
+    {% endcomment %}
+    <dialog x-dialog="open"
+            class="wall-lightbox"
+            aria-label="Photo"
+            x-on:keydown.left="step(-1)"
+            x-on:keydown.right="step(1)">
+
+      <button type="button" class="wall-lightbox-nav wall-lightbox-nav--prev"
+              x-on:click="step(-1)">
+        <span class="sr-only">Previous photo</span>
+        <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+          <path d="M12.3 4.3 6.6 10l5.7 5.7 1.1-1.1L8.8 10l4.6-4.6z"/>
+        </svg>
+      </button>
+
+      <figure class="wall-lightbox-figure">
+        {% comment %}
+        ⚠️ `x-bind:key` 让 Alpine 在换图时重建这个 <img>，而不是改它的 src。
+           改 src 的话，新图到达之前旧图还挂在那里 —— 翻页看起来像卡了一拍。
+        ⚠️ alt 用的是那行小字。照片本身没有描述可用，而「Youth Ministry · 2026」
+           至少说出了它是什么；空 alt 在这里是错的，这张图就是内容。
+        {% endcomment %}
+        <img x-bind:src="current.src" x-bind:alt="current.caption" x-bind:key="index">
+        <figcaption class="wall-lightbox-caption" x-text="current.caption"></figcaption>
+      </figure>
+
+      <button type="button" class="wall-lightbox-nav wall-lightbox-nav--next"
+              x-on:click="step(1)">
+        <span class="sr-only">Next photo</span>
+        <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+          <path d="M7.7 4.3 13.4 10l-5.7 5.7-1.1-1.1L11.2 10 6.6 5.4z"/>
+        </svg>
+      </button>
+
+      {% comment %}
+      ⚠️ `autofocus` —— 打开时焦点落在这里。这是**原生 dialog 的接口**：
+         `showModal()` 会找带 autofocus 的元素，找不到才退回第一个可聚焦的。
+         原来是 `$nextTick(() => this.$refs.close.focus())`，那是在手动重做
+         浏览器已经做好的事，而且要等一帧。
+      ⚠️ 焦点为什么给关闭而不是「上一张」：打开窗口的人刚刚点了一张照片，
+         他下一步最可能做的是看完然后关掉，不是往回翻。
+      {% endcomment %}
+      <button type="button" class="wall-lightbox-nav wall-lightbox-close"
+              autofocus x-on:click="close()">
+        <span class="sr-only">Close</span>
+        <svg width="18" height="18" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+          <path d="M5.3 4.2 10 8.9l4.7-4.7 1.1 1.1L11.1 10l4.7 4.7-1.1 1.1L10 11.1l-4.7 4.7-1.1-1.1L8.9 10 4.2 5.3z"/>
+        </svg>
+      </button>
+    </dialog>
+
+    {% comment %}
+    悬浮窗要翻的那条序列。⚠️ `json_script` 而不是手写 `<script>` —— 它负责把
+    照片说明里的 `<` `>` `&` 转义掉。手拼一段 JSON 进 <script> 是 XSS 的经典写法，
+    而这里的内容有一半来自管理员填的 ministry 名字。
+    {% endcomment %}
+    {{ sequence|json_script:"wall-sequence" }}
+  </div>
+</body>
+</html>

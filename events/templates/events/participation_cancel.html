@@ -1,16 +1,31 @@
 {% extends "core/base.html" %}
-{% block title %}Cancel signup{% endblock %}
+{% block title %}Cancel Signup{% endblock %}
+{% block main_width %}max-w-2xl{% endblock %}
 
 {% block content %}
-  <h1>Cancel signup</h1>
-  <p>{{ participation.event_role.event.name }} — {{ participation.event_role.role.name }}</p>
-  <p>
-    Cancelling does not delete this record; it marks it cancelled. You can sign
-    up again later if you change your mind.
+  <h1 class="text-2xl font-semibold">Cancel This Signup?</h1>
+
+  <div class="card mt-6">
+    <p class="font-medium">{{ participation.event_role.event.name }}</p>
+    <p class="mt-1 text-sm text-ink-600 dark:text-ink-300">
+      {{ participation.event_role.role.name }}
+    </p>
+  </div>
+
+  {% comment %}
+  这一句是这一页存在的理由。取消是改状态不是删行（通知历史指着这些行），
+  而「取消之后还能再报一次」曾经**不成立** —— 那是 C0.3 浏览器验收抓出来的
+  真 bug，334 个测试没有一个发现它，因为每个取消的测试都停在取消那一步。
+  {% endcomment %}
+  <p class="mt-4 text-sm text-ink-600 dark:text-ink-300">
+    Cancelling does not delete this record; it marks it cancelled. You can sign up
+    again later if you change your mind.
   </p>
-  <form method="post">
+
+  <form method="post" class="mt-6 flex flex-wrap gap-2">
     {% csrf_token %}
-    <button type="submit">Yes, cancel it</button>
-    <a href="{% url 'events:my_participations' %}">Never mind</a>
+    {% include "core/components/button.html" with label="Yes, cancel it" variant="danger" %}
+    {% url 'events:my_participations' as back_url %}
+    {% include "core/components/button.html" with label="Never mind" href=back_url variant="ghost" %}
   </form>
 {% endblock %}

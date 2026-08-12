@@ -97,9 +97,18 @@ def can_manage_event(user, event) -> bool:
     return event is not None and administers(user, event.ministry_id)
 
 
-def can_view_registrations(user, event) -> bool:
-    """P4's first half: see who has signed up. The read side."""
-    return event is not None and administers(user, event.ministry_id)
+def in_foundation_tier(user) -> bool:
+    """Is this account in the foundation-wide group?
+
+    The primitive the global tier is built on. Named for what it reads rather
+    than for one thing it permits, because it now answers two questions —
+    "may they appoint ministry admins" and "may they read any event's records"
+    — and giving each of those its own copy of `groups.filter(...)` is how two
+    checks end up disagreeing about who is in the tier.
+    """
+    if user is None or not getattr(user, "is_authenticated", False):
+        return False
+    return user.groups.filter(name=FOUNDATION_ADMIN_GROUP).exists()
 
 
 def can_grant_ministry_admin(user) -> bool:
@@ -109,9 +118,67 @@ def can_grant_ministry_admin(user) -> bool:
     ministry admin must not be able to recruit their own downline. That is what
     makes this tier "higher", and it is the one thing about P5 worth testing.
     """
-    if user is None or not getattr(user, "is_authenticated", False):
+    return in_foundation_tier(user)
+
+
+def can_view_event_records(user, event) -> bool:
+    """Read one event's signups, attendance and report. **Read only.**
+
+    Two ways in, and they are not the same authority (2026-08-05):
+
+      · the ministry's own admin, who may also change these things;
+      · the foundation tier, who may only look.
+
+    ⚠️ Nothing that writes may be gated on this. The attendance page in
+       particular is a write page — check-in, check-out, hours — so it asks
+       this for GET and `can_manage_event` for POST. Hiding the buttons is
+       interface; refusing the POST is the permission, and only the second one
+       is a boundary.
+
+    ⚠️ This widens who can see a minor's emergency contact number, because the
+       attendance page shows it (that is the number somebody dials when an
+       ankle gets twisted). Deliberate, decided 2026-08-05, and written into
+       phase-c.md's "who can see a minor's data" table — which is what C3.7
+       checks against, so it cannot be widened quietly.
+    """
+    if event is None:
         return False
-    return user.groups.filter(name=FOUNDATION_ADMIN_GROUP).exists()
+    return administers(user, event.ministry_id) or in_foundation_tier(user)
+
+
+def can_upload_gallery_photo(user, ministry) -> bool:
+    """Put a photo on the Memories wall, attributed to `ministry`.
+
+    `ministry` None means foundation-wide, and **only the foundation tier may
+    pass it**. That is D20's test applied literally: "a photo that speaks for
+    the whole foundation" contains no "of some ministry", so it belongs to the
+    global tier. A ministry admin publishes their ministry's memories; they do
+    not publish the foundation's.
+    """
+    if ministry is None:
+        return in_foundation_tier(user)
+    return administers(user, ministry) or in_foundation_tier(user)
+
+
+def can_delete_gallery_photo(user, photo) -> bool:
+    """Take a photo back off the wall.
+
+    ⚠️ Deliberately wider than uploading: the foundation tier may delete
+       anything, including a ministry's own. Somebody has to be able to take
+       down a photo of a child whose family has asked for it to go, at an hour
+       when that ministry's admin is not reachable — and that request does not
+       wait for a duty roster.
+
+    ⚠️ And deliberately **not** a read check. There is no "may they see it"
+       function here because the wall is one page behind @login_required with
+       no per-photo visibility; adding a per-photo read rule would be inventing
+       a boundary the interface does not have.
+    """
+    if photo is None:
+        return False
+    if in_foundation_tier(user):
+        return True
+    return photo.ministry_id is not None and administers(user, photo.ministry_id)
 
 
 #: What the global tier may do, as app_label.codename. Global permissions are
@@ -129,6 +196,34 @@ FOUNDATION_ADMIN_PERMISSIONS = [
     "events.view_event",
     "events.view_eventrole",
     "events.view_participation",
+    # Ministries themselves. A production database comes up with none, and
+    # nothing else in the interface can create one — so without these the
+    # foundation cannot get started at all. Django hides a model from the admin
+    # index entirely when you hold no permission on it, which is why this looked
+    # like a missing page rather than a missing permission.
+    #
+    # ⚠️ No delete_ministry, deliberately. Deleting a ministry cascades into its
+    #    events, and "we are not running this any more" is is_active=False —
+    #    the same "an ending is a date, not a deletion" rule the rest of this
+    #    project follows.
+    "org.add_ministry",
+    "org.change_ministry",
+    "org.view_ministry",
+    # The public front page: its picture, its video and the verse over them.
+    # ⚠️ Foundation-wide by construction — the sentence "change the face of the
+    #    foundation" contains no "of some ministry", which is D20's test for
+    #    which tier a permission belongs to. A ministry admin publishes events;
+    #    they do not speak for the whole foundation.
+    "core.change_homepage",
+    "core.view_homepage",
+    # The other lookup tables: read-only for now (2026-08-04 拍板). They still
+    # have to be filled in before the pilot, and that is done by a staff account
+    # in the admin — this tier can see what is there without being able to
+    # rename a category out from under existing rows.
+    "events.view_eventtype",
+    "events.view_participationrole",
+    "org.view_position",
+    "org.view_employmenttype",
 ]
 
 
@@ -143,14 +238,25 @@ def foundation_admin_group() -> Group:
        MinistryRole, and a foundation admin who is not also a ministry's admin
        gets 403 from them. That is deliberate, not an oversight.
     """
-    group, created = Group.objects.get_or_create(name=FOUNDATION_ADMIN_GROUP)
-    if created or not group.permissions.exists():
-        wanted = []
-        for label in FOUNDATION_ADMIN_PERMISSIONS:
-            app_label, codename = label.split(".")
-            found = Permission.objects.filter(
-                content_type__app_label=app_label, codename=codename).first()
-            if found:
-                wanted.append(found)
-        group.permissions.set(wanted)
+    group, _ = Group.objects.get_or_create(name=FOUNDATION_ADMIN_GROUP)
+    wanted = []
+    for label in FOUNDATION_ADMIN_PERMISSIONS:
+        app_label, codename = label.split(".")
+        found = Permission.objects.filter(
+            content_type__app_label=app_label, codename=codename).first()
+        if found:
+            wanted.append(found)
+    # ⚠️ Reconciled every time, not only when the group is new or empty.
+    #
+    #    The earlier version was `if created or not group.permissions.exists()`,
+    #    and it made the list above a **lie on every database that already had
+    #    this group** — adding a permission here did nothing at all, silently,
+    #    and the only symptom was a page missing from the admin index. That is
+    #    exactly how add_ministry went missing: the list was right, the group
+    #    was stale, and nothing reported the difference.
+    #
+    #    Making it authoritative also means a permission ticked by hand in the
+    #    admin is removed on the next call. That is intended and is what the
+    #    docstring above already promised: this list is where the answer lives.
+    group.permissions.set(wanted)
     return group

@@ -1,0 +1,105 @@
+{% comment %}
+一条照片带（2026-08-08：「同样的原理，再来两条照片带子」）。
+
+三条带子共用**这一份**。⚠️ 三条各抄一份的话，改 hover、改懒加载、改接缝的份数
+都得记得改三处，而漏掉一处不会报错 —— 表现只是其中一条的行为和另外两条不一样。
+
+参数：`strip` 是 `gallery.views._strip()` 给的那个 dict ——
+`photos` / `span` / `repeats` / `position`。版面比例和各处数字的来历在
+design-system.md「十五、Memories」。
+{% endcomment %}
+
+{% comment %}
+⚠️ **减速挂在这一层，不是逐张照片上。** 逐张挂的话，鼠标在相邻两张之间移动会连着
+   触发 leave + enter，速度一抖一抖 —— 而两张之间只隔十几像素，谁也瞄不准。
+   缩小是逐张的（CSS `:hover`），减速是整条的。
+
+⚠️ 传的是 `$el`，**不是** `x-ref`。Alpine 的 x-ref 在同一个作用域里同名出现多次时
+   只留最后一个，所以三条都写 `x-ref="track"` 的话，鼠标停在第一条上会去减
+   **第三条**的速 —— 那个 bug 的表现是「减速有时候有效有时候没效」，最难查的那一种。
+   `linger()` 因此拿传进去的那个元素，在它自己里面找轨道。
+
+⚠️ `--strip-index` 写在这一层，靠继承传给轨道。样式表把它乘成一个**负的**
+   `animation-delay`（「从中途开始播」，不是「延迟开始」）—— 三条同速同向，
+   少了它每条都以一张贴着左边缘的照片开场，三条读起来是一整块在滑。
+{% endcomment %}
+<div class="wall-strip"
+     x-on:mouseenter="linger($el, true)"
+     x-on:mouseleave="linger($el, false)"
+     style="--strip-index: {{ strip.position }}">
+
+  {% comment %}
+  ⚠️ **时长由服务端算，速度写在样式里。** `--wall-speed` 是「一个带高单位走完要几秒」，
+     乘上这条带子的实际总宽才是动画时长。写死总时长的话，**照片越多跑得越快** ——
+     基金会每加一批照片，这一页就更急躁一点。
+
+  ⚠️ `--wall-sets` 是这条轨道里放了几份。keyframes 平移 `-100% / var(--wall-sets)`，
+     正好是一份的宽度 —— 所以这个数**必须**跟着下面 `repeats` 的份数走。
+     份数不是固定的 2：一份比窗口还窄时（照片很少的时候）要多放几份，
+     判据在 services.MIN_STRIP_SPAN / repeats_for()。
+
+  ⚠️ `stringformat` 而不是直接输出：这两个数要进 CSS 的 `calc()`，
+     而本地化会按语言把小数点换成逗号，出来是一条浏览器直接丢掉的规则 ——
+     表现是带子纹丝不动，没有任何报错。
+
+  ⚠️ 悬浮窗打开时**停住**（`.is-paused` 走 animation-play-state）。不停的话，
+     关掉窗口回到页面上，刚才点的那张已经走到别处去了。
+     「停住」和 hover 的「减速」是两件事，两套机制，见 app.js。
+  {% endcomment %}
+  <div class="wall-track"
+       x-bind:class="{ 'is-paused': open }"
+       style="--wall-sets: {{ strip.repeats|length }};
+              --wall-duration: calc({{ strip.span|stringformat:"f" }} * var(--wall-speed))">
+
+    {% for copy in strip.repeats %}
+      {% comment %}
+      N 份一模一样的照片并排。⚠️ 第一份是**正本**，后面每一份都是接缝用的克隆。
+
+      ⚠️ 克隆要 `aria-hidden` + `tabindex="-1"`：留在无障碍树里的话，
+         每张照片会被念两遍（照片少的时候是二十几遍），键盘用户按 Tab 要把同一条带子
+         走完 N 次。它们的存在纯粹是为了让循环的接缝看不出来。
+
+      ⚠️ 「减少动效」下克隆整个 `display: none`（样式表里那一条）——
+         不动的时候，同一张照片挨着自己出现两次是说不通的。
+      {% endcomment %}
+      <div class="wall-set{% if not forloop.first %} wall-set--clone{% endif %}"
+           {% if not forloop.first %}aria-hidden="true"{% endif %}>
+
+        {% for item in strip.photos %}
+          {% comment %}
+          ⚠️ `--rel` 和 `--ar` 是**数据**，不是样式（和首页把 hero 图的 URL 写进
+             background-image 同一类）：一张是这张照片自己存下来的高度占
+             GALLERY_THUMB_MAX_EDGE 的比例，一张是它自己的宽高比。
+             怎么把这两个数变成尺寸是样式表的事。
+
+          ⚠️ 没有 `--h`（2026-08-07 去掉）。留一个没有东西读的变量，
+             后面会有人以为它当初是有用的，再把它「修」回来。
+
+          ⚠️ `<button>` 而不是 `<div>`：点开是要开悬浮窗的，键盘用户得能按。
+          {% endcomment %}
+          <button type="button" class="wall-photo"
+                  style="--rel: {{ item.relative_height|stringformat:"f" }}; --ar: {{ item.aspect|stringformat:"f" }}"
+                  {% if not forloop.parentloop.first %}tabindex="-1"{% endif %}
+                  x-on:click="show({{ item.index }})">
+            {% comment %}
+            ⚠️ **正本的图不 lazy，克隆的才 lazy。** 这条带子不是被滚动的，是被
+               `transform` 平移的，懒加载在这种情况下触发得不可靠 ——
+               表现是照片以空白的样子滑进视口。
+
+            ⚠️ `alt=""` + 下面那个 sr-only 的名字，不是给 img 写 alt。
+               照片本身没有描述可用，而这个按钮需要一个能被念出来的名字 ——
+               少了它，读屏软件会念出几十个「按钮、按钮、按钮」，彼此没有任何区别。
+               ⚠️ 这一行在屏幕上一个像素都不占：2026-08-08 拍板「每个图不要带标签了」，
+               去掉的是**画出来的**那行图注（`.wall-caption`），不是这个名字。
+            {% endcomment %}
+            <img src="{{ item.photo.thumb.url }}" alt=""
+                 {% if not forloop.parentloop.first %}loading="lazy"{% endif %}>
+            <span class="sr-only">{{ item.photo.caption }}</span>
+          </button>
+        {% endfor %}
+
+      </div>
+    {% endfor %}
+
+  </div>
+</div>

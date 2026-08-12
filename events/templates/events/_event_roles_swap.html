@@ -1,0 +1,10 @@
+{% comment %}
+HTMX 写操作的响应体 = 面板本身 + 回填 messages。
+
+⚠️ **OOB 那一句不能写进 `_event_roles_panel.html`**，尽管那样少一个文件。
+   整页渲染时 base.html 已经画了一个 `<div id="messages">`，面板里再来一个
+   就是同一个 id 出现两次 —— HTML 无效，而 HTMX 的 OOB 靠 id 找目标。
+   坏的方式是「有时候换对了，有时候换错了」，取决于哪个先被找到。
+{% endcomment %}
+{% include "events/_event_roles_panel.html" %}
+{% include "core/components/_messages_oob.html" %}

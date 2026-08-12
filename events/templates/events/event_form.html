@@ -1,35 +1,61 @@
 {% extends "core/base.html" %}
-{% block title %}{% if event %}Edit event{% else %}Publish an event{% endif %}{% endblock %}
+{% block title %}{% if event %}Edit Event{% else %}Publish an Event{% endif %}{% endblock %}
+{% block main_width %}max-w-2xl{% endblock %}
 
 {% block content %}
-  <h1>{% if event %}Edit “{{ event.name }}”{% else %}Publish an event{% endif %}</h1>
   {% comment %}
   一个模板管建和改两件事，因为它们填的是同一张表单。差别只有标题、按钮字样，
-  和改的时候多出来的那几个链接。
+  和改的时候多出来的那条导航。
 
   ministry 下拉里只有这个人管的那几个。那是防手滑；防越权的是视图里对提交值
   再判一次 —— 两件事，都要有。
 
-  改时间不在这里判：视图看 form.changed_data，走 services.reschedule()，
+  改时间不在这里判：视图问 form.time_changed()（**不是** changed_data，
+  那一版会因为 datetime-local 不带秒而静默误发通知），走 services.reschedule()，
   然后把人送到通知页。这个模板不需要知道那件事。
   {% endcomment %}
-  <form method="post">
+  {% if event %}{% include "events/_event_nav.html" with current="edit" %}{% endif %}
+
+  <h1 class="text-2xl font-semibold">
+    {% if event %}Edit “{{ event.name }}”{% else %}Publish an Event{% endif %}
+  </h1>
+
+  {% if event %}
+    <div class="card mt-4 border border-info-fg/30 bg-info-bg dark:border-info-fg-dark/30 dark:bg-info-bg-dark">
+      <p class="text-sm text-info-fg dark:text-info-fg-dark">
+        Changing the start or end time sends you straight to the notice page —
+        everyone who signed up needs to hear about it.
+      </p>
+    </div>
+  {% endif %}
+
+  {% comment %}
+  ⚠️ enctype 不能少。没有它，浏览器把表单当 urlencoded 发，文件**只发文件名**——
+     表单照样通过验证、活动照样保存，就是没有图片。整条路上没有任何报错。
+  {% endcomment %}
+  <form method="post" enctype="multipart/form-data" class="card mt-6">
     {% csrf_token %}
-    {{ form.as_p }}
-    <button type="submit">
-      {% if event %}Save changes{% else %}Create and open roles{% endif %}
-    </button>
+    {% include "core/components/form_fields.html" %}
+    <div class="mt-6 flex flex-wrap gap-2">
+      {% if event %}
+        {% include "core/components/button.html" with label="Save changes" variant="primary" %}
+        {% url 'events:event_detail' event.pk as back_url %}
+        {% include "core/components/button.html" with label="Back to the event" href=back_url variant="ghost" %}
+      {% else %}
+        {% include "core/components/button.html" with label="Create and open roles" variant="primary" %}
+      {% endif %}
+    </div>
   </form>
 
   {% if event %}
-    <p>
-      <a href="{% url 'events:event_detail' event.pk %}">Back to the event</a> ·
-      <a href="{% url 'events:event_roles' event.pk %}">Roles</a> ·
-      <a href="{% url 'events:event_notify' event.pk %}">Notify volunteers</a>
-    </p>
-    <p>
-      Changing the start or end time sends you straight to the notice page —
-      everyone who signed up needs to hear about it.
-    </p>
+    {% comment %}
+    工种并进这一页（2026-08-04）。在此之前它是单独的 /events/<pk>/roles/，
+    而那一页**自己没有入口** —— 只有「刚建完活动」那一次重定向能到，
+    第二天回来就找不着了。合并之后「改这场活动」是一个地方，不是两个。
+
+    ⚠️ 两张独立的表单，不是一张。上面那张改时间会跳通知页，下面这张不会。
+    {% endcomment %}
+    <h2 class="mb-4 mt-10 text-lg font-semibold">Roles for this event</h2>
+    {% include "events/_event_roles_panel.html" %}
   {% endif %}
 {% endblock %}

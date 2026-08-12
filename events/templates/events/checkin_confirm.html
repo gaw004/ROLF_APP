@@ -1,0 +1,129 @@
+{% extends "core/base.html" %}
+{% block title %}{% if checking_in %}Check In{% else %}Check Out{% endif %}{% endblock %}
+{% block main_width %}max-w-md{% endblock %}
+
+{% comment %}
+扫码之后真正按的那一页。
+
+⚠️ 它是 POST，不是 GET —— 这是这一页存在的第一个理由。原方案是扫码即打卡，
+   而那意味着微信 / iMessage 的链接预览抓取器、浏览器预取、企业网关的 URL 扫描
+   都会替人打卡。**GET 不能写。**
+
+⚠️ 表单里**没有 token**。凭据在 session 里。把 token 塞进 hidden field 是那个
+   一眼看上去更省事的写法，它会把 90 秒的窗口重新套回到「打完密码之后」，
+   而两段式就是为了把它挪开才存在的。
+
+⚠️ 一个工种时不问任何问题（95% 的情况）。多个工种才画单选 —— 那是唯一
+   不编造数字的方案，见 D28 第五节。
+{% endcomment %}
+
+{% block content %}
+  <h1 class="text-2xl font-semibold">
+    {% if checking_in %}Check In{% else %}Check Out{% endif %}
+  </h1>
+  <p class="mt-1 text-ink-600 dark:text-ink-300">{{ event.name }}</p>
+  <p class="text-sm text-ink-600 dark:text-ink-300">
+    {{ event.start_time }} – {{ event.end_time|time }}
+  </p>
+
+  {% if targets.pending %}
+    <form method="post" class="mt-6">
+      {% csrf_token %}
+
+      {% if only %}
+        <input type="hidden" name="participation" value="{{ only.pk }}">
+        <div class="card">
+          <p class="font-medium">{{ only.event_role.role.name }}</p>
+          {% if not checking_in and only.checked_in_at %}
+            <p class="mt-1 text-sm text-ink-600 dark:text-ink-300">
+              Checked in at {{ only.checked_in_at|time }}
+            </p>
+          {% endif %}
+        </div>
+      {% else %}
+        {% comment %}
+        ⚠️ 这几句是这一页上唯一一处「问问题」。它只在一个人同一场活动报了
+           多个工种时出现 —— 罕见，但另外两种处理方式（全部一起打 / 只写第一行）
+           一个让总工时翻倍，一个在报表里留下一批说谎的 0。
+        {% endcomment %}
+        <p class="text-sm text-ink-600 dark:text-ink-300">
+          You are signed up for more than one role at this event. Which one are
+          you {% if checking_in %}starting{% else %}finishing{% endif %}?
+        </p>
+        <div class="mt-3 flex flex-col gap-2">
+          {% for row in targets.pending %}
+            <label class="card flex cursor-pointer items-center gap-3">
+              <input type="radio" name="participation" value="{{ row.pk }}"
+                     {% if forloop.first %}checked{% endif %}>
+              <span>
+                <span class="font-medium">{{ row.event_role.role.name }}</span>
+                {% if not checking_in and row.checked_in_at %}
+                  <span class="block text-sm text-ink-600 dark:text-ink-300">
+                    Checked in at {{ row.checked_in_at|time }}
+                  </span>
+                {% endif %}
+              </span>
+            </label>
+          {% endfor %}
+        </div>
+      {% endif %}
+
+      {% comment %}
+      ⚠️ 签退这一句必须写出来。check_out() 会照时钟**写进**一个权威的工时数字，
+         而手滑早签退的后果是那一行从此不能被标缺勤。按之前把话说清楚，
+         是这个代价能被接受的两个条件之一（另一个是 history 留痕）。
+      {% endcomment %}
+      {% if not checking_in %}
+        <p class="mt-4 text-sm text-ink-600 dark:text-ink-300">
+          This records your hours from when you checked in. If you leave and come
+          back, ask the organiser to correct them.
+        </p>
+      {% endif %}
+
+      {% comment %}
+      ⚠️ `variant="primary"`，而组件的默认值是 secondary。这一页上这个按钮就是
+         「这一屏你唯一要做的事」—— 而志愿者是在大厅里、单手、隔着一段距离看它的。
+         第一版漏了这个参数，画出来是白底描边，和旁边的 My Signups 一样重。
+         这正是 button.html 顶上「一屏最多一个 primary」那条规矩在说的事。
+      {% endcomment %}
+      <div class="mt-6">
+        {% if checking_in %}
+          {% include "core/components/button.html" with label="Check in" variant="primary" full=1 %}
+        {% else %}
+          {% include "core/components/button.html" with label="Check out" variant="primary" full=1 %}
+        {% endif %}
+      </div>
+    </form>
+
+  {% elif targets.needs_check_in %}
+    <div class="card mt-6">
+      <p>You have not checked in yet, so there is nothing to check out of.</p>
+    </div>
+    <p class="mt-4 text-sm text-ink-600 dark:text-ink-300">
+      Ask the organiser to switch the screen to Check in.
+    </p>
+
+  {% else %}
+    {% comment %}
+    已经打过了。⚠️ 这不是错误，是陈述 —— 最常见的到达方式是页面慢、手指急。
+    画成红色的失败会把这个人送去找管理员，而事情其实已经成了。
+    {% endcomment %}
+    <div class="card mt-6">
+      {% for row in targets.done %}
+        <p{% if not forloop.first %} class="mt-2"{% endif %}>
+          <span class="font-medium">{{ row.event_role.role.name }}</span> —
+          {% if checking_in %}
+            checked in at {{ row.checked_in_at|time }}.
+          {% else %}
+            checked out at {{ row.checked_out_at|time }}.
+          {% endif %}
+        </p>
+      {% endfor %}
+    </div>
+  {% endif %}
+
+  <div class="mt-6">
+    {% url 'events:my_participations' as mine_url %}
+    {% include "core/components/button.html" with label="My Signups" href=mine_url variant="ghost" %}
+  </div>
+{% endblock %}

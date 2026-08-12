@@ -24,6 +24,8 @@ from django.core.exceptions import NON_FIELD_ERRORS, ValidationError
 #    offending fields cannot be mapped — split the constraint instead. That is
 #    why contact_name_matches_type became three constraints; see contact/models.py.
 CONSTRAINT_FIELD = {
+    # accounts.User
+    "user_email_taken": "email",
     # contact.Contact
     "individual_needs_last_name": "legal_last_name",
     "organization_needs_name": "organization_name",

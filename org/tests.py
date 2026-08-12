@@ -4,7 +4,8 @@ import inspect
 from django.apps import apps
 from django.contrib import admin
 from django.contrib.auth import get_user_model
-from django.contrib.auth.models import AnonymousUser
+from django.contrib.auth.models import AnonymousUser, Group, Permission
+from django.core.management import call_command
 from django.core.exceptions import ValidationError
 from django.db import IntegrityError, connection, transaction
 from django.db.models import ProtectedError
@@ -19,10 +20,12 @@ from events.models import Event, EventType
 from .admin import StaffingFilter
 from .models import Assignment, EmploymentType, Ministry, MinistryRole, Position
 from .permissions import (
+    FOUNDATION_ADMIN_GROUP,
+    FOUNDATION_ADMIN_PERMISSIONS,
     can_grant_ministry_admin,
     can_manage_event,
     can_publish_event,
-    can_view_registrations,
+    can_view_event_records,
     foundation_admin_group,
     ministry_ids_administered_by,
 )
@@ -469,7 +472,7 @@ class StaffingTests(TestCase):
         for number in range(10):
             make_position(f"post{number}", f"Post {number}", self.ministry)
         self.client.force_login(
-            get_user_model().objects.create_superuser(username="staff", password="x"))
+            get_user_model().objects.create_superuser(email="staff@example.com", password="x"))
         url = reverse("admin:org_position_changelist")
 
         with CaptureQueriesContext(connection) as captured:
@@ -672,7 +675,7 @@ class MinistryRoleTests(TestCase):
     def test_deleting_the_granting_user_keeps_the_grant(self):
         # SET_NULL. CASCADE here would revoke a batch of people's authority
         # because somebody's account was closed.
-        granter = get_user_model().objects.create_user(username="boss", password="x")
+        granter = get_user_model().objects.create_user(email="boss@example.com", password="x")
         grant = self.grant(granted_by=granter)
         granter.delete()
         grant.refresh_from_db()
@@ -694,7 +697,7 @@ class PermissionTests(TestCase):
         self.tax = make_ministry(code="tax_help", name="Tax Help")
         self.zhang = make_person("Zhang")
         self.user = get_user_model().objects.create_user(
-            username="zhang", password="x", contact=self.zhang)
+            email="zhang@example.com", password="x", contact=self.zhang)
         MinistryRole.objects.create(contact=self.zhang, ministry=self.pantry)
 
     def make_event(self, ministry):
@@ -735,23 +738,23 @@ class PermissionTests(TestCase):
     def test_a_user_with_no_grants_is_denied_everything(self):
         # Deny by default, never "allowed unless forbidden".
         stranger = get_user_model().objects.create_user(
-            username="stranger", password="x", contact=make_person("Stranger"))
+            email="stranger@example.com", password="x", contact=make_person("Stranger"))
         self.assertFalse(can_publish_event(stranger, self.pantry))
-        self.assertFalse(can_view_registrations(stranger, self.make_event(self.pantry)))
+        self.assertFalse(can_view_event_records(stranger, self.make_event(self.pantry)))
         self.assertFalse(can_grant_ministry_admin(stranger))
 
     def test_a_user_with_no_contact_is_denied_everything_without_raising(self):
         # A normal state, not an error: MinistryRole hangs off Contact while the
         # entry point is a User, and User.contact must stay nullable (D12/D21).
         # Raising here would 500 every protected view for such an account.
-        technical = get_user_model().objects.create_user(username="tech", password="x")
+        technical = get_user_model().objects.create_user(email="tech@example.com", password="x")
         self.assertEqual(ministry_ids_administered_by(technical), set())
         self.assertFalse(can_publish_event(technical, self.pantry))
 
     def test_a_superuser_gets_no_ministry_scope_either(self):
         # No exemption. One here would be a hole straight through the scoping
         # that D20 exists to create; a superuser has the admin already.
-        root = get_user_model().objects.create_superuser(username="root", password="x")
+        root = get_user_model().objects.create_superuser(email="root@example.com", password="x")
         self.assertFalse(can_publish_event(root, self.pantry))
         self.assertFalse(can_grant_ministry_admin(root))
 
@@ -770,3 +773,69 @@ class PermissionTests(TestCase):
         # The name says ids because the return value is ids. Two documents once
         # gave this function two names; it is the most-called one we have.
         self.assertEqual(ministry_ids_administered_by(self.user), {self.pantry.pk})
+
+
+class FoundationAdminGroupTests(TestCase):
+    """The global tier's permissions, and the reconciliation that keeps them true.
+
+    ⚠️ 这一组存在的理由是一次真实的静默失败：`foundation_admin_group()` 原来写的是
+       `if created or not group.permissions.exists()`，于是**在任何已经有这个组的
+       库上，往清单里加一条权限都不会生效** —— 清单是对的，组是旧的，没有任何东西
+       报告这个差别。症状是 admin 首页少一个模块，看起来像「页面没做」。
+    """
+
+    def test_the_group_grants_what_the_list_says(self):
+        group = foundation_admin_group()
+        granted = {
+            f"{p.content_type.app_label}.{p.codename}" for p in group.permissions.all()
+        }
+        # Subset rather than equality: a permission named in the list but absent
+        # from this database (an app not installed yet) is skipped by design.
+        self.assertTrue(granted <= set(FOUNDATION_ADMIN_PERMISSIONS))
+        self.assertIn("org.add_ministry", granted,
+                      "A production database starts with no ministries and nothing "
+                      "else can create one.")
+
+    def test_it_never_grants_delete_ministry(self):
+        # Deleting a ministry cascades into its events. "We stopped running it"
+        # is is_active=False — an ending is a date, not a deletion.
+        granted = {p.codename for p in foundation_admin_group().permissions.all()}
+        self.assertNotIn("delete_ministry", granted)
+
+    def test_a_migrate_is_what_keeps_the_group_true_in_production(self):
+        """⚠️ The second half of the same bug, and the half that mattered more.
+
+        Making `foundation_admin_group()` reconcile was not enough: the only
+        things that called it were `seed_demo` and the tests, and **neither runs
+        on a deployed site**. Adding a permission to the list therefore did
+        nothing at all in production — silently — and the only symptom was a
+        page missing from the admin index.
+
+        It is now wired to `post_migrate`, and `migrate` runs on every deploy.
+        This asserts the wiring, not the function: strip the group down, run
+        migrate, and it has to come back.
+        """
+        group, _ = Group.objects.get_or_create(name=FOUNDATION_ADMIN_GROUP)
+        group.permissions.clear()
+
+        call_command("migrate", verbosity=0)
+
+        granted = {p.codename for p in group.permissions.all()}
+        self.assertIn("add_ministry", granted)
+        self.assertIn("change_homepage", granted)
+
+    def test_an_existing_group_is_brought_up_to_date(self):
+        """The bug this whole class is about, as an assertion.
+
+        Build the group with one stale permission, then call again: the second
+        call has to reconcile it, not walk away because the group was non-empty.
+        """
+        group, _ = Group.objects.get_or_create(name=FOUNDATION_ADMIN_GROUP)
+        stale = Permission.objects.get(
+            content_type__app_label="org", codename="view_ministryrole")
+        group.permissions.set([stale])
+
+        refreshed = foundation_admin_group()
+        granted = {p.codename for p in refreshed.permissions.all()}
+        self.assertIn("add_ministry", granted)
+        self.assertGreater(len(granted), 1)

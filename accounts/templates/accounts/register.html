@@ -1,19 +1,76 @@
 {% extends "core/base.html" %}
 {% block title %}Register{% endblock %}
+{% block main_width %}max-w-2xl{% endblock %}
 
 {% block content %}
-  <h1>Create an account</h1>
-  <p>
-    Once you have an account you can sign up for events. Leave your date of
-    birth blank and we will treat you as under 18, which means signups ask for
-    a guardian's consent — you can fill it in later under My profile.
+  <h1 class="text-2xl font-semibold">Create an Account</h1>
+  <p class="mt-2 text-sm text-ink-600 dark:text-ink-300">
+    Once you have an account you can sign up for events. Leave your date of birth
+    blank and we will treat you as under 18, which means signups ask for a
+    guardian's consent — you can fill it in later under My profile.
   </p>
 
-  <form method="post">
+  {% if google_client_id %}
+    {% comment %}
+    「Continue with Google」——**只填表，不登录**（2026-08-06）。
+    Google 交出 email / first name / last name，密码仍然要自己设，
+    建出来的账号是普通的密码账号。理由和边界写在 accounts/google.py。
+
+    ⚠️ 没配 `GOOGLE_OAUTH_CLIENT_ID` 时这一整段不输出。一个按下去就报错的
+       「用 Google 登录」比没有这个按钮糟得多 —— C0.5 刚为三条死链付过这笔学费。
+
+    ⚠️ 这是全站**第一个外部脚本**。代价如实记在 revisions.md：多一个第三方域名、
+       多一次外部请求，而且 Google 的脚本挂了这个按钮就不出现。
+       挂了也只是不出现 —— 下面那张表单不依赖它。
+
+    ⚠️ 回调走的是**我们自己的表单**（带 csrf_token），不是 Google 文档里那个
+       `data-login_uri`。后者从 Google 的 iframe 里直接 POST，不带我们的 CSRF
+       token，跟着它做就得把这个端点 csrf_exempt 掉、再自己实现一遍
+       double-submit 校验。理由展开在 accounts/views.py 的 register_with_google。
+    {% endcomment %}
+    <div class="mt-6">
+      <div id="g_id_onload"
+           data-client_id="{{ google_client_id }}"
+           data-callback="onGoogleCredential"
+           data-auto_prompt="false"></div>
+      <div class="g_id_signin" data-type="standard" data-text="continue_with"
+           data-shape="rectangular" data-width="320"></div>
+      <form method="post" action="{% url 'accounts:register_with_google' %}"
+            id="google-prefill-form" class="hidden">
+        {% csrf_token %}
+        <input type="hidden" name="credential" value="">
+      </form>
+    </div>
+
+    <p class="mt-4 text-xs text-ink-600 dark:text-ink-300">
+      This only fills the form in for you. You still choose a password, and we
+      never see your Google password.
+    </p>
+
+    <div class="mt-6 flex items-center gap-3 text-xs text-ink-500 dark:text-ink-400">
+      <span class="h-px flex-1 bg-ink-200 dark:bg-ink-700"></span>
+      <span>or fill it in yourself</span>
+      <span class="h-px flex-1 bg-ink-200 dark:bg-ink-700"></span>
+    </div>
+
+    {% comment %}
+    ⚠️ `defer` 不加。GIS 的脚本要在 `#g_id_onload` 出现之后才跑，而它自己就是
+       在这个位置同步加载的 —— 加 defer 会让它在 DOMContentLoaded 之后才执行，
+       那时按钮的位置已经排好版了，插进来会让页面跳一下。
+    {% endcomment %}
+    <script src="https://accounts.google.com/gsi/client" async></script>
+  {% endif %}
+
+  <form method="post" class="card mt-6">
     {% csrf_token %}
-    {{ form.as_p }}
-    <button type="submit">Register</button>
+    {% include "core/components/form_fields.html" %}
+    <div class="mt-6">
+      {% include "core/components/button.html" with label="Register" variant="primary" full=1 %}
+    </div>
   </form>
 
-  <p>Already have an account? <a href="{% url 'accounts:login' %}">Log in</a></p>
+  <p class="mt-6 text-center text-sm text-ink-600 dark:text-ink-300">
+    Already have an account?
+    <a href="{% url 'accounts:login' %}" class="prose-link">Log in</a>
+  </p>
 {% endblock %}

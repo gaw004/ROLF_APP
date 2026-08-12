@@ -22,6 +22,7 @@ from simple_history.models import HistoricalRecords
 
 from contact.models import Contact, RelationshipType
 from core.constraints import ConstraintErrorFieldMixin
+from core.limits import LONG_TEXT, SHORT_TEXT
 from core.models import ImmutableCodeMixin, TimeStampedModel
 from core.timeutils import local_now
 from org.models import Ministry
@@ -181,6 +182,8 @@ class Event(ConstraintErrorFieldMixin, TimeStampedModel):
     dimensions, no third table. See phase-b.md「一人一活动多角色」.
     """
 
+    IMAGE_DIR = "event-images"
+
     class Status(models.TextChoices):
         DRAFT = "draft", "Draft"                      # only this ministry sees it
         OPEN = "open", "Open for signup"              # published, taking signups
@@ -227,7 +230,27 @@ class Event(ConstraintErrorFieldMixin, TimeStampedModel):
     )
 
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.DRAFT)
-    description = models.TextField(blank=True)
+    # Capped. Every volunteer-facing list renders this, so an unbounded column
+    # is one pasted document away from a page that will not load on a phone.
+    # See core/limits.py for which layer actually refuses it.
+    description = models.TextField(blank=True, max_length=LONG_TEXT)
+
+    # A picture for the listing. Optional, and short-lived by design.
+    #
+    # ⚠️ **Deleted once the event is over** — purge_event_images, on a daily
+    #    schedule. The picture is gone for good at that point: the past-events
+    #    list shows the default logo from then on. That is the requirement, not
+    #    an oversight, and it is what keeps this feature from accumulating.
+    #
+    # ⚠️ A file, never a column of bytes. The backup is a pg_dump, so anything
+    #    stored in the database is in every backup forever — the opposite of
+    #    what was asked for. See the MEDIA notes in config/settings/base.py.
+    #
+    # ⚠️ Uploads are re-encoded before they are stored (services.normalise_
+    #    event_image): resized, converted to WebP and **stripped of EXIF**.
+    #    A phone photo carries GPS coordinates, and an event picture taken at
+    #    somebody's home would publish where they live to every signed-in user.
+    image = models.ImageField(upload_to=IMAGE_DIR, blank=True)
 
     # Published to the outside world: a change of time or place has to be
     # answerable for afterwards.
@@ -283,6 +306,17 @@ class EventRoleQuerySet(models.QuerySet):
                 filter=Q(participations__status=Participation.Status.ATTENDED),
                 distinct=True,
             ),
+        ).annotate(
+            # "Is this role short?" as a column, so the signups page can flag it
+            # without restating the rule.
+            #
+            # ⚠️ The rule has a trap in it — needed_count NULL means "no limit",
+            #    so such a role is never short rather than short by infinity —
+            #    and a template writing `registered_count < needed_count` would
+            #    be a second copy of it. Copies of a rule with a trap in it do
+            #    not stay in step; understaffed() below filters on this same
+            #    annotation for exactly that reason.
+            is_short=Q(needed_count__isnull=False) & Q(registered_count__lt=F("needed_count")),
         )
 
     def understaffed(self):
@@ -293,10 +327,12 @@ class EventRoleQuerySet(models.QuerySet):
         ⚠️ Roles nobody signed up for have to appear here. That is the whole
            reason this table exists: they have no row in Participation to be
            found through. See goal.md D19.
+
+        Filters on the `is_short` annotation rather than spelling the condition
+        out again — one definition, so this and the badge on the signups page
+        can never come to different conclusions about the same role.
         """
-        return self.with_signup_counts().filter(
-            needed_count__isnull=False, registered_count__lt=F("needed_count"),
-        )
+        return self.with_signup_counts().filter(is_short=True)
 
 
 class EventRole(ConstraintErrorFieldMixin, TimeStampedModel):
@@ -314,7 +350,9 @@ class EventRole(ConstraintErrorFieldMixin, TimeStampedModel):
         null=True, blank=True,
         help_text="Leave empty for no limit. Advisory only — signups are never blocked.",
     )
-    notes = models.TextField(blank=True)
+    # SHORT_TEXT rather than LONG_TEXT: this is read inside a row of the roles
+    # panel, where a screenful in one cell pushes the other roles off the page.
+    notes = models.TextField(blank=True, max_length=SHORT_TEXT)
 
     # needed_count is a promise published to volunteers ("we need 5 for
     # lifting"), so changing it has to be traceable — same reason as Event.
@@ -374,10 +412,25 @@ class Participation(ConstraintErrorFieldMixin, TimeStampedModel):
         ABSENT = "absent", "No-show"
         CANCELLED = "cancelled", "Cancelled"
 
+    class CheckInMethod(models.TextChoices):
+        """Who put the attendance on this row: an admin, or the volunteer.
+
+        D28. The QR check-in cannot be made tamper-proof — a live accomplice on
+        site can always forward the link — so the mitigation is not to try, but
+        to make the fact **visible** on the attendance page. A problem nobody can
+        see is a problem nobody handles.
+        """
+
+        ADMIN = "admin", "Recorded by an admin"
+        SELF_QR = "self_qr", "Self check-in by QR"
+
     class ConsentMethod(models.TextChoices):
-        VERBAL = "verbal", "口头"
-        PAPER = "paper", "纸质"
-        ONLINE = "online", "线上"
+        # ⚠️ C2.5 改的是**标签**（右边那半，显示给人看的）。左边的 value 一个字
+        #    没动，也不许动 —— 它们已经写在库里了，改 value 是一次数据迁移，
+        #    而漏掉迁移的表现是旧行的同意方式变成一个不在选项里的值。
+        VERBAL = "verbal", "In person"
+        PAPER = "paper", "On paper"
+        ONLINE = "online", "Online"
 
     event_role = models.ForeignKey(
         EventRole, on_delete=models.CASCADE, related_name="participations",
@@ -396,6 +449,21 @@ class Participation(ConstraintErrorFieldMixin, TimeStampedModel):
     registered_at = models.DateTimeField(null=True, blank=True)
     checked_in_at = models.DateTimeField(null=True, blank=True)   # P4: did they turn up
     checked_out_at = models.DateTimeField(null=True, blank=True)
+    # How the attendance on this row was **first** established. D28.
+    #
+    # ⚠️ blank, and deliberately **no default**. Empty means "this row predates
+    #    self check-in", which is not the same fact as "an admin recorded it".
+    #    A default of ADMIN would back-date a claim onto every historical row —
+    #    vouching for something nobody checked, the same objection D27 raised
+    #    about the no-show rate's denominator.
+    #
+    # ⚠️ First write wins, and undo_attendance() clears it. The question this
+    #    column answers is "did the volunteer fill this row in, or did I?", and
+    #    an admin correcting the hours afterwards must not rewrite the answer to
+    #    "I did" — the correction is in the history table, this is the origin.
+    checked_in_method = models.CharField(
+        max_length=20, choices=CheckInMethod.choices, blank=True,
+    )
     # Decimal, never Float: hours may end up attached to recognition, and floats
     # drift when summed. null=True because signed-up-but-not-yet-happened is not
     # the same fact as turned-up-and-did-zero.
@@ -486,9 +554,13 @@ class Participation(ConstraintErrorFieldMixin, TimeStampedModel):
     def guardian_address(self):
         """(address, channel) for the guardian, or None — D22's rule 2.
 
-        Email first: the default backend is email, and the fallback path
-        (EmergencyContact) can only manage SMS because that table has no email
-        column at all.
+        Email first: the default backend is email, and it costs essentially
+        nothing where a text message does not.
+
+        ⚠️ 2026-08-05 更正：这段原来写的是「兜底路径（EmergencyContact）只能走
+           短信，因为那张表根本没有 email 列」。**那句话不再成立** ——
+           EmergencyContact 现在有必填的 email，兜底的顺序由它自己的
+           reachable_at 决定，和这里同序。
         """
         if self.consent_email:
             return self.consent_email, "email"
@@ -527,7 +599,11 @@ class EventNotification(ConstraintErrorFieldMixin, TimeStampedModel):
     reason = models.CharField(max_length=30, choices=Reason.choices)
     # A snapshot of the words. Editing the event afterwards must not rewrite
     # what this notice said.
-    message = models.TextField()
+    #
+    # ⚠️ NotifyForm is a plain Form, so it carries this cap **as well** — from
+    #    the same constant, deliberately. The form is what a person submits
+    #    against; this column is what the form's output has to fit in.
+    message = models.TextField(max_length=LONG_TEXT)
     sent_at = models.DateTimeField()
     sent_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,

@@ -1,0 +1,58 @@
+{% comment %}
+工种列表 + 添加表单。整页和 HTMX 片段渲染的是同一份。
+
+⚠️ role_delete 视图在 HTMX 路径上渲染的也是这一份，用的是同一套上下文键 ——
+   两处渲染同一个面板，所以它们不可能对列表的内容有不同看法。
+{% endcomment %}
+<div id="roles-panel">
+  {% if roles %}
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th>Role</th><th>Wanted</th><th>Signed up</th><th>Notes</th><th></th></tr>
+        </thead>
+        <tbody>
+          {% for role in roles %}
+            <tr>
+              <td class="font-medium">{{ role.role.name }}</td>
+              <td>{{ role.needed_count|default_if_none:"No limit" }}</td>
+              <td>{{ role.registered_count }}</td>
+              <td class="whitespace-normal">{{ role.notes }}</td>
+              <td>
+                {% comment %}
+                ⭐ 这是一个写操作，所以它是一张**完整的服务端表单** ——
+                   hx-post 只是它的快路。关掉 JavaScript，这个按钮照样能删掉工种。
+                {% endcomment %}
+                <form method="post" action="{% url 'events:role_delete' role.pk %}"
+                      hx-post="{% url 'events:role_delete' role.pk %}"
+                      hx-target="#roles-panel" hx-swap="outerHTML">
+                  {% csrf_token %}
+                  {% include "core/components/button.html" with label="Delete" variant="danger" confirm="Delete this role? Anyone signed up for it goes with it." %}
+                </form>
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% else %}
+    {% include "core/components/empty.html" with message="No roles opened yet. Volunteers cannot sign up until there is at least one job to sign up for." %}
+  {% endif %}
+
+  <form method="post" action="{% url 'events:event_roles' event.pk %}"
+        hx-post="{% url 'events:event_roles' event.pk %}"
+        hx-target="#roles-panel" hx-swap="outerHTML"
+        class="card mt-6">
+    {% csrf_token %}
+    <h2 class="mb-4 text-lg font-semibold">Add a role</h2>
+    {% comment %}
+    ⚠️ 这张表单**不是**上面那张活动表单的一部分，尽管它们在同一页上。
+       两张独立的 <form>，两个提交按钮 —— 改时间会跳到通知页，加工种不会，
+       混成一张的话加一个工种就会给所有报名的人发一封「时间改了」。
+    {% endcomment %}
+    {% include "core/components/form_fields.html" with form=role_form %}
+    <div class="mt-6">
+      {% include "core/components/button.html" with label="Add" variant="primary" %}
+    </div>
+  </form>
+</div>

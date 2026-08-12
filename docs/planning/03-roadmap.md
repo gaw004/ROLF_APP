@@ -341,6 +341,38 @@ Django 在模板不存在时返回一个 `details` 为空的裸页面，
 匿名浏览器打开站点，**点导航每一个链接都不出现 404**；
 拿 A ministry 的 admin 打 B ministry 的 `/registrations/`，403 页面上**读得到为什么**。
 
+**实测结果（2026-08-03，三件全部做完）**：
+
+| 项 | 结果 |
+|---|---|
+| `python manage.py test` | **409 个，全绿**（34.6s）—— 这一段的起点是 404，新增 5 条（计划里写的是「多两条」） |
+| `check` / `makemigrations --check` / `ruff check .` | 干净 / No changes / All checks passed |
+| 新增的文件 | `core/templates/403.html` · `404.html` · `500.html` · `.pre-commit-config.yaml` · `.github/workflows/ci.yml` |
+| 改动 | `config/settings/base.py` 加 `LOGIN_URL`；`requirements-dev.txt` 加 `pre-commit` |
+| 死链复现 | `/events/` → 302 `/accounts/login/?next=…` → **404**，而真实路径是 `/login/`（和计划写的一字不差） |
+| 守卫真的拦得住 | 故意在 `events/views.py` 里查一次 `MinistryRole`：本地 pre-commit `Failed`，`manage.py test` **exit 1** |
+
+新增的 5 条测试（计划写「两条」，实际拆成 5 条，因为它们盯的是 5 件不同的事）：
+
+| 测试 | 盯的是 |
+|---|---|
+| `test_following_the_login_redirect_lands_on_a_real_page` | **`follow=True` 是这条的全部价值** —— 不跟随的断言证明的是「跳了」，而坏掉的是「跳到哪」 |
+| `test_every_link_the_anonymous_navigation_draws_resolves` | 扫渲染出来的 HTML 取 `href`，不在测试里列 URL —— 这样 `base.html` 新加一个链接**当天就被覆盖** |
+| `test_the_403_page_prints_the_reason_it_was_refused` | 断言 `SCOPED_DENIAL` **原文**出现，不是「页面非空」 |
+| `test_the_404_page_is_ours` | `assertTemplateUsed` |
+| `test_the_500_template_renders_with_no_request_at_all` | Django 渲染 500 时**不带 request**，见下面[计划外记录](#c052--500html-不能-extends-basehtml) |
+
+⚠️ **两条要害，都不在原计划里**：
+
+1. **「红灯禁止合并」不在 `ci.yml` 里** —— 那是 GitHub 仓库的**分支保护规则**。
+   这份 workflow 只负责变红；要让红了就不许合，得去
+   Settings → Branches 把 `guards` 这个 job 设成 required status check。
+   ⚠️ **少了那一步，这个文件的作用只是「PR 页面上显示一个红叉，然后照样能点合并」** ——
+   而那正是本节开头说的「只写在清单里的规则」的另一种形态；
+2. pre-commit 的守卫**按模块跑（`core.tests`），不按类名列**。
+   `core/tests.py` 开头写着「Project-wide guards … they police every app」——
+   按模块跑，新加的守卫当天自动生效；按类名列，新守卫要等有人记得回来改配置。
+
 ---
 
 ## C1 / C2 · 前端 —— 正文在 [`04-roadmap.md`](04-roadmap.md)
@@ -394,13 +426,38 @@ C0.5 产出的是三个模板和一批文案，排在样式之后就要再排一
 
 ### C3.1 首页 `/`
 
-`core/views.py`（现在只有一行注释）加 `home`，按角色分流：
-未登录 → 介绍 + 登录/注册入口；志愿者 → 活动列表；
-ministry admin → C0.2.4 那个「我管理的活动」；**foundation_admin → ministry 列表 + P5 的授权页**。
+> **2026-08-05 推翻并重做**，见 [D25](decisions/D25-public-front-page.md)。
+> 本步原来的计划是一个**按角色分流的调度页**（未登录 → 介绍；志愿者 → 活动列表；
+> ministry admin → 我管理的活动；foundation_admin → ministry 列表）。
+> 那个设计有用，但它**不是首页** —— 把链接发给一个从没听过这个基金会的人，
+> 他打开看到的是一张登录表单，而「链接是 404」和「链接是登录表单」
+> 是同一个问题的两种形态。
+>
+> ⚠️ 连带代价：本步从「约一小时的硬前置」变成了**几天的门面工程**，
+> 而它**不阻塞试点**。当天明确接受了这个排序。
 
-⚠️ **判断「是不是 ministry admin」只能问 `org/permissions.py`**，
-不许在这个视图里碰 `MinistryRole.objects` —— 守卫测试盯着这条。
-C0.2.4 已经把这两个判断放进上下文处理器了，这里直接用。
+**做完的样子**（2026-08-05）：`/` 对所有人开放，登录与否看到同一页 ——
+满幅的图或视频、一段经文、平时藏起来的顶栏、左侧滑出的菜单，形制参照 LV 的首页。
+
+| 落点 | 文件 |
+|---|---|
+| 单例模型（背景图 / 视频 / 经文正文 / 出处） | `core/models.py::HomePage` |
+| 只有 foundation tier 能改 | `org/permissions.py` 的 `core.change_homepage` |
+| 视图（**没有** `login_required`） | `core/views.py::home` |
+| 模板（**不继承 `base.html`**） | `core/templates/core/home.html` |
+| 顶栏淡入 / 菜单逐项入场 / 滚动呼吸 | `assets/app.css` 的 `.home-bar` / `.home-menu` / `.scroll-breathe` |
+
+**实测结果**：
+
+| 项 | 结果 |
+|---|---|
+| `python manage.py test` | **503 个，全绿** —— 上一段收尾是 492 |
+| 白字对比度（拿一张带白色云团的刁难图量的） | 顶栏区 **9.94:1**、经文区 **5.57:1**，都过 4.5 |
+| 菜单交互（浏览器里驱动验证） | 滑出 ✅ · 逐项延迟 160→325ms ✅ · hover 展开顶栏 ✅ · Esc 关闭 ✅ |
+
+⚠️ **三件为可达性守住的，不是可选项**：窄屏顶栏常驻（触屏没有 hover，
+否则手机用户在首页上没有任何入口）· `:focus-within` 也触发（键盘用户同理）·
+菜单用 `translateX` 移出视口而不是 `display:none`（后者让链接对读屏软件不存在）。
 
 ### C3.2 密码重置
 
@@ -465,15 +522,31 @@ preload 更是单向门 —— 退出要等月级。
 
 ### C3.5 部署到 Render
 
-- **先查 Render 支持到哪个 Python 版本**（本机跑的是 3.14）。
+- ✅ **先查 Render 支持到哪个 Python 版本**（本机跑的是 3.14）。
   ⚠️ 这一条排在最前面是有原因的：它是**唯一一件到这一步才发现就已经太晚的事** ——
   那时 Tailwind、20 个模板、prod 配置全都做完了。
-  需要的话加 `.python-version` 或降版本，**降完在本机先跑一遍全部测试**；
-- `requirements.txt` 加 `gunicorn`；
-- `render.yaml`：Web Service + **Render 自己的托管 Postgres**（2026-08-03 定），
-  健康检查指向 `/`；
+  需要的话加 `.python-version` 或降版本，**降完在本机先跑一遍全部测试**。
+
+  2026-08-12 查了，结论是**不用降**：Render 2026-02-11 之后新建的服务默认就是
+  Python 3.14.3，本机是 3.14.6。加了 `.python-version` = `3.14`（省略 patch，
+  平台取最新的那个）—— 不是因为默认值不对，是因为**默认值会自己变**，
+  而这份部署不该跟着它变。这一条最贵的分支没有发生，一行代码都没改；
+- ✅ `requirements.txt` 加 `gunicorn`（`26.0.0`，连它的 `packaging` 一起 pin）；
+- ✅ `render.yaml`：Web Service + **Render 自己的托管 Postgres**（2026-08-03 定），
+  健康检查指向 `/`。
   ⚠️ **分支盯的是 [C1.2](04-roadmap.md#c12-产物走-ci不进主分支) 那个部署分支，不是 `main`** ——
-  前端产物由 CI 推到那里。盯错分支的表现是「合进 main 了但线上没变」，且看不出为什么；
+  前端产物由 CI 推到那里。盯错分支的表现是「合进 main 了但线上没变」，且看不出为什么。
+  这一条现在有守卫了：`core/tests.py::RenderBlueprintGuardTests`，
+  连同「没有任何一档是 free」「Postgres 大版本和 CI 一致」
+  「`.python-version` 和 CI 一致」「`prod.py` 里每个 `required=True` 的变量
+  都真的发到了每个跑 Django 的服务上」一共八条。
+
+  ⚠️ 健康检查指向 `/` 有一个前提，容易在换首页时踩掉：**它必须在空库上也返回 200**。
+  第一次部署时库里一行 `HomePage` 都没有，首页 500 的话流量永远切不过去，
+  而现象是「健康检查一直红」，不是「首页坏了」。
+  `core/tests.py::test_an_empty_home_page_still_renders` 钉着这一条。
+  顺带查清了 [C3.4](#c34-生产加固) 那天会担心的事：Render 认 2xx 和 3xx 都算健康，
+  所以 `SECURE_SSL_REDIRECT` 的 301 不会把它搞红；
 - **数据库这一项有三条要当场定，不能等到出事**：
   1. ⚠️ **不能用免费档的 Postgres。** Render 的免费数据库**到期会被直接删掉**，
      而试点期间里面装的是基金会的真实数据。这不是性能问题，是数据会没。
@@ -485,17 +558,61 @@ preload 更是单向门 —— 退出要等月级。
      `pg_dump` 的客户端比服务端旧会**直接拒绝导出** ——
      而备份 cron 里那个客户端就是最容易和服务端不同步的东西。
      [C3.6](#c36-备份--恢复演练) 的恢复演练之所以要求「灌进空库 + 跑测试」，
-     防的正是这一类；
+     防的正是这一类。
+     2026-08-12 查了：18 在 Render 上有，而且已经是新库的默认值，
+     所以这一条不用妥协，`postgresMajorVersion: "18"` 直接写死；
   3. **Render 自带的备份留着当第二道，不当第一道** —— 理由见
      [D3 的 2026-08-03 补](decisions/D03-portable-postgres.md#2026-08-03-补render-的托管-postgres-过不过这一关)：
      库和备份在同一家，平台出事两边一起没；
-- `build.sh`：`pip install -r requirements.txt` → `collectstatic --noinput` → `migrate`
+- ✅ `build.sh`：`pip install -r requirements.txt` → `collectstatic --noinput`
   （原计划中间那步 `compilemessages` 随 [D23](decisions/D23-i18n-interface-only.md) 改口删掉；
-  **不需要 `npm`**，产物是 CI 构建好推过来的）；
-- 环境变量：`DJANGO_SETTINGS_MODULE=config.settings.prod`、
+  **不需要 `npm`**，产物是 CI 构建好推过来的）。
+
+  🔴 **2026-08-12 改口：`migrate` 从这里挪到 `render.yaml` 的 `preDeployCommand`。**
+  原文把它写成 `build.sh` 的第三步，那是 `preDeployCommand` 还不存在时的写法。
+  两个理由，第二个才是真的要害：三个服务在同一次 push 上**各自 build**，
+  写在 `build.sh` 里就是三份并发跑同一套迁移；而更糟的是**构建期的迁移已经改完库了** ——
+  后面任何一步让这次部署失败，留下的是「库比正在服务的代码新」，
+  那是最难收拾的一种不一致。`preDeployCommand` 在 build 之后、切流量之前跑一次，
+  失败则整次部署失败、旧版本继续服务。经过在 [revisions.md 三十三](revisions.md)。
+  ⚠️ 它跑在一台独立实例上，**对文件系统的改动不会带进正在跑的服务** ——
+  `migrate` 只改库所以没关系，但别往那一行加任何写文件的步骤；
+- ✅ **两个 Cron Job，不是一个**：备份那个在 [C3.6](#c36-备份--恢复演练)；
+  另一个每天跑 `python manage.py purge_event_images`，删掉已结束活动的图片。
+  ⚠️ 它**是** management command 而备份**不是**，两者不矛盾：备份必须在应用起不来
+  的时候照样能跑，而这一个要问 ORM「哪些活动结束了」——没有不依赖 Django 的版本。
+
+  两个都已经写进 `render.yaml` 了，但**备份那个现在同步不过去**，是故意的：
+  它指向 `scripts/backup/`，而那个目录由 [C3.6](#c36-备份--恢复演练) 创建。
+  第一次同步 blueprint 之前，要么先把 C3.6 做完，要么把那一段临时注释掉。
+  之所以现在就写，是因为漏掉它的表现是**没有表现** —— 备份不存在不报错，
+  只在需要它的那天才发现。
+  ⚠️ 备份那个是 `runtime: docker` 而不是 `python`，理由就是上面数据库第 2 条：
+  `pg_dump` 的客户端版本必须是 18，而 Render 的 python runtime 带哪个版本
+  不由我们决定、还会随平台升级变。docker 是唯一能把「客户端就是 18」写进 git 的写法；
+- ✅ **`STORAGES` 已经接上 R2**（2026-08-06 做完，`config/settings/prod.py`）。
+  三个别名各指一个桶，划分和理由在 [C3.6](#c36-备份--恢复演练) 那张表。
+  ⚠️ 少了这一步的表现是：Render 的磁盘每次部署都会清空，图片
+  **不是活动结束时消失，是下次部署时消失** —— 而那是随机的，看起来像 bug 不像设计。
+  ⚠️ `prod.py` 缺任何一个 R2 变量就**拒绝启动**，故意的：另一种做法（退回本地磁盘）
+  正是上面那种静默失败；
+- ✅ 环境变量：`DJANGO_SETTINGS_MODULE=config.settings.prod`、
   **新生成的** `DJANGO_SECRET_KEY`、`DJANGO_ALLOWED_HOSTS`、SES 的 SMTP 四项、
-  `NOTIFICATION_BACKEND`、`SENTRY_DSN`、R2 的 endpoint 和密钥
-  （`DATABASE_URL` 由 Render 注入）；
+  `NOTIFICATION_BACKEND`、`SENTRY_DSN`、R2 的七项
+  （`R2_ENDPOINT_URL`、`R2_ACCESS_KEY_ID`、`R2_SECRET_ACCESS_KEY`、
+  三个桶名、`R2_PUBLIC_BASE_HOST` —— 名字和逐条说明在 `.env.example`）
+  （`DATABASE_URL` 由 Render 注入）。
+  名字全部写进了 `render.yaml`，值一个都没有：秘密走 `sync: false`（第一次同步时
+  平台挨个问你要），`DJANGO_SECRET_KEY` 走 `generateValue: true`（Render 现生成，
+  不进任何文件，正好满足「必须是新生成的」）。
+  ⚠️ 三个跑 Django 的服务共用一个 env group，**理由不是省字数**：
+  `generateValue` 每写一次就生成一份新的值，在两个服务里各写一次
+  会得到两个不同的 `SECRET_KEY`，而那件事不报错 —— 表现是 session 和签名过的
+  链接偶尔莫名其妙失效。反过来，`sync: false` 的**不能进 group**（Render 的限制），
+  所以 R2 那七项在 web 和 purge cron 里是逐字重复的，靠守卫盯着两边一致；
+  ⚠️ **`NOTIFICATION_BACKEND` 现在指着 SES 的适配器，而 [C3.3](#c33-真实发信) 还没做。**
+  在 `prod.py` 补上 `EMAIL_*` 之前，Django 会退回默认 SMTP 后端去连 localhost:25
+  然后失败。第一次真实部署之前，要么 C3.3 先落地，要么临时把它改成 console backend；
 - **先用 `xxx.onrender.com` 跑通**，挂自定义域名留到 C5
   （域名本身在 [C3.0](#c30-域名--ses--最先做因为它靠别人) 就买好了，那是给发信用的）；
 - ⚠️ **别用 Render 的免费档跑试点。** 免费 Web Service 无请求十几分钟就休眠，
@@ -539,6 +656,40 @@ R2 和 Sentry（都在免费额度内）—— 合计**每月十几美元量级*
 - 一个 shell 脚本：`pg_dump` → 上传 R2（**不写成 management command**，
   理由见 [`phase-c.md` 的备份落点](phase-c.md#备份脚本的落点)）；
 - Render Cron Job 每天跑一次；
+- ⚠️ **四个桶，不是两个**（2026-08-05 定了前两个，2026-08-06 加到四个）。
+  每一个桶是「谁能读」和「什么东西有权删它」两个问题的一组答案，
+  而**一个桶装不下两组答案** —— 合并的诱惑一直是那句「反正都是 R2」。
+  开通那天照这张表建：
+
+  | 桶 | 环境变量 | 谁能读 | 什么能删它 |
+  |---|---|---|---|
+  | 备份 | 脚本自己的（不经过 Django） | 私有 | — |
+  | 活动图片 | `R2_BUCKET_EVENT_IMAGES` | 私有，签名 URL | `purge_event_images` 每天扫 |
+  | memories | `R2_BUCKET_MEMORIES` | 私有，签名 URL | ⚠️ **只有人手动删** |
+  | 首页素材 | `R2_BUCKET_PUBLIC` | 公开 | — |
+
+- ⚠️ **memories 桶不许挂任何 lifecycle 规则，活动图片桶将来可以。**
+  这就是它得单开一个桶的理由：照片墙上的照片是全系统唯一**既不能重建、
+  又不在 `pg_dump` 里**的东西 —— 库能从 dump 恢复，活动图片本来就该消失，
+  只有这些误删一次就永久没了。给活动图片桶挂的任何自动清理，
+  挂上去那天就同时挂在了照片墙上；
+
+- 🔴 **2026-08-12 改口：R2 没有 object versioning。**
+  这两条原来写的是「活动图片桶版本控制必须**关**（开了 `purge_event_images` 的删除
+  只是个标记，而控制台上看确实显示已删除）· memories 桶必须**开**，那是它唯一的安全网」。
+  去控制台上建桶时发现**这个功能不存在** —— R2 只有 bucket lock（保留策略）
+  和 lifecycle 规则。于是前一条天然成立（⚠️ 换到 S3 / B2 时它立刻又是一个要守的开关），
+  后一条**做不到，主动接受**：照片误删一次永久没了。
+  ⚠️ **不用 bucket lock 顶替** —— 它会连正当的撤下请求一起挡住，
+  而 [C3.10](#c310-一页隐私说明) 正要承诺「怎么要求删除」。
+  完整经过在 [D29](decisions/D29-memories-wall.md#2026-08-12-改口r2-没有-object-versioning)，
+  代价记在 [`phase-c.md` 的已知缺口](phase-c.md#五已知缺口与处置)；
+- ⚠️ **首页素材桶是公开的，而且必须是。** 首页是全站唯一不需要登录的页面，
+  给公开内容签发限时 URL 是自相矛盾的，还会让那个 hero 视频（每个访客都要下完整份）
+  在 CDN 上一次都缓存不住。
+  ⚠️ 反过来，**另外两个桶必须是私有的**：它们靠 Django 签发的一小时期限 URL 提供，
+  而那正是 `@login_required` 在照片上生效的方式。公开桶会让登录闸门只挡住页面 ——
+  照片 URL 一旦流出就是永久公开的，而画面里有未成年人；
 - **桶必须是私有的**，密钥只给写权限，开服务端加密。
   ⚠️ dump 里是**未成年人的姓名、生日、住址、紧急联系电话、家长邮箱**的全量明文。
   一个默认公开的桶就是一次全库泄露 —— 而它比删库更难发现：
@@ -578,9 +729,76 @@ R2 和 Sentry（都在免费额度内）—— 合计**每月十几美元量级*
 - `django-axes` 管登录爆破；
 - 密码重置加一条 per-IP 节流。
 
-**注册暂不加验证码**（2026-08-03 定）：试点只有一个 ministry、人数可数，
-垃圾账号真出现了肉眼就看得见。⚠️ 这条**只在试点期成立** ——
+**注册限流已经做了**（2026-08-06）：`django-ratelimit`，per-IP 和全站两个桶，
+额度走环境变量。做法和「为什么额度定得松」在 `core/ratelimit.py` 里。
+部署时**必须同时确认两件事**，两件都属于「不做也不报错」那一类：
+
+| 要确认的 | 不做会怎样 |
+|---|---|
+| `prod.py` 里 `TRUST_PROXY_CLIENT_IP = True`（已经写进去了，别删） | Render 在反代后面，`REMOTE_ADDR` 是代理 —— 全世界共用一个桶，这一小时头 20 次注册用光所有人的额度 |
+| cache 表存在（`core/0004` 迁移会建，所以跑过 `migrate` 就有了） | `django-ratelimit` 在 cache 里计数，表不在就是注册页报错 |
+
+⚠️ **不要把 cache 换成 Django 默认的本地内存**。gunicorn 多 worker 时那是各数一份，
+额度悄悄变成 worker 数倍，而且不报错。要换就换 Redis，别退回默认值。
+
+**注册的邮箱验证仍然没有做**（2026-08-03 定，2026-08-06 复核）：
+限流挡的是脚本批量灌库，**挡不住有人用不属于自己的地址手工注册**。
+邮箱验证依赖真实发信，所以按「依赖上线后才存在的东西现在不做」推迟 ——
+它要和「改 email 的重新验证」一起做，见 [C3.11](#c311-邮箱验证注册--改-email)。
+⚠️ 这条**只在试点期成立** ——
 重看条件写进 [`phase-c.md` 的已知缺口](phase-c.md#五已知缺口与处置)：公开放开注册之前必须补。
+
+### C3.11 邮箱验证（注册 + 改 email）
+
+2026-08-06 新增，**排在 [C3.3](#c33-真实发信) 之后**，因为它整件事都依赖真实发信。
+
+⚠️ **它一定要排在 C3.3 验证通过之后，不能并行。** 失败模式很难看：账号建出来是未激活的，
+而激活邮件发不出去 —— 于是注册被整个锁死，且每个人看到的都是「注册成功，去收邮件」。
+
+两半，必须一起做：
+
+1. **注册**：`is_active=False` 建账号 → 发激活链接 → 点了才能登录。
+   - 链接用 Django 自带的 `default_token_generator`（和密码重置同一套 `uidb64/token`），
+     **不要自己发明 token**：那一套自带过期（`PASSWORD_RESET_TIMEOUT`），不用新建表；
+   - 登录页要为「地址存在但没激活」单独说一句话 + 一个「重发激活邮件」入口（也要限流）。
+     ⚠️ 不加这句话的话，`ModelBackend` 对未激活账号返回的是通用错误，
+     人看到的是「邮箱或密码不对」，而他的密码是对的 —— 于是他会一遍遍重置密码；
+   - 一条清理命令删「N 天未激活」的账号。⚠️ 它建的 `Contact` 也要删，
+     但**只能删「从未激活 + 没有任何 Participation / MinistryRole / Assignment」的那些**，
+     否则会删到真人。反射的写法照 `contact/services.py::merge_contacts()` 反过来用，
+     默认 `--dry-run`。
+2. **改 email**：加 `pending_email` 字段 + 第二套确认流程，确认之前登录名不变。
+   ⚠️ 只做第一半是留一道现成的绕路：注册时验证了地址，然后随手改成任意地址。
+
+**验证**：用一个**不属于你自己的**邮箱注册 → 收到激活邮件 → 点了才能登录；
+未激活时登录，页面明确说「去收邮件」而不是「密码不对」。
+
+### C3.12 Google 预填要的那个 Client ID（你做的部分）
+
+2026-08-06 新增。注册页上「Continue with Google」的代码**已经写完了**，
+按钮在没配 `GOOGLE_OAUTH_CLIENT_ID` 时不渲染 —— 所以现在缺的只是这一个值。
+⚠️ **和注册 AWS 账号一起做**（同一次坐下来办完外部账号的事）。
+
+它只填三个框：Google 交出 email / first name / last name，密码仍然自己设，
+建出来的账号是普通密码账号。**不是「用 Google 登录」**，见 `accounts/google.py`。
+
+你要做的：
+
+1. Google Cloud Console → 建一个项目（或用现成的）；
+2. APIs & Services → **OAuth consent screen**：External，填应用名和支持邮箱；
+3. APIs & Services → Credentials → Create credentials → **OAuth client ID** →
+   Application type = **Web application**；
+4. **Authorized JavaScript origins** 填 `http://localhost:8000`（本机），
+   上线后把正式来源加进去；
+   ⚠️ **Authorized redirect URIs 不用填** —— 这个流程不做 code 交换；
+5. 把 Client ID 填进 `.env` 的 `GOOGLE_OAUTH_CLIENT_ID`，线上填进环境变量。
+
+⚠️ **只要 Client ID，不要 client secret。** 这个流程里没有任何需要 secret 的一步，
+而把 secret 放进环境变量是给自己多一个要保管的东西。
+
+**验证**（要在浏览器里做，测试替不了）：注册页出现 Google 按钮 → 点 → 选账号 →
+回到注册页，email / first name / last name 三个框**已经填好** → 设个密码 → 注册成功。
+⚠️ 再确认一遍数据库里那个账号是**普通密码账号**：`has_usable_password()` 是 True。
 
 ### C3.10 一页隐私说明
 
@@ -606,9 +824,15 @@ R2 和 Sentry（都在免费额度内）—— 合计**每月十几美元量级*
    环的兜底和 N+1 的规避都在那个函数里，Phase B 已写好并测过，
    而且 `core/tests.py` 有一条守卫盯着「只有 `org/services.py` 能走汇报链」；
 2. **组织架构图** —— 同一步，只依赖 `Position` 一张表，不 join 任职数据；
-3. **志愿者活跃排行、跨活动总工时** —— 靠 `Participation`。
-   ⚠️ 口径写进 queryset 方法，**不写进视图**（守卫盯着「视图里没有 `Sum` / `Count`」）；
-4. **CSV 导出**。
+3. ~~**志愿者活跃排行、跨活动总工时**~~ —— **2026-08-05 提前做掉了**，
+   在管理列表旁边那块报表面板里（[D27](decisions/D27-ministry-report.md)）。
+   排行是「Most hours」那张图，跨活动总工时是「已记录工时」那个数字。
+   ⚠️ 口径确实写在 `services.py` 里而不是视图里，守卫照旧生效。
+   这一步剩下的是**别的切法**（按 ministry 的年度榜、给志愿者看自己的累计），
+   等试点反馈再定要不要做；
+4. **CSV 导出**。⚠️ 报表面板做完之后这一条的价值变了 ——
+   原来它是「唯一能把数字拿出去」的路，现在页面上已经有数字了，
+   它变成「拿去做别的分析」。先问基金会真的要拿去做什么，再定导什么列。
 
 ---
 
@@ -630,6 +854,130 @@ R2 和 Sentry（都在免费额度内）—— 合计**每月十几美元量级*
 
 ---
 
+## C6 · 现场扫码自助签到
+
+**决策全文在 [D28](decisions/D28-qr-checkin.md)。** 这一节只讲照着做的顺序，
+不重复「为什么」——每一步后面标的是 D28 里对应的那一节。
+
+它解决的是一件具体的事：**一场一百人的活动，让一个 admin 点四十次签到、
+四十次签退，不会被真的执行**，而不执行的后果是 D27 那张报表的已记录工时和
+缺勤率同时失真，且失真方向跟着「哪个 admin 比较负责」走。
+
+⚠️ 动手前先读 D28 的[唯一的不变量](decisions/D28-qr-checkin.md#-唯一的不变量这是一个减少录入的工具不是一个防作弊的机制)。
+这个功能**不承诺任何一行是真的** —— 权威仍然是 admin 的 attendance 页。
+把它当成防作弊机制去实现，会在几个地方做出相反的取舍
+（尤其是 [token 一次性化](decisions/D28-qr-checkin.md#三token-一次性化是一个-bug不是一个加固)那一条，
+照原需求写会让一百人的队伍里九十九个人打不上卡）。
+
+### C6.1 `events/tokens.py` —— 纯函数，先写这一层
+
+无 DB、无 request、无 settings 读取（除了 `SECRET_KEY` 经由 `salted_hmac`）。
+
+```python
+issue(event_id, mode, *, at=None) -> str
+verify(token, *, at=None) -> (event_id, mode)   # 失败抛自己的异常
+window_is_open(event, *, at=None) -> bool       # start-2h ~ end+4h
+```
+
+⚠️ `at=None` 不是可选的写法，是这一层的**全部理由**。本项目所有跟时间有关的写路径
+都注入时钟（`check_in(participation, *, at=None)`、`upcoming(now=None)`），
+`TimestampSigner` 因为注不进时钟才被否决 ——
+见 [D28 为什么不用 TimestampSigner](decisions/D28-qr-checkin.md#为什么不用-timestampsigner)。
+写成读 `local_now()` 的版本，测「刚好 90 秒」和「刚好 91 秒」就得 mock，
+而这一层存在的意义就是不用 mock。
+
+⚠️ `key_salt="events.checkin"` 不能省，理由同上一节末尾。
+
+⚠️ 放 `tokens.py` 而不是 `views.py`：`ViewsAreThinGuardTests` 禁止 views.py 出现
+`local_now(`，会直接红。
+
+**这一步的测试（不碰 DB，`SimpleTestCase` 就够）**：
+
+| | |
+|---|---|
+| 签发再验证 | 拿回同一个 `(event_id, mode)` |
+| 89 秒 / 91 秒 | 边界两侧各一条，注入时钟，不 mock |
+| 改一个字符 | 拒绝 |
+| 换 `event_id` 重签 | 拒绝（签名覆盖了它） |
+| 换 `mode` 重签 | 拒绝 |
+| 时间窗 | `start-2h` 前一分钟拒、后一分钟过；`end+4h` 同理 |
+
+### C6.2 `checked_in_method` —— 一次迁移
+
+`Participation` 加一列，`blank=True`，**没有 default**
+（[为什么不给 default](decisions/D28-qr-checkin.md#四checked_in_method一次迁移一列出事时想看的那一列)）。
+
+`check_in()` / `check_out()` / `record_hours()` 三个都接 `method=` 参数，默认 `ADMIN`。
+⚠️ **三个都要接**：`_mark_attended()` 的注释里已经写过「一个规则三个入口一个守卫，
+等于两条绕路」，来源字段是同一个形状。
+
+测试：三条写路径各自记下正确的来源；空字符串的老行不被读成 admin。
+
+### C6.3 session 凭据 + 两个志愿者页面
+
+```
+GET  /events/checkin/<token>/     验签 → 写 session → login_required 跳转
+GET  /events/checkin/confirm/     读凭据 → （多工种则让他选）→ 显示确认
+POST /events/checkin/confirm/     transaction.atomic() + select_for_update()
+                                  → check_in() / check_out()
+                                  → redirect My Signups + 一条 success
+```
+
+⚠️ **确认页的表单里不带 token。** POST 校验的是 session 凭据。带上 token 会诱使人
+重新验一次，那就把 90 秒的窗口套回到「打完密码之后」，
+[两段式](decisions/D28-qr-checkin.md#为什么-②-和-③-一定要分开两个理由各自都是硬的)就白分了。
+
+⚠️ 凭据的读写规则（10 分钟、绑 event 和 mode）放 `services.py`，不放视图 ——
+它是业务规则。
+
+⚠️ 锁里面**不许有任何 I/O**，也**不许**用 `.update()` 绕过 `full_clean()` 和
+simple-history（会不留 history 行，而那是 `undo_attendance()` 敢删 hours 的前提）。
+
+**这一步的测试**：
+
+| 情况 | 断言 |
+|---|---|
+| 未登录扫码 | 跳登录，`next` 指向确认页；登录回来仍能完成 |
+| token 过期 | 拒绝，页面指向「重扫屏幕上的码」 |
+| 凭据过了 10 分钟 | 拒绝 |
+| 没报名这场活动 | 拒绝 + 报名链接，**且库里没有新建 Participation** |
+| 未成年缺同意 | `ConsentRequired` 渲染成一句人话，**不是 500** |
+| 连打两次 | 幂等：`checked_in_at` 不变，history 只多一行 |
+| mode 和状态对不上 | 「你 9:03 已经签到了」/「先签到」 |
+| 已 cancelled 的报名 | 拒绝 |
+| 一人两工种 | 出选择页；选完只有那一行被打 |
+| 签退 | 写 `hours`，且 `checked_in_method` 是 `self_qr` |
+
+⚠️ 单元测试里**测不了真并发**（sqlite 上 `select_for_update` 近乎无操作）。
+所以这里断言的是幂等，真并发走 C6.5。
+
+### C6.4 admin 的平板页
+
+`npm i qrcode` → `assets/js/` 一个新模块（**不是 Alpine** —— 它有网络和定时器）。
+
+⚠️ 二维码里的 URL **从服务端来，JS 不拼** —— 同
+`AssetPathsComeFromTemplatesGuardTests` 的教训。
+
+⚠️ [`setInterval` 单独用当天一定翻车](decisions/D28-qr-checkin.md#setinterval-单独用当天一定翻车)。
+四条对策缺一不可，其中最反直觉的一条：**fetch 失败时要把二维码盖掉**。
+留着它，失败会静默转移到志愿者身上。
+
+测试：token 端点对非 `can_manage` 的账号 403（**这是整个方案最关键的一条** ——
+不检查的话任何志愿者在家里就能给自己发码）；时间窗外拒签；draft / cancelled 拒签；
+响应里带 `expires_at`；限流生效。
+
+### C6.5 入口、My Signups、压测
+
+- `/events/manage/` 的 Go to 列加 **Check-in QR**（`can_manage` 才画 ——
+  同一列里已经有「只读身份不画 Edit / Notify」的规矩）；attendance 页顶部也放一个；
+- `my_participations.html` **合并成一列 `Attendance`**，
+  [不能再加两列](decisions/D28-qr-checkin.md#my-signups-那张表不能再加两列)；
+- staging 打 200 个并发 POST：同一个人只产生一次 `check_in`、p95 延迟、零 500；
+- ⚠️ 顺带核对 `gunicorn workers × threads` 对 Render Postgres 连接上限的算式 ——
+  [一百人真可能撞到的墙是连接数，不是 CPU](decisions/D28-qr-checkin.md#真正要处理的四件事)。
+
+---
+
 ## 验收
 
 - [ ] ⭐ **14 条需求每一条都能从某个链接点得到** —— 不是「service 写好了」，
@@ -646,7 +994,14 @@ R2 和 Sentry（都在免费额度内）—— 合计**每月十几美元量级*
       [`phase-c.md`](phase-c.md#样式的落点css-只许出现在两个地方)）
 - [ ] 把所有 `x-` 属性删掉、关掉 JavaScript，**每个写操作仍然能完成**
       （判据见 [D24](decisions/D24-htmx-alpine-tailwind.md#渐进增强的口径只管写操作)）
-- [ ] **备份恢复演练三样都做过**；R2 的桶**确认是私有的**
+- [ ] **备份恢复演练三样都做过**；R2 的四个桶**逐个点开确认过**三件事 ——
+      读权限（备份 / 活动图片 / memories 三个私有，首页素材公开）·
+      **四个桶都没有 lifecycle 规则**（尤其 memories）· **都没有设 bucket lock**。
+      ⚠️ 这几项没有一项能靠代码或测试验出来，只能在 R2 控制台上看，
+      而弄错的表现都是「一切正常」：memories 桶上挂一条自动清理，
+      照片会在某天集体消失；设了 bucket lock，正当的撤下请求会删不掉。
+      ⚠️ 2026-08-12：这一条原来查的是「版本控制开/关」，
+      而 **R2 没有 object versioning**，见 [C3.6](#c36-备份--恢复演练)
 - [ ] ⭐ **越权实测**：A ministry 的 admin 打 B ministry 三个 URL 全 403；
       志愿者打 `/admin/` 得 403。**且 403 页面上读得到为什么**
 - [ ] 线上完成一次「注册 → 收密码重置邮件 → 改密 → 登录」，
@@ -737,3 +1092,72 @@ roadmap 原来写的做法是 `moved = bool({"start_time", "end_time"} & set(for
 ⚠️ **这一条会静默失败，所以有一条测试专门盯着它**
 （`test_seconds_the_widget_cannot_show_are_not_read_as_a_reschedule`）——
 把库里的时间改成带 `37` 秒，然后只改地点，断言**不**跳通知页。
+
+### C0.5.2 · 500.html 不能 extends base.html
+
+403 和 404 都 `extends "core/base.html"`，500 **不能** —— 而这件事看代码看不出来，
+要去读 Django 的 `django.views.defaults.server_error`：
+
+```python
+return HttpResponseServerError(template.render())   # 注意：没有 request
+```
+
+**不带 request**，所以 context processors 一个都不跑、`user` 是空的、
+`{% csrf_token %}` 拿不到 token。这些大多不会当场炸，但 **500 页面自己再抛一次异常
+是这一层最糟的结局**：用户拿到的是 Django 的兜底纯文本，而你连这一页写过什么都看不见。
+
+所以 500 那份是自足的：不继承、不依赖 context。**底下那个链接也故意写死成 `/events/`，
+不用 `{% url %}`** —— 理由不是 `{% url %}` 在这里跑不动（它只查 urlconf，跑得动），
+而是它**会抛 `NoReverseMatch`**：路由名改了这一页就自己炸掉，而别处炸了有它兜着，
+它炸了没有下一层。⚠️ 代价如实说：路由改了这里不会跟着改，**也不会有测试变红**。
+
+配套那条测试打的正是这个条件本身 ——
+`loader.get_template("500.html").render()`，不给 context，
+和 Django 真实调用的形状一样。用 `self.client.get()` 触发一个真 500 测不出这件事，
+因为那条路径上 request 是有的。
+
+### C0.5.3 · pre-commit 里不能用 `--keepdb`
+
+第一版写的是 `manage.py test --keepdb core.tests`，图它快。
+**实测差别只有 1 秒**（2.0s → 3.0s），而它留下的 `test_rolf_dev` 会让**下一次普通的
+`manage.py test` 停在一个交互提问上**（「要不要删掉这个测试库」）——
+当场就撞到了：跑全套的时候拿到的是 `EOFError`，而那个报错的样子完全不像
+「上一次用了 `--keepdb`」。
+
+一秒换一个每天要撞很多次的坑，不划算。改成 `--noinput`，
+顺带解决 pre-commit 没有 tty 时任何交互提问都变成 `EOFError` 的问题。
+
+> **这条的一般形式**：**优化一个 2 秒的东西之前，先量一下它到底省几秒。**
+
+### C4.3 · 报表的月份图全是 1，而二十条测试全绿（2026-08-05）
+
+管理列表右边那块报表面板做完，第一张截图上：
+左边的列表列着**十一场**八月的活动，右边的「Events by month」写着「Aug 2026 — 1 event」。
+
+成因是 Django 的一条规则，而它只在**显式**排序时生效：
+
+```python
+events = events.order_by("-start_time")          # 视图里，为了让列表倒序
+...
+events.annotate(month=TruncMonth("start_time")).values("month").annotate(n=Count("pk"))
+```
+
+那个 `order_by` **也进了 GROUP BY** —— 于是分组键是「月 + 精确到秒的开始时间」，
+一场活动一组，每组都是 1。
+
+⚠️ Django 3.1 之后会为聚合查询忽略 `Meta.ordering`，**但从不忽略谁写的 `order_by()`**。
+很容易记成「Django 已经处理好了」。
+
+改法是在每一处 `values().annotate()` 之前 `.order_by()` 清空。
+
+> **这条值得记的不是修法，是它怎么活下来的**：当时二十条测试全绿，
+> 因为**每一条都自己造了一个没排序的 queryset**。视图交出来的那个是排过序的，
+> 而没有任何测试走过那条路。
+>
+> **下一次给一个"接收 queryset"的函数写测试，问一句「调用它的人手里那个 queryset
+> 长什么样」** —— 尤其是排序、`distinct()`、`select_related()` 这些不改内容、
+> 只改 SQL 形状的东西。它们改的正是聚合的行为。
+
+另外，**这个是看截图发现的，不是测试发现的。** 数字本身完全合理 ——
+「八月一场活动」不会让任何人皱眉，是它**旁边就摆着那十一行**才暴露的。
+把报表和它描述的列表放在同一屏，本来只是布局决定，结果成了一道校验。

@@ -1,0 +1,76 @@
+# C1.2 —— 前端产物走 CI，不进主分支。
+#
+# 构建 → 把产物提交到 `deploy` 分支 → Render 盯 `deploy`。
+#
+# 为什么不在 Render 上装 Node：Render 的 Python runtime 不带 Node，要么上
+# Dockerfile（多一层要维护的东西），要么把构建搬到 CI。选后者，于是 Render 那边的
+# 构建仍然只剩 pip install + collectstatic + migrate（见 C3.5 的 build.sh）。
+#
+# 为什么不直接把产物提交进 main：改完样式忘记重跑构建这件事**一定会发生**，
+# 而它的表现是线上样式停在上一版、没有任何报错。交给 CI 就不存在「忘记」。
+#
+# ⚠️ C3.5 写 render.yaml 时，**分支要填 `deploy`，不是 `main`**。
+#    盯错分支的表现是「合进 main 了但线上没变」，而且看不出为什么 ——
+#    因为两边都没有报错，CI 是绿的，Render 也说部署成功了（它部署的是旧的 main）。
+
+name: deploy branch
+
+on:
+  push:
+    branches: ["main"]
+  # 手动重推一次的口子。产物坏了或者 Render 那边要重新拉一遍时用得上。
+  workflow_dispatch:
+
+# ⚠️ 不设 cancel-in-progress。这个 job 会推分支，取消一个推到一半的构建
+# 会留下一个「代码是新的、产物是旧的」的 deploy 分支 —— 而那正是这整个
+# workflow 要防的那件事。连推两次就老老实实排队跑两次。
+concurrency:
+  group: deploy-branch
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      # npm ci 而不是 npm install：它照 package-lock.json 精确安装，装不出
+      # 「本机一个版本、CI 另一个版本」。而 Tailwind 换个小版本产物就会变。
+      - name: Install and build
+        run: |
+          npm ci
+          npm run build
+
+      - name: Fail if the build produced nothing
+        # ⚠️ 这一步不是多余的。Tailwind 扫不到任何模板时**不报错**，只是产出一个
+        #    几百字节的空壳，而后面每一步都会照常成功 —— 直到有人打开线上页面。
+        #    定个下限：CSS 至少 2KB、JS 至少 20KB（htmx + alpine 打包后约 100KB）。
+        run: |
+          css=$(wc -c < static/css/app.css)
+          js=$(wc -c < static/js/app.js)
+          echo "css=${css}B js=${js}B"
+          test "$css" -gt 2048  || { echo "::error::app.css is ${css}B — Tailwind scanned nothing"; exit 1; }
+          test "$js"  -gt 20480 || { echo "::error::app.js is ${js}B — the bundle is missing htmx/alpine"; exit 1; }
+
+      - name: Push products to the deploy branch
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # deploy 分支 = 这次 main 的内容 + 构建产物，一次性重建。
+          # 它是一个产物分支，没有值得保留的历史 —— 所以 force push，
+          # 而不是在上面累积提交。
+          git checkout -B deploy
+          git add --force static/css static/js
+          # ⚠️ commit 失败不能 exit —— 「产物没变」和「main 前进了」是两件事，
+          #    而后者仍然需要 push。第一版把 push 写在 || 分支之后就跳过了，
+          #    表现会是「只改了 Python 的那次提交永远上不了线」。
+          git commit -m "build: products for ${GITHUB_SHA}" || echo "No product changes."
+          git push --force origin deploy

@@ -6,6 +6,10 @@ copy of it in each would be a copy of a business rule.
 """
 
 from django.contrib import admin
+from django.shortcuts import redirect
+from django.urls import reverse
+
+from .models import HomePage
 
 
 class InEffectFilter(admin.SimpleListFilter):
@@ -24,7 +28,7 @@ class InEffectFilter(admin.SimpleListFilter):
     parameter_name = "in_effect"
 
     def lookups(self, request, model_admin):
-        return [("yes", "生效中"), ("no", "已结束或未开始")]
+        return [("yes", "In effect"), ("no", "Ended or not started")]
 
     def queryset(self, request, queryset):
         if self.value() == "yes":
@@ -32,3 +36,37 @@ class InEffectFilter(admin.SimpleListFilter):
         if self.value() == "no":
             return queryset.exclude(pk__in=queryset.model.objects.active())
         return queryset
+
+
+@admin.register(HomePage)
+class HomePageAdmin(admin.ModelAdmin):
+    """The one row, edited in place. No list to choose from, no add, no delete.
+
+    ⚠️ `has_add_permission` returns False and the changelist redirects straight
+       into the single object. A model with one row still gets Django's full
+       list-add-delete furniture otherwise, and every piece of it is a way to
+       end up with zero rows or two.
+    """
+
+    fieldsets = [
+        ("Background", {
+            "fields": ["hero_video", "hero_image"],
+            "description": "A video is used instead of the image when both are "
+                           "set. It plays muted and looped — browsers refuse to "
+                           "autoplay sound.",
+        }),
+        ("Words over the picture", {
+            "fields": ["verse_text", "verse_reference"],
+        }),
+    ]
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+    def changelist_view(self, request, extra_context=None):
+        # Straight to the only object there is.
+        return redirect(reverse("admin:core_homepage_change",
+                                args=[HomePage.load().pk]))

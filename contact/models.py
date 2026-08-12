@@ -8,6 +8,7 @@ from django_countries.fields import CountryField
 from simple_history.models import HistoricalRecords
 
 from core.constraints import ConstraintErrorFieldMixin
+from core.limits import LONG_TEXT
 from core.models import ImmutableCodeMixin, TimeStampedModel
 from core.timeutils import local_today
 
@@ -140,7 +141,7 @@ class ContactQuerySet(models.QuerySet):
 
         Pairing lives on the queryset for the reason the judgement does (D18):
         admin.py renders this, it does not work it out. It also means the merge
-        column and the "疑似重复" filter now answer from one definition instead
+        column and the "Possible duplicates" admin filter now answer from one
         of two that could disagree.
         """
         grouped = defaultdict(list)
@@ -245,7 +246,7 @@ class Contact(ConstraintErrorFieldMixin, TimeStampedModel):
 
     # --- Status & bookkeeping ---
     is_active = models.BooleanField(default=True, db_index=True)
-    notes = models.TextField(blank=True)
+    notes = models.TextField(blank=True, max_length=LONG_TEXT)
     # created_at / updated_at come from TimeStampedModel
 
     # Who changed what, and when. Dictionary tables like Language do not need
@@ -398,11 +399,7 @@ class Contact(ConstraintErrorFieldMixin, TimeStampedModel):
            in dropdowns and log entries. Acceptable for a small foundation, but
            it is a real disclosure, not a free win.
         """
-        if self.contact_type == self.ContactType.ORGANIZATION:
-            base = self.organization_name or "(unnamed organization)"
-        else:
-            full = f"{self.legal_first_name} {self.legal_last_name}".strip()
-            base = self.preferred_name or full or "(unnamed contact)"
+        base = self.plain_name
         # The organization branch gets the same treatment: two chapters of one
         # charity are as easy to confuse as two people.
         if self.email:
@@ -410,6 +407,42 @@ class Contact(ConstraintErrorFieldMixin, TimeStampedModel):
         if self.phone:
             return f"{base} ({self.phone})"
         return f"{base} #{self.pk}" if self.pk else base
+
+    @property
+    def short_label(self):
+        """The name, disambiguated by id rather than by contact details.
+
+        ⚠️ For places that **display a list**, not places that offer a choice.
+           `__str__` pays for its disambiguation in disclosure — it prints an
+           email or a phone number, which it needs to, because picking the wrong
+           王强 out of a dropdown is a silent data error nothing would catch.
+           A ranked list is not a picker: nothing is chosen from it, so the
+           email buys nothing and is simply published (2026-08-05, the report's
+           "Most hours" chart — a panel people screenshot and send around).
+
+        ⚠️ Still disambiguated, just not with contact details. Two identical
+           names in a leaderboard read as one person listed twice, and the id
+           costs nobody anything.
+        """
+        return f"{self.plain_name} #{self.pk}" if self.pk else self.plain_name
+
+    @property
+    def plain_name(self):
+        """What this contact is called, and nothing else.
+
+        ⚠️ **No disambiguation of any kind** — no email, no id. That makes it the
+           wrong thing for a dropdown (see `__str__`) and the right thing for
+           the one place a name is simply being spoken to its owner: the top bar
+           greeting the person who is logged in. They know which 王强 they are.
+
+        Extracted 2026-08-06 because it was the third caller that needed it, and
+        the two that already existed each held their own copy of "preferred name
+        if there is one, otherwise the legal names, otherwise say so".
+        """
+        if self.contact_type == self.ContactType.ORGANIZATION:
+            return self.organization_name or "(unnamed organization)"
+        full = f"{self.legal_first_name} {self.legal_last_name}".strip()
+        return self.preferred_name or full or "(unnamed contact)"
 
 
 class RelationshipType(ImmutableCodeMixin, ConstraintErrorFieldMixin, models.Model):
@@ -552,10 +585,23 @@ class EmergencyContact(ConstraintErrorFieldMixin, TimeStampedModel):
     person = models.ForeignKey(
         Contact, on_delete=models.CASCADE, related_name="emergency_contacts",
     )
-    # All three are required. An emergency contact with no phone number is
+    # All four are required. An emergency contact with no phone number is
     # pointless, and one with no relationship does not say who they are.
+    #
+    # ⚠️ `email` became required on 2026-08-05, and the reason is money rather
+    #    than completeness: this address is what P6 falls back to when a minor
+    #    has no consent address on file, and until now that fallback could only
+    #    send SMS because this table had no email column. Email costs
+    #    essentially nothing to send and SMS does not.
+    #
+    # ⚠️ The cost is real and is recorded in phase-c.md's known gaps: somebody
+    #    being entered from a paper sign-in sheet, whose guardian left only a
+    #    phone number, **cannot be recorded at all**. If that turns out to
+    #    happen in the pilot, the way back is to make this blank again and have
+    #    reachable_at() below simply skip the empty case — it already does.
     name = models.CharField(max_length=200)
     phone = PhoneNumberField(region="US")
+    email = models.EmailField()
     relationship_type = models.ForeignKey(
         RelationshipType,
         on_delete=models.PROTECT,
@@ -567,6 +613,25 @@ class EmergencyContact(ConstraintErrorFieldMixin, TimeStampedModel):
                   "parent.” Pick what the emergency contact is to them, "
                   "not the other way round.",
     )
+
+    @property
+    def reachable_at(self):
+        """(address, channel) for this person, or None — email first, then phone.
+
+        ⚠️ One definition, because P6 reaches an emergency contact from two
+           different places (a change of time, and a signup confirmation) and a
+           guardian reached by email for one and by SMS for the other is a bug
+           nobody would ever file — it just looks like the messages went
+           missing.
+
+        The order matches Participation.guardian_address deliberately: whichever
+        route a notice takes to a guardian, it prefers the same channel.
+        """
+        if self.email:
+            return self.email, "email"
+        if self.phone:
+            return str(self.phone), "sms"
+        return None
 
     class Meta:
         # No "one per person" rule. The table supports several by nature; the

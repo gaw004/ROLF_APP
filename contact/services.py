@@ -60,8 +60,7 @@ def merge_contacts(keep, drop, *, actor=None):
                 **{field_name: keep}).exists():
             raise MergeConflict(
                 f"Both records have a {model._meta.verbose_name}, so this cannot be "
-                f"merged automatically — "
-                "请先决定保留哪一个。"
+                f"merged automatically — decide which one to keep first."
             )
 
         # Conflict 2: unique constraints. Cheaper than reflecting over every

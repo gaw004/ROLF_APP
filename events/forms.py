@@ -8,8 +8,11 @@ reaching into a request. Phase C's views construct the same classes unchanged.
 import datetime
 
 from django import forms
+from django.conf import settings
+from django.db.models import Q
 
 from contact.models import EmergencyContact, RelationshipType
+from core.limits import LONG_TEXT, PHONE, SEARCH
 from core.timeutils import day_start
 from org.models import Ministry
 from org.permissions import ministry_ids_administered_by
@@ -44,15 +47,27 @@ class SignUpForm(forms.Form):
         queryset=RelationshipType.objects.filter(usable_as_emergency_contact=True),
         required=False, label="They are the volunteer's…",
     )
-    consent_method = forms.ChoiceField(
-        choices=[("", "---------"), *Participation.ConsentMethod.choices],
-        required=False, label="How consent was given",
-    )
     # ⚠️ At least one of these two. Consent carrying only a *name* satisfies the
     #    paperwork and leaves P6 with no address to send anything to, so the
     #    signup would go in already guaranteed to be unreachable.
     consent_email = forms.EmailField(required=False, label="Guardian's email")
-    consent_phone = forms.CharField(required=False, label="Guardian's phone")
+    # ⚠️ max_length is not decoration here: a plain CharField has **no** upper
+    #    bound at all, and this one is copied into Participation.consent_phone,
+    #    which is varchar(200). Without it an overlong number passes validation
+    #    and fails at the INSERT — a 500 on the ordinary signup path.
+    consent_phone = forms.CharField(
+        required=False, max_length=PHONE, label="Guardian's phone")
+    # Declared last because it is asked last: it applies to **both** paths
+    # through this form — the emergency-contact shortcut still has to say how
+    # consent was given — so it sits after the branch rather than inside it.
+    #
+    # `required=False` here and switched on in __init__ when consent actually
+    # applies. Marking it required at class level would demand it from adults
+    # too, for whom the whole section is hidden.
+    consent_method = forms.ChoiceField(
+        choices=[("", "---------"), *Participation.ConsentMethod.choices],
+        required=False, label="How consent was given",
+    )
 
     CONSENT_FIELDS = [
         "consent_given_by", "consent_relationship", "consent_method",
@@ -79,6 +94,19 @@ class SignUpForm(forms.Form):
             self.fields["use_emergency_contact"].queryset = (
                 contact.emergency_contacts.select_related("relationship_type")
             )
+            # ⚠️ Genuinely required, not just marked with a star.
+            #
+            #    services.sign_up() has always refused a signup whose consent
+            #    carries no method — so the field was **already** compulsory,
+            #    and the form simply did not say so. The cost of that gap is a
+            #    whole round trip: submit, get bounced by the service layer,
+            #    and read the complaint attached to a different field. Saying
+            #    it here puts the error under the box that caused it.
+            #
+            #    The service-layer check stays. It guards the other callers —
+            #    an admin entering somebody from a paper list meets the same
+            #    rule, and that path never touches this form.
+            self.fields["consent_method"].required = True
         else:
             for name in [*self.CONSENT_FIELDS, "use_emergency_contact"]:
                 self.fields[name].widget = forms.HiddenInput()
@@ -105,7 +133,10 @@ class SignUpForm(forms.Form):
                 "consent_given_by": kin.name,
                 "consent_relationship": kin.relationship_type,
                 "consent_method": self.cleaned_data.get("consent_method") or "",
-                "consent_email": "",
+                # ⚠️ 2026-08-05：email 也复制过来了。原来这里写死成 "" ——
+                #    那时 EmergencyContact 没有 email 列，所以这条路上的家长
+                #    只能收短信。现在它有了，而 P6 优先走 email。
+                "consent_email": kin.email,
                 "consent_phone": str(kin.phone),
             }
 
@@ -129,13 +160,46 @@ class EventForm(forms.ModelForm):
         fields = [
             "name", "event_type", "ministry", "start_time", "end_time",
             "location", "status", "requires_guardian_consent", "description",
+            "image",
         ]
         widgets = {
             "start_time": forms.DateTimeInput(attrs={"type": "datetime-local"}),
             "end_time": forms.DateTimeInput(attrs={"type": "datetime-local"}),
+            # `accept` is a semantic attribute, not styling — it tells the file
+            # picker what to offer, the same exception type="date" gets under
+            # phase-c.md's placement rules. It is a convenience and never a
+            # check: clean_image() below is the check.
+            "image": forms.ClearableFileInput(attrs={"accept": "image/*"}),
         }
 
     TIME_FIELDS = ("start_time", "end_time")
+
+    def clean_image(self):
+        """Re-encode the upload, or refuse it.
+
+        ⚠️ 2026-08-05 更正：这段注释原来写的是「大小检查发生在 Pillow 打开文件
+           **之前**」。**那是错的** —— Django 的 `ImageField.to_python()` 早在
+           `clean_image()` 被调用之前就已经 `Image.open()` + `verify()` 过一遍了。
+           一条测试当场抓出来：喂一个超大的假文件，回来的报错是 Django 的
+           「不是有效图片」，而不是这里的大小提示。
+
+           所以真正挡住解压炸弹的是 **Pillow 自己的 `MAX_IMAGE_PIXELS`**，不是
+           下面这个比较。这里这一条管的是**存储和带宽**：一张 40 MB 的原图能被
+           解码，但不该被接收。两件事，别再把它们写成一件。
+        """
+        uploaded = self.cleaned_data.get("image")
+        # An unchanged field hands back the stored FieldFile, which has already
+        # been through this and must not be re-encoded on every save.
+        if not uploaded or not hasattr(uploaded, "content_type"):
+            return uploaded
+        if uploaded.size > settings.EVENT_IMAGE_MAX_UPLOAD_BYTES:
+            raise forms.ValidationError(
+                f"That image is larger than "
+                f"{settings.EVENT_IMAGE_MAX_UPLOAD_BYTES // (1024 * 1024)} MB. "
+                f"Most phone photos are well under it.")
+        from .services import normalise_event_image
+
+        return normalise_event_image(uploaded)
 
     def __init__(self, *args, user, **kwargs):
         super().__init__(*args, **kwargs)
@@ -169,14 +233,34 @@ class EventForm(forms.ModelForm):
 
 
 class EventPeriodForm(forms.Form):
-    """R1: "how many events in this window", as two optional date boxes.
+    """R1: "how many events in this window", plus which ministry ran them.
 
     Lives here rather than in the view for the reason the grep guard states:
     a view holding date arithmetic gets rewritten along with the templates.
-    Both boxes are optional — an empty form means "no limit at that end", which
-    is what makes the same form work for the upcoming list and the past one.
+    Every box is optional, and that is what makes one form answer three
+    different questions — "what is on next month", "what does the food pantry
+    have open at all", and the two together.
     """
 
+    # ⚠️ Matches the name **or** the location, and the second half is the point:
+    #    somebody looking for "the one in the kitchen" remembers where it was, not
+    #    what it was called. One OR over two indexed-enough columns; the pilot has
+    #    tens of events, so there is nothing to optimise yet.
+    #
+    # ⚠️ Deliberately **not** the ministry's name. There is a ministry dropdown two
+    #    boxes along, and a search that also matched it would empty the whole of
+    #    Food Pantry onto the page for the word "food" — which reads as the search
+    #    having been ignored.
+    #
+    # ⚠️ The label says what it matches. A placeholder would have said the same
+    #    thing and then disappeared the moment somebody started typing.
+    q = forms.CharField(
+        required=False, max_length=SEARCH, label="Search by name or location",
+        # `type="search"` is semantic, not styling — it is what gives a phone the
+        # right keyboard and the browser its own clear button. Same exception
+        # `type="date"` gets under phase-c.md's placement rules.
+        widget=forms.TextInput(attrs={"type": "search"}),
+    )
     start = forms.DateField(
         required=False, label="From",
         widget=forms.DateInput(attrs={"type": "date"}),
@@ -185,6 +269,38 @@ class EventPeriodForm(forms.Form):
         required=False, label="Until",
         widget=forms.DateInput(attrs={"type": "date"}),
     )
+    # ⚠️ Every active ministry, not "the ones with events in the current
+    #    results". The narrower list reads better right up to the moment
+    #    somebody picks a ministry and watches it vanish from the dropdown it
+    #    was just chosen from — the options would then depend on the filter
+    #    they are part of.
+    ministry = forms.ModelChoiceField(
+        queryset=Ministry.objects.filter(is_active=True).order_by("name"),
+        required=False, label="Ministry", empty_label="All ministries",
+    )
+
+    def __init__(self, *args, ministries=None, **kwargs):
+        """`ministries` narrows the dropdown to a scope the page already has.
+
+        ⚠️ Interface only — it is not a permission. The pages that pass it have
+           already narrowed their **queryset**, so a forged ministry id in the
+           query string filters a list that never contained that ministry's
+           events and comes back empty. What this prevents is the other thing:
+           a ministry admin offered every ministry in the foundation, picking
+           one, and getting an empty list with nothing saying why (2026-08-05).
+        """
+        super().__init__(*args, **kwargs)
+        if ministries is not None:
+            self.fields["ministry"].queryset = ministries
+        # ⚠️ Ministry first (2026-08-05). Declared after the dates because it was
+        #    added later, and declaration order is render order — so the box most
+        #    people reach for first was sitting third. Which ministry you are
+        #    looking at narrows the list far more than a date range does.
+        #
+        # ⚠️ `q` first (2026-08-06). Somebody who already knows which event they
+        #    want types its name; scanning a dropdown is what you do when you do
+        #    not know. The narrower action goes first.
+        self.order_fields(["q", "ministry", "start", "end"])
 
     def clean(self):
         cleaned = super().clean()
@@ -210,18 +326,82 @@ class EventPeriodForm(forms.Form):
             day_start(end + datetime.timedelta(days=1)) if end else None,
         )
 
+    def description(self):
+        """One English line saying what this filter selected.
+
+        Lives here because the form is what knows — the full report page prints
+        it under the heading, and a printed report with no statement of what it
+        covers is a page of numbers somebody will read as "everything".
+        """
+        if not self.is_valid():
+            return "All ministries · all dates"
+        ministry = self.cleaned_data.get("ministry")
+        start, end = self.cleaned_data.get("start"), self.cleaned_data.get("end")
+        who = ministry.name if ministry else "All ministries"
+        if start and end:
+            when = f"{start:%d %b %Y} – {end:%d %b %Y}"
+        elif start:
+            when = f"from {start:%d %b %Y}"
+        elif end:
+            when = f"until {end:%d %b %Y}"
+        else:
+            when = "all dates"
+        parts = [who, when]
+        # ⚠️ The search term has to appear here. This line is printed under the
+        #    heading of the full report and on the paper it becomes — and a report
+        #    that does not state what it covers gets read as "everything". A
+        #    search is the easiest of the three filters to forget you left on.
+        search = (self.cleaned_data.get("q") or "").strip()
+        if search:
+            parts.append(f"matching “{search}”")
+        return " · ".join(parts)
+
     def narrow(self, events):
-        """Apply whichever ends were filled in."""
+        """Apply whichever boxes were filled in.
+
+        ⚠️ An invalid form narrows by nothing rather than raising. The page
+           still has to render — with the error shown next to the box — and a
+           list that 500s because somebody typed a bad date is a worse answer
+           than the unfiltered list plus an explanation.
+        """
         start, end = self.bounds()
         if start is not None:
             events = events.filter(start_time__gte=start)
         if end is not None:
             events = events.filter(start_time__lt=end)
+        ministry = self.cleaned_data.get("ministry") if self.is_valid() else None
+        if ministry is not None:
+            events = events.filter(ministry=ministry)
+        search = (self.cleaned_data.get("q") or "").strip() if self.is_valid() else ""
+        if search:
+            # ⚠️ `.strip()` above, and it matters more than it looks: a trailing
+            #    space from a phone's autocorrect would make `icontains` match
+            #    nothing at all, and the page would come back empty with the box
+            #    apparently holding a perfectly good word.
+            events = events.filter(
+                Q(name__icontains=search) | Q(location__icontains=search))
         return events
 
 
 class EventRoleForm(forms.ModelForm):
-    """Open one job on an event and say how many people it wants."""
+    """Open one job on an event and say how many people it wants.
+
+    2026-08-04: it can also **add to the vocabulary**. A ministry admin is not
+    staff, so the admin site is shut to them, and a job nobody had entered
+    before used to be a dead end — the dropdown was the whole world.
+
+    ⚠️ The cost is real and is accepted rather than hidden: ParticipationRole is
+       the grouping dimension for R5 and R7, so two rows meaning one job split
+       one column of every report in two. Nothing raises; both halves look
+       right. The duplicate check below is what keeps that rare, and it only
+       catches exact-after-normalising matches — see
+       services.matching_participation_role().
+    """
+
+    new_role_name = forms.CharField(
+        required=False, max_length=100, label="…or add a new kind of role",
+        help_text="Only if none of the above fits. Everyone will see it from then on.",
+    )
 
     class Meta:
         model = EventRole
@@ -231,6 +411,49 @@ class EventRoleForm(forms.ModelForm):
         super().__init__(*args, **kwargs)
         self.instance.event = event
         self.fields["role"].queryset = ParticipationRole.objects.filter(is_active=True)
+        # Not required on its own any more: one of `role` and `new_role_name`
+        # has to be filled, and clean() is where "one of" can be said.
+        self.fields["role"].required = False
+        # ⚠️ Directly under the dropdown it is the alternative to. Declared
+        #    fields render after Meta.fields by default, which put "…or add a
+        #    new kind of role" three boxes below the one it replaces — far
+        #    enough down that it reads as a fourth thing to fill in rather than
+        #    as the other half of a choice.
+        self.order_fields(["role", "new_role_name", "needed_count", "notes"])
+
+    def clean(self):
+        cleaned = super().clean()
+        role = cleaned.get("role")
+        new_name = (cleaned.get("new_role_name") or "").strip()
+
+        if role and new_name:
+            raise forms.ValidationError(
+                "Pick a role from the list or add a new one — not both.")
+        if not role and not new_name:
+            raise forms.ValidationError("Pick a role, or add a new one.")
+
+        if new_name:
+            from .services import matching_participation_role
+
+            existing = matching_participation_role(new_name)
+            if existing is not None:
+                # ⚠️ Named in the message. "That already exists" leaves the
+                #    person hunting a dropdown of thirty entries for something
+                #    they may have spelled differently; the name they need to
+                #    look for is the whole content of this error.
+                self.add_error("new_role_name", forms.ValidationError(
+                    f"There is already a role called “{existing.name}”. "
+                    f"Pick it from the list above instead of adding a second one."))
+        return cleaned
+
+    def save(self, commit=True):
+        """Create the vocabulary entry first, then the row that points at it."""
+        new_name = (self.cleaned_data.get("new_role_name") or "").strip()
+        if new_name:
+            from .services import create_participation_role
+
+            self.instance.role = create_participation_role(new_name)
+        return super().save(commit=commit)
 
 
 class HoursForm(forms.Form):
@@ -247,7 +470,11 @@ class NotifyForm(forms.Form):
     """
 
     reason = forms.ChoiceField(label="Reason")
-    message = forms.CharField(widget=forms.Textarea, label="Message")
+    # Same constant as EventNotification.message, from core/limits.py. A plain
+    # Form gets nothing from the model, so this is the only thing standing
+    # between a pasted document and the column it is written to.
+    message = forms.CharField(
+        widget=forms.Textarea, max_length=LONG_TEXT, label="Message")
 
     def __init__(self, *args, **kwargs):
         # Imported here rather than at module level to keep the import graph of

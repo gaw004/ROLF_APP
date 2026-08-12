@@ -1,51 +1,150 @@
 {% extends "core/base.html" %}
-{% block title %}My profile{% endblock %}
+{% block title %}My Profile{% endblock %}
+{% comment %}
+两个版心（2026-08-06）：**堆叠时 672px，两栏时 896px**。
+
+⚠️ 两个值都要，不是挑一个。这一页从 lg 起变成两栏，两栏需要的总宽比原来更大；
+   而 lg 以下是上下堆叠 —— 那时如果也用 896，每张卡片会比改之前**更宽**，
+   和「卡片不要那么宽」正好反了。所以窄屏保持 672，两栏时才放到 896。
+{% endcomment %}
+{% block main_width %}max-w-2xl lg:max-w-4xl{% endblock %}
 
 {% block content %}
-  <h1>My profile</h1>
   {% comment %}
   三个 POST 动作共用一页：改资料、加紧急联系人、删紧急联系人。靠 action 区分。
 
   生日那一格是自由改的（2026-07-31 拍板）—— 代价写在 phase-c.md 的已知缺口里：
   未成年人可以改大生日绕过同意门，缓解只有 Contact 的 simple-history 留痕。
+
+  ⚠️ **这一页没有上 HTMX**，尽管 design-system.md 的表里列了它。
+     判据是那份文档自己写的下一句：「别为了用而用 —— 每加一个片段端点，
+     就多一处『整页和片段可能对不上』的地方」。
+     增删紧急联系人一个人一辈子做两三次，整页刷新完全够用；
+     而换来的是这一页上三个写操作全部只有一条路，没有第二种可能出错的方式。
+     真正值得上 HTMX 的是签到那一页 —— 那是一场活动里要重复几十次的动作。
   {% endcomment %}
+  <h1 class="text-2xl font-semibold">My Profile</h1>
 
   {% if is_minor is None %}
-    <p>
-      Your date of birth is missing, so every signup will ask for a guardian's
-      consent. Fill it in below and that stops.
-    </p>
+    <div class="card mt-6 border border-warning-fg/30 bg-warning-bg dark:border-warning-fg-dark/30 dark:bg-warning-bg-dark">
+      <p class="text-sm text-warning-fg dark:text-warning-fg-dark">
+        Your date of birth is missing, so every signup will ask for a guardian's
+        consent. Fill it in below and that stops.
+      </p>
+    </div>
   {% elif is_minor %}
-    <p>You are under 18, so signing up needs a guardian's consent.</p>
+    <div class="card mt-6 border border-info-fg/30 bg-info-bg dark:border-info-fg-dark/30 dark:bg-info-bg-dark">
+      <p class="text-sm text-info-fg dark:text-info-fg-dark">
+        You are under 18, so signing up needs a guardian's consent.
+      </p>
+    </div>
   {% endif %}
 
-  <form method="post">
+  {% comment %}
+  两栏（2026-08-06）：左边是 Your Details，右边是 Login Information 和
+  Emergency Contacts。`lg:grid-cols-5` 加 3 : 2 —— 左边那张表单有十二个字段，
+  右边两块都是短行，平分会让左边挤而右边空。
+
+  ⚠️ `items-start` 不能少。grid 项默认拉伸到行高，于是右栏那两张卡会被拉到和
+     左边整张表单一样高 —— 一张只有两行字的卡片下面挂着半屏空白。
+
+  ⚠️ 断点是 `lg`（1024px）而不是 `md`。768px 下两栏是 440 / 295，而右栏那一行
+     紧急联系人（姓名 · 电话 · email · 关系）在 295px 里会折成三四行 ——
+     两栏在那个宽度上是负收益。
+  {% endcomment %}
+  <div class="mt-8 grid items-start gap-x-8 gap-y-10 lg:grid-cols-5">
+
+  <div class="lg:col-span-3">
+  {% comment %}
+  ⚠️ 这个小标题是 2026-08-06 加的，而且它不是装饰：Login information 那一栏
+     里写着「Change it under Your details above」，没有这个标题那句话指的是空气。
+     ⚠️ 两栏之后它其实在**左边**而不是「上面」，所以那句话的措辞跟着改了。
+  {% endcomment %}
+  <h2 class="text-lg font-semibold">Your Details</h2>
+
+  <form method="post" class="card mt-4">
     {% csrf_token %}
-    {{ form.as_p }}
-    <button type="submit" name="action" value="save">Save my details</button>
+    {% include "core/components/form_fields.html" %}
+    <div class="mt-6">
+      {% include "core/components/button.html" with label="Save my details" variant="primary" name="action" value="save" %}
+    </div>
   </form>
+  </div>
 
-  <h2>Emergency contacts</h2>
-  <p>Who we call about you on the day, and who we tell if you are under 18.</p>
+  <div class="lg:col-span-2">
+  {% comment %}
+  Login information（2026-08-06）。
 
-  <ul>
-    {% for row in kin %}
-      <li>
-        {{ row.name }} — {{ row.phone }} ({{ row.relationship_type.name_a_to_b }})
-        <form method="post" style="display:inline">
-          {% csrf_token %}
-          <input type="hidden" name="kin" value="{{ row.pk }}">
-          <button type="submit" name="action" value="remove_kin">Remove</button>
-        </form>
-      </li>
-    {% empty %}
-      <li>None yet.</li>
-    {% endfor %}
-  </ul>
+  ⚠️ 这里的 email 是**只读回显**，改它要到上面那张表单里去 —— 而且这一点必须
+     写在旁边。同一页上两个 email 框，人不知道该信哪一个；一个不能改的灰框旁边
+     什么话都不说，人以为坏了。
 
-  <form method="post">
+  ⚠️ 它显示的是 `user.email`，不是 `form.instance.email`。两者现在保证相同
+     （services.set_login_email 一次写两行），而这一栏的标题写着「Login
+     information」—— 它要回答的是「我用什么登录」，所以它读的必须是登录那一列。
+     读 Contact 那一列的话，万一哪天两者真的分叉了，这一栏会理直气壮地显示
+     一个登不进去的地址。
+
+  ⚠️ 密码那一行没有值可显示，也不该有 —— 库里存的是 hash。所以那一行是一个动作，
+     不是一个字段。
+  {% endcomment %}
+  <h2 class="text-lg font-semibold">Login Information</h2>
+
+  <div class="card mt-4" x-data="{ password: false }">
+    <p class="text-sm font-medium text-ink-800 dark:text-ink-100">Email (username)</p>
+    <p class="readonly-value">{{ user.email }}</p>
+    <p class="mt-1 text-xs text-ink-600 dark:text-ink-300">
+      This is what you log in with. Change it under Your Details.
+    </p>
+
+    <p class="mt-6 text-sm font-medium text-ink-800 dark:text-ink-100">Password</p>
+    <div class="mt-2">
+      {% url 'accounts:password_change' as password_url %}
+      {% include "core/components/button.html" with label="Change password" href=password_url variant="primary" opens="password" %}
+    </div>
+
+    {% include "core/components/modal.html" with state="password" title="Change password" body="accounts/_password_form.html" %}
+  </div>
+
+  <h2 class="mt-8 text-lg font-semibold">Emergency Contacts</h2>
+  <p class="mt-1 text-sm text-ink-600 dark:text-ink-300">
+    Who we call about you on the day, and who we tell if you are under 18.
+  </p>
+
+  {% if kin %}
+    <ul class="mt-4 space-y-2">
+      {% for row in kin %}
+        <li class="card flex flex-wrap items-center justify-between gap-3">
+          <div class="text-sm">
+            <span class="font-medium">{{ row.name }}</span>
+            <span class="text-ink-600 dark:text-ink-300">
+              &middot; {{ row.phone }} &middot; {{ row.email }}
+              &middot; {{ row.relationship_type.name_a_to_b }}
+            </span>
+          </div>
+          <form method="post">
+            {% csrf_token %}
+            <input type="hidden" name="kin" value="{{ row.pk }}">
+            {% include "core/components/button.html" with label="Remove" variant="danger" name="action" value="remove_kin" confirm="Remove this emergency contact?" %}
+          </form>
+        </li>
+      {% endfor %}
+    </ul>
+  {% else %}
+    <div class="mt-4">
+      {% include "core/components/empty.html" with message="None yet. If you are under 18 you need at least one before you can sign up for an event." %}
+    </div>
+  {% endif %}
+
+  <form method="post" class="card mt-6">
     {% csrf_token %}
-    {{ kin_form.as_p }}
-    <button type="submit" name="action" value="add_kin">Add emergency contact</button>
+    <h3 class="mb-4 text-sm font-semibold">Add an emergency contact</h3>
+    {% include "core/components/form_fields.html" with form=kin_form %}
+    <div class="mt-6">
+      {% include "core/components/button.html" with label="Add emergency contact" variant="secondary" name="action" value="add_kin" %}
+    </div>
   </form>
+  </div>
+
+  </div>
 {% endblock %}

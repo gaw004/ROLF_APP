@@ -1,0 +1,23 @@
+{% comment %}
+表单的整体错误（2026-08-09 抽出来）。
+
+它们是「这几个字段合起来不对」那一类 —— 比如报名页的「邮箱或电话至少填一个」
+—— 不属于任何一个字段，漏掉的话用户看到的是一次没有任何解释的失败。
+
+⚠️ 抽出来是因为它有**两个**调用方，而它们没法共用一个更大的组件：
+   `form_fields.html` 整张表单一起渲染时用它；`event_signup.html` 的未成年人
+   分支要把字段拆进 `<fieldset>` 里、用不了 `form_fields.html`，于是原来把
+   这五行抄了一遍。⚠️ 分叉的表现是「同一条错误在两个页面上一个有框一个没框」，
+   两边各自看都正常。
+
+⚠️ `role="alert"`：这段是用户提交之后才出现的，读屏软件必须当场读出来 ——
+   否则表单看起来只是「没反应」。
+
+参数：form。
+{% endcomment %}
+{% if form.non_field_errors %}
+  <div role="alert"
+       class="rounded-md border border-danger-fg/30 bg-danger-bg p-3 text-sm text-danger-fg dark:border-danger-fg-dark/30 dark:bg-danger-bg-dark dark:text-danger-fg-dark">
+    {% for error in form.non_field_errors %}<p>{{ error }}</p>{% endfor %}
+  </div>
+{% endif %}

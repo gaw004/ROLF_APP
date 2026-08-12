@@ -1,58 +1,118 @@
-{% comment %}
-The one shared shell for the self-service pages. Deliberately plain: no CSS
-framework, no JavaScript, and it extends nothing from the admin.
+{% load static %}{% comment %}
+所有自助页面共用的外壳。
 
-Styling is out of scope for this phase on purpose — the acceptance test is
-"clickable, usable, permissions correct". Phase C replaces this file (and only
-this file) to give the pages a look; the views, the forms and the services
-carry over untouched, which is the whole point of keeping them out of admin.py.
+C2.1 兑现了这个文件原来那句注释：「Phase C 替换这一个文件就能上样式，
+views / forms / services 原样带走」—— 那不是愿望，是 core/tests.py 里那些
+守卫保证的。这一版换掉了整个外壳、加了一套组件片段，
+**没有动过任何一个视图、表单或服务函数**。
 
 管理侧那两个入口靠 core.context_processors.navigation 决定显不显示，而它问的是
 org/permissions.py，不是 MinistryRole —— 导航里再抄一份判断，抄出来的那份迟早
 和真的那份不一致，而不一致的表现是「菜单里有个链接，点进去 403」。
-{% endcomment %}
-<!doctype html>
-<html lang="en">
+
+页面可以覆盖的两个 block：
+  content     正文
+  main_width  版心。默认 max-w-6xl；表单页用 max-w-2xl（长行读起来累）
+{% endcomment %}<!doctype html>
+<html lang="en" class="h-full{% if site_hero_image %} has-hero{% endif %}">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{% block title %}ROLF{% endblock %}</title>
+  <title>{% block title %}ROLF{% endblock %} · ROLF</title>
+  {% comment %}
+  标签页图标（2026-08-06 加）。在此之前**根本没有** —— 浏览器去要 /favicon.ico
+  拿到 404，标签页上显示的是它自带的地球。
+
+  ⚠️ 小尺寸用的是**只有波纹**的那一版，不是整张 logo。两者都从
+     `event-default.webp`（基金会 logo）生成，但 16/32px 下 logo 里那两行字
+     会完全糊掉 —— 实测三种裁法之后选的是「两个波峰」：整条波纹是 4:1 的比例，
+     塞进方形之后三条线细到并成一团。
+  ⚠️ 180px 的 apple-touch-icon 用**整张 logo** —— 加到主屏幕那个尺寸上字是看得清的，
+     而那时候人要认的是「哪个基金会」，不是一个抽象符号。
+  {% endcomment %}
+  <link rel="icon" type="image/png" sizes="16x16" href="{% static 'core/img/favicon-16.png' %}">
+  <link rel="icon" type="image/png" sizes="32x32" href="{% static 'core/img/favicon-32.png' %}">
+  <link rel="icon" type="image/png" sizes="48x48" href="{% static 'core/img/favicon-48.png' %}">
+  <link rel="apple-touch-icon" sizes="180x180" href="{% static 'core/img/apple-touch-icon.png' %}">
+  <link rel="stylesheet" href="{% static 'css/app.css' %}">
+  {% include "core/components/_appearance.html" %}
+  {% comment %}
+  进来时是浅色还是深色。⚠️ 抽成组件了（2026-08-06）—— Memories 页是第二个
+  使用者，理由和三条硬要求都写在片段里面。
+  {% endcomment %}
+  {% include "core/components/_theme_boot.html" %}
+  <script defer src="{% static 'js/app.js' %}"></script>
 </head>
-<body>
-  <header>
-    <nav>
-      <a href="{% url 'events:event_list' %}">Events</a>
-      · <a href="{% url 'events:past_events' %}">Past events</a>
-      {% if user.is_authenticated %}
-        · <a href="{% url 'events:my_participations' %}">My signups</a>
-        · <a href="{% url 'accounts:profile' %}">My profile</a>
-        {% if is_ministry_admin %}
-          · <a href="{% url 'events:event_manage_list' %}">Events I manage</a>
-        {% endif %}
-        {% if can_grant_ministry_admin %}
-          · <a href="{% url 'org:ministry_list' %}">Ministry admins</a>
-        {% endif %}
-        {% if user.is_staff %} · <a href="/admin/">Admin site</a>{% endif %}
-        · <span>{{ user.get_username }}</span>
-        <form method="post" action="{% url 'accounts:logout' %}" style="display:inline">
-          {% csrf_token %}
-          <button type="submit">Log out</button>
-        </form>
-      {% else %}
-        · <a href="{% url 'accounts:login' %}">Log in</a>
-        · <a href="{% url 'accounts:register' %}">Register</a>
-      {% endif %}
-    </nav>
-  </header>
 
-  {% if messages %}
-    <ul>
-      {% for message in messages %}<li>{{ message }}</li>{% endfor %}
-    </ul>
-  {% endif %}
+{% comment %}
+hx-headers 挂一次，所有 HTMX 请求都带上 CSRF —— 不要每个表单各写一遍。
+{% endcomment %}
+<body class="flex min-h-full flex-col bg-ink-50 text-ink-900 antialiased dark:bg-transparent dark:text-ink-100"
+      hx-headers='{"X-CSRFToken": "{{ csrf_token }}"}'
+      x-data="{ menu: false, bar: false }"
+      x-on:keydown.escape.window="menu = false">
 
-  <main>
+  {% comment %}
+  跳到主内容。只在键盘 Tab 到它的时候才出现 —— 读屏和键盘用户不必每页先听
+  一遍完整导航。
+  {% endcomment %}
+  {% comment %}
+  深色模式下的整页背景：首页那张照片，压暗，铺满且不随内容滚动。
+  ⚠️ 数值、层级、以及它在对比度上的取舍全部写在 `_hero_backdrop.html` 里 ——
+     Memories 那一页不继承本模板，用的是同一份片段，这里不抄第二遍。
+  {% endcomment %}
+  {% include "core/components/_hero_backdrop.html" %}
+
+  <a href="#main"
+     class="sr-only focus:not-sr-only focus:absolute focus:left-4 focus:top-4 focus:z-50 focus:rounded-md focus:bg-brand-600 focus:px-4 focus:py-2 focus:text-sm focus:text-white">
+    Skip to main content
+  </a>
+
+  {% comment %}
+  ⚠️ 和首页**同一条** bar、**同一个**菜单（2026-08-05 改）。原来这里是一条平铺
+     所有链接的导航条，左上角写着「ROLF」。改成共用组件的理由是衔接：
+     从首页点进活动列表时，字样、字号、字距、位置全都不动 ——
+     两份拷贝迟早会差一两个像素，而那一下跳动就是「不丝滑」的来源。
+
+  内页传 `solid`（一直白着，底下是内容不是照片，藏起来只会让导航变难找）
+  和 `themed`（右侧带主题切换和用户名）。
+
+  ⚠️ 吸顶。导航全收进菜单之后，bar 跟着内容滚走就意味着「在长列表底部想换页
+     得先滚回顶部」—— 而列表正要变长。
+  {% endcomment %}
+  <div class="sticky top-0 z-30">
+    {% include "core/components/_top_bar.html" with solid=1 themed=1 %}
+  </div>
+
+  {% include "core/components/_site_menu.html" %}
+
+  <main id="main" class="mx-auto w-full flex-1 px-4 py-8 {% block main_width %}max-w-6xl{% endblock %}">
+    {% comment %}
+    ⚠️ 这个 id 是 HTMX 片段响应回填 messages 的落点，别改名。
+
+    片段响应不经过 base.html，所以一个 messages.success() 在 HTMX 路径上会
+    **既不显示、又不消失** —— 它躺在 session 里，等下一次整页加载时才冒出来，
+    表现是「刚才那次操作的提示，在你点开另一个页面时才弹出来」。
+    片段模板用 hx-swap-oob 往这里回填，见 core/components/_messages_oob.html。
+    {% endcomment %}
+    <div id="messages">{% include "core/components/messages.html" %}</div>
     {% block content %}{% endblock %}
   </main>
+
+  <footer class="border-t border-ink-200 bg-white dark:border-ink-800 dark:bg-ink-900">
+    <div class="mx-auto max-w-6xl px-4 py-6 text-xs text-ink-600 dark:text-ink-300">
+      {% comment %}
+      C3.10 的隐私说明链接进这里。现在不放占位链接 ——
+      一个指向 404 的页脚链接比没有链接更糟，C0.5 刚为同一件事付过一次学费。
+      {% endcomment %}
+      {% comment %}
+      ⚠️ 2026-08-05 更正：这里原来写的是「Rivers of Living Faith」——
+         那是 C2 写这个文件时**编出来的**，没有任何地方说过基金会叫什么。
+         ROLF = River of Life Foundation。全仓只有这一处，所以改一行就够了；
+         但值得记一句：**编一个看起来合理的名字，比留空更难被发现**。
+      {% endcomment %}
+      River of Life Foundation — volunteer and event management.
+    </div>
+  </footer>
 </body>
 </html>

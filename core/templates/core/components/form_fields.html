@@ -1,0 +1,14 @@
+{% comment %}
+整张表单的字段，逐个走 field.html。取代模板里的 {{ form.as_p }} ——
+as_p 出来的标签结构我们控制不了，错误也会跑到字段上方去。
+
+⚠️ non_field_errors 单独渲染在最前面，走 `_non_field_errors.html` ——
+   报名页的未成年人分支用不了本组件，但要显示同一段东西，所以那五行是片段
+   而不是写在这里。
+
+参数：form。
+{% endcomment %}
+{% include "core/components/_non_field_errors.html" %}
+{% for field in form %}
+  {% if field.is_hidden %}{{ field }}{% else %}{% include "core/components/field.html" %}{% endif %}
+{% endfor %}

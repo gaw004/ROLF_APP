@@ -1,0 +1,6 @@
+{% comment %}
+签到页 HTMX 写操作的响应体 = 那一行 + 回填 messages。
+理由同 _event_roles_swap.html：OOB 不能写进被整页复用的那个片段里。
+{% endcomment %}
+{% include "events/_attendance_row.html" %}
+{% include "core/components/_messages_oob.html" %}

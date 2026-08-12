@@ -1,54 +1,52 @@
-{% comment %}
-Plain, and not extending any admin template — that coupling is exactly what
-kept this out of an admin action (goal.md D18).
+{% extends "core/base.html" %}
+{% block title %}Merge Duplicate Contacts{% endblock %}
 
-Phase C replaces this file; contact_merge() and services.merge_contacts()
-carry over untouched.
-{% endcomment %}
-<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <title>Merge duplicate contacts</title>
-</head>
-<body>
-  <h1>Merge duplicate contacts</h1>
+{% block content %}
+  {% comment %}
+  这一页是从 admin 的改页点进来的，但它**不继承任何 admin 模板** ——
+  那种耦合正是当初把它从 admin action 里挪出来的理由（D18）。
+  C2 之后它继承的是我们自己的 base.html：同一套导航、同一套配色。
 
-  <p>Possible duplicates (same name and number) waiting: {{ waiting }}.</p>
-
-  {% if messages %}
-    <ul>
-      {% for message in messages %}<li>{{ message }}</li>{% endfor %}
-    </ul>
-  {% endif %}
-
-  <p>
-    <strong>Keeping</strong> #{{ keep.pk }} {{ keep }},
-    <strong>merging away</strong> #{{ drop.pk }} {{ drop }}.
-    Everything pointing at the merged record will point at the kept one instead;
-    a field is copied over only where the kept record is empty. The merged
-    record is deactivated, never deleted.
+  contact_merge() 和 services.merge_contacts() 一个字没动。
+  {% endcomment %}
+  <h1 class="text-2xl font-semibold">Merge Duplicate Contacts</h1>
+  <p class="mt-1 text-sm text-ink-600 dark:text-ink-300">
+    Possible duplicates (same name and number) waiting: {{ waiting }}.
   </p>
 
-  <table border="1" cellpadding="4">
-    <thead>
-      <tr><th>Field</th><th>Keeping #{{ keep.pk }}</th><th>Merging away #{{ drop.pk }}</th></tr>
-    </thead>
-    <tbody>
-      {% for row in fields %}
-        <tr>
-          <th>{{ row.label }}</th>
-          <td>{{ row.keep|default_if_none:"" }}</td>
-          <td>{{ row.drop|default_if_none:"" }}</td>
-        </tr>
-      {% endfor %}
-    </tbody>
-  </table>
+  <div class="card mt-6">
+    <p class="text-sm text-ink-800 dark:text-ink-100">
+      <strong>Keeping</strong> #{{ keep.pk }} {{ keep }},
+      <strong>merging away</strong> #{{ drop.pk }} {{ drop }}.
+    </p>
+    <p class="mt-2 text-sm text-ink-600 dark:text-ink-300">
+      Everything pointing at the merged record will point at the kept one instead; a
+      field is copied over only where the kept record is empty. The merged record is
+      deactivated, never deleted.
+    </p>
+  </div>
 
-  <form method="post">
+  <div class="table-wrap mt-6">
+    <table>
+      <thead>
+        <tr><th>Field</th><th>Keeping #{{ keep.pk }}</th><th>Merging away #{{ drop.pk }}</th></tr>
+      </thead>
+      <tbody>
+        {% for row in fields %}
+          <tr>
+            <td class="font-medium">{{ row.label }}</td>
+            <td>{{ row.keep|default_if_none:"" }}</td>
+            <td>{{ row.drop|default_if_none:"" }}</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <form method="post" class="mt-6 flex flex-wrap gap-2">
     {% csrf_token %}
-    <button type="submit">Merge them</button>
-    <a href="{% url 'admin:contact_contact_change' keep.pk %}">Cancel</a>
+    {% include "core/components/button.html" with label="Merge them" variant="primary" confirm="Merge these two records? The merged one is deactivated, not deleted." %}
+    {% url 'admin:contact_contact_change' keep.pk as cancel_url %}
+    {% include "core/components/button.html" with label="Cancel" href=cancel_url variant="ghost" %}
   </form>
-</body>
-</html>
+{% endblock %}

@@ -94,8 +94,11 @@
 >   [D10](decisions/D10-person-role-position-assignment.md) /
 >   [D11](decisions/D11-position-and-assignment.md) /
 >   [D15](decisions/D15-relationship-carriers.md) 这四条 —— 它们决定了"一条信息该放进哪张表"。
-> - **已经在写代码的人**：日常查的是 [`phase-b.md`](phase-b.md)（实现要点）和
->   [`02-roadmap.md`](02-roadmap.md)（实施步骤）。
+> - **已经在写代码的人**：日常查的是 [`phase-c.md`](phase-c.md)（判据 + 落点规矩）和
+>   [`03-roadmap.md`](03-roadmap.md) / [`04-roadmap.md`](04-roadmap.md)（实施步骤）。
+>   ⚠️ 本行原来指向 phase-b.md / 02-roadmap.md，那是 Phase B 开工时写的，
+>   Phase C 开工后一直没改 —— 而本文档开头那张表早就把它们标成了「查历史」，
+>   于是同一份文件里两处打架（2026-08-09 对齐）。
 
 ### 常见问题 → 去哪找
 
@@ -103,7 +106,7 @@
 |---|---|
 | 现在到底该做什么？ | [零、当前优先级](#零当前优先级2026-07-29-定) —— 14 条需求 + 逐条覆盖对账 |
 | 这件事该不该做？ | 判据：**它是不是那 14 条的前置条件**。不是就不做，见[零](#零当前优先级2026-07-29-定) |
-| 下一步具体做什么？ | [六、下一步](#六下一步)，然后照 [`02-roadmap.md`](02-roadmap.md) 的 B6 起 |
+| 下一步具体做什么？ | [六、下一步](#六下一步)，然后照 [`03-roadmap.md`](03-roadmap.md)（前端那一段在 [`04-roadmap.md`](04-roadmap.md)）|
 | 「食物银行的 admin」在数据库里怎么表达？ | [D20](decisions/D20-ministry-role.md) —— Django Group 顶不上，为什么 |
 | 「这场活动开了几个工种」为什么不能数报名？ | [D19](decisions/D19-event-role.md) —— 和 D11 的「空缺编制」是同一个病 |
 | 活动改时间了，通知谁？ | [D22](decisions/D22-event-notifications.md) —— **未成年人通知家长**；联系不上的人必须自己算 |
@@ -127,11 +130,15 @@
 **完整索引在 [`decisions/README.md`](decisions/README.md)**（每条一句话结论 + 它回答的问题）。
 一条决策一个文件，编号是稳定引用。
 
-### Phase B 实现要点索引
+### 实现要点索引
 
-**在 [`phase-b.md`](phase-b.md) 开头**。开工期间日常翻的就是那一份 ——
+**当前（Phase C）在 [`phase-c.md`](phase-c.md) 开头** —— 判据、落点规矩
+（样式写哪、JS 写哪、什么该翻）、验收口径、已知缺口。开工期间日常翻的是那一份。
+
+**Phase B 的在 [`phase-b.md`](phase-b.md) 开头**，已完成但没过期：
 `.active()` 与时间口径、约束清单、`on_delete` 表、R8 那条查询、可见性、
-签到与 `hours`、必须写的测试、验收清单，全部在那里。
+签到与 `hours`、必须写的测试、验收清单，全部在那里 —— 查表的形状和它为什么
+带那些约束，仍然去那一份。
 
 ---
 
@@ -314,7 +321,7 @@ D1–D24 **一条一个文件**，索引见 [`decisions/README.md`](decisions/RE
 |---|---|---|
 | 数据核心设计（`Contact` / `Language` / `EmergencyContact`） | ✅ 已完成，有测试 | [`progress.md`](progress.md#-已完成--数据核心设计这是目前最有价值的部分) |
 | **Phase A · 地基加固**（A1–A10） | ✅ 已完成（2026-07-27，分支 `phase-a`） | [`progress.md`](progress.md#-已完成--phase-a-地基加固) · [`01-roadmap.md`](01-roadmap.md) |
-| Phase B · 活动闭环 | 🔄 五处缺口已补齐（C0.2）、**404 个测试全绿**，**只差 [C0.3](03-roadmap.md#c03-三角色浏览器验收) 那一遍浏览器验收**就能标 ✅ | [`phase-b.md`](phase-b.md)（要点） · [`02-roadmap.md`](02-roadmap.md)（步骤） · [五处缺口](phase-c.md#phase-b-的五处缺口2026-07-31-发现) |
+| Phase B · 活动闭环 | 🔄 五处缺口已补齐（C0.2）、**414 个测试全绿**，**只差 [C0.3](03-roadmap.md#c03-三角色浏览器验收) 那一遍浏览器验收**就能标 ✅ | [`phase-b.md`](phase-b.md)（要点） · [`02-roadmap.md`](02-roadmap.md)（步骤） · [五处缺口](phase-c.md#phase-b-的五处缺口2026-07-31-发现) |
 | Phase C · 上线与真实运营 | 🔄 **当前在做**（2026-07-31 开工，2026-08-03 重排） | [`phase-c.md`](phase-c.md)（要点） · [`03-roadmap.md`](03-roadmap.md)（主册） · [`04-roadmap.md`](04-roadmap.md)（前端分册） · [`progress.md`](progress.md#phase-c--上线与真实运营)（原始计划） |
 | Phase D · 资金追踪 | ⬜ 未开始 | [`progress.md`](progress.md#phase-d--资金追踪) |
 
@@ -364,21 +371,30 @@ C0.2 和它的返工之后是 **404**），
 **C0.2 已经做完了**（2026-08-03）：五处缺口全补上，加上浏览器带回的那一轮返工，
 测试 **334 → 404**。
 
-**所以下一步是 [C0.3](03-roadmap.md#c03-三角色浏览器验收) 和
-[C0.5](03-roadmap.md#c05--上线前的三条死链) 这两件。**
+**[C0.5](03-roadmap.md#c05--上线前的三条死链) 也做完了**（2026-08-03，分支 `phase-c-frontend`）：
+`LOGIN_URL` 补上、三个错误页模板落地、守卫接进 pre-commit 和 CI，测试 **404 → 409**。
+⚠️ 其中一条**不在代码里**：CI 的「红灯禁止合并」是 GitHub 的分支保护规则，
+要去 Settings → Branches 把 `guards` 设成 required status check，
+否则这个 workflow 只是在 PR 上显示一个红叉、照样能合。
 
-- **C0.3**：照[验收清单](phase-b.md#验收2026-07-29-重写改成按-14-条需求逐条验收)扮三个角色各走一遍。
-  `python manage.py seed_demo` 一条命令把数据造齐（账号密码在命令的输出里），
-  清单上大部分勾已经有对应的自动化测试（`events.tests.AcceptanceWalkTests`），
-  **但浏览器那一遍仍然要走** —— 表单排版坏了、链接指向空处，断言看不出来。
-  ⚠️ C0.2 交付后确实走过一遍浏览器（带回 10 条返工），
-  **但那不是这一遍** —— 清单上「撤销授权不删行」和「employee 任职结束后从 R8 名单消失」
-  两条一条都没碰到；
-- **C0.5**（2026-08-03 新增）：`LOGIN_URL` 没设，**匿名点导航第一个链接就是 404**；
-  没有 `403.html`，`SCOPED_DENIAL` 那些文案一个字都看不见。
-  顺带把 12 条 grep 守卫接进 pre-commit 和 CI。
+所以下一步是 [C0.3](03-roadmap.md#c03-三角色浏览器验收) —— **它等的是人，不是代码**。
 
-两件都走完，再把上面那张表的 Phase B 改成 ✅。
+照[验收清单](phase-b.md#验收2026-07-29-重写改成按-14-条需求逐条验收)扮三个角色各走一遍。
+`python manage.py seed_demo` 一条命令把数据造齐（账号密码在命令的输出里），
+清单上大部分勾已经有对应的自动化测试（`events.tests.AcceptanceWalkTests`），
+**但浏览器那一遍仍然要走** —— 表单排版坏了、链接指向空处，断言看不出来。
+⚠️ C0.2 交付后确实走过一遍浏览器（带回 10 条返工），
+**但那不是这一遍** —— 清单上「撤销授权不删行」和「employee 任职结束后从 R8 名单消失」
+两条一条都没碰到。
+
+走完再把上面那张表的 Phase B 改成 ✅。
+
+[C1](04-roadmap.md#c1--构建链) 和 [C2](04-roadmap.md#c2--设计系统与-20-个模板) **也做完了**
+（2026-08-04，分支 `phase-c-frontend`）：构建链 + 20 个模板重写完毕，测试 409 → **414**。
+所以前端不再挡任何事，**C0.3 现在是 Phase B 收尾唯一剩下的一步**。
+
+⚠️ C0.3 那一遍现在走**正好**：模板刚重写过，而它带回来的返工正是落在模板上的。
+早一天走，返工就少改一遍。
 
 > **这一轮学到的**：404 个测试全绿，而四个功能没有入口 ——
 > 因为**没有 URL 的功能，测试也没有 URL 可打**。

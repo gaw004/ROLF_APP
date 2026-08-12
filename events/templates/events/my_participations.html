@@ -1,24 +1,79 @@
 {% extends "core/base.html" %}
-{% block title %}My signups{% endblock %}
+{% block title %}My Signups{% endblock %}
+{% comment %}
+版心和 Events / Past Events / 活动详情同一个值（2026-08-06）。
+⚠️ 代价如实说：这一页是一张六列表格，收窄到 896px 之后桌面上就可能开始横向滚动。
+   它包在 `.table-wrap` 里，所以滚的是表格自己，不会把整页撑宽 —— 那一条是
+   375px 那个 bug 留下的规矩。
+{% endcomment %}
+{% block main_width %}max-w-4xl{% endblock %}
 
 {% block content %}
-  <h1>My signups</h1>
-  <table border="1" cellpadding="4">
-    <tr><th>Event</th><th>Role</th><th>Status</th><th>Hours</th><th></th></tr>
-    {% for row in participations %}
-      <tr>
-        <td><a href="{% url 'events:event_detail' row.event_role.event.pk %}">{{ row.event_role.event.name }}</a></td>
-        <td>{{ row.event_role.role.name }}</td>
-        <td>{{ row.get_status_display }}</td>
-        <td>{{ row.hours|default:"—" }}</td>
-        <td>
-          {% if row.status == "registered" %}
-            <a href="{% url 'events:participation_cancel' row.pk %}">Cancel</a>
-          {% endif %}
-        </td>
-      </tr>
-    {% empty %}
-      <tr><td colspan="5">You have not signed up for anything yet.</td></tr>
-    {% endfor %}
-  </table>
+  <h1 class="mb-6 text-2xl font-semibold">My Signups</h1>
+
+  {% if participations %}
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th>Event</th><th>Starts</th><th>Role</th><th>Status</th><th>Attendance</th><th>Hours</th><th></th></tr>
+        </thead>
+        <tbody>
+          {% for row in participations %}
+            <tr>
+              <td>
+                <a href="{% url 'events:event_detail' row.event_role.event.pk %}?from=mine"
+                   class="prose-link">{{ row.event_role.event.name }}</a>
+              </td>
+              {% comment %}
+              ⚠️ 只显示开始时间，不显示起止两个。表格已经六列，两个完整时间会把
+                 窄屏挤到只剩横向滚动 —— 而「什么时候」这个问题，开始时间答得了
+                 九成，完整时段在详情页上。
+              {% endcomment %}
+              <td class="whitespace-nowrap">{{ row.event_role.event.start_time }}</td>
+              <td>{{ row.event_role.role.name }}</td>
+              <td>
+                {% if row.status == "registered" %}
+                  {% include "core/components/badge.html" with label=row.get_status_display tone="success" %}
+                {% elif row.status == "attended" %}
+                  {% include "core/components/badge.html" with label=row.get_status_display tone="info" %}
+                {% else %}
+                  {% include "core/components/badge.html" with label=row.get_status_display %}
+                {% endif %}
+              </td>
+              {% comment %}
+              签到和签退**合成一列**（D28）。这张表已经六列，模板顶上那条宽度
+              警告说的就是它 —— 再加两列，桌面上也开始横向滚动。
+              ⚠️ 「两个时间两列」在这一页上已经被否决过一次（Starts / Ends），
+                 理由一模一样。这是第二次，所以写进了 D28 而不是只留在这里。
+              {% endcomment %}
+              <td class="whitespace-nowrap">
+                {% if row.checked_out_at %}
+                  {{ row.checked_in_at|time }} &rarr; {{ row.checked_out_at|time }}
+                {% elif row.checked_in_at %}
+                  In {{ row.checked_in_at|time }}
+                {% else %}
+                  —
+                {% endif %}
+              </td>
+              <td>{{ row.hours|default_if_none:"—" }}</td>
+              <td>
+                {% comment %}
+                取消走一个独立的确认页，不是这里一个带确认框的按钮 ——
+                那一页解释了「取消不会删除记录，你以后还能再报一次」，
+                而那句话正是这个动作最容易被误解的地方。
+                {% endcomment %}
+                {% if row.status == "registered" %}
+                  {% url 'events:participation_cancel' row.pk as cancel_url %}
+                  {% include "core/components/button.html" with label="Cancel" href=cancel_url variant="ghost" %}
+                {% endif %}
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% else %}
+    {% url 'events:event_list' as browse_url %}
+    {% include "core/components/empty.html" with message="You have not signed up for anything yet." action_label="Browse events" action_href=browse_url %}
+  {% endif %}
 {% endblock %}

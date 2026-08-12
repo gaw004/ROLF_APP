@@ -32,7 +32,7 @@ class PossibleDuplicateFilter(admin.SimpleListFilter):
     parameter_name = "duplicates"
 
     def lookups(self, request, model_admin):
-        return [("yes", "只看疑似重复")]
+        return [("yes", "Possible duplicates only")]
 
     def queryset(self, request, queryset):
         if self.value() == "yes":
@@ -62,7 +62,7 @@ class MinorFilter(admin.SimpleListFilter):
     parameter_name = "minor"
 
     def lookups(self, request, model_admin):
-        return [("yes", "未成年"), ("no", "成年"), ("unknown", "生日未知")]
+        return [("yes", "Under 18"), ("no", "18 or over"), ("unknown", "No date of birth")]
 
     def queryset(self, request, queryset):
         if self.value() == "yes":
@@ -148,8 +148,8 @@ class ContactAdmin(SimpleHistoryAdmin):
         if namesakes.exists():
             self.message_user(
                 request,
-                f"{namesakes.count()} other contacts share this name (different numbers)."
-                "重名是合法的，这里只是提醒。",
+                f"{namesakes.count()} other contacts share this name (different numbers). "
+                "Sharing a name is normal; this is a note, not a problem.",
                 messages.WARNING,
             )
 
@@ -176,7 +176,7 @@ class ContactAdmin(SimpleHistoryAdmin):
             if other_pk is None:
                 return ""
             return format_html(
-                '<a href="{}?keep={}&drop={}">合并掉 #{}</a>',
+                '<a href="{}?keep={}&drop={}">Merge away #{}</a>',
                 reverse("contact:contact_merge"), obj.pk, other_pk, other_pk,
             )
 

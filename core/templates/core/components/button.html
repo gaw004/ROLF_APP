@@ -1,0 +1,60 @@
+{% comment %}
+按钮。**模板里不许手抄 class 串** —— 抄第二遍就会分叉，而分叉出来的第二种按钮
+单独看没问题，和第一种放在一起就是业余感的来源（design-system.md 开头那条判据）。
+
+参数：
+  label    必填，按钮上的字
+  variant  primary / secondary / danger / ghost，默认 secondary
+  href     给了就渲染成 <a>，否则是 <button>
+  type     submit / button，默认 submit（只对 <button> 有意义）
+  name     配合 value 用，同一张表单里区分多个动作
+  value
+  confirm  给了就带二次确认。⚠️ 破坏性动作必须给
+  full     真值时占满一行（窄屏上的表单按钮）
+  opens    Alpine 的状态名。给了就把这个链接变成「开弹窗」，没 JS 时照旧跳 href。
+           ⚠️ 必须同时给 href，见 _button_tag.html 里的理由
+  disabled 真值 → 渲染成灰掉、点不动、也进不了 Tab 顺序的按钮。
+           ⚠️ **不能和 `href` 同时给** —— `<a>` 没有 disabled 属性，给了会
+              静默失效：按钮看起来是活的，点下去真的会跳走。要一个「看得见但
+              不能用」的链接，只有 `<button disabled>` 一种写法。
+           ⚠️ 它是**展示**，不是权限。一个 disabled 按钮挡不住任何人 ——
+              页面上的按钮画不画从来只是界面，真正的拒绝在视图里。
+  prints   真值 → 点了调浏览器的打印对话框。只有完整版报表页用。
+           ⚠️ 它存在的理由不是省一行代码，是**药丸化那次漏掉了这个按钮** ——
+              它当时是模板里手抄的一串 class，于是全站药丸之后只有它还是方角。
+              这正是「模板里不许手抄 class 串」那条规矩防的事，而它当初是靠
+              「这里需要一个 onclick」绕开的。现在不需要绕了。
+
+⚠️ 一屏最多一个 primary。两个 primary 等于没有 primary ——
+   它的全部作用是告诉人「这一屏你最可能要做的是这件事」。
+
+⚠️ 每个变体都写了 dark: 对。留到最后统一补等于把所有模板再扫一遍。
+{% endcomment %}
+{% spaceless %}
+{% comment %}
+⚠️ **药丸形**（2026-08-06 改，原来是 `rounded-md`）。水平内边距同时从 `px-4` 加到
+   `px-5` —— 药丸的圆端会把两侧的视觉空间吃掉一部分，不加的话字看起来贴着边。
+
+⚠️ 输入框和 badge **没有**跟着变，是故意的：输入框保持方角（参照给的那张图就是
+   方角输入框配药丸按钮），badge 保持 `rounded-md` 因为它不可点 ——
+   跟着变成药丸就会让「能按的」和「不能按的」长得一样。
+{% endcomment %}
+{% comment %}
+⚠️ `btn` 和 `btn-<变体>` 是**给 CSS 用的钩子**，不是样式本身（外观仍然在下面那串
+   工具类里）。加它们的理由：深色模式下按钮要变成玻璃，而那条规则得挂在一个
+   **稳定的选择器**上 —— 靠 `.bg-brand-600` 去匹配会命中任何借用这个颜色的东西，
+   而且工具类的名字是会随设计调整而变的。
+{% endcomment %}
+{% with base="btn inline-flex items-center justify-center gap-2 rounded-full px-5 py-2 text-sm font-medium transition-colors disabled:opacity-50 disabled:pointer-events-none" %}
+{% if variant == "primary" %}
+  {% comment %}白字配 brand-600 = 5.21:1。⚠️ 别改成 brand-500，那是 3.65:1，过不了线。{% endcomment %}
+  {% with cls=base|add:" btn-primary bg-brand-600 text-white hover:bg-brand-700 dark:bg-brand-500 dark:hover:bg-brand-400 dark:text-ink-950" %}{% include "core/components/_button_tag.html" %}{% endwith %}
+{% elif variant == "danger" %}
+  {% with cls=base|add:" btn-danger bg-danger-bg text-danger-fg ring-1 ring-inset ring-danger-fg/30 hover:bg-danger-fg hover:text-white dark:bg-danger-bg-dark dark:text-danger-fg-dark dark:ring-danger-fg-dark/30 dark:hover:bg-danger-fg-dark dark:hover:text-ink-950" %}{% include "core/components/_button_tag.html" %}{% endwith %}
+{% elif variant == "ghost" %}
+  {% with cls=base|add:" btn-ghost text-ink-700 hover:bg-ink-100 dark:text-ink-200 dark:hover:bg-ink-800" %}{% include "core/components/_button_tag.html" %}{% endwith %}
+{% else %}
+  {% with cls=base|add:" btn-secondary bg-white text-ink-800 ring-1 ring-inset ring-ink-300 hover:bg-ink-50 dark:bg-ink-800 dark:text-ink-100 dark:ring-ink-600 dark:hover:bg-ink-700" %}{% include "core/components/_button_tag.html" %}{% endwith %}
+{% endif %}
+{% endwith %}
+{% endspaceless %}

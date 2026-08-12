@@ -1285,9 +1285,14 @@ class StorageSplitTests(TestCase):
     ⚠️ None of this can be checked against a real bucket from a test, so what
        is asserted is the *configuration* — that the aliases exist, that the
        models name the right one, and that no migration has frozen a backend.
-       The bucket-level settings (versioning on for memories, off for event
-       images, private for both) are a deployment checklist item, written into
-       03-roadmap.md's C3.5.
+       The bucket-level settings (private for all but `public`, and no automatic
+       deletion anywhere near memories) are a deployment checklist item, written
+       into 03-roadmap.md's C3.5.
+
+    ⚠️ **2026-08-12:** these docstrings used to explain the split as "versioning
+       on for memories, off for event images". **R2 has no object versioning**,
+       so that was never true of the store this runs on. Every assertion below
+       is unchanged and still worth making — what changed is the reason.
     """
 
     def test_every_alias_the_models_ask_for_exists(self):
@@ -1298,10 +1303,11 @@ class StorageSplitTests(TestCase):
                 self.assertIn(alias, settings.STORAGES)
 
     def test_gallery_photos_are_not_in_the_event_image_bucket(self):
-        """⚠️ The whole reason for a third bucket. Event images need versioning
-        **off** so that purge_event_images really deletes; gallery photos need
-        it **on** because they are the only files here that no backup brings
-        back. One bucket cannot hold both policies.
+        """⚠️ The whole reason for a third bucket. purge_event_images sweeps the
+        event-images bucket daily and an object lifecycle rule would be a
+        reasonable thing to add to it; gallery photos are the only files here
+        that no backup brings back, so no automatic deletion may ever be able to
+        reach them. One bucket cannot hold both policies.
 
         ⚠️ Asserted on the **callable**, not on `field.storage`. Django resolves
            a callable once, when the model class is loaded, and keeps the
@@ -1320,9 +1326,9 @@ class StorageSplitTests(TestCase):
 
     def test_gallery_photos_do_not_silently_fall_back_to_the_default_bucket(self):
         """The failure this rules out: dropping the `storage=` argument. The
-        photos would go to the event-images bucket, which has versioning off,
-        and the loss of the safety net would be visible nowhere until the day
-        somebody deleted one by mistake."""
+        photos would go to the event-images bucket — the one that gets swept —
+        and that would be visible nowhere until the day a photograph vanished
+        because an event it had nothing to do with had finished."""
         from django.core.files.storage import default_storage
 
         field = GalleryPhoto._meta.get_field("image")

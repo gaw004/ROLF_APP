@@ -522,15 +522,31 @@ preload 更是单向门 —— 退出要等月级。
 
 ### C3.5 部署到 Render
 
-- **先查 Render 支持到哪个 Python 版本**（本机跑的是 3.14）。
+- ✅ **先查 Render 支持到哪个 Python 版本**（本机跑的是 3.14）。
   ⚠️ 这一条排在最前面是有原因的：它是**唯一一件到这一步才发现就已经太晚的事** ——
   那时 Tailwind、20 个模板、prod 配置全都做完了。
-  需要的话加 `.python-version` 或降版本，**降完在本机先跑一遍全部测试**；
-- `requirements.txt` 加 `gunicorn`；
-- `render.yaml`：Web Service + **Render 自己的托管 Postgres**（2026-08-03 定），
-  健康检查指向 `/`；
+  需要的话加 `.python-version` 或降版本，**降完在本机先跑一遍全部测试**。
+
+  2026-08-12 查了，结论是**不用降**：Render 2026-02-11 之后新建的服务默认就是
+  Python 3.14.3，本机是 3.14.6。加了 `.python-version` = `3.14`（省略 patch，
+  平台取最新的那个）—— 不是因为默认值不对，是因为**默认值会自己变**，
+  而这份部署不该跟着它变。这一条最贵的分支没有发生，一行代码都没改；
+- ✅ `requirements.txt` 加 `gunicorn`（`26.0.0`，连它的 `packaging` 一起 pin）；
+- ✅ `render.yaml`：Web Service + **Render 自己的托管 Postgres**（2026-08-03 定），
+  健康检查指向 `/`。
   ⚠️ **分支盯的是 [C1.2](04-roadmap.md#c12-产物走-ci不进主分支) 那个部署分支，不是 `main`** ——
-  前端产物由 CI 推到那里。盯错分支的表现是「合进 main 了但线上没变」，且看不出为什么；
+  前端产物由 CI 推到那里。盯错分支的表现是「合进 main 了但线上没变」，且看不出为什么。
+  这一条现在有守卫了：`core/tests.py::RenderBlueprintGuardTests`，
+  连同「没有任何一档是 free」「Postgres 大版本和 CI 一致」
+  「`.python-version` 和 CI 一致」「`prod.py` 里每个 `required=True` 的变量
+  都真的发到了每个跑 Django 的服务上」一共八条。
+
+  ⚠️ 健康检查指向 `/` 有一个前提，容易在换首页时踩掉：**它必须在空库上也返回 200**。
+  第一次部署时库里一行 `HomePage` 都没有，首页 500 的话流量永远切不过去，
+  而现象是「健康检查一直红」，不是「首页坏了」。
+  `core/tests.py::test_an_empty_home_page_still_renders` 钉着这一条。
+  顺带查清了 [C3.4](#c34-生产加固) 那天会担心的事：Render 认 2xx 和 3xx 都算健康，
+  所以 `SECURE_SSL_REDIRECT` 的 301 不会把它搞红；
 - **数据库这一项有三条要当场定，不能等到出事**：
   1. ⚠️ **不能用免费档的 Postgres。** Render 的免费数据库**到期会被直接删掉**，
      而试点期间里面装的是基金会的真实数据。这不是性能问题，是数据会没。
@@ -542,29 +558,61 @@ preload 更是单向门 —— 退出要等月级。
      `pg_dump` 的客户端比服务端旧会**直接拒绝导出** ——
      而备份 cron 里那个客户端就是最容易和服务端不同步的东西。
      [C3.6](#c36-备份--恢复演练) 的恢复演练之所以要求「灌进空库 + 跑测试」，
-     防的正是这一类；
+     防的正是这一类。
+     2026-08-12 查了：18 在 Render 上有，而且已经是新库的默认值，
+     所以这一条不用妥协，`postgresMajorVersion: "18"` 直接写死；
   3. **Render 自带的备份留着当第二道，不当第一道** —— 理由见
      [D3 的 2026-08-03 补](decisions/D03-portable-postgres.md#2026-08-03-补render-的托管-postgres-过不过这一关)：
      库和备份在同一家，平台出事两边一起没；
-- `build.sh`：`pip install -r requirements.txt` → `collectstatic --noinput` → `migrate`
+- ✅ `build.sh`：`pip install -r requirements.txt` → `collectstatic --noinput`
   （原计划中间那步 `compilemessages` 随 [D23](decisions/D23-i18n-interface-only.md) 改口删掉；
-  **不需要 `npm`**，产物是 CI 构建好推过来的）；
-- **两个 Cron Job，不是一个**：备份那个在 [C3.6](#c36-备份--恢复演练)；
+  **不需要 `npm`**，产物是 CI 构建好推过来的）。
+
+  🔴 **2026-08-12 改口：`migrate` 从这里挪到 `render.yaml` 的 `preDeployCommand`。**
+  原文把它写成 `build.sh` 的第三步，那是 `preDeployCommand` 还不存在时的写法。
+  两个理由，第二个才是真的要害：三个服务在同一次 push 上**各自 build**，
+  写在 `build.sh` 里就是三份并发跑同一套迁移；而更糟的是**构建期的迁移已经改完库了** ——
+  后面任何一步让这次部署失败，留下的是「库比正在服务的代码新」，
+  那是最难收拾的一种不一致。`preDeployCommand` 在 build 之后、切流量之前跑一次，
+  失败则整次部署失败、旧版本继续服务。经过在 [revisions.md 三十三](revisions.md)。
+  ⚠️ 它跑在一台独立实例上，**对文件系统的改动不会带进正在跑的服务** ——
+  `migrate` 只改库所以没关系，但别往那一行加任何写文件的步骤；
+- ✅ **两个 Cron Job，不是一个**：备份那个在 [C3.6](#c36-备份--恢复演练)；
   另一个每天跑 `python manage.py purge_event_images`，删掉已结束活动的图片。
   ⚠️ 它**是** management command 而备份**不是**，两者不矛盾：备份必须在应用起不来
-  的时候照样能跑，而这一个要问 ORM「哪些活动结束了」——没有不依赖 Django 的版本；
+  的时候照样能跑，而这一个要问 ORM「哪些活动结束了」——没有不依赖 Django 的版本。
+
+  两个都已经写进 `render.yaml` 了，但**备份那个现在同步不过去**，是故意的：
+  它指向 `scripts/backup/`，而那个目录由 [C3.6](#c36-备份--恢复演练) 创建。
+  第一次同步 blueprint 之前，要么先把 C3.6 做完，要么把那一段临时注释掉。
+  之所以现在就写，是因为漏掉它的表现是**没有表现** —— 备份不存在不报错，
+  只在需要它的那天才发现。
+  ⚠️ 备份那个是 `runtime: docker` 而不是 `python`，理由就是上面数据库第 2 条：
+  `pg_dump` 的客户端版本必须是 18，而 Render 的 python runtime 带哪个版本
+  不由我们决定、还会随平台升级变。docker 是唯一能把「客户端就是 18」写进 git 的写法；
 - ✅ **`STORAGES` 已经接上 R2**（2026-08-06 做完，`config/settings/prod.py`）。
   三个别名各指一个桶，划分和理由在 [C3.6](#c36-备份--恢复演练) 那张表。
   ⚠️ 少了这一步的表现是：Render 的磁盘每次部署都会清空，图片
   **不是活动结束时消失，是下次部署时消失** —— 而那是随机的，看起来像 bug 不像设计。
   ⚠️ `prod.py` 缺任何一个 R2 变量就**拒绝启动**，故意的：另一种做法（退回本地磁盘）
   正是上面那种静默失败；
-- 环境变量：`DJANGO_SETTINGS_MODULE=config.settings.prod`、
+- ✅ 环境变量：`DJANGO_SETTINGS_MODULE=config.settings.prod`、
   **新生成的** `DJANGO_SECRET_KEY`、`DJANGO_ALLOWED_HOSTS`、SES 的 SMTP 四项、
   `NOTIFICATION_BACKEND`、`SENTRY_DSN`、R2 的七项
   （`R2_ENDPOINT_URL`、`R2_ACCESS_KEY_ID`、`R2_SECRET_ACCESS_KEY`、
   三个桶名、`R2_PUBLIC_BASE_HOST` —— 名字和逐条说明在 `.env.example`）
-  （`DATABASE_URL` 由 Render 注入）；
+  （`DATABASE_URL` 由 Render 注入）。
+  名字全部写进了 `render.yaml`，值一个都没有：秘密走 `sync: false`（第一次同步时
+  平台挨个问你要），`DJANGO_SECRET_KEY` 走 `generateValue: true`（Render 现生成，
+  不进任何文件，正好满足「必须是新生成的」）。
+  ⚠️ 三个跑 Django 的服务共用一个 env group，**理由不是省字数**：
+  `generateValue` 每写一次就生成一份新的值，在两个服务里各写一次
+  会得到两个不同的 `SECRET_KEY`，而那件事不报错 —— 表现是 session 和签名过的
+  链接偶尔莫名其妙失效。反过来，`sync: false` 的**不能进 group**（Render 的限制），
+  所以 R2 那七项在 web 和 purge cron 里是逐字重复的，靠守卫盯着两边一致；
+  ⚠️ **`NOTIFICATION_BACKEND` 现在指着 SES 的适配器，而 [C3.3](#c33-真实发信) 还没做。**
+  在 `prod.py` 补上 `EMAIL_*` 之前，Django 会退回默认 SMTP 后端去连 localhost:25
+  然后失败。第一次真实部署之前，要么 C3.3 先落地，要么临时把它改成 console backend；
 - **先用 `xxx.onrender.com` 跑通**，挂自定义域名留到 C5
   （域名本身在 [C3.0](#c30-域名--ses--最先做因为它靠别人) 就买好了，那是给发信用的）；
 - ⚠️ **别用 Render 的免费档跑试点。** 免费 Web Service 无请求十几分钟就休眠，
@@ -609,24 +657,33 @@ R2 和 Sentry（都在免费额度内）—— 合计**每月十几美元量级*
   理由见 [`phase-c.md` 的备份落点](phase-c.md#备份脚本的落点)）；
 - Render Cron Job 每天跑一次；
 - ⚠️ **四个桶，不是两个**（2026-08-05 定了前两个，2026-08-06 加到四个）。
-  每一个桶是「谁能读」和「删得掉吗」两个问题的一组答案，而**一个桶装不下两组答案** ——
-  合并的诱惑一直是那句「反正都是 R2」。开通那天照这张表建：
+  每一个桶是「谁能读」和「什么东西有权删它」两个问题的一组答案，
+  而**一个桶装不下两组答案** —— 合并的诱惑一直是那句「反正都是 R2」。
+  开通那天照这张表建：
 
-  | 桶 | 环境变量 | 谁能读 | 版本控制 |
+  | 桶 | 环境变量 | 谁能读 | 什么能删它 |
   |---|---|---|---|
   | 备份 | 脚本自己的（不经过 Django） | 私有 | — |
-  | 活动图片 | `R2_BUCKET_EVENT_IMAGES` | 私有，签名 URL | ⚠️ **关** |
-  | memories | `R2_BUCKET_MEMORIES` | 私有，签名 URL | ⚠️ **开** |
+  | 活动图片 | `R2_BUCKET_EVENT_IMAGES` | 私有，签名 URL | `purge_event_images` 每天扫 |
+  | memories | `R2_BUCKET_MEMORIES` | 私有，签名 URL | ⚠️ **只有人手动删** |
   | 首页素材 | `R2_BUCKET_PUBLIC` | 公开 | — |
 
-- ⚠️ **活动图片桶不能开版本控制。** 开了的话
-  [`purge_event_images`](#c35-部署到-render) 的「删除」只是加一个删除标记，
-  旧版本还在 —— 而**控制台上看确实显示已删除**。
-  「活动结束后图片不再存在于任何地方」这条要求，会以一种看起来已经满足的方式落空；
-- ⚠️ **memories 桶必须开版本控制 —— 和上一条正相反，这就是它得单开一个桶的全部理由。**
-  照片墙上的照片是全系统唯一**既不能重建、又不在 `pg_dump` 里**的东西：
-  库能从 dump 恢复，活动图片本来就该消失，只有这些误删一次就永久没了。
-  桶的版本控制是它唯一的安全网；
+- ⚠️ **memories 桶不许挂任何 lifecycle 规则，活动图片桶将来可以。**
+  这就是它得单开一个桶的理由：照片墙上的照片是全系统唯一**既不能重建、
+  又不在 `pg_dump` 里**的东西 —— 库能从 dump 恢复，活动图片本来就该消失，
+  只有这些误删一次就永久没了。给活动图片桶挂的任何自动清理，
+  挂上去那天就同时挂在了照片墙上；
+
+- 🔴 **2026-08-12 改口：R2 没有 object versioning。**
+  这两条原来写的是「活动图片桶版本控制必须**关**（开了 `purge_event_images` 的删除
+  只是个标记，而控制台上看确实显示已删除）· memories 桶必须**开**，那是它唯一的安全网」。
+  去控制台上建桶时发现**这个功能不存在** —— R2 只有 bucket lock（保留策略）
+  和 lifecycle 规则。于是前一条天然成立（⚠️ 换到 S3 / B2 时它立刻又是一个要守的开关），
+  后一条**做不到，主动接受**：照片误删一次永久没了。
+  ⚠️ **不用 bucket lock 顶替** —— 它会连正当的撤下请求一起挡住，
+  而 [C3.10](#c310-一页隐私说明) 正要承诺「怎么要求删除」。
+  完整经过在 [D29](decisions/D29-memories-wall.md#2026-08-12-改口r2-没有-object-versioning)，
+  代价记在 [`phase-c.md` 的已知缺口](phase-c.md#五已知缺口与处置)；
 - ⚠️ **首页素材桶是公开的，而且必须是。** 首页是全站唯一不需要登录的页面，
   给公开内容签发限时 URL 是自相矛盾的，还会让那个 hero 视频（每个访客都要下完整份）
   在 CDN 上一次都缓存不住。
@@ -937,12 +994,14 @@ simple-history（会不留 history 行，而那是 `undo_attendance()` 敢删 ho
       [`phase-c.md`](phase-c.md#样式的落点css-只许出现在两个地方)）
 - [ ] 把所有 `x-` 属性删掉、关掉 JavaScript，**每个写操作仍然能完成**
       （判据见 [D24](decisions/D24-htmx-alpine-tailwind.md#渐进增强的口径只管写操作)）
-- [ ] **备份恢复演练三样都做过**；R2 的四个桶**逐个确认过读权限和版本控制**
-      —— 备份 / 活动图片 / memories 三个私有，首页素材公开；
-      活动图片桶版本控制**关**，memories 桶版本控制**开**。
-      ⚠️ 这四项没有一项能靠代码或测试验出来，只能在 R2 控制台上看，
-      而其中两项弄反的表现都是「一切正常」：图片桶开了版本控制的话删除是假的，
-      memories 桶没开的话误删一次就永久没了
+- [ ] **备份恢复演练三样都做过**；R2 的四个桶**逐个点开确认过**三件事 ——
+      读权限（备份 / 活动图片 / memories 三个私有，首页素材公开）·
+      **四个桶都没有 lifecycle 规则**（尤其 memories）· **都没有设 bucket lock**。
+      ⚠️ 这几项没有一项能靠代码或测试验出来，只能在 R2 控制台上看，
+      而弄错的表现都是「一切正常」：memories 桶上挂一条自动清理，
+      照片会在某天集体消失；设了 bucket lock，正当的撤下请求会删不掉。
+      ⚠️ 2026-08-12：这一条原来查的是「版本控制开/关」，
+      而 **R2 没有 object versioning**，见 [C3.6](#c36-备份--恢复演练)
 - [ ] ⭐ **越权实测**：A ministry 的 admin 打 B ministry 三个 URL 全 403；
       志愿者打 `/admin/` 得 403。**且 403 页面上读得到为什么**
 - [ ] 线上完成一次「注册 → 收密码重置邮件 → 改密 → 登录」，

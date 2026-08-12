@@ -22,12 +22,17 @@ from django.core.files.storage import storages
 
 
 def memories_storage():
-    """Gallery photos. Private bucket, versioning on, URLs signed for an hour.
+    """Gallery photos. Private bucket, URLs signed for an hour.
 
-    ⚠️ Not the `default` bucket, and the reason is a policy that cannot be held
-       by one bucket twice: event images need versioning **off** so that
-       purge_event_images really deletes, and these need it **on** because they
-       are the only files in the system that no backup can bring back.
+    ⚠️ Not the `default` bucket, and the reason is what is allowed to delete
+       from each: purge_event_images sweeps the event-images bucket daily, and
+       whatever automatic deletion that bucket is given must never be able to
+       reach these — they are the only files in the system that no backup can
+       bring back.
+
+    ⚠️ **2026-08-12:** this used to say "versioning on", and that was the stated
+       reason for the split. **R2 has no object versioning.** Nothing undoes a
+       delete here now; see the note over STORAGES in config/settings/base.py.
     """
     return storages["memories"]
 

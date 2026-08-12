@@ -50,11 +50,20 @@ class GalleryPhoto(TimeStampedModel):
        this photo again, so the foundation should keep its own originals.
 
     ⚠️ These files are the only ones in the system that **no backup can bring
-       back**. The pg_dump covers columns, and these are objects in a bucket, so
-       the bucket's own versioning is the whole of the safety net. That is why
-       Memories has a bucket to itself rather than sharing the event-images one,
-       which must have versioning **off** — the note over STORAGES in
-       config/settings/base.py has the full reasoning.
+       back**. The pg_dump covers columns, and these are objects in a bucket.
+
+    ⚠️ **And nothing catches them if they fall (2026-08-12).** This docstring
+       used to say the bucket's own versioning was the whole of the safety net.
+       **R2 has no object versioning** — that sentence was never true of the
+       store this actually runs on. A bucket lock was refused on purpose: a
+       retention policy also refuses the *legitimate* takedown ("please remove
+       the photo of my child"), which the privacy page has to promise. So one
+       mis-click on gallery/manage is permanent, and the confirm on that button
+       is the whole of what stands in front of it. Memories still has a bucket
+       to itself, for a different reason — whatever automatic deletion the
+       event-images bucket is given must never be able to reach these. Full
+       reasoning over STORAGES in config/settings/base.py; the accepted cost is
+       in docs/planning/phase-c.md's known gaps.
     """
 
     #: Null means foundation-wide. A ministry admin's uploads always carry

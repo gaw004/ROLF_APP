@@ -301,22 +301,39 @@ EVENT_IMAGE_MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 
 # --- Where each kind of upload is stored -------------------------------------
 # ⚠️ **Four aliases, and the split is a requirement rather than tidiness.**
-#    Each one is a different answer to "who may read this" and "may a delete be
-#    undone", and no single bucket can hold two different answers. Decided
+#    Each one is a different answer to "who may read this" and "what is allowed
+#    to delete it", and no single bucket can hold two different answers. Decided
 #    2026-08-06 alongside the Memories page; the reasoning per alias:
 #
 #      default    Event images. Private — every signed-in volunteer may see
-#                 them, nobody else. ⚠️ Its bucket must have **versioning off**:
-#                 with it on, purge_event_images' delete is only a marker and
-#                 the old version is still there, while the console cheerfully
-#                 shows the object as deleted. "Gone after the event" would fail
-#                 in a way that looks like it succeeded.
+#                 them, nobody else. purge_event_images sweeps this bucket
+#                 daily, so an object lifecycle rule ("drop anything older than
+#                 N days") would be a reasonable thing to add here one day.
+#                 ⚠️ It must have **no versioning**. R2 has no such feature at
+#                 all, so today that holds for free — but on S3 or B2 it becomes
+#                 a switch somebody has to keep off, because with versioning on
+#                 the purge's delete is only a marker while the console
+#                 cheerfully shows the object as deleted. "Gone after the event"
+#                 would fail in a way that looks like it succeeded.
 #
-#      memories   Gallery photos. Private, and its bucket **has versioning on**
-#                 — the exact opposite of `default`, which is the whole reason
-#                 it cannot share that bucket. These are the only files in the
-#                 system that can be neither regenerated nor restored from the
-#                 pg_dump, so an accidental delete is permanent without it.
+#      memories   Gallery photos. Private, and the reason it cannot share the
+#                 bucket above is the sentence just before that ⚠️: whatever
+#                 automatic deletion `default` is given must never be able to
+#                 reach these. They are the only files in the system that can be
+#                 neither regenerated nor restored from the pg_dump.
+#
+#                 ⚠️ **2026-08-12: there is no safety net under them, and that
+#                    is now a decision rather than an oversight.** This comment
+#                    used to say the bucket had versioning on and that this was
+#                    "the whole reason" for the split. **R2 has no object
+#                    versioning** — it was never true. Deliberately not replaced
+#                    with a bucket lock: a retention policy also refuses the
+#                    *legitimate* takedown ("please remove the photo of my
+#                    child"), which the privacy page has to promise. So one
+#                    mis-click on gallery/manage deletes a photograph for good,
+#                    and the only thing in the way is the confirm on that
+#                    button. Written down in phase-c.md's known gaps; the
+#                    change of position is in revisions.md.
 #
 #      public     The front page's picture and video. **Public**, because that
 #                 page is the one thing here that needs no login. Signing a URL

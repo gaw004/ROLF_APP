@@ -3000,3 +3000,226 @@ class DialogsStayHiddenWhenClosedGuardTests(TestCase):
                             "justify-content: center"):
             with self.subTest(declaration=declaration):
                 self.assertIn(declaration, block)
+
+
+def _without_comments(text):
+    """The same text with whole-line comments dropped.
+
+    Every check below matches on `key: value` lines, and the prose above them
+    is full of the very strings being searched for — `branch`, `free`,
+    `migrate`. Stripping first is cheaper than making six regexes clever.
+    """
+    return "\n".join(
+        line for line in text.splitlines() if not line.lstrip().startswith("#"))
+
+
+class RenderBlueprintGuardTests(TestCase):
+    """Lint-as-test: the deployment settings whose failure mode is silence.
+
+    ⚠️ Everything in here shares one property, and it is the reason these are
+       tests rather than a checklist in C3.5: **none of them produce an error
+       message naming the real cause.** Deploying the wrong branch succeeds.
+       A free database is deleted on its expiry date, not on a deploy. A
+       pg_dump major version mismatch is discovered on the day the backup is
+       needed. This project's own record says a rule that lives only in an
+       acceptance list does not survive the next round (the `views.py` Sum rule
+       and the four admin hooks both had to be promoted here later); these
+       start here.
+
+    ⚠️ Deliberately parsed with regexes rather than PyYAML. `yaml` is not in
+       requirements.txt — it is in the environment only as somebody else's
+       transitive dependency, and a guard that stops running when an unrelated
+       package is dropped is worse than no guard, because it stays green.
+    """
+
+    @property
+    def blueprint(self):
+        return _without_comments(
+            (Path(settings.BASE_DIR) / "render.yaml").read_text(encoding="utf-8"))
+
+    @property
+    def ci_workflow(self):
+        return (Path(settings.BASE_DIR) / ".github" / "workflows" / "ci.yml"
+                ).read_text(encoding="utf-8")
+
+    @property
+    def services(self):
+        """The `services:` section, as {name: block text}."""
+        section = self.blueprint.split("\nservices:\n", 1)[1].split("\ndatabases:\n")[0]
+        blocks = {}
+        for chunk in re.split(r"^  - type:", section, flags=re.M)[1:]:
+            name = re.search(r"^    name:\s*(\S+)", chunk, flags=re.M)
+            self.assertIsNotNone(name, f"a service has no name:\n{chunk[:200]}")
+            blocks[name.group(1)] = chunk
+        self.assertNotEqual(blocks, {}, "no services parsed out of render.yaml")
+        return blocks
+
+    def test_every_service_deploys_from_the_deploy_branch(self):
+        """⚠️ The one in deploy-branch.yml's warning, made executable.
+
+        `main` has no static/css/app.css — the products are built by CI and
+        pushed to `deploy`. Pointing a service at `main` gives two failures,
+        and the bad one is the quiet one: "merged to main but the site did not
+        change", with CI green and Render reporting a successful deploy, since
+        it did successfully deploy the older code.
+        """
+        for name, block in self.services.items():
+            with self.subTest(service=name):
+                self.assertEqual(
+                    re.findall(r"^\s*branch:\s*(\S+)", block, flags=re.M),
+                    ["deploy"],
+                    f"{name} must deploy from the branch CI pushes products to")
+
+    def test_nothing_runs_on_a_free_plan(self):
+        """Two different disasters wearing one word.
+
+        On the database it is data loss — Render deletes a free database when
+        it expires, and during the pilot that database holds the foundation's
+        real records. On the web service it is the foundation's first
+        impression: a free instance sleeps after minutes of quiet and takes
+        tens of seconds to wake, which reads as "this thing is broken" and is
+        invisible from a development machine.
+        """
+        plans = re.findall(r"^\s*plan:\s*(\S+)", self.blueprint, flags=re.M)
+        self.assertNotEqual(plans, [], "no plan: lines found — has the file moved?")
+        self.assertNotIn("free", plans, f"a free plan is declared: {plans}")
+
+    def test_the_production_postgres_matches_the_major_version_ci_runs(self):
+        """⚠️ pg_dump refuses outright when its client is older than the server.
+
+        So the backup cron — the piece most likely to drift from the server —
+        is the piece this protects, and C3.6's restore drill is what would
+        otherwise discover it, on the day it is needed. CI already pins the
+        same number for a related reason (a cross-version difference makes CI
+        green while a laptop is red); one number, one place to change it.
+        """
+        declared = re.search(
+            r'^\s*postgresMajorVersion:\s*"(\d+)"', self.blueprint, flags=re.M)
+        self.assertIsNotNone(declared, "render.yaml pins no Postgres major version")
+        in_ci = re.search(r"image:\s*postgres:(\d+)", self.ci_workflow)
+        self.assertIsNotNone(in_ci, "ci.yml runs no postgres service image")
+        self.assertEqual(
+            declared.group(1), in_ci.group(1),
+            "production Postgres and the one CI tests against are different "
+            "major versions")
+
+    def test_the_pinned_python_matches_the_one_ci_runs(self):
+        """C3.5's first bullet, kept true after the day it was checked.
+
+        Render's default moves on its own schedule; `.python-version` is what
+        stops it moving under this deployment. It is worth nothing if CI is
+        meanwhile testing a different one.
+        """
+        pinned = (Path(settings.BASE_DIR) / ".python-version"
+                  ).read_text(encoding="utf-8").strip()
+        in_ci = re.search(r'python-version:\s*"([\d.]+)"', self.ci_workflow)
+        self.assertIsNotNone(in_ci, "ci.yml pins no Python version")
+        self.assertEqual(
+            pinned, in_ci.group(1),
+            "the deployment and CI would run different Python versions")
+
+    def test_every_variable_the_settings_refuse_to_start_without_is_declared(self):
+        """⚠️ `required=True` means the process does not start. Not degrade.
+
+        That is the correct behaviour and it was chosen deliberately (falling
+        back to local disk would make photographs vanish at the next deploy,
+        which looks like a bug rather than a missing setting). The cost of
+        choosing it is that a variable missing from this blueprint is a service
+        that will not boot — and the first place it bites is not the web
+        service but `build.sh`, whose collectstatic imports prod.py and stops
+        with "Missing required environment variable" before collecting
+        anything.
+
+        ⚠️ Checked **per service**, not against the file as a whole. Whether
+           the web service happens to name a variable says nothing about the
+           purge cron, and the two failures are not equally visible: the web
+           one is caught by the first person to open the site, while the cron
+           one is a job that dies at 2am with nobody watching, and whose
+           absence looks exactly like "there was nothing to purge".
+
+        Which services must satisfy this is derived rather than listed: it is
+        exactly those pulling in the `rolf-django` group, because that group is
+        what carries DJANGO_SETTINGS_MODULE. The backup cron is deliberately
+        not one of them — it is a shell script and a URL, so that it still runs
+        on the day Django cannot start.
+        """
+        required = set()
+        for path in sorted((Path(settings.BASE_DIR) / "config" / "settings").glob("*.py")):
+            required |= set(re.findall(
+                r'env\(\s*"([A-Z0-9_]+)"\s*,\s*required=True',
+                path.read_text(encoding="utf-8")))
+        self.assertNotEqual(
+            required, set(), "no required=True variables found — has env() changed?")
+
+        group = self.blueprint.split("\nservices:\n", 1)[0]
+        shared = set(re.findall(r"^\s*- key:\s*(\S+)", group, flags=re.M))
+
+        django_services = {
+            name: block for name, block in self.services.items()
+            if "fromGroup: rolf-django" in block
+        }
+        self.assertGreaterEqual(
+            len(django_services), 2,
+            "expected the web service and the purge cron to run Django")
+        for name, block in django_services.items():
+            with self.subTest(service=name):
+                declared = shared | set(
+                    re.findall(r"^\s*- key:\s*(\S+)", block, flags=re.M))
+                self.assertEqual(
+                    required - declared, set(),
+                    f"{name} imports settings that refuse to start without "
+                    f"these, and nothing gives them to it: "
+                    f"{sorted(required - declared)}")
+
+    def test_the_purge_cron_points_at_the_same_buckets_as_the_web_service(self):
+        """⚠️ The duplication Render's own rules force, watched.
+
+        `sync: false` cannot be declared in an environment group, so the seven
+        R2 variables are written out twice. The dangerous half is not omission
+        — prod.py reads all seven at import and refuses to start, so a missing
+        one is loud. It is divergence: a purge job aimed at a different bucket
+        deletes the wrong objects and reports success.
+        """
+        def r2_keys(block):
+            return sorted(set(re.findall(r"^\s*- key:\s*(R2_\S+)", block, flags=re.M)))
+
+        services = self.services
+        web = r2_keys(services["rolf-app"])
+        purge = r2_keys(services["rolf-purge-event-images"])
+        self.assertNotEqual(web, [], "the web service declares no R2 variables")
+        self.assertEqual(
+            web, purge,
+            "the web service and the purge cron name different R2 variables; "
+            "the purge would sweep a different bucket than the one uploads go to")
+
+    def test_migrate_runs_once_before_the_cutover_and_not_during_the_build(self):
+        """⚠️ Both halves, because either one alone can be satisfied wrongly.
+
+        Moved out of build.sh on 2026-08-10 (revisions.md 三十三). Three
+        services build on the same push, so a migrate in build.sh is three
+        concurrent runs of one migration set; and a build-time migrate has
+        already changed the database by the time a later step fails the deploy,
+        which leaves the schema ahead of the code that is still serving.
+        """
+        build = _without_comments(
+            (Path(settings.BASE_DIR) / "build.sh").read_text(encoding="utf-8"))
+        self.assertNotIn(
+            "migrate", build,
+            "migrate belongs in render.yaml's preDeployCommand — in build.sh "
+            "it runs once per service, concurrently")
+        self.assertRegex(
+            self.blueprint, r"preDeployCommand:.*migrate",
+            "nothing runs migrations any more: they left build.sh and no "
+            "preDeployCommand picked them up")
+
+    def test_build_sh_is_executable(self):
+        """render.yaml invokes it as `./build.sh`.
+
+        Without the mode bit committed, every build stops at "permission
+        denied" — on the platform, never on the machine where the file was
+        written, because creating a file and running it locally are the same
+        act there.
+        """
+        self.assertTrue(
+            os.access(Path(settings.BASE_DIR) / "build.sh", os.X_OK),
+            "build.sh has lost its executable bit (git tracks it as 100755)")

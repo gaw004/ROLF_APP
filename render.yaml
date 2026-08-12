@@ -1,0 +1,303 @@
+# C3.5 —— 部署到 Render 的全部形态：一个 web + 两个 cron + 一个 Postgres。
+#
+# 分工照 phase-c.md「部署配置的落点」那张表：
+#
+#   进这个文件（进 git）  服务形态、构建命令、健康检查路径、cron 时刻表
+#   进平台（不进 git）    秘密，以及会变的域名
+#
+# 所以下面凡是 `sync: false` 的，意思都是「**名字**进 git、**值**留在 Render 的
+# 面板上」—— 第一次同步这份 blueprint 时它会挨个问你要值。生产的
+# DJANGO_SECRET_KEY 连问都不问：`generateValue: true`，由 Render 现生成，
+# 从来不进任何文件（早先硬编码在仓库里的那个已经进了 git 历史，永久烧掉）。
+#
+# ⚠️ **反过来的那一半同样要记住：这个文件里写了 `value:` 的东西，每次同步
+#    blueprint 都会被重新写回平台。** 所以「在面板上临时调一下」这种操作，只对
+#    这里**没有**列出的变量成立 —— 见下面 REGISTRATION_RATELIMIT_* 那条注释，
+#    它是故意不写进来的。
+#
+# ⚠️ **rolf-backup 这个服务今天同步不过去**，是已知的、故意留下的：它指向
+#    `scripts/backup/`，而那个目录由 C3.6 创建。第一次同步之前要么先把 C3.6
+#    做完，要么把那一段临时注释掉。写在这里而不是等 C3.6 再补，是因为
+#    「两个 cron，不是一个」这件事漏掉的表现是**没有表现** —— 备份不存在
+#    不会报错，只会在需要它的那天才发现。
+#
+# ⚠️ **三个服务的 `branch` 全是 `deploy`，不是 `main`。** 前端产物由
+#    `.github/workflows/deploy-branch.yml` 构建后推到那个分支，`main` 上根本
+#    没有 static/css/app.css。盯错分支的表现有两种，都不好查：好一点的那种是
+#    build.sh 的 collectstatic 报 MissingFileError；坏的那种是「合进 main 了但
+#    线上没变」—— CI 绿，Render 也说部署成功，因为它确实成功地部署了旧代码。
+#    `core/tests.py::RenderBlueprintGuardTests` 守着这一条。
+#
+#    （这里说的是**服务**拉哪个分支的代码。blueprint 文件本身从哪个分支读，是
+#    创建 blueprint 时另外选的 —— 两者可以不同，而且 deploy 分支是拿 main 的
+#    整棵树重建的，这个文件在两边都在，选哪个都不会读到旧版本。）
+
+# ---------------------------------------------------------------------------
+# 共用的环境变量
+#
+# ⚠️ 这个组存在的理由不是省字数，是 **`generateValue` 每写一次就生成一份新的
+#    值**：在两个服务里各写一次 `generateValue: true`，得到的是**两个不同的
+#    SECRET_KEY**，而那件事不报错 —— 它的表现是 cron 跑得好好的，只有 session
+#    和签名过的链接偶尔莫名其妙失效。
+#
+# ⚠️ 而 `sync: false` 的那些**不能进组**（Render 明文禁止在组里定义 sync:false）。
+#    所以下面 R2 那七项在 web 和 purge cron 里是**逐字重复的**：改一个必须改
+#    另一个，改漏了的表现是 purge 去删另一个桶里的东西。没有别的写法，只能
+#    盯着 —— `RenderBlueprintGuardTests` 把「两边那七项必须一致」变成了红灯。
+envVarGroups:
+  - name: rolf-django
+    envVars:
+      # 不是秘密，也不该变 —— 照落点表，这种就该写死在 git 里。
+      - key: DJANGO_SETTINGS_MODULE
+        value: config.settings.prod
+
+      # Render 现生成一个 256 位随机值，只此一次，只在平台上，不进任何文件。
+      # ⚠️ 生产的这一个**必须是新生成的**：早先硬编码在仓库里的那个已经进了
+      #    git 历史，按 Phase A 的记录永久烧掉，不能再用。
+      - key: DJANGO_SECRET_KEY
+        generateValue: true
+
+      # ⚠️ base.py 本来就默认 False，写在这里是**多一道**：凡是这个文件里写了
+      #    值的变量，每次 blueprint 同步都会被写回平台。也就是说，哪天有人为了
+      #    查一个线上问题在面板上把它点成 True，下一次同步会把它按回去。
+      #    DEBUG=True 的生产站会把 SECRET_KEY 和全部 settings 印在报错页上，
+      #    这是少数几个「值得让平台上改不动」的变量之一。
+      - key: DJANGO_DEBUG
+        value: "False"
+
+      # ⚠️ **这一行在 C3.3 落地之前是个雷。** 适配器（core/notifications/
+      #    django_email.py）早就写好了，但 prod.py 现在还没有 EMAIL_HOST /
+      #    PORT / USER / PASSWORD 那几行，于是 Django 会退回默认的 SMTP 后端、
+      #    去连 localhost:25 然后失败。第一次真实部署之前，要么 C3.3 已经做完，
+      #    要么把这里临时改成 core.notifications.console.ConsoleBackend
+      #    （一样发不出去，但会印在 Render 的日志里，而不是抛异常）。
+      - key: NOTIFICATION_BACKEND
+        value: core.notifications.django_email.DjangoEmailBackend
+
+      # ⚠️ **REGISTRATION_RATELIMIT_PER_IP / _SITE 故意不在这里。** .env.example
+      #    承诺过「为一次注册活动调高它，重启即可，不用部署」—— 而那个承诺只有
+      #    在这个文件不管它们的时候才成立：一旦写进来，面板上调高的值会在下一次
+      #    blueprint 同步时被静默按回去，恰好在活动当天。要用就在面板上直接加。
+
+services:
+  # -------------------------------------------------------------------------
+  # 应用本体。
+  - type: web
+    name: rolf-app
+    runtime: python
+    # ⚠️ **不能是 free。** 免费档无请求十几分钟就休眠，冷启动几十秒 ——
+    #    基金会第一次点开链接等半分钟，读到的是「这东西坏了」，而你在本机
+    #    永远看不到这个现象。starter 是最便宜的付费档。
+    plan: starter
+    # 基金会在 Santa Clara。库必须和它同区，否则 fromDatabase 给的那条内网
+    # 连接串跨区，每个查询多一趟。
+    region: oregon
+    branch: deploy
+    autoDeployTrigger: commit
+
+    # 首页，全站唯一不需要登录的页面（D25），所以它能当健康检查用。
+    #
+    # ⚠️ 它必须在**空库**上也返回 200，否则第一次部署会卡在健康检查上、永远
+    #    切不了流量 —— 那时库里一行 HomePage 都没有。这一条不是这里许的愿：
+    #    core/tests.py::test_an_empty_home_page_still_renders 钉着它。
+    #
+    # ⚠️ 顺带结掉 C3.4 那天会担心的一件事：Render 认 **2xx 和 3xx 都算健康**，
+    #    所以 SECURE_SSL_REDIRECT 打开之后那个 301 不会把健康检查搞红。
+    #    （查过文档，不是推测。）
+    #
+    # ⚠️ 第一次部署最常见的失败长这样：健康检查一直红，日志里是 DisallowedHost。
+    #    那不是健康检查的问题，是 DJANGO_ALLOWED_HOSTS 还没填对 —— 先看日志
+    #    再改这里。
+    healthCheckPath: /
+
+    buildCommand: "./build.sh"
+
+    # ⚠️ **migrate 在这里，不在 build.sh 里**（2026-08-10 改口，原计划在
+    #    build.sh，经过见 revisions.md 三十三）。两个理由：
+    #      · 上面三个服务在同一次 push 上**各自 build**，migrate 写进 build.sh
+    #        就是三份并发跑同一套迁移；
+    #      · preDeployCommand 在 build 之后、切流量之前跑，失败则整次部署失败、
+    #        **旧版本继续服务**。写在 build 里的话，迁移已经改完库了，而新代码
+    #        可能因为后面某一步没上去 —— 库比代码新，是最难收拾的那种不一致。
+    #    ⚠️ 它跑在一台独立的实例上，对文件系统的改动不会带进正在跑的服务；
+    #       migrate 只改库，所以没关系，但别往这里加任何写文件的步骤。
+    preDeployCommand: "python manage.py migrate --noinput"
+
+    # ⚠️ workers × threads = 8，这是这个实例能同时占用的最大数据库连接数
+    #    （CONN_MAX_AGE 没设，Django 每个请求开一条、用完就还）。D28 留的那个
+    #    「核对 gunicorn 对 Render Postgres 连接上限的算式」就是这条：8 条，
+    #    加上两个 cron 各自的一条，任何档位都绰绰有余。
+    # ⚠️ 另一头是内存，starter 是 512MB：两个 worker 各驮一份 Django + boto3，
+    #    静息约 150MB 一个，余量够但不宽裕。**最可能顶破它的是 Pillow** ——
+    #    缩图时整张图在内存里展开，而上传上限是 10MB（EVENT_IMAGE_MAX_UPLOAD_
+    #    BYTES）。真顶破了的表现是间歇 502 加实例重启，不是报错；那时候是升
+    #    standard，不是调小这两个数字。
+    # ⚠️ --timeout 60 而不是默认的 30：R4–R8 那份能打印的完整版报表是全站最慢的
+    #    请求，30 秒会在数据攒起来之后的某一天开始把它掐掉。
+    # ⚠️ 两条 log 都打到标准流，Render 才抓得到 —— C3.8 的 LOGGING 兜底靠这个。
+    startCommand: >-
+      gunicorn config.wsgi:application
+      --bind 0.0.0.0:$PORT
+      --worker-class gthread
+      --workers 2
+      --threads 4
+      --timeout 60
+      --access-logfile -
+      --error-logfile -
+
+    envVars:
+      - fromGroup: rolf-django
+
+      # 内网连接串。base.py 是 required=True 地读它的，所以这一项缺了不是
+      # 「连不上库」，是**进程起不来** —— 包括 build.sh 里的 collectstatic，
+      # 它 import settings 就要这个值。
+      - key: DATABASE_URL
+        fromDatabase:
+          name: rolf-postgres
+          property: connectionString
+
+      # ⚠️ 只有 web 需要它，cron 不看 Host 头。先填 xxx.onrender.com；
+      #    C5 挂自定义域名那天，**这一项和 CSRF_TRUSTED_ORIGINS 必须同时改** ——
+      #    只改这一项的话，所有 POST 表单会被拒，而页面本身看着是好的。
+      - key: DJANGO_ALLOWED_HOSTS
+        sync: false
+
+      # R2 七项。逐条说明在 .env.example；prod.py 缺任何一项都**拒绝启动**，
+      # 故意的 —— 另一种做法（退回本地磁盘）会让照片在下次部署时随机消失。
+      - key: R2_ENDPOINT_URL
+        sync: false
+      - key: R2_ACCESS_KEY_ID
+        sync: false
+      - key: R2_SECRET_ACCESS_KEY
+        sync: false
+      - key: R2_BUCKET_EVENT_IMAGES
+        sync: false
+      - key: R2_BUCKET_MEMORIES
+        sync: false
+      - key: R2_BUCKET_PUBLIC
+        sync: false
+      - key: R2_PUBLIC_BASE_HOST
+        sync: false
+
+      # C3.3 的 SES。四项 SMTP 凭据，prod.py 接上之前设了也没人读。
+      - key: EMAIL_HOST
+        sync: false
+      - key: EMAIL_PORT
+        sync: false
+      - key: EMAIL_HOST_USER
+        sync: false
+      - key: EMAIL_HOST_PASSWORD
+        sync: false
+
+      # C3.7 的错误可见性。留空则不上报，这是 sentry-sdk 自己的口径。
+      - key: SENTRY_DSN
+        sync: false
+
+      # 「Continue with Google」那个按钮。⚠️ 空值 = **按钮根本不画**，
+      # 所以它没填的表现是注册页少一个控件，不是报错。
+      - key: GOOGLE_OAUTH_CLIENT_ID
+        sync: false
+
+  # -------------------------------------------------------------------------
+  # 每天清掉已结束活动的图片。
+  #
+  # ⚠️ 它**是** management command，而下面那个备份**不是**，两者不矛盾：备份必须
+  #    在应用起不来的时候照样能跑，而这一个要问 ORM「哪些活动结束了」——
+  #    没有不依赖 Django 的版本。理由同 purge_event_images.py 的 docstring。
+  - type: cron
+    name: rolf-purge-event-images
+    runtime: python
+    plan: starter
+    region: oregon
+    branch: deploy
+    # ⚠️ **Render 的 cron 一律 UTC。** 10:00 UTC = 太平洋时间凌晨 2 点或 3 点
+    #    （夏令时会让它自己漂一小时）。挑这个点就是为了让那一小时的漂移不重要。
+    schedule: "0 10 * * *"
+    # ⚠️ 不跑 build.sh —— 它里面的 collectstatic 对一个 cron 毫无意义，而且
+    #    那一步是全构建里最慢的。migrate 也不在这里（见 web 的 preDeployCommand）。
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "python manage.py purge_event_images"
+    envVars:
+      - fromGroup: rolf-django
+      - key: DATABASE_URL
+        fromDatabase:
+          name: rolf-postgres
+          property: connectionString
+      # ⚠️ 和 web 那七项**必须逐字一致**。它删的是 default 那个 alias 指向的桶，
+      #    填错一个字就是去删别人的桶 —— 而 prod.py 在 import 期就把七项全读了，
+      #    所以少填一项它会拒绝启动（这反而是好消息，填**错**才是坏消息）。
+      - key: R2_ENDPOINT_URL
+        sync: false
+      - key: R2_ACCESS_KEY_ID
+        sync: false
+      - key: R2_SECRET_ACCESS_KEY
+        sync: false
+      - key: R2_BUCKET_EVENT_IMAGES
+        sync: false
+      - key: R2_BUCKET_MEMORIES
+        sync: false
+      - key: R2_BUCKET_PUBLIC
+        sync: false
+      - key: R2_PUBLIC_BASE_HOST
+        sync: false
+
+  # -------------------------------------------------------------------------
+  # 每天 pg_dump 一份推到 R2。**脚本和 Dockerfile 由 C3.6 创建**，
+  # 在那之前这一段会让整份 blueprint 同步失败（见文件开头的 ⚠️）。
+  #
+  # ⚠️ **为什么它是 docker 而不是 python**：pg_dump 的客户端版本比服务端旧会
+  #    **直接拒绝导出**，而库是 18。Render 的 python runtime 带的是哪个版本的
+  #    postgresql-client 不由我们决定，也会随平台升级变 —— 而它变的那天，表现是
+  #    备份 cron 开始红，或者更糟，继续绿但导出的东西恢复不了。docker 是唯一能
+  #    把「客户端就是 18」这件事写进 git 的写法。
+  #
+  # ⚠️ **不写 startCommand，用镜像自己的 CMD** —— 备份的命令行和它要跑的脚本
+  #    放在一起，而不是分居两个文件。
+  #
+  # ⚠️ 它的 R2 凭据是**另一套**（BACKUP_ 前缀），指向第四个桶。四个桶的划分和
+  #    理由在 C3.6 那张表：备份桶里是明文的未成年人数据，它和照片、和首页素材
+  #    不能共用一把钥匙。名字是这里先起的，C3.6 写脚本时以脚本为准。
+  - type: cron
+    name: rolf-backup
+    runtime: docker
+    plan: starter
+    region: oregon
+    branch: deploy
+    # 09:00 UTC，排在 purge 前面一小时。两者其实互不影响（活动图片本来就不进
+    # dump），排前面只是让「今天备份过了吗」在日志里先看到。
+    schedule: "0 9 * * *"
+    dockerfilePath: ./scripts/backup/Dockerfile
+    dockerContext: ./scripts/backup
+    envVars:
+      # ⚠️ 这里**不**引 rolf-django 那个组，而是自己单独取一份连接串。
+      #    判据是 phase-c.md 的备份落点：备份必须在应用起不来的时候照样能跑，
+      #    所以它连 DJANGO_SETTINGS_MODULE 都不该有。它只需要一个 URL。
+      - key: DATABASE_URL
+        fromDatabase:
+          name: rolf-postgres
+          property: connectionString
+      - key: BACKUP_R2_ENDPOINT_URL
+        sync: false
+      - key: BACKUP_R2_ACCESS_KEY_ID
+        sync: false
+      - key: BACKUP_R2_SECRET_ACCESS_KEY
+        sync: false
+      - key: BACKUP_R2_BUCKET
+        sync: false
+
+databases:
+  - name: rolf-postgres
+    region: oregon
+    # ⚠️ **不能是 free。** Render 的免费数据库**到期会被直接删掉**，而试点期间
+    #    里面装的是基金会的真实数据。这不是性能问题，是数据会没。basic-256mb 是
+    #    最便宜的付费档，试点（一个 ministry、一场活动、几十个人）绰绰有余，
+    #    **而且事后能原地升档，不用搬数据**。
+    plan: basic-256mb
+    # ⚠️ 和本机、和 CI 对齐。跨大版本时 pg_dump 的客户端比服务端旧会**直接拒绝
+    #    导出** —— 而备份 cron 里那个客户端正是最容易和服务端不同步的东西。
+    #    查过：18 在 Render 上有，而且已经是新库的默认值，所以这一条不用妥协。
+    postgresMajorVersion: "18"
+    # 空列表 = 只有 Render 内网连得上，公网一律拒绝。
+    # ⚠️ 要从本机 psql 进去救火，去面板上临时加一条自己的 IP，别写死在这里 ——
+    #    家里的 IP 会变，而一条过期的白名单看起来和一条有效的一模一样。
+    ipAllowList: []

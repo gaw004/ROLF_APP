@@ -10,7 +10,9 @@ django-simple-history==3.13.0
 django-storages==1.14.6
 Django==5.2.16
 google-auth==2.56.3
+gunicorn==26.0.0
 jmespath==1.1.0
+packaging==26.3
 phonenumbers==9.0.35
 Pillow==12.3.0
 psycopg-binary==3.3.4

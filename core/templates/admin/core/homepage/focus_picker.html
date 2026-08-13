@@ -1,0 +1,39 @@
+{% comment %}
+Admin only: the front page's picture, whole, with the focal point drawn on it.
+
+⚠️ `object-fit: contain` (in the stylesheet, not here) — the **entire** picture
+   has to be visible while somebody is choosing a point inside it. Showing it
+   cropped, the way the site shows it, would mean picking a point on a picture
+   whose edges you cannot see, which is the problem this widget exists to solve.
+
+⚠️ The two number inputs are **not** replaced by this. They stay in the form and
+   keep working with JavaScript switched off; the script demotes them to a
+   read-out once it has taken over. Hiding them from the stylesheet instead
+   would hide them in the one case they are needed — when the script did not
+   run. See D24's line on write paths.
+
+⚠️ A video is previewed too, at `preload="metadata"` so it costs a frame rather
+   than the whole file. The focal point applies to both, and a widget that only
+   worked for one of them would read as broken on the day somebody swaps.
+{% endcomment %}
+{% if image_url or video_url %}
+  <div class="hero-focus"
+       data-focus-x="{{ focus_x }}" data-focus-y="{{ focus_y }}">
+    {% if video_url %}
+      <video class="hero-focus__media" src="{{ video_url }}"
+             preload="metadata" muted playsinline></video>
+    {% else %}
+      <img class="hero-focus__media" src="{{ image_url }}" alt="">
+    {% endif %}
+    <span class="hero-focus__marker" aria-hidden="true"></span>
+  </div>
+  <p class="help hero-focus__help">
+    Click the part of the picture that must always stay visible — a face, the
+    horizon, whoever is standing on the left. The screen is filled with this
+    picture, so everything around your point is what gets trimmed away, and how
+    much is trimmed differs between a phone and a laptop.
+  </p>
+{% else %}
+  <p class="help">Add a picture or a video above and save; the framing tool
+    appears here once there is something to frame.</p>
+{% endif %}

@@ -2684,6 +2684,53 @@ class HeroFramingTests(TestCase):
         inner = self.client.get(reverse("accounts:login"))
         self.assertNotContains(inner, "bg-center")
 
+    def test_the_admin_offers_the_picture_to_click_on(self):
+        """The numbers are for the machine; the picture is for the person.
+
+        "0 is the left edge, 100 the right" is a sentence somebody has to
+        translate in their head every time. The widget renders the actual
+        photograph with the current point drawn on it.
+        """
+        staff = get_user_model().objects.create_superuser(
+            email="framer@example.com", password="a-good-long-password")
+        self.client.force_login(staff)
+        page = HomePage.load()
+        page.hero_image = "home/example.webp"
+        page.hero_focus_x, page.hero_focus_y = 25, 75
+        page.save()
+
+        response = self.client.get(
+            reverse("admin:core_homepage_change", args=[page.pk]))
+        self.assertContains(response, 'class="hero-focus"')
+        self.assertContains(response, 'data-focus-x="25"')
+        self.assertContains(response, "home/example.webp")
+
+    def test_the_numbers_stay_in_the_form_behind_the_picture(self):
+        """⚠️ The picker writes into these; it submits nothing of its own.
+
+        So the framing is still editable when the script has not run — a
+        stylesheet that hid these would hide them in exactly the case they are
+        needed. D24's line about write paths, applied to a staff screen.
+        """
+        staff = get_user_model().objects.create_superuser(
+            email="fallback@example.com", password="a-good-long-password")
+        self.client.force_login(staff)
+        page = HomePage.load()
+        response = self.client.get(
+            reverse("admin:core_homepage_change", args=[page.pk]))
+        self.assertContains(response, 'name="hero_focus_x"')
+        self.assertContains(response, 'name="hero_focus_y"')
+
+    def test_with_no_picture_yet_the_widget_says_so_rather_than_breaking(self):
+        staff = get_user_model().objects.create_superuser(
+            email="empty@example.com", password="a-good-long-password")
+        self.client.force_login(staff)
+        response = self.client.get(
+            reverse("admin:core_homepage_change", args=[HomePage.load().pk]))
+        self.assertEqual(response.status_code, 200)
+        self.assertNotContains(response, 'class="hero-focus"')
+        self.assertContains(response, "the framing tool")
+
     def test_a_focus_outside_the_picture_is_refused_by_the_database(self):
         """⚠️ In the database, not only in the form (D9 / D14).
 

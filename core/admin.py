@@ -7,6 +7,7 @@ copy of it in each would be a copy of a business rule.
 
 from django.contrib import admin
 from django.shortcuts import redirect
+from django.template.loader import render_to_string
 from django.urls import reverse
 
 from .models import HomePage
@@ -56,17 +57,46 @@ class HomePageAdmin(admin.ModelAdmin):
                            "autoplay sound.",
         }),
         ("Framing", {
-            "fields": ["hero_focus_x", "hero_focus_y"],
+            "fields": ["focus_picker", "hero_focus_x", "hero_focus_y"],
             "description": "The picture fills the whole screen, so some of it is "
                            "always cut off — and how much differs between a "
-                           "phone and a laptop. These two numbers say which part "
-                           "has to stay visible. Left at 50 and 50 the middle is "
-                           "kept, which is what a browser does anyway.",
+                           "phone and a laptop. Click the part that has to stay "
+                           "visible.",
         }),
         ("Words over the picture", {
             "fields": ["verse_text", "verse_reference"],
         }),
     ]
+
+    readonly_fields = ["focus_picker"]
+
+    class Media:
+        # Collected as plain files, like the two contact-admin scripts. ⚠️ Not
+        # part of assets/ — that bundle is built by CI and downloaded by every
+        # visitor, and this is one staff-only screen.
+        js = ["core/admin/hero_focus_picker.js"]
+        css = {"all": ["core/admin/hero_focus_picker.css"]}
+
+    @admin.display(description="Point to keep")
+    def focus_picker(self, obj):
+        """The picture, whole, with the focal point drawn on it.
+
+        ⚠️ Markup lives in a template, not in this method. admin.py is
+           disposable configuration (D18) and a block of HTML built with string
+           formatting here would be neither reviewable nor replaceable with the
+           admin it is attached to.
+
+        ⚠️ It renders **nothing that is submitted**. The two number fields are
+           the form; this is a way of typing into them. So the framing is still
+           editable when the script does not run, which is the whole reason the
+           numbers were not simply replaced.
+        """
+        return render_to_string("admin/core/homepage/focus_picker.html", {
+            "image_url": obj.hero_image.url if obj.hero_image else "",
+            "video_url": obj.hero_video.url if obj.hero_video else "",
+            "focus_x": obj.hero_focus_x,
+            "focus_y": obj.hero_focus_y,
+        })
 
     def has_add_permission(self, request):
         return False

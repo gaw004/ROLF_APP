@@ -1,0 +1,72 @@
+/*
+ * Home page admin: the framing tool.
+ *
+ * ⚠️ Admin-only, and deliberately not part of the site's stylesheet. app.css is
+ *    built from assets/ by the CI chain and shipped to visitors; this is a
+ *    plain file collected as-is, the same as the two contact-admin scripts. A
+ *    handful of rules for one staff-only screen does not belong in the bundle
+ *    every volunteer downloads.
+ */
+
+.hero-focus {
+    position: relative;
+    display: inline-block;
+    max-width: 640px;
+    cursor: crosshair;
+    line-height: 0;               /* no baseline gap under the media */
+    background: #1b1b1b;          /* the letterbox, when the picture is not 4:3 */
+    border-radius: 4px;
+    overflow: hidden;
+}
+
+/* ⚠️ `contain`, not `cover`. The whole picture has to be visible while a point
+ *    inside it is being chosen — cropping the preview the way the site crops it
+ *    would hide the very edges somebody is trying to keep. */
+.hero-focus__media {
+    display: block;
+    max-width: 100%;
+    max-height: 360px;
+    object-fit: contain;
+}
+
+.hero-focus__marker {
+    position: absolute;
+    width: 22px;
+    height: 22px;
+    margin: -11px 0 0 -11px;      /* centre the ring on the point, not its corner */
+    border: 2px solid #fff;
+    border-radius: 50%;
+    box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.55);
+    pointer-events: none;          /* never eat the click meant for the picture */
+    transition: left 60ms linear, top 60ms linear;
+}
+
+.hero-focus__marker::after {
+    content: "";
+    position: absolute;
+    inset: 8px;
+    background: #fff;
+    border-radius: 50%;
+}
+
+.hero-focus__help {
+    max-width: 640px;
+}
+
+/* The two number rows, once the script has taken over: still there, still
+ * editable, just no longer the main event. */
+.hero-focus-on .hero-focus__readout {
+    display: inline-block;
+    margin-right: 1.5rem;
+    padding: 0;
+}
+
+.hero-focus-on .hero-focus__readout input {
+    width: 4.5rem;
+}
+
+/* "0 is the left edge, 100 the right" is the sentence the picture replaced.
+ * It stays in the HTML for whoever arrives without the script. */
+.hero-focus-on .hero-focus__readout .help {
+    display: none;
+}

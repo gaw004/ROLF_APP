@@ -13,6 +13,7 @@ import datetime
 import io
 import itertools
 import tempfile
+from unittest import mock
 
 from django.core.files.base import ContentFile
 from django.core.files.uploadedfile import SimpleUploadedFile
@@ -59,6 +60,36 @@ LOCAL_STORAGE = {
 #:    about row counts. Every photo differing by a pixel keeps the fixtures
 #:    saying what they look like they say.
 _serial = itertools.count()
+
+
+#: The upload limit the batch tests run under, in place of the real 10 MB.
+#:
+#: ⚠️ Overridden so the oversized fixture costs one megabyte instead of ten. It
+#:    doubles as the check that the wording is **derived** from the setting: the
+#:    messages say "over 1 MB" here, so a hardcoded "10 MB" anywhere in the
+#:    chain fails these tests rather than passing them by coincidence.
+SMALL_LIMIT = 1024 * 1024
+
+#: The name the oversized fixture carries, so assertions can look for it. Taken
+#: from the photo that was actually in the report.
+TOO_BIG_NAME = "milky-way-mountains-5120x5120-15475.jpg"
+
+
+def a_file_too_big(name=TOO_BIG_NAME):
+    """A file over the size limit, for tests that run under `SMALL_LIMIT`.
+
+    ⚠️ **The contents are not an image and do not need to be.** The size check
+       runs before anything opens the file, which is precisely the property
+       `test_an_oversized_photo_is_never_opened` pins: decoding is where the
+       memory goes, so an oversized upload must be turned away unread.
+
+    ⚠️ Sized against the overridden 1 MB limit rather than the real 10 MB one,
+       so this costs a megabyte rather than ten. What the tests check is that
+       the wording follows `settings.EVENT_IMAGE_MAX_UPLOAD_BYTES` — a hardcoded
+       "10 MB" in the message would fail under the override, which is the point.
+    """
+    return SimpleUploadedFile(name, b"\xff\xd8\xff" + b"0" * SMALL_LIMIT,
+                              content_type="image/jpeg")
 
 
 def a_photo(size=(1200, 800), fmt="JPEG", exif=None, colour=(90, 120, 160),
@@ -1055,7 +1086,8 @@ class WallPageTests(PageTestCase):
         self.assertIn('localStorage.getItem("theme")', page)
 
 
-@override_settings(MEDIA_ROOT=tempfile.mkdtemp(), STORAGES=LOCAL_STORAGE)
+@override_settings(MEDIA_ROOT=tempfile.mkdtemp(), STORAGES=LOCAL_STORAGE,
+                   EVENT_IMAGE_MAX_UPLOAD_BYTES=SMALL_LIMIT)
 class ManagePageTests(PageTestCase):
     """Putting photos up and taking them down, through the pages."""
 
@@ -1176,15 +1208,21 @@ class ManagePageTests(PageTestCase):
             302)
         self.assertEqual(GalleryPhoto.objects.count(), MAX_PHOTOS_PER_UPLOAD)
 
-    def test_more_than_ten_is_refused_and_none_of_them_land(self):
-        """⚠️ All or nothing on the count. Taking the first ten and dropping the
-        rest silently is worse than refusing: the admin has no way to tell which
-        eleven they picked became which ten."""
+    def test_more_than_ten_takes_the_first_ten_and_names_the_rest(self):
+        """⚠️ **This reverses the previous decision, and the word that changed is
+        "silently"** (2026-08-13). The old rule refused the whole batch, arguing
+        that dropping the surplus left the admin unable to tell which eleven
+        became which ten. That objection is answered by naming them: the message
+        says exactly which files did not go up, so nothing is guessed at.
+
+        ⚠️ The surplus is trimmed **before** anything is opened, so an eleventh
+        file costs nothing to reject — which is the whole reason the cap exists.
+        """
         self.login(self.zhang)
-        response = self.post_photos(self.pantry, count=MAX_PHOTOS_PER_UPLOAD + 1)
-        self.assertEqual(response.status_code, 200)
-        self.assertFalse(GalleryPhoto.objects.exists())
-        self.assertContains(response, "at a time is the limit")
+        response = self.post_photos(
+            self.pantry, count=MAX_PHOTOS_PER_UPLOAD + 1, follow=True)
+        self.assertEqual(GalleryPhoto.objects.count(), MAX_PHOTOS_PER_UPLOAD)
+        self.assertContains(response, "past the 10-at-once limit")
 
     def test_the_same_photo_twice_in_one_batch_is_added_once(self):
         """The picker lets somebody ctrl-click the same file twice, and they
@@ -1208,14 +1246,15 @@ class ManagePageTests(PageTestCase):
         self.post_photos(self.pantry, files=[a_photo(unique=False)])
         response = self.post_photos(
             self.pantry, files=[a_photo(unique=False), a_photo()], follow=True)
-        self.assertContains(response, "Skipped 1 already on the wall")
+        self.assertContains(response, "Skipped 1 — already on the wall")
         self.assertEqual(GalleryPhoto.objects.count(), 2)
 
     def test_a_batch_of_nothing_but_repeats_is_refused_outright(self):
         self.login(self.zhang)
         self.post_photos(self.pantry, files=[a_photo(unique=False)])
         response = self.post_photos(self.pantry, files=[a_photo(unique=False)])
-        self.assertContains(response, "Nothing to add")
+        self.assertContains(response, "Nothing could be added")
+        self.assertContains(response, "already on the wall")
 
     def test_the_same_photo_as_a_png_is_still_the_same_photo(self):
         """⚠️ Why the digest is taken over the **re-encoded** file rather than
@@ -1230,17 +1269,109 @@ class ManagePageTests(PageTestCase):
             a_photo(size=(400, 400), colour=(10, 20, 30), unique=False, fmt="PNG")])
         self.assertEqual(GalleryPhoto.objects.count(), 1)
 
-    def test_one_bad_file_in_a_batch_stores_none_of_them(self):
-        """⚠️ The re-encode happens in clean, before anything is written. The
-        other order means a batch of ten whose ninth is a PDF has already
-        stored eight by the time it finds out."""
+    def test_one_unreadable_file_does_not_take_the_others_down_with_it(self):
+        """⚠️ Reversed on 2026-08-13 along with the size rule: a PDF among the
+        photographs drops the PDF, not the batch.
+
+        ⚠️ What has **not** changed is the ordering it used to protect: the
+        re-encode still happens in `clean_images`, before a single row is
+        written. So the two good photos here are stored because they were known
+        to be good before anything was saved — not rolled forward and hoped for.
+        """
         self.login(self.zhang)
         pdf = SimpleUploadedFile("notes.pdf", b"%PDF-1.4 not really",
                                  content_type="application/pdf")
         response = self.post_photos(
-            self.pantry, files=[a_photo(), a_photo(), pdf])
+            self.pantry, files=[a_photo(), a_photo(), pdf], follow=True)
+        self.assertEqual(GalleryPhoto.objects.count(), 2)
+        self.assertContains(response, "not usable images: notes.pdf")
+
+    def test_a_photo_over_the_size_limit_is_skipped_and_the_rest_go_up(self):
+        """⭐ The report this whole change came from: nine good photographs and
+        one 12 MB one used to put **nothing** on the wall.
+
+        ⚠️ And the cost was worse than losing the upload: a rejected POST empties
+        the file input, so all ten had to be picked out of the folder again.
+        """
+        self.login(self.zhang)
+        response = self.post_photos(
+            self.pantry,
+            files=[a_photo(), a_file_too_big(), a_photo()],
+            follow=True)
+        self.assertEqual(GalleryPhoto.objects.count(), 2)
+        self.assertContains(response, "Added 2 to Memories")
+        self.assertContains(response, f"over 1 MB: {TOO_BIG_NAME}")
+
+    def test_an_oversized_photo_is_never_opened(self):
+        """🔴 Skipping must not mean "decode it and throw the pixels away".
+
+        ⚠️ Decoding is where the memory goes — a 6000×4000 photograph is 72 MB
+        of pixels out of a 3 MB file, and that is what took production down on
+        2026-08-13. So the size check has to stay **in front of**
+        `normalise_gallery_image`, and this asserts the call never happens
+        rather than asserting the row count, which would pass either way.
+        """
+        self.login(self.zhang)
+        real = normalise_gallery_image
+        opened = []
+
+        def spy(upload):
+            opened.append(upload.name)
+            return real(upload)
+
+        with mock.patch("gallery.services.normalise_gallery_image", spy):
+            self.post_photos(self.pantry, files=[a_file_too_big(), a_photo()])
+
+        self.assertNotIn(TOO_BIG_NAME, opened,
+                         "the oversized file was decoded before being skipped — "
+                         "the size check has moved behind normalise_gallery_image")
+        self.assertEqual(len(opened), 1)
+
+    def test_a_batch_that_is_entirely_unusable_is_still_an_error(self):
+        """⚠️ Skipping everything is not "added 0". There is nothing to redirect
+        to and nothing was achieved, so it stays on the form — where the file
+        input's own error is the right place for it."""
+        self.login(self.zhang)
+        response = self.post_photos(self.pantry, files=[a_file_too_big()])
         self.assertEqual(response.status_code, 200)
         self.assertFalse(GalleryPhoto.objects.exists())
+        self.assertContains(response, "Nothing could be added")
+        self.assertContains(response, TOO_BIG_NAME)
+
+    def test_the_form_says_the_limit_and_says_it_from_the_setting(self):
+        """⚠️ Under the 1 MB override the page must say 1 MB.
+
+        A hardcoded "10 MB" passes in production and is wrong the day the
+        setting moves — and the help text is the one copy of that number a
+        person reads *before* choosing files rather than after.
+        """
+        self.login(self.zhang)
+        page = self.client.get(reverse("gallery:manage")).content.decode()
+        self.assertIn("each under 1 MB", page)
+        self.assertIn("skipped and named", page)
+
+    def test_all_four_reasons_can_be_reported_from_one_batch(self):
+        """⚠️ The four are independent, and a batch can hit all of them at once.
+
+        Written because the loop `continue`s on each — one of them swallowing a
+        later check would look like "that photo just did not go up".
+        """
+        self.login(self.zhang)
+        self.post_photos(self.pantry, files=[a_photo(unique=False)])
+        pdf = SimpleUploadedFile("notes.pdf", b"%PDF-1.4 not really",
+                                 content_type="application/pdf")
+        surplus = [a_photo() for _ in range(MAX_PHOTOS_PER_UPLOAD)]
+        response = self.post_photos(
+            self.pantry,
+            files=[a_photo(), a_file_too_big(), pdf,
+                   a_photo(unique=False), *surplus],
+            follow=True)
+
+        page = response.content.decode()
+        for phrase in ["over 1 MB", "not usable images", "already on the wall",
+                       "past the 10-at-once limit"]:
+            with self.subTest(reason=phrase):
+                self.assertIn(phrase, page)
 
     def test_the_digest_is_stored_so_the_column_can_enforce_it(self):
         self.login(self.zhang)

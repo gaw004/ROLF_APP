@@ -18,6 +18,49 @@ from .models import GalleryPhoto
 #:    the trade being made deliberately.
 MAX_PHOTOS_PER_UPLOAD = 10
 
+#: Why a photo in a batch did not go up, and how to say so — in the order the
+#: reasons are read out.
+#:
+#: ⭐ **Every one of these skips one photo and keeps the rest** (2026-08-13).
+#:    Before that only `repeats` did; the other three refused the whole
+#:    submission, so one 12 MB photo in a pick of ten put none of the ten on the
+#:    wall. And because a rejected POST empties the file input, it also meant
+#:    choosing all ten again — the failure cost more than the mistake did.
+#:
+#: ⚠️ The order is the order somebody should act on them: the two they can do
+#:    something about (shrink it, convert it) come before the two that are
+#:    already fine (it is up there / send the rest in a second batch).
+#:
+#: ⚠️ A table rather than four `if`s spread over two modules. The form fills
+#:    these lists, the view prints them, and the wording lives in neither —
+#:    `describe_skipped()` below is the only place a reason is put into English,
+#:    so the "why" in a success message and the "why" in an error cannot drift.
+SKIP_REASONS = {
+    "too_big": "over {limit_mb} MB",
+    "unreadable": "not usable images",
+    "repeats": "already on the wall",
+    "past_cap": f"past the {MAX_PHOTOS_PER_UPLOAD}-at-once limit",
+}
+
+
+def describe_skipped(skipped):
+    """"over 10 MB: a.jpg; already on the wall: b.jpg" — or "" if none.
+
+    ⚠️ **Names every file**, and that is the point of the whole feature rather
+       than a nicety. A pick of ten that quietly becomes eight is the shape of
+       problem where somebody re-uploads the missing two, watches nothing
+       happen, and concludes the page is broken — when it did exactly what it
+       was asked to. Counting them without naming them is the same trap one step
+       along: "skipped 2" does not tell you *which* two to go and fix.
+    """
+    limit_mb = settings.EVENT_IMAGE_MAX_UPLOAD_BYTES // (1024 * 1024)
+    parts = [
+        f"{phrase.format(limit_mb=limit_mb)}: {', '.join(skipped[key])}"
+        for key, phrase in SKIP_REASONS.items()
+        if skipped.get(key)
+    ]
+    return "; ".join(parts)
+
 
 class MultipleFileInput(forms.ClearableFileInput):
     """The widget half of "pick more than one file".
@@ -68,11 +111,12 @@ class GalleryPhotoForm(forms.Form):
 
     ministry = forms.ModelChoiceField(
         queryset=Ministry.objects.none(), required=False, label="Ministry")
-    images = MultipleFileField(
-        label="Photos",
-        help_text=f"Up to {MAX_PHOTOS_PER_UPLOAD} at once. "
-                  f"JPEG, PNG and WebP; SVG and PDF do not work.",
-    )
+    # ⚠️ `help_text` is filled in by `__init__`, not here. Reading a setting at
+    #    class-definition time freezes it at import, so the sentence would keep
+    #    quoting whatever the limit was when the process started — invisible in
+    #    production, where it never changes, and wrong under `override_settings`
+    #    the moment a test asks what the form tells people.
+    images = MultipleFileField(label="Photos")
 
     def __init__(self, *args, user, **kwargs):
         super().__init__(*args, **kwargs)
@@ -80,12 +124,30 @@ class GalleryPhotoForm(forms.Form):
         # Filled in by clean_images() so the view does not re-encode a second
         # time to find out what it is about to save.
         self.prepared = []
+        # ⚠️ Set up here as well as there, so that reading it is safe on a form
+        #    whose `clean_images()` never ran — an unbound form, or one that
+        #    failed on the ministry field. The view asks for it right after
+        #    `is_valid()`, and an AttributeError on the success path would be a
+        #    500 on the one page this whole change exists to make friendlier.
+        self.skipped = {key: [] for key in SKIP_REASONS}
         administered = ministry_ids_administered_by(user)
         field = self.fields["ministry"]
         # `accept` is a semantic attribute rather than styling — it tells the
         # file picker what to offer. It is a convenience and never a check;
         # Pillow opening the file is the check.
         self.fields["images"].widget.attrs["accept"] = "image/*"
+        # ⚠️ The last sentence states the behaviour **before** it happens, not
+        #    only in the message afterwards. Somebody picking twelve holiday
+        #    photos should know in advance that the two extra and the huge one
+        #    will be left behind; otherwise the first they hear of it is a
+        #    number in a green bar they have already clicked past.
+        limit_mb = settings.EVENT_IMAGE_MAX_UPLOAD_BYTES // (1024 * 1024)
+        self.fields["images"].help_text = (
+            f"Up to {MAX_PHOTOS_PER_UPLOAD} at once, each under {limit_mb} MB. "
+            f"JPEG, PNG and WebP; SVG and PDF do not work. Anything too big, "
+            f"unreadable or already on the wall is skipped and named — the rest "
+            f"still go up."
+        )
 
         if in_foundation_tier(user):
             # The foundation tier may attribute photos to any live ministry, or
@@ -107,11 +169,27 @@ class GalleryPhotoForm(forms.Form):
             field.empty_label = None
 
     def clean_images(self):
-        """Count them, size them, re-encode them, and refuse the repeats.
+        """Take everything that can go up, and name what could not.
 
         Everything expensive happens here rather than in the view, so that a
-        submission which is going to be refused is refused before anything is
+        photo which is going to be refused is refused before anything is
         written.
+
+        ⭐ **One unusable file no longer stops the other nine** (2026-08-13).
+           Every reason a photo cannot be used — too big, unreadable, already on
+           the wall, past the ten-at-once cap — drops that one photo and keeps
+           the rest; the message afterwards names what was dropped and why. Only
+           a batch where **nothing** survives is an error.
+
+           What made it worth changing: a rejected POST empties the file input,
+           so one 12 MB photo in a pick of ten meant choosing all ten again. The
+           repeats path already worked this way and was the model for the rest.
+
+        ⚠️ Skipping is **not** "decode it and throw it away". The size check
+           stays in front of `normalise_gallery_image`, because decoding is
+           where the memory goes: a 6000×4000 photograph is 72 MB of pixels out
+           of a 3 MB file, and that is what took production down earlier the
+           same day. An oversized file is never opened.
 
         ⚠️ The size check is about **storage and bandwidth, not safety**.
            Django's `ImageField.to_python()` has already opened the file with
@@ -124,21 +202,34 @@ class GalleryPhotoForm(forms.Form):
         uploads = [f for f in self.cleaned_data.get("images") or [] if f]
         if not uploads:
             raise forms.ValidationError("Choose at least one photo.")
-        if len(uploads) > MAX_PHOTOS_PER_UPLOAD:
-            raise forms.ValidationError(
-                f"That is {len(uploads)} photos. "
-                f"{MAX_PHOTOS_PER_UPLOAD} at a time is the limit — the rest "
-                f"can go in a second batch.")
+
+        skipped = {key: [] for key in SKIP_REASONS}
+
+        # ⚠️ Trimmed to the cap **before** the loop rather than filtered down to
+        #    ten survivors afterwards. The cap is there to bound the work in one
+        #    request — at most ten decodes and ten re-encodes — and "keep going
+        #    until ten of them are good" would put no bound on it at all: a pick
+        #    of two hundred unreadable files would open two hundred files.
+        skipped["past_cap"] = [f.name for f in uploads[MAX_PHOTOS_PER_UPLOAD:]]
+        uploads = uploads[:MAX_PHOTOS_PER_UPLOAD]
 
         limit = settings.EVENT_IMAGE_MAX_UPLOAD_BYTES
-        prepared, digests, repeats = [], set(), []
+        prepared, digests = [], set()
         for upload in uploads:
             if upload.size > limit:
-                raise forms.ValidationError(
-                    f"“{upload.name}” is larger than "
-                    f"{limit // (1024 * 1024)} MB. Most phone photos are well "
-                    f"under it.")
-            image, thumb, taken_year = normalise_gallery_image(upload)
+                skipped["too_big"].append(upload.name)
+                continue
+            try:
+                image, thumb, taken_year = normalise_gallery_image(upload)
+            except forms.ValidationError:
+                # ⚠️ Caught, not propagated — and this is the only thing that may
+                #    be swallowed here. `normalise_gallery_image` raises
+                #    ValidationError for one situation, a file Pillow cannot
+                #    open, and re-raises everything else as itself. A bare
+                #    `except Exception` would turn a genuine fault into "that
+                #    photo was skipped" and nobody would ever hear about it.
+                skipped["unreadable"].append(upload.name)
+                continue
             digest = digest_of(image)
             # ⚠️ Two checks, not one. `digests` catches the same photo twice in
             #    **this** submission — which is what happens when somebody
@@ -149,7 +240,7 @@ class GalleryPhotoForm(forms.Form):
             #    field.
             if digest in digests or GalleryPhoto.objects.filter(
                     image_digest=digest).exists():
-                repeats.append(upload.name)
+                skipped["repeats"].append(upload.name)
                 continue
             digests.add(digest)
             prepared.append({
@@ -157,12 +248,16 @@ class GalleryPhotoForm(forms.Form):
                 "taken_year": taken_year, "image_digest": digest,
             })
 
-        if repeats and not prepared:
+        if not prepared:
+            # ⚠️ The same sentence the success message uses, out of the same
+            #    function. Two ways of saying "here is why these were skipped"
+            #    are two that drift apart, and the one nobody re-reads is this
+            #    branch.
             raise forms.ValidationError(
-                f"Already on the wall: {', '.join(repeats)}. Nothing to add.")
+                f"Nothing could be added — {describe_skipped(skipped)}.")
 
         self.prepared = prepared
-        self.repeats = repeats
+        self.skipped = skipped
         return uploads
 
     def save(self):

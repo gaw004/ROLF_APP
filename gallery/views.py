@@ -17,7 +17,7 @@ from org.permissions import (
     ministry_ids_administered_by,
 )
 
-from .forms import GalleryPhotoForm
+from .forms import GalleryPhotoForm, describe_skipped
 from .models import GalleryPhoto
 from .services import repeats_for, strips_for
 
@@ -80,18 +80,23 @@ def wall(request):
     })
 
 
-def _added_message(added, repeats):
+def _added_message(added, skipped):
     """What to say after a batch upload.
 
-    ⚠️ The skipped ones are named. A batch of ten that quietly becomes eight is
-       the shape of problem where somebody re-uploads the missing two, watches
-       nothing happen, and concludes the page is broken — when in fact it did
-       exactly what it was asked to.
+    ⚠️ The skipped ones are named, and the wording comes from
+       `forms.describe_skipped` rather than from here. That function also writes
+       the "nothing could be added" error, and those two sentences answer the
+       same question — a second phrasing in this module is a second thing to
+       keep in step, with the error branch being the one nobody re-reads.
+
+    ⚠️ Counted **and** named. "Skipped 2" leaves somebody hunting through their
+       own file picker for which two; the count is only there so the number
+       added and the number missing are both in the first clause.
     """
     said = f"Added {len(added)} to Memories."
-    if repeats:
-        said += (f" Skipped {len(repeats)} already on the wall: "
-                 f"{', '.join(repeats)}.")
+    dropped = sum(len(names) for names in skipped.values())
+    if dropped:
+        said += f" Skipped {dropped} — {describe_skipped(skipped)}."
     return said
 
 
@@ -121,7 +126,7 @@ def manage(request):
                     "A photo with no ministry speaks for the whole foundation, "
                     "and only the foundation tier may publish one.")
             added = form.save()
-            messages.success(request, _added_message(added, form.repeats))
+            messages.success(request, _added_message(added, form.skipped))
             return redirect("gallery:manage")
     else:
         form = GalleryPhotoForm(user=request.user)

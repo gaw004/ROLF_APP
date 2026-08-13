@@ -4229,6 +4229,46 @@ class EventImageUploadTests(PageTestCase):
             self.assertLessEqual(max(check.size), 900)
             self.assertEqual(check.format, "WEBP")
 
+    def test_the_full_size_picture_is_never_held_twice(self):
+        """⚠️ 2026-08-13. The same shape as gallery's, and the same measurement.
+
+        `convert()` into the mode an image is already in still returns a
+        full-size copy — 72 MB for a phone photograph, spent to produce pixels
+        identical to the ones it was handed. Dropping it took this path from
+        198 MB of peak memory to 113 MB, on a 512 MB instance already holding
+        two workers.
+
+        The one duplicate that remains is Pillow's own: `exif_transpose` copies
+        when there is no orientation tag to act on.
+
+        ⚠️ A regression here is invisible everywhere else — the stored image is
+           byte-for-byte the same either way. It shows up as a restart under
+           load, which is how the front page's version of this was found.
+        """
+        from unittest import mock
+
+        size = (3000, 2000)
+        seen = []
+
+        def spy_on(name):
+            real = getattr(PILImage.Image, name)
+
+            def spy(self, *args, **kwargs):
+                seen.append((name, self.size))
+                return real(self, *args, **kwargs)
+            return mock.patch.object(PILImage.Image, name, spy)
+
+        with spy_on("copy"), spy_on("convert"):
+            form = self.upload(a_photo(size=size))
+            self.assertTrue(form.is_valid(), form.errors)
+
+        at_full_size = [name for name, seen_size in seen if seen_size == size]
+        self.assertLessEqual(
+            len(at_full_size), 1,
+            f"the original was duplicated {len(at_full_size)} times before "
+            f"being resized ({at_full_size}); one is exif_transpose's and the "
+            f"rest are 72 MB each on a phone photograph")
+
     def test_a_small_photo_is_not_blown_up(self):
         # thumbnail() only ever shrinks. Upscaling would add bytes and no detail.
         form = self.upload(a_photo(size=(120, 90)))

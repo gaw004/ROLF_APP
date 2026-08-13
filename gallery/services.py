@@ -110,17 +110,31 @@ def _exif_year(source):
     return None
 
 
-def _encode(upright, max_edge):
-    """One derivative: resized down (never up) and written as WebP."""
-    # ⚠️ .copy() — thumbnail() resizes in place, so without it the second call
-    #    would be shrinking the already-shrunken first one, and the "large"
-    #    image would silently come out at the thumbnail's size.
-    resized = upright.copy()
-    resized.thumbnail((max_edge, max_edge), PILImage.LANCZOS)
+def _shrink_and_encode(image, max_edge):
+    """Resize `image` **in place** (never up) and write it out as WebP.
+
+    ⚠️ **In place, and the caller has to know that.** This used to take a
+       `.copy()` of its own, and that copy was the problem: at full size a
+       6000×4000 photograph is 72 MB, so one per derivative cost **238 MB of
+       peak memory for a single upload** on a 512 MB instance (measured
+       2026-08-13, after the front page's version of the same mistake restarted
+       production and 502'd everybody). Making the large derivative first means
+       the second call resizes something that is already 1600px, and its copy
+       is cheap: 238 MB → 134 MB, with the stored bytes of the large derivative
+       **unchanged** — which is what keeps `image_digest` meaning today what it
+       meant yesterday.
+
+    ⚠️ So callers must go **large first, then small**. Backwards, the "large"
+       image comes out at the thumbnail's size — a valid file, the right
+       format, simply the wrong picture, and nothing raises. That is what the
+       old `.copy()` defended against; it is now defended by
+       `test_the_large_one_is_not_made_from_the_small_one` instead.
+    """
+    image.thumbnail((max_edge, max_edge), PILImage.LANCZOS)
     buffer = io.BytesIO()
     # No exif= argument, so none is written. Stated rather than assumed, because
     # "Pillow does not copy it by default" is the kind of default that changes.
-    resized.save(buffer, "WEBP", quality=GALLERY_IMAGE_QUALITY, method=6)
+    image.save(buffer, "WEBP", quality=GALLERY_IMAGE_QUALITY, method=6)
     return ContentFile(buffer.getvalue(), name=f"{uuid.uuid4().hex}.webp")
 
 
@@ -166,9 +180,21 @@ def normalise_gallery_image(uploaded):
             # RGBA is kept where it exists — WebP carries alpha, and flattening
             # a scan with transparent corners onto white would put a white box
             # on a dark page.
-            upright = upright.convert("RGBA" if "A" in upright.getbands() else "RGB")
-            image = _encode(upright, GALLERY_IMAGE_MAX_EDGE)
-            thumb = _encode(upright, GALLERY_THUMB_MAX_EDGE)
+            #
+            # ⚠️ Converted only when the mode is not already the one wanted.
+            #    `convert()` into the mode an image is already in still returns
+            #    a **full-size copy** — 72 MB for a phone photograph, spent to
+            #    produce pixels identical to the ones it was handed.
+            wanted = "RGBA" if "A" in upright.getbands() else "RGB"
+            if upright.mode != wanted:
+                upright = upright.convert(wanted)
+            # ⚠️ **Large first, then small, and the order is load-bearing.**
+            #    _shrink_and_encode resizes in place, so the second call works
+            #    on an image that is already 1600px and its copy is cheap.
+            #    Swap these two lines and the lightbox picture comes out at
+            #    700px — valid file, right format, wrong picture, no error.
+            image = _shrink_and_encode(upright, GALLERY_IMAGE_MAX_EDGE)
+            thumb = _shrink_and_encode(upright.copy(), GALLERY_THUMB_MAX_EDGE)
     except ValidationError:
         raise
     except Exception as error:

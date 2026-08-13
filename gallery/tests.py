@@ -125,15 +125,60 @@ class GalleryImageProcessingTests(TestCase):
     def test_the_large_one_is_not_made_from_the_small_one(self):
         """⚠️ The bug this catches is silent and total.
 
-        `Image.thumbnail()` resizes **in place**. Without the .copy() in
-        services._encode, encoding the thumbnail first would shrink the shared
-        object, and every "large" image on the site would come out at 700px —
-        a valid file, the right format, simply the wrong picture. Nothing
-        raises; the lightbox is just soft forever.
+        `Image.thumbnail()` resizes **in place**, and since 2026-08-13 the
+        pipeline relies on that rather than defending against it: the large
+        derivative is made first and the thumbnail is taken from the result.
+        Swap the two calls and every "large" image comes out at 700px — a valid
+        file, the right format, simply the wrong picture. Nothing raises; the
+        lightbox is just soft forever.
         """
         image, thumb, _ = normalise_gallery_image(a_photo(size=(3000, 2000)))
         with PILImage.open(image) as large, PILImage.open(thumb) as small:
             self.assertGreater(max(large.size), max(small.size))
+
+    def test_the_full_size_picture_is_never_held_twice(self):
+        """⚠️ 2026-08-13, after the front page's version of this restarted
+        production and 502'd everybody looking at the site.
+
+        A 6000×4000 photograph is 72 MB once decoded, and this used to make
+        **four** of them: one from exif_transpose, one from a convert() into
+        the mode it was already in, and one per derivative. Measured at 238 MB
+        of peak memory for a single upload, against a 512 MB instance already
+        holding two workers. Now it makes one, and the peak is 134 MB.
+
+        ⚠️ The assertion is on **buffers at the original size**, not on memory:
+           a memory number would drift with Pillow and the machine, while this
+           is the actual rule. One is Pillow's own — `exif_transpose` copies
+           when there is no orientation tag to act on — and it stays until
+           there is a reason to fight it.
+
+        ⚠️ Nothing else notices a regression here. Put the `convert()` back and
+           every photograph is byte-for-byte identical, every other test stays
+           green, and the only difference is a number that shows up as a
+           restart on a busy afternoon.
+        """
+        from unittest import mock
+
+        size = (3000, 2000)
+        seen = []
+
+        def spy_on(name):
+            real = getattr(PILImage.Image, name)
+
+            def spy(self, *args, **kwargs):
+                seen.append((name, self.size))
+                return real(self, *args, **kwargs)
+            return mock.patch.object(PILImage.Image, name, spy)
+
+        with spy_on("copy"), spy_on("convert"):
+            normalise_gallery_image(a_photo(size=size))
+
+        at_full_size = [name for name, seen_size in seen if seen_size == size]
+        self.assertLessEqual(
+            len(at_full_size), 1,
+            f"the original was duplicated {len(at_full_size)} times before "
+            f"being resized ({at_full_size}); one is exif_transpose's and the "
+            f"rest are 72 MB each on a phone photograph")
 
     def test_a_small_photo_is_not_blown_up(self):
         image, thumb, _ = normalise_gallery_image(a_photo(size=(300, 200)))

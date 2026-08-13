@@ -61,7 +61,7 @@ class HomePageAdmin(admin.ModelAdmin):
             "description": "The picture fills the whole screen, so some of it is "
                            "always cut off — and how much differs between a "
                            "phone and a laptop. Click the part that has to stay "
-                           "visible.",
+                           "visible, or drag the ring onto it.",
         }),
         ("Words over the picture", {
             "fields": ["verse_text", "verse_reference"],
@@ -90,6 +90,15 @@ class HomePageAdmin(admin.ModelAdmin):
            the form; this is a way of typing into them. So the framing is still
            editable when the script does not run, which is the whole reason the
            numbers were not simply replaced.
+
+        ⚠️ These two URLs are what is **saved**, and the widget is rendered even
+           when both are empty (2026-08-13). Emptiness is a `hidden` attribute
+           in the template rather than an absent element, because the script
+           puts the file somebody has *just chosen* into it — before this, the
+           framing tool did not exist in the document until the upload had been
+           saved, so choosing a picture and scrolling down to frame it found the
+           sentence "add a picture and save" instead. Framing then took two
+           trips through the form.
         """
         return render_to_string("admin/core/homepage/focus_picker.html", {
             "image_url": obj.hero_image.url if obj.hero_image else "",

@@ -1,8 +1,20 @@
+from collections import namedtuple
+
 from django.core.validators import FileExtensionValidator
 from django.db import IntegrityError, models
 
 from core.limits import LONG_TEXT
 from core.storages import public_storage
+
+#: What `HomePage.hero` answers with: the file to fill the screen, and which of
+#: the two kinds it is.
+#:
+#: ⚠️ A **namedtuple**, so `hero.kind` reads as itself in a template while
+#:    `hero[1]` still works for anything that already unpacked it. The template
+#:    is the whole reason it exists: `{% if page.hero.1 == "video" %}` is a line
+#:    nobody can check by reading, and this is the one rule the front page and
+#:    the rest of the site have to keep agreeing about.
+Hero = namedtuple("Hero", "file kind")
 
 
 class TimeStampedModel(models.Model):
@@ -252,14 +264,48 @@ class HomePage(models.Model):
 
     @property
     def hero(self):
-        """(file, kind) for whatever should fill the screen, or None.
+        """`Hero(file, kind)` for whatever should fill the screen, or None.
 
         ⚠️ Video wins when both are set. The alternative — showing both, or
            picking by upload date — gives a page whose appearance depends on
            something nobody can see from the form.
+
+        ⚠️ **The only place that rule is written**, as of 2026-08-13. Until then
+           `home.html` decided it a second time with a `{% if page.hero_video %}`
+           of its own and nothing used this property but the tests — so the rule
+           had two implementations, one of them dead, and a green suite proved
+           nothing about the page anybody actually loads. The front page reads
+           this now.
+
+        ⚠️ It answers for the **front page only**. Every other page shows the
+           image and never the video, and that is deliberate rather than an
+           oversight — see `core.context_processors.site_appearance`, which
+           reaches for `hero_image` directly for exactly that reason.
         """
         if self.hero_video:
-            return self.hero_video, "video"
+            return Hero(self.hero_video, "video")
         if self.hero_image:
-            return self.hero_image, "image"
+            return Hero(self.hero_image, "image")
         return None
+
+    @classmethod
+    def for_request(cls, request):
+        """`current()`, fetched at most once per request.
+
+        ⚠️ The front page asked for this row **twice** on every hit until
+           2026-08-13: once in `core.views.home` for the verse and the picture,
+           and once in the `site_appearance` context processor, which runs on
+           every page in the site including this one. Two identical SELECTs on
+           the busiest public URL there is, and neither call site could see the
+           other — which is what makes it worth a method rather than a note.
+
+        ⚠️ Cached on the **request**, not on the class or the module. A
+           process-wide cache would serve the old picture to everybody until the
+           worker restarted, and the symptom would be "I saved it and nothing
+           happened, so I saved it again".
+        """
+        page = getattr(request, "_homepage", None)
+        if page is None:
+            page = cls.current()
+            request._homepage = page
+        return page

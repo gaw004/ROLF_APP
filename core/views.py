@@ -22,10 +22,15 @@ def home(request):
     ⚠️ The only public pages are this one, login and register. Everything else
        still requires a session — the boundary did not move, it grew by one.
 
-    ⚠️ `current()`, not `load()`. The latter is a get_or_create, and this is a
-       public page — putting a write on the busiest read path in the site means
-       every anonymous visitor takes a write lock on the same single row.
-       Only the admin creates it, which is the one place creating means
-       something.
+    ⚠️ Not `load()`. That one is a get_or_create, and this is a public page —
+       putting a write on the busiest read path in the site means every
+       anonymous visitor takes a write lock on the same single row. Only the
+       admin creates it, which is the one place creating means something.
+
+    ⚠️ `for_request()` rather than `current()` (2026-08-13) because the
+       `site_appearance` context processor wants the same row and runs on every
+       page in the site, this one included. Two identical SELECTs on the front
+       page, and neither call site could see the other. The method caches on the
+       request, so whichever runs first pays.
     """
-    return render(request, "core/home.html", {"page": HomePage.current()})
+    return render(request, "core/home.html", {"page": HomePage.for_request(request)})

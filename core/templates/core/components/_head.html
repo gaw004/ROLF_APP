@@ -1,0 +1,40 @@
+{% load static %}{% comment %}
+每一页 `<head>` 里相同的那几行。**三个顶层模板共用**（2026-08-13 抽出来）。
+
+⚠️ 抽出来的理由是它已经分叉了，而且分叉的那一处是纯粹漏的：
+   `base.html` 声明了四个尺寸的图标，`wall.html` 只有一个 32px，
+   **`home.html` 一个都没有** —— 首页的标签页上是浏览器自带的地球。
+   三份各自看都像写完了，而 `FaviconTests` 当时只请求了一个内页，
+   注释里写着「Declared in base.html, so one assertion covers the whole site」。
+   那句话不成立，守卫也就没看住 —— 现在三页都测。
+
+⚠️ 两处**真差异**做成了参数，没有抹平：
+
+   `themed` —— 进来时是浅色还是深色。首页**不传**，因为首页不跟随深色模式
+   （理由在 home.html：它是满屏照片加白字，深色版本没有意义，而 `<html>` 一旦
+   有了 `.dark`，顶栏那套「白字 / 深蓝字」的规则会全部翻转）。
+
+   `<title>` —— 三页各写各的，不在这里。内页要 `{% templatetag openblock %} block title {% templatetag closeblock %}`，
+   而 block 是穿不过 `{% templatetag openblock %} include {% templatetag closeblock %}` 的。
+
+⚠️ 这一段要紧挨着 `<head>` 放，**在 `<title>` 之前** —— `charset` 必须落在
+   文档头 1024 字节里，浏览器才不会先按猜的编码解析一遍再回头重来。
+   上面那段 comment 不输出任何字节，不占这个额度。
+
+⚠️ 顺序不是随便排的：`_appearance.html` 覆盖的是 `app.css` 里 `@theme` 定义的
+   那套设计令牌，所以必须排在样式表**之后**。`_theme_boot.html` 又必须排在
+   `_appearance.html` 之后并且内联执行 —— 三条硬要求写在那个片段自己里面。
+
+⚠️ 小尺寸图标用的是**只有波纹**的那一版，不是整张 logo；180px 的
+   apple-touch-icon 才是整张。两者都从 `event-default.webp` 生成，但 16/32px 下
+   logo 里那两行字会完全糊掉。理由的长版本原来在 base.html，跟着搬过来了。
+{% endcomment %}<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" type="image/png" sizes="16x16" href="{% static 'core/img/favicon-16.png' %}">
+<link rel="icon" type="image/png" sizes="32x32" href="{% static 'core/img/favicon-32.png' %}">
+<link rel="icon" type="image/png" sizes="48x48" href="{% static 'core/img/favicon-48.png' %}">
+<link rel="apple-touch-icon" sizes="180x180" href="{% static 'core/img/apple-touch-icon.png' %}">
+<link rel="stylesheet" href="{% static 'css/app.css' %}">
+{% include "core/components/_appearance.html" %}
+{% if themed %}{% include "core/components/_theme_boot.html" %}{% endif %}
+<script defer src="{% static 'js/app.js' %}"></script>

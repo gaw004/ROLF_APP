@@ -13,17 +13,20 @@
 {% endcomment %}<!doctype html>
 <html lang="en" class="h-full">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>River of Life Foundation</title>
-  <link rel="stylesheet" href="{% static 'css/app.css' %}">
-  {% include "core/components/_appearance.html" %}
   {% comment %}
-  ⚠️ 首页**不跟随深色模式**，也不读 localStorage.theme。它是一张满屏的照片
-     加白字，深色版本没有意义 —— 而如果这里也切主题，那段内联脚本给 <html>
-     加上 .dark 之后，顶栏那套「白字 / 深蓝字」的规则会全部翻转。
+  charset / 图标 / 样式表 / app.js，和内页、Memories 共用（2026-08-13 抽出来）。
+
+  ⚠️ **不传 `themed`**，所以这一页不 include 主题引导脚本。首页不跟随深色模式，
+     也不读 localStorage.theme：它是一张满屏的照片加白字，深色版本没有意义 ——
+     而如果这里也切主题，那段脚本给 <html> 加上 .dark 之后，顶栏那套
+     「白字 / 深蓝字」的规则会全部翻转。这是片段里那个参数存在的唯一理由。
+
+  ⚠️ 抽出来顺带补上了图标：在此之前这一页**一个 favicon 都没有声明**，
+     标签页上是浏览器自带的地球，而内页早就有四个尺寸。三份 `<head>` 各写各的，
+     漏掉一份也没人看得出来 —— 那正是抽它的理由。
   {% endcomment %}
-  <script defer src="{% static 'js/app.js' %}"></script>
+  {% include "core/components/_head.html" %}
+  <title>River of Life Foundation</title>
 </head>
 
 <body class="h-full overflow-hidden bg-ink-950">
@@ -55,18 +58,29 @@
        matters, and applying it to one but not the other would read as a bug on
        the day they switch.
     {% endcomment %}
-    {% if page.hero_video %}
-      <video class="absolute inset-0 h-full w-full object-cover"
+    {% comment %}
+    ⚠️ 「视频赢」这条规则来自 `HomePage.hero`，不在这里判（2026-08-13 改）。
+       原来这里是 `{% templatetag openblock %} if page.hero_video {% templatetag closeblock %}` —— 也就是说规则有两份实现，
+       而模型上那一份（连同它写清楚理由的注释）**没有任何人在用**，只有测试
+       盯着它。测试全绿，证明不了任何一个访客看到的东西。现在只有一份。
+
+    ⚠️ `hero` 为空时退回基金会 logo，是首页独有的。内页在同样情况下退回纯深色
+       —— 见 `_hero_backdrop.html`，那是有意的差别，不是漏了。
+    {% endcomment %}
+    {% with hero=page.hero %}
+      {% if hero.kind == "video" %}
+        <video class="absolute inset-0 h-full w-full object-cover"
+               style="object-position: {{ page.hero_focus }}"
+               src="{{ hero.file.url }}"
+               autoplay muted loop playsinline preload="metadata"
+               aria-hidden="true"></video>
+      {% else %}
+        <img class="absolute inset-0 h-full w-full object-cover"
              style="object-position: {{ page.hero_focus }}"
-             src="{{ page.hero_video.url }}"
-             autoplay muted loop playsinline preload="metadata"
-             aria-hidden="true"></video>
-    {% else %}
-      <img class="absolute inset-0 h-full w-full object-cover"
-           style="object-position: {{ page.hero_focus }}"
-           src="{% if page.hero_image %}{{ page.hero_image.url }}{% else %}{% static 'core/img/event-default.webp' %}{% endif %}"
-           alt="" fetchpriority="high">
-    {% endif %}
+             src="{% if hero %}{{ hero.file.url }}{% else %}{% static 'core/img/event-default.webp' %}{% endif %}"
+             alt="" fetchpriority="high">
+      {% endif %}
+    {% endwith %}
 
     {% comment %}
     两层压暗，不是装饰，是**可读性的唯一保障**。

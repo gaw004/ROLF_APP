@@ -17,6 +17,41 @@
     background: #1b1b1b;          /* the letterbox, when the picture is not 4:3 */
     border-radius: 4px;
     overflow: hidden;
+
+    /* ⚠️ Without this a drag on a touchscreen scrolls the page instead. The
+     *    browser claims the gesture the moment it looks like a pan, and the
+     *    pointermove events simply stop arriving — the ring is left behind
+     *    wherever the finger went down. */
+    touch-action: none;
+    /* A drag across a picture would otherwise start selecting the page. */
+    -webkit-user-select: none;
+    user-select: none;
+}
+
+/* ⚠️ `hidden` has to be said out loud here. Its `display: none` comes from the
+ *    UA stylesheet, and the two `display` declarations around it — the
+ *    `inline-block` above and the `block` below — are more specific than that,
+ *    so an element would stay visible with `hidden` sitting on it doing
+ *    nothing. The script hides the empty picker and whichever media it is not
+ *    using this way, so these rules are load-bearing, not tidying. */
+.hero-focus[hidden],
+.hero-focus__media[hidden],
+.hero-focus__help[hidden],
+.hero-focus__empty[hidden] {
+    display: none;
+}
+
+/* Held down: the cursor says so, and the ring stops easing.
+ * ⚠️ The transition is what makes a *click* land softly, and it is the same
+ *    thing that makes a *drag* trail the finger by 60ms — which reads as the
+ *    widget being slow rather than as an animation. Off while dragging, back
+ *    on the moment it is let go. */
+.hero-focus--dragging {
+    cursor: grabbing;
+}
+
+.hero-focus--dragging .hero-focus__marker {
+    transition: none;
 }
 
 /* ⚠️ `contain`, not `cover`. The whole picture has to be visible while a point
@@ -27,6 +62,9 @@
     max-width: 100%;
     max-height: 360px;
     object-fit: contain;
+    /* Belt and braces with the pointerdown handler's preventDefault(): a native
+     * image drag hands the gesture to the browser, ghost thumbnail and all. */
+    -webkit-user-drag: none;
 }
 
 .hero-focus__marker {

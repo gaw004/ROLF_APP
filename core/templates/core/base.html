@@ -1,5 +1,9 @@
-{% load static %}{% comment %}
+{% comment %}
 所有自助页面共用的外壳。
+
+⚠️ 不再 `{% templatetag openblock %} load static {% templatetag closeblock %}`：这个文件里最后一处 `static` 随
+   `<head>` 一起搬进 `_head.html` 了（2026-08-13）。`load` 是**按模板**算的，
+   继承它的子模板各自 load 各自的，所以拿掉它对谁都没有影响。
 
 C2.1 兑现了这个文件原来那句注释：「Phase C 替换这一个文件就能上样式，
 views / forms / services 原样带走」—— 那不是愿望，是 core/tests.py 里那些
@@ -14,34 +18,19 @@ org/permissions.py，不是 MinistryRole —— 导航里再抄一份判断，�
   content     正文
   main_width  版心。默认 max-w-6xl；表单页用 max-w-2xl（长行读起来累）
 {% endcomment %}<!doctype html>
-<html lang="en" class="h-full{% if site_hero_image %} has-hero{% endif %}">
+{% comment %}
+⚠️ 根元素的 class 由 `core.context_processors` 算好（2026-08-13）。原来这里和
+   `wall.html` 各写一遍 `{% templatetag openblock %} if site_hero_image {% templatetag closeblock %} has-hero`，
+   而 `wall.html` 自己的注释就写着两处必须一致、不一致既不报错也不像漏了 class。
+   一个条件写两遍来维持「一致」，维持不住 —— 现在只有一处算它。
+{% endcomment %}<html lang="en" class="{{ site_root_class }}">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  {% comment %}
+  charset / 图标 / 样式表 / 主题引导，三个顶层模板共用（2026-08-13 抽出来）。
+  ⚠️ 内页传 `themed`，首页不传 —— 理由和排序上的三条硬要求全在片段里。
+  {% endcomment %}
+  {% include "core/components/_head.html" with themed=1 %}
   <title>{% block title %}ROLF{% endblock %} · ROLF</title>
-  {% comment %}
-  标签页图标（2026-08-06 加）。在此之前**根本没有** —— 浏览器去要 /favicon.ico
-  拿到 404，标签页上显示的是它自带的地球。
-
-  ⚠️ 小尺寸用的是**只有波纹**的那一版，不是整张 logo。两者都从
-     `event-default.webp`（基金会 logo）生成，但 16/32px 下 logo 里那两行字
-     会完全糊掉 —— 实测三种裁法之后选的是「两个波峰」：整条波纹是 4:1 的比例，
-     塞进方形之后三条线细到并成一团。
-  ⚠️ 180px 的 apple-touch-icon 用**整张 logo** —— 加到主屏幕那个尺寸上字是看得清的，
-     而那时候人要认的是「哪个基金会」，不是一个抽象符号。
-  {% endcomment %}
-  <link rel="icon" type="image/png" sizes="16x16" href="{% static 'core/img/favicon-16.png' %}">
-  <link rel="icon" type="image/png" sizes="32x32" href="{% static 'core/img/favicon-32.png' %}">
-  <link rel="icon" type="image/png" sizes="48x48" href="{% static 'core/img/favicon-48.png' %}">
-  <link rel="apple-touch-icon" sizes="180x180" href="{% static 'core/img/apple-touch-icon.png' %}">
-  <link rel="stylesheet" href="{% static 'css/app.css' %}">
-  {% include "core/components/_appearance.html" %}
-  {% comment %}
-  进来时是浅色还是深色。⚠️ 抽成组件了（2026-08-06）—— Memories 页是第二个
-  使用者，理由和三条硬要求都写在片段里面。
-  {% endcomment %}
-  {% include "core/components/_theme_boot.html" %}
-  <script defer src="{% static 'js/app.js' %}"></script>
 </head>
 
 {% comment %}

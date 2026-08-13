@@ -1,5 +1,8 @@
-{% load static %}{% comment %}
+{% comment %}
 Memories —— 羽毛后面那条照片带（2026-08-06 新增，2026-08-07 按新参考图重做）。
+
+⚠️ 不再 `{% templatetag openblock %} load static {% templatetag closeblock %}`：这个文件里最后一处 `static` 随
+   `<head>` 一起搬进 `_head.html` 了（2026-08-13）。
 
 一整页：左上角一个返回，上方是标题，下方是一条**等高、自然宽度**的照片带，
 缓慢向左滑，每张下面一行小字。
@@ -23,16 +26,22 @@ Memories —— 羽毛后面那条照片带（2026-08-06 新增，2026-08-07 按
    但压在它上面的 62% 黑不会，于是照片以近乎原样的强度透过来，
    整页看起来又花又亮。**而这既不报错，也不像是漏了一个 class**。
    实测撞到过一次：先加了图层，忘了加这个类。
-{% endcomment %}<html lang="en" class="h-full{% if site_hero_image %} has-hero{% endif %}">
+
+   2026-08-13：所以这个条件不再在这里写第二遍了。`core.context_processors`
+   算好整串 class，这一页和 base.html 都只是把它印出来 —— 上面那段话原来是
+   一条只能靠人记住的纪律，现在结构上就分不了叉。
+{% endcomment %}<html lang="en" class="{{ site_root_class }}">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  {% comment %}
+  charset / 图标 / 样式表 / 主题引导，和首页、内页共用（2026-08-13 抽出来）。
+
+  ⚠️ 传 `themed`：这一页**跟随**深色模式（首页不跟随），所以要那段主题引导脚本。
+     它必须内联、必须在 <head> 里、必须在样式表之后，三条硬要求写在片段里面。
+
+  ⚠️ 抽出来顺带补齐了图标：这一页原来只声明了一个 32px，内页有四个尺寸。
+  {% endcomment %}
+  {% include "core/components/_head.html" with themed=1 %}
   <title>Memories · ROLF</title>
-  <link rel="icon" type="image/png" sizes="32x32" href="{% static 'core/img/favicon-32.png' %}">
-  <link rel="stylesheet" href="{% static 'css/app.css' %}">
-  {% include "core/components/_appearance.html" %}
-  {% include "core/components/_theme_boot.html" %}
-  <script defer src="{% static 'js/app.js' %}"></script>
 </head>
 
 <body class="wall-page h-full overflow-hidden">

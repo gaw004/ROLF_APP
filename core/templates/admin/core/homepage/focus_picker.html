@@ -15,25 +15,49 @@ Admin only: the front page's picture, whole, with the focal point drawn on it.
 ⚠️ A video is previewed too, at `preload="metadata"` so it costs a frame rather
    than the whole file. The focal point applies to both, and a widget that only
    worked for one of them would read as broken on the day somebody swaps.
+
+⚠️ **Both media tags are always rendered, and emptiness is `hidden` rather than
+   an `{% templatetag openblock %} if {% templatetag closeblock %}` wrapped round the lot** (2026-08-13). The reason is
+   the live preview: until then this markup only existed once a file had been
+   *saved*, so choosing a picture and looking down at the framing tool showed
+   the sentence "add a picture and save" — the tool turned up on the second
+   visit to the page, and the framing could not be set in the same pass as the
+   upload. The script swaps in the file the browser is already holding, and it
+   can only do that if there is something in the document to swap it into.
+
+⚠️ The two `data-*-url` attributes are what is **stored**, kept apart from what
+   is merely *chosen* in the file inputs. Reading the saved URL back off `src`
+   would not survive a preview being drawn over it, and "cancel the upload and
+   the old picture is gone" is a widget lying about the state of the record.
+
+⚠️ Still renders nothing that is submitted, and the script writes nothing of its
+   own — including the admin's own "Clear" checkbox, which it reads and never
+   sets. Somebody who ticks Clear *and* picks a file has contradicted
+   themselves, Django refuses that on submit and says so, and a widget that
+   quietly untangled it would be deciding which half they meant.
 {% endcomment %}
-{% if image_url or video_url %}
-  <div class="hero-focus"
-       data-focus-x="{{ focus_x }}" data-focus-y="{{ focus_y }}">
-    {% if video_url %}
-      <video class="hero-focus__media" src="{{ video_url }}"
-             preload="metadata" muted playsinline></video>
-    {% else %}
-      <img class="hero-focus__media" src="{{ image_url }}" alt="">
-    {% endif %}
-    <span class="hero-focus__marker" aria-hidden="true"></span>
-  </div>
-  <p class="help hero-focus__help">
-    Click the part of the picture that must always stay visible — a face, the
-    horizon, whoever is standing on the left. The screen is filled with this
-    picture, so everything around your point is what gets trimmed away, and how
-    much is trimmed differs between a phone and a laptop.
-  </p>
-{% else %}
-  <p class="help">Add a picture or a video above and save; the framing tool
-    appears here once there is something to frame.</p>
-{% endif %}
+<div class="hero-focus"
+     data-focus-x="{{ focus_x }}" data-focus-y="{{ focus_y }}"
+     data-image-url="{{ image_url }}" data-video-url="{{ video_url }}"
+     {% if not image_url and not video_url %}hidden{% endif %}>
+  <video class="hero-focus__media hero-focus__video"
+         {% if video_url %}src="{{ video_url }}"{% else %}hidden{% endif %}
+         preload="metadata" muted playsinline></video>
+  <img class="hero-focus__media hero-focus__image" alt=""
+       {% if image_url %}src="{{ image_url }}"{% endif %}
+       {% if video_url or not image_url %}hidden{% endif %}>
+  <span class="hero-focus__marker" aria-hidden="true"></span>
+</div>
+<p class="help hero-focus__help"
+   {% if not image_url and not video_url %}hidden{% endif %}>
+  Click the part of the picture that must always stay visible — a face, the
+  horizon, whoever is standing on the left — or drag the ring to nudge it. The
+  screen is filled with this picture, so everything around your point is what
+  gets trimmed away, and how much is trimmed differs between a phone and a
+  laptop.
+</p>
+<p class="help hero-focus__empty"
+   {% if image_url or video_url %}hidden{% endif %}>
+  Add a picture or a video above; the framing tool appears here as soon as you
+  choose a file.
+</p>

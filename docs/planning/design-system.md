@@ -937,6 +937,27 @@ Foundation admin，各带一个小标题），哪一组不显示，手写的序�
 ⚠️ **只用图片，从不用视频。** 每一页都解码一段视频在手机上是发烫和耗电，
 而没有人在看它。
 
+### 一张照片，谁怎么用（2026-08-13 补）
+
+整个站只有 `HomePage.hero_image` 一个字段，也只有 `hero_focus` 一个焦点。
+下面这张表说的是**行为**，而每一格的取值都来自同一处，不是三份实现：
+
+| | 首页 | 内页 / Memories |
+|---|---|---|
+| 有视频 | **放视频**（`HomePage.hero` 定的，只此一处） | 仍然放图片，永不放视频 |
+| 只有图片 | 放图片 | 放图片 |
+| 都没有 | 退回基金会 logo | 不铺背景，退回纯 `ink-950` |
+| 怎么铺 | `<img object-cover>` + `object-position` | CSS `background-image` + `background-position` |
+| 裁切焦点 | `hero_focus` | `hero_focus`（同一个值） |
+
+⚠️ 表里**唯一两处不同**（首页的 logo 兜底、img 与背景图两种铺法）是有意的：
+首页不能是一块空屏，而内页拿 logo 当满幅背景就是压在文字底下的噪声。
+其余每一格共用同一份取值、同一份遮罩（`_hero_scrim.html`）。
+
+⚠️ `.has-hero` 这个 class **由 `core.context_processors` 算好**，模板只是印出来。
+它原来在 `base.html` 和 `wall.html` 各写一遍 `{% if site_hero_image %}` ——
+少了它，照片照画、压在上面的 62% 黑不画，整页又花又亮，**而且不报错**。撞到过一次。
+
 ---
 
 ## 十一、滚动惯性（2026-08-05 重做）

@@ -170,9 +170,15 @@ def site_appearance(request):
     that picture.
 
     ⚠️ One **read** query per request, on a single row that almost never
-       changes. `current()` rather than `load()` on purpose: the latter is a
+       changes. `for_request()` rather than `load()` on purpose: the latter is a
        get_or_create, which puts a write on the read path of every page in the
        site. Two query-count tests caught that within a minute of it landing.
+
+    ⚠️ `for_request()` rather than `current()` as of 2026-08-13, and it is the
+       front page that was paying: `core.views.home` needs the same row for the
+       verse, so that one page — the busiest public URL in the site — ran this
+       SELECT twice. Neither call site could see the other, which is why the
+       caching is on the model rather than a note asking people to be careful.
 
     ⚠️ One query is cheap but not free, and it is the reason `brand_palette` is
        stored on the row rather than computed: quantising a photograph per page
@@ -183,13 +189,26 @@ def site_appearance(request):
        something nobody is looking at. A page whose only hero is a video falls
        back to the plain dark background.
     """
-    page = HomePage.current()
+    page = HomePage.for_request(request)
+    hero_image = page.hero_image if page.hero_image else None
     return {
-        "site_hero_image": page.hero_image if page.hero_image else None,
+        "site_hero_image": hero_image,
         "site_brand_palette": page.brand_palette or None,
         # ⚠️ The same string the front page uses, out of the same property.
         #    Every page crops this one photograph to a different shape, and the
         #    focus is what keeps all of those framings agreeing with each other.
         #    Formatting it separately here is how they would drift apart.
         "site_hero_focus": page.hero_focus,
+        # The `<html>` class for every page that carries the shell. Computed
+        # here for one reason, and it is written on the two files that used to
+        # do it themselves:
+        #
+        # ⚠️ `has-hero` is what selects the dark glass — every rule for it is
+        #    `.dark.has-hero ...`. Without the class the backdrop photograph is
+        #    still painted but the 62% black over it is not, so the picture comes
+        #    through at nearly full strength and the whole page goes bright and
+        #    busy. **It does not error and it does not look like a missing
+        #    class.** `wall.html` said exactly that in a comment while holding
+        #    the second copy of the condition; it has been hit once already.
+        "site_root_class": "h-full has-hero" if hero_image else "h-full",
     }

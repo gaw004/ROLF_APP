@@ -17,8 +17,9 @@ from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.contrib.staticfiles import finders
 from django.core.management import call_command
-from django.db import IntegrityError, models
-from django.test import TestCase
+from django.db import IntegrityError, connection, models
+from django.test import RequestFactory, TestCase
+from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
 
 from core.constraints import CONSTRAINT_FIELD
@@ -2139,6 +2140,18 @@ class ReportPanelExitsTests(TestCase):
                 self.assertIn("whitespace-nowrap", anchor[:40])
 
 
+#: The three documents that carry a `<head>` of their own, and the URL that
+#: serves each. Everything else on the site extends `base.html`.
+#:
+#: ⚠️ Memories and the event list are both behind a login, so tests over this
+#:    list sign in. The front page is public and stays that way.
+THREE_HEADS = [
+    ("home", "home"),
+    ("an inner page", "events:event_list"),
+    ("Memories", "gallery:wall"),
+]
+
+
 class FaviconTests(TestCase):
     """There was no favicon at all until 2026-08-06 — the tab showed a globe."""
 
@@ -2155,10 +2168,194 @@ class FaviconTests(TestCase):
                 self.assertEqual(Image.open(path).size, (size, size))
 
     def test_every_page_declares_them(self):
-        # Declared in base.html, so one assertion covers the whole site.
-        response = self.client.get(reverse("accounts:login"))
-        for name in ["favicon-32.png", "apple-touch-icon.png"]:
-            self.assertContains(response, name)
+        """⚠️ **All three top-level templates**, not one of them.
+
+        This test used to fetch a single inner page and carried the comment
+        "Declared in base.html, so one assertion covers the whole site". That
+        sentence was not true and the guard could not tell: there are three
+        documents with a `<head>` of their own, and they had drifted —
+        `base.html` declared four sizes, `wall.html` one, and **`home.html`
+        none at all**, so the front page showed the browser's globe. Each file
+        looked finished on its own. Fixed on 2026-08-13 by sharing `_head.html`;
+        this is the guard that would have caught it.
+        """
+        # ⚠️ Signed in, because Memories is behind a login — and Memories is
+        #    precisely one of the two pages that had drifted.
+        self.client.force_login(get_user_model().objects.create_user(
+            email="icons@example.com", password="a-good-long-password"))
+        for label, url_name in THREE_HEADS:
+            with self.subTest(page=label):
+                response = self.client.get(reverse(url_name))
+                self.assertEqual(response.status_code, 200)
+                for name in ["favicon-16.png", "favicon-32.png",
+                             "favicon-48.png", "apple-touch-icon.png"]:
+                    self.assertContains(response, name)
+
+
+class SharedHeadTests(TestCase):
+    """The `<head>` every page has, written once (2026-08-13).
+
+    ⚠️ Three documents carry one: `base.html` for the whole application,
+       `home.html` because the front page is a full-screen picture rather than
+       the app shell, and `wall.html` for the same reason. Three copies of the
+       same six lines, and the copies had already diverged — see FaviconTests.
+
+    ⚠️ The two **real** differences are parameters rather than duplication, and
+       both are tested below: the front page does not follow dark mode (so no
+       theme boot), and the three titles differ.
+    """
+
+    FRAGMENT = Path("core") / "templates" / "core" / "components" / "_head.html"
+    TOP_LEVEL = [
+        Path("core") / "templates" / "core" / "base.html",
+        Path("core") / "templates" / "core" / "home.html",
+        Path("gallery") / "templates" / "gallery" / "wall.html",
+    ]
+
+    def setUp(self):
+        # Memories and the event list are both behind a login.
+        self.client.force_login(get_user_model().objects.create_user(
+            email="heads@example.com", password="a-good-long-password"))
+
+    def body(self, path):
+        markup = (Path(settings.BASE_DIR) / path).read_text()
+        return re.sub(r"\{%\s*comment\s*%\}.*?\{%\s*endcomment\s*%\}", "",
+                      markup, flags=re.S)
+
+    def test_no_page_writes_the_shared_head_itself(self):
+        for path in self.TOP_LEVEL:
+            with self.subTest(path=str(path)):
+                body = self.body(path)
+                self.assertIn("core/components/_head.html", body,
+                              "this page does not use the shared <head>")
+                for copied in ["<meta charset", "rel=\"icon\"",
+                               "rel=\"apple-touch-icon\"", "css/app.css",
+                               "js/app.js", "_appearance.html"]:
+                    self.assertNotIn(
+                        copied, body,
+                        f"this page hand-writes {copied} instead of including "
+                        "the fragment, so the three will drift apart again — "
+                        "and the last time they did, the front page lost its "
+                        "favicon without anything failing")
+
+    def test_charset_comes_before_the_title(self):
+        """⚠️ It has to land inside the first 1024 bytes or the browser parses
+        the document once with a guessed encoding and then starts over. The
+        fragment leads with it, so the fragment has to be included before
+        anything else the page writes into its own head.
+        """
+        for path in self.TOP_LEVEL:
+            with self.subTest(path=str(path)):
+                body = self.body(path)
+                self.assertLess(body.index("core/components/_head.html"),
+                                body.index("<title>"),
+                                "the shared head is included after the title; "
+                                "charset is no longer first in the document")
+
+    def test_the_front_page_alone_skips_the_theme_boot(self):
+        """⚠️ The one difference the parameter exists for, stated in both
+        directions. The front page is white text over a photograph and does not
+        follow dark mode — and if it did boot the theme, `.dark` on `<html>`
+        would invert the top bar's whole white-text/navy-text rule set.
+        """
+        home = self.body(Path("core") / "templates" / "core" / "home.html")
+        self.assertIn("_head.html", home)
+        self.assertNotIn("themed", home,
+                         "the front page now boots the theme; its top bar's "
+                         "colours invert the moment <html> gets .dark")
+        for path in [Path("core") / "templates" / "core" / "base.html",
+                     Path("gallery") / "templates" / "gallery" / "wall.html"]:
+            with self.subTest(path=str(path)):
+                self.assertIn("themed=1", self.body(path))
+
+    def test_the_theme_boot_still_reaches_the_pages_that_want_it(self):
+        # Through the fragment now, so a grep for the include in the page files
+        # would read the refactor as a removal. Assert on what is served.
+        for label, url_name in [("an inner page", "events:event_list"),
+                                ("Memories", "gallery:wall")]:
+            with self.subTest(page=label):
+                self.assertContains(self.client.get(reverse(url_name)),
+                                    "localStorage")
+        self.assertNotContains(self.client.get(reverse("home")), "localStorage")
+
+    def test_the_three_titles_are_still_their_own(self):
+        self.assertContains(self.client.get(reverse("home")),
+                            "<title>River of Life Foundation</title>")
+        self.assertContains(self.client.get(reverse("gallery:wall")),
+                            "<title>Memories · ROLF</title>")
+        self.assertContains(self.client.get(reverse("events:event_list")),
+                            "· ROLF</title>")
+
+    def test_the_fragment_says_why_it_exists(self):
+        # ⚠️ Same rule as every other shared fragment: one pulled out of three
+        #    copies is indistinguishable from one that was always a component,
+        #    until somebody inlines it back.
+        markup = (Path(settings.BASE_DIR) / self.FRAGMENT).read_text()
+        self.assertIn("{% comment %}", markup)
+        self.assertIn("⚠️", markup)
+
+
+class RootClassTests(TestCase):
+    """`has-hero` on `<html>`, decided in one place (2026-08-13).
+
+    🔴 Why this is worth a class of its own: every dark-mode glass rule is
+       selected by `.dark.has-hero ...`. Without the class the backdrop
+       photograph is still painted but the 62% black over it is not, so the
+       picture comes through at nearly full strength and the page goes bright
+       and busy. **It does not error and it does not look like a missing
+       class.** It has been hit once already, and `wall.html` was carrying a
+       comment saying so while holding the second copy of the condition.
+    """
+
+    def setUp(self):
+        self.client.force_login(get_user_model().objects.create_user(
+            email="rootclass@example.com", password="a-good-long-password"))
+
+    def pages(self):
+        return [("an inner page", reverse("events:event_list")),
+                ("Memories", reverse("gallery:wall"))]
+
+    def test_the_condition_is_not_written_in_any_template(self):
+        for path in [Path("core") / "templates" / "core" / "base.html",
+                     Path("gallery") / "templates" / "gallery" / "wall.html"]:
+            with self.subTest(path=str(path)):
+                markup = (Path(settings.BASE_DIR) / path).read_text()
+                body = re.sub(r"\{%\s*comment\s*%\}.*?\{%\s*endcomment\s*%\}",
+                              "", markup, flags=re.S)
+                self.assertIn("{{ site_root_class }}", body)
+                self.assertNotIn(
+                    "has-hero", body,
+                    "this page decides `has-hero` for itself again; the two "
+                    "copies drift and the symptom is a page that is simply too "
+                    "bright in dark mode")
+
+    def test_a_picture_puts_the_class_on_and_no_picture_takes_it_off(self):
+        for label, url in self.pages():
+            with self.subTest(page=label, hero=False):
+                self.assertContains(self.client.get(url), 'class="h-full"')
+
+        page = HomePage.load()
+        page.hero_image = "home/example.webp"
+        page.save()
+
+        for label, url in self.pages():
+            with self.subTest(page=label, hero=True):
+                self.assertContains(self.client.get(url),
+                                    'class="h-full has-hero"')
+
+    def test_the_two_pages_always_agree(self):
+        """⚠️ The failure this replaces was never "one page is wrong" — it was
+        the two disagreeing, each looking correct on its own screen.
+        """
+        page = HomePage.load()
+        page.hero_image = "home/example.webp"
+        page.save()
+        classes = {
+            label: re.search(r"<html[^>]*class=\"([^\"]*)\"",
+                             self.client.get(url).content.decode()).group(1)
+            for label, url in self.pages()
+        }
+        self.assertEqual(len(set(classes.values())), 1, classes)
 
 
 class SiteMenuTests(TestCase):
@@ -2463,6 +2660,56 @@ class HomePageSingletonTests(TestCase):
         page.hero_image = ""
         self.assertIsNone(page.hero)
 
+    def test_the_answer_is_readable_by_name_and_still_unpacks(self):
+        """⚠️ `hero.kind` is what makes the front page's branch checkable.
+
+        The template asks this question now, and `{% if page.hero.1 == "video" %}`
+        is a line nobody can verify by reading it. The tuple half is kept
+        because anything that already indexed it — this file included — has no
+        reason to be rewritten for a rename.
+        """
+        page = HomePage.load()
+        page.hero_video = "home/b.mp4"
+        self.assertEqual(page.hero.kind, "video")
+        self.assertEqual(page.hero.file, page.hero_video)
+        self.assertEqual(tuple(page.hero), (page.hero_video, "video"))
+
+    def test_one_query_for_the_row_however_many_places_ask(self):
+        """⚠️ The front page asked for this row twice on every single hit.
+
+        `core.views.home` wants it for the verse and the picture, and the
+        `site_appearance` context processor wants it for the shell — and that
+        processor runs on every page in the site, this one included. Two
+        identical SELECTs on the busiest public URL there is, with neither call
+        site in a position to notice the other.
+        """
+        page = HomePage.load()
+        page.hero_image = "home/example.webp"
+        page.save()
+        with CaptureQueriesContext(connection) as captured:
+            response = self.client.get(reverse("home"))
+        self.assertEqual(response.status_code, 200)
+        reads = [q for q in captured.captured_queries if "core_homepage" in q["sql"]]
+        self.assertEqual(
+            len(reads), 1,
+            "the front page reads the home page row more than once — "
+            "HomePage.for_request caches on the request, so somebody has gone "
+            f"back to current() at one of the two call sites. Got: {reads}")
+
+    def test_the_row_is_cached_on_the_request_and_not_on_the_process(self):
+        """⚠️ A module- or class-level cache would serve yesterday's picture to
+        everybody until the worker restarted, and the symptom is somebody
+        saving the page, seeing nothing change, and saving it again.
+        """
+        self.assertIsNone(HomePage.for_request(RequestFactory().get("/")).pk)
+
+        page = HomePage.load()
+        page.verse_reference = "Colossians 3:23"
+        page.save()
+
+        later = HomePage.for_request(RequestFactory().get("/"))
+        self.assertEqual(later.verse_reference, "Colossians 3:23")
+
 
 class DerivedPaletteTests(TestCase):
     """The brand ramp is built from the front page's photograph (D26).
@@ -2684,6 +2931,62 @@ class HeroFramingTests(TestCase):
         inner = self.client.get(reverse("accounts:login"))
         self.assertNotContains(inner, "bg-center")
 
+    def test_the_video_wins_rule_has_exactly_one_implementation(self):
+        """⚠️ It had two, and one of them was dead (fixed 2026-08-13).
+
+        `HomePage.hero` carried the rule and a comment explaining it, and
+        **nothing but this test file called it** — the front page decided the
+        same thing again with a `{% if page.hero_video %}` of its own. So the
+        suite was green about a property no visitor's page ever reached, and
+        the two could have disagreed without a single failure.
+        """
+        markup = (Path(settings.BASE_DIR) / "core" / "templates" / "core"
+                  / "home.html").read_text()
+        body = re.sub(r"\{%\s*comment\s*%\}.*?\{%\s*endcomment\s*%\}", "",
+                      markup, flags=re.S)
+        self.assertIn("page.hero", body,
+                      "the front page no longer asks HomePage.hero")
+        self.assertNotIn(
+            "hero_video", body,
+            "the front page is deciding video-over-image for itself again; "
+            "that rule belongs to HomePage.hero and nowhere else")
+
+    def test_the_front_page_plays_the_video_while_the_rest_of_the_site_does_not(self):
+        """Both halves of the split, in one place, because they are one decision.
+
+        ⚠️ Every other page shows the **image** — a video behind every page
+           means every page decodes video, which on a phone is heat and battery
+           for something nobody is looking at.
+        """
+        page = HomePage.load()
+        page.hero_image = "home/example.webp"
+        page.hero_video = "home/clip.mp4"
+        page.save()
+
+        front = self.client.get(reverse("home"))
+        self.assertContains(front, "home/clip.mp4")
+        self.assertNotContains(front, "home/example.webp")
+
+        self.client.force_login(get_user_model().objects.create_user(
+            email="inner@example.com", password="a-good-long-password"))
+        inner = self.client.get(reverse("events:event_list"))
+        self.assertContains(inner, "home/example.webp")
+        self.assertNotContains(inner, "home/clip.mp4")
+
+    def test_with_nothing_uploaded_the_front_page_still_shows_the_logo(self):
+        """⚠️ The front page's fallback, and it is **not** shared with the rest
+        of the site: every other page falls back to plain dark. Deliberate —
+        the front page cannot be a blank screen, and an inner page carrying the
+        logo as a full-bleed background would be noise behind text.
+        """
+        front = self.client.get(reverse("home"))
+        self.assertContains(front, "event-default")
+
+        self.client.force_login(get_user_model().objects.create_user(
+            email="nologo@example.com", password="a-good-long-password"))
+        inner = self.client.get(reverse("events:event_list"))
+        self.assertIsNone(inner.context["site_hero_image"])
+
     def test_the_admin_offers_the_picture_to_click_on(self):
         """The numbers are for the machine; the picture is for the person.
 
@@ -2722,14 +3025,147 @@ class HeroFramingTests(TestCase):
         self.assertContains(response, 'name="hero_focus_y"')
 
     def test_with_no_picture_yet_the_widget_says_so_rather_than_breaking(self):
+        """⚠️ The markup is **present and hidden**, not absent (2026-08-13).
+
+        It used to be wrapped in an `{% if %}` and so did not exist until a file
+        had been saved — which is exactly why choosing a picture and scrolling
+        down to frame it found a sentence instead of the tool. The script fills
+        this in from the file the browser is already holding, and it needs
+        somewhere to put it. What somebody *sees* with an empty form is
+        unchanged: the sentence, and no picture.
+        """
         staff = get_user_model().objects.create_superuser(
             email="empty@example.com", password="a-good-long-password")
         self.client.force_login(staff)
         response = self.client.get(
             reverse("admin:core_homepage_change", args=[HomePage.load().pk]))
         self.assertEqual(response.status_code, 200)
-        self.assertNotContains(response, 'class="hero-focus"')
-        self.assertContains(response, "the framing tool")
+        markup = response.content.decode()
+
+        picker = re.search(r"<div class=\"hero-focus\"[^>]*>", markup)
+        self.assertIsNotNone(picker, "the picker is not in the document at all, "
+                                     "so there is nothing for the script to "
+                                     "preview an unsaved file into")
+        self.assertIn("hidden", picker.group(0),
+                      "an empty picker is being shown rather than hidden")
+        self.assertIn("the framing tool", markup)
+
+    def test_the_saved_urls_are_handed_over_separately_from_the_preview(self):
+        """⚠️ Stored and merely-chosen have to stay apart.
+
+        The script draws an unsaved file over `src`; the saved URL has to
+        survive that, or cancelling an upload leaves the widget claiming the
+        old picture is gone.
+        """
+        staff = get_user_model().objects.create_superuser(
+            email="urls@example.com", password="a-good-long-password")
+        self.client.force_login(staff)
+        page = HomePage.load()
+        page.hero_image = "home/example.webp"
+        page.save()
+        response = self.client.get(
+            reverse("admin:core_homepage_change", args=[page.pk]))
+        self.assertContains(response, "data-image-url=")
+        self.assertContains(response, "data-video-url=")
+
+    def test_both_media_tags_are_always_rendered(self):
+        """⚠️ Both, so a swap between a picture and a video is a `hidden` flip
+        rather than markup the script has to build. Only one is ever shown, and
+        the rule for which is `HomePage.hero`'s — video wins.
+        """
+        staff = get_user_model().objects.create_superuser(
+            email="bothtags@example.com", password="a-good-long-password")
+        self.client.force_login(staff)
+        page = HomePage.load()
+        page.hero_image = "home/example.webp"
+        page.save()
+        markup = self.client.get(
+            reverse("admin:core_homepage_change", args=[page.pk])).content.decode()
+        self.assertIn("hero-focus__video", markup)
+        self.assertIn("hero-focus__image", markup)
+
+
+class FocusPickerScriptTests(TestCase):
+    """Lint-as-test over the framing widget's script and stylesheet.
+
+    ⚠️ None of this runs in the test suite — there is no browser here. These
+       are the handful of lines whose absence is silent: a drag that scrolls
+       the page instead, a marker that trails the finger, a blob: URL nobody
+       lets go of. Each one is a symptom somebody would report as "it feels
+       broken" rather than as an error.
+    """
+
+    def script(self):
+        return (Path(settings.BASE_DIR) / "core" / "static" / "core" / "admin"
+                / "hero_focus_picker.js").read_text()
+
+    def stylesheet(self):
+        return (Path(settings.BASE_DIR) / "core" / "static" / "core" / "admin"
+                / "hero_focus_picker.css").read_text()
+
+    def test_dragging_is_pointer_events_and_captures(self):
+        """⚠️ One pair of handlers for a mouse, a trackpad and a finger.
+
+        And `setPointerCapture`, or a drag that leaves the picture stops being
+        delivered — the ring freezes at the edge, which reads as the widget
+        breaking rather than as a boundary being reached.
+        """
+        source = self.script()
+        for needle in ["pointerdown", "pointermove", "pointerup",
+                       "pointercancel", "setPointerCapture"]:
+            with self.subTest(needle=needle):
+                self.assertIn(needle, source)
+
+    def test_clicking_is_still_the_same_gesture_and_not_a_second_handler(self):
+        """⚠️ A click **is** a pointerdown, so the point lands on the way down
+        and a drag only keeps updating it. A separate `click` listener would be
+        a second implementation of the same thing, free to disagree.
+        """
+        self.assertNotIn('addEventListener("click"', self.script())
+
+    def test_a_drag_does_not_scroll_the_page_instead(self):
+        """⚠️ Without `touch-action: none` the browser claims the gesture as a
+        pan the moment it looks like one, pointermove stops arriving, and the
+        widget is simply dead to a finger — on the device where the framing
+        matters most.
+        """
+        self.assertIn("touch-action: none", self.stylesheet())
+
+    def test_the_marker_does_not_ease_while_it_is_being_dragged(self):
+        # 60ms of easing is what makes a click land softly and a drag lag.
+        self.assertIn(".hero-focus--dragging .hero-focus__marker",
+                      self.stylesheet())
+        self.assertIn("transition: none", self.stylesheet())
+
+    def test_hidden_is_given_a_display_rule_of_its_own(self):
+        """⚠️ `[hidden]`'s `display: none` comes from the UA stylesheet and is
+        beaten by the `inline-block`/`block` rules on these very elements. The
+        script hides things with the attribute, so without this the attribute
+        is set and nothing disappears.
+        """
+        self.assertIn(".hero-focus[hidden]", self.stylesheet())
+        self.assertIn(".hero-focus__media[hidden]", self.stylesheet())
+
+    def test_object_urls_are_released(self):
+        """⚠️ Each blob: URL pins the whole file in memory until it is revoked.
+        Somebody trying four photographs in a row would hold all four.
+        """
+        self.assertIn("revokeObjectURL", self.script())
+
+    def test_the_preview_follows_the_same_video_wins_rule_as_the_page(self):
+        # A widget previewing the picture while the site plays the video would
+        # be showing the wrong thing to aim at, and would look reasonable.
+        self.assertIn("video.hidden ? image : video", self.script())
+
+    def test_the_script_reads_the_clear_box_and_never_writes_it(self):
+        """⚠️ Ticking Clear *and* choosing a file is a contradiction Django
+        rejects on submit with a message of its own. Untangling it here would
+        be deciding which half somebody meant — and this widget's whole
+        contract is that it submits nothing.
+        """
+        source = self.script()
+        self.assertIn("clears[kind].checked", source)
+        self.assertNotIn(".checked =", source)
 
     def test_a_focus_outside_the_picture_is_refused_by_the_database(self):
         """⚠️ In the database, not only in the form (D9 / D14).

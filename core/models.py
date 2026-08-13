@@ -130,9 +130,67 @@ class HomePage(models.Model):
     #:    also type is two answers to one question. Recomputed in save().
     brand_palette = models.JSONField(default=dict, blank=True, editable=False)
 
+    #: Which part of the picture has to survive being cropped, as a percentage
+    #: from the left and from the top. 50/50 — the middle — is what a browser
+    #: does on its own, so the default changes nothing.
+    #:
+    #: ⚠️ **A point, not a crop rectangle, and that is the whole design**
+    #:    (2026-08-13). The picture is shown full-bleed, so the shape of the
+    #:    hole it has to fill is different on every device: a phone held
+    #:    upright keeps a tall slice, a laptop keeps a wide one. No single
+    #:    stored crop can be right for both — it would simply be cropped again.
+    #:    Naming the point that must stay visible is the one instruction that
+    #:    survives every screen.
+    #:
+    #: ⚠️ The file is never touched. Cropping happens in the browser, so
+    #:    changing this is free and reversible, and the original is still there
+    #:    the day somebody wants a different framing.
+    hero_focus_x = models.PositiveSmallIntegerField(
+        default=50,
+        verbose_name="focus, across",
+        help_text="0 is the left edge, 100 the right. 50 keeps the middle — "
+                  "raise it to save something on the right of the picture.",
+    )
+    hero_focus_y = models.PositiveSmallIntegerField(
+        default=50,
+        verbose_name="focus, down",
+        help_text="0 is the top edge, 100 the bottom. 50 keeps the middle — "
+                  "lower it (towards 0) to stop faces being cut off the top.",
+    )
+
     class Meta:
         verbose_name = "home page"
         verbose_name_plural = "home page"
+        constraints = [
+            # ⚠️ In the database, not only in the form (D9 / D14). The field
+            #    type already refuses negatives; this is the other end. A 300
+            #    here is not a validation nicety — object-position accepts it,
+            #    so the picture would simply slide off its own frame and the
+            #    page would come out mostly blank, with nothing raised.
+            models.CheckConstraint(
+                condition=models.Q(hero_focus_x__lte=100)
+                & models.Q(hero_focus_y__lte=100),
+                name="homepage_hero_focus_within_the_picture",
+                violation_error_message="The focus has to be between 0 and 100 "
+                                        "— it is a position inside the picture.",
+                violation_error_code="homepage_focus_out_of_range",
+            ),
+        ]
+
+    @property
+    def hero_focus(self):
+        """The focal point as CSS writes it: "50% 50%".
+
+        ⚠️ One property, two callers — the front page's `object-position` and
+           every other page's `background-position`, which show **the same
+           photograph**. Formatting it at each call site is how those two end
+           up disagreeing, and the symptom would be a picture framed one way on
+           the front page and another way behind the rest of the site, with
+           both looking deliberate. `_hero_backdrop.html` carries a comment
+           about exactly that kind of divergence; it was written after it
+           happened once.
+        """
+        return f"{self.hero_focus_x}% {self.hero_focus_y}%"
 
     def __str__(self):
         return "Home page"

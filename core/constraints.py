@@ -61,6 +61,13 @@ CONSTRAINT_FIELD = {
     "participation_hours_without_attendance": "hours",
     "participation_checkout_before_checkin": "checked_out_at",
     "participation_absent_after_checkin": "status",
+    # core.HomePage
+    #
+    # ⚠️ One constraint covers both halves of the framing, so the message has to
+    #    land on one of the two fields; the horizontal one is where the eye
+    #    starts. If that ever reads wrong the fix is two constraints, not a
+    #    cleverer mapping.
+    "homepage_focus_out_of_range": "hero_focus_x",
 }
 
 

@@ -42,13 +42,28 @@
        而这不是可以绕过的限制，是设计上就该如此：一个打开就出声的页面更糟。
        playsinline 是为了 iOS：少了它，视频会被强制全屏接管整个屏幕。
     {% endcomment %}
+    {% comment %}
+    ⚠️ `object-position` is written on the tag on purpose. It is a **number the
+       foundation chose**, not a styling decision, and it belongs next to the
+       URL of the picture it applies to — the same category as the aspect ratio
+       each photo on the Memories strip carries (see the note over `.wall-photo`
+       in app.css). What to *do* with it — fill the screen, crop the overflow —
+       is still in the class list.
+
+    ⚠️ The video gets it too. Somebody who set the framing for a picture and
+       then swapped in a video has not changed their mind about which part
+       matters, and applying it to one but not the other would read as a bug on
+       the day they switch.
+    {% endcomment %}
     {% if page.hero_video %}
       <video class="absolute inset-0 h-full w-full object-cover"
+             style="object-position: {{ page.hero_focus }}"
              src="{{ page.hero_video.url }}"
              autoplay muted loop playsinline preload="metadata"
              aria-hidden="true"></video>
     {% else %}
       <img class="absolute inset-0 h-full w-full object-cover"
+           style="object-position: {{ page.hero_focus }}"
            src="{% if page.hero_image %}{{ page.hero_image.url }}{% else %}{% static 'core/img/event-default.webp' %}{% endif %}"
            alt="" fetchpriority="high">
     {% endif %}

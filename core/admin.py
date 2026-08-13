@@ -55,6 +55,14 @@ class HomePageAdmin(admin.ModelAdmin):
                            "set. It plays muted and looped — browsers refuse to "
                            "autoplay sound.",
         }),
+        ("Framing", {
+            "fields": ["hero_focus_x", "hero_focus_y"],
+            "description": "The picture fills the whole screen, so some of it is "
+                           "always cut off — and how much differs between a "
+                           "phone and a laptop. These two numbers say which part "
+                           "has to stay visible. Left at 50 and 50 the middle is "
+                           "kept, which is what a browser does anyway.",
+        }),
         ("Words over the picture", {
             "fields": ["verse_text", "verse_reference"],
         }),

@@ -994,7 +994,14 @@ class WallPageTests(PageTestCase):
         page = self.client.get(reverse("gallery:wall")).content.decode()
         self.assertIn("background-image: url(", page)
         # Dark only — light mode is unchanged by any of this.
-        self.assertIn("hidden bg-cover bg-center dark:block", page)
+        #
+        # ⚠️ `bg-center` left the class list on 2026-08-13: the crop is now
+        #    positioned by the front page's focal point, so that this page and
+        #    the front page frame **the same photograph** the same way. A class
+        #    that pins it back to the centre would beat the inline value
+        #    silently — see core.tests.HeroFramingTests.
+        self.assertIn("hidden bg-cover dark:block", page)
+        self.assertIn("background-position: 50% 50%", page)
         # ⚠️ **And the class the glass is selected by.** This was missed on the
         #    first pass: the photo layer rendered, `has-hero` did not, so every
         #    `.dark.has-hero` rule silently failed to match and the photo came

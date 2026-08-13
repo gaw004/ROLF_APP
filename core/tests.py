@@ -2629,6 +2629,75 @@ class AppearanceContextTests(TestCase):
         self.client.get(reverse("home"))
         self.assertEqual(HomePage.objects.count(), 0)
 
+
+class HeroFramingTests(TestCase):
+    """Which part of the front page's photograph survives being cropped.
+
+    ⚠️ The problem this answers is not "the crop is wrong", it is that **the
+       crop is a different shape on every device** — a phone keeps a tall slice
+       of the picture and a laptop a wide one. So what is stored is a point
+       that must stay visible, not a rectangle: a rectangle would simply be
+       cropped again on the next screen (2026-08-13).
+    """
+
+    def test_the_default_is_what_a_browser_does_on_its_own(self):
+        """50/50 has to be the default, and it has to be the middle.
+
+        ⚠️ Anything else would silently re-frame the picture already on the
+           front page the moment this migration lands — a change nobody asked
+           for, arriving as "the photo moved by itself".
+        """
+        self.assertEqual(HomePage().hero_focus, "50% 50%")
+
+    def test_the_front_page_and_every_other_page_are_framed_by_one_number(self):
+        """⚠️ The same photograph, two croppings, one instruction.
+
+        The front page crops it with object-position and the shared dark
+        backdrop with background-position. Letting each pick its own would come
+        out as a picture framed one way on the front page and another way
+        behind the rest of the site, both looking deliberate — which is the
+        divergence `_hero_backdrop.html` was already carrying a warning about.
+        """
+        page = HomePage.load()
+        page.hero_image = "home/example.webp"
+        page.hero_focus_x, page.hero_focus_y = 30, 15
+        page.save()
+
+        front = self.client.get(reverse("home"))
+        self.assertContains(front, "object-position: 30% 15%")
+        self.assertEqual(front.context["site_hero_focus"], "30% 15%")
+
+        inner = self.client.get(reverse("accounts:login"))
+        self.assertContains(inner, "background-position: 30% 15%")
+
+    def test_the_inner_pages_no_longer_pin_the_crop_to_the_centre(self):
+        """`bg-center` was the hard-coded half of the same decision.
+
+        ⚠️ Leaving it in the class list would beat the inline value silently —
+           the focus would be stored, shown in the admin, applied on the front
+           page, and do nothing at all on every other page.
+        """
+        page = HomePage.load()
+        page.hero_image = "home/example.webp"
+        page.hero_focus_x, page.hero_focus_y = 80, 20
+        page.save()
+        inner = self.client.get(reverse("accounts:login"))
+        self.assertNotContains(inner, "bg-center")
+
+    def test_a_focus_outside_the_picture_is_refused_by_the_database(self):
+        """⚠️ In the database, not only in the form (D9 / D14).
+
+        `object-position: 300% 50%` is valid CSS: it slides the picture off its
+        own frame, and the page comes out mostly empty background with nothing
+        raised anywhere. The field type already refuses negatives; this is the
+        other end of the range.
+        """
+        page = HomePage.load()
+        page.hero_focus_x = 300
+        with self.assertRaises(IntegrityError):
+            page.save()
+
+
 class SiteMenuShapeTests(TestCase):
     """Two things about the menu that are easy to get wrong and never raise."""
 

@@ -187,4 +187,9 @@ def site_appearance(request):
     return {
         "site_hero_image": page.hero_image if page.hero_image else None,
         "site_brand_palette": page.brand_palette or None,
+        # ⚠️ The same string the front page uses, out of the same property.
+        #    Every page crops this one photograph to a different shape, and the
+        #    focus is what keeps all of those framings agreeing with each other.
+        #    Formatting it separately here is how they would drift apart.
+        "site_hero_focus": page.hero_focus,
     }

@@ -37,11 +37,17 @@
 ⚠️ 代价是真实存在的，写在片段的注释里，并记进 phase-c.md 的已知缺口。
 
 需要 `site_hero_image`，由 `core.context_processors` 提供 —— 调用方不用传参。
+
+⚠️ 2026-08-13：裁切的位置改由 `site_hero_focus` 决定，`bg-center` 从 class 串里
+   拿掉了 —— 它正是首页以前被钉死的那个「永远留中间」。这里和首页是**同一张
+   照片**、裁成两种形状，所以必须由同一个数定位；共用一个上下文值就是为了这个。
+   在这里再写死一次 `bg-center`，就是把这个文件自己警告过的那种分叉请回来。
 {% endcomment %}
 {% if site_hero_image %}
   <div aria-hidden="true"
-       class="pointer-events-none fixed inset-0 -z-10 hidden bg-cover bg-center dark:block"
-       style="background-image: url('{{ site_hero_image.url }}')">
+       class="pointer-events-none fixed inset-0 -z-10 hidden bg-cover dark:block"
+       style="background-image: url('{{ site_hero_image.url }}');
+              background-position: {{ site_hero_focus }}">
     {% include "core/components/_hero_scrim.html" %}
   </div>
 {% endif %}

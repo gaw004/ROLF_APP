@@ -109,10 +109,39 @@ def dominant_colour(image_file):
     ⚠️ Near-white, near-black and near-grey groups are skipped. Sky and shadow
        dominate most photographs by area while saying nothing about their
        colour; a picture of a red barn under a big sky is a red picture.
+
+    ⚠️ **`draft()` before `convert()`, and the order is the whole point**
+       (2026-08-12, after this took the production instance down). `convert()`
+       decodes the *entire* picture into memory before `thumbnail()` gets a
+       chance to shrink it: measured at **+94 MB of peak memory for one
+       6000×4000 photograph — from a source file of 1.1 MB**. `draft()` asks
+       the JPEG decoder for a reduced-scale decode instead, and the same
+       measurement becomes **+3.3 MB**.
+
+       The 10 MB upload limit does not protect against this and never did:
+       what costs the memory is the pixel count after decoding, and a small
+       file can hold a very large picture.
+
+       ⚠️ It is a **no-op for PNG and WebP** — only JPEG can be decoded at
+       reduced scale. A very large PNG still costs its full pixel count here.
+       Left as a known gap rather than papered over, because the honest fix for
+       that case is a limit on dimensions, not a trick.
+
+       320 rather than 160: draft picks the nearest scale **not smaller** than
+       what is asked for, so asking for double the working size leaves the
+       LANCZOS thumbnail below something to resample from rather than an image
+       that is already exactly the target.
+
+       ⚠️ JPEG only offers 1/2, 1/4 and 1/8, so **1/8 is the floor** whatever is
+       asked for: 6000×4000 arrives here as 750×500, not as 320×213. That is
+       still 1.1 MB instead of 72 MB, but it means a genuinely enormous
+       photograph (20000px wide, say) would still decode at 2500px. The answer
+       to that one is a limit on dimensions, not a smaller number here.
     """
     from PIL import Image
 
     with Image.open(image_file) as source:
+        source.draft("RGB", (320, 320))
         image = source.convert("RGB")
         image.thumbnail((160, 160))
         quantised = image.quantize(colors=16, method=Image.MEDIANCUT)

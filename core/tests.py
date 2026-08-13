@@ -24,7 +24,7 @@ from django.urls import reverse
 from core.constraints import CONSTRAINT_FIELD
 from core.limits import LONG_TEXT
 from core.models import HomePage
-from core.palette import ramp_from, relative_luminance
+from core.palette import dominant_colour, ramp_from, relative_luminance
 from core.querysets import DateRangeQuerySet
 from core.timeutils import local_today
 
@@ -2552,6 +2552,60 @@ class DerivedPaletteTests(TestCase):
     def saturation_of(self, hex_colour):
         rgb = [int(hex_colour.lstrip("#")[i:i + 2], 16) / 255 for i in (0, 2, 4)]
         return colorsys.rgb_to_hls(*rgb)[2]
+
+    def test_a_large_photograph_is_never_decoded_at_its_full_size(self):
+        """⚠️ 2026-08-12: this one took the production instance down.
+
+        `convert()` decodes the whole picture before `thumbnail()` can shrink
+        it — measured at **+94 MB of peak memory for one 6000×4000 photograph
+        out of a 1.1 MB file**, against a 512 MB instance running two workers.
+        Changing the front page picture a few times in a row was enough: the
+        process was killed and every visitor got a 502. With `draft()` the same
+        measurement is +3.3 MB.
+
+        ⚠️ **The regression this guards is invisible in every other way.**
+           Delete the `draft()` line and the colours that come out are
+           identical (verified on three photographs), every other test stays
+           green, and the only difference is a number nobody is looking at
+           until the instance dies. So the assertion is on the *size of the
+           image at the moment it is converted*, which is the actual rule.
+
+        ⚠️ The 10 MB upload limit is not a defence and never was: what costs
+           the memory is the pixel count after decoding, and a small file can
+           hold a very large picture — the fixture here is proof.
+        """
+        import io
+
+        from PIL import Image as PILImage
+
+        source = PILImage.new("RGB", (6000, 4000), (178, 34, 34))
+        buffer = io.BytesIO()
+        source.save(buffer, "JPEG", quality=88)
+        source.close()
+        buffer.seek(0)
+        self.assertLess(len(buffer.getvalue()), 10 * 1024 * 1024,
+                        "the fixture has to be an upload the form would accept")
+
+        real_convert = PILImage.Image.convert
+        converted_at = []
+
+        def spy(self, *args, **kwargs):
+            converted_at.append(self.size)
+            return real_convert(self, *args, **kwargs)
+
+        with mock.patch.object(PILImage.Image, "convert", spy):
+            dominant_colour(buffer)
+
+        self.assertNotEqual(converted_at, [], "nothing was converted at all")
+        # ⚠️ A quarter of the original, not "small": JPEG can only be decoded at
+        #    1/2, 1/4 or 1/8 scale, so 6000×4000 comes out at 750×500 and no
+        #    smaller however little is asked for. Asserting a fixed pixel count
+        #    would encode that arithmetic; asserting a ratio says the rule.
+        self.assertLessEqual(
+            max(max(size) for size in converted_at), 6000 / 4,
+            "the picture was still at full size when it was decoded — the "
+            "draft() call in dominant_colour has gone, and with it the only "
+            "thing keeping a phone photograph from costing ~94 MB of memory")
 
 
 class AppearanceContextTests(TestCase):

@@ -12,6 +12,7 @@ from django.shortcuts import get_object_or_404, redirect, render
 
 from org.permissions import (
     can_delete_gallery_photo,
+    can_reach_gallery_manage,
     can_upload_gallery_photo,
     in_foundation_tier,
     ministry_ids_administered_by,
@@ -19,7 +20,19 @@ from org.permissions import (
 
 from .forms import GalleryPhotoForm, describe_skipped
 from .models import GalleryPhoto
-from .services import repeats_for, strips_for
+from .services import (
+    MAX_PHOTOS_PER_REMOVAL,
+    remove_photo,
+    repeats_for,
+    resolve_removal,
+    strips_for,
+)
+
+#: The one sentence both photo-admin pages refuse with. ⚠️ Written once: two
+#: doors onto the same room that disagree about why it is locked is how a
+#: refusal starts sounding like a bug.
+NOT_A_PHOTO_ADMIN = ("Photos on the Memories wall are put there by a ministry's "
+                     "admins and by the foundation.")
 
 
 def _strip(photos, position):
@@ -112,9 +125,7 @@ def manage(request):
     foundation = in_foundation_tier(request.user)
     administered = ministry_ids_administered_by(request.user)
     if not foundation and not administered:
-        raise PermissionDenied(
-            "Photos on the Memories wall are put there by a ministry's admins "
-            "and by the foundation.")
+        raise PermissionDenied(NOT_A_PHOTO_ADMIN)
 
     if request.method == "POST":
         form = GalleryPhotoForm(request.POST, request.FILES, user=request.user)
@@ -138,6 +149,11 @@ def manage(request):
     return render(request, "gallery/manage.html", {
         "form": form,
         "photos": photos,
+        # ⚠️ Handed to the template so the page can stop somebody ticking a
+        #    61st box, rather than letting them pick 200 and refusing the lot
+        #    afterwards. The number is **not** written in the template — one
+        #    source of truth, same rule as MAX_PHOTOS_PER_UPLOAD's help text.
+        "removal_cap": MAX_PHOTOS_PER_REMOVAL,
     })
 
 
@@ -156,13 +172,89 @@ def delete(request, pk):
     if request.method != "POST":
         return redirect("gallery:manage")
 
-    caption = photo.caption
-    # ⚠️ The files go too, and before the row does. Deleting only the row
-    #    leaves two objects in the bucket that nothing points at any more —
-    #    invisible, unbilled to anyone's attention, and holding a photograph
-    #    somebody asked to have taken down.
-    photo.image.delete(save=False)
-    photo.thumb.delete(save=False)
-    photo.delete()
+    # ⚠️ The files go with the row, and that is `services.remove_photo`'s job
+    #    rather than four lines here — the batch path below has to do exactly
+    #    the same thing, and a second copy of it is where the thumbnail gets
+    #    forgotten.
+    caption = remove_photo(photo)
     messages.success(request, f"Removed from Memories — {caption}.")
+    return redirect("gallery:manage")
+
+
+def _skipped_note(removal):
+    """What to add about the ids that will not be acted on. "" when there are none.
+
+    ⚠️ Counts, no names. The two reasons are told apart because they mean
+       different things to the person reading — one is "somebody beat you to
+       it", the other is "that was never yours" — but neither says *which*
+       photo, because an id that came back named would make this form into a
+       way of asking whether photo 412 exists and whose it is.
+    """
+    parts = []
+    if removal.missing:
+        parts.append(f"{removal.missing} already gone")
+    if removal.forbidden:
+        parts.append(f"{removal.forbidden} not yours to take down")
+    return f" Left alone: {', '.join(parts)}." if parts else ""
+
+
+@login_required
+def remove_selected(request):
+    """Take several photos off the wall — confirmation page, then the deletion.
+
+    Two POSTs, and the first one deletes nothing. It renders the photographs
+    that are actually about to go, at a size somebody can recognise them at.
+
+    ⚠️ **The second POST re-resolves from the ids rather than trusting the page
+       it came from.** The confirmation page is a picture of a decision, not the
+       authority to carry it out: it holds no token, no signature and no
+       server-side state, so a stale one — rendered before a role was revoked,
+       or before somebody else deleted half of it — is simply resolved again and
+       comes out smaller. This is the whole reason it is safe to put ids in
+       hidden inputs.
+
+    ⚠️ POST for **both** steps, including the one that only shows the list. A
+       GET that carried the ids would be a URL somebody could bookmark, share,
+       or have prefetched — and the page it renders has a one-click delete on
+       it.
+    """
+    if not can_reach_gallery_manage(request.user):
+        # ⚠️ The gate is here as well as on `manage`, even though a volunteer
+        #    would get an empty removal anyway. "It happens to resolve to
+        #    nothing" is not a refusal — it is a refusal by accident, one
+        #    permission change away from not being one.
+        raise PermissionDenied(NOT_A_PHOTO_ADMIN)
+    if request.method != "POST":
+        return redirect("gallery:manage")
+
+    removal = resolve_removal(request.user, request.POST.getlist("photo"))
+
+    if removal.over_cap:
+        messages.error(request, (
+            f"That is more than {MAX_PHOTOS_PER_REMOVAL} photos at once, so "
+            f"nothing was removed — send them in smaller batches."))
+        return redirect("gallery:manage")
+
+    if not removal.photos:
+        # ⚠️ Not an error page. Ticking nothing is a slip, and everything else
+        #    that lands here (ids that are gone, ids that are not theirs) is
+        #    already accounted for in the note.
+        messages.error(
+            request,
+            "Nothing was removed — no photos you can take down were selected."
+            + _skipped_note(removal))
+        return redirect("gallery:manage")
+
+    if not request.POST.get("confirmed"):
+        return render(request, "gallery/remove_selected.html", {
+            "removal": removal,
+            "skipped_note": _skipped_note(removal),
+        })
+
+    for photo in removal.photos:
+        remove_photo(photo)
+    messages.success(
+        request,
+        f"Removed {len(removal.photos)} from Memories. The files are gone."
+        + _skipped_note(removal))
     return redirect("gallery:manage")

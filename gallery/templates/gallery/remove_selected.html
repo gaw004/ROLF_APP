@@ -1,0 +1,97 @@
+{% extends "core/base.html" %}
+{% block title %}Remove from Memories{% endblock %}
+
+{% block content %}
+  {% comment %}
+  批量删除的确认页。**这一页什么都还没删。**
+
+  ⚠️ 它的全部作用是把「要删的那几张」画出来给人看一眼。一个只有数字的 confirm
+     框答不了「我到底勾中了哪几张」—— 而这些文件删掉之后没有任何备份能捞回来
+     （gallery/models.py 的类注释、config/settings/base.py 的 STORAGES 注释）。
+     确认页是那句话的界面形态。
+
+  ⚠️ 这一页**不带任何权限**。下面那些 hidden 的 id 回到服务端之后会被
+     services.resolve_removal 从头重判一遍 —— 所以这一页在浏览器里放多久、
+     被谁转发出去，都不改变谁能删掉什么。它是一张决定的照片，不是执行那个决定的凭据。
+  {% endcomment %}
+
+  <h1 class="text-2xl font-semibold">Remove {{ removal.photos|length }} from Memories?</h1>
+
+  {% comment %}
+  ⚠️ **警示框，不是页面上一行普通小字**，而且用的是 event_detail.html 上那个
+     现成的样式（card + warning 色），不是这里新发明的一套。
+
+  ⚠️ 用框而不用裸文字的理由是深色模式下量出来的：这一页的底垫是首页那张照片，
+     裸的小字会直接压在照片上，亮的地方基本读不出来（phase-c.md 里那条 🔴，
+     卡外小字 4.03:1，而且**跟着基金会哪天换了首页图而变**）。
+     偏偏这一句是全页最不能读不出来的那一句 —— 它就是这一页存在的理由。
+
+  ⚠️ 「回不来」写成一句陈述句，不是一个感叹号。
+  {% endcomment %}
+  <div class="card mt-4 max-w-2xl border border-warning-fg/30 bg-warning-bg dark:border-warning-fg-dark/30 dark:bg-warning-bg-dark">
+    <p class="text-sm text-warning-fg dark:text-warning-fg-dark">
+      The photo files are deleted for good — they are not in any backup, and
+      nothing can bring them back.{{ skipped_note }}
+    </p>
+  </div>
+
+  {% comment %}
+  比 manage 页密一档（那边是 2/3/4）。⚠️ 判据**不是**「越大越好」：
+  这一页要满足的是「认得出是哪张」，而不是「看得清细节」——
+  桌面上一格约 175px，认一张风景或一张合照绰绰有余（2026-08-14 拍板：
+  「小一点完全没问题，as long as 能看清」）。
+
+  ⚠️ 密一档同时解决另一件事：上限是 60 张，排成 4 列就是 15 行 ——
+     按钮在网格下面，那等于要滚十五行才够得着。6 列是 10 行。
+
+  ⚠️ 按钮仍然留在网格**下面**，不放上面。滚过一遍自己要销毁的东西，
+     正是这一页存在的那点阻力。
+  {% endcomment %}
+  <ul class="mt-6 grid grid-cols-3 gap-3 sm:grid-cols-4 lg:grid-cols-6">
+    {% for photo in removal.photos %}
+      {% comment %}
+      ⚠️ `card`，和 manage 页上每一张一样 —— **不是**光秃秃的 `<li>`。
+         第一版是光秃秃的，深色模式下当场露馅：深色模式的页面底垫是首页那张照片，
+         于是这行 12px 的小字直接压在雪山上，白底白字，基本看不见。
+         这正是 phase-c.md 里那条 🔴「卡片外的小字只有 4.03:1，而且**跟着照片变**」——
+         它跟着基金会哪天换了首页图而变，且不会有任何东西报错。
+         卡片那层玻璃是这个项目对这件事的现成答案，照抄就是了。
+      {% endcomment %}
+      <li class="card p-3">
+        {% comment %}
+        ⚠️ 缩略图，而且要看得出是哪张 —— 认脸是这一页唯一的功能。
+           宽高照旧写上，少了它们这个网格会一路重排。
+        {% endcomment %}
+        <img src="{{ photo.thumb.url }}" alt="{{ photo.caption }}"
+             width="{{ photo.thumb_width }}" height="{{ photo.thumb_height }}"
+             loading="lazy" decoding="async"
+             class="aspect-square w-full rounded-md object-cover">
+        <p class="mt-2 truncate text-xs text-ink-600 dark:text-ink-300">{{ photo.caption }}</p>
+      </li>
+    {% endfor %}
+  </ul>
+
+  <form method="post" action="{% url 'gallery:remove_selected' %}"
+        class="mt-8 flex flex-wrap items-center gap-3">
+    {% csrf_token %}
+    {% comment %}
+    ⚠️ 重发的是 `removal.photos` 的 id，不是原样转发用户提交的那一串。两者可能不同 ——
+       中间被别人删掉的、不属于这个人的，在上一步已经落下了。把原串转发回去
+       等于让第二步重新面对第一步已经处理过的东西，而它们在页面上是看不见的。
+    {% endcomment %}
+    {% for photo in removal.photos %}
+      <input type="hidden" name="photo" value="{{ photo.pk }}">
+    {% endfor %}
+    {% comment %}
+    这个值是「这是第二次了」的全部含义。没有它，视图渲染确认页；有它，视图动手。
+    {% endcomment %}
+    <input type="hidden" name="confirmed" value="1">
+    {% include "core/components/button.html" with label="Yes, remove them" variant="danger" %}
+    {% comment %}
+    ⚠️ 退出的路是一条 GET 链接回列表页，不是「取消」按钮。这一页没有任何东西
+       需要撤销 —— 走开就是取消。
+    {% endcomment %}
+    {% url 'gallery:manage' as manage_url %}
+    {% include "core/components/button.html" with label="Keep them" href=manage_url variant="ghost" %}
+  </form>
+{% endblock %}

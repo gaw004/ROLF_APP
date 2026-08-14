@@ -48,31 +48,115 @@
   </h2>
 
   {% if photos %}
-    <ul class="mt-4 grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4">
-      {% for photo in photos %}
-        <li class="card p-3">
+    {% comment %}
+    勾选 + 批量删除。⚠️ `picked` 是一串**字符串 id**，纯 UI 状态 ——
+    页面上删得掉哪几张从来由服务端判（views.remove_selected 会把 id 重新判一遍），
+    这里只负责「勾了几个」这个数字和全选那一下。D24 那条线就在这儿。
+
+    ⚠️ x-data 挂在**包住顶栏和网格**的这一层，不是顶栏上。计数要数的复选框在网格里，
+       两者不在同一个作用域的话，Alpine 根本看不见它们。
+    {% endcomment %}
+    {% comment %}
+    ⚠️ `cap` 是服务端给的（views.manage 里的 `removal_cap`），模板里不写那个数字。
+       写死一份的后果是改上限的人只改到其中一处，而**不一致的那一半是浏览器这半**：
+       页面让你勾 100 张，服务端把整批退回来。
+    {% endcomment %}
+    <div x-data="{ picked: [], cap: {{ removal_cap }} }">
+      {% comment %}
+      ⚠️ 这张 form **不包住那些复选框**，复选框靠 `form="remove-selected"` 属性
+         认领进来。理由是每张卡片下面已经有一张单删的 form —— 表单不能嵌套，
+         嵌套的那份浏览器会直接丢掉，症状是「单删按钮点了没反应」。
+      {% endcomment %}
+      <form method="post" action="{% url 'gallery:remove_selected' %}"
+            id="remove-selected" class="mt-4 flex flex-wrap items-center gap-3">
+        {% csrf_token %}
+        <label class="flex items-center gap-2 text-sm text-ink-700 dark:text-ink-200">
           {% comment %}
-          缩略图，不是大图。这一页可能列出几百张，而大图是给悬浮窗用的。
-          ⚠️ 宽高照旧写上：少了它们，这个网格会在图片逐张到达时一路重排。
+          ⚠️ 这个框自己**不记状态**，它显示的是 `picked` 算出来的结果。
+             另记一个布尔的话，全选之后手动取消掉一张，「全选」仍然亮着 ——
+             亮着的全选配上实际选中 7 张，是没人会去怀疑的那种错。
+
+          ⚠️ 那一串 id 从 DOM 里数，不从模板里渲染一份出来。渲染一份等于把同一个
+             列表写两遍，而它们分叉的那天，全选会勾中一张页面上已经没有的照片。
           {% endcomment %}
-          <img src="{{ photo.thumb.url }}" alt="{{ photo.caption }}"
-               width="{{ photo.thumb_width }}" height="{{ photo.thumb_height }}"
-               loading="lazy" decoding="async"
-               class="aspect-square w-full rounded-md object-cover">
-          <p class="mt-2 truncate text-xs text-ink-600 dark:text-ink-300">{{ photo.caption }}</p>
           {% comment %}
-          ⚠️ POST，不是一条 GET 链接。GET 删除会被每一个预取器和爬虫触发，
-             而这两个文件是全系统唯一没有备份能捞回来的东西。
-          ⚠️ confirm 是必须的（button.html 对破坏性动作的要求），而且这里的
-             删除是真删 —— 文件和记录一起走。
+          ⚠️ 全选也吃上限：照片多于 cap 时，它勾中的是**前 cap 张**，不是全部。
+             不吃上限的话，一个 200 张的库里点一下全选就直接撞上服务端那道拒绝，
+             而「全选」是这一页最容易被点的东西。
           {% endcomment %}
-          <form method="post" action="{% url 'gallery:delete' photo.pk %}" class="mt-2">
-            {% csrf_token %}
-            {% include "core/components/button.html" with label="Remove" variant="danger" full=1 confirm="Remove this photo from Memories? The file is deleted for good." %}
-          </form>
-        </li>
-      {% endfor %}
-    </ul>
+          <input type="checkbox"
+                 x-bind:checked="picked.length === Math.min(cap, $root.querySelectorAll('input[name=photo]').length)"
+                 x-on:change="picked = $event.target.checked ? Array.from($root.querySelectorAll('input[name=photo]')).slice(0, cap).map(b => b.value) : []">
+          Select all
+        </label>
+        {% comment %}
+        没有 JS 时这两句都不出现（`x-text` 到不了，元素是空的），按钮照样能用 ——
+        勾选和提交都是浏览器原生行为。
+        {% endcomment %}
+        <span class="text-sm text-ink-600 dark:text-ink-300"
+              x-text="picked.length ? picked.length + ' selected' : ''"></span>
+        {% comment %}
+        ⚠️ 撞到上限时说一句，而不是让人对着一排点不动的复选框猜。
+           灰掉的控件从来只说「不能点」，不说「为什么」。
+        {% endcomment %}
+        <span class="text-sm text-warning-fg dark:text-warning-fg-dark"
+              x-text="picked.length >= cap ? cap + ' at a time is the most — send the rest in a second batch' : ''"></span>
+        {% comment %}
+        ⚠️ 这里的 confirm 是**第一道**，而且它不是最后一道：提交之后还有一页
+           确认页，会把真正要删的那几张的缩略图列出来。批量删除不可逆，
+           而一个只有数字的 confirm 框答不了「我到底勾中了哪几张」这个问题。
+        {% endcomment %}
+        {% include "core/components/button.html" with label="Remove selected" variant="danger" %}
+      </form>
+
+      <ul class="mt-4 grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4">
+        {% for photo in photos %}
+          <li class="card p-3">
+            <label class="flex items-center gap-2 text-xs text-ink-600 dark:text-ink-300">
+              {% comment %}
+              ⚠️ `form` 属性把这个框交给上面那张 form —— 它在 DOM 里并不在那张
+                 form 里面。这是 HTML 自己的机制，没有 JS 也成立。
+              {% endcomment %}
+              {% comment %}
+              ⚠️ 到了上限之后，**还没勾的**那些灰掉，已经勾上的照旧能取消 ——
+                 否则就是勾满 60 张之后连反悔都做不到。
+              ⚠️ 灰掉是**界面**，不是权限（button.html 上写着同一句）：
+                 真正的上限在服务端，这里挡的是手滑，不是 POST。
+              {% endcomment %}
+              <input type="checkbox" name="photo" value="{{ photo.pk }}"
+                     form="remove-selected" x-model="picked"
+                     x-bind:disabled="picked.length >= cap && !picked.includes('{{ photo.pk }}')">
+              {% comment %}
+              ⚠️ 标签是**每张照片各不相同的那句话**，而且是 sr-only 的。
+                 写成看得见的「Select」有两处不好：几十张卡片上重复几十遍是纯噪音，
+                 而对读屏软件来说，几十个都叫「Select」的复选框等于一个都没有名字 ——
+                 听下来是「复选框、复选框、复选框」，选中哪张全靠数。
+              {% endcomment %}
+              <span class="sr-only">Select {{ photo.caption }}</span>
+            </label>
+            {% comment %}
+            缩略图，不是大图。这一页可能列出几百张，而大图是给悬浮窗用的。
+            ⚠️ 宽高照旧写上：少了它们，这个网格会在图片逐张到达时一路重排。
+            {% endcomment %}
+            <img src="{{ photo.thumb.url }}" alt="{{ photo.caption }}"
+                 width="{{ photo.thumb_width }}" height="{{ photo.thumb_height }}"
+                 loading="lazy" decoding="async"
+                 class="mt-2 aspect-square w-full rounded-md object-cover">
+            <p class="mt-2 truncate text-xs text-ink-600 dark:text-ink-300">{{ photo.caption }}</p>
+            {% comment %}
+            ⚠️ POST，不是一条 GET 链接。GET 删除会被每一个预取器和爬虫触发，
+               而这两个文件是全系统唯一没有备份能捞回来的东西。
+            ⚠️ confirm 是必须的（button.html 对破坏性动作的要求），而且这里的
+               删除是真删 —— 文件和记录一起走。
+            {% endcomment %}
+            <form method="post" action="{% url 'gallery:delete' photo.pk %}" class="mt-2">
+              {% csrf_token %}
+              {% include "core/components/button.html" with label="Remove" variant="danger" full=1 confirm="Remove this photo from Memories? The file is deleted for good." %}
+            </form>
+          </li>
+        {% endfor %}
+      </ul>
+    </div>
   {% else %}
     {% include "core/components/empty.html" with message="No photos yet. The first one you add is on the wall tomorrow morning — and today, if the wall is not already full." %}
   {% endif %}

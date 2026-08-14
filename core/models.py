@@ -1,7 +1,7 @@
 from collections import namedtuple
 
 from django.core.validators import FileExtensionValidator
-from django.db import IntegrityError, models
+from django.db import IntegrityError, models, transaction
 
 from core.limits import LONG_TEXT
 from core.storages import public_storage
@@ -102,6 +102,15 @@ class HomePage(models.Model):
     SINGLETON_PK = 1
 
     MEDIA_DIR = "home"
+
+    #: The two fields that put an object in the public bucket.
+    #:
+    #: ⚠️ A tuple rather than two mentions in `save()`, because everything that
+    #:    knows about the bucket has to agree on it: the replacement below, and
+    #:    `core.services.orphaned_home_media`, which decides what is *not*
+    #:    pointed at. Those two disagreeing means the sweep deletes a live
+    #:    picture — the one failure mode here that a user would actually see.
+    MEDIA_FIELDS = ("hero_image", "hero_video")
 
     # ⚠️ The **public** bucket, named explicitly, unlike every other upload in
     #    the project. This page is the one thing here that needs no login, so
@@ -213,7 +222,60 @@ class HomePage(models.Model):
         #    one of them by chance.
         self.pk = self.SINGLETON_PK
         self.refresh_palette()
+        # ⚠️ Read **before** the write, obviously — but also *outside* the
+        #    on_commit callback below, which runs when the old row is already
+        #    gone from the database and could no longer be asked.
+        superseded = self._superseded_media()
         super().save(*args, **kwargs)
+        if superseded:
+            from .services import discard_media
+
+            # ⚠️ **After the commit, not here.** Deleting inline means a
+            #    transaction that then rolls back leaves a row pointing at a
+            #    file that no longer exists — the front page renders a broken
+            #    image and nothing anywhere raises. on_commit runs immediately
+            #    when there is no transaction open, so the plain case is
+            #    unaffected.
+            transaction.on_commit(lambda: discard_media(superseded))
+
+    def _superseded_media(self):
+        """`[(storage, name)]` — the objects this save stops pointing at.
+
+        ⚠️ **The whole reason this exists**: replacing the front page's picture
+           used to leave the old one in the bucket for good. Django writes the
+           new upload under a new key and simply forgets the old one, so every
+           change of picture added a file that nothing referred to, that no
+           page could reach, and that nobody would ever think to look for.
+           These are also the largest files the project stores — the front page
+           is the one upload that is **not** re-encoded — so it is the most
+           expensive place in the system to leak a file.
+
+        ⚠️ Compared against **the database**, not against `self`. An instance
+           whose field was reassigned in memory has already lost the old name;
+           the stored row is the only thing that still knows it.
+
+        ⚠️ Clearing a field counts, and that is deliberate (asked and answered
+           2026-08-14). "Remove the picture" means the picture is gone — a file
+           left behind in a **public** bucket is still on a URL that works,
+           which is the opposite of what was asked for.
+
+        ⚠️ Per field, so switching from a picture to a video does not take the
+           picture with it. `hero` prefers the video when both are set, and
+           somebody setting one has not said anything about the other.
+        """
+        if not self.pk:
+            return []
+        stored = (
+            type(self)._base_manager.filter(pk=self.pk)
+            .values(*self.MEDIA_FIELDS).first()
+        )
+        if stored is None:
+            return []
+        return [
+            (self._meta.get_field(field).storage, stored[field])
+            for field in self.MEDIA_FIELDS
+            if stored[field] and stored[field] != getattr(self, field).name
+        ]
 
     def refresh_palette(self):
         """Re-derive the brand ramp from the current picture. Never raises.

@@ -28,6 +28,7 @@ from events.tests import PageTestCase
 from gallery.forms import MAX_PHOTOS_PER_UPLOAD
 from gallery.models import GalleryPhoto
 from gallery.services import (
+    MAX_PHOTOS_PER_REMOVAL,
     MIN_STRIP_SPAN,
     STRIP_COUNT,
     STRIP_SIZE,
@@ -1579,6 +1580,239 @@ class ManagePageTests(PageTestCase):
         self.login(self.lisi)
         page = self.client.get(reverse("events:event_list")).content.decode()
         self.assertNotIn(reverse("gallery:manage"), page)
+
+
+@override_settings(MEDIA_ROOT=tempfile.mkdtemp(), STORAGES=LOCAL_STORAGE)
+class BatchRemovalTests(PageTestCase):
+    """Taking several photos down at once (2026-08-14).
+
+    ⭐ **Two POSTs, and the first one deletes nothing.** These files are the only
+       ones in the system that no backup brings back, so the confirmation page
+       is not politeness — it is the one place somebody can see, at a size they
+       can recognise a face at, exactly which photographs are about to stop
+       existing. A `window.confirm` holding a number cannot answer "which ones
+       did I tick?".
+
+    ⚠️ The other half of the design is that the confirmation page carries **no
+       authority**: it holds ids and nothing else, and the second POST resolves
+       them from scratch. Two tests below are about that alone.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.director = self.account("director", "王",
+                                     birth_date=datetime.date(1970, 1, 1))
+        self.director.groups.add(foundation_admin_group())
+
+    def remove(self, photos, confirmed=False, follow=False, ids=None):
+        data = {"photo": ids if ids is not None else [p.pk for p in photos]}
+        if confirmed:
+            data["confirmed"] = "1"
+        return self.client.post(
+            reverse("gallery:remove_selected"), data, follow=follow)
+
+    def files_of(self, photo):
+        return photo.image.storage, (photo.image.name, photo.thumb.name)
+
+    def test_a_plain_volunteer_cannot_reach_it_at_all(self):
+        """⚠️ A gate of its own, not "it happens to resolve to nothing". The
+        second of those is a refusal by accident, one permission change away
+        from not being one."""
+        self.login(self.lisi)
+        photo = store(self.pantry)
+        self.assertEqual(self.remove([photo]).status_code, 403)
+        self.assertTrue(GalleryPhoto.objects.filter(pk=photo.pk).exists())
+
+    def test_a_get_deletes_nothing_and_goes_back_to_the_list(self):
+        """⚠️ POST for both steps, including the one that only shows a list. A
+        GET carrying the ids would be a URL somebody could bookmark or have
+        prefetched — and the page it renders has a one-click delete on it."""
+        self.login(self.zhang)
+        store(self.pantry)
+        response = self.client.get(reverse("gallery:remove_selected"))
+        self.assertRedirects(response, reverse("gallery:manage"))
+        self.assertEqual(GalleryPhoto.objects.count(), 1)
+
+    def test_the_first_post_shows_the_photos_and_deletes_nothing(self):
+        self.login(self.zhang)
+        photos = [store(self.pantry) for _ in range(3)]
+
+        response = self.remove(photos)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(GalleryPhoto.objects.count(), 3)
+        self.assertEqual([p.pk for p in response.context["removal"].photos],
+                         [p.pk for p in photos])
+        for photo in photos:
+            with self.subTest(photo=photo.pk):
+                self.assertContains(response, photo.thumb.url)
+
+    def test_the_confirmation_page_says_the_files_do_not_come_back(self):
+        """⚠️ The sentence is the reason the page exists. These are the only
+        files here that no backup covers, and a confirmation that does not say
+        so is just a second click."""
+        self.login(self.zhang)
+        response = self.remove([store(self.pantry)])
+        self.assertContains(response, "not in any backup")
+
+    def test_confirming_takes_the_rows_and_both_files(self):
+        """⚠️ **Both** files. The batch path forgetting the thumbnail would
+        break nothing visible and turn up only as a bucket bill — which is why
+        one `remove_photo` serves this and the single Remove button."""
+        self.login(self.zhang)
+        photos = [store(self.pantry) for _ in range(3)]
+        stored = [self.files_of(p) for p in photos]
+
+        response = self.remove(photos, confirmed=True, follow=True)
+
+        self.assertFalse(GalleryPhoto.objects.exists())
+        for storage, names in stored:
+            for name in names:
+                with self.subTest(file=name):
+                    self.assertFalse(storage.exists(name))
+        self.assertContains(response, "Removed 3 from Memories")
+
+    def test_another_ministrys_photo_is_left_alone_and_counted(self):
+        """⚠️ Skipped rather than refusing the batch (decided 2026-08-14), and
+        **counted rather than named** — naming it would answer "does photo 412
+        exist, and whose is it?" for anybody willing to type numbers into a
+        form."""
+        self.login(self.zhang)
+        mine, theirs = store(self.pantry), store(self.tax)
+
+        response = self.remove([mine, theirs], confirmed=True, follow=True)
+
+        self.assertTrue(GalleryPhoto.objects.filter(pk=theirs.pk).exists())
+        self.assertFalse(GalleryPhoto.objects.filter(pk=mine.pk).exists())
+        self.assertContains(response, "1 not yours to take down")
+
+    def test_the_second_post_re_judges_instead_of_trusting_the_page(self):
+        """⭐ What makes hidden ids safe. The confirmation page holds no token
+        and no server-side state, so a stale one — rendered before a role was
+        revoked, or by somebody else entirely — is simply resolved again against
+        whoever is posting it now."""
+        self.login(self.zhang)
+        theirs = store(self.tax)
+
+        response = self.remove([theirs], confirmed=True, follow=True)
+
+        self.assertTrue(GalleryPhoto.objects.filter(pk=theirs.pk).exists())
+        self.assertContains(response, "Nothing was removed")
+
+    def test_an_id_that_is_already_gone_is_counted_rather_than_an_error(self):
+        """Somebody else got there first — between the page being drawn and the
+        button being pressed. Not a fault, and not a 404 either: the rest of the
+        batch still goes."""
+        self.login(self.zhang)
+        alive, doomed = store(self.pantry), store(self.pantry)
+        gone_pk = doomed.pk
+        doomed.delete()
+
+        response = self.client.post(
+            reverse("gallery:remove_selected"),
+            {"photo": [alive.pk, gone_pk], "confirmed": "1"}, follow=True)
+
+        self.assertFalse(GalleryPhoto.objects.exists())
+        self.assertContains(response, "1 already gone")
+
+    def test_a_nonsense_id_is_shrugged_off_like_a_missing_one(self):
+        """It can only come from a hand-made POST, and there is no photograph
+        behind it either way."""
+        self.login(self.zhang)
+        photo = store(self.pantry)
+
+        response = self.remove(None, ids=[str(photo.pk), "banana"],
+                               confirmed=True, follow=True)
+
+        self.assertFalse(GalleryPhoto.objects.exists())
+        self.assertContains(response, "Removed 1 from Memories")
+
+    def test_the_same_id_twice_removes_it_once(self):
+        self.login(self.zhang)
+        photo = store(self.pantry)
+
+        response = self.remove(None, ids=[photo.pk, photo.pk],
+                               confirmed=True, follow=True)
+
+        self.assertContains(response, "Removed 1 from Memories")
+
+    def test_selecting_nothing_says_so_rather_than_falling_over(self):
+        self.login(self.zhang)
+        store(self.pantry)
+        response = self.remove([], follow=True)
+        self.assertContains(response, "Nothing was removed")
+        self.assertEqual(GalleryPhoto.objects.count(), 1)
+
+    def test_past_the_cap_the_whole_batch_is_refused(self):
+        """⚠️ The **opposite** of the upload path, deliberately. An upload that
+        silently keeps ten of twelve can be finished by sending the other two;
+        a removal that silently takes 60 of 200 has already done something
+        nobody can undo, to a set nobody can name afterwards.
+
+        ⚠️ No rows are needed to prove it — the cap is judged on how many ids
+        arrived, before anything is looked up, which is what keeps a
+        two-hundred-id POST from costing two hundred queries."""
+        self.login(self.zhang)
+        photo = store(self.pantry)
+        ids = [photo.pk] + list(range(10_000, 10_000 + MAX_PHOTOS_PER_REMOVAL))
+
+        response = self.remove(None, ids=ids, confirmed=True, follow=True)
+
+        self.assertTrue(GalleryPhoto.objects.filter(pk=photo.pk).exists())
+        self.assertContains(response, f"more than {MAX_PHOTOS_PER_REMOVAL} photos")
+
+    def test_exactly_the_cap_is_allowed(self):
+        """The boundary, because "more than 60" and "60 or more" are one
+        character apart and both look right."""
+        self.login(self.zhang)
+        photo = store(self.pantry)
+        ids = [photo.pk] + list(range(10_000, 10_000 + MAX_PHOTOS_PER_REMOVAL - 1))
+
+        response = self.remove(None, ids=ids, confirmed=True, follow=True)
+
+        self.assertFalse(GalleryPhoto.objects.exists())
+        self.assertContains(response, "Removed 1 from Memories")
+
+    def test_the_manage_page_carries_the_boxes_and_the_batch_form(self):
+        """⚠️ The checkboxes sit **outside** that form in the DOM and are
+        claimed by `form="remove-selected"`. Nesting them inside it would nest
+        two forms — which browsers do not do, and the symptom is the *single*
+        Remove button silently doing nothing."""
+        self.login(self.zhang)
+        photo = store(self.pantry)
+        page = self.client.get(reverse("gallery:manage")).content.decode()
+
+        self.assertIn(reverse("gallery:remove_selected"), page)
+        self.assertIn(f'name="photo" value="{photo.pk}"', page)
+        self.assertIn('form="remove-selected"', page)
+
+    def test_the_page_carries_the_cap_so_the_boxes_can_stop_at_it(self):
+        """⚠️ The number reaches the browser **from the server**, so there is one
+        of it. A 60 typed into the template is the copy that does not get
+        changed — and the half that goes stale is the browser's, which means a
+        page that happily lets you tick 100 and a server that refuses the lot.
+
+        ⚠️ Asserted as `cap: 60` rather than as "60 appears somewhere on the
+        page": there are sixty photos' worth of other numbers on this page.
+        """
+        self.login(self.zhang)
+        store(self.pantry)
+        page = self.client.get(reverse("gallery:manage")).content.decode()
+        self.assertIn(f"cap: {MAX_PHOTOS_PER_REMOVAL}", page)
+
+    def test_the_boxes_are_not_drawn_for_a_ministry_admins_other_ministries(self):
+        """Nothing new — the list is narrowed in the queryset — but the batch
+        form is a second way to act on that list, so it is worth pinning that
+        it is drawn from the same narrowed one."""
+        self.login(self.director)
+        theirs = store(self.tax)
+        self.login(self.zhang)
+        mine = store(self.pantry)
+
+        page = self.client.get(reverse("gallery:manage")).content.decode()
+
+        self.assertIn(f'name="photo" value="{mine.pk}"', page)
+        self.assertNotIn(f'name="photo" value="{theirs.pk}"', page)
 
 
 class FeatherEntranceTests(PageTestCase):

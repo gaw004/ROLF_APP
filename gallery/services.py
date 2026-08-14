@@ -487,3 +487,134 @@ def strips_for(day=None):
             index += 1
         strips.append(strip)
     return strips
+
+
+# --- Taking photos back off the wall ----------------------------------------
+
+#: How many photos one submission may take down.
+#:
+#: ⚠️ A cap on the **request**, the same reasoning as MAX_PHOTOS_PER_UPLOAD and
+#:    a different number for a different cost. Each removal is two objects out
+#:    of R2 — the large one and the thumbnail — so this is 120 round trips done
+#:    one after another inside one request. Past a few hundred, the request
+#:    times out **halfway**, and because each row is committed as it goes, what
+#:    is left behind is "some of them, and you cannot see which".
+#:
+#: ⚠️ 60 because it is the number already on the page: STRIP_SIZE is what a
+#:    day's wall holds, so "clear what is up today" is one submission.
+MAX_PHOTOS_PER_REMOVAL = STRIP_SIZE
+
+
+@dataclass(frozen=True)
+class Removal:
+    """What a batch of submitted ids turned out to mean.
+
+    ⚠️ Four fields rather than a list of photos, because "what will not happen"
+       is half of what the confirmation page has to say. A page that shows 8
+       thumbnails after you ticked 10 boxes, and does not account for the other
+       two, is a page that looks like it lost them.
+    """
+
+    #: The photos that will actually go, in the order they were submitted —
+    #: which is the order they sit in on the page, because a browser sends its
+    #: inputs in document order and the confirmation page keeps that order.
+    photos: list
+    #: How many submitted ids are no longer rows. Somebody else got there first.
+    missing: int
+    #: How many are real photos this person may not take down.
+    forbidden: int
+    #: True when the batch is over the cap and **nothing** will be done.
+    #:
+    #: ⚠️ Separate from `photos` being empty, because the two mean opposite
+    #:    things to say out loud: "you picked too many" is about the request,
+    #:    "none of those were yours" is about the photos. One flag covering both
+    #:    would produce a message that is wrong in one of the two cases.
+    over_cap: bool = False
+
+
+def resolve_removal(user, ids):
+    """Work out which of `ids` this person is actually taking down.
+
+    ⚠️ Called **twice** per removal — once to build the confirmation page and
+       again when it comes back — and it has to be, because that is what makes
+       the confirmation page carry no authority. The hidden ids that come back
+       are re-judged from scratch, so a page left open while somebody's role was
+       revoked cannot delete anything on the strength of having been rendered
+       earlier.
+
+    ⚠️ Unknown and forbidden ids are **counted, never named** (decided
+       2026-08-14). Skipping them rather than refusing the batch is what was
+       asked for; naming them would answer "does photo 412 exist, and whose is
+       it?" for anybody willing to type numbers into a form — which the wall
+       does not otherwise tell you.
+
+    ⚠️ Over the cap refuses the **whole** batch instead of taking the first 60.
+       The upload path does the opposite, and the asymmetry is the point:
+       an upload that silently keeps ten of twelve can be finished by sending
+       the other two, while a removal that silently takes 60 of 200 has already
+       done something no one can undo, to a set nobody can name afterwards.
+
+    ⚠️ **That branch is a backstop, not the experience** (2026-08-14). Being
+       told "too many, start again" after picking two hundred boxes is a bad
+       way to learn the limit, so the page now stops the 61st box being ticked
+       at all — the remaining boxes go grey and say why. This still has to be
+       here because that is Alpine's doing, and the no-JS path submits whatever
+       it likes; but with a browser running, nobody reaches it.
+    """
+    from org.permissions import can_delete_gallery_photo
+
+    wanted = []
+    for value in ids:
+        try:
+            number = int(value)
+        except (TypeError, ValueError):
+            # ⚠️ Not an error. A non-numeric id can only come from a hand-made
+            #    POST, and this is the same shrug the missing ones get — there
+            #    is no photograph behind it either way.
+            continue
+        if number not in wanted:
+            wanted.append(number)
+
+    if len(wanted) > MAX_PHOTOS_PER_REMOVAL:
+        return Removal(photos=[], missing=0, forbidden=0, over_cap=True)
+
+    found = GalleryPhoto.objects.on_the_wall().in_bulk(wanted)
+    photos, forbidden = [], 0
+    for number in wanted:
+        photo = found.get(number)
+        if photo is None:
+            continue
+        if not can_delete_gallery_photo(user, photo):
+            forbidden += 1
+            continue
+        photos.append(photo)
+    return Removal(
+        photos=photos,
+        missing=len(wanted) - len(found),
+        forbidden=forbidden,
+    )
+
+
+def remove_photo(photo):
+    """Delete one photo: both files first, then the row. Returns its caption.
+
+    ⚠️ **The files go before the row does, and both of them go.** Deleting only
+       the row leaves two objects in the bucket that nothing points at any more
+       — invisible, unbilled to anyone's attention, and still holding a
+       photograph somebody asked to have taken down. The same mistake the front
+       page made until 2026-08-14, with a worse subject.
+
+    ⚠️ One function, two callers — the single Remove button and the batch. This
+       is a four-line body that it would be entirely natural to write out at
+       each call site, and then the batch path would be the one that forgets the
+       thumbnail: nothing would break, no test would go red, and the leak would
+       only ever show up as a bucket bill.
+
+    ⚠️ The caption is read out **before** anything is deleted, because it is
+       assembled from the row and the row is about to stop existing.
+    """
+    caption = photo.caption
+    photo.image.delete(save=False)
+    photo.thumb.delete(save=False)
+    photo.delete()
+    return caption

@@ -181,6 +181,25 @@ def can_delete_gallery_photo(user, photo) -> bool:
     return photo.ministry_id is not None and administers(user, photo.ministry_id)
 
 
+def can_reach_gallery_manage(user) -> bool:
+    """Open the page photos are put up and taken down from at all.
+
+    ⚠️ Coarser than the two above on purpose, and it does not replace either.
+       This answers "is this person any kind of photo admin" — the question the
+       *page* asks — while `can_upload_gallery_photo` and
+       `can_delete_gallery_photo` answer it per photo, which is what the page's
+       contents and its buttons are decided by. A gate this wide is the right
+       shape for a door and the wrong shape for anything behind it.
+
+    ⚠️ It exists because the batch removal added a **second** URL that has to
+       ask it (2026-08-14). One copy of `in_foundation_tier(...) or
+       ministry_ids_administered_by(...)` in a view was fine; two copies is a
+       permission rule living in views.py, and the second copy is the one that
+       gets forgotten when the rule changes.
+    """
+    return in_foundation_tier(user) or bool(ministry_ids_administered_by(user))
+
+
 #: What the global tier may do, as app_label.codename. Global permissions are
 #: the right shape here precisely because none of these sentences contains "of
 #: some ministry" — which is the test for whether something belongs in a Group

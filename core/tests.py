@@ -7,8 +7,11 @@ keeps reaching for when a rule has to hold everywhere and no linter enforces it
 
 import colorsys
 import datetime
+import io
 import os
 import re
+import shutil
+import tempfile
 from pathlib import Path
 from unittest import mock
 
@@ -16,15 +19,17 @@ from django.apps import apps
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.contrib.staticfiles import finders
+from django.core.files.base import ContentFile
 from django.core.management import call_command
 from django.db import IntegrityError, connection, models
-from django.test import RequestFactory, TestCase
+from django.test import RequestFactory, TestCase, override_settings
 from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
 
 from core.constraints import CONSTRAINT_FIELD
 from core.limits import LONG_TEXT
 from core.models import HomePage
+from core.services import orphaned_home_media
 from core.palette import dominant_colour, ramp_from, relative_luminance
 from core.querysets import DateRangeQuerySet
 from core.timeutils import local_today
@@ -2709,6 +2714,245 @@ class HomePageSingletonTests(TestCase):
 
         later = HomePage.for_request(RequestFactory().get("/"))
         self.assertEqual(later.verse_reference, "Colossians 3:23")
+
+
+#: The four aliases on the local filesystem, so a test that stores a file never
+#: reaches Cloudflare R2. Same override the gallery suite uses, and for the same
+#: reason: base.py already keeps them local, and saying so out loud is what
+#: stops a future change to the defaults quietly putting the test suite on the
+#: network.
+LOCAL_STORAGE = {
+    "default": {"BACKEND": "django.core.files.storage.FileSystemStorage"},
+    "memories": {"BACKEND": "django.core.files.storage.FileSystemStorage"},
+    "public": {"BACKEND": "django.core.files.storage.FileSystemStorage"},
+    "staticfiles": {"BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage"},
+}
+
+
+class EmptyBucketTestCase(TestCase):
+    """A TestCase whose bucket starts empty for **every method**.
+
+    ⚠️ The usual `@override_settings(MEDIA_ROOT=tempfile.mkdtemp())` on the
+       class makes the directory **once**, at import — so files written by one
+       test are still there in the next. The database is rolled back between
+       methods and the bucket is not, which is exactly the asymmetry these two
+       classes are about: they assert on what is and is not in the bucket, and
+       leftovers from an earlier method are indistinguishable from the orphans
+       being hunted. Two of the tests below found this the honest way.
+    """
+
+    def setUp(self):
+        super().setUp()
+        root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        overridden = override_settings(MEDIA_ROOT=root, STORAGES=LOCAL_STORAGE)
+        overridden.enable()
+        self.addCleanup(overridden.disable)
+
+
+class HomePageMediaReplacementTests(EmptyBucketTestCase):
+    """Changing the front page's picture takes the old one out of the bucket.
+
+    ⭐ **Until 2026-08-14 it did not, and nothing anywhere said so.** Django
+       writes each upload under a new key and forgets the previous one, so every
+       change of picture left a file behind that no row referred to, no page
+       could reach, and nobody would think to look for. The front page is also
+       the one upload that is **not** re-encoded — what arrives is what is
+       stored — so this was the most expensive place in the project to leak a
+       file.
+    """
+
+    def storage(self):
+        return HomePage._meta.get_field("hero_image").storage
+
+    def put(self, page, field="hero_image", name="hero.jpg", body=b"first"):
+        """Store a file on one of the two media fields and return its key."""
+        getattr(page, field).save(name, ContentFile(body), save=True)
+        return getattr(page, field).name
+
+    def test_replacing_the_picture_deletes_the_one_it_replaces(self):
+        page = HomePage.load()
+        first = self.put(page)
+        self.assertTrue(self.storage().exists(first))
+
+        with self.captureOnCommitCallbacks(execute=True):
+            self.put(page, name="second.jpg", body=b"second")
+
+        self.assertFalse(
+            self.storage().exists(first),
+            "the picture that was replaced is still in the public bucket — "
+            "HomePage._superseded_media no longer finds it")
+        self.assertTrue(self.storage().exists(page.hero_image.name))
+
+    def test_the_old_file_is_only_deleted_once_the_save_has_committed(self):
+        """⚠️ Deleting inline would mean a transaction that then rolls back
+        leaves the row pointing at a file that is no longer there — a broken
+        image on the front page, arrived at with nothing raised anywhere.
+
+        Asserted by watching the boundary: inside the block the callback is
+        captured but not yet run, so the old file must still be there.
+        """
+        page = HomePage.load()
+        first = self.put(page)
+
+        with self.captureOnCommitCallbacks(execute=True):
+            self.put(page, name="second.jpg", body=b"second")
+            self.assertTrue(
+                self.storage().exists(first),
+                "the old file was deleted before the save committed")
+
+        self.assertFalse(self.storage().exists(first))
+
+    def test_clearing_the_picture_deletes_the_file_too(self):
+        """⚠️ "Remove the picture" means the picture is gone. A file left behind
+        in the **public** bucket is still on a URL that works — which is the
+        opposite of what was asked for. Decided 2026-08-14.
+        """
+        page = HomePage.load()
+        first = self.put(page)
+
+        with self.captureOnCommitCallbacks(execute=True):
+            page.hero_image = ""
+            page.save()
+
+        self.assertFalse(self.storage().exists(first))
+
+    def test_saving_without_touching_the_media_deletes_nothing(self):
+        """⭐ The regression that would cost a photograph rather than leak one.
+
+        Every save of this row runs the comparison, and most saves — the verse,
+        the framing — do not touch a file at all. A comparison that answered
+        "changed" for those would delete the live picture the first time
+        somebody edited the verse.
+        """
+        page = HomePage.load()
+        first = self.put(page)
+
+        with self.captureOnCommitCallbacks(execute=True):
+            page.verse_reference = "Colossians 3:23"
+            page.hero_focus_x = 30
+            page.save()
+
+        self.assertTrue(self.storage().exists(first))
+        self.assertEqual(HomePage.load().hero_image.name, first)
+
+    def test_reloading_the_row_and_saving_it_deletes_nothing(self):
+        """The same guard from the other direction: a fresh instance read out of
+        the database, saved unchanged. This is what a management command or a
+        shell session does, and it must be inert."""
+        page = HomePage.load()
+        first = self.put(page)
+
+        with self.captureOnCommitCallbacks(execute=True):
+            HomePage.load().save()
+
+        self.assertTrue(self.storage().exists(first))
+
+    def test_changing_the_video_leaves_the_picture_alone(self):
+        """⚠️ Per field. `hero` prefers the video when both are set, but
+        somebody uploading a video has said nothing about the picture — and the
+        picture is what every *other* page in the site shows.
+        """
+        page = HomePage.load()
+        picture = self.put(page)
+        video = self.put(page, field="hero_video", name="loop.mp4", body=b"one")
+
+        with self.captureOnCommitCallbacks(execute=True):
+            self.put(page, field="hero_video", name="loop2.mp4", body=b"two")
+
+        self.assertTrue(self.storage().exists(picture))
+        self.assertFalse(self.storage().exists(video))
+
+    def test_a_bucket_that_refuses_the_delete_does_not_break_the_save(self):
+        """⚠️ Swallowed on purpose. This runs after the save has committed, so
+        there is nothing to roll back and nothing useful to say: the picture
+        *is* live. A 500 here would be read as "it did not save", and the next
+        thing that happens is somebody pressing save again.
+        """
+        page = HomePage.load()
+        self.put(page)
+
+        with mock.patch.object(type(self.storage()), "delete",
+                               side_effect=OSError("R2 said no")):
+            with self.assertLogs("core.services", level="ERROR") as logged:
+                with self.captureOnCommitCallbacks(execute=True):
+                    self.put(page, name="second.jpg", body=b"second")
+
+        self.assertEqual(HomePage.load().hero_image.name, page.hero_image.name)
+        self.assertIn("Could not delete superseded media", "\n".join(logged.output))
+
+
+class OrphanedHomeMediaTests(EmptyBucketTestCase):
+    """The sweep for what was left behind before the replacement above existed.
+
+    ⚠️ It **reports**; a person decides. Every assertion about the command below
+       is really about that: the default run deletes nothing, and the number it
+       prints as deleted is the number that actually went.
+    """
+
+    def storage(self):
+        return HomePage._meta.get_field("hero_image").storage
+
+    def orphan(self, name="stale.jpg"):
+        """A file under the front page's prefix that no row points at."""
+        return self.storage().save(f"{HomePage.MEDIA_DIR}/{name}",
+                                   ContentFile(b"left behind"))
+
+    def run_command(self, *args):
+        out = io.StringIO()
+        call_command("purge_orphaned_home_media", *args, stdout=out)
+        return out.getvalue()
+
+    def test_nothing_uploaded_yet_is_not_an_error(self):
+        """A fresh install has no such prefix at all, which is a state and not
+        a fault."""
+        self.assertEqual(orphaned_home_media(), [])
+
+    def test_a_file_no_row_points_at_is_listed(self):
+        stale = self.orphan()
+        self.assertEqual(orphaned_home_media(), [stale])
+
+    def test_the_live_picture_and_video_are_never_listed(self):
+        """⭐ The one bug in this feature that costs something irreversible."""
+        page = HomePage.load()
+        page.hero_image.save("live.jpg", ContentFile(b"live"), save=True)
+        page.hero_video.save("live.mp4", ContentFile(b"live"), save=True)
+        stale = self.orphan()
+
+        self.assertEqual(orphaned_home_media(), [stale])
+
+    def test_the_command_deletes_nothing_unless_told_twice(self):
+        """⚠️ The opposite default to purge_event_images. Being wrong there
+        costs a picture that was going to go anyway; being wrong here costs the
+        front page's photograph, out of the bucket the pg_dump does not cover.
+        """
+        stale = self.orphan()
+        output = self.run_command()
+
+        self.assertIn(stale, output)
+        self.assertIn("Nothing was deleted", output)
+        self.assertTrue(self.storage().exists(stale))
+
+    def test_with_delete_they_actually_go(self):
+        stale = self.orphan()
+        output = self.run_command("--delete")
+
+        self.assertFalse(self.storage().exists(stale))
+        self.assertIn("1 object(s) deleted", output)
+
+    def test_it_reports_what_it_could_not_delete_rather_than_the_count_it_wanted(self):
+        """⚠️ discard_media swallows a storage error, so the two numbers can
+        differ — and printing the number asked for as the number deleted is how
+        a bucket quietly stays full while the command says it emptied it.
+        """
+        self.orphan()
+        with mock.patch.object(type(self.storage()), "delete",
+                               side_effect=OSError("R2 said no")):
+            with self.assertLogs("core.services", level="ERROR"):
+                output = self.run_command("--delete")
+
+        self.assertIn("0 object(s) deleted", output)
+        self.assertIn("1 could not be deleted", output)
 
 
 class DerivedPaletteTests(TestCase):

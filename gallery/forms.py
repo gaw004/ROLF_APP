@@ -197,7 +197,7 @@ class GalleryPhotoForm(forms.Form):
            Pillow's own MAX_IMAGE_PIXELS. That correction was paid for once
            already over in events/forms.py; the full note is there.
         """
-        from .services import digest_of, normalise_gallery_image
+        from .services import digest_of, normalise_gallery_image, source_digest_of
 
         uploads = [f for f in self.cleaned_data.get("images") or [] if f]
         if not uploads:
@@ -214,10 +214,27 @@ class GalleryPhotoForm(forms.Form):
         uploads = uploads[:MAX_PHOTOS_PER_UPLOAD]
 
         limit = settings.EVENT_IMAGE_MAX_UPLOAD_BYTES
-        prepared, digests = [], set()
+        prepared, digests, source_digests = [], set(), set()
         for upload in uploads:
             if upload.size > limit:
                 skipped["too_big"].append(upload.name)
+                continue
+            # ⭐ **The same file again is caught here, before it is decoded**
+            #    (2026-08-13). This is the cheap check and the common case —
+            #    somebody picks the same folder twice, or re-sends a photo they
+            #    already sent — and catching it up here means the most likely
+            #    duplicate never costs a decode at all.
+            #
+            # ⚠️ It is also the half of duplicate detection that **survives a
+            #    change to the pipeline**, which is the whole reason the column
+            #    exists; see GalleryPhoto.source_digest. The `image_digest`
+            #    check further down is the other half and catches what this one
+            #    cannot: the same photograph re-saved as a different format.
+            #    Neither replaces the other.
+            source_digest = source_digest_of(upload)
+            if source_digest in source_digests or GalleryPhoto.objects.filter(
+                    source_digest=source_digest).exists():
+                skipped["repeats"].append(upload.name)
                 continue
             try:
                 image, thumb, taken_year = normalise_gallery_image(upload)
@@ -243,9 +260,11 @@ class GalleryPhotoForm(forms.Form):
                 skipped["repeats"].append(upload.name)
                 continue
             digests.add(digest)
+            source_digests.add(source_digest)
             prepared.append({
                 "image": image, "thumb": thumb,
                 "taken_year": taken_year, "image_digest": digest,
+                "source_digest": source_digest,
             })
 
         if not prepared:

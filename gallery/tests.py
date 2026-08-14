@@ -238,36 +238,106 @@ class GalleryImageProcessingTests(TestCase):
            today's luck, because the luck is Pillow's and can be revised in a
            patch release. That is the same reason `in_place=True` needed a
            check of its own: both lines are invisible until they are wrong.
+
+        ⚠️ 2026-08-13, second round: "fully decoded" now means *at the drafted
+           scale*, which is the scale this pipeline asked for. What is still
+           being ruled out is a **second**, unasked-for reduction on top of it.
+        """
+        for size, still_unread in self._resizes_seen((4000, 3000)):
+            self.assertFalse(
+                still_unread,
+                f"the picture ({size}) still had unread tiles when a resize "
+                f"began, so a second reduced-scale decode is free to fire on "
+                f"top of the one draft_to asked for — put back the load() in "
+                f"normalise_gallery_image")
+
+    def _resizes_seen(self, size):
+        """(size, has-unread-tiles) at each resize during one upload."""
+        from unittest import mock
+
+        seen = []
+        real = PILImage.Image.resize
+
+        def spy(inner, *args, **kwargs):
+            # `tile` is what an ImageFile still has left to read; a decoded
+            # image has none, and a plain Image never had any.
+            seen.append((inner.size, bool(getattr(inner, "tile", None))))
+            return real(inner, *args, **kwargs)
+
+        with mock.patch.object(PILImage.Image, "resize", spy):
+            normalise_gallery_image(a_photo(size=size))
+        self.assertNotEqual(
+            seen, [], "nothing was resized at all — has the pipeline moved?")
+        return seen
+
+    def test_a_large_photograph_is_never_decoded_at_its_full_size(self):
+        """⚠️ The guard on `core.images.draft_to`, and it has to assert the rule rather than
+        a memory figure, which drifts with Pillow and the machine.
+
+        What costs the memory is the pixel count after decoding, and a small
+        file can hold a very large picture — the 10 MB upload limit does not
+        protect against this and never did. Measured on Linux, one 49 MP
+        upload: 278 MB of peak RSS without it, 47 MB with it, against a
+        512 MB instance already holding two workers.
+
+        ⚠️ Delete the `draft_to` call and **nothing else here goes red**: every
+           stored photograph is still the right size, the right format and
+           visually the same picture. The only difference is a number that
+           surfaces as an instance restart on a busy afternoon, which is
+           exactly how this was found in the first place — twice.
+
+        ⚠️ The threshold is deliberately loose. libjpeg offers 1/2, 1/4 and
+           1/8 and nothing finer, so what a given photograph lands on depends
+           on its dimensions; pinning an exact size here would make this test
+           a restatement of the arithmetic rather than a check on the rule.
+        """
+        native = (4000, 3000)
+        first_size, _ = self._resizes_seen(native)[0]
+        self.assertLess(
+            max(first_size), max(native),
+            f"a {native[0]}x{native[1]} photograph reached the resize still at "
+            f"its full size ({first_size}), so it was decoded whole — "
+            f"has the draft_to call gone, or is its target square again? A "
+            f"square target lets the short edge pin Pillow's scale at 1 and "
+            f"the call does nothing at all")
+
+    def test_the_stored_size_does_not_depend_on_the_decode_scale(self):
+        """⚠️ The guard on `_stored_size` — a one-pixel difference that would
+        otherwise be nobody's fault and nobody's to find.
+
+        `draft()` produces a picture whose aspect ratio is a hair off the
+        original: a 1/2 or 1/4 decode ceilings both edges, and ceiling two
+        numbers does not preserve a ratio. Letting the resize work its own
+        target out from that gave 1600×914 where the un-drafted pipeline gives
+        1600×915, on one of the foundation's own photographs.
+
+        ⚠️ One pixel is nothing to look at, and that is the whole problem.
+           `thumb_width` and `thumb_height` are columns the wall's layout
+           divides by (`WallPhoto.relative_height`), so this would make the
+           page's geometry depend on **which scale libjpeg picked for that
+           particular photograph**. Nobody chasing a layout would look there.
+
+        Run with `draft_to` switched off and the sizes have to match.
         """
         from unittest import mock
 
-        size = (3000, 2000)
-        seen = []
-        real = PILImage.Image.thumbnail
-
-        def spy(self, *args, **kwargs):
-            # `tile` is what an ImageFile still has left to read; an image that
-            # has been decoded has none. A plain Image never had any.
-            seen.append((self.size, bool(getattr(self, "tile", None))))
-            return real(self, *args, **kwargs)
-
-        with mock.patch.object(PILImage.Image, "thumbnail", spy):
-            normalise_gallery_image(a_photo(size=size))
-
-        self.assertNotEqual(
-            seen, [], "nothing was resized at all — has the pipeline moved?")
-        first_size, still_unread = seen[0]
-        self.assertEqual(
-            first_size, size,
-            "the first resize was handed a picture that is no longer at its "
-            "native size, so something decoded it at reduced scale on the way "
-            "in and every stored byte has moved")
-        self.assertFalse(
-            still_unread,
-            "the picture still had unread tiles when the first resize began, "
-            "so thumbnail()'s own reduced-scale decode is free to fire and "
-            "change every stored byte — put back the load() in "
-            "normalise_gallery_image")
+        # Landscape, portrait, square, an odd ratio that rounds awkwardly, one
+        # already small enough to be left alone, and one right on the boundary.
+        for size in [(4000, 3000), (6000, 3429), (5120, 5120), (3024, 4032),
+                     (4001, 2999), (900, 400), (1600, 1200)]:
+            with self.subTest(size=size):
+                drafted = normalise_gallery_image(a_photo(size=size, unique=False))
+                with mock.patch("gallery.services.draft_to"):
+                    plain = normalise_gallery_image(a_photo(size=size, unique=False))
+                for kind, one, other in (("image", drafted[0], plain[0]),
+                                         ("thumb", drafted[1], plain[1])):
+                    with PILImage.open(one) as a, PILImage.open(other) as b:
+                        self.assertEqual(
+                            a.size, b.size,
+                            f"the stored {kind} is {a.size} with the reduced-"
+                            f"scale decode and {b.size} without it, so the "
+                            f"dimensions this row carries depend on a decoder "
+                            f"setting rather than on the photograph")
 
     def test_a_small_photo_is_not_blown_up(self):
         image, thumb, _ = normalise_gallery_image(a_photo(size=(300, 200)))
@@ -1327,6 +1397,48 @@ class ManagePageTests(PageTestCase):
             a_photo(size=(400, 400), colour=(10, 20, 30), unique=False, fmt="PNG")])
         self.assertEqual(GalleryPhoto.objects.count(), 1)
 
+    def test_the_same_file_again_is_caught_without_being_decoded(self):
+        """⭐ The cheap half of duplicate detection (2026-08-13).
+
+        The commonest duplicate by far is the same *file* — a folder picked
+        twice, or a photo re-sent by somebody who does not remember sending it.
+        Hashing the upload answers that before anything is opened, so the most
+        likely duplicate costs no decode at all.
+
+        ⚠️ And it is the half that **survives a change to this pipeline**,
+           which is the reason the column exists. `image_digest` is a hash of
+           bytes this project produces, so it moves whenever the processing
+           moves — that is what adding `draft()` cost, once, on a wall that
+           happened to hold only test uploads. Nothing about `source_digest`
+           moves, ever.
+        """
+        from unittest import mock
+
+        self.login(self.zhang)
+        self.post_photos(self.pantry, files=[a_photo(unique=False)])
+        with mock.patch("gallery.services.normalise_gallery_image") as decode:
+            self.post_photos(self.pantry, files=[a_photo(unique=False)])
+        decode.assert_not_called()
+        self.assertEqual(GalleryPhoto.objects.count(), 1)
+
+    def test_the_same_photograph_with_different_metadata_is_still_caught(self):
+        """⚠️ What `image_digest` catches and `source_digest` cannot, written
+        down so that neither is ever deleted as the redundant one.
+
+        Two files whose bytes differ: one photograph carrying a camera's EXIF
+        block, and the same photograph with it stripped — which is what a trip
+        through a chat app does to a picture. The upload hashes differ and are
+        right to differ; only the digest taken over the re-encoded derivative
+        can tell that these are one photograph.
+        """
+        self.login(self.zhang)
+        exif = PILImage.Exif()
+        exif[271] = "TestPhone"
+        shot = dict(size=(400, 400), colour=(10, 20, 30), unique=False)
+        self.post_photos(self.pantry, files=[a_photo(exif=exif, **shot)])
+        self.post_photos(self.pantry, files=[a_photo(**shot)])
+        self.assertEqual(GalleryPhoto.objects.count(), 1)
+
     def test_one_unreadable_file_does_not_take_the_others_down_with_it(self):
         """⚠️ Reversed on 2026-08-13 along with the size rule: a PDF among the
         photographs drops the PDF, not the batch.
@@ -1436,6 +1548,24 @@ class ManagePageTests(PageTestCase):
         self.post_photos(self.pantry)
         photo = GalleryPhoto.objects.get()
         self.assertEqual(len(photo.image_digest), 64)
+
+    def test_both_digests_are_stored_so_both_columns_can_enforce_them(self):
+        """⚠️ `source_digest` is nullable, because rows written before it
+        existed have no original left to hash — the upload is deliberately not
+        kept. That means forgetting to fill it in on the write path would not
+        raise anything at all; it would just quietly leave the column empty and
+        the cheap half of duplicate detection switched off.
+        """
+        self.login(self.zhang)
+        self.post_photos(self.pantry)
+        photo = GalleryPhoto.objects.get()
+        self.assertEqual(len(photo.image_digest), 64)
+        self.assertEqual(len(photo.source_digest or ""), 64)
+        self.assertNotEqual(
+            photo.source_digest, photo.image_digest,
+            "the two digests came out identical, so one of them is being "
+            "taken over the wrong bytes — they hash the upload and the stored "
+            "derivative respectively, and those are never the same file")
 
     def test_the_manage_page_is_reachable_from_the_menu(self):
         """⚠️ Every management page in this project was once reachable only by

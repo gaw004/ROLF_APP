@@ -33,6 +33,7 @@ from django.core.files.base import ContentFile
 from PIL import Image as PILImage
 from PIL import ImageOps as PILImageOps
 
+from core.images import draft_to, stored_size, upright_size
 from core.timeutils import local_today
 
 from .models import GalleryPhoto
@@ -110,27 +111,36 @@ def _exif_year(source):
     return None
 
 
-def _shrink_and_encode(image, max_edge):
-    """Resize `image` **in place** (never up) and write it out as WebP.
+def _resized_to(image, target):
+    """`image` at exactly `target`. `None`, or already there, leaves it alone.
 
-    ⚠️ **In place, and the caller has to know that.** This used to take a
-       `.copy()` of its own, and that copy was the problem: at full size a
-       6000×4000 photograph is 72 MB, so one per derivative cost **238 MB of
-       peak memory for a single upload** on a 512 MB instance (measured
-       2026-08-13, after the front page's version of the same mistake restarted
-       production and 502'd everybody). Making the large derivative first means
-       the second call resizes something that is already 1600px, and its copy
-       is cheap: 238 MB → 134 MB, with the stored bytes of the large derivative
-       **unchanged** — which is what keeps `image_digest` meaning today what it
-       meant yesterday.
-
-    ⚠️ So callers must go **large first, then small**. Backwards, the "large"
-       image comes out at the thumbnail's size — a valid file, the right
-       format, simply the wrong picture, and nothing raises. That is what the
-       old `.copy()` defended against; it is now defended by
-       `test_the_large_one_is_not_made_from_the_small_one` instead.
+    ⚠️ Not `thumbnail()`, which works the target out for itself from the size
+       of whatever it is handed. That is the difference this whole arrangement
+       exists for — see `core.images.stored_size`.
     """
-    image.thumbnail((max_edge, max_edge), PILImage.LANCZOS)
+    if target is None or image.size == target:
+        return image
+    return image.resize(target, PILImage.LANCZOS)
+
+
+def _resized(image, max_edge):
+    """`image` with its longest edge at `max_edge`. Never enlarged.
+
+    Returns `image` itself when it is already small enough, so a small scan is
+    stored as it arrived.
+
+    ⚠️ Callers must still go **large first, then small**: the thumbnail is
+       taken from the large derivative, so it resamples something that is
+       already 1600px instead of decoding the photograph a second time.
+       Backwards, the "large" image comes out at the thumbnail's size — a valid
+       file, the right format, simply the wrong picture, and nothing raises.
+       `test_the_large_one_is_not_made_from_the_small_one` is what holds it.
+    """
+    return _resized_to(image, stored_size(image.size, max_edge))
+
+
+def _encode(image):
+    """The stored WebP for one derivative."""
     buffer = io.BytesIO()
     # No exif= argument, so none is written. Stated rather than assumed, because
     # "Pillow does not copy it by default" is the kind of default that changes.
@@ -149,6 +159,47 @@ def digest_of(image_file):
     """
     image_file.seek(0)
     return hashlib.sha256(image_file.read()).hexdigest()
+
+
+#: Read in pieces rather than whole: an upload may be 10 MB, and the point of
+#: this whole round of work is to stop handling one photograph from costing
+#: more memory than it needs to.
+_DIGEST_CHUNK = 64 * 1024
+
+
+def source_digest_of(uploaded):
+    """SHA-256 of the file **as it was uploaded**, before anything touches it.
+
+    ⚠️ The companion to `digest_of`, and they answer different questions. Both
+       are needed and neither replaces the other:
+
+         · `digest_of` hashes the **stored** derivative, so it recognises the
+           same photograph sent once as a JPEG and again as a PNG. The price is
+           that it necessarily moves whenever this pipeline moves, because the
+           pipeline is what produces the bytes it hashes.
+         · this one hashes the **upload**, so it recognises "that exact file
+           again" — the common case, a folder picked twice — and **nothing
+           about it moves when the pipeline is rewritten**.
+
+    ⚠️ It exists because of what 2026-08-13 cost. Adding `draft()` changed
+       every stored byte, and with only `digest_of` that meant every photograph
+       already on the wall silently stopped being recognised. It was affordable
+       exactly once, while the wall held nothing but test uploads. This column
+       is what stops the next such change costing the same thing: after it, the
+       most common kind of duplicate is still caught across any pipeline
+       change at all.
+
+    ⚠️ Rewinds afterwards. `normalise_gallery_image` reads the same file next,
+       and an upload left at EOF opens as a truncated image — which surfaces as
+       "that file could not be read as an image" against a perfectly good
+       photograph.
+    """
+    uploaded.seek(0)
+    digest = hashlib.sha256()
+    for chunk in iter(lambda: uploaded.read(_DIGEST_CHUNK), b""):
+        digest.update(chunk)
+    uploaded.seek(0)
+    return digest.hexdigest()
 
 
 def normalise_gallery_image(uploaded):
@@ -176,6 +227,14 @@ def normalise_gallery_image(uploaded):
     try:
         with PILImage.open(uploaded) as source:
             taken_year = _exif_year(source)
+            # ⚠️ Read **before** `draft_to` rewrites `source.size`. Everything
+            #    stored is sized from this, never from the decoded size — see
+            #    `core.images.stored_size`.
+            native = upright_size(source)
+            # The memory fix. Full note over `core.images.draft_to`; the short
+            # version is that a 49 MP photograph is 146 MB of pixels thrown away
+            # in the next breath, and this asks libjpeg not to produce them.
+            draft_to(source, stored_size(native, GALLERY_IMAGE_MAX_EDGE))
             # ⚠️ **`in_place=True`** (2026-08-13, after ten photographs killed
             #    the instance). Without it `exif_transpose` hands back a
             #    *second* full-size picture — `image.copy()` when there is no
@@ -216,6 +275,11 @@ def normalise_gallery_image(uploaded):
             #    One cheap line instead of a dependency on somebody else's
             #    internals. `test_the_picture_is_fully_decoded_before_resizing`
             #    is what holds it.
+            #
+            # ⚠️ 2026-08-13, second round: with `_draft` above, "fully decoded"
+            #    now means **at the drafted scale**, which is the intended
+            #    scale. What this line still rules out is a *second*,
+            #    unasked-for reduction on top of it.
             source.load()
             # RGBA is kept where it exists — WebP carries alpha, and flattening
             # a scan with transparent corners onto white would put a white box
@@ -235,12 +299,19 @@ def normalise_gallery_image(uploaded):
             if picture.mode != wanted:
                 picture = picture.convert(wanted)
             # ⚠️ **Large first, then small, and the order is load-bearing.**
-            #    _shrink_and_encode resizes in place, so the second call works
-            #    on an image that is already 1600px and its copy is cheap.
-            #    Swap these two lines and the lightbox picture comes out at
-            #    700px — valid file, right format, wrong picture, no error.
-            image = _shrink_and_encode(picture, GALLERY_IMAGE_MAX_EDGE)
-            thumb = _shrink_and_encode(picture.copy(), GALLERY_THUMB_MAX_EDGE)
+            #    The thumbnail is resampled from the large derivative, so it
+            #    costs a 1600px resize rather than a second decode. Swap these
+            #    and the lightbox picture comes out at 700px — valid file,
+            #    right format, wrong picture, no error.
+            #
+            # ⚠️ The large one is sized from `upright_size` — the photograph's
+            #    own dimensions — and **not** from `picture.size`, which is
+            #    whatever scale libjpeg decoded at. The thumbnail is then sized
+            #    from the large, which is already decoder-independent.
+            large = _resized_to(
+                picture, stored_size(native, GALLERY_IMAGE_MAX_EDGE))
+            image = _encode(large)
+            thumb = _encode(_resized(large, GALLERY_THUMB_MAX_EDGE))
     except ValidationError:
         raise
     except Exception as error:

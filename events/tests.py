@@ -4273,6 +4273,58 @@ class EventImageUploadTests(PageTestCase):
             f"the original was duplicated before being resized "
             f"({at_full_size}); each of those is 72 MB on a phone photograph")
 
+    def test_a_large_photograph_is_never_decoded_at_its_full_size(self):
+        """⚠️ The guard on `core.images.draft_to`, on this side of it.
+
+        The geometry is shared with gallery; the policy is not (see
+        `normalise_event_image`'s docstring on why the two normalise functions
+        stay separate). So the shared arithmetic has its own tests in
+        `core.tests`, and each caller still has to show that it actually calls
+        it — an import is not a use.
+
+        ⚠️ This started as a *copy* of the arithmetic rather than a call, held
+           together by exactly this check in each app. It was not enough: the
+           two copies produced pictures a pixel apart within the day, and both
+           guards stayed green throughout, because both were only ever asked
+           "was this decoded smaller?" and on both the answer was yes. The
+           lesson is in the check's limits, not in the check — it can tell you
+           the decode was cheapened, never that it was cheapened correctly.
+
+        What costs the memory is the pixel count after decoding, and a small
+        file can hold a very large picture; the 10 MB upload limit does not
+        protect against this and never did.
+
+        ⚠️ Delete the `draft_to` call and nothing else goes red. The stored image
+           is the right size, the right format and visually the same picture —
+           the only difference is a number that surfaces as an instance restart
+           under load.
+
+        ⚠️ The likeliest way to break this is not deleting the call but giving
+           it a **square** target: Pillow picks its scale from
+           `min(w // tw, h // th)`, so a square target lets the short edge pin
+           it at 1 and the call silently does nothing.
+        """
+        from unittest import mock
+
+        native = (4000, 3000)
+        seen = []
+        real = PILImage.Image.resize
+
+        def spy(inner, *args, **kwargs):
+            seen.append(inner.size)
+            return real(inner, *args, **kwargs)
+
+        with mock.patch.object(PILImage.Image, "resize", spy):
+            form = self.upload(a_photo(size=native))
+            self.assertTrue(form.is_valid(), form.errors)
+
+        self.assertNotEqual(seen, [], "nothing was resized — has the pipeline moved?")
+        self.assertLess(
+            max(seen[0]), max(native),
+            f"a {native[0]}x{native[1]} photograph reached the resize still at "
+            f"its full size ({seen[0]}), so it was decoded whole — has the "
+            f"draft_to call gone, or is its target square again?")
+
     def test_a_small_photo_is_not_blown_up(self):
         # thumbnail() only ever shrinks. Upscaling would add bytes and no detail.
         form = self.upload(a_photo(size=(120, 90)))

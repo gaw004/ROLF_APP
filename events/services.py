@@ -21,6 +21,7 @@ from PIL import Image as PILImage
 from PIL import ImageOps as PILImageOps
 
 from contact.models import Contact, ContactQuerySet
+from core.images import draft_to, stored_size, upright_size
 from core.notifications.base import EMAIL, SMS, Message, get_backend
 from core.timeutils import local_date_of, local_now
 from org.models import Assignment, Position
@@ -1222,6 +1223,29 @@ def normalise_event_image(uploaded):
 
     try:
         with PILImage.open(uploaded) as source:
+            # ⚠️ The memory fix. Full note over `core.images.draft_to`; short
+            #    version: a photograph's decode costs its **pixel count, not
+            #    its file size** (49 MP is 146 MB out of a 6 MB file), and JPEG
+            #    can be decoded at 1/2, 1/4 or 1/8 scale and still give the
+            #    whole frame. Nothing stored here is larger than
+            #    EVENT_IMAGE_MAX_EDGE, so the rest was always waste.
+            #
+            # ⚠️ `target` is worked out **now**, from the size the photograph
+            #    arrived at, and used for both the decode and the resize below.
+            #    Recomputing it afterwards from the decoded size is what put an
+            #    event card at 900×515 where the arithmetic says 900×514 — the
+            #    reduced-scale decode shifts the aspect ratio by a hair. See
+            #    `core.images.stored_size`.
+            #
+            # ⚠️ The geometry is shared with gallery, the **policy is not** —
+            #    see this function's docstring on why the two normalise
+            #    functions stay separate. The first attempt kept a copy of the
+            #    arithmetic here too, and the copies were a pixel apart within
+            #    the day, with a behaviour guard in each app staying green
+            #    throughout: both were asked "was this decoded smaller?", and
+            #    on both the answer was yes.
+            target = stored_size(upright_size(source), EVENT_IMAGE_MAX_EDGE)
+            draft_to(source, target)
             # ⚠️ **`in_place=True`, and the reasoning is gallery's** (2026-08-13)
             #    — the full note lives over the same call in
             #    gallery/services.py::normalise_gallery_image, because that is
@@ -1260,8 +1284,13 @@ def normalise_event_image(uploaded):
             wanted = "RGBA" if "A" in picture.getbands() else "RGB"
             if picture.mode != wanted:
                 picture = picture.convert(wanted)
-            picture.thumbnail(
-                (EVENT_IMAGE_MAX_EDGE, EVENT_IMAGE_MAX_EDGE), PILImage.LANCZOS)
+            # ⚠️ Resized to the target worked out above, not `thumbnail()`,
+            #    which would work its own out from the decoded size. `target`
+            #    is None for a picture already inside the limit — those are
+            #    stored as they arrived, because enlarging adds bytes and no
+            #    detail.
+            if target is not None and picture.size != target:
+                picture = picture.resize(target, PILImage.LANCZOS)
             buffer = io.BytesIO()
             # No exif= argument, so none is written. Stated rather than assumed,
             # because "Pillow does not copy it by default" is the kind of

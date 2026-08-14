@@ -117,6 +117,28 @@ class GalleryPhoto(TimeStampedModel):
     #:    "duplicate detection" sounds like it means more than this does.
     image_digest = models.CharField(max_length=64, unique=True, editable=False)
 
+    #: SHA-256 of the file **as it was uploaded**, before any processing.
+    #:
+    #: ⚠️ The companion to `image_digest`, not a replacement, and the pair is
+    #:    deliberate. `image_digest` catches the same photograph sent once as a
+    #:    JPEG and again as a PNG — but it is a hash of bytes this project
+    #:    produces, so **it moves whenever the image pipeline moves**. This one
+    #:    is a hash of bytes somebody else produced, so it moves never.
+    #:
+    #: ⚠️ It exists because of what 2026-08-13 cost. Adding `draft()` changed
+    #:    every stored byte, and with only `image_digest` that meant every
+    #:    photograph already up silently stopped being recognised on re-upload.
+    #:    It was affordable exactly once, because the wall held nothing but test
+    #:    uploads that day. This column is what stops the next such change
+    #:    costing the same thing.
+    #:
+    #: ⚠️ Nullable, and it has to be: the original is deliberately not kept
+    #:    (see the class docstring), so a row written before this column existed
+    #:    can never be filled in. Postgres treats NULLs as distinct in a unique
+    #:    index, so any number of those coexist.
+    source_digest = models.CharField(
+        max_length=64, unique=True, null=True, blank=True, editable=False)
+
     #: The year shown under the photo in the lightbox. Taken from the upload's
     #: EXIF when it has any, otherwise the year it was uploaded.
     #:

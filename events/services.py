@@ -1222,7 +1222,25 @@ def normalise_event_image(uploaded):
 
     try:
         with PILImage.open(uploaded) as source:
-            upright = PILImageOps.exif_transpose(source)
+            # ⚠️ **`in_place=True`, and the reasoning is gallery's** (2026-08-13)
+            #    — the full note lives over the same call in
+            #    gallery/services.py::normalise_gallery_image, because that is
+            #    where it was measured. Short version: without it
+            #    `exif_transpose` returns a *second* full-size picture and the
+            #    first stays alive under `source`, so a phone photograph is
+            #    decoded twice over to produce one small WebP.
+            #
+            # ⚠️ Allowed only because the stored bytes are unchanged — the same
+            #    check was run here, over real photographs and every
+            #    orientation tag. This path has no digest riding on it today,
+            #    but the two functions are deliberately not shared (see the
+            #    docstring), so each one has to be able to state its own
+            #    guarantee.
+            PILImageOps.exif_transpose(source, in_place=True)
+            # ⚠️ Forces the decode before `thumbnail()` can ask for a
+            #    reduced-scale one of its own. Same line, same reason, same
+            #    guard as gallery's — see there.
+            source.load()
             # RGBA is kept where it exists — WebP carries alpha, and flattening
             # a logo onto white would put a white box on a dark page.
             #
@@ -1233,16 +1251,22 @@ def normalise_event_image(uploaded):
             #    2026-08-13: 198 MB of peak memory for one upload, down to
             #    113 MB without it. The front page's version of this mistake
             #    restarted production the day before.
-            wanted = "RGBA" if "A" in upright.getbands() else "RGB"
-            if upright.mode != wanted:
-                upright = upright.convert(wanted)
-            upright.thumbnail(
+            #
+            # ⚠️ A second name rather than rebinding `source`: the `with` keeps
+            #    its own reference to whatever `open()` returned, so rebinding
+            #    would not release the original — it would only read as if it
+            #    had.
+            picture = source
+            wanted = "RGBA" if "A" in picture.getbands() else "RGB"
+            if picture.mode != wanted:
+                picture = picture.convert(wanted)
+            picture.thumbnail(
                 (EVENT_IMAGE_MAX_EDGE, EVENT_IMAGE_MAX_EDGE), PILImage.LANCZOS)
             buffer = io.BytesIO()
             # No exif= argument, so none is written. Stated rather than assumed,
             # because "Pillow does not copy it by default" is the kind of
             # default that changes.
-            upright.save(buffer, "WEBP", quality=EVENT_IMAGE_QUALITY, method=6)
+            picture.save(buffer, "WEBP", quality=EVENT_IMAGE_QUALITY, method=6)
     except ValidationError:
         raise
     except Exception as error:

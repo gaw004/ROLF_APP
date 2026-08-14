@@ -176,7 +176,47 @@ def normalise_gallery_image(uploaded):
     try:
         with PILImage.open(uploaded) as source:
             taken_year = _exif_year(source)
-            upright = PILImageOps.exif_transpose(source)
+            # ⚠️ **`in_place=True`** (2026-08-13, after ten photographs killed
+            #    the instance). Without it `exif_transpose` hands back a
+            #    *second* full-size picture — `image.copy()` when there is no
+            #    orientation tag to act on — while the first stays alive under
+            #    `source` for the rest of this function. Two decoded copies of
+            #    a phone photograph where one will do.
+            #
+            #    Peak RSS for one upload, measured on Linux (what the
+            #    deployment runs; macOS reports a different shape and was
+            #    misleading):
+            #        12 MP    139 MB -> 92 MB
+            #        24 MP    240 MB -> 148 MB
+            #        49 MP    470 MB -> 284 MB
+            #    The last row is the one that mattered: against a 512 MB
+            #    instance already holding two workers, that upload had nowhere
+            #    to fit, and the symptom was a restart rather than an error.
+            #
+            # ⚠️ Permitted **only because the stored bytes do not change** —
+            #    checked over the foundation's own photographs and over every
+            #    orientation tag, SHA-256 equal on both derivatives in all of
+            #    them. That is the whole licence for this line: `image_digest`
+            #    is a hash of these bytes, so a pipeline that shifts them by one
+            #    pixel value stops recognising photographs that are already on
+            #    the wall, and stops silently.
+            PILImageOps.exif_transpose(source, in_place=True)
+            # ⚠️ **The decode is forced here deliberately** — this line is the
+            #    other half of "the stored bytes do not change".
+            #
+            #    `thumbnail()` below asks the JPEG decoder for a reduced-scale
+            #    decode of its own (its `reducing_gap`), and that request only
+            #    has an effect while the file is still unread. Today it never
+            #    fires, because `exif_transpose` reads the file first — but that
+            #    is *its* implementation detail, not a promise. The day it stops
+            #    doing so, a 5120px photograph would quietly be decoded at
+            #    2560px: still a valid 1600px WebP, nothing raised, and every
+            #    digest different from every digest stored before that day.
+            #
+            #    One cheap line instead of a dependency on somebody else's
+            #    internals. `test_the_picture_is_fully_decoded_before_resizing`
+            #    is what holds it.
+            source.load()
             # RGBA is kept where it exists — WebP carries alpha, and flattening
             # a scan with transparent corners onto white would put a white box
             # on a dark page.
@@ -185,16 +225,22 @@ def normalise_gallery_image(uploaded):
             #    `convert()` into the mode an image is already in still returns
             #    a **full-size copy** — 72 MB for a phone photograph, spent to
             #    produce pixels identical to the ones it was handed.
-            wanted = "RGBA" if "A" in upright.getbands() else "RGB"
-            if upright.mode != wanted:
-                upright = upright.convert(wanted)
+            #
+            # ⚠️ A second name rather than rebinding `source`: the `with`
+            #    keeps its own reference to whatever `open()` returned, so
+            #    rebinding would not release the original — it would only read
+            #    as though it had.
+            picture = source
+            wanted = "RGBA" if "A" in picture.getbands() else "RGB"
+            if picture.mode != wanted:
+                picture = picture.convert(wanted)
             # ⚠️ **Large first, then small, and the order is load-bearing.**
             #    _shrink_and_encode resizes in place, so the second call works
             #    on an image that is already 1600px and its copy is cheap.
             #    Swap these two lines and the lightbox picture comes out at
             #    700px — valid file, right format, wrong picture, no error.
-            image = _shrink_and_encode(upright, GALLERY_IMAGE_MAX_EDGE)
-            thumb = _shrink_and_encode(upright.copy(), GALLERY_THUMB_MAX_EDGE)
+            image = _shrink_and_encode(picture, GALLERY_IMAGE_MAX_EDGE)
+            thumb = _shrink_and_encode(picture.copy(), GALLERY_THUMB_MAX_EDGE)
     except ValidationError:
         raise
     except Exception as error:

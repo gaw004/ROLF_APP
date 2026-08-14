@@ -173,17 +173,22 @@ class GalleryImageProcessingTests(TestCase):
 
         A 6000×4000 photograph is 72 MB once decoded, and this used to make
         **four** of them: one from exif_transpose, one from a convert() into
-        the mode it was already in, and one per derivative. Measured at 238 MB
-        of peak memory for a single upload, against a 512 MB instance already
-        holding two workers. Now it makes one, and the peak is 134 MB.
+        the mode it was already in, and one per derivative. Now it makes
+        **none**.
+
+        ⚠️ The last one went later the same day, and this docstring used to say
+           it would stay: "one is Pillow's own — `exif_transpose` copies when
+           there is no orientation tag to act on — and it stays until there is
+           a reason to fight it." Ten photographs in one submission were the
+           reason. `in_place=True` is the fight, and it was worth having:
+           measured on Linux, one 49 MP upload went from 470 MB of peak RSS to
+           284 MB, against a 512 MB instance already holding two workers.
 
         ⚠️ The assertion is on **buffers at the original size**, not on memory:
            a memory number would drift with Pillow and the machine, while this
-           is the actual rule. One is Pillow's own — `exif_transpose` copies
-           when there is no orientation tag to act on — and it stays until
-           there is a reason to fight it.
+           is the actual rule.
 
-        ⚠️ Nothing else notices a regression here. Put the `convert()` back and
+        ⚠️ Nothing else notices a regression here. Put either copy back and
            every photograph is byte-for-byte identical, every other test stays
            green, and the only difference is a number that shows up as a
            restart on a busy afternoon.
@@ -205,11 +210,64 @@ class GalleryImageProcessingTests(TestCase):
             normalise_gallery_image(a_photo(size=size))
 
         at_full_size = [name for name, seen_size in seen if seen_size == size]
-        self.assertLessEqual(
-            len(at_full_size), 1,
-            f"the original was duplicated {len(at_full_size)} times before "
-            f"being resized ({at_full_size}); one is exif_transpose's and the "
-            f"rest are 72 MB each on a phone photograph")
+        self.assertEqual(
+            at_full_size, [],
+            f"the original was duplicated before being resized "
+            f"({at_full_size}); each of those is 72 MB on a phone photograph, "
+            f"and it is what a batch of ten cannot afford")
+
+    def test_the_picture_is_fully_decoded_before_resizing(self):
+        """⚠️ The guard on `source.load()` — and on what that line protects,
+        which is not memory.
+
+        `Image.thumbnail()` asks the JPEG decoder for a reduced-scale decode of
+        its own (its `reducing_gap`), and that request only does anything while
+        the file is still unread. An unread picture arriving here therefore
+        means a 5120px photograph gets decoded at 2560px instead — producing a
+        perfectly valid 1600px WebP made of **different bytes** from the one
+        the same photograph produced yesterday.
+
+        ⚠️ That is a duplicate-detection failure, not a picture-quality one,
+           and it is silent both ways: `image_digest` hashes those bytes, so
+           every photograph already on the wall quietly stops being recognised
+           when somebody uploads it a second time. Nothing raises, nothing
+           looks wrong, and the wall just starts collecting pairs.
+
+        ⚠️ Nothing would fail today without the `load()` — `exif_transpose`
+           happens to read the file first. This asserts the rule rather than
+           today's luck, because the luck is Pillow's and can be revised in a
+           patch release. That is the same reason `in_place=True` needed a
+           check of its own: both lines are invisible until they are wrong.
+        """
+        from unittest import mock
+
+        size = (3000, 2000)
+        seen = []
+        real = PILImage.Image.thumbnail
+
+        def spy(self, *args, **kwargs):
+            # `tile` is what an ImageFile still has left to read; an image that
+            # has been decoded has none. A plain Image never had any.
+            seen.append((self.size, bool(getattr(self, "tile", None))))
+            return real(self, *args, **kwargs)
+
+        with mock.patch.object(PILImage.Image, "thumbnail", spy):
+            normalise_gallery_image(a_photo(size=size))
+
+        self.assertNotEqual(
+            seen, [], "nothing was resized at all — has the pipeline moved?")
+        first_size, still_unread = seen[0]
+        self.assertEqual(
+            first_size, size,
+            "the first resize was handed a picture that is no longer at its "
+            "native size, so something decoded it at reduced scale on the way "
+            "in and every stored byte has moved")
+        self.assertFalse(
+            still_unread,
+            "the picture still had unread tiles when the first resize began, "
+            "so thumbnail()'s own reduced-scale decode is free to fire and "
+            "change every stored byte — put back the load() in "
+            "normalise_gallery_image")
 
     def test_a_small_photo_is_not_blown_up(self):
         image, thumb, _ = normalise_gallery_image(a_photo(size=(300, 200)))

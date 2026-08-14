@@ -4238,8 +4238,13 @@ class EventImageUploadTests(PageTestCase):
         198 MB of peak memory to 113 MB, on a 512 MB instance already holding
         two workers.
 
-        The one duplicate that remains is Pillow's own: `exif_transpose` copies
-        when there is no orientation tag to act on.
+        ⚠️ The one duplicate that used to remain was Pillow's own —
+           `exif_transpose` copies when there is no orientation tag to act on —
+           and it went later the same day, when a batch of ten photographs
+           killed the instance a second time. `in_place=True` is what removed
+           it; the measurement and the reasoning live over the same call in
+           gallery/services.py, and the byte-for-byte check was run on this
+           path too.
 
         ⚠️ A regression here is invisible everywhere else — the stored image is
            byte-for-byte the same either way. It shows up as a restart under
@@ -4263,11 +4268,10 @@ class EventImageUploadTests(PageTestCase):
             self.assertTrue(form.is_valid(), form.errors)
 
         at_full_size = [name for name, seen_size in seen if seen_size == size]
-        self.assertLessEqual(
-            len(at_full_size), 1,
-            f"the original was duplicated {len(at_full_size)} times before "
-            f"being resized ({at_full_size}); one is exif_transpose's and the "
-            f"rest are 72 MB each on a phone photograph")
+        self.assertEqual(
+            at_full_size, [],
+            f"the original was duplicated before being resized "
+            f"({at_full_size}); each of those is 72 MB on a phone photograph")
 
     def test_a_small_photo_is_not_blown_up(self):
         # thumbnail() only ever shrinks. Upscaling would add bytes and no detail.

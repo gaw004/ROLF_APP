@@ -16,6 +16,7 @@
 > | [`phase-c.md`](phase-c.md) | **Phase C** 的要点：判据 · **落点规矩**（样式写哪、JS 写哪、什么该翻）· 验收口径 · 已知缺口 | 当前开工期间天天翻 |
 > | [`03-roadmap.md`](03-roadmap.md) | **Phase C** 的**实施步骤** C0 · C0.5 · C3 · C4 · C5（照着一步步做） | 当前动手写代码时 |
 > | [`04-roadmap.md`](04-roadmap.md) | **Phase C 的前端分册**：C1（构建链）· C2（设计系统 + 20 个模板） | 做前端那一段时 |
+> | [`05-roadmap.md`](05-roadmap.md) | **Phase D · 员工与排班** 的实施步骤 D1 / D2 / D3 三批 | 做员工那一段时 |
 > | [`design-system.md`](design-system.md) | 色板 · 字号 · 间距 · 组件 · HTMX 与 Alpine 的用法 | C2 逐页重写时天天翻 |
 > | [`phase-b.md`](phase-b.md) | Phase B 的模型表 + 全部实现要点 + 测试清单 + 验收 | 查 Phase B 建的表和它们的判据 |
 > | [`02-roadmap.md`](02-roadmap.md) | Phase B 的**实施步骤** B0–B13 | 查历史 |
@@ -113,6 +114,10 @@
 | 志愿者能看到哪些活动？ | [phase-b.md「可见性与生命周期」](phase-b.md#可见性与生命周期两个谓词不是一个-status2026-07-29-晚新增) —— **`draft` 是唯一的不可见档**，别把可见性写成 `status=open` |
 | 新加一个分类字段，做成 `TextChoices` 还是字典表？ | [D5 判定规则](decisions/D05-lookup-tables-not-enums.md#判定规则什么时候用字典表什么时候用-textchoices2026-07-28-补) |
 | 这条信息该放 `Contact` / 角色表 / `Position` / `Assignment`？ | [D10 四层判断标准](decisions/D10-person-role-position-assignment.md) |
+| 「像员工一样有固定岗位、但不拿钱」的人怎么存？ | [D32](decisions/D32-worker-axes-schedule-and-assignment.md) —— 不是缺一个类型，是一个字段扛了三个轴 |
+| 员工的工作时间 / 排班 / 请假在哪？ | [D32](decisions/D32-worker-axes-schedule-and-assignment.md) —— `WorkPattern` + `Shift` + `Leave`；⚠️ 和推迟清单里被否决的那个「活动内班次 `Shift`」不是一回事 |
+| 一个人「总共投入了多少小时」怎么算？ | [D32 第八节](decisions/D32-worker-axes-schedule-and-assignment.md) —— ⚠️ **两个账本会重叠，加起来就是错的**；量不出来的人显示模式标签，不显示 `0` |
+| 员工要不要打卡？ | [D32](decisions/D32-worker-axes-schedule-and-assignment.md) —— 取决于 exempt / non-exempt，不取决于机构偏好；而一行班次就是法律认的例外记录表 |
 | 一种新关系该用字段、自引用 FK 还是专用表？ | [D15 四条判据 + 选择规则](decisions/D15-relationship-carriers.md) |
 | 新模型放哪个 app？ | [D17](decisions/D17-app-layout.md) |
 | 这段代码写在 admin 里行不行？ | [D18 的落点规矩](decisions/D18-admin-boundary.md#逻辑落点的硬规矩成本为零现在就要守) —— 判据：换个界面要不要跟着搬 |
@@ -125,7 +130,7 @@
 | 某件事为什么现在不做？ | [`deferred.md`](deferred.md) |
 | 还有什么没拍板？ | [六 · 还没定的](#还没定的哪些阻塞哪些不阻塞) |
 
-### 决策一览 D1–D24
+### 决策一览 D1–D32
 
 **完整索引在 [`decisions/README.md`](decisions/README.md)**（每条一句话结论 + 它回答的问题）。
 一条决策一个文件，编号是稳定引用。
@@ -305,7 +310,7 @@
 
 ## 三、重大决策记录 → [`decisions/`](decisions/README.md)
 
-D1–D24 **一条一个文件**，索引见 [`decisions/README.md`](decisions/README.md)。
+D1–D32 **一条一个文件**，索引见 [`decisions/README.md`](decisions/README.md)。
 
 > **为什么搬走**：D1–D18 原来全部塞在 `<details>` 里，而本文档有几十处链接指向它们内部的小节 ——
 > **点过去都是收起状态**。拆开之后每条决策是一页，链接落在正文上。
@@ -323,11 +328,15 @@ D1–D24 **一条一个文件**，索引见 [`decisions/README.md`](decisions/RE
 | **Phase A · 地基加固**（A1–A10） | ✅ 已完成（2026-07-27，分支 `phase-a`） | [`progress.md`](progress.md#-已完成--phase-a-地基加固) · [`01-roadmap.md`](01-roadmap.md) |
 | Phase B · 活动闭环 | 🔄 五处缺口已补齐（C0.2）、**414 个测试全绿**，**只差 [C0.3](03-roadmap.md#c03-三角色浏览器验收) 那一遍浏览器验收**就能标 ✅ | [`phase-b.md`](phase-b.md)（要点） · [`02-roadmap.md`](02-roadmap.md)（步骤） · [五处缺口](phase-c.md#phase-b-的五处缺口2026-07-31-发现) |
 | Phase C · 上线与真实运营 | 🔄 **当前在做**（2026-07-31 开工，2026-08-03 重排） | [`phase-c.md`](phase-c.md)（要点） · [`03-roadmap.md`](03-roadmap.md)（主册） · [`04-roadmap.md`](04-roadmap.md)（前端分册） · [`progress.md`](progress.md#phase-c--上线与真实运营)（原始计划） |
-| Phase D · 资金追踪 | ⬜ 未开始 | [`progress.md`](progress.md#phase-d--资金追踪) |
+| Phase D · 员工与排班 | ⬜ 已定案，未开工（2026-08-14 定） | [D32](decisions/D32-worker-axes-schedule-and-assignment.md)（决策全文） · [`05-roadmap.md`](05-roadmap.md)（三批实施步骤） |
+| Phase E · 资金追踪 | ⬜ 未开始 | [`progress.md`](progress.md#phase-d--资金追踪) |
 
 > **Phase B 完成的定义**：[零](#零当前优先级2026-07-29-定)里 R1–R8 + P1–P6 全部跑通，
 > 扮三个角色各走一遍（[验收清单](phase-b.md#验收2026-07-29-重写改成按-14-条需求逐条验收)）。
 > ⚠️ **C / D 在 2026-07-29 对调过**：原来 C 是资金、D 是上线。
+> **2026-08-14 又动了一次**：员工与排班插进来当 Phase D，资金追踪顺延成 Phase E。
+> 判据和上次一样 —— 排序跟着"哪件事先做"走，不跟着"当初写在哪"走。
+> `progress.md` 里那一节仍叫「Phase D · 资金追踪」，指的是现在的 Phase E。
 
 ## 五、明确推迟的事 → [`deferred.md`](deferred.md)
 

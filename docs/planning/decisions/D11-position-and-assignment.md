@@ -12,6 +12,35 @@
 > | 2026-07-27 | `Assignment` 1:N，`reports_to` 指向**另一行 `Assignment`** | 见「第二次修订」 |
 > | 2026-07-28（本版） | `Position`（编制）+ `Assignment`（任职），`reports_to` 指向 `Position` | — |
 
+## 2026-08-14 修订：`kind` 收窄成 `staff | board`，报酬拆成独立字段
+
+**本文正文里所有写着 `kind = employee | volunteer | board` 的地方都已经过时**，
+现在是 `kind = staff | board` + `compensation = paid | unpaid | stipend`。
+全文见 [D32](D32-worker-axes-schedule-and-assignment.md)。
+
+结构一个字节没动 —— `Position` / `Assignment` 的分层、汇报线挂编制、
+一人多岗、空缺可表达，四条全部照旧。变的只是 `kind` 这一个字段扛了两件事：
+「他在组织里是什么」和「拿不拿钱」。基金会出现了「像员工一样有固定岗位和
+固定开会时间、但不拿钱」的一类成员，那个字段就说不出来了。
+
+**本文有一句话反而是这次修订的判据**，原样成立、不需要改：
+
+> 空缺编制必须说得出自己是有薪岗还是志愿岗（招人的时候正是要知道这些）。
+
+它决定了 `compensation` 必须挂 `Position` 而不是 `Assignment`。
+
+跟着作废的两处：
+
+- 末尾那条 `employment_type` 只对 `kind=employee` 有意义的 `clean()` 提示**已删除**。
+  无薪的人一样分「每周来两天」和「每周来五天」，那个信息交给新的
+  `Assignment.fte`，`employment_type` 回到它字面的意思（合同形态）；
+- **「`EmployeeProfile` 因此不建」的结论维持，但理由要更新**：现在多了
+  `service_start_date` 和 `employee_number` 两个人级字段，它们放在 `Contact` 上。
+  本文当时的理由是"只剩员工编号之类的零碎"，字段数为 2 时那句话仍然成立 ——
+  重新考虑的条件写在 [D32 第九节](D32-worker-axes-schedule-and-assignment.md)。
+
+**薪酬暂不入库那一节不变**，`payroll` 独立 app 的位置也不变。
+
 ## 第一次修订：为什么 `EmployeeProfile` 不行
 
 <details>

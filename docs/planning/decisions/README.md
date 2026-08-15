@@ -1,4 +1,4 @@
-# 重大决策记录 D1–D31
+# 重大决策记录 D1–D32
 
 每条记录：**结论 → 为什么 → 代价 / 何时重新考虑**。
 
@@ -44,10 +44,11 @@
 | [**D29**](D29-memories-wall.md) | Memories 照片墙：独立 app + 自己的桶 + 每日抽签 | 为什么它是一个谁都不依赖的 app（于是最容易删）；**种子是日期**所以页面不在人眼皮底下重排，而 `hash()` 做种子的 bug 在单进程下永远复现不出来；桶必须分开是因为「删了还能不能找回来」两边**正好相反**；原图不留（GPS 会把志愿者家住址发布出去），代价是 1600px 就是以后能看到的最大尺寸；去重只到「同一份字节」为止<br>↳ [唯一的不变量](D29-memories-wall.md#二-唯一的不变量这一页描述的是今天) · [桶为什么不能共用](D29-memories-wall.md#三桶为什么-memories-不和活动图片共用一个) · [被删掉的那一半](D29-memories-wall.md#七被删掉的那一半2026-08-07) |
 | [**D30**](D30-registration-and-login.md) | 邮箱即账号；Google 只用来预填；注册限流 | **拿着 Google 账号在这里什么都不代表** —— 它只填三个框，建出来的是普通密码账号；没有邮箱就没有登录（D12 本来就允许的形状）；限流挡得住脚本、挡不住手动冒用，后者推迟而不是做一半；🔴 `client_ip()` 不写的话线上**静默地**让全世界共用一个桶，而顺手信 `X-Forwarded-For` 比这个 bug 更糟<br>↳ [Google 那一段是预填](D30-registration-and-login.md#二-google-那一段它是预填不是登录) · [client_ip](D30-registration-and-login.md#-client_ip不写这个函数线上会静默地量错东西) |
 | [**D31**](D31-overlays-in-the-top-layer.md) | 覆盖层一律 `<dialog>` + `showModal()`（top layer） | `position: fixed` **不等于**相对视口 —— 祖先有 `transform`/`filter`/`contain`/`backdrop-filter` 中任一个就成了包含块，而这个项目到处是深色玻璃；改密码弹窗被关进卡片（用户报的「有时候」= 只在深色下），Memories 悬浮窗**同样中招却一直看着正常**（`.wall` 恰好满屏），后者才是这条决策的理由；🔴 `<dialog open>` 不进 top layer 而且看起来是对的；顺带把 Esc/焦点/inert 五件事交回浏览器，其中两件原来没做<br>↳ [唯一的不变量](D31-overlays-in-the-top-layer.md#-唯一的不变量覆盖层的包含块必须是视口而这件事只有-top-layer-保证得了) · [为什么不是「注意别放进卡片」](D31-overlays-in-the-top-layer.md#为什么不是以后注意别把弹窗放进卡片里) · [守卫](D31-overlays-in-the-top-layer.md#守卫coretestsoverlaysliveinthetoplayerguardtests) |
+| [**D32**](D32-worker-axes-schedule-and-assignment.md) | 编制拆轴（`kind` / `compensation`）、班表与请假、活动的指派路径 | 「像员工的志愿者」怎么表达 —— 答案是**一个字段扛了三个轴**，不是缺一个类型；`compensation` 为什么必须挂编制（D11 自己写过理由）；R8 的 employee 改成"所有在编的人"，而这是一次**不报错的语义变更**；班次为什么是稠密的（稀疏方案预设了模板存在，装不下不规则班次）；🔴 重新生成只许动未来 —— 覆盖过去的行是静默改写考勤史；请假为什么从来不用 N 行班次表达；打卡不做，因为一行班次就是法律认的例外记录表；🔴 **工时从此有两个账本**（`Participation.hours` 和 `Shift`），会重叠、**永远不许相加**，所以没有一个「总投入工时」可以印；R6/R7 只数无薪的 —— 而那个污染是指派路径**自己制造出来的**；「量不出来」用 `hours_tracking` 四档表达，让报表里写 `0` 在结构上不可能发生 |
 
 ## 加一条新决策时
 
-1. 编号接着往下（D32…），文件名 `D32-<kebab-slug>.md`，**开头一行 `# D32 · 结论`**；
+1. 编号接着往下（D33…），文件名 `D33-<kebab-slug>.md`，**开头一行 `# D33 · 结论`**；
 2. 回到这张表加一行；
 3. 如果它推翻或修改了旧决策，**去那条决策的文件里就地写修订说明**，
    不要只在新决策里说 —— 本项目已经因此吃过一次亏（[D20](D20-ministry-role.md) 声称"已在原地改掉"，

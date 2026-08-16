@@ -37,7 +37,7 @@
 - **「`EmployeeProfile` 因此不建」的结论维持，但理由要更新**：现在多了
   `service_start_date` 和 `employee_number` 两个人级字段，它们放在 `Contact` 上。
   本文当时的理由是"只剩员工编号之类的零碎"，字段数为 2 时那句话仍然成立 ——
-  重新考虑的条件写在 [D32 第九节](D32-worker-axes-schedule-and-assignment.md)。
+  重新考虑的条件写在 [D37](D37-hris-fields-and-credentials.md)。
 
 **薪酬暂不入库那一节不变**，`payroll` 独立 app 的位置也不变。
 

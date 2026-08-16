@@ -16,7 +16,8 @@
 > | [`phase-c.md`](phase-c.md) | **Phase C** 的要点：判据 · **落点规矩**（样式写哪、JS 写哪、什么该翻）· 验收口径 · 已知缺口 | 当前开工期间天天翻 |
 > | [`03-roadmap.md`](03-roadmap.md) | **Phase C** 的**实施步骤** C0 · C0.5 · C3 · C4 · C5（照着一步步做） | 当前动手写代码时 |
 > | [`04-roadmap.md`](04-roadmap.md) | **Phase C 的前端分册**：C1（构建链）· C2（设计系统 + 20 个模板） | 做前端那一段时 |
-> | [`05-roadmap.md`](05-roadmap.md) | **Phase D · 员工与排班** 的实施步骤 D1 / D2 / D3 三批 | 做员工那一段时 |
+> | [`phase-d.md`](phase-d.md) | **Phase D** 的要点：**需求原文（第二批）** · 判据 · ⭐ **页面与入口总表** · 权限 · 验收口径 · 已知缺口 | 做员工那一段时天天翻 |
+> | [`05-roadmap.md`](05-roadmap.md) | **Phase D · 员工与排班** 的实施步骤 D1 / D2a / D2b / D3 四批 | 做员工那一段动手写代码时 |
 > | [`design-system.md`](design-system.md) | 色板 · 字号 · 间距 · 组件 · HTMX 与 Alpine 的用法 | C2 逐页重写时天天翻 |
 > | [`phase-b.md`](phase-b.md) | Phase B 的模型表 + 全部实现要点 + 测试清单 + 验收 | 查 Phase B 建的表和它们的判据 |
 > | [`02-roadmap.md`](02-roadmap.md) | Phase B 的**实施步骤** B0–B13 | 查历史 |
@@ -77,6 +78,11 @@
 > > **这件事是不是[零](#零当前优先级2026-07-29-定)里那 14 条需求的前置条件？
 > > 不是 → 它不进本阶段，不管它以前排在哪。**
 >
+> **2026-08-14：这条规则第一次换锚了**（Phase D 不满足它）。
+> 退休判据、新的锚、以及为什么手续要补，见
+> [判定规则的第一次换锚](#判定规则的第一次换锚2026-08-14)。
+> Phase C 收尾**仍然优先**。
+>
 > 已经因此改动的决策：[D2](decisions/D02-frontend-deferred.md)（前端不再整体推迟）、
 > [Phase B 的模型表](phase-b.md)（`Event` 一族重画）、
 > [Phase C / D 的排序](progress.md)（资金追踪整体后移，权限提前）。
@@ -115,9 +121,14 @@
 | 新加一个分类字段，做成 `TextChoices` 还是字典表？ | [D5 判定规则](decisions/D05-lookup-tables-not-enums.md#判定规则什么时候用字典表什么时候用-textchoices2026-07-28-补) |
 | 这条信息该放 `Contact` / 角色表 / `Position` / `Assignment`？ | [D10 四层判断标准](decisions/D10-person-role-position-assignment.md) |
 | 「像员工一样有固定岗位、但不拿钱」的人怎么存？ | [D32](decisions/D32-worker-axes-schedule-and-assignment.md) —— 不是缺一个类型，是一个字段扛了三个轴 |
-| 员工的工作时间 / 排班 / 请假在哪？ | [D32](decisions/D32-worker-axes-schedule-and-assignment.md) —— `WorkPattern` + `Shift` + `Leave`；⚠️ 和推迟清单里被否决的那个「活动内班次 `Shift`」不是一回事 |
-| 一个人「总共投入了多少小时」怎么算？ | [D32 第八节](decisions/D32-worker-axes-schedule-and-assignment.md) —— ⚠️ **两个账本会重叠，加起来就是错的**；量不出来的人显示模式标签，不显示 `0` |
-| 员工要不要打卡？ | [D32](decisions/D32-worker-axes-schedule-and-assignment.md) —— 取决于 exempt / non-exempt，不取决于机构偏好；而一行班次就是法律认的例外记录表 |
+| 员工的工作时间 / 排班在哪？ | [D33](decisions/D33-work-schedule.md) —— `WorkPattern` + `Shift`；⚠️ 和推迟清单里被否决的那个「活动内班次 `Shift`」不是一回事 |
+| 请假记在哪？ | [D34](decisions/D34-leave.md) —— 独立成表，理由走 `LeaveType` 字典表**不用自由文本** |
+| 一个人「总共投入了多少小时」怎么算？ | [D36](decisions/D36-two-hour-ledgers.md) —— ⚠️ **两个账本会重叠，「总投入」加起来就是错的**；量不出来的人显示模式标签，不显示 `0`。⭐ 但**志愿服务小时数有定义、可以印**，见 [D38 第七节](decisions/D38-served-as-volunteer-or-work.md) |
+| 一次批量建了 30 条模板，建错了怎么收？ | [D40](decisions/D40-undo-a-pattern-batch.md) —— 整批撤销，⚠️ 但「撤销」是**停止并收回未来**，过去的班次一行都不动 |
+| 一个人被排了两件同时的事，系统会说话吗？ | [D39](decisions/D39-scheduling-conflicts.md) —— 四类冲突走一个函数，⚠️ **一类都不拦截**；而其中一半的检测 D36 / D38 早就写好了，只是挂错了条件、也出现在事后的报表上 |
+| 员工要不要打卡？ | [D33 第七节](decisions/D33-work-schedule.md) —— 取决于 exempt / non-exempt，不取决于机构偏好；而一行班次就是法律认的例外记录表 |
+| ⭐ 一个员工参加活动，怎么分清是**献爱心**还是**工作安排**？ | [D38](decisions/D38-served-as-volunteer-or-work.md) —— 一个字段 `served_as`，**当事人自己声明**、admin 可更正、改动本人看得见。⚠️ 不许从「谁点的按钮」或「那天有没有排班」推 |
+| 员工在哪里看自己的排班和工时？ | [`phase-d.md` 的 My Schedule](phase-d.md#my-schedule-的形状) —— 一页、两条泳道、三个数、永不求和，外加一个 `.ics` 订阅 |
 | 一种新关系该用字段、自引用 FK 还是专用表？ | [D15 四条判据 + 选择规则](decisions/D15-relationship-carriers.md) |
 | 新模型放哪个 app？ | [D17](decisions/D17-app-layout.md) |
 | 这段代码写在 admin 里行不行？ | [D18 的落点规矩](decisions/D18-admin-boundary.md#逻辑落点的硬规矩成本为零现在就要守) —— 判据：换个界面要不要跟着搬 |
@@ -130,7 +141,7 @@
 | 某件事为什么现在不做？ | [`deferred.md`](deferred.md) |
 | 还有什么没拍板？ | [六 · 还没定的](#还没定的哪些阻塞哪些不阻塞) |
 
-### 决策一览 D1–D32
+### 决策一览 D1–D40
 
 **完整索引在 [`decisions/README.md`](decisions/README.md)**（每条一句话结论 + 它回答的问题）。
 一条决策一个文件，编号是稳定引用。
@@ -262,6 +273,46 @@
 
 ---
 
+## 判定规则的第一次换锚（2026-08-14）
+
+上面那条判定规则（「**是不是那 14 条需求的前置条件？不是就不做**」）
+自 2026-07-29 起管着每一件事。**Phase D 是第一件不满足它的工作** ——
+除了 R8 换口径之外，员工与排班和那 14 条一条都不沾。
+
+这里把手续补上 —— **规则没有退休条件，比破例本身更糟**。
+一次没有解释的例外，会让下一个读文档的人发现规则和进度表互相矛盾，
+**然后两个都不信**。
+
+### 旧规则退休的判据，以及它现在到哪了
+
+> R1–R8 + P1–P6 **全部跑通**，并经过一次真实试点。
+
+现在的位置：功能侧十四条已经全部落地，差的是
+[C0.3 那一遍浏览器验收](03-roadmap.md#c03-三角色浏览器验收)和 C5 试点。
+所以旧规则**接近功成，但还没功成** —— 由此得出本次换锚的两条纪律：
+
+1. **Phase C 的收尾优先级不变**：C0.3 · C3 部署 · C5 试点仍然排在
+   Phase D 的 [D2b / D3](05-roadmap.md#交付节奏四批中间留一次反馈) 之前；
+2. **Phase D 的 D1 / D2a 可以并行** —— 它们几乎全是结构和页面，不碰上线路径，
+   而基金会用过之后的反馈会直接改善后面两批。
+
+### 新的锚：基金会的第二批需求
+
+**原文一字不改地记在 [`phase-d.md` 第一节](phase-d.md#一需求原文第二批不要转述)**，
+和 [零](#零当前优先级2026-07-29-定) 里第一批的待遇一样 —— 转述会丢东西。
+
+Phase D 期间的判据换成两条，**两条都要过**：
+
+> 1. 它是不是第二批原文里某一句的前置条件？
+> 2. 这张表 / 这个字段 / 这个页面，**哪条查询或哪个人会读它**？
+
+第 2 条不是新的 —— 它就是上面那句自查问题。
+⚠️ **它在 2026-08-14 第一次被真的执行了一遍，当场砍掉四个字段和一整套排除规则**，
+记录在 [`phase-d.md` 第六节](phase-d.md#六自查这一轮砍掉和补上的东西)。
+在此之前它被写下来过、引用过，**但没有被执行过**。
+
+---
+
 ## 一、终极目标
 
 为一个非营利基金会做一个 web application，帮他们**管理志愿者**并**追踪各类资源（人、钱、活动）**。
@@ -310,7 +361,7 @@
 
 ## 三、重大决策记录 → [`decisions/`](decisions/README.md)
 
-D1–D32 **一条一个文件**，索引见 [`decisions/README.md`](decisions/README.md)。
+D1–D40 **一条一个文件**，索引见 [`decisions/README.md`](decisions/README.md)。
 
 > **为什么搬走**：D1–D18 原来全部塞在 `<details>` 里，而本文档有几十处链接指向它们内部的小节 ——
 > **点过去都是收起状态**。拆开之后每条决策是一页，链接落在正文上。
@@ -328,7 +379,7 @@ D1–D32 **一条一个文件**，索引见 [`decisions/README.md`](decisions/RE
 | **Phase A · 地基加固**（A1–A10） | ✅ 已完成（2026-07-27，分支 `phase-a`） | [`progress.md`](progress.md#-已完成--phase-a-地基加固) · [`01-roadmap.md`](01-roadmap.md) |
 | Phase B · 活动闭环 | 🔄 五处缺口已补齐（C0.2）、**414 个测试全绿**，**只差 [C0.3](03-roadmap.md#c03-三角色浏览器验收) 那一遍浏览器验收**就能标 ✅ | [`phase-b.md`](phase-b.md)（要点） · [`02-roadmap.md`](02-roadmap.md)（步骤） · [五处缺口](phase-c.md#phase-b-的五处缺口2026-07-31-发现) |
 | Phase C · 上线与真实运营 | 🔄 **当前在做**（2026-07-31 开工，2026-08-03 重排） | [`phase-c.md`](phase-c.md)（要点） · [`03-roadmap.md`](03-roadmap.md)（主册） · [`04-roadmap.md`](04-roadmap.md)（前端分册） · [`progress.md`](progress.md#phase-c--上线与真实运营)（原始计划） |
-| Phase D · 员工与排班 | ⬜ 已定案，未开工（2026-08-14 定） | [D32](decisions/D32-worker-axes-schedule-and-assignment.md)（决策全文） · [`05-roadmap.md`](05-roadmap.md)（三批实施步骤） |
+| Phase D · 员工与排班 | ⬜ 已定案，未开工（2026-08-14 定案 + 同日自查重排） | [`phase-d.md`](phase-d.md)（要点 · 需求原文 · 页面总表） · [D32](decisions/D32-worker-axes-schedule-and-assignment.md)–[D40](decisions/D40-undo-a-pattern-batch.md)（九条决策） · [`05-roadmap.md`](05-roadmap.md)（四批实施步骤） |
 | Phase E · 资金追踪 | ⬜ 未开始 | [`progress.md`](progress.md#phase-d--资金追踪) |
 
 > **Phase B 完成的定义**：[零](#零当前优先级2026-07-29-定)里 R1–R8 + P1–P6 全部跑通，

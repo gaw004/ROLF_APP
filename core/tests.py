@@ -603,6 +603,107 @@ class MarkdownLinkGuardTests(TestCase):
         )
 
 
+class DecisionSectionReferenceGuardTests(TestCase):
+    """Lint-as-test: prose references like "D33 第七节" point at a real section.
+
+    MarkdownLinkGuardTests checks the file and the anchor of a link. It cannot
+    check the *text* of one — and this project cites decisions by section number
+    in prose far more often than by anchor: "见 D36 第四节", "同 D33 第七节".
+
+    That gap has already cost it. Splitting D32 into D33–D38 on 2026-08-14
+    renumbered every section, and two references to "D32 第七节" survived,
+    pointing into a file that now ends at 第五节. Both sat there for a day with
+    every guard green — which is exactly goal.md 约定 3's "假引用比没引用更糟":
+    a reader follows it, finds nothing, and stops trusting the other few hundred.
+
+    ⚠️ Mention is not use. A reference inside 「」 is the project quoting a
+       reference — most often the broken one it is in the middle of correcting.
+       Same rule the emphasis guard already applies to ⭐ inside backticks.
+    """
+
+    FENCE = re.compile(r"^\s*(?:>\s*)*(?:```|~~~)")
+    # 「…」 quotes a reference rather than making one; backticks name a symbol.
+    QUOTED = re.compile(r"「[^」\n]*」|`[^`\n]*`")
+    # "D33 第七节" / "D9 第一节". The numeral is CJK: 一, 十, 十一 …
+    REFERENCE = re.compile(r"\bD(\d{1,2})\s*第([一二三四五六七八九十]+)节")
+    # "## 七、打卡：不做" — the numbered sections a decision actually offers.
+    # Lazy prefix so an ornament (## ⭐ 四、…) does not swallow the numeral.
+    SECTION = re.compile(r"^##\s+.*?([一二三四五六七八九十]+)、")
+
+    DIGITS = "零一二三四五六七八九"
+
+    @classmethod
+    def value(cls, numeral):
+        """一 → 1, 十 → 10, 十一 → 11. Only ever used to sort a message."""
+        if "十" not in numeral:
+            return cls.DIGITS.find(numeral)
+        tens, _, ones = numeral.partition("十")
+        return (cls.DIGITS.find(tens) if tens else 1) * 10 + (
+            cls.DIGITS.find(ones) if ones else 0
+        )
+
+    @classmethod
+    def sections_by_decision(cls, documents):
+        """{33: {"一", "二", …}} for every decisions/D*.md we can parse."""
+        found = {}
+        for path, text in documents.items():
+            if path.parent.name != "decisions" or not path.name.startswith("D"):
+                continue
+            number = re.match(r"D(\d{1,2})", path.name)
+            if not number:
+                continue
+            sections, in_fence = set(), False
+            for line in text.split("\n"):
+                if cls.FENCE.match(line):
+                    in_fence = not in_fence
+                    continue
+                if in_fence:
+                    continue
+                match = cls.SECTION.match(line)
+                if match:
+                    sections.add(match.group(1))
+            if sections:
+                found[int(number.group(1))] = sections
+        return found
+
+    def test_every_section_reference_resolves(self):
+        documents = dict(project_markdown_files())
+        sections = self.sections_by_decision(documents)
+
+        broken = []
+        for path, text in documents.items():
+            in_fence = False
+            for number, line in enumerate(text.split("\n"), 1):
+                if self.FENCE.match(line):
+                    in_fence = not in_fence
+                    continue
+                if in_fence:
+                    continue
+                for decision, section in self.REFERENCE.findall(
+                    self.QUOTED.sub("", line)
+                ):
+                    decision = int(decision)
+                    # A decision with no numbered sections at all (or no file of
+                    # its own yet) is not something this guard can rule on.
+                    if decision not in sections:
+                        continue
+                    if section not in sections[decision]:
+                        have = "/".join(sorted(sections[decision], key=self.value))
+                        broken.append(
+                            f"{path}:{number}  D{decision} 第{section}节 does not "
+                            f"exist — D{decision} has 第{have}节"
+                        )
+
+        self.assertEqual(
+            broken,
+            [],
+            f"{len(broken)} reference(s) name a section that is not there. "
+            "Section numbers move when a decision is split or a section is "
+            "inserted, and goal.md 约定 3 rates a false reference as worse than "
+            "no reference at all:\n" + "\n".join(broken),
+        )
+
+
 class EmphasisGuardTests(TestCase):
     """Lint-as-test: emphasis is a budget, not a tone of voice (goal.md 约定 6).
 

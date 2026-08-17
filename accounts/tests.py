@@ -1,6 +1,8 @@
+import re
 from unittest import mock
 
 from django.contrib.auth import get_user_model
+from django.core import mail
 from django.core.management import call_command
 from django.db import IntegrityError, transaction
 from django.test import RequestFactory, TestCase, override_settings
@@ -894,3 +896,135 @@ class ProfileLanguageAndKinEmailTests(TestCase):
             "phone": "+14085550103", "relationship_type": relationship.pk,
         })
         self.assertEqual(self.user.contact.emergency_contacts.count(), 0)
+
+
+class PasswordResetTests(TestCase):
+    """C3.2. Django's flow, this project's templates, and one limit.
+
+    ⚠️ What is worth asserting here is **not** that Django's token works — that
+       is Django's own test suite. It is the three decisions layered on top:
+       who the flow refuses to serve, what it refuses to reveal, and that a
+       refused request sends no mail. Every one of those, done wrong, looks
+       exactly like a working page.
+    """
+
+    ASK = reverse("accounts:password_reset")
+
+    def setUp(self):
+        mail.outbox = []
+        self.user = User.objects.create_user(
+            email="mei@example.invalid", password="the-old-password-1")
+
+    def ask_for(self, email, ip=None):
+        extra = {"REMOTE_ADDR": ip} if ip else {}
+        return self.client.post(self.ASK, {"email": email}, **extra)
+
+    def link_from_the_email(self):
+        found = re.search(r"https?://[^\s]+", mail.outbox[0].body)
+        self.assertIsNotNone(found, "the message carries no link at all")
+        return found.group(0).split("testserver", 1)[1]
+
+    # --- the walk ---------------------------------------------------------
+
+    def test_a_registered_volunteer_can_get_back_in(self):
+        # ⭐ End to end, because the parts are only worth anything joined up:
+        #    ask → receive → follow → set → log in with the new one.
+        self.ask_for("mei@example.invalid")
+        self.assertEqual(len(mail.outbox), 1)
+
+        confirm = self.client.get(self.link_from_the_email(), follow=True)
+        self.assertTrue(confirm.context["validlink"])
+        self.client.post(confirm.request["PATH_INFO"], {
+            "new_password1": "a-brand-new-password-42",
+            "new_password2": "a-brand-new-password-42"})
+
+        self.assertTrue(self.client.login(
+            email="mei@example.invalid", password="a-brand-new-password-42"))
+
+    def test_the_link_stops_working_once_it_is_used(self):
+        # ⚠️ Asserted rather than assumed: a reset link sits in an inbox for
+        #    ever, and an inbox is not a safe place. Django invalidates it by
+        #    hashing the old password into the token, which is the sort of
+        #    thing that keeps working right up until somebody "simplifies" it.
+        self.ask_for("mei@example.invalid")
+        link = self.link_from_the_email()
+        confirm = self.client.get(link, follow=True)
+        self.client.post(confirm.request["PATH_INFO"], {
+            "new_password1": "a-brand-new-password-42",
+            "new_password2": "a-brand-new-password-42"})
+
+        again = self.client.get(link, follow=True)
+        self.assertFalse(again.context["validlink"])
+        self.assertContains(again, "That Link No Longer Works")
+
+    # --- what it will not say ---------------------------------------------
+
+    def test_an_unknown_address_gets_the_same_page_and_no_mail(self):
+        # ⭐ The page must not become a way to ask "is this person a volunteer
+        #    here". This database holds minors.
+        known = self.ask_for("mei@example.invalid")
+        mail.outbox = []
+        unknown = self.ask_for("nobody@example.invalid")
+        self.assertEqual(unknown.status_code, known.status_code)
+        self.assertEqual(unknown["Location"], known["Location"])
+        self.assertEqual(mail.outbox, [])
+
+    def test_an_admin_entered_contact_with_no_account_gets_nothing(self):
+        # The documented gap, pinned so that it stays the documented gap:
+        # somebody entered from a paper list has no password to reset.
+        Contact.objects.create(
+            contact_type=Contact.ContactType.INDIVIDUAL,
+            legal_last_name="Paper", email="paper@example.invalid")
+        self.ask_for("paper@example.invalid")
+        self.assertEqual(mail.outbox, [])
+
+    def test_the_message_carries_an_address_and_a_link_and_no_names(self):
+        # Same rule as the event notifications (D22): what leaves this database
+        # through a third party is an address and an announcement.
+        self.user.contact = Contact.objects.create(
+            contact_type=Contact.ContactType.INDIVIDUAL,
+            legal_first_name="Mei", legal_last_name="Chen")
+        self.user.save(update_fields=["contact"])
+        self.ask_for("mei@example.invalid")
+        body = mail.outbox[0].body
+        self.assertIn("mei@example.invalid", body)
+        for name in ("Mei", "Chen"):
+            with self.subTest(name=name):
+                self.assertNotIn(name, body)
+
+    # --- the limit --------------------------------------------------------
+
+    @override_settings(PASSWORD_RESET_RATELIMIT_PER_IP="2/h")
+    def test_one_machine_is_cut_off_after_its_allowance(self):
+        for _ in range(2):
+            self.ask_for("mei@example.invalid")
+        self.assertEqual(self.ask_for("mei@example.invalid").status_code, 429)
+
+    @override_settings(PASSWORD_RESET_RATELIMIT_PER_IP="2/h")
+    def test_a_refused_request_sends_nothing(self):
+        # ⭐ The assertion that makes this a limit rather than a message. What
+        #    is being protected is the day's mail allowance, so a 429 that
+        #    still sends is worth nothing at all.
+        for _ in range(2):
+            self.ask_for("mei@example.invalid")
+        mail.outbox = []
+        self.assertEqual(self.ask_for("mei@example.invalid").status_code, 429)
+        self.assertEqual(mail.outbox, [])
+
+    @override_settings(PASSWORD_RESET_RATELIMIT_PER_IP="50/h",
+                       PASSWORD_RESET_RATELIMIT_SITE="2/h")
+    def test_many_machines_asking_once_each_are_counted_together(self):
+        # ⚠️ The per-IP bucket cannot see this shape, and against a shared daily
+        #    allowance it is the shape that actually empties it.
+        for n in range(2):
+            self.ask_for("mei@example.invalid", ip=f"203.0.113.{n}")
+        self.assertEqual(
+            self.ask_for("mei@example.invalid", ip="203.0.113.9").status_code, 429)
+
+    # --- the way in -------------------------------------------------------
+
+    def test_the_login_page_offers_the_way_out_of_being_locked_out(self):
+        # ⚠️ A reset flow nobody can find is a reset flow nobody uses, and the
+        #    person who needs it is standing at a form that just refused them.
+        page = self.client.get(reverse("accounts:login"))
+        self.assertContains(page, self.ASK)

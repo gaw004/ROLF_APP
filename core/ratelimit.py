@@ -89,3 +89,28 @@ def registration_rate_site(group, request):
     if _unlimited_for_signed_in(request):
         return None
     return settings.REGISTRATION_RATELIMIT_SITE
+
+
+def password_reset_rate_per_ip(group, request):
+    """Per-IP limit on asking for a reset link.
+
+    ⚠️ What is being protected here is **not** the accounts — the reset link
+       goes to the address on file, so guessing addresses gains nothing. It is
+       the mail allowance. On an open-registration site anybody can make the
+       application send mail to any address they like, as often as they like,
+       and every one of those comes out of the same daily quota as the
+       notifications and the resets that real people need. Two things break at
+       once and neither of them errors: the quota runs out, and the domain's
+       reputation goes with it, because mail nobody asked for is what a spam
+       complaint is.
+    """
+    return settings.PASSWORD_RESET_RATELIMIT_PER_IP
+
+
+def password_reset_rate_site(group, request):
+    """The same, counted across everybody.
+
+    The per-IP bucket cannot see a thousand addresses asking once each, and
+    against a shared daily allowance that is the shape that actually empties it.
+    """
+    return settings.PASSWORD_RESET_RATELIMIT_SITE

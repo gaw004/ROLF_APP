@@ -483,6 +483,29 @@ Brevo 免费档走的是共享 IP 池，SES 出沙箱后是自己认证过的域
 写四个模板 + 一封邮件模板（**英文**）。
 `accounts/urls.py` 加四条路由，`base.html` 的登录页加入口。
 
+**做完的样子**（2026-08-17）：
+
+| 落点 | 文件 |
+|---|---|
+| 四个视图（各自只加模板、限流和去处） | `accounts/views.py::VolunteerPasswordReset*View` |
+| 四条路由 + 确认页那条 `<uidb64>/<token>` | `accounts/urls.py` |
+| 六个模板（四页 + 一封信 + 一个 429 页） | `accounts/templates/accounts/password_reset*` |
+| 新密码表单（**加了 `max_length`**，`SetPasswordForm` 没有） | `accounts/forms.py::VolunteerSetPasswordForm` |
+| 每 IP / 全站两个桶 | `core/ratelimit.py::password_reset_rate_*` |
+| 开发机上打印到控制台 | `config/settings/dev.py` 的 `EMAIL_BACKEND` |
+
+⚠️ **限流挡的不是「猜账号」**，链接只会发到库里存的那个地址上。挡的是**发信额度**：
+这是一个能让本应用给任意地址发信的表单，而额度和域名信誉是和真人的密码重置、
+活动通知共用的。换成免费档之后这条从「以后再说」变成了现在就要有
+（原计划把它归在 [C3.9](#c39-登录限流)）。
+
+**九条测试**，其中三条钉的是「它不肯说什么」：地址不存在时**同一个页面、同一个跳转、
+零封信**（否则这一页就是一个「这个邮箱是不是志愿者」的查询接口，而库里有未成年人）·
+代录的 `Contact` 拿不到信 · 信里**只有地址和链接，没有姓名**（同 D22 对通知内容的口径）。
+
+口径见 [`phase-c.md` 的已知缺口](phase-c.md#五已知缺口与处置)：
+**只服务自行注册的账号**，代录的 `Contact` 本来就不登录。
+
 ### C3.3 真实发信
 
 **服务商 = Brevo**（2026-08-17 定；原定 Amazon SES，出不了沙箱，经过见 [C3.0](#c30-域名--发信服务--最先做因为它靠别人)）。

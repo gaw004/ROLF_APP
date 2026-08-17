@@ -16,6 +16,21 @@
 >
 > 写于 2026-08-03。
 
+## 进度：整份做完了（2026-08-17 复核）
+
+**C1 ✅ · C2 ✅。** 构建链、设计系统、20 个模板全部落地，
+[C2 的验收表](#c26-两条新守卫)六行全过（一个组件、删掉 CSS 仍可用、关掉 JS 六个写操作走得完、
+375px 不横向滚、深浅两色各一遍）。C2 之后又长出来一批不在本册计划内的东西：
+[D25](decisions/D25-public-front-page.md) 首页、[D26](decisions/D26-palette-from-the-hero.md) 品牌色、
+[D27](decisions/D27-ministry-report.md) 报表、[D28](decisions/D28-qr-checkin.md) 扫码签到、
+[D29](decisions/D29-memories-wall.md) 照片墙 —— 它们的坑都记在下面的[计划外记录](#计划外记录)里。
+
+⚠️ 唯一还挂着的是一处**文档漂移**：[C1.1](#c11-npm-与三个依赖) 正文写的是源文件放
+`static/src/`，实际落在 `assets/`（`ManifestStaticFilesStorage` 会去解析
+`@import "tailwindcss"` 然后让部署当场失败）。经过记在计划外记录里，正文没有回改。
+
+Phase C 其余各步的进度在 [`03-roadmap.md` 的进度表](03-roadmap.md#进度2026-08-17-收盘)。
+
 ## 编号没有变
 
 C1 / C2 **还是叫 C1 / C2**，只是正文搬到了这里——同 `goal.md` 拆分时的做法：

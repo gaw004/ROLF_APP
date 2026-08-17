@@ -377,8 +377,8 @@ D1–D40 **一条一个文件**，索引见 [`decisions/README.md`](decisions/RE
 |---|---|---|
 | 数据核心设计（`Contact` / `Language` / `EmergencyContact`） | ✅ 已完成，有测试 | [`progress.md`](progress.md#-已完成--数据核心设计这是目前最有价值的部分) |
 | **Phase A · 地基加固**（A1–A10） | ✅ 已完成（2026-07-27，分支 `phase-a`） | [`progress.md`](progress.md#-已完成--phase-a-地基加固) · [`01-roadmap.md`](01-roadmap.md) |
-| Phase B · 活动闭环 | 🔄 五处缺口已补齐（C0.2）、**414 个测试全绿**，**只差 [C0.3](03-roadmap.md#c03-三角色浏览器验收) 那一遍浏览器验收**就能标 ✅ | [`phase-b.md`](phase-b.md)（要点） · [`02-roadmap.md`](02-roadmap.md)（步骤） · [五处缺口](phase-c.md#phase-b-的五处缺口2026-07-31-发现) |
-| Phase C · 上线与真实运营 | 🔄 **当前在做**（2026-07-31 开工，2026-08-03 重排） | [`phase-c.md`](phase-c.md)（要点） · [`03-roadmap.md`](03-roadmap.md)（主册） · [`04-roadmap.md`](04-roadmap.md)（前端分册） · [`progress.md`](progress.md#phase-c--上线与真实运营)（原始计划） |
+| Phase B · 活动闭环 | 🔄 五处缺口已补齐（C0.2）、**1049 个测试全绿**（2026-08-17 实测），**只差 [C0.3](03-roadmap.md#c03-三角色浏览器验收) 那一遍浏览器验收**就能标 ✅ | [`phase-b.md`](phase-b.md)（要点） · [`02-roadmap.md`](02-roadmap.md)（步骤） · [五处缺口](phase-c.md#phase-b-的五处缺口2026-07-31-发现) |
+| Phase C · 上线与真实运营 | 🔄 **当前在做**。2026-08-17：**站点已上线**（Render + 自定义域名 + HTTPS），发信链路打通，前端整份完工；四条交付硬前置里做完一条（生产加固），逐步进度见 [03-roadmap 的进度表](03-roadmap.md#进度2026-08-17-收盘) | [`phase-c.md`](phase-c.md)（要点） · [`03-roadmap.md`](03-roadmap.md)（主册） · [`04-roadmap.md`](04-roadmap.md)（前端分册） · [`progress.md`](progress.md#phase-c--上线与真实运营)（原始计划） |
 | Phase D · 员工与排班 | ⬜ 已定案，未开工（2026-08-14 定案 + 同日自查重排） | [`phase-d.md`](phase-d.md)（要点 · 需求原文 · 页面总表） · [D32](decisions/D32-worker-axes-schedule-and-assignment.md)–[D40](decisions/D40-undo-a-pattern-batch.md)（九条决策） · [`05-roadmap.md`](05-roadmap.md)（四批实施步骤） |
 | Phase E · 资金追踪 | ⬜ 未开始 | [`progress.md`](progress.md#phase-d--资金追踪) |
 
@@ -430,6 +430,18 @@ C0.2 和它的返工之后是 **404**），
 
 **C0.2 已经做完了**（2026-08-03）：五处缺口全补上，加上浏览器带回的那一轮返工，
 测试 **334 → 404**。
+
+**2026-08-17：站点上线了，而且真人已经能收到信。** Phase C 的 C1 / C2（前端整份）、
+C0.5、C3.0（域名 + 发信服务）、C3.1（首页）、**C3.2 密码重置**、**C3.3 真实发信**、
+C3.4（生产加固）、C3.12 做完并验过；C3.5 部署、C3.6 备份、C3.8 错误可见性、
+C6 扫码签到**代码做完，各差一次真实验证**。测试 **404 → 1049**。
+
+⚠️ 发信服务当天从 Amazon SES 换成 **Brevo**（SES 出不了沙箱），
+代码零改动 —— 见 [`revisions.md` 第三十九批](revisions.md#三十九2026-08-17发信换成-brevo以及那条没写下来的通知记录)。
+
+**下一步不是写代码**：剩下的四件里三件是[交付硬前置](phase-c.md#判据什么必须做完才能放真人什么可以边用边加)，
+而它们**都只能拿真账号、真收件人、真库做** —— 备份的真实恢复演练、权限复核、
+隐私说明（内容要基金会定），加上一直悬着的 C0.3 三角色浏览器验收。
 
 **[C0.5](03-roadmap.md#c05--上线前的三条死链) 也做完了**（2026-08-03，分支 `phase-c-frontend`）：
 `LOGIN_URL` 补上、三个错误页模板落地、守卫接进 pre-commit 和 CI，测试 **404 → 409**。

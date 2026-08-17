@@ -4572,6 +4572,35 @@ class CheckDeploymentCommandTests(TestCase):
         self.assertNotIn("thing(s) to fix", text)
         self.assertIn("development machine", text)
 
+    def test_an_empty_dictionary_table_is_called_out(self):
+        # ⚠️ The failure this catches is not an error: a coordinator opens
+        #    "publish an event", the event-type dropdown is empty, and the page
+        #    simply cannot be completed. Nothing is logged anywhere.
+        text = self.report()
+        self.assertIn("EventType", text)
+        self.assertIn("empty, so the form that needs it", text)
+
+    def test_a_deployment_whose_only_account_is_the_superuser_is_called_out(self):
+        # ⭐ The easiest step in C3.5 to skip, and it leaves no trace: everything
+        #    works, and "nobody runs the foundation from a superuser" is broken
+        #    the same day.
+        get_user_model().objects.create_superuser(
+            email="rescue@example.invalid", password="x")
+        text = self.report()
+        self.assertIn("foundation staff (not superuser)", text)
+        self.assertIn("the only way in is the superuser", text)
+
+    def test_a_foundation_account_that_exists_is_not_called_out(self):
+        from django.contrib.auth.models import Group
+
+        user = get_user_model().objects.create_user(
+            email="office@example.invalid", password="x", is_staff=True)
+        # get_or_create: post_migrate already wires this group up (that is
+        # where its permission list lives), so creating it here is a duplicate.
+        group, _ = Group.objects.get_or_create(name="foundation_admin")
+        user.groups.add(group)
+        self.assertNotIn("the only way in is the superuser", self.report())
+
     def test_the_live_send_reports_a_refusal_instead_of_raising(self):
         # The command's whole job is to answer; a traceback answers nothing and
         # a management command that crashes reads as "the tool is broken".

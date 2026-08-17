@@ -72,6 +72,7 @@ class Command(BaseCommand):
         self.email()
         self.https()
         self.errors()
+        self.readiness()
 
         if options["send_to"]:
             self.send_one(options["send_to"])
@@ -188,6 +189,70 @@ class Command(BaseCommand):
         self.line(OK if dsn else WARN, "SENTRY_DSN", self.shape(dsn),
                   "" if dsn else "unset, so nothing is reported anywhere but "
                                  "the log; that is a choice, not a fault")
+
+    def readiness(self):
+        """C3.5's checklist, answered from the database instead of from memory.
+
+        ⚠️ Every row here fails silently. An empty EventType table is not an
+           error, it is a "publish an event" form with an empty dropdown; a
+           deployment whose only account is the superuser works perfectly and
+           quietly breaks the rule that nobody runs the foundation from one.
+
+        ⚠️ Models are looked up by name rather than imported. This command lives
+           in core, and D17 puts the dependency the other way round — core must
+           stay importable without the business apps. A dynamic lookup keeps
+           that true and degrades into a warning rather than an ImportError.
+        """
+        from django.apps import apps
+        from django.contrib.auth import get_user_model
+        from django.db.utils import OperationalError, ProgrammingError
+
+        self.section("Accounts and base data (C3.5)")
+        user_model = get_user_model()
+        try:
+            superusers = user_model.objects.filter(is_superuser=True).count()
+            # ⭐ The account the foundation actually uses. Creating only the
+            #    superuser is the easiest step in C3.5 to skip: everything works,
+            #    and "nobody runs this from a superuser" is broken the same day
+            #    with nothing to show for it.
+            staff = user_model.objects.filter(
+                is_staff=True, is_superuser=False,
+                groups__name="foundation_admin").count()
+        except (OperationalError, ProgrammingError) as error:
+            self.line(WARN, "database", type(error).__name__, str(error))
+            return
+
+        self.line(OK if superusers else WARN, "superusers", str(superusers),
+                  "" if superusers else "no rescue account exists")
+        self.line(
+            OK if staff else BAD, "foundation staff (not superuser)", str(staff),
+            "" if staff else
+            "the foundation has no account of its own, so the only way in is the "
+            "superuser — which is the thing C3.5 says not to run the place from")
+
+        # The dictionaries a coordinator needs before they can publish anything.
+        # ParticipationRole ships one row from a migration, so one is still empty.
+        wanted = [
+            ("org", "Ministry", 1), ("org", "Position", 1),
+            ("org", "EmploymentType", 1), ("events", "EventType", 1),
+            ("events", "ParticipationRole", 2),
+            # Not hand-entered — a data migration fills it. Zero here means the
+            # migration did not run, and an emergency contact cannot be saved
+            # at all, which is what stops a minor signing up.
+            ("contact", "RelationshipType", 1),
+        ]
+        for app_label, name, minimum in wanted:
+            try:
+                model = apps.get_model(app_label, name)
+                rows = model.objects.count()
+            except (LookupError, OperationalError, ProgrammingError) as error:
+                self.line(WARN, name, type(error).__name__, str(error))
+                continue
+            self.line(
+                OK if rows >= minimum else BAD, name, f"{rows} rows",
+                "" if rows >= minimum else
+                "empty, so the form that needs it offers an empty dropdown — "
+                "no error, just a page nobody can complete")
 
     def send_one(self, address):
         self.section("Live send")

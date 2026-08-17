@@ -1,8 +1,30 @@
-"""The pages that belong to no single app. So far: the public front page."""
+"""The pages that belong to no single app: the public front page, and a pulse."""
 
+from django.http import HttpResponse
 from django.shortcuts import render
 
+from .health import HEALTH_PATH  # noqa: F401 — re-exported for the URLconf
 from .models import HomePage
+
+
+def healthz(request):
+    """A pulse for the platform. 200 and nothing else.
+
+    ⚠️ **It touches no database and renders no template, deliberately.** Render
+       restarts an instance whose health check stops answering, so anything this
+       depends on becomes a thing that can take the whole site down. A database
+       hiccup would kill every instance rather than showing a slow page — and it
+       would take down the very pages that could report the trouble. The
+       question the platform is asking is "can this process answer?", not "is
+       everything downstream perfect".
+
+    ⚠️ And it exists at all because of SECURE_SSL_REDIRECT. The platform checks
+       the instance directly over plain HTTP, with no X-Forwarded-Proto on the
+       request, so Django rightly answers 301 to https — which the check reads
+       as a failed deploy. prod.py exempts this one path from that redirect
+       (SECURE_REDIRECT_EXEMPT); the front page keeps redirecting, as it must.
+    """
+    return HttpResponse("ok", content_type="text/plain")
 
 
 def home(request):

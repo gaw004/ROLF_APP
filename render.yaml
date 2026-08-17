@@ -108,7 +108,13 @@ services:
     # ⚠️ 第一次部署最常见的失败长这样：健康检查一直红，日志里是 DisallowedHost。
     #    那不是健康检查的问题，是 DJANGO_ALLOWED_HOSTS 还没填对 —— 先看日志
     #    再改这里。
-    healthCheckPath: /
+    # ⚠️ **Not `/`.** The check runs against the instance over plain HTTP, so
+    #    SECURE_SSL_REDIRECT answers the front page with a 301 and the platform
+    #    reads that as a failed deploy — it says "health check timed out", which
+    #    sounds like the application is dead. /healthz is exempted from that
+    #    redirect in prod.py and touches no database. Three files have to agree
+    #    on this path; core.tests.HealthCheckGuardTests is why they stay agreed.
+    healthCheckPath: /healthz
 
     buildCommand: "./build.sh"
 

@@ -19,12 +19,17 @@ from django.conf.urls.static import static
 from django.contrib import admin
 from django.urls import include, path
 
-from core.views import home
+from core.health import HEALTH_PATH
+from core.views import healthz, home
 
 urlpatterns = [
     # The public front page. ⚠️ No login_required: this is the one page a link
     # shared with a stranger has to open. See D25.
     path('', home, name='home'),
+    # ⚠️ Before anything that could shadow it, and outside every app: the
+    #    platform's health check has to answer even while the rest of the site
+    #    is having a bad day. See core/views.py::healthz.
+    path(HEALTH_PATH, healthz, name='healthz'),
     path('admin/', admin.site.urls),
     # Staff-only pages pushed out of the admin by D18's shape trigger
     # (the contact merge page).

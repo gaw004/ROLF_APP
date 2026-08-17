@@ -1321,6 +1321,49 @@ def notify_event_change(event, *, reason, message, sent_by, backend=None):
 把 `@transaction.atomic` 放回去反向验过，红的（`[2] != [1]`）。
 
 
+### C3.4 · 健康检查打的是 `/`，而 `/` 现在会跳转
+
+2026-08-17，上线当天第一次真部署就红了。报错是这一句：
+
+```
+Timed out after waiting for internal health check to return a successful
+response code at: rolf-v.org:10000/
+==> Build failed
+```
+
+这句话描述的是**一个死掉的或者慢得离谱的应用**。而应用两样都不是 ——
+它在**好好地回 301**。
+
+Render 的健康检查**直接打实例**，走的是纯 HTTP，不经过它自己那层反代，
+所以那个请求上没有 `X-Forwarded-Proto: https`。`SECURE_SSL_REDIRECT` 一看是
+http，就照规矩跳去 https。平台要 2xx，拿到 301，判定失败。
+
+⚠️ **整条链路上没有任何一个字提到设置、路径或文件。** 部署日志里连一行红字都没有
+（301 不是错误），Render 说的是「超时」，而超时听起来像要去查 gunicorn 和数据库。
+
+改法是给健康检查一个自己的端点，而不是让首页兼职：
+
+| 落点 | 内容 |
+|---|---|
+| `core/health.py` | 只有一个常量 `HEALTH_PATH`，**没有任何 import** —— `prod.py` 要读它，而 settings 求值时 app registry 还没起来 |
+| `core/views.py::healthz` | 200 + 一个字符串。**不碰数据库、不渲染模板** |
+| `prod.py` | `SECURE_REDIRECT_EXEMPT` 只放这一条路径；首页照旧跳转 |
+| `render.yaml` | `healthCheckPath: /healthz` |
+| 守卫 | `core.tests.HealthCheckGuardTests` 三条，两个方向都反向验过 |
+
+⚠️ **健康检查不许碰数据库**，这一条比它看起来重要：Render 会重启一个不回话的实例，
+所以健康检查依赖什么，什么就有权把整个站点拖下去。数据库抖一下，
+本该是「页面变慢」，会变成「所有实例被杀」—— 而被杀掉的那些正是唯一能报告出事了的东西。
+平台问的是「这个进程还能应答吗」，不是「下游一切正常吗」。
+
+⚠️ 守卫的第二条断言是「首页**仍然**跳转」。只写第一条的话，
+把整站都豁免掉一样能让测试变绿 —— 而那时没有任何一个页面被强制上 HTTPS。
+
+> **一般形式**：**平台的报错描述的是它观察到的现象，不是原因。**
+> 「健康检查超时」是现象；原因可以是应用死了、端口不对、Host 不在 `ALLOWED_HOSTS` 里
+> （那是 400），或者像这次一样 —— 应用完全正常，只是回了一个平台不接受的状态码。
+> 这一类错误值不值得写守卫，判据是「读着它能不能找到原因」，而不是「它红不红」。
+
 ### C3.4 · 「短值一样零警告」是错的，而它错在验收上
 
 2026-08-17。C3.4 原文写着：短的 HSTS 一样能拿到干净的 `check --deploy`，

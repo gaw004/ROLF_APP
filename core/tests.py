@@ -18,6 +18,8 @@ from unittest import mock
 
 from django.apps import apps
 from django.core.mail.backends.base import BaseEmailBackend
+from django.http import HttpResponse
+from django.middleware.security import SecurityMiddleware
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.contrib.staticfiles import finders
@@ -29,6 +31,7 @@ from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
 
 from core.constraints import CONSTRAINT_FIELD
+from core.health import HEALTH_PATH
 from core.limits import LONG_TEXT
 from core.models import HomePage
 from core.services import orphaned_home_media
@@ -4590,3 +4593,74 @@ class CheckDeploymentCommandTests(TestCase):
                 EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend"):
             call_command("check_deployment", send_to="x@example.invalid", stdout=out)
         self.assertIn("accepted is not delivered", out.getvalue())
+
+
+class HealthCheckGuardTests(TestCase):
+    """Lint-as-test: the health check path, in the three files that must agree.
+
+    ⚠️ This class exists because of a failed deploy on 2026-08-17, and the
+       reason it was worth a guard is the error message: **"Timed out after
+       waiting for internal health check to return a successful response
+       code"**. That sentence describes an application which is dead or slow.
+       The application was neither — it was answering 301, because the platform
+       checks the instance directly over plain HTTP (no X-Forwarded-Proto) and
+       SECURE_SSL_REDIRECT had just been turned on. Nothing in the failure named
+       a setting, a path, or a file.
+
+    Three files have to agree, and two of them fail silently on their own:
+    the URLconf (a 404 reads as unhealthy), prod.py's SECURE_REDIRECT_EXEMPT
+    (a 301 reads as unhealthy) and render.yaml's healthCheckPath.
+    """
+
+    @property
+    def blueprint(self):
+        return (Path(settings.BASE_DIR) / "render.yaml").read_text(encoding="utf-8")
+
+    @property
+    def prod_settings(self):
+        return (Path(settings.BASE_DIR) / "config" / "settings" / "prod.py"
+                ).read_text(encoding="utf-8")
+
+    def test_the_blueprint_checks_the_path_the_code_serves(self):
+        declared = re.search(r"^\s*healthCheckPath:\s*(\S+)", self.blueprint, re.M)
+        self.assertIsNotNone(declared, "render.yaml declares no healthCheckPath")
+        self.assertEqual(
+            declared.group(1).strip("/"), HEALTH_PATH.strip("/"),
+            "render.yaml points the health check somewhere other than the view "
+            "that answers it — the platform will restart a healthy instance")
+
+    def test_the_health_path_answers_without_touching_the_database(self):
+        # ⚠️ The database must not be able to take the site down through this
+        #    route. Render restarts an instance whose check stops answering, so
+        #    a hiccup would kill every instance rather than showing a slow page.
+        with self.assertNumQueries(0):
+            response = self.client.get(f"/{HEALTH_PATH}")
+        self.assertEqual(response.status_code, 200)
+
+    def test_the_health_path_is_exempt_from_the_ssl_redirect(self):
+        """⭐ The one that would have caught the failed deploy.
+
+        Exercised through SecurityMiddleware directly rather than the test
+        client: the client's handler builds its middleware once and caches it,
+        so an override of SECURE_SSL_REDIRECT would be read too late and this
+        test would pass without testing anything.
+        """
+        exempt = re.search(r"^SECURE_REDIRECT_EXEMPT\s*=\s*(.+)$",
+                           self.prod_settings, re.M)
+        self.assertIsNotNone(
+            exempt, "prod.py exempts nothing from the SSL redirect, so the "
+                    "health check will be answered with a 301")
+        with override_settings(
+                SECURE_SSL_REDIRECT=True, ALLOWED_HOSTS=["testserver"],
+                SECURE_REDIRECT_EXEMPT=[rf"^{HEALTH_PATH}?$"]):
+            middleware = SecurityMiddleware(lambda request: HttpResponse("ok"))
+            plain_http = RequestFactory()
+            # The platform's request: no X-Forwarded-Proto anywhere on it.
+            self.assertEqual(
+                middleware(plain_http.get(f"/{HEALTH_PATH}")).status_code, 200)
+            # ⚠️ The other half. Exempting the health path also "fixes" this by
+            #    exempting everything, and then nothing on the site is forced on
+            #    to HTTPS while every test still passes.
+            self.assertEqual(middleware(plain_http.get("/")).status_code, 301)
+            self.assertEqual(
+                middleware(plain_http.get("/events/")).status_code, 301)

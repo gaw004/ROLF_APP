@@ -19,6 +19,8 @@ import sentry_sdk
 from botocore.config import Config
 
 from .base import *  # noqa: F403
+from core.health import HEALTH_PATH
+
 from .base import ALLOWED_HOSTS, env
 
 # --- C3.4 · Hardening -------------------------------------------------------
@@ -32,6 +34,15 @@ from .base import ALLOWED_HOSTS, env
 #    header — with nothing in front of the app, any caller could claim https.
 SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
 SECURE_SSL_REDIRECT = True
+# ⚠️ **The one path that must not be redirected**, and leaving it out cost a
+#    failed deploy on 2026-08-17. Render checks the instance directly, over
+#    plain HTTP, with no X-Forwarded-Proto on the request — so Django correctly
+#    answers 301 to https, the platform reads "not a success code", and the
+#    deploy times out. The message says "health check timed out", which points
+#    at the application being slow or dead; nothing in it points at a setting.
+#    The exemption is one path and never the site: the front page still
+#    redirects, which is the whole point of the line above.
+SECURE_REDIRECT_EXEMPT = [rf"^{HEALTH_PATH}?$"]
 SESSION_COOKIE_SECURE = True
 CSRF_COOKIE_SECURE = True
 X_FRAME_OPTIONS = "DENY"

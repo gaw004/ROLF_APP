@@ -899,16 +899,30 @@ def event_notify(request, pk):
     if request.method == "POST":
         form = NotifyForm(request.POST)
         if form.is_valid():
-            notify_event_change(
+            notification = notify_event_change(
                 event,
                 reason=form.cleaned_data["reason"],
                 message=form.cleaned_data["message"],
                 sent_by=request.user,
             )
-            messages.success(
-                request,
-                f"Notified {len(recipients)}; {len(unreachable)} could not be reached.",
-            )
+            # ⚠️ Counted off the record that was just written, not off the
+            #    recipients resolved above: those two numbers are the same only
+            #    when every message was accepted, and the interesting day is the
+            #    one where they are not.
+            told = notification.recipients.count()
+            failed = notification.failed.count()
+            if failed:
+                messages.warning(
+                    request,
+                    f"Notified {told}; {failed} could not be sent and "
+                    f"{len(unreachable)} could not be reached. "
+                    "The names are under “Already notified”, below.",
+                )
+            else:
+                messages.success(
+                    request,
+                    f"Notified {told}; {len(unreachable)} could not be reached.",
+                )
             return redirect("events:event_notify", pk=event.pk)
     else:
         reason = request.GET.get("reason") or EventNotification.Reason.TIME_CHANGED
@@ -927,7 +941,10 @@ def event_notify(request, pk):
         "unreachable": unreachable,
         # "Last notified 5 minutes ago" is the only thing standing between a
         # shaky connection and two identical notices (D22, cost 3).
-        "previous": event.notifications.all()[:5],
+        # prefetch: the template names whoever a notice failed to reach, and
+        # without this that is one query per notice plus one per name.
+        "previous": event.notifications.prefetch_related(
+            "failed__contact")[:5],
     })
 
 

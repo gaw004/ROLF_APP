@@ -21,6 +21,23 @@
         reaching {{ previous.0.recipients.count }}). There is no queue and no
         idempotency key, so read that line before sending again.
       </p>
+      {% comment %}
+      ⚠️ 发失败的人**按名字**列出来，不是只报个数 —— 和「联系不上」那一组同一条理由
+         （D22 ②）：数字答得了「几个」，答不了「哪三个」，而这一页是唯一会有人
+         回头看的地方。⚠️ 它只在真的有人发失败时出现：常态是这里什么都没有，
+         所以它一出现就该被读成「有事发生」。发失败最可能的原因是发信服务的
+         每日额度用完了，那时**后面的人全在这张名单上**。
+      {% endcomment %}
+      {% for notice in previous %}
+        {# `.all`，不是 `.exists` —— 后者绕过 prefetch 的缓存，每条通知多一次查询。 #}
+        {% if notice.failed.all %}
+          <p class="mt-3 border-t border-warning-fg/30 pt-3 text-sm text-danger-fg dark:border-warning-fg-dark/30 dark:text-danger-fg-dark">
+            {{ notice.sent_at }}: could not be sent to
+            {% for row in notice.failed.all %}{{ row.contact }}{% if not forloop.last %}, {% endif %}{% endfor %}.
+            They have an address on file — the message did not leave. Send again.
+          </p>
+        {% endif %}
+      {% endfor %}
     </div>
   {% endif %}
 

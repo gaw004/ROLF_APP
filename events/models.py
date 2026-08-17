@@ -621,6 +621,22 @@ class EventNotification(ConstraintErrorFieldMixin, TimeStampedModel):
     #    That is what D22 ② is asking for.
     unreachable = models.ManyToManyField(
         Participation, related_name="notifications_unreachable", blank=True)
+    # Had an address, and it still did not go: the provider refused it, the
+    # daily quota ran out, the connection dropped halfway down the list.
+    #
+    # ⚠️ A third column rather than a second meaning for `unreachable`, and the
+    #    difference is not pedantic: "we never had a way to tell this person"
+    #    is fixed by asking them for a phone number, and "the mail server said
+    #    no at 19:04" is fixed by looking at the provider. Merging them makes
+    #    the first question unanswerable forever, because nothing else in this
+    #    record remembers which one it was.
+    #
+    # ⚠️ The three sets are exclusive and together they are everybody who was
+    #    signed up at that moment. Anything that lands in none of them is a
+    #    person nobody can account for, which is the failure this whole record
+    #    exists to prevent.
+    failed = models.ManyToManyField(
+        Participation, related_name="notifications_failed", blank=True)
     provider_ref = models.CharField(max_length=200, blank=True)
 
     class Meta:

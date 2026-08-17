@@ -1608,14 +1608,28 @@ def default_message(event, reason):
     return "\n".join(lines)
 
 
-@transaction.atomic
 def notify_event_change(event, *, reason, message, sent_by, backend=None):
     """Resolve, deliver, and leave a record. Returns the EventNotification.
 
-    ⚠️ Both M2Ms are written once, from what was true at this moment. Never
-       turn either into a property that recalculates: somebody unreachable in
-       March may have a number today, and recomputing would rewrite this record
-       into "everybody was told", which is a lie. Same rule as hours.
+    ⚠️ All three M2Ms are written once, from what was true at this moment. Never
+       turn any of them into a property that recalculates: somebody unreachable
+       in March may have a number today, and recomputing would rewrite this
+       record into "everybody was told", which is a lie. Same rule as hours.
+
+    ⚠️ **The sending happens before the transaction opens, and must never move
+       inside it.** It used to be inside, which cost two things. A batch of a
+       hundred held a database transaction open for as long as the mail server
+       took; and anything raising partway through rolled the record back, so
+       the forty-six people who already had the email in their inbox were
+       recorded as never having been told. Rolling back a network call is not a
+       thing anybody can do, so the only honest order is: send, then write down
+       what happened. The other half of that fix is that the adapters do not
+       raise — see core/notifications/base.py.
+
+    ⚠️ A message the backend did not accept lands in `failed`, never in
+       `recipients`. The backends have always answered per message (see
+       DeliveryResult) — it was this function that threw the answer away and
+       recorded everyone it *tried* as everyone it *told*.
     """
     recipients, unreachable = resolve_recipients(event)
     backend = backend or get_backend()
@@ -1626,14 +1640,25 @@ def notify_event_change(event, *, reason, message, sent_by, backend=None):
         for r in recipients
     ])
 
-    notification = EventNotification.objects.create(
-        event=event,
-        reason=reason,
-        message=message,          # a snapshot: editing the event never changes it
-        sent_at=local_now(),
-        sent_by=sent_by,
-        provider_ref=next((r.provider_ref for r in results if r.provider_ref), ""),
-    )
-    notification.recipients.set([r.participation for r in recipients])
-    notification.unreachable.set([u.participation for u in unreachable])
+    # One verdict per recipient, in order — that is the backend contract. A
+    # backend answering with fewer results than it was handed is broken, and the
+    # safe direction is to call the leftovers failed: "check on these" is
+    # recoverable, "they were told" is not.
+    accepted = [result.accepted for result in results]
+    accepted += [False] * (len(recipients) - len(accepted))
+
+    with transaction.atomic():
+        notification = EventNotification.objects.create(
+            event=event,
+            reason=reason,
+            message=message,      # a snapshot: editing the event never changes it
+            sent_at=local_now(),
+            sent_by=sent_by,
+            provider_ref=next((r.provider_ref for r in results if r.provider_ref), ""),
+        )
+        notification.recipients.set(
+            [r.participation for r, ok in zip(recipients, accepted) if ok])
+        notification.unreachable.set([u.participation for u in unreachable])
+        notification.failed.set(
+            [r.participation for r, ok in zip(recipients, accepted) if not ok])
     return notification

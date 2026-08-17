@@ -11,11 +11,13 @@ import io
 import os
 import re
 import shutil
+import smtplib
 import tempfile
 from pathlib import Path
 from unittest import mock
 
 from django.apps import apps
+from django.core.mail.backends.base import BaseEmailBackend
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.contrib.staticfiles import finders
@@ -439,6 +441,38 @@ class AdminHasNoLogicGuardTests(TestCase):
             "Move this to models.py / services.py — admin.py renders, it does "
             "not decide:\n" + "\n".join(hits),
         )
+
+
+class QuotaEmailBackend(BaseEmailBackend):
+    """A mail server that accepts `allowance` messages and then refuses.
+
+    Which is what a free tier's daily limit looks like from inside the process:
+    not a rejection at connect time, but the same call working and then not.
+    Class attributes rather than instance ones because Django builds this from
+    a dotted path in settings and hands it no arguments.
+    """
+
+    allowance = 1
+    sent: list = []
+    opened = 0
+
+    @classmethod
+    def reset(cls, allowance=1):
+        cls.allowance, cls.sent, cls.opened = allowance, [], 0
+
+    def open(self):
+        type(self).opened += 1
+        return True
+
+    def close(self):
+        pass
+
+    def send_messages(self, email_messages):
+        for message in email_messages:
+            if len(type(self).sent) >= type(self).allowance:
+                raise smtplib.SMTPDataError(554, b"Daily sending quota exceeded")
+            type(self).sent.append(message)
+        return len(email_messages)
 
 
 class NotificationBackendTests(TestCase):

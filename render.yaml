@@ -179,7 +179,10 @@ services:
       - key: R2_PUBLIC_BASE_HOST
         sync: false
 
-      # C3.3 的 SES。四项 SMTP 凭据，prod.py 接上之前设了也没人读。
+      # C3.3 的发信服务。四项 SMTP 凭据，prod.py 接上之前设了也没人读。
+      # ⚠️ 供应商无关，故意的：2026-08-17 从 Amazon SES 换成 Brevo，
+      #    这四行一个字都没改。换回去也一样 —— 但要重跑 C3.3 的送达验证，
+      #    免费档走的是共享 IP 池，和自己认证过的域名不是同一条路。
       - key: EMAIL_HOST
         sync: false
       - key: EMAIL_PORT

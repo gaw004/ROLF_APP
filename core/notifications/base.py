@@ -51,6 +51,13 @@ class DeliveryResult:
 
 
 class NotificationBackend(Protocol):
+    """⚠️ send() answers with one result per message, in the order given, and
+    does not raise: a provider refusing address 47 must still leave the caller
+    able to say what happened to the other 99. The caller writes those verdicts
+    down, so a backend that raises instead costs a record that cannot be
+    rebuilt — the messages that already went out cannot be un-sent.
+    """
+
     def send(self, messages: Sequence[Message]) -> list[DeliveryResult]: ...
 
 

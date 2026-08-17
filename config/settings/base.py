@@ -202,6 +202,19 @@ GOOGLE_OAUTH_CLIENT_ID = env("GOOGLE_OAUTH_CLIENT_ID", "")
 REGISTRATION_RATELIMIT_PER_IP = env("REGISTRATION_RATELIMIT_PER_IP", "20/h")
 REGISTRATION_RATELIMIT_SITE = env("REGISTRATION_RATELIMIT_SITE", "100/h")
 
+# The password-reset request page, limited for a different reason: it is a form
+# that makes this application send mail to any address a stranger types, and the
+# allowance it spends is shared with every notification and every reset a real
+# person needs. Tighter than registration because the honest case is smaller —
+# forty people at one event all register, and approximately none of them all
+# forget their password on the same evening.
+#
+# ⚠️ Tuning these means asking what the mail plan allows per day, not what feels
+#    safe. The failure is not an error page: it is the day's remaining messages
+#    being gone, and the people who needed them hearing nothing.
+PASSWORD_RESET_RATELIMIT_PER_IP = env("PASSWORD_RESET_RATELIMIT_PER_IP", "10/h")
+PASSWORD_RESET_RATELIMIT_SITE = env("PASSWORD_RESET_RATELIMIT_SITE", "60/h")
+
 # Where the client's address comes from. See core/ratelimit.py::client_ip — the
 # short version is that REMOTE_ADDR is the proxy in production, and trusting the
 # whole X-Forwarded-For header is worse than not limiting at all.

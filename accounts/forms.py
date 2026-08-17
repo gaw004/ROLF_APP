@@ -2,7 +2,7 @@
 
 from django import forms
 from django.contrib.auth import get_user_model, password_validation
-from django.contrib.auth.forms import PasswordChangeForm
+from django.contrib.auth.forms import PasswordChangeForm, SetPasswordForm
 from django.core.exceptions import ValidationError
 from django.core.validators import MaxLengthValidator
 from phonenumber_field.formfields import PhoneNumberField
@@ -107,6 +107,32 @@ class VolunteerPasswordChangeForm(PasswordChangeForm):
         super().__init__(*args, **kwargs)
         labels = {
             "old_password": "Current password",
+            "new_password1": "New password",
+            "new_password2": "Confirm new password",
+        }
+        for name, label in labels.items():
+            self.fields[name].label = label
+            self.fields[name].max_length = PASSWORD
+            self.fields[name].validators.append(MaxLengthValidator(PASSWORD))
+
+
+class VolunteerSetPasswordForm(SetPasswordForm):
+    """The form behind a reset link. Same two caps as the change form.
+
+    ⚠️ The cap is the whole reason this class exists, and it is the same hole
+       VolunteerPasswordChangeForm was written to close: `SetPasswordForm`'s two
+       fields carry **no max_length**, so a submitted megabyte is hashed. That
+       one is reachable while logged in; this one is reachable by anybody
+       holding a link, which is the wider door of the two.
+
+    ⚠️ Subclassed rather than reusing VolunteerPasswordChangeForm: that one also
+       asks for the current password, and somebody arriving here is precisely
+       the person who does not have it.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        labels = {
             "new_password1": "New password",
             "new_password2": "Confirm new password",
         }

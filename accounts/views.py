@@ -4,14 +4,24 @@ from django.conf import settings
 from django.contrib import messages
 from django.contrib.auth import login, update_session_auth_hash
 from django.contrib.auth.decorators import login_required
-from django.contrib.auth.views import LoginView, LogoutView
+from django.contrib.auth.views import (
+    LoginView,
+    LogoutView,
+    PasswordResetCompleteView,
+    PasswordResetConfirmView,
+    PasswordResetDoneView,
+    PasswordResetView,
+)
 from django.core.exceptions import PermissionDenied
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse, reverse_lazy
+from django.utils.decorators import method_decorator
 from django_ratelimit.decorators import ratelimit
 
 from core.ratelimit import (
+    password_reset_rate_per_ip,
+    password_reset_rate_site,
     registration_rate_per_ip,
     registration_rate_site,
     site_wide,
@@ -24,6 +34,7 @@ from .forms import (
     ProfileForm,
     RegistrationForm,
     VolunteerPasswordChangeForm,
+    VolunteerSetPasswordForm,
 )
 from .services import register_account
 
@@ -132,6 +143,69 @@ class VolunteerLoginView(LoginView):
 
 class VolunteerLogoutView(LogoutView):
     next_page = reverse_lazy("events:event_list")
+
+
+# --- C3.2 · Password reset ---------------------------------------------------
+#
+# Django's own four views, given this project's templates and one limit. The
+# flow is not reimplemented: the token, its expiry, the single use and the
+# careful refusal to say whether an address exists are all Django's, and they
+# are the parts that are easy to get subtly wrong.
+#
+# ⚠️ It serves accounts that were **registered**, which is the whole population
+#    that can log in. A Contact entered by an admin from a paper list has no
+#    account and no password, and Django's own form skips exactly those (it
+#    looks for users with a usable password). That is the documented gap in
+#    phase-c.md, not a bug to fix here.
+
+
+@method_decorator(
+    ratelimit(key="ip", rate=password_reset_rate_per_ip, method="POST", block=False),
+    name="post")
+@method_decorator(
+    ratelimit(key=site_wide, rate=password_reset_rate_site, method="POST", block=False),
+    name="post")
+class VolunteerPasswordResetView(PasswordResetView):
+    """Ask for a link. ⚠️ Limited, and not for the reason it looks like.
+
+    The link goes to the address on file, so hammering this page reveals
+    nothing and unlocks nothing. What it does is make this application send
+    mail to any address a stranger types — spending an allowance shared with
+    every notification and every reset a real person needs, and collecting spam
+    complaints against the domain while it does. Neither of those two failures
+    produces an error anywhere.
+    """
+
+    template_name = "accounts/password_reset.html"
+    email_template_name = "accounts/password_reset_email.txt"
+    subject_template_name = "accounts/password_reset_subject.txt"
+    success_url = reverse_lazy("accounts:password_reset_done")
+
+    def post(self, request, *args, **kwargs):
+        if getattr(request, "limited", False):
+            # ⚠️ Before the form is validated, so a refused attempt sends
+            #    nothing at all. 429 rather than 403 for the same reason as
+            #    registration: this is "not now", not "not you".
+            return render(request, "accounts/password_reset_rate_limited.html",
+                          status=429)
+        return super().post(request, *args, **kwargs)
+
+
+class VolunteerPasswordResetDoneView(PasswordResetDoneView):
+    template_name = "accounts/password_reset_done.html"
+
+
+class VolunteerPasswordResetConfirmView(PasswordResetConfirmView):
+    """Set the new password. The link's validity is checked by Django."""
+
+    template_name = "accounts/password_reset_confirm.html"
+    # Capped, unlike SetPasswordForm — see the form's docstring.
+    form_class = VolunteerSetPasswordForm
+    success_url = reverse_lazy("accounts:password_reset_complete")
+
+
+class VolunteerPasswordResetCompleteView(PasswordResetCompleteView):
+    template_name = "accounts/password_reset_complete.html"
 
 
 @login_required

@@ -179,7 +179,10 @@ services:
       - key: R2_PUBLIC_BASE_HOST
         sync: false
 
-      # C3.3 的 SES。四项 SMTP 凭据，prod.py 接上之前设了也没人读。
+      # C3.3 的发信服务。四项 SMTP 凭据，prod.py 接上之前设了也没人读。
+      # ⚠️ 供应商无关，故意的：2026-08-17 从 Amazon SES 换成 Brevo，
+      #    这四行一个字都没改。换回去也一样 —— 但要重跑 C3.3 的送达验证，
+      #    免费档走的是共享 IP 池，和自己认证过的域名不是同一条路。
       - key: EMAIL_HOST
         sync: false
       - key: EMAIL_PORT
@@ -188,8 +191,12 @@ services:
         sync: false
       - key: EMAIL_HOST_PASSWORD
         sync: false
+      # ⚠️ 必须是**在发信服务那边认证过的那个域名**下的地址（C3.0 的 DKIM/SPF）。
+      #    填一个没认证过的 From:，表现是不报错、不退信，信静静地进垃圾箱。
+      - key: DEFAULT_FROM_EMAIL
+        sync: false
 
-      # C3.7 的错误可见性。留空则不上报，这是 sentry-sdk 自己的口径。
+      # C3.8 的错误可见性。留空则不上报，这是 sentry-sdk 自己的口径。
       - key: SENTRY_DSN
         sync: false
 
@@ -239,6 +246,20 @@ services:
       - key: R2_BUCKET_PUBLIC
         sync: false
       - key: R2_PUBLIC_BASE_HOST
+        sync: false
+      # ⚠️ **这个 cron 一封信都不发，而它必须有这四项。** prod.py 在 import 期就
+      #    读它们（C3.3 定的 required=True：一个发不出信的部署应该起不来，而不是
+      #    等某个志愿者点了「忘记密码」才发现）。代价就是这里 —— 凡是 import
+      #    这份 settings 的服务都得有，包括这个只删图片的定时任务。
+      #    ⚠️ 少填一项的表现是：这个 job 每天凌晨两点静静地死，而它看起来和
+      #    「今天没有图片要删」一模一样。填 web 那边同样的值即可。
+      - key: EMAIL_HOST
+        sync: false
+      - key: EMAIL_HOST_USER
+        sync: false
+      - key: EMAIL_HOST_PASSWORD
+        sync: false
+      - key: DEFAULT_FROM_EMAIL
         sync: false
 
   # -------------------------------------------------------------------------

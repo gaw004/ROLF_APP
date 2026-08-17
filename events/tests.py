@@ -116,6 +116,30 @@ def make_event(ministry=None, **kwargs):
     return Event.objects.create(**fields)
 
 
+class RefusingEmailBackend:
+    """A provider that accepts `allowance` messages and refuses the rest.
+
+    What a free tier's daily limit looks like from in here: not an outage, but
+    the same call working and then not, halfway down a list. Module level
+    because NOTIFICATION_BACKEND is a dotted path and gets no arguments.
+    """
+
+    allowance = 0
+
+    def __init__(self, allowance=None):
+        if allowance is not None:
+            self.allowance = allowance
+
+    def send(self, messages):
+        from core.notifications.base import DeliveryResult
+
+        return [
+            DeliveryResult(message=message, accepted=number < self.allowance,
+                           detail="" if number < self.allowance else "quota exceeded")
+            for number, message in enumerate(messages)
+        ]
+
+
 def give_emergency_contact(contact, name="Emergency Kin", phone="+14085550177"):
     """Minors must have somebody to call — sign_up() refuses without one.
 
@@ -2609,6 +2633,143 @@ class NotificationTests(TestCase):
         self.assertEqual(notification.recipients.count(), 1)
         self.assertEqual(notification.unreachable.count(), 1)
 
+    # --- what happens when the provider says no ---------------------------
+    #
+    # ⭐ These pin the defect found on 2026-08-17, the day the mail provider
+    #    changed to a free tier: the sending used to happen inside
+    #    transaction.atomic(), so a quota refusing message 47 rolled the record
+    #    back — 46 people had an email in their inbox and the database said
+    #    nobody had been told. See 03-roadmap.md's 计划外记录 for C3.3.
+
+    def three_adults(self):
+        people = [
+            make_person(name, birth_date=datetime.date(1980, 1, 1),
+                        email=f"{n}@example.com")
+            for n, name in enumerate(["李", "王", "陈"])
+        ]
+        for person in people:
+            self.signup(person)
+        return people
+
+    def test_a_refused_message_lands_in_failed_and_not_in_recipients(self):
+        people = self.three_adults()
+        notification = notify_event_change(
+            self.event,
+            reason=EventNotification.Reason.TIME_CHANGED,
+            message="Moved to Sunday.",
+            sent_by=self.sender,
+            backend=RefusingEmailBackend(allowance=1),
+        )
+        self.assertEqual(
+            [row.contact for row in notification.recipients.all()], people[:1])
+        self.assertEqual(
+            [row.contact for row in notification.failed.all()], people[1:])
+
+    def test_the_record_survives_the_quota_running_out_partway(self):
+        # The regression itself. What must exist afterwards is the record —
+        # the messages that already went out cannot be un-sent, so a rollback
+        # does not undo the send, it only destroys the evidence of it.
+        self.three_adults()
+        notification = notify_event_change(
+            self.event,
+            reason=EventNotification.Reason.TIME_CHANGED,
+            message="Moved to Sunday.",
+            sent_by=self.sender,
+            backend=RefusingEmailBackend(allowance=1),
+        )
+        self.assertEqual(EventNotification.objects.count(), 1)
+        self.assertEqual(notification.recipients.count(), 1)
+        self.assertEqual(notification.failed.count(), 2)
+
+    def test_everybody_signed_up_lands_in_exactly_one_of_the_three_groups(self):
+        told = self.three_adults()
+        missed = make_person("无", birth_date=datetime.date(1980, 1, 1))
+        Participation.objects.create(
+            contact=missed, event_role=make_role(self.event, "welcome"))
+        notification = notify_event_change(
+            self.event,
+            reason=EventNotification.Reason.TIME_CHANGED,
+            message="Moved to Sunday.",
+            sent_by=self.sender,
+            backend=RefusingEmailBackend(allowance=2),
+        )
+        groups = [
+            {row.contact for row in notification.recipients.all()},
+            {row.contact for row in notification.failed.all()},
+            {row.contact for row in notification.unreachable.all()},
+        ]
+        self.assertEqual(set.union(*groups), {*told, missed})
+        # Exclusive: the sizes add up only if nobody is in two of them.
+        self.assertEqual(sum(len(group) for group in groups), 4)
+        self.assertEqual(groups[2], {missed})
+
+    def test_a_backend_answering_short_records_the_rest_as_failed(self):
+        # A broken backend is not a reason to lose people. "Check on these" is
+        # recoverable; "they were told" is not.
+        class SilentBackend:
+            def send(self, messages):
+                return []
+
+        people = self.three_adults()
+        notification = notify_event_change(
+            self.event,
+            reason=EventNotification.Reason.TIME_CHANGED,
+            message="Moved to Sunday.",
+            sent_by=self.sender,
+            backend=SilentBackend(),
+        )
+        self.assertEqual(notification.recipients.count(), 0)
+        self.assertEqual(
+            {row.contact for row in notification.failed.all()}, set(people))
+
+    def test_the_sending_happens_outside_the_transaction(self):
+        # ⭐ The other half of the 2026-08-17 fix, and the half no assertion
+        #    about counts can reach: with the send inside transaction.atomic(),
+        #    anything raising partway rolled back a record of emails that had
+        #    already left, and a batch of a hundred held a database transaction
+        #    open for as long as the mail server took.
+        #
+        # Depth, not a boolean: every test here already runs inside a
+        # transaction, so "are we in one" answers True either way. An atomic
+        # block around the send would push one more savepoint than the caller
+        # is standing in.
+        depth = []
+
+        class DepthProbingBackend:
+            def send(self, messages):
+                from core.notifications.base import DeliveryResult
+
+                depth.append(len(connection.savepoint_ids))
+                return [DeliveryResult(message=m, accepted=True) for m in messages]
+
+        self.three_adults()
+        outside = len(connection.savepoint_ids)
+        notify_event_change(
+            self.event,
+            reason=EventNotification.Reason.TIME_CHANGED,
+            message="Moved to Sunday.",
+            sent_by=self.sender,
+            backend=DepthProbingBackend(),
+        )
+        self.assertEqual(depth, [outside])
+
+    def test_who_failed_does_not_change_after_a_later_notice_succeeds(self):
+        # Same snapshot rule as unreachable: this record says what happened at
+        # 19:04, and sending again makes a second record, not a correction.
+        people = self.three_adults()
+        first = notify_event_change(
+            self.event,
+            reason=EventNotification.Reason.TIME_CHANGED,
+            message="Moved to Sunday.",
+            sent_by=self.sender,
+            backend=RefusingEmailBackend(allowance=0),
+        )
+        self.notify()
+        first.refresh_from_db()
+        self.assertEqual(
+            {row.contact for row in first.failed.all()}, set(people))
+        self.assertEqual(first.recipients.count(), 0)
+
     def test_who_was_unreachable_is_still_queryable_afterwards(self):
         # The reason unreachable is an M2M and not a count: a number answers
         # "how many" once and can never answer "which three".
@@ -2700,6 +2861,24 @@ class NotificationPageTests(PageTestCase):
         # The group is rendered even when empty — it is the one part of this
         # page that could fail without anybody noticing.
         self.assertContains(response, "Cannot be reached")
+
+    @override_settings(NOTIFICATION_BACKEND="events.tests.RefusingEmailBackend")
+    def test_a_notice_that_could_not_be_sent_says_so_and_names_who(self):
+        # ⭐ The page has to be the place this becomes visible. A green
+        #    "Notified 1" over a message that never left is the same silent
+        #    failure the "Cannot be reached" group exists to prevent — and with
+        #    a provider on a daily quota it is the likelier of the two.
+        Participation.objects.create(contact=self.lisi.contact, event_role=self.role)
+        self.login(self.zhang)
+        response = self.client.post(
+            reverse("events:event_notify", args=[self.event.pk]),
+            {"reason": EventNotification.Reason.TIME_CHANGED, "message": "Moved."},
+            follow=True)
+        self.assertContains(response, "could not be sent")
+        self.assertContains(response, str(self.lisi.contact))
+        notification = EventNotification.objects.get()
+        self.assertEqual(notification.recipients.count(), 0)
+        self.assertEqual(notification.failed.count(), 1)
 
     def test_a_message_past_the_cap_is_a_form_error_and_sends_nothing(self):
         # ⚠️ The assertion that matters is the second one. A form error is

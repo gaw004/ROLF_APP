@@ -14,9 +14,16 @@
   </form>
 
   {% comment %}
-  密码重置入口是 C3.2 的事。⚠️ 现在不放占位链接 —— 指向 404 的链接比没有链接更糟，
-  C0.5 刚为同一件事付过一次学费。
+  C3.2 落地了，所以这个链接现在指向一个真的存在的页面。
+
+  ⚠️ 它在登录按钮**正下方**，不在页脚里：会用到它的人，正站在一个刚拒绝了他的
+     表单前面。这一条是这一页唯一一次「入口位置本身就是功能」——
+     找不到它的人的下一步是放弃，而放弃是没有任何东西会报告的。
   {% endcomment %}
+  <p class="mt-4 text-center text-sm">
+    <a href="{% url 'accounts:password_reset' %}" class="prose-link">Forgot your password?</a>
+  </p>
+
   <p class="mt-6 text-center text-sm text-ink-600 dark:text-ink-300">
     No account yet?
     <a href="{% url 'accounts:register' %}" class="prose-link">Register</a>

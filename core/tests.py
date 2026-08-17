@@ -509,6 +509,49 @@ class NotificationBackendTests(TestCase):
         self.assertTrue(results[0].accepted)
         self.assertEqual(len(mail.outbox), 1)
 
+    def test_the_quota_running_out_is_reported_per_message_not_raised(self):
+        # ⭐ The one that matters for a free tier. The provider takes the first
+        #    message and refuses the second; the caller has to come out of this
+        #    holding a verdict for both, because it is about to write down who
+        #    was told — and the first one really was.
+        from core.notifications.django_email import DjangoEmailBackend
+
+        QuotaEmailBackend.reset(allowance=1)
+        with self.settings(EMAIL_BACKEND="core.tests.QuotaEmailBackend"):
+            results = DjangoEmailBackend().send([
+                self.message(to="first@example.com"),
+                self.message(to="second@example.com"),
+                self.message(to="third@example.com"),
+            ])
+        self.assertEqual([r.accepted for r in results], [True, False, False])
+        self.assertIn("quota", results[1].detail.lower())
+
+    def test_a_batch_shares_one_connection(self):
+        # A hundred signups used to mean a hundred connect/authenticate/quit
+        # cycles, which providers rate-limit in their own right — and the
+        # failure arrives as refused connections partway down a list that was
+        # fine a moment earlier.
+        from core.notifications.django_email import DjangoEmailBackend
+
+        QuotaEmailBackend.reset(allowance=10)
+        with self.settings(EMAIL_BACKEND="core.tests.QuotaEmailBackend"):
+            DjangoEmailBackend().send([self.message(to=f"v{n}@example.com")
+                                       for n in range(5)])
+        self.assertEqual(QuotaEmailBackend.opened, 1)
+
+    def test_a_mail_server_that_will_not_open_fails_every_message(self):
+        # Nothing went out, so nothing may be recorded as sent. Reported rather
+        # than raised for the same reason as above: the caller writes it down.
+        from core.notifications.django_email import DjangoEmailBackend
+
+        with self.settings(EMAIL_BACKEND="core.tests.QuotaEmailBackend"):
+            with mock.patch.object(QuotaEmailBackend, "open",
+                                   side_effect=OSError("connection refused")):
+                results = DjangoEmailBackend().send(
+                    [self.message(), self.message(to="other@example.com")])
+        self.assertEqual([r.accepted for r in results], [False, False])
+        self.assertIn("connection refused", results[0].detail)
+
     def test_the_novu_backend_posts_to_the_api(self):
         # Mocked on purpose: there is no domain and no sender identity on a
         # laptop, so a live integration could be neither sent nor verified.
@@ -4156,6 +4199,42 @@ class RenderBlueprintGuardTests(TestCase):
                     f"these, and nothing gives them to it: "
                     f"{sorted(required - declared)}")
 
+    def test_the_ci_step_that_imports_prod_settings_has_every_required_variable(self):
+        """⚠️ The same rule as the blueprint, aimed at the other file that imports
+        these settings — and this one has already bitten once.
+
+        CI runs `collectstatic` under the production settings on purpose (it is
+        the only place ManifestStaticFilesStorage is exercised before a deploy).
+        The day prod.py grew the seven R2 variables, that step went red on a
+        missing variable rather than on the thing it guards, **and stayed red
+        for weeks** — found by a repo audit on 2026-08-09, not by anyone reading
+        the failure. Adding email credentials repeated the setup exactly, so the
+        rule stops living in a comment.
+        """
+        required = set()
+        for path in sorted((Path(settings.BASE_DIR) / "config" / "settings").glob("*.py")):
+            required |= set(re.findall(
+                r'env\(\s*"([A-Z0-9_]+)"\s*,\s*required=True',
+                path.read_text(encoding="utf-8")))
+
+        workflow = self.ci_workflow
+        step = workflow.split("DJANGO_SETTINGS_MODULE: config.settings.prod", 1)
+        self.assertEqual(
+            len(step), 2,
+            "no CI step runs under the production settings any more — if that "
+            "is deliberate, this guard has nothing left to protect")
+        # From that line to the end of the step's env block.
+        step = step[1].split("\n        run:", 1)[0]
+        # Job-level env counts too: SECRET_KEY and DATABASE_URL live there.
+        job_env = workflow.split("\n    steps:", 1)[0]
+        declared = set(re.findall(r"^\s*([A-Z0-9_]+):", step, flags=re.M))
+        declared |= set(re.findall(r"^\s*([A-Z0-9_]+):", job_env, flags=re.M))
+        self.assertEqual(
+            required - declared, set(),
+            "the CI step importing prod.py is missing variables it refuses to "
+            f"start without, so it will fail on those instead of on what it "
+            f"checks: {sorted(required - declared)}")
+
     def test_the_purge_cron_points_at_the_same_buckets_as_the_web_service(self):
         """⚠️ The duplication Render's own rules force, watched.
 
@@ -4332,3 +4411,88 @@ class RenderBlueprintGuardTests(TestCase):
                     forbidden, self.backup_script,
                     "the backup script has grown a way to delete objects — "
                     "expiring old dumps is the bucket lifecycle rule's job")
+
+
+class ProductionHardeningGuardTests(TestCase):
+    """Lint-as-test: C3.4's settings, and the two that bite when they disagree.
+
+    ⚠️ Read from the source of config/settings/prod.py rather than by importing
+       it. Importing means every R2 and mail variable has to exist in the
+       environment of whoever runs the tests — and a guard that only runs where
+       the production credentials are is a guard that never runs.
+
+    ⚠️ These are not "did somebody delete a line". Each one has a failure that
+       arrives dressed as something else: an infinite redirect loop reads as a
+       broken deploy, a missing CSRF origin reads as a broken form, and HSTS
+       set bravely on day one reads as nothing at all until the day it cannot
+       be undone.
+    """
+
+    @property
+    def source(self):
+        return (Path(settings.BASE_DIR) / "config" / "settings" / "prod.py"
+                ).read_text(encoding="utf-8")
+
+    def test_ssl_redirect_never_ships_without_the_proxy_header(self):
+        """⚠️ The pair, not either one. Render terminates TLS at its proxy, so
+        Django sees http and redirects to https, which arrives as http again —
+        a redirect loop on every page, with nothing in the message about the
+        setting that caused it.
+        """
+        redirect = re.search(r"^SECURE_SSL_REDIRECT\s*=\s*(\S+)", self.source, re.M)
+        self.assertIsNotNone(redirect, "SECURE_SSL_REDIRECT is gone from prod.py")
+        if redirect.group(1) == "True":
+            self.assertRegex(
+                self.source,
+                r'SECURE_PROXY_SSL_HEADER\s*=\s*\(\s*"HTTP_X_FORWARDED_PROTO"\s*,\s*"https"\s*\)',
+                "SECURE_SSL_REDIRECT is on with no SECURE_PROXY_SSL_HEADER: "
+                "every request will redirect to itself for ever",
+            )
+
+    def test_the_cookies_and_the_frame_option_are_set(self):
+        for line in ("SESSION_COOKIE_SECURE = True", "CSRF_COOKIE_SECURE = True",
+                     'X_FRAME_OPTIONS = "DENY"'):
+            with self.subTest(setting=line):
+                self.assertIn(line, self.source)
+
+    def test_csrf_origins_are_derived_from_allowed_hosts(self):
+        """⚠️ C5 hangs a custom domain on this app, and these two have to change
+        together. A second hand-written list is a second thing to forget, and
+        forgetting it is invisible: the site opens, every POST is rejected, and
+        it reads as "the form is broken".
+        """
+        self.assertRegex(
+            self.source,
+            r"CSRF_TRUSTED_ORIGINS\s*=\s*\[[^]]*for host in ALLOWED_HOSTS",
+            "CSRF_TRUSTED_ORIGINS is no longer derived from ALLOWED_HOSTS",
+        )
+
+    def test_the_hsts_silence_expires_with_the_short_value(self):
+        """⚠️ The one that must not become permanent. Silencing W005/W021 is how
+        a short HSTS passes `check --deploy`; tying the silence to the value
+        means C5 raising the value brings both warnings back on its own, asking
+        for exactly the settings C5 exists to turn on. A hardcoded list would
+        stay silent for ever, and nothing would ever say so.
+        """
+        self.assertRegex(
+            self.source,
+            r"SILENCED_SYSTEM_CHECKS\s*=\s*\(\s*\n?\s*\[[^]]*\]\s*if\s+_HSTS_IS_STILL_PROVISIONAL",
+            "the HSTS silence is no longer conditional on the value being short",
+        )
+        self.assertIn("_HSTS_IS_STILL_PROVISIONAL = SECURE_HSTS_SECONDS < 31536000",
+                      self.source)
+
+    def test_error_mail_is_not_wired_to_the_admins(self):
+        """⚠️ Not an omission. Error mail and the volunteers' password resets
+        come out of one daily allowance, and the day something breaks is the day
+        it breaks repeatedly — spending the allowance on notifying us about a
+        fault, while the people locked out of their accounts get nothing.
+        """
+        # Quoted: the prose above the LOGGING block explains the choice and
+        # names it, so a bare substring search would convict its own reason.
+        self.assertNotRegex(self.source, r'["\']mail_admins["\']')
+
+    def test_sentry_is_told_not_to_collect_personal_data(self):
+        # This database holds minors' names, dates of birth and addresses.
+        self.assertIn("send_default_pii=False", self.source)
+        self.assertNotIn("send_default_pii=True", self.source)

@@ -128,4 +128,12 @@ jobs:
           R2_BUCKET_MEMORIES: ci-memories
           R2_BUCKET_PUBLIC: ci-public
           R2_PUBLIC_BASE_HOST: ci-static.example.invalid
+          # ⚠️ 同上，四个假的邮件变量。C3.3 给 prod.py 接上发信之后，它在 import
+          #    期同样 `required=True` 地读它们 —— 少了这四行，这一步会重演
+          #    2026-08-09 那次：红在「缺环境变量」上，而不是它本来要守的那件事。
+          #    这次没有等体检发现，因为 core.tests 里新加了一条守卫盯着这份清单。
+          EMAIL_HOST: smtp.example.invalid
+          EMAIL_HOST_USER: ci-only-not-a-secret
+          EMAIL_HOST_PASSWORD: ci-only-not-a-secret
+          DEFAULT_FROM_EMAIL: ci@example.invalid
         run: python manage.py collectstatic --noinput

@@ -4496,3 +4496,97 @@ class ProductionHardeningGuardTests(TestCase):
         # This database holds minors' names, dates of birth and addresses.
         self.assertIn("send_default_pii=False", self.source)
         self.assertNotIn("send_default_pii=True", self.source)
+
+
+class CheckDeploymentCommandTests(TestCase):
+    """The report somebody pastes into a chat window to ask "did I do it right?"
+
+    ⚠️ The first test is the one that matters, and it is a security test rather
+       than a formatting one. This command exists because the alternative — a
+       screenshot of the dashboard — carries the SMTP password and the object
+       store's keys in the picture, so the act of asking for help is what leaks
+       them. A report that prints a secret is worse than no report: it is the
+       same leak with a friendlier interface.
+    """
+
+    def report(self, **overrides):
+        out = io.StringIO()
+        with override_settings(**overrides):
+            call_command("check_deployment", stdout=out)
+        return out.getvalue()
+
+    SECRETS = {
+        "EMAIL_HOST_PASSWORD": "xkeysib-the-actual-smtp-password",
+        "EMAIL_HOST_USER": "9f2c1a@smtp-brevo.example",
+    }
+
+    def test_no_secret_reaches_the_output(self):
+        text = self.report(EMAIL_HOST="smtp.example.invalid", **self.SECRETS)
+        for name, value in self.SECRETS.items():
+            with self.subTest(name=name):
+                self.assertNotIn(value, text)
+                # ⚠️ Not even a prefix. Enough of a key to recognise which key
+                #    it is, is enough to be worth rotating after pasting it.
+                self.assertNotIn(value[:8], text)
+
+    def test_a_secret_is_reported_by_its_shape_so_a_typo_is_still_visible(self):
+        # "set, 32 characters" answers "did the whole thing get pasted" without
+        # answering "what is it" — the only question the reader actually has.
+        text = self.report(EMAIL_HOST="smtp.example.invalid", **self.SECRETS)
+        self.assertIn(f"set, {len(self.SECRETS['EMAIL_HOST_PASSWORD'])} characters", text)
+
+    def test_an_empty_credential_is_called_out(self):
+        text = self.report(EMAIL_HOST="smtp.example.invalid", EMAIL_HOST_PASSWORD="")
+        self.assertIn("EMAIL_HOST_PASSWORD", text)
+        self.assertIn("(empty)", text)
+
+    def test_a_sender_at_the_providers_domain_is_flagged(self):
+        # ⚠️ It works, which is why nothing else will ever mention it. The cost
+        #    lands on the day the provider changes: a new From: address for
+        #    every recipient, and the sending reputation left behind.
+        text = self.report(EMAIL_HOST="smtp.example.invalid",
+                           DEFAULT_FROM_EMAIL="rolf@brevosend.example")
+        self.assertIn("provider's own domain", text)
+
+    def test_a_sender_at_the_foundations_own_domain_is_not_flagged(self):
+        text = self.report(EMAIL_HOST="smtp.example.invalid",
+                           DEFAULT_FROM_EMAIL="noreply@riveroflife.example")
+        self.assertNotIn("provider's own domain", text)
+
+    def test_a_port_that_disagrees_with_the_encryption_is_flagged(self):
+        # ⚠️ The failure this one is for does not raise: 465 expects TLS from
+        #    the first byte, 587 starts in the clear and upgrades. Ask for the
+        #    wrong one and the connection hangs until it times out.
+        text = self.report(EMAIL_HOST="smtp.example.invalid",
+                           EMAIL_PORT=465, EMAIL_USE_SSL=False, EMAIL_USE_TLS=True)
+        self.assertIn("465 with STARTTLS", text)
+
+    def test_a_development_machine_is_not_reported_as_broken(self):
+        # ⚠️ Every "must be True in production" line is false on a laptop, and
+        #    correctly so. A report that is always red is a report nobody reads
+        #    — the same failure C3.4's silenced checks were written to avoid.
+        text = self.report()
+        self.assertNotIn("thing(s) to fix", text)
+        self.assertIn("development machine", text)
+
+    def test_the_live_send_reports_a_refusal_instead_of_raising(self):
+        # The command's whole job is to answer; a traceback answers nothing and
+        # a management command that crashes reads as "the tool is broken".
+        out = io.StringIO()
+        with override_settings(
+                EMAIL_BACKEND="django.core.mail.backends.smtp.EmailBackend",
+                EMAIL_HOST="127.0.0.1", EMAIL_PORT=1):
+            call_command("check_deployment", send_to="x@example.invalid", stdout=out)
+        text = out.getvalue()
+        self.assertIn("Live send", text)
+        self.assertIn("thing(s) to fix", text)
+
+    def test_a_live_send_that_works_says_accepted_is_not_delivered(self):
+        # ⭐ The sentence that stops a green line from being read as "done".
+        # A provider accepting a message says nothing about a spam folder, and
+        # C3.3's acceptance criterion is explicitly about the folder.
+        out = io.StringIO()
+        with override_settings(
+                EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend"):
+            call_command("check_deployment", send_to="x@example.invalid", stdout=out)
+        self.assertIn("accepted is not delivered", out.getvalue())

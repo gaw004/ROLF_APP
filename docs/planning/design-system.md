@@ -1352,7 +1352,7 @@ Foundation admin，各带一个小标题），哪一组不显示，手写的序�
 > 一张 400px 的扫描件画到 340 CSS px，在 2 倍屏上要 680 个真实像素而只有 400 个。
 > 那就是「有些照片为了做成等高的照片都糊了」。现在这个系数**永远 ≤ 1**，
 > 照片只会被画得比存的小，不可能糊。守卫在
-> `gallery.tests.StripLayoutTests.test_no_photo_is_ever_drawn_larger_than_it_is_stored`。
+> `gallery.tests.StripDrawTests.test_no_photo_is_ever_drawn_larger_than_it_is_stored`。
 
 ⚠️ `GALLERY_THUMB_MAX_EDGE` 因此**同时是存储尺寸和版面的分母**。改它会改变页面上
 每一张照片的大小；调小它还会让整条带子在 2 倍屏上变糊，而那种糊**只在高分屏上出现**，
@@ -1631,7 +1631,7 @@ Tailwind 的工具类在 `@layer utilities`，**层的优先级高于选择器�
 留一个 `bg-white` 在标签上，`.dark.has-hero .home-menu` 再具体也盖不过它。
 而失败的样子不是「没样式」，是**白底 + 已经改成浅色的字**，
 也就是全站唯一那套导航几乎读不出来。同一个坑 `button.html` 那边也记着。
-守卫：`core.tests.SiteMenuShapeTests.test_the_panel_background_is_not_a_utility_class`。
+守卫：`core.tests.SiteMenuShapeTests.test_the_menu_panel_has_a_dark_pair_for_everything_it_paints`。
 
 ⚠️ **首页不需要任何例外，而且是自动的。** 首页永远不带 `.dark`（满屏照片配白字，
 不跟随深色模式），所以上面每一个 `dark:` 档在那边一次都不会命中，

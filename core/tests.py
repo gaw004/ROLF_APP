@@ -589,6 +589,70 @@ class NotificationBackendTests(TestCase):
         self.assertFalse(results[0].accepted)
 
 
+class DocTestReferenceGuardTests(TestCase):
+    """Lint-as-test: every **qualified** test name in the docs points at a real one.
+
+    Sibling of MarkdownLinkGuardTests, and for the same reason: the planning
+    documents cite guards constantly ("守卫：`core.tests.XTests.test_y`"), and a
+    citation that no longer resolves fails silently. The reader goes looking for
+    the test that supposedly pins a rule, does not find it, and is left unable
+    to tell which of the two is stale — the rule or the pointer.
+
+    Found two real breaks the day it was written, both from renames months
+    earlier: a class renamed (`StripLayoutTests` → `StripDrawTests`) and a
+    method renamed under a class that still existed.
+
+    ⚠️ **Only qualified references are checked** — `SomeTests.test_x`. The bare
+       `def test_x(self)` lines in 01/02-roadmap are Phase A/B's *checklists of
+       what to pin*, written before the code, and about fifteen of those names
+       drifted during implementation. Those are history, not pointers; the
+       convention is written at the top of 02-roadmap. Checking them here would
+       either fail forever or force a rewrite of a record this project keeps on
+       purpose.
+
+    ⚠️ The method has to live **in the class named**, not merely somewhere. A
+       method that moved class is exactly the case the reader cannot resolve
+       alone, and it is one of the two this test caught.
+    """
+
+    REFERENCE = re.compile(r"(?:[a-z_]+\.tests\.)?(\w*Tests)\.(test_[a-z0-9_]+)")
+
+    def suites(self):
+        """{class name: {method names}} across every app's tests.py.
+
+        ⚠️ Not named `test_suites`: the runner collects anything starting with
+           `test_`, so a helper by that name is silently reported as a passing
+           test. Caught here by the count going from 1 to 2.
+        """
+        suites = {}
+        for path in sorted(Path(settings.BASE_DIR).glob("*/tests.py")):
+            source = path.read_text()
+            for block in re.finditer(
+                    r"^class (\w+)\(.*?(?=^class |\Z)", source, re.S | re.M):
+                suites.setdefault(block.group(1), set()).update(
+                    re.findall(r"^    def (test_[a-z0-9_]+)\(", block.group(0), re.M))
+        return suites
+
+    def test_every_cited_guard_exists(self):
+        suites = self.suites()
+        self.assertIn("MarkdownLinkGuardTests", suites, "no test suites were found")
+
+        problems = []
+        for path in sorted(Path(settings.BASE_DIR).glob("docs/**/*.md")):
+            for number, line in enumerate(path.read_text().split("\n"), 1):
+                for suite, name in self.REFERENCE.findall(line):
+                    where = f"{path.relative_to(settings.BASE_DIR)}:{number}"
+                    if suite not in suites:
+                        problems.append(f"{where}  {suite} — no such test class")
+                    elif name not in suites[suite]:
+                        problems.append(f"{where}  {suite}.{name} — no such test")
+        self.assertEqual(
+            problems, [],
+            "A doc points at a guard that does not exist. Either the guard was "
+            "renamed (fix the citation) or it is gone (say so, and say what "
+            "pins the rule now):\n" + "\n".join(problems))
+
+
 class MarkdownLinkGuardTests(TestCase):
     """Lint-as-test: every link in every .md file resolves — file and anchor.
 

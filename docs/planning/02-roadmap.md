@@ -1738,6 +1738,8 @@ def sign_up(*, contact, event_role, consent=None):
 ```python
 def test_the_event_list_shows_only_open_events(self)
 def test_a_cancelled_event_does_not_appear_in_the_list(self)      # 补集定义的坑
+#   ⚠️ 2026-08-17 改名为 test_a_cancelled_event_is_listed_saying_it_is_cancelled，
+#      而且断言反过来了：列表现在**会**列出已取消的活动，带一个 Cancelled 标签
 def test_a_signed_up_volunteer_can_still_open_a_confirmed_event(self)   # 可见性 ≠ 可报名
 def test_a_draft_event_detail_page_is_404_for_volunteers(self)
 def test_every_event_status_is_in_exactly_one_of_the_two_sets_or_neither(self)

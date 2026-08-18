@@ -969,3 +969,43 @@ function checkinDisplay(root) {
 for (const root of document.querySelectorAll("[data-checkin-display]")) {
   checkinDisplay(root);
 }
+
+// ---------------------------------------------------------------------------
+// 占位框的尺寸读数（2026-08-17，**临时**）
+//
+// Events 页上日程还没画，那里现在是一个虚线框。这段代码把它**实测的宽×高**写在
+// 框里 —— 这一批要回答的问题就是「让位之后右边空出来多大」，而那个数取决于视口，
+// 服务端渲染不出来。
+//
+// 🔴 **日历画上去的那一天，这一段和模板里的 `.schedule-placeholder` 一起删。**
+//    它没有第二个用途，留着就是一段永远在跑的 ResizeObserver。
+//
+// ⚠️ 用 ResizeObserver 而不是监听 window.resize：宽度变化有两个来源 ——
+//    拖窗口，和点 Schedule 之后那 560ms 的过渡。后者根本不触发 resize 事件，
+//    于是读数会停在展开前的那个值，也就是恰好在最需要它的时候是错的。
+//
+// ⚠️ 读 `borderBoxSize`，不是 `contentRect`：框上有 1px 虚线边框，而人量的是
+//    整个框。差 2px 不影响判断，但一个「实测尺寸」写错 2px 就不再是实测了。
+//
+// ⚠️ 四舍五入到整数。过渡期间的宽度是小数，不取整的话那行字每帧变成
+//    「640.328125 × 812」这种东西。
+(function () {
+  const boxes = document.querySelectorAll("[data-size-readout]");
+  if (!boxes.length || typeof ResizeObserver === "undefined") return;
+
+  const observer = new ResizeObserver((entries) => {
+    for (const entry of entries) {
+      const out = entry.target.querySelector("[data-size-readout-value]");
+      if (!out) continue;
+      const box = entry.borderBoxSize?.[0];
+      const width = Math.round(box ? box.inlineSize : entry.contentRect.width);
+      const height = Math.round(box ? box.blockSize : entry.contentRect.height);
+      // ⚠️ 宽度 0 时不写。收起状态下面板是 visibility: hidden 且宽度为 0，
+      //    写上去就是一行「0 × 0」躺在无障碍树里等着被念出来。
+      if (width === 0) continue;
+      out.textContent = `${width} × ${height}`;
+    }
+  });
+
+  for (const box of boxes) observer.observe(box);
+})();

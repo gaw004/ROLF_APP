@@ -785,6 +785,67 @@ class VisibilityTests(TestCase):
         )
 
 
+class FromTodayTests(TestCase):
+    """from_today(): which day is it on, cut at midnight (2026-08-17).
+
+    ⚠️ A third question, not a rewording of the two this replaced. upcoming()
+       and past() both read "is it over" off start_time / end_time and left a
+       running event between them on purpose; both were deleted on 2026-08-17
+       once nothing called them. This one asks which **day** an event belongs
+       to, and answers it off start_time so that "today" means the same thing
+       here as it does in in_period().
+    """
+
+    def setUp(self):
+        self.ministry = Ministry.objects.create(code="food_pantry", name="Food Pantry")
+        self.midnight = day_start(local_today())
+
+    def make(self, name, start, hours=1, **fields):
+        return make_event(
+            ministry=self.ministry, name=name, start_time=start,
+            end_time=start + hours * HOUR, **fields)
+
+    def test_an_event_that_finished_this_morning_is_in(self):
+        event = self.make("This morning", self.midnight + HOUR)
+        self.assertIn(event, Event.objects.from_today())
+
+    def test_an_event_still_running_is_in(self):
+        event = self.make("Running", self.midnight + HOUR, hours=23)
+        self.assertIn(event, Event.objects.from_today())
+
+    def test_the_first_minute_of_today_is_in(self):
+        # Half-open at the bottom: midnight itself belongs to today.
+        event = self.make("Midnight", self.midnight)
+        self.assertIn(event, Event.objects.from_today())
+
+    def test_yesterday_is_out(self):
+        event = self.make("Yesterday", self.midnight - HOUR)
+        self.assertNotIn(event, Event.objects.from_today())
+
+    def test_an_overnight_event_belongs_to_the_day_it_started(self):
+        """⚠️ The stated cost of reading off start_time.
+
+        Something that began at 22:00 yesterday and ends at 02:00 today drops
+        off the page at midnight, while it is still running. Accepted rather
+        than fixed: the alternative — end_time — would keep last month's
+        three-day trip on the page for as long as it ran over, and "which day
+        is this on" would stop meaning the same thing here and in in_period().
+        """
+        event = self.make("Overnight", self.midnight - 2 * HOUR, hours=4)
+        self.assertNotIn(event, Event.objects.from_today())
+
+    def test_the_day_can_be_handed_in(self):
+        """⚠️ The parameter is not decoration: it is how a caller — or a test —
+           says which day it means instead of racing the clock. The default is
+           the foundation's today, built through core.timeutils, which is the
+           only spelling of "midnight" D16 allows.
+        """
+        yesterday = local_today() - datetime.timedelta(days=1)
+        event = self.make("Yesterday", self.midnight - HOUR)
+        self.assertIn(event, Event.objects.from_today(today=yesterday))
+        self.assertNotIn(event, Event.objects.from_today())
+
+
 class SignUpTests(TestCase):
     """P3, including the two rules that no constraint can express."""
 
@@ -1110,24 +1171,36 @@ class VolunteerPageTests(PageTestCase):
         self.assertContains(response, self.event.name)
         self.assertNotContains(response, draft.name)
 
-    def test_a_confirmed_event_is_absent_from_the_list_but_still_opens(self):
-        # ⭐ Visibility and signability are two questions. Answer them with one
-        # status test and P6's "can't make it? cancel here" link 404s, on
-        # exactly the events that filled up.
+    def test_a_confirmed_event_is_listed_saying_it_is_confirmed(self):
+        """⭐ Visibility and signability are two questions, and 2026-08-17 moved
+           where the *list* stands on the first one.
+
+           It used to drop a full event, which put the page in the position of
+           telling the people most likely to look it up — the ones who got in —
+           that it did not exist. Now the row is there wearing its status, and
+           the thing that refuses a signup is still event_signup's
+           open_for_signup(), one layer down where it cannot be styled away.
+        """
         self.login(self.lisi)
         self.event.status = Event.Status.CONFIRMED
         self.event.save()
         listing = self.client.get(reverse("events:event_list"))
-        self.assertNotContains(listing, self.event.name)
+        self.assertContains(listing, self.event.name)
+        self.assertContains(listing, "Confirmed")
         detail = self.client.get(reverse("events:event_detail", args=[self.event.pk]))
         self.assertEqual(detail.status_code, 200)
+        signup = self.client.get(reverse("events:event_signup", args=[self.event.pk]))
+        self.assertEqual(signup.status_code, 404)
 
-    def test_a_cancelled_event_does_not_appear_in_the_list(self):
+    def test_a_cancelled_event_is_listed_saying_it_is_cancelled(self):
+        # The people who need to know it is off are exactly the ones who signed
+        # up — and this is the page they were sent to from the notification.
         self.login(self.lisi)
         self.event.status = Event.Status.CANCELLED
         self.event.save()
         response = self.client.get(reverse("events:event_list"))
-        self.assertNotContains(response, self.event.name)
+        self.assertContains(response, self.event.name)
+        self.assertContains(response, "Cancelled")
 
     def test_a_draft_event_detail_page_is_404_for_volunteers(self):
         self.login(self.lisi)
@@ -1423,13 +1496,17 @@ class NavigationEntranceTests(PageTestCase):
 
 
 class PeriodFilterPageTests(PageTestCase):
-    """C0.2.3: R1 with a URL — "how many events run in this window".
+    """The period filter on /events/ — "how much is on in this window".
 
     in_period() and events_in_period() were written and tested in Phase B and
-    then had no caller but the tests: the only UI that could answer the first
-    line of the requirement was the admin changelist, which volunteers cannot
-    reach. These two pages are for everybody, because deciding which event to
-    join is the same question pointed forwards.
+    then had no caller but the tests: the only UI that could answer that
+    question was the admin changelist, which volunteers cannot reach.
+
+    ⚠️ This was **two** pages until 2026-08-17, /events/ and /events/past/, and
+       the class still reads as if it were about both in places. Past Events is
+       gone; /events/ now starts at midnight today rather than at "not started
+       yet", so the backwards half of R1 is answered on All Events by the tier
+       that has it (goal.md's R1 row).
     """
 
     def setUp(self):
@@ -1531,51 +1608,76 @@ class PeriodFilterPageTests(PageTestCase):
     def test_the_box_is_on_the_page_and_comes_from_the_form(self):
         # Hand-written search inputs are refused by a guard in core/tests.py —
         # the cap only exists at the form layer.
-        for name in ["events:event_list", "events:past_events"]:
-            with self.subTest(page=name):
-                self.login(self.lisi)
-                response = self.client.get(reverse(name))
-                self.assertContains(response, 'name="q"')
-                self.assertContains(response, "Search by name or location")
-
-    def test_past_events_are_listed_and_counted(self):
         self.login(self.lisi)
-        response = self.client.get(reverse("events:past_events"))
-        self.assertEqual(response.context["total"], 1)
-        self.assertContains(response, "Last month")
+        response = self.client.get(reverse("events:event_list"))
+        self.assertContains(response, 'name="q"')
+        self.assertContains(response, "Search by name or location")
 
-    def test_a_finished_event_is_reachable_again(self):
-        # The point of the page: before it existed, an event left the interface
-        # the moment it ended, taking its report with it.
+    def test_last_month_is_not_on_the_page(self):
+        """The window starts at midnight today, so a finished month is gone.
+
+        ⚠️ Not "gone from the system" — self.old still opens by URL, because
+           event_detail runs visible_to_volunteers() and the people who were
+           there have hours on it. What this asserts is that the *list* is a
+           list of what is on, not a history.
+        """
         self.login(self.lisi)
-        response = self.client.get(reverse("events:past_events"))
-        self.assertContains(
-            response, reverse("events:event_detail", args=[self.old.pk]))
+        response = self.client.get(reverse("events:event_list"))
+        self.assertNotContains(response, "Last month")
+        self.assertEqual(
+            self.client.get(
+                reverse("events:event_detail", args=[self.old.pk])
+            ).status_code, 200)
 
-    def test_an_event_running_right_now_is_neither_upcoming_nor_past(self):
-        # past() reads end_time, not "not upcoming". An event that started this
-        # morning and runs until tonight is still happening; filing it under
-        # history while people are checking in would be wrong in both places.
-        running = make_event(
-            ministry=self.pantry, owner=self.zhang.contact, name="Running now",
-            start_time=NOW - HOUR, end_time=NOW + HOUR,
+    def test_an_event_that_finished_this_morning_stays_until_midnight(self):
+        """⭐ The reason from_today() cuts at midnight rather than at now.
+
+        Somebody opening the page at lunchtime is looking at today. An event
+        that ran at nine is part of today — it says so with its status, rather
+        than by having disappeared while people were still checking in.
+        """
+        make_event(
+            ministry=self.pantry, owner=self.zhang.contact, name="This morning",
+            status=Event.Status.COMPLETED,
+            start_time=day_start(local_today()) + HOUR,
+            end_time=day_start(local_today()) + 2 * HOUR,
         )
         self.login(self.lisi)
-        self.assertNotContains(
-            self.client.get(reverse("events:past_events")), "Running now")
-        self.assertNotContains(
+        self.assertContains(
+            self.client.get(reverse("events:event_list")), "This morning")
+
+    def test_an_event_running_right_now_is_on_the_page(self):
+        """It started this morning and runs until tonight.
+
+        ⚠️ This used to assert the opposite on both pages, and that was the
+           hole: upcoming() was start_time-based and past() was end_time-based,
+           so a running event fell between the two and appeared on neither.
+           from_today() asks a third question — which day is it on — and a
+           running event is unambiguously on today's.
+        """
+        running = make_event(
+            ministry=self.pantry, owner=self.zhang.contact, name="Running now",
+            start_time=day_start(local_today()) + HOUR, end_time=NOW + HOUR,
+        )
+        self.login(self.lisi)
+        self.assertContains(
             self.client.get(reverse("events:event_list")), "Running now")
         self.assertTrue(Event.objects.filter(pk=running.pk).exists())
 
-    def test_a_draft_never_appears_on_either_page(self):
+    def test_a_draft_never_appears(self):
+        """Today's drafts too, not only last month's.
+
+        ⚠️ Worth its own case now that the page reaches back to midnight: the
+           predicate that keeps drafts out is visible_to_volunteers(), and it
+           is the *status* half of the query, untouched by the date half.
+        """
         make_event(
             ministry=self.pantry, owner=self.zhang.contact, name="Secret draft",
             status=Event.Status.DRAFT,
-            start_time=NOW - 5 * DAY, end_time=NOW - 5 * DAY + HOUR,
+            start_time=day_start(local_today()) + HOUR,
+            end_time=day_start(local_today()) + 2 * HOUR,
         )
         self.login(self.lisi)
-        self.assertNotContains(
-            self.client.get(reverse("events:past_events")), "Secret draft")
         self.assertNotContains(
             self.client.get(reverse("events:event_list")), "Secret draft")
 
@@ -1586,11 +1688,9 @@ class PeriodFilterPageTests(PageTestCase):
         })
         self.assertFalse(response.context["period"].is_valid())
 
-    def test_both_pages_need_a_login(self):
-        for name in ["event_list", "past_events"]:
-            with self.subTest(page=name):
-                response = self.client.get(reverse(f"events:{name}"))
-                self.assertEqual(response.status_code, 302)
+    def test_the_page_needs_a_login(self):
+        response = self.client.get(reverse("events:event_list"))
+        self.assertEqual(response.status_code, 302)
 
     # --- R2 as a filter, not only as a column (2026-08-04) -----------------
 
@@ -1636,10 +1736,19 @@ class PeriodFilterPageTests(PageTestCase):
         offered = set(response.context["period"].fields["ministry"].queryset)
         self.assertIn(self.tax, offered)
 
-    def test_past_events_can_be_filtered_by_ministry_too(self):
+    def test_a_window_entirely_in_the_past_comes_back_empty(self):
+        """⚠️ And that is now the honest answer, not a bug.
+
+        The date fields still accept a backwards window — the same form serves
+        the management list, where the whole history is in scope. On this page
+        the query starts at midnight today, so an old window intersects nothing
+        and the empty state says to widen the range. What it must *not* do is
+        quietly show today's events while the boxes say last month.
+        """
         self.login(self.lisi)
-        response = self.client.get(reverse("events:past_events"),
-                                   {"ministry": self.tax.pk})
+        response = self.client.get(reverse("events:event_list"), {
+            "start": self.day(NOW - 40 * DAY), "end": self.day(NOW - 20 * DAY),
+        })
         self.assertEqual(response.context["total"], 0)
 
 
@@ -1751,13 +1860,20 @@ class DetailPageBackLinkTests(PageTestCase):
         self.assertContains(response, reverse("events:event_manage_list"))
         self.assertContains(response, "&larr; Events I Manage")
 
-    def test_arriving_from_past_events_goes_back_to_past_events(self):
-        # Otherwise somebody three pages into the history is dropped into the
-        # "upcoming" list and has to start again.
+    def test_an_old_past_marker_falls_through_to_events(self):
+        """⭐ Why the marker is a whitelist and not a URL.
+
+        `?from=past` was a valid marker until 2026-08-17, and links carrying it
+        are in sent emails and in people's history. The page it named is gone,
+        so the only two options were "send them to a 404" or "fall through to
+        the default" — and falling through is what a whitelist does for free.
+        A version that read a URL out of the query string would have had to
+        grow a special case here instead.
+        """
         self.login(self.lisi)
         response = self.client.get(self.url("past"))
-        self.assertContains(response, reverse("events:past_events"))
-        self.assertContains(response, "&larr; Past Events")
+        self.assertContains(response, reverse("events:event_list"))
+        self.assertContains(response, "&larr; Events")
 
     def test_a_volunteer_handed_a_manage_marker_is_not_sent_somewhere_they_are_refused(self):
         """⚠️ The marker is honoured only if the page is actually reachable.
@@ -2083,9 +2199,8 @@ class FeatherLayerTests(PageTestCase):
         # layer is fixed-position — dropped into a base template by mistake it
         # would show up everywhere including the attendance and report pages.
         self.login(self.lisi)
-        for name in ["past_events", "my_participations"]:
-            with self.subTest(page=name):
-                self.assertIsNone(self.layer(self.client.get(reverse(f"events:{name}"))))
+        self.assertIsNone(
+            self.layer(self.client.get(reverse("events:my_participations"))))
         detail = self.client.get(reverse("events:event_detail", args=[self.event.pk]))
         self.assertIsNone(self.layer(detail))
 
@@ -3228,13 +3343,16 @@ class AcceptanceWalkTests(TestCase):
         self.as_role("volunteer_adult")
         self.assertEqual(self.client.get("/admin/").status_code, 403)
 
-    def test_a_volunteer_sees_open_events_only(self):
+    def test_a_volunteer_sees_published_events_including_the_full_one(self):
+        # 2026-08-17: the list is "what is on", not "what you can join". A full
+        # event is on it, saying it is full; a draft is not on it at all,
+        # because that is a different question — whether it is published.
         self.as_role("volunteer_adult")
         response = self.client.get(reverse("events:event_list"))
         listed = {event.name for event in response.context["events"]}
         self.assertIn("Saturday distribution", listed)
+        self.assertIn("English corner (full)", listed)            # confirmed
         self.assertNotIn("Christmas distribution (not published yet)", listed)     # draft
-        self.assertNotIn("English corner (full)", listed)         # confirmed
 
     def test_a_volunteer_can_still_open_the_event_they_joined_once_it_filled_up(self):
         # ⭐ Visibility is not signability. Written the other way, P6's
@@ -3779,15 +3897,18 @@ class ManageListReportPageTests(PageTestCase):
 class PaginationTests(PageTestCase):
     """20 / 20 / 50, and the two ways paging can lie (2026-08-05)."""
 
-    def make_many(self, count, *, past=False, ministry=None):
+    # ⚠️ The `past=True` half of this helper went with Past Events (2026-08-17).
+    #    Kept it as a forward-only maker rather than leaving a branch nothing
+    #    takes — a helper with an unreachable mode reads as "somebody will need
+    #    this", and the next person writes a test around it.
+    def make_many(self, count, *, ministry=None):
         for index in range(count):
             offset = (index + 2) * DAY
             make_event(
                 ministry=ministry or self.pantry, name=f"Filler {index}",
                 owner=self.zhang.contact,
-                start_time=NOW - offset if past else NOW + offset,
-                end_time=(NOW - offset if past else NOW + offset) + HOUR,
-                status=Event.Status.COMPLETED if past else Event.Status.OPEN,
+                start_time=NOW + offset, end_time=NOW + offset + HOUR,
+                status=Event.Status.OPEN,
             )
 
     def test_the_volunteer_list_holds_twenty(self):
@@ -3798,12 +3919,6 @@ class PaginationTests(PageTestCase):
         # ⚠️ The count is the whole filtered set, not the page. "20 events"
         #    under a filter that matched 26 answers a question nobody asked.
         self.assertEqual(response.context["total"], 26)
-
-    def test_past_events_holds_twenty(self):
-        self.make_many(22, past=True)
-        self.login(self.lisi)
-        response = self.client.get(reverse("events:past_events"))
-        self.assertEqual(len(response.context["events"]), 20)
 
     def test_the_management_list_holds_fifty(self):
         self.make_many(55)
@@ -4711,15 +4826,287 @@ class EventRowTests(PageTestCase):
         self.assertIn("Location to be announced",
                       self.rows_html("events:event_list"))
 
-    def test_past_events_rows_get_the_same_treatment(self):
+    def test_a_finished_event_from_today_gets_the_same_row(self):
+        """⚠️ Past Events had its own row template (`.event-row-past`) until
+           2026-08-17. Now that finished events appear on this list until
+           midnight, they go through **the same row as everything else** —
+           which is the point of deleting that page rather than folding its
+           template in: one row, one set of rules about it.
+        """
         make_event(
             ministry=self.pantry, owner=self.zhang.contact, name="Over and done",
             status=Event.Status.COMPLETED, location="",
-            start_time=NOW - 2 * DAY, end_time=NOW - 2 * DAY + HOUR)
-        html = self.rows_html("events:past_events")
-        self.assertIn("event-row-past", html)
+            start_time=day_start(local_today()) + HOUR,
+            end_time=day_start(local_today()) + 2 * HOUR)
+        html = self.rows_html("events:event_list")
+        self.assertNotIn("event-row-past", html)
+        self.assertIn("Over and done", html)
         self.assertIn("event-row-link", html)
-        self.assertIn("No location was recorded", html)
+        self.assertIn("Location to be announced", html)
+
+
+class EventRowHeadingTests(PageTestCase):
+    """The name line: ministry after the name, status at the far right (2026-08-17).
+
+    The two badges say different kinds of thing and the stylesheet's rule for
+    that is not decorative: `brand` is for **categories**, the four semantic
+    tones are for **states**. A ministry borrowing a state colour gives a label
+    that means nothing in particular a tone of voice.
+    """
+
+    def row(self):
+        self.login(self.lisi)
+        html = self.client.get(reverse("events:event_list")).content.decode()
+        return re.search(r'<li class="event-row.*?</li>', html, re.S).group(0)
+
+    def test_the_ministry_sits_between_the_name_and_the_status(self):
+        row = self.row()
+        name = row.index(self.event.name)
+        ministry = row.index("Food Pantry")
+        status = row.index("Open for signup")
+        self.assertLess(name, ministry, "the ministry must follow the name")
+        self.assertLess(ministry, status, "the status must be last, on the right")
+
+    def test_the_ministry_keeps_the_category_tone(self):
+        # bg-brand-50 is what badge.html renders for tone="brand".
+        badge = re.search(r'<span class="inline-flex[^"]*"[^>]*>Food Pantry',
+                          self.row())
+        self.assertIsNotNone(badge, "no badge around the ministry name")
+        self.assertIn("bg-brand-50", badge.group(0))
+
+    def test_open_is_the_only_status_that_gets_a_colour(self):
+        """⭐ Green means "you can still join", so only one status may be green.
+
+        ⚠️ And `cancelled` must **not** be danger — the house rule from
+           `_status_badge.html`: it is a truthful record, not an accident, and
+           danger means "something is wrong here" everywhere else in this
+           interface.
+        """
+        self.assertIn("bg-success-bg", self.row())
+
+        for status in [Event.Status.CONFIRMED, Event.Status.CANCELLED,
+                       Event.Status.COMPLETED]:
+            with self.subTest(status=status):
+                self.event.status = status
+                self.event.save(update_fields=["status"])
+                row = self.row()
+                self.assertNotIn("bg-success-bg", row)
+                self.assertNotIn("bg-danger-bg", row)
+                self.assertIn(self.event.get_status_display(), row)
+
+    def test_the_name_is_wrapped_so_a_long_one_cannot_push_the_badge_out(self):
+        """⚠️ `min-w-0` on the wrapper, not only on the name.
+
+        A flex item defaults to `min-width: auto` — "never shrink below your
+        content" — which beats the `overflow: hidden` that `line-clamp` sets.
+        Without it a long name shoves the ministry badge past the card's right
+        edge instead of being clipped, and the narrower the card gets the more
+        of them do it.
+        """
+        markup = (Path(settings.BASE_DIR) / "events" / "templates" / "events"
+                  / "_event_list_results.html").read_text()
+        wrapper = re.search(r'<span class="flex[^"]*">\s*<span class="event-name',
+                            markup)
+        self.assertIsNotNone(wrapper, "the name and the ministry are not wrapped")
+        self.assertIn("min-w-0", wrapper.group(0))
+
+
+class LiveFilterTests(PageTestCase):
+    """筛选和搜索实时化（2026-08-17）—— 没有 Filter 按钮了。
+
+    ⚠️ 这一组存在的直接原因：把 `Filter` 挪进 `<noscript>` 之后，**整个测试套件
+       一条都没红** —— `assertContains` 读的是 HTML 源码，而 `<noscript>` 里的
+       内容照样在源码里。也就是说，原来没有任何一条测试真的钉着「筛选是怎么
+       触发的」，只钉着「页面上有 Filter 这四个字母」。
+    """
+
+    def form(self, url_name="events:event_list", user=None):
+        self.login(user or self.lisi)
+        html = self.client.get(reverse(url_name)).content.decode()
+        return re.search(r"<form[^>]*hx-get[^>]*>", html).group(0)
+
+    def test_typing_triggers_the_request_and_a_pause_debounces_it(self):
+        trigger = re.search(r'hx-trigger="([^"]*)"', self.form()).group(1)
+        self.assertIn("input", trigger)
+        self.assertRegex(trigger, r"delay:\d+ms")
+
+    def test_the_trigger_is_input_and_not_keyup(self):
+        """⚠️ `keyup` misses three ordinary ways a box changes: paste, an IME
+           candidate, and the browser's own clear button on `type="search"`.
+           All three look the same from the outside — the text changed and the
+           list did not move.
+        """
+        trigger = re.search(r'hx-trigger="([^"]*)"', self.form()).group(1)
+        self.assertNotIn("keyup", trigger)
+
+    def test_the_trigger_does_not_carry_the_changed_modifier(self):
+        """🔴 `changed` reads `value` off **the element the trigger is on**, and
+           this one is on the `<form>`. `form.value` is undefined, so "has it
+           changed" answers "no" forever and not one request is ever sent.
+           Nothing errors; the filter is simply dead.
+        """
+        trigger = re.search(r'hx-trigger="([^"]*)"', self.form()).group(1)
+        self.assertNotIn("changed", trigger)
+
+    def test_enter_is_still_caught(self):
+        # A form with no submit button can still submit implicitly on Enter,
+        # and which browsers do it depends on how many fields there are. Not
+        # catching it means one keypress reloads the whole page.
+        self.assertIn("submit",
+                      re.search(r'hx-trigger="([^"]*)"', self.form()).group(1))
+
+    def test_the_url_is_replaced_rather_than_pushed(self):
+        """⭐ The half of live filtering that is invisible until somebody presses
+        Back. Pushing means one history entry per debounced keystroke — seven
+        presses to get out of "kitchen". Replacing keeps the filter shareable
+        and leaves Back meaning "the page I came from".
+        """
+        form = self.form()
+        self.assertIn('hx-replace-url="true"', form)
+        self.assertNotIn("hx-push-url", form)
+
+    def test_a_slower_answer_cannot_overwrite_a_newer_one(self):
+        """⚠️ Debouncing reduces concurrency; it does not remove it.
+
+        On a slow connection the request for "kitch" can come back *after* the
+        one for "kitchen", and htmx paints whichever lands last — so the list
+        shows the previous keystroke's results while the box says something
+        else. It corrects itself on the next keypress, which is why it reads as
+        "it glitches sometimes" rather than as a bug with a cause.
+        """
+        self.assertIn('hx-sync="this:replace"', self.form())
+
+    def test_the_filter_button_exists_only_for_people_without_javascript(self):
+        self.login(self.lisi)
+        html = self.client.get(reverse("events:event_list")).content.decode()
+        noscript = re.search(r"<noscript>.*?</noscript>", html, re.S)
+        self.assertIsNotNone(noscript, "the no-JS submit path is gone")
+        self.assertIn(">Filter</button>", noscript.group(0))
+        self.assertEqual(html.count(">Filter</button>"), 1,
+                         "a Filter button outside <noscript> does nothing when "
+                         "the filter is live, and reads as a step you missed")
+
+    def test_clear_survives_because_it_is_not_a_filter_button(self):
+        # Four boxes to empty by hand is exactly what it saves, and live
+        # filtering does not empty them for you.
+        self.login(self.lisi)
+        self.assertContains(
+            self.client.get(reverse("events:event_list")), ">Clear</a>")
+
+    def test_the_management_list_is_live_too_and_keeps_its_report_button(self):
+        form = self.form("events:event_manage_list", user=self.zhang)
+        self.assertIn("hx-trigger", form)
+        html = self.client.get(reverse("events:event_manage_list")).content.decode()
+        self.assertIn(">Generate report</button>", html)
+
+
+class ScheduleToggleTests(PageTestCase):
+    """The Schedule button and the shell it moves (2026-08-17).
+
+    The calendar itself is not built yet — this is the button, the room it
+    makes, and the two structural facts that room depends on.
+    """
+
+    def page(self):
+        self.login(self.lisi)
+        return self.client.get(reverse("events:event_list")).content.decode()
+
+    def test_the_button_is_on_the_events_page(self):
+        html = self.page()
+        self.assertIn(">Schedule</button>", html)
+        self.assertIn('aria-controls="schedule-panel"', html)
+
+    def test_it_is_not_a_submit_button(self):
+        """🔴 The trap. It lives inside the filter form, and `<button>` defaults
+           to `type="submit"` — so the default would make one click submit the
+           filter, reload the list, and reset the toggle. On screen that reads
+           as "the button does nothing", which is the hardest kind of broken to
+           chase.
+        """
+        html = self.page()
+        button = re.search(r'<button[^>]*>Schedule</button>', html).group(0)
+        self.assertIn('type="button"', button)
+
+    def test_the_management_list_does_not_get_one(self):
+        # Same filter card, one parameter apart. The management list is a table
+        # of every event including finished ones — a day's schedule beside it
+        # would be answering a question that page is not asking.
+        self.login(self.zhang)
+        html = self.client.get(reverse("events:event_manage_list")).content.decode()
+        self.assertNotIn(">Schedule</button>", html)
+
+    def test_the_toggle_state_lives_outside_the_swapped_fragment(self):
+        """🔴 Why the `x-data` is on the shell and not on the card or the results.
+
+        HTMX replaces `#event-results` on every filter and every page turn. A
+        state declared inside that block is destroyed and recreated with each
+        one — so the schedule would slam shut whenever somebody filtered or
+        paged, and only ever on the real site, never in a unit test that reads
+        the first render.
+        """
+        html = self.page()
+        shell = html.index('x-data="{ schedule: false }"')
+        results = html.index('id="event-results"')
+        self.assertLess(shell, results,
+                        "the schedule state must be declared before, and outside, "
+                        "the fragment HTMX swaps")
+
+    def test_the_panel_is_not_in_what_htmx_swaps_in(self):
+        """Same reason, checked on the payload itself rather than on the page.
+
+        The filter swaps `#event-results` with `outerHTML`. If the panel or the
+        state were part of that response they would be replaced — the panel by a
+        second copy of itself, the state by a fresh `false` — every time
+        somebody filtered.
+        """
+        self.login(self.lisi)
+        fragment = self.client.get(
+            reverse("events:event_list"), HTTP_HX_REQUEST="true"
+        ).content.decode()
+        self.assertIn('id="event-results"', fragment)
+        self.assertNotIn('id="schedule-panel"', fragment)
+        self.assertNotIn("schedule: false", fragment)
+
+    def test_the_placeholder_says_what_it_is_and_leaves_room_for_the_readout(self):
+        html = self.page()
+        self.assertIn("data-size-readout", html)
+        self.assertIn("data-size-readout-value", html)
+
+
+class PastEventsIsGoneTests(PageTestCase):
+    """2026-08-17: the page was deleted, not hidden.
+
+    ⚠️ A route left in place with no entrance is the state this project keeps
+       paying for (C0.2.4: event_roles was the hub of the management side and
+       had no way in). Deleting the entrance and keeping the view would be that
+       shape again, this time on purpose.
+    """
+
+    def test_the_route_does_not_exist(self):
+        from django.urls import NoReverseMatch
+
+        with self.assertRaises(NoReverseMatch):
+            reverse("events:past_events")
+
+    def test_the_old_address_is_a_404(self):
+        self.login(self.lisi)
+        self.assertEqual(self.client.get("/events/past/").status_code, 404)
+
+    def test_nothing_links_to_it_any_more(self):
+        """⚠️ A grep, because the failure is silent in a different way: Django
+           raises NoReverseMatch at **render** time, so a leftover
+           `{% url 'events:past_events' %}` in a rarely-drawn branch (an empty
+           state, a 404 page) breaks that page and nothing else.
+        """
+        roots = [Path(settings.BASE_DIR) / app for app in
+                 ["events", "core", "accounts", "org", "contact", "gallery"]]
+        offenders = [
+            str(path.relative_to(settings.BASE_DIR))
+            for root in roots if root.exists()
+            for path in root.rglob("*.html")
+            if "past_events" in path.read_text()
+        ]
+        self.assertEqual(offenders, [])
 
 
 class EventImageDisplayTests(PageTestCase):
@@ -4736,18 +5123,6 @@ class EventImageDisplayTests(PageTestCase):
         self.login(self.lisi)
         response = self.client.get(reverse("events:event_list"))
         self.assertContains(response, self.event.image.url)
-
-    def test_past_events_carry_no_picture_column(self):
-        """⚠️ Deliberate: every finished event shows the default logo, so a
-           column of identical logos would be noise rather than information.
-        """
-        make_event(
-            ministry=self.pantry, owner=self.zhang.contact, name="Over",
-            status=Event.Status.COMPLETED,
-            start_time=NOW - 2 * DAY, end_time=NOW - 2 * DAY + HOUR)
-        self.login(self.lisi)
-        self.assertNotContains(self.client.get(reverse("events:past_events")),
-                               "event-thumb")
 
     def test_the_detail_page_carries_no_picture_yet(self):
         # Not decided where it should sit; drawn nowhere until it is.

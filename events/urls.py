@@ -6,9 +6,12 @@ app_name = "events"
 
 urlpatterns = [
     # B9 — the volunteer's own pages
+    # ⚠️ This one now lists **today's events and everything after**, whatever
+    #    their status — not just what is open (2026-08-17). `events/past/` was
+    #    removed in the same change; nothing replaced the route, so an old link
+    #    to it 404s rather than landing on a page that answers a different
+    #    question while looking like the one they bookmarked.
     path("events/", views.event_list, name="event_list"),
-    # C0.2.3 — R1. `past` before `<int:pk>`, same reason as `new` below.
-    path("events/past/", views.past_events, name="past_events"),
     path("events/<int:pk>/", views.event_detail, name="event_detail"),
     path("events/<int:pk>/signup/", views.event_signup, name="event_signup"),
     path("me/participations/", views.my_participations, name="my_participations"),

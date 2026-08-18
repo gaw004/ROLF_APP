@@ -138,8 +138,11 @@ def _back_link(request):
     marker = request.GET.get("from")
     if marker == "mine":
         return reverse("events:my_participations"), "My Signups"
-    if marker == "past":
-        return reverse("events:past_events"), "Past Events"
+    # ⚠️ `past` was a marker here until 2026-08-17. It is not merely unused now
+    #    — the page it pointed at is gone, so honouring it would send people to
+    #    a 404. Unknown markers fall through to the default below, which is the
+    #    behaviour an old bookmark carrying `?from=past` gets, and the reason
+    #    this function was written as a whitelist in the first place.
     if marker == "manage":
         administers_any = bool(ministry_ids_administered_by(request.user))
         if administers_any or in_foundation_tier(request.user):
@@ -191,17 +194,32 @@ def _my_contact(request):
 
 @login_required
 def event_list(request):
-    """P3: what a volunteer can sign up for.
+    """P3: what is on, from today forward.
 
-    open_for_signup(), not visible_to_volunteers(): a list of things to join
-    should not offer events that are full or already over. The detail page uses
-    the other predicate — being able to see something and being able to join it
-    are different questions.
+    visible_to_volunteers() + from_today() (2026-08-17). It used to be
+    open_for_signup().upcoming() — that predicate is gone now, deleted with
+    past() once neither had a caller left — which is a narrower thing: *only*
+    what you
+    could still join, and *only* what had not started. Two consequences, both
+    of them wrong for a page called "Events":
+
+      · An event vanished the moment it filled up. The volunteers most likely
+        to look it up are the ones who got in, and for them the page said the
+        event did not exist. Same for a cancelled one — the people who need to
+        see it is off are exactly the ones who signed up.
+      · An event vanished the moment it ended, mid-morning, while people were
+        still checking in.
+
+    Being able to *see* an event and being able to *join* it stay different
+    questions — that is the whole point of the two predicates. The join gate has
+    not moved: event_signup still runs open_for_signup(), so a full or cancelled
+    event 404s there no matter how it is listed. What the row carries now is its
+    status, so the page says which of the two it is instead of hiding one.
     """
     period = EventPeriodForm(request.GET or None)
     events = (
-        Event.objects.open_for_signup()
-        .upcoming()
+        Event.objects.visible_to_volunteers()
+        .from_today()
         .select_related("ministry", "event_type")
         .order_by("start_time")
     )
@@ -219,35 +237,17 @@ def event_list(request):
     })
 
 
-@login_required
-def past_events(request):
-    """R1's other half: everything already over.
-
-    Not an admin report. The requirement's first line is "how many events run
-    in a given period", and a volunteer answering "which of these do I want to
-    join" needs the same query pointed the other way — event_list only ever
-    shows what is open and upcoming, so an event vanished from the interface
-    the moment it ended, taking its report page with it.
-
-    visible_to_volunteers(), so a cancelled or completed event still appears:
-    the people who were there have hours on it.
-    """
-    period = EventPeriodForm(request.GET or None)
-    events = (
-        Event.objects.visible_to_volunteers()
-        .past()
-        .select_related("ministry", "event_type")
-        .order_by("-start_time")
-    )
-    events = period.narrow(events)
-    page = _page(request, events, EVENTS_PER_PAGE)
-    return render(request, _template(
-        request, "events/past_events.html", "events/_past_events_results.html"), {
-        "events": page,
-        "page": page,
-        "period": period,
-        "total": page.paginator.count,
-    })
+# ⚠️ There is no past_events view any more (2026-08-17). The page it used to
+#    draw is gone, deliberately, along with its two templates and its route —
+#    see revisions.md. What answers R1 now, and for whom, is written down in
+#    goal.md's R1 row: the foundation tier reads it off All Events, which can
+#    already be filtered to any period. A volunteer's own finished events are
+#    still on My Signups, which is where they were being looked up from anyway.
+#
+#    ⚠️ Do not bring it back as `event_list(past=True)`. The one thing that page
+#       had that this one does not is a *backwards* window, and a flag that
+#       flips a queryset's direction is how one view ends up answering two
+#       questions badly.
 
 
 @login_required

@@ -24,7 +24,7 @@ from contact.models import Contact, RelationshipType
 from core.constraints import ConstraintErrorFieldMixin
 from core.limits import LONG_TEXT, SHORT_TEXT
 from core.models import ImmutableCodeMixin, TimeStampedModel
-from core.timeutils import local_now
+from core.timeutils import day_start, local_today
 from org.models import Ministry
 
 
@@ -120,7 +120,7 @@ class ParticipationRole(ImmutableCodeMixin, ConstraintErrorFieldMixin, models.Mo
 
 
 class EventQuerySet(models.QuerySet):
-    """Two predicates, because status is answering two different questions.
+    """Two status predicates, because status is answering two different questions.
 
     Event.status carries the lifecycle (draft → open → confirmed → completed /
     cancelled) *and* the visibility of the event to volunteers, and those are
@@ -143,25 +143,48 @@ class EventQuerySet(models.QuerySet):
         """Everything a volunteer may still sign up for."""
         return self.filter(status__in=Event.OPEN_FOR_SIGNUP)
 
-    def upcoming(self, now=None):
-        """Not started yet.
+    # ⚠️ `upcoming()` (start_time >= now) and `past()` (end_time < now) lived
+    #    here until 2026-08-17. They went with their last callers — the Past
+    #    Events page, and event_list's old window — and are **not** kept "in
+    #    case the calendar wants one": an unused predicate has nothing checking
+    #    it and reads to the next person as a supported way of doing things.
+    #    Same reasoning that deleted the old Memories rules; the opposite
+    #    mistake is the one R1 recorded, where in_period() sat here with no
+    #    caller but the tests and the requirement went unanswered for a month.
+    #
+    #    They asked a third question, and that question no longer has a page:
+    #    "is it over yet". What the interface asks now is "which day is it on",
+    #    which is from_today() below.
 
-        Here rather than in the view: a view holding date arithmetic is one that
-        gets rewritten along with the templates, and there is a grep guard
-        saying so.
+    def from_today(self, today=None):
+        """Today's events and everything after them — what /events/ is a list of.
+
+        ⚠️ The boundary is **midnight in the foundation's timezone**, not `now`.
+           An event that ran this morning is still one of today's: it stays on
+           the page until the day rolls over, wearing "Completed". Cutting at
+           `now` would make the list drop a row at the instant that event
+           ended — and the schedule drawn beside it would be showing today with
+           its morning missing.
+
+        ⚠️ Read off start_time, so "which day is this event on" is answered by
+           the same column in_period() slices R1 by. The cost, stated: an
+           overnight event that began yesterday and ends this morning counts as
+           yesterday's and leaves at midnight with the rest of yesterday.
+
+        🔴 **"Which day is it on" and "is it over yet" are two questions, and
+           this method only answers the first.** They come apart on exactly the
+           events where it matters: one that started this morning and runs
+           until tonight is on today (in) and not over (also in, by luck); one
+           that started last night and ends this morning is on yesterday (out)
+           and not over (which this does not ask). Writing the second question
+           as this one's complement is the trap the deleted upcoming()/past()
+           pair was written to avoid — and their comment said so, right up to
+           the day their last caller went away.
+
+        ⚠️ Midnight comes from core.timeutils, never from a naive datetime —
+           D16, and there is a grep guard on it.
         """
-        return self.filter(start_time__gte=now or local_now())
-
-    def past(self, now=None):
-        """Already over — paired with upcoming(), and deliberately not its negation.
-
-        ⚠️ Read off end_time, not start_time. An event that began this morning
-           and runs until tonight is neither upcoming nor past, and calling it
-           past would file a running event under history while people are still
-           checking in. The two methods leave that gap on purpose; "not
-           upcoming" would have silently closed it.
-        """
-        return self.filter(end_time__lt=now or local_now())
+        return self.filter(start_time__gte=day_start(today or local_today()))
 
     def in_period(self, start, end):
         """R1: the events that ran in a window, half-open [start, end).

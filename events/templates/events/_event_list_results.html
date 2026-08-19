@@ -163,7 +163,7 @@ event_list 的结果区。整页和 HTMX 片段渲染的是同一份 —— 视�
                  「画出来的链接一定点得通」这件事仍然成立 —— 那正是下面那条
                  「只有 open 那一档是链接」的注释在守的东西。
               {% endcomment %}
-              {% if event.is_open_for_signup %}
+              {% if event.accepting_signups %}
                 <a href="{% url 'events:event_signup' event.pk %}"
                    class="event-row-badge-link"
                    aria-label="Sign up for {{ event.name }}"

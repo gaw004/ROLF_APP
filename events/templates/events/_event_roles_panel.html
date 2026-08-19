@@ -15,8 +15,24 @@
           {% for role in roles %}
             <tr>
               <td class="font-medium">{{ role.role.name }}</td>
-              <td>{{ role.needed_count|default_if_none:"No limit" }}</td>
-              <td>{{ role.registered_count }}</td>
+              {% comment %}
+              ⚠️ 「要几个」这一格现在还要说**那个数字拦不拦人**（2026-08-19）。
+                 光写「2」的话，屏幕上看不出这一格勾没勾「到这个人数就停止报名」——
+                 而那正是「为什么有人报不进来」和「为什么报进来了 50 个」两个问题
+                 的答案所在。
+              {% endcomment %}
+              <td>
+                {{ role.needed_count|default_if_none:"No limit" }}
+                {% if role.needed_count and not role.stop_at_needed_count %}
+                  <span class="text-xs text-ink-600 dark:text-ink-300">(target, more welcome)</span>
+                {% endif %}
+              </td>
+              <td>
+                {{ role.registered_count }}
+                {% if role.is_full %}
+                  {% include "core/components/badge.html" with label="Full" %}
+                {% endif %}
+              </td>
               <td class="whitespace-normal">{{ role.notes }}</td>
               <td>
                 {% comment %}

@@ -44,6 +44,15 @@ class ConsentRequired(ValidationError):
     """
 
 
+class RoleFull(ValidationError):
+    """This job has as many people as it asked for, and it asked to stop there.
+
+    Its own class for the same reason as ConsentRequired: a view may want to
+    tell this apart from an ordinary form error — and because "full" is not a
+    mistake anybody made, it is an answer.
+    """
+
+
 class TurnedUp(ValidationError):
     """Refusing to mark somebody absent when the record says they were here.
 
@@ -101,6 +110,33 @@ def sign_up(*, contact, event_role, consent=None):
        raises, the person simply never hears.
     """
     consent = dict(consent or {})
+
+    # 🔴 The capacity gate (2026-08-19). Until this line existed, `needed_count`
+    #    fed the "understaffed" reports and **stopped nobody**: a job wanting
+    #    five people accepted fifty, and that only became visible on the day.
+    #
+    # ⚠️ Re-read through `with_signup_counts()` rather than reading the row we
+    #    were handed. Two reasons, and both are load-bearing: the caller's row
+    #    may not carry the annotation at all (an admin's, an importer's), and
+    #    the count has to be **this moment's** — the form that produced this row
+    #    was rendered some seconds ago, and the last place may have gone in
+    #    between. One query.
+    #
+    # ⚠️ Still a hint layer, not a lock (D14's standing caveat): two requests
+    #    arriving together can both read "one place left". A database constraint
+    #    cannot express this — the count lives in another table — so the honest
+    #    statement is that this refuses the ordinary case and does not pretend
+    #    to serialise the rare one. The over-subscription that results is one
+    #    extra person, visible on the roles panel, not a silent corruption.
+    fresh = (EventRole.objects.with_signup_counts()
+             .filter(pk=event_role.pk).first())
+    if fresh is not None and fresh.is_full:
+        raise RoleFull({
+            "event_role": f"“{event_role.role.name}” is full — it has all "
+                          f"{event_role.needed_count} people it asked for. "
+                          f"Try another role, or ask the organiser.",
+        })
+
     needs_consent = consent_required_for(contact, event_role.event)
 
     if needs_consent:

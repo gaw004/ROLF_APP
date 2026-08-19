@@ -317,9 +317,16 @@ class Command(BaseCommand):
                 "status": Event.Status.OPEN,
             },
         )
+        # 🔴 三个角色，现在**各演一种容量**（2026-08-19，`stop_at_needed_count`
+        #    落地那天补的）：
+        #      lifting      要 2 人、已经 2 人、卡上限   → 满了，报不进
+        #      welcome      要 4 人、已经 3 人           → 还有位置
+        #      interpreting 要 1 人、不卡上限            → 「多多益善」那一档
+        #    没有第三种的话，演示数据里根本走不到满员那条路，而那正是这次要看的。
         lifting = self.role(self.open_event, self.lifting, 2)
         welcome = self.role(self.open_event, self.welcome, 4)
-        self.role(self.open_event, self.interpreting, 1)   # nobody signs up
+        self.role(self.open_event, self.interpreting, 1,   # nobody signs up
+                  stop_at_needed_count=False)
 
         if created:
             self.signup(self.adult, lifting)
@@ -338,7 +345,7 @@ class Command(BaseCommand):
             },
         )
 
-        # 3. Confirmed and full: absent from the list, but whoever signed up
+        # 3. Full: absent from the list, but whoever signed up
         #    can still open it. That is the difference between "can see" and
         #    "can join", and P6's cancel link depends on it.
         confirmed, made = Event.objects.get_or_create(
@@ -346,7 +353,7 @@ class Command(BaseCommand):
             defaults={
                 "event_type": self.distribution, "ministry": self.pantry,
                 "start_time": now + 3 * DAY, "end_time": now + 3 * DAY + 2 * HOUR,
-                "owner": self.pantry_admin.contact, "status": Event.Status.CONFIRMED,
+                "owner": self.pantry_admin.contact, "status": Event.Status.FULL,
             },
         )
         if made:
@@ -531,10 +538,10 @@ class Command(BaseCommand):
 
     # --- helpers ---------------------------------------------------------
 
-    def role(self, event, participation_role, needed_count):
+    def role(self, event, participation_role, needed_count, **fields):
         return EventRole.objects.get_or_create(
             event=event, role=participation_role,
-            defaults={"needed_count": needed_count},
+            defaults={"needed_count": needed_count, **fields},
         )[0]
 
     def signup(self, who, event_role, **consent):

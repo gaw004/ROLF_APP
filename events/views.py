@@ -273,6 +273,10 @@ def _visible_events(period):
     return period.narrow(
         Event.objects.visible_to_volunteers()
         .from_today()
+        # ⚠️ 每一行都要问「满了没」来决定那枚标签画不画成链接（2026-08-19）。
+        #    不加这个注解的话那是**每行一次查询** —— 一页二十行，在全站被打得
+        #    最多的一页上。判据本身没有在这里重写，见 `with_capacity()`。
+        .with_capacity()
         .select_related("ministry", "event_type")
         .order_by("start_time")
     )
@@ -359,7 +363,7 @@ def event_schedule(request):
 
 @login_required
 def event_detail(request, pk):
-    """visible_to_volunteers(), so a confirmed or finished event still opens.
+    """visible_to_volunteers(), so a full or finished event still opens.
 
     ⚠️ Written as status == OPEN this page would 404 the moment an event filled
        up — for exactly the people who had signed up, and for P6's "can't make
@@ -429,7 +433,7 @@ def _detail(request, pk):
         #    are the same gate seen from two sides. Reading only the status here
         #    put a Sign up button on events that finished last year, and the
         #    page it led to had already stopped accepting them.
-        "can_sign_up": event.is_open_for_signup,
+        "can_sign_up": event.accepting_signups,
         "can_manage": can_manage_event(request.user, event),
         # ⚠️ False on every published event, so the banner is not something a
         #    template has to remember to switch off. It is only ever true for a
@@ -509,7 +513,7 @@ def event_signup(request, pk):
        换成一块只有一句话的空面板，等于让人再点一次才能确认。
 
     ⚠️ 面板成功那一次**不重画左边那一列**。报名会让一场活动满员、于是列表上
-       那个绿标签该变成 Confirmed —— 这里没有跟着换。知情的取舍：换它要连着
+       那个绿标签该变成 Full —— 这里没有跟着换。知情的取舍：换它要连着
        算一次分页（`_page_holding`）并回送 40KB，而那个标签在下一次筛选、翻页
        或刷新时自然就对了。写下来是因为「点了报名，左边标签没变」看起来像 bug，
        而它是这一行。

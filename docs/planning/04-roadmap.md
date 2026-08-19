@@ -180,10 +180,10 @@ views / forms / services 原样带走」——这一步就是兑现它。**注�
 
 ### C2.2 志愿者路径（用户最多，要手机友好）
 
-`event_list` → `past_events` → `event_detail` → `event_signup` →
+`event_list` → ~~`past_events`~~ → `event_detail` → `event_signup` →
 `my_participations` → `participation_cancel` → `accounts/profile`。
 
-- HTMX 用在 `event_list` / `past_events` 的时间段筛选、
+- HTMX 用在 `event_list` / ~~`past_events`~~ 的时间段筛选（2026-08-17：后者整页删了，前者的筛选改成实时）、
   `accounts/profile` 的增删紧急联系人；
 - ⚠️ `event_signup` 的未成年人同意分支（姓名 / 关系 / 方式 / **邮箱或电话至少一个**）
   是这一组里唯一有条件显示的表单。它的显隐可以交给 Alpine，
@@ -255,7 +255,7 @@ views / forms / services 原样带走」——这一步就是兑现它。**注�
 | `check` / `makemigrations --check` / `ruff check .` | 干净 / No changes / All checks passed |
 | 重写的模板 | 20 个，各只碰一次 |
 | 新增的组件片段 | `core/templates/core/components/` 下 8 个：`button` · `_button_tag` · `_nav_link` · `field` · `form_fields` · `badge` · `empty` · `messages` · `_messages_oob` |
-| 新增的 HTMX 片段 | `_event_list_results` · `_past_events_results` · `_period_filter` · `_event_roles_panel` · `_event_roles_swap` · `_attendance_row` · `_attendance_row_swap` · `_event_nav` · `_event_nav_link` |
+| 新增的 HTMX 片段 | `_event_list_results` · ~~`_past_events_results`~~（2026-08-17 删）· `_period_filter` · `_event_roles_panel` · `_event_roles_swap` · `_attendance_row` · `_attendance_row_swap` · `_event_nav` · `_event_nav_link` |
 | 新增的迁移 | `events/0006_consent_method_labels_in_english`（**只改 label，value 一个字没动**） |
 | 新增的守卫 | `InterfaceLanguageGuardTests`（模板里注释块之外不许有中日韩字符）· `AlpineStaysUiOnlyGuardTests`（`x-` 属性里不许有权限 / 工时 / 日期运算） |
 

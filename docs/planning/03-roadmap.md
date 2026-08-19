@@ -185,6 +185,17 @@ python manage.py seed_demo          # 账号和共享密码在命令输出里
   倒序，同样能筛时间段、同样显示条数。**这是活动一结束就从界面上消失的解药**；
 - 模型侧加 `EventQuerySet.past(now=None)`，和已有的 `upcoming()` 并排。
 
+> 2026-08-17：**`past_events` 这一页删了**（上面两条仍是当时的记录，不改）。
+> 用得少，而它解的那个病换了个解法：`event_list` 的窗口从「还没开始的」
+> 挪到「**今天零点起**」（`EventQuerySet.from_today()`），于是活动不再是
+> 一结束就消失，而是当天一直在，带着 Completed 的标签，到午夜才走。
+> 往回看的那一半交给管理侧的 All Events（见 goal.md 的 R1 行）。
+> ⚠️ **同一天，`past()` 和 `upcoming()` 两个方法本身也删了。** 这一条最初写的是
+> 「`past()` 仍在，管理列表的筛选还用它」——**那句话是错的**，管理列表用的是
+> `EventPeriodForm.narrow()` 走 `in_period()`。查过之后两个方法一个调用者都没有
+> （应用代码、测试、模板），于是随页面一起删；理由写在 `EventQuerySet` 里
+> `from_today()` 上面那段注释。
+
 ⚠️ **日期默认值不许写在视图里** —— `core/tests.py` 的守卫盯着
 「视图里不许出现 `timedelta(` / `local_now(` / `month_bounds(`」。
 放 `events/forms.py` 的一个筛选表单里，或 `services.py`。
@@ -226,7 +237,7 @@ python manage.py seed_demo          # 账号和共享密码在命令输出里
 | `python manage.py test` | **372 个，全绿**（31.2s）—— 开工时 334，五件事带来 38 个 |
 | `check` / `makemigrations --check` / `ruff check .` | 干净 / No changes / All checks passed |
 | 新增的路由 | `events/past/` · `events/manage/` · `events/<pk>/edit/` · `ministries/` · `me/profile/` |
-| 新增的模板 | `past_events.html` · `event_manage_list.html` · `org/ministry_list.html` · `accounts/profile.html`（**都直接写的英文**，见 [D23](decisions/D23-i18n-interface-only.md)） |
+| 新增的模板 | ~~`past_events.html`~~（2026-08-17 删，见上）· `event_manage_list.html` · `org/ministry_list.html` · `accounts/profile.html`（**都直接写的英文**，见 [D23](decisions/D23-i18n-interface-only.md)） |
 | 新增的其它文件 | `contact/migrations/0004_seed_relationship_types.py` · `core/context_processors.py` |
 
 ⚠️ **三处发现文档原来写错了**，都已就地改掉并记进[计划外记录](#计划外记录)：

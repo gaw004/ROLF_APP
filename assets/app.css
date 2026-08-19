@@ -315,6 +315,893 @@
     border-color: var(--color-danger-fg-dark);
   }
 
+  /* --- Events 页的日程壳（2026-08-17）-------------------------------------
+   *
+   * 点一下筛选卡上的 Schedule，整列活动**往左让**，右侧腾出来的地方给日程。
+   * 这一批只做让位，日历本身还没画，那里现在是一个虚线占位框。
+   *
+   * ⭐ **让位的做法是把壳撑宽，不是把卡片推走。** 壳是居中的（`margin-inline:
+   *    auto` 由下面那条负外边距的对称性代替），宽度一变大，它的左边缘自然往左
+   *    走 —— 于是标题、筛选卡、每一张卡片一起挪，相对关系一点没变。
+   *    真去给每张卡片加 `translateX` 的话，一来滚动惯性那段 JS 每帧在写同一个
+   *    元素的 transform（这个文件里已经为它判过一次刑），二来标题和筛选卡不会
+   *    跟着走，读起来是「卡片跑了、外壳留在原地」。
+   *
+   * 🔴 **版心（`<main>` 的 max-w-4xl）不动，撑出去的是这一层。**
+   *    负外边距对称地探出 main 的两侧。为什么不直接换 main 的 max-width：
+   *    那要么把 base.html 的 `main_width` 做成跟着 Alpine 状态变的 class
+   *    （全站共用的外壳为一页背一个状态），要么让 JS 去改 `<main>` ——
+   *    而 `#messages` 也是 main 的直接子元素，跟着变宽之后提示条会比正文宽一截。
+   *
+   * ⚠️ **两个宽度都由媒体查询给，不用 `100vw`。** `100vw` 含竖滚动条的宽度，
+   *    而媒体查询不含 —— 用 `min(78rem, calc(100vw - 2rem))` 这种写法，在刚好
+   *    卡在边界的视口上会横向溢出十几个像素，也就是整页可以左右拖动。
+   *    这个 bug 这个文件里已经有过一次（筛选卡那一行的 `min-w-0`）。
+   *    媒体查询里的数字**保证了余量**，所以里面可以写死 rem，不必再 min() 一次。
+   *
+   * 几何（版心内容宽 54rem = 864px，因为 main 是 max-w-4xl 再去掉 px-4）：
+   *
+   *   视口        壳宽     负外边距（每侧）      列宽      日程宽
+   *   ≥ 80rem    78rem    (54−78)/2 = −12rem   34rem     78−34−1.5 = 42.5rem
+   *   64–80rem   62rem    (54−62)/2 = −4rem    34rem     62−34−1.5 = 26.5rem
+   *   < 64rem    54rem    0                    —（藏起来）满宽
+   *
+   *   1440px 上就是：整体左移 192px，卡片从 756 收到 436，右侧空出 680。
+   *
+   *   列宽 34rem = 544 是**三个数加出来的**：缩略图 84 + 间距 24 + 卡片 436。
+   *   ⚠️ 所以要改卡片宽度，改的是这个 34rem —— 而**图和那 24 的间距不许动**
+   *      （2026-08-17 定）。少了这条，下一次「卡片再窄一点」会从缩略图身上找，
+   *      而缩略图一小，那张正方形图就不再是这一行的锚点了。
+   *
+   * ⚠️ 列宽是**定死的**，不跟着壳变。多出来的地方全部归日程 ——
+   *    卡片再宽回去就等于把这次收窄白做了。
+   *
+   * ⚠️ **80rem 以上不再加档**（2026-08-17 定）：更宽的屏幕上两侧留白更多，
+   *    日程仍是 40rem。曾经加过一串 8rem 一档、一直到 160rem 的阶梯，
+   *    当天撤掉了 —— 撤的理由不在代码里，在需求那边。
+   *
+   * ⚠️ **窄于 64rem 时列表整个藏起来、日程占满**，而不是并排。1024 以下并排
+   *    的话日程只剩一百多像素 —— 那不是「窄了一点」，那是画不出一天。
+   *    手机上点 Schedule 得到的因此是一整屏日程，回来再点一下。
+   */
+  .events-shell {
+    /* ⚠️ 关着的时候这一层必须**逐像素等于改之前**：宽度就是版心，没有外边距。
+     *    这是「默认视图零风险」那条决定的落点。 */
+    width: 100%;
+    transition:
+      width 560ms cubic-bezier(0.32, 0.72, 0, 1),
+      margin-left 560ms cubic-bezier(0.32, 0.72, 0, 1);
+  }
+
+  /* 壳里分两块：左边整列（标题、筛选卡、结果区），右边日程。
+   * ⚠️ 标题在**列里面**，不在壳的外面 —— 否则开日程时卡片左移 192px 而
+   *    「Events」四个字留在原地，那一行会明显对不齐。 */
+  .events-row {
+    display: flex;
+    gap: 0;
+    transition: gap 560ms cubic-bezier(0.32, 0.72, 0, 1);
+  }
+
+  /* 🔴 **两端的 flex-basis 都必须是长度，不能有一个是 `auto`。**
+   *    `auto` 不可插值 —— 从 `auto` 过渡到 `36rem`，浏览器不会报错，它只是
+   *    **不过渡**：第 0 帧卡片就已经收到 468px 了，然后外壳才慢慢往左滑。
+   *    看起来是「卡片先啪地一缩，接着整块才动」，而 CSS 里每一条都写着 560ms。
+   *    所以静息态写 `0 0 100%`（等价于原来的填满）而不是 `1 1 auto`。
+   *
+   * ⚠️ `min-width: 0` 不能省：flex 项默认不许缩到比内容窄，而里面有定死宽度的
+   *    缩略图和不换行的按钮行。少了它，收窄的不是这一列而是右边的日程。 */
+  .events-col {
+    flex: 0 0 100%;
+    min-width: 0;
+    transition: flex-basis 560ms cubic-bezier(0.32, 0.72, 0, 1);
+  }
+
+  /* 日程面板。
+   *
+   * ⚠️ 关着时是 `visibility: hidden`，不是只有宽度 0。宽度为 0 的东西仍然在
+   *    无障碍树和 Tab 顺序里 —— 日历上将来那些按钮会变成一串按不到也看不见的
+   *    焦点。`visibility` 可以过渡（顶栏菜单那条也是这么写的），所以它不会
+   *    让面板在动画开始前就消失。
+   *
+   * ⚠️ `overflow: hidden` 是给收起的那半秒用的：面板里的内容不会在壳收窄的
+   *    过程中溢到列上面。 */
+  /* ⚠️ 面板**不过渡自己的宽度**，只翻 `flex-grow`（0 → 1）。它的宽度是「列和外壳
+   *    让出来的那部分」，所以它天然跟着那两条动画走，一帧不差。给它自己也写一条
+   *    宽度过渡的话，就是两条曲线各算各的，中间那道缝会忽宽忽窄。
+   *    基准一直是 0，于是两端都是长度，不存在上面那条 `auto` 的坑。
+   *
+   * --- 高度：一屏，而且钉住（2026-08-17）--------------------------------
+   *
+   * 日程是**一屏**，不是一根跟着列表长的长条。一页 20 张卡片有三四屏高，
+   * 而「这一周是什么样」这件事一旦要靠滚动拼起来，就不再是一眼能看的东西了。
+   *
+   * ⚠️ `align-self: flex-start` + 显式高度，两个一起才成立：flex 项的交叉轴
+   *    默认是 stretch，被拉到整行高之后它和它的包含块一样高 —— 而 `sticky`
+   *    要生效，元素必须**比包含块矮**，否则没有可以粘的行程。
+   *    只写 `position: sticky` 不写高度，看起来什么都没发生，也不报错。
+   *
+   * ⚠️ `top` 要**让开吸顶的导航栏**。写 `top: 0` 的话面板顶部那一截会滑到
+   *    那条白色 bar 底下 —— 日历少掉的正好是写星期几的那一行。
+   *
+   *    🔴 **4.25rem / 4.75rem 是量出来的，而第一版是「推」出来的、推错了。**
+   *       推的时候按「bar 里是 `text-sm`，行高 1.25rem」算，得到 52 / 60px。
+   *       浏览器里量到的是 **68 / 76px**：撑高那一行的根本不是文字，是右边
+   *       **主题切换那颗按钮** —— `p-2` 的内边距配一个 `h-5 w-5` 的图标，
+   *       8+20+8 = 36px，比 20px 的文字高出 16px。
+   *       加上 nav 的 `py-4`（sm 起 `py-5`）：36+32 = 68、36+40 = 76。
+   *       ⚠️ 推错的那一版不会报错，屏幕上只是日历顶上被压掉一条 ——
+   *       这就是为什么这个数最后是打开浏览器量的，不是算的。
+   *    ⚠️ 守卫 `core.tests.ScheduleShellTests.test_the_top_bar_is_still_the_height_this_assumes`
+   *       钉的是**这个高度的来源**：nav 的 `py-4 / sm:py-5`，以及那颗按钮的
+   *       `p-2` 和图标的 `h-5`。少钉那颗按钮，就等于守着一个不成立的推导。
+   *
+   * ⚠️ 用 `svh` 不用 `dvh`：手机上地址栏一伸一缩，`dvh` 会让面板每滚一下就
+   *    重算一次高度（连带那行尺寸读数一直在跳）。`svh` 取的是「地址栏展开时」
+   *    那一档，于是它在任何时刻都装得下，代价是地址栏收起来时底下多一条空白。
+   *    ⚠️ 前一行 `vh` 不是冗余，是给不认识 `svh` 的浏览器的兜底。
+   *
+   * 🔴 日历将来**必须自己装进这个高度**（内部再分区、或者自己滚），不能靠把
+   *    面板撑高来放下 —— 撑高就等于把「一屏」这条又还回去了。
+   */
+  .schedule-panel {
+    --top-bar-h: 4.25rem;
+    flex: 0 0 0;
+    min-width: 0;
+    align-self: flex-start;
+    position: sticky;
+    top: calc(var(--top-bar-h) + 1rem);
+    height: calc(100vh - var(--top-bar-h) - 2rem);
+    height: calc(100svh - var(--top-bar-h) - 2rem);
+    overflow: hidden;
+    visibility: hidden;
+    opacity: 0;
+    transition:
+      opacity 380ms ease,
+      visibility 560ms;
+  }
+
+  @media (width >= 40rem) {
+    .schedule-panel {
+      --top-bar-h: 4.75rem;
+    }
+  }
+
+  /* 日程开着时，筛选卡钉在顶上（2026-08-18）。
+   *
+   * ⚠️ **只在开着的时候**（选择器带 `.is-open`）。关着那一档是全站最常打开的
+   *    默认视图，而它现在没有人抱怨 —— 「关着时逐像素等于改之前」那条决定
+   *    （见上面 `.events-shell`）在这里同样成立。
+   *
+   * ⚠️ `top` 和日程面板用**同一个** `--top-bar-h`：两块并排的东西钉在不同的
+   *    高度上，是一眼看得出来的错位。⚠️ 但那个变量是声明在 `.schedule-panel`
+   *    上的，作用域不到这里 —— 所以这里重新声明一份，两处的值由
+   *    core.tests.ScheduleShellTests 一起钉着。
+   *
+   * ⚠️ `z-index` 不能省。卡片本身没有层叠上下文，而下面滚上来的活动卡片带
+   *    `position: relative`（模板上那个 `relative`）—— 少了它，滚过来的卡片
+   *    会从筛选卡**上面**穿过去。
+   *
+   * 🔴 `.card` 在深色+大图那一档是**半透明毛玻璃**。钉住之后它底下会一直有东西
+   *    滚过，而半透明意味着那些字会隐约透出来 —— 玻璃后面有东西在动，正是这
+   *    材质该有的样子，不是 bug。真要遮住只能给它一个不透明底，而那会让它和
+   *    旁边的日程面板变成两种材质（design-system.md 判过刑的那件事）。
+   *
+   * ⚠️ 代价如实说：这张卡连下边距约 257px，钉住之后那一列永久少掉这么多。
+   *    800px 高的窗口上剩给活动卡片的约 2.9 张。这是知情的取舍，不是没量。 */
+  .events-shell.is-open .filter-card {
+    --top-bar-h: 4.25rem;
+    position: sticky;
+    top: calc(var(--top-bar-h) + 1rem);
+    z-index: 20;
+  }
+
+  @media (width >= 40rem) {
+    .events-shell.is-open .filter-card {
+      --top-bar-h: 4.75rem;
+    }
+  }
+
+  /* ⚠️ 1.5rem = 24px，和行内「缩略图 ↔ 卡片」那道缝**同一个值**（2026-08-17 改，
+   *    原来是 2rem）。一行里两道竖缝，宽度一样才读得出「图 · 卡片 · 日程」是
+   *    并排的三块；一道 24 一道 32 会让日程看起来离得更远、像另一个区域。 */
+  .events-shell.is-open .events-row {
+    gap: 1.5rem;
+  }
+
+  .events-shell.is-open .schedule-panel {
+    flex: 1 1 0;
+    visibility: visible;
+    opacity: 1;
+  }
+
+  /* 并排的那些档。⚠️ 列宽和公式写在这里而不是每个断点里抄一遍 ——
+   *    64rem 以下没有「列」这回事（列是藏起来的），给它一个 36rem 的基准
+   *    只会在动画的中途露出一列被压扁的卡片。 */
+  /* 并排的两档。⚠️ 列宽写在这里而不是写在 `.is-open` 的通则里 ——
+   *    64rem 以下没有「列」这回事（列是藏起来的），给它一个 34rem 的基准
+   *    只会在动画的中途露出一列被压扁的卡片。 */
+  @media (width >= 64rem) {
+    .events-shell.is-open {
+      width: 62rem;
+      margin-left: -4rem;
+    }
+
+    /* 34rem = 544 = 缩略图 84 + 间距 24 + 卡片 436。
+     * ⚠️ **这是三个数加出来的，而只有卡片那一项可以动**（2026-08-17）。
+     *    图是 `shrink-0` 的 5.25rem、间距是行上的 `gap-6`，两者都不参与
+     *    「卡片再窄一点」——收窄只从卡片身上出。 */
+    .events-shell.is-open .events-col {
+      flex: 0 0 34rem;
+    }
+  }
+
+  @media (width >= 80rem) {
+    .events-shell.is-open {
+      width: 78rem;
+      margin-left: -12rem;
+    }
+  }
+
+  /* 窄屏：日程占满，列表让出去。
+   * ⚠️ 用 `display: none` 而不是宽度 0 —— 这里要的就是「它不在了」，
+   *    而不是「它被压扁了」。 */
+  @media (width < 64rem) {
+    .events-shell.is-open .events-col {
+      display: none;
+    }
+  }
+
+  /* ⚠️ 减少动效下**不是关掉这个功能**，是让它瞬间到位。让位本身是版面，不是装饰。 */
+  @media (prefers-reduced-motion: reduce) {
+    .events-shell,
+    .events-row,
+    .events-col,
+    .schedule-panel {
+      transition: none;
+    }
+  }
+
+  /* --- 日程本身（2026-08-18）------------------------------------------------
+   *
+   * 上面那一整段是**房间**（面板多宽、多高、钉在哪儿）；这一段是房间里的东西。
+   * 占位框连同 app.js 里那段尺寸读数一起删掉了 —— 它当时的全部用途就是量这间
+   * 房子，房子已经量完了。
+   *
+   * 结构（`events/templates/events/_schedule.html`）：
+   *
+   *   .schedule            一列 flex：翻页行、星期行、滚动区
+   *     .schedule-nav        [‹] Aug 18 – Aug 21 [›]，三档各一份
+   *     .schedule-head       空格 + 四个星期  ← 在滚动区**外面**
+   *     .schedule-scroll     ← 滚的是这一层
+   *       .schedule-grid     高 24 × 每小时，刻度 + 四列
+   *
+   * 🔴 **滚动条在 `.schedule-scroll` 上，不在 `.schedule-panel` 上。** 面板那一层
+   *    是 `overflow: hidden` 且高度定死一屏（上面那段的决定），日历自己装不下的
+   *    部分归自己滚 —— 把面板改成 `overflow: auto` 就等于把「一屏」那条还回去了，
+   *    而且星期那一行会跟着滚走，于是一屏格子说不出自己是哪一天。 */
+  .schedule {
+    /* 🔴 每小时多少像素，**必须和 events/schedule.py 的 PX_PER_HOUR 相等**。
+     *    卡片的 top/height 是那边算好的像素，格线是这里画的 —— 两边不一样时
+     *    什么都不会报错，只是每张卡都和它自己的时间差半格。
+     *    守卫：events.tests.ScheduleGeometryGuardTests.test_the_stylesheet_agrees_with_python_about_the_hour */
+    --schedule-hour: 48px;
+    /* 左边刻度条的宽度。⚠️ 星期行和格子行**共用**这个变量，两行的列才对得齐。 */
+    --schedule-gutter: 2.75rem;
+    /* 重叠时每一档往右下偏多少。⚠️ 偏移是**设计**，档数才是逻辑（在 schedule.py
+     *    里算，落成 `--depth`）。代价如实说：偏下去的那张卡，它的上沿不再精确
+     *    对应它的开始时间 —— 一档 8px 是 10 分钟。完全重叠的两张卡里总得有一张
+     *    让步，而让步 10 分钟换的是「下面那张还看得见」。 */
+    --schedule-offset: 8px;
+    --schedule-line: var(--color-ink-200);
+    /* 列与列之间那道缝。⚠️ 它是「分开两天」的唯一手段（竖线去掉了），
+     *    所以它不能再小：小于 4px 时两列的卡片会读成一列里的两摞。 */
+    --schedule-column-gap: 0.375rem;
+
+    display: flex;
+    height: 100%;
+    flex-direction: column;
+    /* ⚠️ 24 格浅色盘。色值在这里、格数在 schedule.py（PALETTE = 24），
+     *    两个数必须一样：多了会有活动配到一个**没定义**的变量上，而 CSS 对
+     *    未定义的变量不报错，它渲染成一张透明的卡。 */
+    --schedule-fill-0:  #bee1fc;
+    --schedule-fill-1:  #fcdee2;
+    --schedule-fill-2:  #f9ebda;
+    --schedule-fill-3:  #daf0e3;
+    --schedule-fill-4:  #fde1ca;
+    --schedule-fill-5:  #e4ecce;
+    --schedule-fill-6:  #fcfbca;
+    --schedule-fill-7:  #f2e2fc;
+    --schedule-fill-8:  #fcddc8;
+    --schedule-fill-9:  #e2f1fa;
+    --schedule-fill-10: #f0fad2;
+    --schedule-fill-11: #cff1e7;
+    --schedule-fill-12: #cfd6ef;
+    --schedule-fill-13: #dce1c2;
+    --schedule-fill-14: #f0cffc;
+    --schedule-fill-15: #cec9ee;
+    --schedule-fill-16: #ecc7de;
+    --schedule-fill-17: #b7ddd4;
+    --schedule-fill-18: #fdc4d6;
+    --schedule-fill-19: #c0d8ed;
+    --schedule-fill-20: #fcf6c9;
+    --schedule-fill-21: #fddac0;
+    --schedule-fill-22: #f6c1c5;
+    --schedule-fill-23: #bcd9e0;
+  }
+
+  .dark .schedule {
+    --schedule-line: var(--color-ink-700);
+  }
+
+  /* 🔴 **面板本身就是那张卡片**（2026-08-18）—— 模板上是 `class="schedule-panel card"`。
+   *    浅色白卡、深色 `ink-900`、首页有大图时深色下自动变成毛玻璃，全部由
+   *    现成的 `.card` 给（`.dark.has-hero .card:not(.border)`：blur + saturate
+   *    + 方向性高光）。这里一行颜色都不写 —— 写第二套就是分叉的开始。
+   *
+   * 🔴 **`.card` 在这个文件里排在 `.schedule-panel` 后面，它的 `position: relative`
+   *    会盖掉上面那条 `sticky`。** 表现是日程跟着列表一路滚出屏幕，而不是钉在
+   *    顶栏底下 —— 不报错，看起来像「这个功能本来就这样」。
+   *    所以这里用 `.schedule-panel.card`（0-2-0）把它按回去，而不是靠源码顺序：
+   *    顺序是会被下一个人重排的，特异性不会。
+   *    守卫：core.tests.ScheduleShellTests.test_the_panel_is_one_screen_and_stays_put
+   *
+   * ⚠️ 卡片自带 `padding: 1rem`，于是里面那一屏日程矮了 2rem。`.schedule` 是
+   *    `height: 100%`，量的是内容盒，所以它自己跟着缩，不必再算一遍。
+   *
+   * ⚠️ `overflow: hidden` 裁的是**子元素**，裁不到卡片自己的投影 —— 投影画在
+   *    边框盒外面。 */
+  .schedule-panel.card {
+    position: sticky;
+  }
+
+  /* 面板里两块内容：日程，和在它位置上打开的活动详情。
+   * ⚠️ 两块都是 `height: 100%`，因为它们各自要负责自己的滚动 —— 面板是一屏，
+   *    这条从上一批起就没变过。 */
+  .schedule-pane {
+    height: 100%;
+  }
+
+  /* ⚠️ 详情那一层被 HTMX 换掉时里面是空的，而空的块级元素不占高 —— 没关系，
+   *    它被 `x-show` 藏着。这里写下来是因为「为什么它有时候没高度」会被查两次。 */
+
+  /* 详情。⚠️ 用的是**活动详情页那一份模板**，一字不改 —— 它是给 896px 的版心
+   *    写的，而这里只有 680（中间档 424）。
+   *
+   * 🔴 缩小用 `zoom`，不用 `transform: scale()`。scale 只是把画好的东西缩，
+   *    版面照 680px 排完再缩，于是右边空出一条、点击热区也和看到的位置对不上；
+   *    `zoom` 会**重新排版**，等于告诉那一页「你有 800px」（680 ÷ 0.85），
+   *    正好接近它当初被写出来时的宽度。
+   *
+   * ⚠️ 代价如实说：`zoom` 之后这一块里所有的 CSS 像素都不再等于设备像素，
+   *    所以任何拿 `getBoundingClientRect` 在这里面算位置的 JS 都要小心。
+   *    目前没有 —— 日程的那几段 JS 全在另一块 pane 里。 */
+  .schedule-detail {
+    zoom: 0.85;
+    /* 🔴 `height: 100%`，**不是** `calc(100% / 0.85)`。
+     *    第一版写了那个除法，理由是「缩小之后要补回来」—— 量出来是错的：
+     *    百分比在**已经缩放过的**坐标系里解析，所以 100% 渲染出来正好等于
+     *    父元素的高度，再除一次就是重复计算，详情比面板高出 84px。
+     *    多出来的那一截被面板的 `overflow: hidden` 裁掉，**而且滚不到** ——
+     *    屏幕上看起来只是「这个活动没写那么多」。 */
+    height: 100%;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+
+  /* 关闭。⚠️ 钉在右上角、盖在内容上，而不是占一行 —— 面板是一屏，
+   *    一整行只放一颗按钮等于把日历的一小时让出去。 */
+  .schedule-detail-close {
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    float: right;
+    display: inline-flex;
+    height: 1.75rem;
+    width: 1.75rem;
+    align-items: center;
+    justify-content: center;
+    border-radius: 9999px;
+    background-color: var(--color-ink-100);
+    color: var(--color-ink-600);
+    font-size: 1rem;
+    line-height: 1;
+  }
+
+  .schedule-detail-close:hover {
+    background-color: var(--color-ink-200);
+    color: var(--color-ink-900);
+  }
+
+  .dark .schedule-detail-close {
+    background-color: var(--color-ink-700);
+    color: var(--color-ink-200);
+  }
+
+  .dark .schedule-detail-close:hover {
+    background-color: var(--color-ink-600);
+    color: var(--color-ink-50);
+  }
+
+  /* 左边列表上那一圈霓虹：右边正开着的就是这一场（2026-08-18 重做）。
+   *
+   * 真霓虹是**三层**，少一层就只是「一圈彩色描边」：
+   *   ① 玻璃管本身 —— 一道细而**发白**的芯（不是纯主题色：真灯管中心是过曝的）
+   *   ② 贴着管子的浓光 —— 半径小、饱和度高
+   *   ③ 散开的辉光 —— 半径大、很淡，负责「这一块空气被照亮了」
+   *
+   * 🔴 **用 `box-shadow` 而不是 `outline`。** 上一版是 outline，当时写下的理由是
+   *    「box-shadow 那一格被 `.card` 的悬浮影占着，加一条会把它冲掉」——
+   *    那条约束现在解决了（`--card-elevation` 变量），而 outline **画不出辉光**：
+   *    它只有一个宽度和一个颜色，没有模糊半径。
+   *    ⚠️ 悬浮影仍然要跟在列表末尾，少了它选中的那张卡会当场变平。
+   *
+   * 🔴 **绝不能改成给 `::after` 加辉光。** `.event-row > .card` 是
+   *    `overflow: hidden` 的，伪元素的外辉光会被整个裁掉 —— 屏幕上是「有环、
+   *    没有光」，而 CSS 里每一层都写着。元素**自己**的 box-shadow 不受自己的
+   *    overflow 影响，这是这里必须用它的第二个理由。
+   *    （`::after` 那一格也已经被深色玻璃的亮边环占着。）
+   *
+   * ⚠️ 圆角不用写：box-shadow 自动跟着 `.card` 的 12px 走。 */
+  /* ⚠️ 浅色这一档是**克制的**，而且是看过加强版之后**特意退回来的**
+   *    （2026-08-18）：中途试过「实心主题色管芯 + 四层辉光」，屏幕上确实更像
+   *    霓虹，但那不是这一页要的响度 —— 它旁边就是一列安静的白卡片。
+   *    ⚠️ 所以下一个人看到「浅色下光晕比深色弱得多」时，那不是没调完，
+   *       是调过了又收回来的。要动的话先看 revisions.md 四十三。 */
+  .event-row.is-picked > .card {
+    box-shadow:
+      /* ① 芯 */
+      0 0 0 1.5px color-mix(in oklab, var(--color-brand-400) 55%, white),
+      /* ② 浓光 */
+      0 0 6px 1px color-mix(in oklab, var(--color-brand-500) 62%, transparent),
+      /* ③ 辉光 */
+      0 0 18px 3px color-mix(in oklab, var(--color-brand-400) 34%, transparent),
+      var(--card-elevation);
+  }
+
+  /* 深色下放开：芯更亮、辉光更远。
+   * ⚠️ 浅色那一档是**克制**的，不是同一套数值调低 —— 白底会把辉光冲淡，
+   *    照搬深色的半径只会得到一圈脏兮兮的灰蓝。霓虹灯在白天本来就不亮。 */
+  .dark .event-row.is-picked > .card {
+    box-shadow:
+      0 0 0 1.5px color-mix(in oklab, var(--color-brand-300) 70%, white),
+      0 0 10px 1px color-mix(in oklab, var(--color-brand-400) 85%, transparent),
+      0 0 26px 6px color-mix(in oklab, var(--color-brand-400) 52%, transparent),
+      0 0 48px 12px color-mix(in oklab, var(--color-brand-500) 30%, transparent),
+      var(--card-elevation);
+  }
+
+  /* ⚠️ 减少动效下不去掉光圈 —— 它不是动效，是「右边开着的是这一张」这句话的
+   *    全部载体。这里没有 transition 可去，写下来是因为下一个人扫这个文件时
+   *    会问一句。 */
+
+
+  /* 翻页行。三对箭头，一档一对 —— 默认全部不显示，下面每个断点放出一对。
+   *
+   * 🔴 为什么是三对而不是一对加一点 JS：**一次翻几天 = 那一档看得见几列**，
+   *    而那是这里决定的。目标日期由服务端算好（schedule.navigation），
+   *    于是前端一个日期运算都不做。JS 算出来的那一天没有任何测试看得见，
+   *    而算错一天的表现是「按一下跳过了一天」，没有人会报上来。 */
+  .schedule-nav-tier {
+    display: none;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    padding-bottom: 0.5rem;
+  }
+
+  .schedule-range {
+    font-size: 0.8125rem;
+    font-weight: 500;
+    color: var(--color-ink-600);
+    /* ⚠️ 等宽数字：翻页时日期变化，比例字体下整行会左右抖一下。 */
+    font-variant-numeric: tabular-nums;
+  }
+
+  .dark .schedule-range {
+    color: var(--color-ink-300);
+  }
+
+  .schedule-arrow {
+    display: inline-flex;
+    height: 1.75rem;
+    width: 1.75rem;
+    flex: none;
+    align-items: center;
+    justify-content: center;
+    border-radius: 9999px;
+    font-size: 1.125rem;
+    line-height: 1;
+    color: var(--color-ink-600);
+    transition: background-color 150ms ease, color 150ms ease;
+  }
+
+  .schedule-arrow:hover {
+    background-color: var(--color-ink-100);
+    color: var(--color-ink-900);
+  }
+
+  .dark .schedule-arrow {
+    color: var(--color-ink-300);
+  }
+
+  .dark .schedule-arrow:hover {
+    background-color: var(--color-ink-700);
+    color: var(--color-ink-50);
+  }
+
+  /* 到头了。⚠️ 是「画出来但按不动」，不是把它拿掉 —— 拿掉的话另一颗箭头会
+   *    往左跳一格，而那一颗此刻正被人连着点。 */
+  .schedule-arrow.is-spent {
+    color: var(--color-ink-300);
+    pointer-events: none;
+  }
+
+  .dark .schedule-arrow.is-spent {
+    color: var(--color-ink-600);
+  }
+
+  /* 星期行和格子行**同一套列**，否则表头和格子对不齐。
+   * ⚠️ 列数写死在每个断点里，不写成 `repeat(var(--n), …)` —— `repeat()` 的
+   *    次数不接受自定义属性的代换，写了不报错，整条 grid-template-columns 失效，
+   *    四列会叠成一列。 */
+  .schedule-head,
+  .schedule-grid {
+    display: grid;
+    grid-template-columns: var(--schedule-gutter) repeat(4, minmax(0, 1fr));
+    /* ⚠️ 竖线去掉之后，分开两天的**只剩这道缝**，所以它必须两行一致 ——
+     *    表头和格子用不同的缝，星期几就会和它底下那一列错开。 */
+    column-gap: var(--schedule-column-gap);
+  }
+
+  .schedule-head {
+    flex: none;
+    border-bottom: 1px solid var(--schedule-line);
+    padding-bottom: 0.375rem;
+  }
+
+  .schedule-day {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.0625rem;
+    font-size: 0.75rem;
+    line-height: 1.1;
+    color: var(--color-ink-500);
+  }
+
+  .schedule-day-date {
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* 今天：星期行上是主题色，格子那一列整条晕一层极浅的主题色。 */
+  .schedule-day.is-today {
+    color: var(--color-brand-600);
+  }
+
+  .dark .schedule-day.is-today {
+    color: var(--color-brand-300);
+  }
+
+  .dark .schedule-day {
+    color: var(--color-ink-400);
+  }
+
+  .schedule-scroll {
+    flex: 1;
+    /* ⚠️ `min-height: 0` 不能省。flex 项的默认下限是「不许缩到比内容窄/矮」，
+     *    而这里的内容是 1152px 高的一天 —— 少了它，滚动区会把面板整个撑破，
+     *    而面板是 `overflow: hidden`，于是下半天被裁掉、也滚不到。 */
+    min-height: 0;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+
+  .schedule-grid {
+    position: relative;
+    /* ⚠️ 从 `--schedule-gutter` 之后才开始画，刻度那一栏里不要横线。
+     *    `background-position` 的原点因此挪到刻度右边。 */
+    background-image: repeating-linear-gradient(
+      to bottom,
+      var(--schedule-line) 0 1px,
+      transparent 1px var(--schedule-hour)
+    );
+    background-position: var(--schedule-gutter) 0;
+    background-size: calc(100% - var(--schedule-gutter)) 100%;
+    background-repeat: no-repeat;
+  }
+
+  .schedule-gutter {
+    position: relative;
+  }
+
+  /* 整点的字。⚠️ `translateY(-50%)` 让字**骑在**格线上，而不是坐在它下面 ——
+   *    坐在下面的话每个数字看起来都属于它下一个小时。 */
+  .schedule-hour {
+    position: absolute;
+    right: 0.375rem;
+    transform: translateY(-50%);
+    font-size: 0.625rem;
+    line-height: 1;
+    color: var(--color-ink-400);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .dark .schedule-hour {
+    color: var(--color-ink-500);
+  }
+
+  /* 一天一列。
+   *
+   * 🔴 **列与列之间没有竖线**（2026-08-18 改，参考图就是这样）。分开靠的是
+   *    上面 `column-gap` 那道缝 —— 竖线会把四天读成一张表格，而它们是四叠
+   *    并排的卡片。
+   *
+   * 🔴 **整点格线画在 `.schedule-grid` 上，不在列上。** 画在列上的话，每道
+   *    竖缝都会把横线切断一截 —— 一条断成四段的线读起来不是刻度，是四个盒子
+   *    各自的边框，正好把刚去掉的竖线又暗示了回来。
+   *
+   * ⚠️ 格线是一条 repeating-linear-gradient，不是 24 个 div —— 后者是 96 个
+   *    空节点躺在无障碍树里。 */
+  .schedule-col {
+    position: relative;
+  }
+
+  /* ⚠️ `background-color` 和上面那条 `background-image` 是两个属性，所以晕染和
+   *    格线叠在一起，不互相覆盖。写成 `background:` 简写会把格线擦掉。 */
+  .schedule-col.is-today {
+    background-color: color-mix(in oklab, var(--color-brand-500) 7%, transparent);
+  }
+
+  .dark .schedule-col.is-today {
+    background-color: color-mix(in oklab, var(--color-brand-400) 10%, transparent);
+  }
+
+  /* 一张卡。
+   *
+   * ⚠️ `top` / `height` / `--depth` 由模板的行内 style 给 —— 那三个是**数据**
+   *    （这场活动几点开始、多长、压在第几层），不是设计。
+   *
+   * ⚠️ 竖直方向用 `translate` 而不是改 `top`：偏移是画面上的让位，而 `top` 是
+   *    时间。两件事写在同一个属性里，下次想调偏移量就得去动时间的算法。
+   *
+   * 🔴 **水平方向是把 `left` 推进去，不是把整张卡推过去。** 右边缘钉死不动，
+   *    于是每偏一档卡片就窄一点，**永远待在自己那一天里**。
+   *    第一版写的是 `translate: 8px 8px`，在浏览器里当场看出来了：第三档的卡
+   *    探进了隔壁那一列，读起来像是那天的活动 —— 而它在测试里没有任何表现，
+   *    因为测试量的是 top/height/depth，全都是对的。
+   *    代价：最深那一档比第一档窄 24px。96px 一列的中间档上是四分之一。
+   *
+   * ⚠️ `container-type: size` 是给下面那条 @container 用的：卡太矮时把时间那行
+   *    收起来。它要求元素有确定的高度，而这里正好有（行内 style 给的）。 */
+  .schedule-card {
+    position: absolute;
+    left: calc(0.125rem + var(--depth, 0) * var(--schedule-offset));
+    right: 0.25rem;
+    display: block;
+    overflow: hidden;
+    border-radius: 0.5rem;
+    padding: 0.1875rem 0.375rem;
+    background-color: var(--schedule-fill, var(--color-ink-100));
+    color: var(--color-ink-900);
+    translate: 0 calc(var(--depth, 0) * var(--schedule-offset));
+    container-type: size;
+    transition: filter 150ms ease;
+  }
+
+  .schedule-card:hover {
+    filter: brightness(0.96);
+  }
+
+  /* 24 条一行一句的映射。写成 24 个 class 而不是让模板直接写颜色值 ——
+   * 色值是设计，它必须待在样式表里，否则改一次配色要去改 Python。
+   * ⚠️ 这里的条数 = schedule.py 的 PALETTE。少一条，尾巴上那个颜色会落到
+   *    `--schedule-fill` 的兜底值上，也就是一张灰卡混在彩色里。
+   *    守卫：events.tests.ScheduleColourTests.test_every_slot_in_the_palette_has_a_colour_and_a_class */
+  .schedule-card--0 { --schedule-fill: var(--schedule-fill-0); }
+  .schedule-card--1 { --schedule-fill: var(--schedule-fill-1); }
+  .schedule-card--2 { --schedule-fill: var(--schedule-fill-2); }
+  .schedule-card--3 { --schedule-fill: var(--schedule-fill-3); }
+  .schedule-card--4 { --schedule-fill: var(--schedule-fill-4); }
+  .schedule-card--5 { --schedule-fill: var(--schedule-fill-5); }
+  .schedule-card--6 { --schedule-fill: var(--schedule-fill-6); }
+  .schedule-card--7 { --schedule-fill: var(--schedule-fill-7); }
+  .schedule-card--8 { --schedule-fill: var(--schedule-fill-8); }
+  .schedule-card--9 { --schedule-fill: var(--schedule-fill-9); }
+  .schedule-card--10 { --schedule-fill: var(--schedule-fill-10); }
+  .schedule-card--11 { --schedule-fill: var(--schedule-fill-11); }
+  .schedule-card--12 { --schedule-fill: var(--schedule-fill-12); }
+  .schedule-card--13 { --schedule-fill: var(--schedule-fill-13); }
+  .schedule-card--14 { --schedule-fill: var(--schedule-fill-14); }
+  .schedule-card--15 { --schedule-fill: var(--schedule-fill-15); }
+  .schedule-card--16 { --schedule-fill: var(--schedule-fill-16); }
+  .schedule-card--17 { --schedule-fill: var(--schedule-fill-17); }
+  .schedule-card--18 { --schedule-fill: var(--schedule-fill-18); }
+  .schedule-card--19 { --schedule-fill: var(--schedule-fill-19); }
+  .schedule-card--20 { --schedule-fill: var(--schedule-fill-20); }
+  .schedule-card--21 { --schedule-fill: var(--schedule-fill-21); }
+  .schedule-card--22 { --schedule-fill: var(--schedule-fill-22); }
+  .schedule-card--23 { --schedule-fill: var(--schedule-fill-23); }
+
+  /* 已经结束的活动：半透明（2026-08-18 加）。
+   * ⚠️ 用 `opacity` 而不是换一套浅一档的颜色 —— 24 个颜色各配一个「过去版」
+   *    是 24 次分叉的机会，而这里要的本来就是「同一张卡，退后一步」。
+   * ⚠️ 它会过时：页面开着的时候活动会结束。app.js 每 30 秒重判一次，
+   *    所以这条 class 不是渲染完就定死的。 */
+  .schedule-card.is-past {
+    opacity: 0.5;
+  }
+
+  /* 🔴 **深色下卡片颜色一模一样，不兑深底**（2026-08-18 定）。
+   *
+   *    同一天早些时候写的是「把同一个色 color-mix 进 ink-950」，理由是深色界面
+   *    里的大色块要压暗。撤掉了：日程是这一页唯一的彩色信息载体，而「这一场是
+   *    什么颜色」必须在两个模式下是同一个答案 —— 白天记住的粉色，晚上还得是
+   *    那个粉色。
+   *
+   * 🔴 **于是文字必须留在深色。** `.schedule-card` 上那条 `color: ink-900` 对两个
+   *    模式都成立，不能跟着 `.dark` 翻白 —— 浅底白字在这里不是「看不清」，是
+   *    几乎看不见。而深色模式下这个项目别处的规矩全是「文字翻白」，所以这一条
+   *    是最可能被下一个人顺手改掉的，守卫钉着它
+   *    （events.tests.ScheduleColourTests.test_dark_mode_does_not_repaint_the_cards）。
+   *
+   * ⚠️ hover 也跟着改方向：卡片在深色下仍然是浅的，`brightness(1.25)` 会把它冲到
+   *    发白；要的仍然是压暗一点点，和浅色模式同一个方向、同一个值。 */
+  .dark .schedule-card:hover {
+    filter: brightness(0.96);
+  }
+
+  .schedule-card-name {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    overflow: hidden;
+    font-size: 0.6875rem;
+    font-weight: 600;
+    line-height: 1.25;
+  }
+
+  .schedule-card-time {
+    display: block;
+    font-size: 0.625rem;
+    line-height: 1.3;
+    opacity: 0.75;
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* ⚠️ 矮到放不下两行时**收起**时间那行，而不是靠 overflow 把它切一半 ——
+   *    切一半的字比没有字更像坏了。半小时的活动（24px）就是这一档。 */
+  @container (height < 34px) {
+    .schedule-card-time {
+      display: none;
+    }
+  }
+
+  @container (height < 34px) {
+    .schedule-card-name {
+      -webkit-line-clamp: 1;
+    }
+  }
+
+  /* 已取消：灰底 + 删线，不占用彩色盘（2026-08-18 拍板）。
+   * ⚠️ 照常上色是会主动误导人的 —— 报过名的人正是需要看见它黄了的人，
+   *    而一张和旁边一样实的浅色卡读起来是「照常举行」。 */
+  .schedule-card.is-cancelled {
+    background-color: var(--color-ink-100);
+    color: var(--color-ink-500);
+  }
+
+  .schedule-card.is-cancelled .schedule-card-name {
+    text-decoration: line-through;
+  }
+
+  /* ⚠️ 取消的那张**没有**深色版本，和其余 24 格一样（2026-08-18）：
+   *    「两个模式同一个颜色」这条规矩不给它开例外 —— 开了的话，深色下满屏浅色
+   *    卡片里只有它是深灰，读起来会是「另一类东西」，而它要说的只是
+   *    「这一场黄了」，那句话由删除线负责。 */
+
+  /* 红线 —— 只有今天那一列有。
+   * ⚠️ `z-index` 要压过卡片：卡片是后画的，同层时会盖住线，而这条线是这一页上
+   *    唯一一个人会拿来对时间的东西。 */
+  .schedule-now {
+    position: absolute;
+    left: 0;
+    right: 0;
+    z-index: 5;
+    border-top: 2px solid var(--color-danger-fg);
+    pointer-events: none;
+  }
+
+  .dark .schedule-now {
+    border-top-color: var(--color-danger-fg-dark);
+  }
+
+  /* 线左端那个圆点，和参考图一样。 */
+  .schedule-now::before {
+    content: "";
+    position: absolute;
+    left: -3px;
+    top: -4px;
+    height: 6px;
+    width: 6px;
+    border-radius: 9999px;
+    background-color: var(--color-danger-fg);
+  }
+
+  .dark .schedule-now::before {
+    background-color: var(--color-danger-fg-dark);
+  }
+
+  /* 「还剩多久」。挂在**线**上而不是卡上：线压到好几张卡时，一张卡一个倒计时
+   * 是一堆互相矛盾的数字。写的是最快结束的那一场。 */
+  .schedule-now-left {
+    position: absolute;
+    right: 0.25rem;
+    top: -0.625rem;
+    border-radius: 0.25rem;
+    padding: 0 0.25rem;
+    background-color: var(--color-danger-fg);
+    color: white;
+    font-size: 0.5625rem;
+    font-weight: 600;
+    line-height: 1.25rem;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+
+  .dark .schedule-now-left {
+    background-color: var(--color-danger-fg-dark);
+    color: var(--color-ink-950);
+  }
+
+  /* 空的一天不画任何东西 —— 空状态那张虚线卡在这里是错的语言：这一列不是
+   * 「还没有内容」，它就是那天没有活动。 */
+
+  /* --- 三档屏幕看得见几列（2026-08-18 拍板：4 / 2 / 3）----------------------
+   *
+   * 服务端永远画四列，这里决定露几列。
+   * ⚠️ 中间那档只有 424px，四列一列 96px —— 那个宽度上活动名基本只剩一两个字
+   *    就截断了。手机那档日程是**满宽**的，所以反而比中间那档宽，能放三列
+   *    （和参考图的手机版一样）。 */
+  @media (width >= 80rem) {
+    .schedule-nav-tier--4 {
+      display: flex;
+    }
+  }
+
+  @media (64rem <= width < 80rem) {
+    .schedule-nav-tier--2 {
+      display: flex;
+    }
+
+    .schedule-head,
+    .schedule-grid {
+      grid-template-columns: var(--schedule-gutter) repeat(2, minmax(0, 1fr));
+    }
+
+    /* 第一格是刻度条，所以第 N 天是第 N+1 个 —— 藏掉第三、第四天。 */
+    .schedule-head > :nth-child(n + 4),
+    .schedule-grid > :nth-child(n + 4) {
+      display: none;
+    }
+  }
+
+  @media (width < 64rem) {
+    .schedule-nav-tier--3 {
+      display: flex;
+    }
+
+    .schedule-head,
+    .schedule-grid {
+      grid-template-columns: var(--schedule-gutter) repeat(3, minmax(0, 1fr));
+    }
+
+    .schedule-head > :nth-child(n + 5),
+    .schedule-grid > :nth-child(n + 5) {
+      display: none;
+    }
+  }
+
   /* --- 活动列表的一行（2026-08-06 重做）----------------------------------
    *
    * ⭐ **图片是不是正方形，从「量出来的巧合」变成了「结构上必然」。**
@@ -414,8 +1301,9 @@
    *
    *    ⚠️ `--i` 写在 `<li>` 上，靠**继承**传给这两个子元素。所以模板不用改两处。
    *
-   *    ⚠️ 往期活动那一页的 `<li>` **本身就是** `.card`，动画和玻璃在同一个元素上，
-   *       所以那一页从来没坏过 —— 这正好是这个诊断的旁证。
+   *    ⚠️ 当时的往期活动页是这个诊断的旁证：那一页的 `<li>` **本身就是** `.card`，
+   *       动画和玻璃在同一个元素上，所以它从来没坏过。
+   *       （那一页 2026-08-17 删了，旁证留着 —— 它说明的是机制，不是那一页。）
    */
   .event-row > .card,
   .event-row > .event-row-thumb {
@@ -423,12 +1311,9 @@
     animation-delay: calc(min(var(--i, 0), 9) * 55ms);
   }
 
-  /* 往期活动：`<li>` 自己就是卡片，所以动画直接挂它。 */
-  .event-row-past {
-    animation: event-row-in 1260ms cubic-bezier(0.32, 0.72, 0, 1) both;
-    animation-delay: calc(min(var(--i, 0), 9) * 55ms);
-  }
-
+  /* ⚠️ 这里原来还有一条 `.event-row-past`（往期活动那一页的 `<li>` 自己就是卡片，
+   *    动画直接挂它）。那一页 2026-08-17 删了，规则跟着走 —— 留着一条没有元素
+   *    命中的选择器，下一个读这个文件的人会去找那个页面。 */
   @keyframes event-row-in {
     from {
       opacity: 0;
@@ -447,8 +1332,7 @@
    *    会把 delay 一起复位。 */
   @media (prefers-reduced-motion: reduce) {
     .event-row > .card,
-    .event-row > .event-row-thumb,
-    .event-row-past {
+    .event-row > .event-row-thumb {
       animation: none;
       opacity: 1;
       translate: none;
@@ -476,8 +1360,9 @@
    *    ⚠️ 这和玻璃那两次是同一个形状：**这条声明写在哪个元素上，决定了它伤到什么** ——
    *    而看这条声明本身永远看不出来。
    *
-   * ⚠️ 往期活动那一页**不受影响也不需要改**：那里 `<li>` 本身就是卡片，
-   *    所以 `overflow` 一直是挂在卡片上的。它的那一条在下面 `.event-row-past` 里。
+   * ⚠️ 曾经的往期活动页不受这条影响：那里 `<li>` 本身就是卡片，`overflow` 一直挂在
+   *    卡片上。它的规则（`.event-row-past`）随那一页一起删了（2026-08-17）——
+   *    **别再去下面找它**。
    */
   .event-row {
     height: var(--event-row-height);
@@ -505,17 +1390,6 @@
       height: var(--event-row-thumb);
       align-self: center;
     }
-  }
-
-  /* 往期活动那一行多一条正文（ministry 名单独一行），所以高一档：
-   * 2 + 1.75 + 0.5 + 3 × 1.25 = 8rem。那一页没有图片，所以这个值只需要统一。
-   *
-   * ⚠️ 裁剪写在这里，和 Events 页那条（`.event-row > .card`）是**同一件事的两种落法**：
-   *    要裁的始终是「卡片」。这一页 `<li>` 就是卡片，所以挂它自己；
-   *    Events 页卡片是行的子元素，所以挂子元素。挂错的后果见上面那段。 */
-  .event-row-past {
-    --event-row-height: 8rem;
-    overflow: hidden;
   }
 
   /* 铺满整行的链接层（2026-08-06）。
@@ -813,15 +1687,26 @@
     position: relative;
     /* 阴影加重到约 4 倍（2026-08-06）：一层远的扩散负责「悬浮」，一层近的负责
      * 「贴着页面的那道边界」。只有近的那层时卡片是「平贴」，只有远的那层时
-     * 边界会糊掉。 */
-    box-shadow:
+     * 边界会糊掉。
+     *
+     * ⚠️ 值放在 `--card-elevation` 里（2026-08-18），因为**有别的规则要在它前面
+     *    再叠东西**：日程选中的那一行要在卡片外面点一圈霓虹，而 `box-shadow`
+     *    是一个属性、不能累加 —— 直接写第二条会把这两层悬浮影整个换掉，
+     *    卡片当场变平。深浅两个模式只改这个变量，不再各自重写 box-shadow。
+     *
+     * 🔴 「没有影子」那一档写 `0 0 #0000`，**不能写 `none`**。这个变量会被
+     *    代进一串逗号分隔的影子列表里，而 `none` 在列表中间是**语法错误** ——
+     *    浏览器丢掉整条声明，于是霓虹光圈在深色模式下**一起消失**。
+     *    不报错，只是「深色下这个功能没了」。 */
+    --card-elevation:
       0 10px 30px -8px rgb(0 0 0 / 0.28),
       0 2px 8px -2px rgb(0 0 0 / 0.14);
+    box-shadow: var(--card-elevation);
   }
 
   .dark .card {
     background-color: var(--color-ink-900);
-    box-shadow: none;
+    --card-elevation: 0 0 #0000;
   }
 
   /* 正文里的链接。brand-700 白底 7.17:1，深色下 brand-300 配 ink-950 10.10:1。 */
@@ -1898,8 +2783,9 @@
     background-image: linear-gradient(
       140deg, rgb(255 255 255 / 0.07), rgb(255 255 255 / 0) 42%);
     /* 深色下的「悬浮」不能靠黑影（黑影压在暗背景上看不见），靠的是
-     * **卡片外围一圈更暗的晕** —— 在照片亮的地方非常有效。 */
-    box-shadow: 0 14px 34px -10px rgb(0 0 0 / 0.55);
+     * **卡片外围一圈更暗的晕** —— 在照片亮的地方非常有效。
+     * ⚠️ 改的是变量不是 box-shadow，理由在 `.card` 那一段。 */
+    --card-elevation: 0 14px 34px -10px rgb(0 0 0 / 0.55);
   }
 
   /* 亮边（2026-08-06）。要的效果是两条：**看得清**，而且**亮度跟着背景走**。

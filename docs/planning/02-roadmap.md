@@ -5,6 +5,17 @@
 > `01-roadmap.md` 是 Phase A 的实施手册，已完成，留作记录，不再更新。
 >
 > 写于 2026-07-28，**2026-07-29 从 B6 起整段重写**。
+>
+> ⚠️ **本手册里的 `def test_x(self)` 清单是当时的「要钉住什么」，不是代码的索引。**
+> 实现时有十来个名字改了（`inactive` → `retired`、`anonymous_users` →
+> `anonymous_visitors`、加了 `_without_raising` 后缀之类），**清单没跟着改，
+> 也不打算改** —— 它记的是当时想清楚了哪些边界，那件事本身没有过期。
+> 要找现在真正在跑的测试，以代码为准。
+>
+> 两者的分界是**写法**：裸的 `def test_x(self)` 是计划；写成
+> 「某某Tests 点 某个测试名」那种**带类名的引用**才是指向现役代码的，
+> 由 `core.tests.DocTestReferenceGuardTests` 钉着，指不到就红。
+> ⚠️ 所以这一段**没法**举一个真的例子 —— 举了就会被那条守卫当成真引用抓住。
 
 > ## 当前进度与去哪读（2026-07-29）
 >
@@ -1738,6 +1749,8 @@ def sign_up(*, contact, event_role, consent=None):
 ```python
 def test_the_event_list_shows_only_open_events(self)
 def test_a_cancelled_event_does_not_appear_in_the_list(self)      # 补集定义的坑
+#   ⚠️ 2026-08-17 改名为 test_a_cancelled_event_is_listed_saying_it_is_cancelled，
+#      而且断言反过来了：列表现在**会**列出已取消的活动，带一个 Cancelled 标签
 def test_a_signed_up_volunteer_can_still_open_a_confirmed_event(self)   # 可见性 ≠ 可报名
 def test_a_draft_event_detail_page_is_404_for_volunteers(self)
 def test_every_event_status_is_in_exactly_one_of_the_two_sets_or_neither(self)

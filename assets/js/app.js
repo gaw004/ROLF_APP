@@ -969,3 +969,229 @@ function checkinDisplay(root) {
 for (const root of document.querySelectorAll("[data-checkin-display]")) {
   checkinDisplay(root);
 }
+
+// ---------------------------------------------------------------------------
+// 日程：红线、倒计时、以及「已经过去」那半透明（2026-08-18）
+//
+// 这一段接替了占位框那段尺寸读数 —— 那段的全部用途是量右边空出来多大，
+// 量完了，连同 `.schedule-placeholder` 一起删了。
+//
+// 🔴 **这里不做日期运算。** 翻页翻到哪一天是服务端算好的（三对箭头，
+//    events/schedule.py 的 navigation），这里只做一件算术：把两个**绝对时刻**
+//    相减。差值和时区无关 —— 这正是为什么模板给的是 epoch 毫秒，
+//    而不是「今天几点」。
+//
+//    ⚠️ 用浏览器本地的午夜去算红线位置是错的，而且是那种在开发机上永远看不见的
+//       错：基金会的时区是洛杉矶（D16），一个在纽约的志愿者看到的红线会差三小时，
+//       页面上一切正常。
+//
+// ⚠️ 服务端已经把这三样都渲染好了（红线位置、倒计时、半透明），这里是**刷新**，
+//    不是初始化。没有 JS 的人看到的是打开页面那一刻的正确状态；有 JS 的人看到
+//    的是一直对的状态。反过来写（服务端不渲染、全靠 JS）会让没有 JS 的人得到
+//    一张没有红线的日历，而红线是这一页最有用的东西。
+const SCHEDULE_TICK_MS = 30000;
+
+// 一小时多少像素。⚠️ 必须和 app.css 的 `--schedule-hour`、以及
+//    events/schedule.py 的 PX_PER_HOUR 相等。三份，因为三层各自都要用到它，
+//    而它们之间没有任何东西连着 —— 从 CSS 变量里读，就少一份手抄。
+function scheduleHourPx(root) {
+  const raw = getComputedStyle(root).getPropertyValue("--schedule-hour");
+  return parseFloat(raw) || 48;
+}
+
+function paintSchedule(root) {
+  const now = Date.now();
+  const hourPx = scheduleHourPx(root);
+
+  // 已经结束的卡片半透明。⚠️ 每一次都两个方向都设，不能只加不减 ——
+  //    翻页换进来的是新的一批卡，而这个函数也跑在它们身上。
+  for (const card of root.querySelectorAll("[data-schedule-card]")) {
+    card.classList.toggle("is-past", Number(card.dataset.end) <= now);
+  }
+
+  for (const line of root.querySelectorAll("[data-schedule-now]")) {
+    const dayStart = Number(line.dataset.dayStart);
+    // ⚠️ 跨过午夜时这条线会走出它那一列的底部。它属于的那一天已经不是今天了，
+    //    整块日程该重取 —— 但在那之前，把线藏起来，而不是让它挂在列外面。
+    const minutes = (now - dayStart) / 60000;
+    if (minutes < 0 || minutes >= 24 * 60) {
+      line.hidden = true;
+      continue;
+    }
+    line.hidden = false;
+    line.style.top = `${Math.round((minutes / 60) * hourPx)}px`;
+
+    // 红线正压着的那些卡里，最快结束的那一场还剩多久。
+    // ⚠️ 和服务端 _soonest_ending 是同一条规则。两份实现，因为一份要在没有 JS
+    //    时也成立 —— 分叉的表现是刷新一下数字跳一下，所以两边的取整方式
+    //    （都向上取整到分钟）也必须一样。
+    const column = line.closest(".schedule-col");
+    let soonest = null;
+    for (const card of column.querySelectorAll("[data-schedule-card]")) {
+      const start = Number(card.dataset.start);
+      const end = Number(card.dataset.end);
+      if (start <= now && now < end && (soonest === null || end < soonest)) {
+        soonest = end;
+      }
+    }
+
+    let pill = line.querySelector("[data-schedule-left]");
+    if (soonest === null) {
+      if (pill) pill.remove();
+      continue;
+    }
+    if (!pill) {
+      pill = document.createElement("span");
+      pill.className = "schedule-now-left";
+      pill.dataset.scheduleLeft = "";
+      line.appendChild(pill);
+    }
+    pill.textContent = remainingText(soonest - now);
+  }
+}
+
+// "1h 21m left" / "42m left"。⚠️ 向上取整，和 schedule.remaining() 一致 ——
+//    向下取整的话最后 59 秒写的是「0m left」，而那一分钟活动还在进行。
+function remainingText(ms) {
+  const minutes = Math.max(0, Math.ceil(ms / 60000));
+  const hours = Math.floor(minutes / 60);
+  const rest = minutes % 60;
+  if (!hours) return `${rest}m left`;
+  return rest ? `${hours}h ${rest}m left` : `${hours}h left`;
+}
+
+// 打开时滚到哪儿（2026-08-18 定：7am 打底，现在更晚就跟着现在）
+//
+// 🔴 **不从 0:00 开始。** 一天里最不可能有活动的正是凌晨那几个小时，而日程第一眼
+//    如果是一块空白，人得先自己往下拖才知道有没有东西 —— 一屏日历的全部意义
+//    就是不必先做这一步。
+//
+// 规则只有两条，取更晚的那个：
+//   ① 7am 打底 —— 于是 7am–6pm 那 11 小时落在一屏里（11 × 48 = 528px，
+//      而 900px 高的窗口上可视区约 526px，正好）。
+//   ② 「现在」不许掉到屏幕外 —— 傍晚打开时窗口跟着往下走。
+//
+// ⚠️ 凌晨的活动**不会**把窗口自己往上拽。这是明确选择的（2026-08-18）：
+//    宁可让那种少见的情况多滚一下，也不要「每翻一页起点都不一样」。
+//    往上滚一下就看得见，而不可预测的起点是每次都要重新找位置。
+const SCHEDULE_OPENS_AT_HOUR = 7;
+
+function scrollScheduleIntoView(root) {
+  const scroller = root.querySelector("[data-schedule-scroll]");
+  if (!scroller) return;
+  const hourPx = scheduleHourPx(root);
+  let top = SCHEDULE_OPENS_AT_HOUR * hourPx;
+
+  // 「现在」在这个窗口里，而且它已经晚到快要看不见了 —— 跟着它走。
+  // ⚠️ 减掉三分之一屏而不是把红线顶在最上面：刚过去的那一场是人最常回头看的。
+  const line = root.querySelector("[data-schedule-now]:not([hidden])");
+  if (line) {
+    top = Math.max(top, parseFloat(line.style.top) - scroller.clientHeight / 3);
+  }
+
+  // ⚠️ 夹在合法范围里。日程末尾那几个小时是空的，`scrollTop` 设过头浏览器会
+  //    自己截断 —— 但**截断之后读回来的值和写进去的不一样**，而下面没有人再读它。
+  //    写下来是因为将来若要「记住滚动位置」，那件事会从这里开始出错。
+  scroller.scrollTop = Math.max(
+    0, Math.min(top, scroller.scrollHeight - scroller.clientHeight));
+}
+
+// 🔴 **一个计时器、一个监听，挂在文档上，不是一块日程一份。**
+//    翻页和筛选都会把整块日程换成新的 DOM。每换一次就新挂一份的话，旧的那份
+//    既不会被回收也没人停得掉它 —— 翻五十次页就是五十个 `setInterval` 对着
+//    五十棵已经脱离文档的树跑，外加五十个永远摘不掉的 `visibilitychange`。
+//    这在浏览器里看不出来（画面全对），只有页面开久了才慢慢变卡。
+//
+// ⚠️ 2026-08-18：改「打开时滚到哪儿」那次，把这一整段连同上面的函数一起删掉了 ——
+//    红线和「已结束」的刷新就此停摆，而屏幕上打开的第一眼完全正常，
+//    要等一分钟才看得出线没动。是守卫抓住的
+//    （ScheduleGeometryGuardTests.test_the_clock_is_one_timer_on_the_document_not_one_per_block），
+//    不是人看出来的。
+function paintAllSchedules() {
+  for (const root of document.querySelectorAll("[data-schedule]")) paintSchedule(root);
+}
+
+// ⚠️ 回到前台立刻重画。息屏半小时之后回来，`setInterval` 在后台被节流得很凶，
+//    红线可能停在半小时前 —— 而那正是「一条画错位置的红线」。
+setInterval(paintAllSchedules, SCHEDULE_TICK_MS);
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) paintAllSchedules();
+});
+
+// 每一块日程只需要做一次的事：先画一遍，然后滚到该看的地方。
+// ⚠️ `data-schedule-live` 挡的是**重复滚动**：afterSettle 一次请求会触发两回
+//    （主体一次，out-of-band 一次），少了它，人刚拖到的位置会被第二回拽回去。
+function startSchedule(root) {
+  if (root.dataset.scheduleLive) return;
+  root.dataset.scheduleLive = "1";
+  paintSchedule(root);
+  scrollScheduleIntoView(root);
+}
+
+function bootSchedules(scope) {
+  for (const root of scope.querySelectorAll("[data-schedule]")) startSchedule(root);
+}
+
+bootSchedules(document);
+
+// ---------------------------------------------------------------------------
+// 点日程上的一张卡：左边翻到那一场、滚进视口、套一圈高亮（2026-08-18）
+//
+// 服务端在那一次请求里已经把左边换成了正确的一页、并且画上了 `is-picked`。
+// 这里做的是它做不到的两件事：
+//
+//   ① **滚进视口** —— 服务端渲染不了滚动位置。
+//   ② **让高亮活得比那一次响应长** —— 之后每一次筛选、每一次翻页都会把整块
+//      列表换掉，而新换进来的那一份不知道刚才点的是谁。
+//
+// 🔴 这里**不记「哪一页」**，只记一个 pk。记页码的话，筛选一变，同一个页码
+//    指向的是另一批人 —— 而高亮会安静地落在一个陌生的活动上。
+let pickedEvent = null;
+
+function paintPicked() {
+  for (const row of document.querySelectorAll("[data-event]")) {
+    // ⚠️ 两个方向都设。只加不减的话，翻一页回来会留下两圈高亮。
+    // ⚠️ `[data-event]` 同时命中日程上的卡片和列表里的行 —— 前者没有
+    //    `.event-row`，而 `.is-picked` 的样式挂在 `.event-row.is-picked` 上，
+    //    所以给卡片加上这个 class 不会画出任何东西。留着是有意的：将来若要
+    //    在日程那边也标一下「正开着的是这张」，钩子已经在了。
+    row.classList.toggle("is-picked", String(pickedEvent) === row.dataset.event);
+  }
+}
+
+function scrollPickedIntoView() {
+  if (pickedEvent === null) return;
+  const row = document.querySelector(
+    `.event-row[data-event="${CSS.escape(String(pickedEvent))}"]`);
+  // ⚠️ 找不到是**正常**的：那一场可能不在左边的列表里（日程画的是那几天的
+  //    全部，列表还带着「今天起」那一刀），窄屏上那一整列更是 display:none。
+  //    静静地什么都不做，不是报错。
+  if (!row || !row.offsetParent) return;
+  // ⚠️ `block: "center"` 而不是 `"start"` —— start 会把那一行顶到吸顶导航栏
+  //    底下去，正好被盖住一截。
+  row.scrollIntoView({ behavior: "smooth", block: "center" });
+}
+
+// 记下点的是谁。⚠️ 用事件委托挂在 body 上，不是给每张卡各挂一个 ——
+//    卡片每次翻页都被整批换掉，逐张挂等于每翻一次页漏一批监听。
+document.body.addEventListener("click", (event) => {
+  const card = event.target.closest("[data-schedule-card][data-event]");
+  if (!card) return;
+  pickedEvent = card.dataset.event;
+});
+
+// 每一次 HTMX 落地之后补一次。⚠️ `afterSettle` 而不是 `afterSwap`：
+//    左边那一列是 out-of-band 换进来的，afterSwap 时还没落到文档里。
+document.body.addEventListener("htmx:afterSettle", () => {
+  paintPicked();
+  scrollPickedIntoView();
+});
+
+// 翻页和筛选都会把整块日程换掉（一个是普通 swap，一个是 out-of-band），
+// 换进来的是全新的 DOM。
+// ⚠️ `htmx:afterSettle` 而不是 `afterSwap`：out-of-band 的那一块在 afterSwap
+//    时还没落到文档里，于是筛选之后日程会变成一块没有红线、也不会自己滚的
+//    静态图 —— 而它看起来完全正常。
+//    ⚠️ 从 document 起扫，不从 `event.target` 起：out-of-band 换掉的那一块
+//       **不是** target（target 是列表），从 target 起扫会正好漏掉日程。
+document.body.addEventListener("htmx:afterSettle", () => bootSchedules(document));

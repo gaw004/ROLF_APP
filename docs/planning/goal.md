@@ -222,7 +222,7 @@
 
 | # | 靠什么回答 | 状态 |
 |---|---|---|
-| R1 | `Event.start_time` + `Index(start_time)` + `EventQuerySet.in_period()` | ⚠️ 查询就位，**缺页面** —— 2026-07-31 发现 `events_in_period()` 只有测试调用，见 [`phase-c.md`](phase-c.md#phase-b-的五处缺口2026-07-31-发现)。补法：活动列表加时间段筛选 + 一个往期活动页，**所有人可见**（志愿者要靠它挑参加哪一场） |
+| R1 | `Event.start_time` + `Index(start_time)` + `EventQuerySet.in_period()` | ✅ 时间段筛选 + 条数，落在**两处**：志愿者的 `/events/`（今天起，往前看）和管理侧的 All Events（任意窗口，含全部历史）。2026-08-17 **改口**：原本还有一个「所有人可见的往期活动页」，那一页删了 —— 往回看的那一半现在**只有 foundation tier 有**（走 All Events）。志愿者自己参加过的仍在 My Signups。改动的经过见 [`revisions.md`](revisions.md) |
 | R2 | `Event.ministry` | ⚠️ **原设计可空 → 改非空**，见下面模型表 |
 | R3 | `end_time - start_time`，派生不存 | ✅ |
 | R4 | `EventRole` 一行一个工种 | ❌ **原设计没有这张表**，见 [D19](decisions/D19-event-role.md#d19--活动的工种编制-eventrole2026-07-29) |

@@ -60,17 +60,20 @@ def _menu_for(user, administered, foundation):
     Headings are entries too, rather than a nested structure: a flat list is what
     lets one loop number every item, which is the whole point (above).
     """
+    # ⚠️ "Past Events" left this menu on 2026-08-17 along with the page itself.
+    #    Events now starts at today rather than at "not started yet", so the
+    #    one entry covers what the two used to; a volunteer's own finished
+    #    events are on My Signups, and any period at all is on All Events for
+    #    the tier that has it.
     if not user.is_authenticated:
         return [
             _link("Events", "events:event_list"),
-            _link("Past Events", "events:past_events"),
             _link("Log In", "accounts:login"),
             _link("Register", "accounts:register"),
         ]
 
     menu = [
         _link("Events", "events:event_list"),
-        _link("Past Events", "events:past_events"),
         _link("My Signups", "events:my_participations"),
         _link("My Profile", "accounts:profile"),
     ]

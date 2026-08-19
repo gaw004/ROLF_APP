@@ -5,39 +5,125 @@
 版心比默认的 max-w-6xl 窄（2026-08-06）。⚠️ 这不是排版偏好 —— 深色模式下背景是
 首页那张照片，而版心顶到 1152px 时两侧几乎不剩地方，照片等于没有。
 
-⚠️ 三页必须**用同一个值**：Events、Past Events、活动详情。
-   少改一页，从列表点进详情时整块内容会往外一弹 —— 那正是这个项目一直在防的
-   「衔接不丝滑」。管理侧和表单页各有自己的宽度，不受这条影响。
+⚠️ 这一页和活动详情页必须**用同一个值**。少改一页，从列表点进详情时整块内容会
+   往外一弹 —— 那正是这个项目一直在防的「衔接不丝滑」。管理侧和表单页各有
+   自己的宽度，不受这条影响。
+   （原来是三页共用，Past Events 那一页 2026-08-17 删了。）
+
+⚠️ 日程开着的时候，**版心并不变** —— 撑出去的是下面 `.events-shell` 那一层，
+   靠负外边距对称地探出 main 的两侧。为什么不在这里换一个 max-w：那要么把
+   `main_width` 做成一个跟着 Alpine 状态变的 class（base.html 是全站共用的外壳，
+   为一页加一个全局状态），要么把 `<main>` 交给 JS 改 —— 两种都是让别的页面
+   替这一页背一个条件；而 `#messages` 也是 main 的直接子元素，跟着变宽之后
+   提示条会比正文宽一截。几何和那串断点写在 app.css 的 `.events-shell`。
 {% endcomment %}
 {% block main_width %}max-w-4xl{% endblock %}
 
 {% block content %}
   {% comment %}
-  这一页只列 open_for_signup() + 未开始的。筛选发生在查询里，不是在这里用
-  {% if %} 藏起来 —— 模板里不显示 ≠ 数据没发出去。
+  这一页列的是**今天零点起、所有对志愿者可见的活动**（2026-08-17 改）。
+  筛选发生在查询里，不是在这里用 {% templatetag openblock %} if {% templatetag closeblock %} 藏起来 ——
+  模板里不显示 ≠ 数据没发出去。
+
+  ⚠️ 标题不再是「Events Open for Signup」：满员的、取消的、今天上午已经跑完的
+     都在这一页上，各自带着自己的状态标签。标题写「open for signup」就是一句
+     被右边那一列标签当场证伪的话。菜单里那一格也叫 Events，两处一致。
   {% endcomment %}
-  <h1 class="mb-6 text-2xl font-semibold">Events Open for Signup</h1>
+  {% comment %}
+  日程壳（2026-08-17）。左边是原来那一列（筛选卡 + 结果区），右边是日程。
 
-  {% url 'events:event_list' as here %}
-  {% include "events/_period_filter.html" with action=here %}
-  {% include "events/_event_list_results.html" %}
+  ⚠️ `schedule` 这个状态挂在**这里**，不在筛选卡上，也不在结果区里。
+     HTMX 筛选和翻页换掉的是 `#event-results`，而它在这一层里面 ——
+     状态挂在被换掉的那块上，等于每筛一次、每翻一页日程自己关一次。
 
-  <p class="mt-8 text-sm">
-    <a href="{% url 'events:past_events' %}" class="prose-link">Looking for something that already happened?</a>
-  </p>
+  ⚠️ 壳是**标题 + 一行两块**，不是「结果区里多一列」。日程要和筛选卡一样高地
+     立在右边，而筛选卡在结果区外面。
+
+  ⚠️ 标题在这一层、在那一行**外面**：窄屏上开日程会把整列藏起来（app.css 里
+     那条 `display: none`），标题放在列里就会跟着一起消失，于是一屏日程上面
+     什么都没有。
+
+  ⚠️ `x-cloak` 不需要：默认状态就是关着的，而关着的样子和没有 JS 时一模一样。
+  {% endcomment %}
+  <div class="events-shell" x-data="{ schedule: false }"
+       x-bind:class="schedule ? 'is-open' : ''">
+    <h1 class="mb-6 text-2xl font-semibold">Events</h1>
+
+    <div class="events-row">
+      <div class="events-col">
+        {% url 'events:event_list' as here %}
+        {% include "events/_period_filter.html" with action=here schedule_button=1 %}
+        {% include "events/_event_list_results.html" %}
+      </div>
+
+      {% comment %}
+      日程面板（2026-08-18 画上内容，此前是一个虚线占位框）。
+
+      ⚠️ `aria-labelledby` 指向里面那个只给读屏看的 `<h2>`。占位框那一版用的是
+         `aria-label`，因为一个指向空盒子的标题在读屏的标题列表里是条死线索 ——
+         现在里面有东西了，标题就该是真的标题。
+
+      ⚠️ 关着的时候是 `visibility: hidden`（在 app.css 里），不是只有宽度为 0 ——
+         宽度为 0 的东西仍然在无障碍树和 Tab 顺序里，而日程上现在有箭头和
+         几十张卡片，那会是一长串按不到也看不见的焦点。
+
+      ⚠️ 面板自己**不滚**（app.css 上是 `overflow: hidden`）。滚的是里面那一层，
+         见 `_schedule.html`。这两件事分开，是「日程是一屏」那条决定的落点。
+      {% endcomment %}
+      <aside id="schedule-panel" class="schedule-panel card"
+             aria-labelledby="schedule-heading"
+             x-data="{ detail: false }">
+        <h2 id="schedule-heading" class="sr-only">Schedule</h2>
+
+        {% comment %}
+        面板里两块，同一时刻只露一块（2026-08-18）。
+
+        🔴 **日程那一块是藏起来，不是换掉。** 关掉详情时回到的必须是你翻到的
+           那个窗口、那个滚动位置 —— 重新取一次的话，人会发现自己被送回了今天。
+           代价：那块 DOM 一直在（几十张卡片），换来的是「关掉 = 回到原处」。
+
+        ⚠️ `x-show` 用的是 `display: none`，所以藏起来的那一块不在无障碍树里，
+           也不在 Tab 顺序里。
+
+        ⚠️ `x-data` 挂在**面板**上，不在里面任何一块上：`#schedule` 会被箭头
+           翻页整个换掉，`#schedule-detail` 会被每次点击换掉 —— 状态写在被换掉
+           的那块上，等于每换一次自己归零一次。和外层 shell 上那个 `schedule`
+           是同一条规矩。
+
+        ⚠️ 不需要 `x-cloak`：没有 JS 时两块都显示，而详情那块是空的 ——
+           也就是和现在一模一样。
+        {% endcomment %}
+        <div class="schedule-pane" x-show="!detail">
+          {% include "events/_schedule.html" %}
+        </div>
+        {% comment %}
+        ⚠️ HTMX 的靶子**就是这一层**，中间不再套一个 div（2026-08-18 改）。
+           套一层的代价不是多一个节点：那一层高度是 auto，于是里面
+           `.schedule-detail` 的 `height: calc(100% / …)` 落在一个 auto 上、
+           整条失效 —— 详情只占面板的一半高，长活动的下半截被面板的
+           `overflow: hidden` 裁掉，**而且滚不到**。屏幕上看起来只是「这个活动
+           没写那么多」。
+        {% endcomment %}
+        <div class="schedule-pane" id="schedule-detail" x-show="detail"></div>
+      </aside>
+    </div>
+  </div>
 
   {% comment %}
-  飘着的羽毛（2026-08-06）。志愿者那三页里**只有这一页有**，公开首页另有一份。
+  飘着的羽毛（2026-08-06）。志愿者那两页里**只有这一页有**，公开首页另有一份。
 
   ⚠️ 放在 content 的最后，是为了让它待在 `#event-results` **外面** —— HTMX 筛选
      会把那一块整个换掉，容器要是在里面，每筛一次羽毛就被连根拔掉重来。
      （它是 fixed，所以 DOM 位置不影响布局，只影响这一件事。）
 
+  ⚠️ 同理它也在 `.events-shell` **外面**：那一层开日程时会动宽度和外边距，
+     而羽毛铺的是整个视口。放进去就会跟着一起挪。
+
   ⚠️ 不传 `on_photo`：这一页浅色时底是 ink-50、深色时才压照片，
      而深色那一档由 `.dark .feather` 自己管。首页不跟随深色模式，所以那边要传。
 
-  ⚠️ Past Events 和活动详情页上没有（2026-08-06 定）。那两页和这一页共用版心是
-     为了跳转时不弹，而羽毛是叠在上层的独立一层，少了它不会让内容位移。
+  ⚠️ 活动详情页上没有（2026-08-06 定）。那一页和这一页共用版心是为了跳转时不弹，
+     而羽毛是叠在上层的独立一层，少了它不会让内容位移。
   {% endcomment %}
   {% include "core/components/_feather_sky.html" %}
 {% endblock %}

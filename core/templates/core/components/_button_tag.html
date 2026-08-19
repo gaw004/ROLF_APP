@@ -29,8 +29,18 @@ button.html 挑好变体之后落地的那一层。分成两个文件是为了�
      {% if opens %}x-on:click.prevent="{{ opens }} = true"{% endif %}
      {% if confirm %}x-on:click="if (!window.confirm('{{ confirm|escapejs }}')) $event.preventDefault()"{% endif %}>{{ label }}</a>
 {% else %}
-  <button type="{{ type|default:'submit' }}" class="{{ cls }}{% if full %} w-full{% endif %}"
+  {% comment %}
+  ⚠️ `toggles` 强制 `type="button"`，**不接受调用方传别的**。它几乎总是长在
+     表单里（第一个用它的是筛选卡上的 Schedule），而默认的 submit 会让点一下
+     开关变成提交一次筛选 —— 整页重来、状态归零，表现是「点了没反应」。
+     把它交给调用方记住，就是把一个必然会被忘的细节交出去。
+  {% endcomment %}
+  <button type="{% if toggles %}button{% else %}{{ type|default:'submit' }}{% endif %}"
+          class="{{ cls }}{% if full %} w-full{% endif %}"
           {% if disabled %}disabled{% endif %}
+          {% if toggles %}x-on:click="{{ toggles }} = !{{ toggles }}"
+                          x-bind:aria-pressed="{{ toggles }}"
+                          {% if controls %}aria-controls="{{ controls }}"{% endif %}{% endif %}
           {% if name %}name="{{ name }}" value="{{ value }}"{% endif %}
           {% if prints %}x-on:click="window.print()"{% endif %}
           {% if confirm %}x-on:click="if (!window.confirm('{{ confirm|escapejs }}')) $event.preventDefault()"{% endif %}>{{ label }}</button>

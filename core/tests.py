@@ -589,6 +589,93 @@ class NotificationBackendTests(TestCase):
         self.assertFalse(results[0].accepted)
 
 
+class DocTestReferenceGuardTests(TestCase):
+    """Lint-as-test: every **qualified** test name in the docs points at a real one.
+
+    Sibling of MarkdownLinkGuardTests, and for the same reason: the planning
+    documents cite guards constantly ("守卫：`core.tests.XTests.test_y`"), and a
+    citation that no longer resolves fails silently. The reader goes looking for
+    the test that supposedly pins a rule, does not find it, and is left unable
+    to tell which of the two is stale — the rule or the pointer.
+
+    Found two real breaks the day it was written, both from renames months
+    earlier: a class renamed (`StripLayoutTests` → `StripDrawTests`) and a
+    method renamed under a class that still existed.
+
+    ⚠️ **Only qualified references are checked** — `SomeTests.test_x`. The bare
+       `def test_x(self)` lines in 01/02-roadmap are Phase A/B's *checklists of
+       what to pin*, written before the code, and about fifteen of those names
+       drifted during implementation. Those are history, not pointers; the
+       convention is written at the top of 02-roadmap. Checking them here would
+       either fail forever or force a rewrite of a record this project keeps on
+       purpose.
+
+    ⚠️ The method has to live **in the class named**, not merely somewhere. A
+       method that moved class is exactly the case the reader cannot resolve
+       alone, and it is one of the two this test caught.
+
+    2026-08-18 — it now reads the **source** as well as the documents. The gap
+    was found the way these usually are: three dangling citations were written
+    into `assets/app.css` and `events/schedule.py` in one afternoon, by somebody
+    who had just read the commit that added this guard. Docs were checked;
+    comments were not, and a comment saying "守卫：X" is the same promise to the
+    same reader. Everything outside this session's three was already clean, so
+    turning it on cost nothing.
+    """
+
+    REFERENCE = re.compile(r"(?:[a-z_]+\.tests\.)?(\w*Tests)\.(test_[a-z0-9_]+)")
+
+    def suites(self):
+        """{class name: {method names}} across every app's tests.py.
+
+        ⚠️ Not named `test_suites`: the runner collects anything starting with
+           `test_`, so a helper by that name is silently reported as a passing
+           test. Caught here by the count going from 1 to 2.
+        """
+        suites = {}
+        for path in sorted(Path(settings.BASE_DIR).glob("*/tests.py")):
+            source = path.read_text()
+            for block in re.finditer(
+                    r"^class (\w+)\(.*?(?=^class |\Z)", source, re.S | re.M):
+                suites.setdefault(block.group(1), set()).update(
+                    re.findall(r"^    def (test_[a-z0-9_]+)\(", block.group(0), re.M))
+        return suites
+
+    def cited_files(self):
+        """The documents, plus the source files that cite guards in comments.
+
+        ⚠️ `*/tests.py` is excluded, and not as an optimisation: those files are
+           full of bare `test_x` names being *defined*, and a test that renames
+           its own neighbour would then have to update a citation of itself.
+        """
+        root = Path(settings.BASE_DIR)
+        skip = {"node_modules", "staticfiles", ".venv", "migrations", "__pycache__"}
+        found = list(root.glob("docs/**/*.md"))
+        for pattern in ("*/*.py", "*/**/*.html", "assets/*.css", "assets/**/*.js"):
+            found += [path for path in root.glob(pattern)
+                      if not skip & set(path.parts) and path.name != "tests.py"]
+        return sorted(set(found))
+
+    def test_every_cited_guard_exists(self):
+        suites = self.suites()
+        self.assertIn("MarkdownLinkGuardTests", suites, "no test suites were found")
+
+        problems = []
+        for path in self.cited_files():
+            for number, line in enumerate(path.read_text().split("\n"), 1):
+                for suite, name in self.REFERENCE.findall(line):
+                    where = f"{path.relative_to(settings.BASE_DIR)}:{number}"
+                    if suite not in suites:
+                        problems.append(f"{where}  {suite} — no such test class")
+                    elif name not in suites[suite]:
+                        problems.append(f"{where}  {suite}.{name} — no such test")
+        self.assertEqual(
+            problems, [],
+            "A doc points at a guard that does not exist. Either the guard was "
+            "renamed (fix the citation) or it is gone (say so, and say what "
+            "pins the rule now):\n" + "\n".join(problems))
+
+
 class MarkdownLinkGuardTests(TestCase):
     """Lint-as-test: every link in every .md file resolves — file and anchor.
 
@@ -1392,13 +1479,12 @@ class HoverUnderlineTests(TestCase):
         # The reason the rule above exists. If the clamp ever moves off this
         # element, a negative offset becomes harmless again and this pair of tests
         # should be revisited rather than worked around.
-        for template in ["events/_event_list_results.html",
-                         "events/_past_events_results.html"]:
-            with self.subTest(template=template):
-                markup = (Path(settings.BASE_DIR) / "events" / "templates" / template).read_text()
-                name_element = re.search(r'<span class="event-name[^"]*"', markup)
-                self.assertIsNotNone(name_element, f"no .event-name in {template}")
-                self.assertIn("line-clamp", name_element.group(0))
+        # ⚠️ One template since 2026-08-17 — Past Events had the second one.
+        template = "events/_event_list_results.html"
+        markup = (Path(settings.BASE_DIR) / "events" / "templates" / template).read_text()
+        name_element = re.search(r'<span class="event-name[^"]*"', markup)
+        self.assertIsNotNone(name_element, f"no .event-name in {template}")
+        self.assertIn("line-clamp", name_element.group(0))
 
     def test_hovering_the_row_is_what_reveals_it(self):
         # ⚠️ `.event-row:hover`, not `.event-name:hover`. The whole row is one link,
@@ -1895,8 +1981,9 @@ class CardShadowIsNotClippedTests(TestCase):
        other two were `backdrop-filter` (killed by an ancestor's opacity animation,
        then by the card being its own backdrop root).
 
-    ⚠️ Past Events is the same rule with the opposite placement — there the `<li>`
-       **is** the card, so the clip belongs on it. Both are checked below.
+    ⚠️ Past Events used to be the same rule with the opposite placement — there
+       the `<li>` **was** the card, so the clip belonged on it. That page was
+       deleted on 2026-08-17; only the one placement is checked below now.
     """
 
     def rules(self):
@@ -1921,12 +2008,14 @@ class CardShadowIsNotClippedTests(TestCase):
         # ⚠️ The pair matters: dropping the clip entirely would let a long title
         #    spill out of the fixed row height, which is the thing the row height
         #    exists to prevent.
-        for selector in [".event-row > .card", ".event-row-past"]:
-            with self.subTest(selector=selector):
-                self.assertRegex(
-                    self.declarations_for(selector), r"overflow:\s*hidden",
-                    f"nothing clips `{selector}` any more, so content longer than "
-                    f"the fixed row height will spill out of it")
+        # ⚠️ One selector since 2026-08-17. `.event-row-past` was the other, and
+        #    it is gone with the page it dressed — not merely unused: a rule
+        #    nothing can match is a signpost to a page that no longer exists.
+        selector = ".event-row > .card"
+        self.assertRegex(
+            self.declarations_for(selector), r"overflow:\s*hidden",
+            f"nothing clips `{selector}` any more, so content longer than "
+            f"the fixed row height will spill out of it")
 
 
 class EventThumbnailIsStructurallySquareTests(TestCase):
@@ -2000,6 +2089,146 @@ class EventThumbnailIsStructurallySquareTests(TestCase):
                 f"stylesheet with the rest of the geometry.")
 
 
+class ScheduleShellTests(TestCase):
+    """The room the schedule opens into (2026-08-17).
+
+    Two facts about the stylesheet, both of which are invisible on the machine
+    they were written on and expensive on somebody else's.
+    """
+
+    def declarations(self, selector):
+        css = re.sub(r"/\*.*?\*/", "",
+                     (Path(settings.BASE_DIR) / "assets" / "app.css").read_text(),
+                     flags=re.S)
+        blocks = [body for sel, body in re.findall(r"([^{}]+?)\{([^{}]*?)\}", css, re.S)
+                  if selector in {one.strip() for one in sel.split(",")}]
+        self.assertTrue(blocks, f"`{selector}` is gone from app.css")
+        return "\n".join(blocks)
+
+    def test_the_closed_shell_is_exactly_the_page_it_replaced(self):
+        """⚠️ Everybody who has not pressed the button sees this state, so it has
+           to be `width: 100%` and nothing else — no width of its own, no
+           margin. Anything else silently redesigns the default view of the
+           busiest page in the app in exchange for a feature nobody asked to
+           have on.
+        """
+        block = self.declarations(".events-shell")
+        self.assertRegex(block, r"width:\s*100%")
+        self.assertNotRegex(
+            block, r"margin-left:\s*-",
+            "the pull belongs in the `.is-open` rules, not on the resting state")
+
+    def test_the_open_widths_never_come_from_vw(self):
+        """🔴 `100vw` includes the vertical scrollbar; a media query does not.
+
+        So `min(78rem, calc(100vw - 2rem))` overflows by the width of the
+        scrollbar on the viewports where the clamp is doing anything at all —
+        and the symptom is the whole page sliding sideways, which looks like a
+        broken card rather than like a width. This file already records the same
+        bug happening once, on the filter row.
+
+        The widths therefore live inside media queries, which have the room
+        already, and are written as plain rem.
+        """
+        css = re.sub(r"/\*.*?\*/", "",
+                     (Path(settings.BASE_DIR) / "assets" / "app.css").read_text(),
+                     flags=re.S)
+        shell = "\n".join(
+            block for block in re.findall(r"\.events-shell[^{]*\{[^}]*\}", css, re.S))
+        self.assertNotIn("vw", shell,
+                         "a viewport unit in the shell's geometry — see the "
+                         "docstring, this is the scrollbar trap")
+
+    def test_the_panel_is_one_screen_and_stays_put(self):
+        """日程是一屏，钉在那儿 —— 不是一根跟着列表长的长条。
+
+        ⚠️ 三条声明缺一不可，而少任何一条都**不报错**：
+           `position: sticky` 少了 → 日历跟着卡片滚出屏幕；
+           显式高度少了 → flex 项被拉成整行高，和包含块一样高，
+                          于是 sticky 没有可粘的行程，看起来像没写；
+           `align-self: flex-start` 少了 → 同上，stretch 会盖掉高度。
+        """
+        block = self.declarations(".schedule-panel")
+        self.assertRegex(block, r"position:\s*sticky")
+        self.assertRegex(block, r"align-self:\s*flex-start")
+        self.assertRegex(block, r"height:\s*calc\(100svh")
+
+    def test_the_panel_clears_the_sticky_top_bar(self):
+        # `top: 0` would slide the panel's first rows under the white bar —
+        # on a calendar that is exactly the row naming the days.
+        block = self.declarations(".schedule-panel")
+        self.assertNotRegex(block, r"top:\s*0")
+        self.assertRegex(block, r"top:\s*calc\(var\(--top-bar-h\)")
+
+    def test_the_top_bar_is_still_the_height_this_assumes(self):
+        """🔴 `--top-bar-h` is a **measured** number, and the first version of it
+        was a derived one that was wrong.
+
+        Derived from "the bar is `text-sm`, so 20px of text plus its padding" it
+        came out at 52 / 60px. The browser says 68 / 76: the tallest thing in
+        that row is not the text at all, it is the **theme toggle** — `p-2`
+        around an `h-5 w-5` icon, 8+20+8 = 36px. Plus the nav's `py-4` /
+        `sm:py-5`: 36+32 and 36+40.
+
+        So this pins the three utilities the number actually comes from. Pin
+        only the padding and you are guarding a derivation that does not hold —
+        which is exactly how it was wrong the first time. When it is wrong
+        nothing errors; the calendar just has a strip cut off its top, behind a
+        white bar that looks like it is supposed to be there.
+        """
+        markup = (Path(settings.BASE_DIR) / "core" / "templates" / "core"
+                  / "components" / "_top_bar.html").read_text()
+        nav = re.search(r"<nav[^>]*>", markup).group(0)
+        self.assertIn("py-4", nav)
+        self.assertIn("sm:py-5", nav)
+
+        # The theme toggle: the tallest child, and therefore the real owner of
+        # the bar's height.
+        toggle = re.search(r'<button[^>]*x-data="themeToggle"[^>]*>', markup)
+        self.assertIsNotNone(toggle, "the theme toggle moved; re-measure the bar")
+        self.assertIn("p-2", toggle.group(0))
+        icon = re.search(r'<svg class="h-5 w-5[^"]*"', markup)
+        self.assertIsNotNone(icon, "the toggle's icon is no longer h-5; re-measure")
+
+        css = re.sub(r"/\*.*?\*/", "",
+                     (Path(settings.BASE_DIR) / "assets" / "app.css").read_text(),
+                     flags=re.S)
+        self.assertIn("--top-bar-h: 4.25rem", css)   # 36 + 2 × 16
+        self.assertIn("--top-bar-h: 4.75rem", css)   # 36 + 2 × 20
+
+        # ⚠️ 2026-08-18 起有**两处**声明它：日程面板，和日程开着时钉住的筛选卡。
+        #    两块并排的东西钉在不同的高度上是一眼看得出来的错位，而各改一处
+        #    不会报错。所以这里钉的是「所有声明只有这两个值」。
+        declared = set(re.findall(r"--top-bar-h:\s*([\d.]+rem)", css))
+        self.assertEqual(declared, {"4.25rem", "4.75rem"},
+                         "有人给 --top-bar-h 加了第三个值，钉在顶上的两块会错开")
+
+    def test_the_panel_is_hidden_rather_than_merely_narrow(self):
+        # A zero-width panel is still in the accessibility tree and still in the
+        # tab order — the calendar's buttons would be focusable and invisible.
+        self.assertRegex(self.declarations(".schedule-panel"),
+                         r"visibility:\s*hidden")
+
+    def test_the_column_can_actually_shrink(self):
+        # flex items default to `min-width: auto` ("never narrower than your
+        # content"), and this column holds fixed-width thumbnails and a row of
+        # buttons that does not wrap. Without this, opening the schedule
+        # squeezes the panel instead of the list.
+        self.assertRegex(self.declarations(".events-col"), r"min-width:\s*0")
+
+    def test_reduced_motion_keeps_the_layout_and_drops_only_the_travel(self):
+        """⚠️ Not `display: none` on the panel, not a disabled button: making
+           room is layout, and somebody who has asked for less motion still
+           wants the schedule. Only the 560ms of travel goes.
+        """
+        css = (Path(settings.BASE_DIR) / "assets" / "app.css").read_text()
+        block = re.search(
+            r"@media \(prefers-reduced-motion: reduce\) \{\s*\.events-shell.*?\n  \}",
+            css, re.S)
+        self.assertIsNotNone(block, "the shell has no reduced-motion rule")
+        self.assertIn("transition: none", block.group(0))
+
+
 class EventRowEntranceTests(TestCase):
     """Cards come in one after another, like the menu items (2026-08-06).
 
@@ -2056,6 +2285,17 @@ class EventRowEntranceTests(TestCase):
     def entrance_blocks(self):
         return [body for _, body in self.entrance_rules()]
 
+    def row_template(self):
+        """The one template that draws event rows.
+
+        ⚠️ There were two until 2026-08-17 (Past Events had its own, where the
+           `<li>` itself was the card). Both loops that used to walk the pair
+           are single-file now, and the two tests below still exist for the same
+           reason: they pin the *premises* the animation rules depend on.
+        """
+        return (Path(settings.BASE_DIR) / "events" / "templates" / "events"
+                / "_event_list_results.html").read_text()
+
     def test_the_animation_is_not_on_an_ancestor_of_the_glass(self):
         """🔴 The bug this exists for: **the entrance silently switched the glass
         off on the whole Events page**, and neither rule looked wrong.
@@ -2073,8 +2313,10 @@ class EventRowEntranceTests(TestCase):
            destroy it. That distinction is the whole rule, and it is the reason
            the fix was "move it down one level" rather than "drop the fade".
 
-        ⚠️ Past Events is not affected and must not be "fixed" to match: there the
-           `<li>` **is** the card, so the animation is already on the glass itself.
+        ⚠️ Past Events used to be the counter-example here — there the `<li>`
+           **was** the card, so the animation sat on the glass itself and that
+           page never broke. The page is gone (2026-08-17); the observation is
+           kept because it is what proved the diagnosis.
         """
         for selector in self.entrance_selectors():
             with self.subTest(selector=selector):
@@ -2097,22 +2339,12 @@ class EventRowEntranceTests(TestCase):
         # The reason the rule above exists. If `scroll-breathe` ever leaves these
         # rows, `transform` becomes free again and this pair should be revisited
         # rather than worked around.
-        for template in ["events/_event_list_results.html",
-                         "events/_past_events_results.html"]:
-            with self.subTest(template=template):
-                markup = (Path(settings.BASE_DIR) / "events" / "templates"
-                          / template).read_text()
-                row = re.search(r'<li class="event-row[^"]*"', markup).group(0)
-                self.assertIn("scroll-breathe", row)
+        row = re.search(r'<li class="event-row[^"]*"', self.row_template()).group(0)
+        self.assertIn("scroll-breathe", row)
 
     def test_every_row_is_numbered(self):
         # Without `--i` the whole list shares one delay and arrives as a block.
-        for template in ["events/_event_list_results.html",
-                         "events/_past_events_results.html"]:
-            with self.subTest(template=template):
-                markup = (Path(settings.BASE_DIR) / "events" / "templates"
-                          / template).read_text()
-                self.assertIn("--i: {{ forloop.counter0 }}", markup)
+        self.assertIn("--i: {{ forloop.counter0 }}", self.row_template())
 
     def test_the_delay_is_capped(self):
         """⚠️ A page holds 20 cards. Uncapped, the last waits 1.05s — and every
@@ -2578,9 +2810,10 @@ class SiteMenuTests(TestCase):
             legal_last_name="Mei")
 
     def test_a_stranger_sees_only_the_public_entries(self):
+        # ⚠️ "Past Events" was between Events and Log In until 2026-08-17.
         self.assertEqual(
             self.labels(self.menu()),
-            ["Events", "Past Events", "Log In", "Register"])
+            ["Events", "Log In", "Register"])
 
     def test_an_ordinary_volunteer_gets_no_admin_heading(self):
         # ⭐ The one that matters most: a heading called "Ministry admin" drawn
@@ -3701,8 +3934,11 @@ class SharedFragmentGuardTests(TestCase):
         return re.sub(r"\{%\s*comment\s*%\}.*?\{%\s*endcomment\s*%\}",
                       "", self.markup(path), flags=re.S)
 
+    # ⚠️ 活动详情这一格指的是 `_event_detail_body.html`，不是 `event_detail.html`
+    #    （2026-08-18 正文抽出去了，因为日程面板里就地打开的是同一份）。
+    #    守的是那份**正文**，而不是外面那层壳 —— 壳里现在只有一个 include。
     SIGNUP_LISTS = [
-        Path("events") / "templates" / "events" / "event_detail.html",
+        Path("events") / "templates" / "events" / "_event_detail_body.html",
         Path("events") / "templates" / "events" / "event_registrations.html",
     ]
 

@@ -24,7 +24,7 @@ from contact.models import Contact, RelationshipType
 from core.constraints import ConstraintErrorFieldMixin
 from core.limits import LONG_TEXT, SHORT_TEXT
 from core.models import ImmutableCodeMixin, TimeStampedModel
-from core.timeutils import local_now
+from core.timeutils import day_start, local_today
 from org.models import Ministry
 
 
@@ -120,7 +120,7 @@ class ParticipationRole(ImmutableCodeMixin, ConstraintErrorFieldMixin, models.Mo
 
 
 class EventQuerySet(models.QuerySet):
-    """Two predicates, because status is answering two different questions.
+    """Two status predicates, because status is answering two different questions.
 
     Event.status carries the lifecycle (draft → open → confirmed → completed /
     cancelled) *and* the visibility of the event to volunteers, and those are
@@ -143,25 +143,65 @@ class EventQuerySet(models.QuerySet):
         """Everything a volunteer may still sign up for."""
         return self.filter(status__in=Event.OPEN_FOR_SIGNUP)
 
-    def upcoming(self, now=None):
-        """Not started yet.
+    # ⚠️ `upcoming()` (start_time >= now) and `past()` (end_time < now) lived
+    #    here until 2026-08-17. They went with their last callers — the Past
+    #    Events page, and event_list's old window — and are **not** kept "in
+    #    case the calendar wants one": an unused predicate has nothing checking
+    #    it and reads to the next person as a supported way of doing things.
+    #    Same reasoning that deleted the old Memories rules; the opposite
+    #    mistake is the one R1 recorded, where in_period() sat here with no
+    #    caller but the tests and the requirement went unanswered for a month.
+    #
+    #    ⚠️ 2026-08-18: from_today() below now reads end_time, so it is much
+    #       closer to the `past()` those two deleted predicates split badly —
+    #       and that is the point. Splitting "is it over" across two predicates
+    #       read off two columns is what left a running overnight event falling
+    #       between them. One predicate, one column, one question.
 
-        Here rather than in the view: a view holding date arithmetic is one that
-        gets rewritten along with the templates, and there is a grep guard
-        saying so.
+    def from_today(self, today=None):
+        """Today's events and everything after them — what /events/ is a list of.
+
+        ⚠️ The boundary is **midnight in the foundation's timezone**, not `now`.
+           An event that ran this morning is still one of today's: it stays on
+           the page until the day rolls over, wearing "Completed". Cutting at
+           `now` would make the list drop a row at the instant that event
+           ended — and the schedule drawn beside it would be showing today with
+           its morning missing.
+
+        🔴 **Read off end_time (2026-08-18), not start_time.** The question this
+           answers is "is it still to come, or still going", and end_time is the
+           column that knows. One row of behaviour changed: an event that began
+           at 22:00 yesterday and ends at 02:00 this morning is **in** — it used
+           to drop off the page at midnight while it was still running, and the
+           schedule beside the list drew it on today's column the whole time,
+           so clicking it led to a row the list did not have.
+
+           ⚠️ The comment this replaced argued that end_time "would keep last
+              month's three-day trip on the page for as long as it ran over".
+              That conflated two things: reading end_time, and keeping finished
+              events. A trip that ended last month has `end_time` in the past,
+              so it is out — by this predicate, on the first evaluation. What
+              stays is a multi-day event **while it is still running**, which is
+              the correct answer to "what is on".
+
+           The cost, stated: such an event sits on the list every day until it
+           ends, and because the page orders by start_time it sorts to the
+           **top** — above things starting later today. That is deliberate; it
+           is the one still in progress.
+
+        ⚠️ So this no longer slices on the same column in_period() does. The two
+           are answering different questions and always were: R1 asks "which
+           events ran in this window" (start_time, matching how a report counts
+           them), this asks "what is on from today". Reading them off one column
+           is what made the overnight case wrong.
+
+        ⚠️ The filter column is **not** the indexed one any more (the indexes are
+           on start_time, and on (status, start_time)). Left alone deliberately:
+           the pilot has tens of events, so there is nothing to optimise yet —
+           the same call this file's search filter makes. When there is, the
+           index to add is (status, end_time), not one on end_time alone.
         """
-        return self.filter(start_time__gte=now or local_now())
-
-    def past(self, now=None):
-        """Already over — paired with upcoming(), and deliberately not its negation.
-
-        ⚠️ Read off end_time, not start_time. An event that began this morning
-           and runs until tonight is neither upcoming nor past, and calling it
-           past would file a running event under history while people are still
-           checking in. The two methods leave that gap on purpose; "not
-           upcoming" would have silently closed it.
-        """
-        return self.filter(end_time__lt=now or local_now())
+        return self.filter(end_time__gt=day_start(today or local_today()))
 
     def in_period(self, start, end):
         """R1: the events that ran in a window, half-open [start, end).

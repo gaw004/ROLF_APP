@@ -6,10 +6,22 @@ app_name = "events"
 
 urlpatterns = [
     # B9 — the volunteer's own pages
+    # ⚠️ This one now lists **today's events and everything after**, whatever
+    #    their status — not just what is open (2026-08-17). `events/past/` was
+    #    removed in the same change; nothing replaced the route, so an old link
+    #    to it 404s rather than landing on a page that answers a different
+    #    question while looking like the one they bookmarked.
     path("events/", views.event_list, name="event_list"),
-    # C0.2.3 — R1. `past` before `<int:pk>`, same reason as `new` below.
-    path("events/past/", views.past_events, name="past_events"),
+    # 日程翻页换掉的那一块（2026-08-18）。
+    #
+    # ⚠️ 它和下面 `new` / `manage` 那几条**不是**同一种情况，别照抄它们的注释：
+    #    `<int:pk>` 只吃数字，所以 "schedule" 撞不上它，顺序在这里无所谓。
+    #    写在这里只是因为它属于 event_list 那一页。
+    path("events/schedule/", views.event_schedule, name="event_schedule"),
     path("events/<int:pk>/", views.event_detail, name="event_detail"),
+    # 日程上点一张卡时换进面板的那一块（2026-08-18）。⚠️ 同一份模板、同一份
+    # 上下文、同一道权限，只是外面少了一层页面 —— 见 views.event_detail_panel。
+    path("events/<int:pk>/panel/", views.event_detail_panel, name="event_detail_panel"),
     path("events/<int:pk>/signup/", views.event_signup, name="event_signup"),
     path("me/participations/", views.my_participations, name="my_participations"),
     # D28 — the two halves of a scan. `confirm` comes first for the same reason

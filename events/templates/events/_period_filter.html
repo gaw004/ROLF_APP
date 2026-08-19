@@ -3,12 +3,19 @@
 
 ⭐ 这是一个**读操作**，所以按 D24 的口径它可以只有 HTMX 一条路 —— 但它偏偏
    不需要：`method="get"` 的普通表单本来就能用，HTMX 只是省掉整页重绘。
-   关掉 JavaScript，筛选照样工作。
+   关掉 JavaScript，筛选照样工作（见下面 `<noscript>` 里那颗按钮）。
+
+⚠️ **实时筛选**（2026-08-17）：不再有 `Filter` 按钮，改字、改日期、换 ministry
+   都在停手 400ms 之后自己去取。三件事因此变了，都写在下面表单标签那一段：
+   触发器、`hx-replace-url`、以及那颗只对没有 JS 的人存在的提交按钮。
 
 参数：
-  action        表单要打的 URL
-  report_button 真值 → 多一个「Generate report」按钮（只有管理列表用）
-  scope         可选。给了就随表单一起提交（隐藏字段），并且带进「Clear」
+  action          表单要打的 URL
+  report_button   真值 → 多一个「Generate report」按钮（只有管理列表用）
+  schedule_button 真值 → 多一个「Schedule」开关，外加一个隐藏的 `from`
+                  （日程翻到了哪一天）。只有 Events 页用。
+  schedule_from   配 schedule_button 用，当前日程窗口的第一天
+  scope           可选。给了就随表单一起提交（隐藏字段），并且带进「Clear」
 
 ⚠️ `scope` 必须是**隐藏字段**，不能只写在 action 的查询串里。`method="get"` 的表单
    提交时浏览器会把 action 上的查询串**整个丢掉**，换成表单自己序列化出来的那一份 ——
@@ -16,11 +23,70 @@
    而列表看起来完全正常（只是少了别人的活动）。
    翻页不受影响，那边走 `{% templatetag openblock %} querystring {% templatetag closeblock %}`，它保留全部参数。
 {% endcomment %}
+{% comment %}
+实时筛选的三条属性，每一条都在挡一个具体的毛病：
+
+⚠️ `hx-trigger="input delay:400ms, submit"` —— 事件从各个输入框**冒泡到表单**，
+   所以一条写在这里就够，不必给每个字段各挂一份（字段是 `field.html` 渲染的，
+   给它加 hx 属性就等于让全站所有表单都长出筛选的行为）。
+
+   ⚠️ 用 `input` 而**不是** `keyup`：`keyup` 抓不到从剪贴板粘进来的字、
+      抓不到手机输入法的候选词、也抓不到浏览器给 `type="search"` 那颗清除按钮。
+      三种情况的表现都一样 —— 框里的字变了，列表没动。
+
+   ⚠️ 不写 `changed`：那个修饰符读的是**挂着触发器的那个元素**的 `value`，
+      而这里挂在 `<form>` 上，`form.value` 是 undefined —— 于是「值变了没」
+      永远答「没变」，一次请求都不会发出去。
+
+   ⚠️ 400ms 这一档同样落在下拉框和日期框上（它们也发 `input`），
+      所以选一个 ministry 之后也要等这 400ms。知情的取舍：换成
+      `input, change` 两个触发器的话，选一次下拉会**发两次请求**
+      （`change` 立刻发，`input` 的 400ms 到点再发一次）。
+
+   ⚠️ `submit` 要留着：没有提交按钮的表单，在文本框里按回车时浏览器
+      **仍然可能**触发隐式提交（几个字段时各家行为不一）。不接住它，
+      按一次回车就是一次整页刷新。
+
+⚠️ `hx-replace-url` 而不是 `hx-push-url`：实时筛选下，push 是**每敲一个字
+   （防抖之后）往历史里塞一条**。搜 "kitchen" 之后想退回上一页，得按七次后退。
+   replace 保住了「这一份筛选可以被收藏、被转发」，同时让后退键仍然是
+   「回到我进来之前那一页」。
+
+⚠️ `hx-sync="this:replace"` —— 防抖**减少**并发，但消不掉它：网慢的时候
+   「kitchen」那次的请求可能比「kitch」那次先发出、后回来，而 htmx 默认是
+   谁回来谁贴上去。表现是**列表显示的是你上一个字的结果**，而搜索框里写着
+   新的字；下一次敲键又会自己好，所以它看起来像「偶尔抽一下」。
+   `replace` 让新的一次直接顶掉还在飞的那一次，于是屏幕上永远是最后一次输入的答案。
+
+⚠️ `hx-indicator` 比原来更要紧：以前有按钮，按下去就是反馈；现在唯一说明
+   「你的字已经收到了、正在取」的东西就是它。
+{% endcomment %}
 <form method="get" action="{{ action }}"
       hx-get="{{ action }}" hx-target="#event-results" hx-swap="outerHTML"
-      hx-push-url="true" hx-indicator="#filter-busy"
-      class="card mb-6">
+      hx-trigger="input delay:400ms, submit"
+      hx-sync="this:replace"
+      hx-replace-url="true" hx-indicator="#filter-busy"
+      {% comment %}
+      ⚠️ `filter-card` 是**给 CSS 用的钩子**，不是样式（外观仍然是 `.card`）。
+         日程开着时这张卡要钉在顶上，而那条规则得挂在一个稳定的选择器上 ——
+         靠 `form.card` 去匹配会命中将来任何一张长在表单里的卡片。
+         同 `.btn` / `.event-row` 那几个钩子的理由。
+      {% endcomment %}
+      class="filter-card card mb-6">
   {% if scope %}<input type="hidden" name="scope" value="{{ scope }}">{% endif %}
+  {% if schedule_button %}
+    {% comment %}
+    日程翻到了哪一天（2026-08-18）。⚠️ 它必须是这张表单里的一个**字段**，
+    理由和上面 `scope` 那一段一模一样：`method="get"` 的表单提交时只带它自己
+    序列化出来的那一份，action 上的查询串整个丢掉。少了这一行，翻到第三屏之后
+    随便改一个筛选，日程就自己弹回起点 —— 而列表看起来完全正常。
+
+    ⚠️ 箭头翻页时由 `_schedule.html` 用 out-of-band 把这里改掉。两处必须一致，
+       否则「先翻页、再筛选」会退回翻页之前的窗口。
+    {% endcomment %}
+    <input type="hidden" name="from" id="schedule-from"
+           value="{{ schedule_from|date:'Y-m-d' }}">
+  {% endif %}
   {% comment %}
   ⚠️ `w-fit max-w-full` 是搜索框宽度的**全部机关**（2026-08-06）。
 
@@ -64,7 +130,20 @@
   <div class="w-full min-w-0 sm:w-auto">{% include "core/components/field.html" with field=period.start %}</div>
   <div class="w-full min-w-0 sm:w-auto">{% include "core/components/field.html" with field=period.end %}</div>
   <div class="flex flex-wrap items-center gap-2">
-    {% include "core/components/button.html" with label="Filter" variant="primary" %}
+    {% comment %}
+    ⚠️ 这里原来是一颗 `Filter` 主按钮（2026-08-17 撤掉）。筛选实时之后它是一颗
+       **按不按都一样**的按钮，而一颗点了什么都不改变的按钮比没有按钮更难懂 ——
+       人会以为自己漏了一步。
+
+    ⚠️ 但它对**没有 JavaScript 的人**不是多余的：那条路上表单要靠提交才走。
+       `<noscript>` 里的内容只在 JS 关掉时才渲染，所以这颗按钮对其余所有人
+       不存在，对他们则照旧是唯一那条完整的服务端路径（D24 的渐进增强）。
+       ⚠️ 别改成 `x-show` / CSS 藏起来：那样它仍然在 DOM 和 Tab 顺序里，
+          键盘用户会 Tab 到一颗看不见的按钮上。
+    {% endcomment %}
+    <noscript>
+      {% include "core/components/button.html" with label="Filter" variant="primary" %}
+    </noscript>
     {% if report_button %}
       {% comment %}
       ⚠️ 报表**不跟着筛选实时算**（2026-08-05 拍板）。十三个指标是十来条聚合查询，
@@ -74,8 +153,14 @@
          「要不要报表」一起进 URL，这一份报表可以被收藏、被转发、被刷新。
          另开一个表单的话两边的日期会各填各的。
 
-      ⚠️ 反过来：点「Filter」不带 report，报表就消失。一份算给旧筛选的报表贴在
-         新列表旁边，是会主动误导人的 —— 那两个东西看起来属于同一页。
+      ⚠️ 反过来：不带 report 的那次请求一到，报表就消失。一份算给旧筛选的报表
+         贴在新列表旁边，是会主动误导人的 —— 那两个东西看起来属于同一页。
+
+      ⚠️ 筛选实时之后这条**更常发生**（2026-08-17）：出了报表再去改一个日期，
+         报表当场消失。这不是回归，是同一条规矩在新的触发频率下的样子 ——
+         提交按钮的 name/value 只有**点它那一次**才会带上，实时那条路带不上。
+         真要让报表跟着筛选活，那是「十来条聚合查询挂在每一次敲键上」，
+         正是这颗按钮当初被拆出来的原因。
       {% endcomment %}
       {% include "core/components/button.html" with label="Generate report" variant="secondary" name="report" value="1" %}
     {% endif %}
@@ -89,9 +174,30 @@
     {% else %}
       {% include "core/components/button.html" with label="Clear" href=action variant="ghost" %}
     {% endif %}
+    {% if schedule_button %}
+      {% comment %}
+      日程开关（2026-08-17）。点一下，列表整体往左让出右侧，日程画在腾出来的地方。
+
+      ⚠️ **排在最后**，因为它不是同一类事：前面那些是「对这次筛选做点什么」，
+         这一颗是「换一种看法」。挨着 Clear 放在它前面会让两者看起来二选一。
+
+      ⚠️ 它**不是这张表单的第二个提交**（`Generate report` 才是）。日程开的是一个
+         版面状态，不是一次查询 —— 走 URL 的话每开关一次都要往服务器跑一趟，
+         还会丢掉当前的滚动位置。`toggles` 因此强制 `type="button"`：
+         默认的 submit 会让「点一下开关」变成「提交一次筛选」。
+
+      ⚠️ `schedule` 这个状态属于**外层的 `.events-shell`**（在 event_list.html 上），
+         不属于这张卡。刻意如此：HTMX 筛选和翻页换掉的是 `#event-results`，
+         而 shell 在它外面，于是「日程开着」这件事在筛选和翻页之后仍然成立。
+         真正的版面（列多宽、面板多宽）也只有 shell 那一层看得全。
+      {% endcomment %}
+      {% include "core/components/button.html" with label="Schedule" variant="secondary" toggles="schedule" controls="schedule-panel" %}
+    {% endif %}
     {% comment %}
-    加载态。⚠️ 没有加载态的按钮用户会点第二次 —— 这一个是读操作所以点两次无害，
-    但同一条规矩下面签到那几个按钮点第二次是有后果的，写法要一致。
+    加载态。⚠️ 筛选实时化之后它**更要紧了**（2026-08-17）：原来按下 Filter 那一下
+    本身就是反馈，现在唯一告诉人「你的字收到了、正在取」的东西只剩它。
+    （原来的理由是「没有加载态的按钮用户会点第二次」——那颗按钮已经不在了，
+    但同一条规矩下面签到那几个按钮点第二次是有后果的，写法仍然要一致。）
     {% endcomment %}
     <span id="filter-busy" class="htmx-indicator text-xs text-ink-600 dark:text-ink-300">Loading…</span>
   </div>

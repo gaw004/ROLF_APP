@@ -1,0 +1,37 @@
+{% comment %}
+在日程那张卡片里就地打开的活动详情（2026-08-18）。
+
+一次请求换两块东西：
+  · 这一块 → 面板里 `#schedule-detail`
+  · 左边的列表 → out-of-band，翻到这场活动所在的那一页
+
+⚠️ 正文是 `_event_detail_body.html`，和整页详情**同一份**。不许在这里做一个
+   「面板专用的精简版」—— 两份会在第二次改动之后说两件不一样的事，而两边都
+   渲染成功。塞进 680px 靠的是 app.css 里 `.schedule-detail` 那个 `zoom`，
+   不是靠删内容。
+{% endcomment %}
+<div class="schedule-detail" data-schedule-detail>
+  {% comment %}
+  ⚠️ `type="button"`：它长在 Alpine 的作用域里而不是表单里，但下一个人很容易把它
+     搬到别处 —— 默认的 submit 在表单里会变成一次提交。button.html 的 `toggles`
+     强制这一条也是同一个理由。
+
+  ⚠️ 关掉只是把这一块藏起来，**不清空**。日程那一块一直原样待在旁边（见
+     event_list.html），所以关掉之后回到的是你翻到的那个窗口、那个滚动位置 ——
+     重新取一次的话，人会发现自己被送回了今天。
+  {% endcomment %}
+  <button type="button" class="schedule-detail-close"
+          x-on:click="detail = false" aria-label="Close event">&times;</button>
+
+  {% include "events/_event_detail_body.html" %}
+</div>
+
+{% comment %}
+左边那一列。⚠️ 它在 `#schedule-detail` **外面**、和它平级：htmx 只在响应的
+顶层找 `hx-swap-oob`，写在里面不报错 —— 那一整块列表会被当成普通内容贴进
+详情里面去。
+
+⚠️ 这一份**不带**日程（`schedule_oob` 没给）。这一次请求正是要把日程换成详情，
+   顺手再贴一块日程回去等于自己把自己盖掉。
+{% endcomment %}
+{% include "events/_event_list_results.html" %}

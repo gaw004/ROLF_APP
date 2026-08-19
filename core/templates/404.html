@@ -16,10 +16,14 @@
     may have been removed.
   </p>
 
-  <div class="mt-6 flex flex-wrap gap-2">
+  {% comment %}
+  ⚠️ 一个出口，不是两个（2026-08-17）。第二个按钮原来是 Past Events，
+     而那一页删掉了。**没有拿别的页面去补那个位置**：这一页最可能的到访者是
+     打错地址或点了旧链接的人，而「My Signups」对未登录的人是一次跳转到登录页，
+     一个 404 页上的按钮不该把人送去填表单。
+  {% endcomment %}
+  <div class="mt-6">
     {% url 'events:event_list' as events_url %}
-    {% url 'events:past_events' as past_url %}
     {% include "core/components/button.html" with label="Events" href=events_url variant="primary" %}
-    {% include "core/components/button.html" with label="Past Events" href=past_url variant="secondary" %}
   </div>
 {% endblock %}

@@ -1,13 +1,15 @@
+import datetime
 import json
 import re
 from unittest import mock
 
 from django.contrib.auth import get_user_model
+from django.contrib.auth.hashers import check_password
 from django.core import mail
 from django.core.management import call_command
 from django.db import IntegrityError, transaction
 from django.test import RequestFactory, TestCase, override_settings
-from django.urls import reverse
+from django.urls import reverse, reverse_lazy
 
 from django.contrib.staticfiles import finders
 
@@ -15,8 +17,10 @@ from contact.admin import ContactAdmin
 from contact.forms import ContactAdminForm
 from contact.models import Contact, EmergencyContact, Language, RelationshipType
 from core.ratelimit import client_ip
+from core.timeutils import local_now
 
-from .services import register_account
+from .models import EmailVerification
+from .services import mark_email_verified, register_account, send_verification_code
 
 User = get_user_model()
 
@@ -142,17 +146,22 @@ class RegistrationTests(TestCase):
 
 
 class RegistrationPageTests(TestCase):
-    def test_the_registration_page_creates_an_account_and_logs_in(self):
+    def test_the_registration_page_creates_an_account_and_asks_for_the_code(self):
+        """🔴 2026-08-19：注册**不再直接登录**。
+
+        这条测试原来叫 `..._and_logs_in`，断言的是注册完就有 session。
+        现在账号建好了、但没人登进去 —— 中间隔着一封信。改的是流程本身，
+        不是这条断言写错了。
+        """
         response = self.client.post(reverse("accounts:register"), {
             "email": "lisi@example.com",
             "password": "a-good-long-password",
             "legal_last_name": "李",
             "legal_first_name": "四",
         })
-        self.assertRedirects(response, reverse("events:event_list"))
+        self.assertRedirects(response, reverse("accounts:verify_email"))
         self.assertTrue(User.objects.filter(email="lisi@example.com").exists())
-        self.assertEqual(self.client.session.get("_auth_user_id"),
-                         str(User.objects.get(email="lisi@example.com").pk))
+        self.assertIsNone(self.client.session.get("_auth_user_id"))
 
     def test_a_weak_password_is_refused_and_nothing_is_created(self):
         response = self.client.post(reverse("accounts:register"), {
@@ -443,8 +452,9 @@ class RegistrationRateLimitTests(TestCase):
         # reloads the page twice can no longer register at all.
         for _ in range(5):
             self.assertEqual(self.client.get(self.URL).status_code, 200)
+        # ⚠️ 落点是验证页而不是活动列表（2026-08-19 起注册不再直接登录）。
         self.assertRedirects(
-            self.attempt("mei@example.com"), reverse("events:event_list"))
+            self.attempt("mei@example.com"), reverse("accounts:verify_email"))
 
     @override_settings(REGISTRATION_RATELIMIT_PER_IP="100/h",
                        REGISTRATION_RATELIMIT_SITE="2/h")
@@ -462,7 +472,7 @@ class RegistrationRateLimitTests(TestCase):
         # limit that pooled everybody would refuse the second person to sign up.
         self.attempt("a@example.com", ip="203.0.113.1")
         response = self.attempt("b@example.com", ip="203.0.113.2")
-        self.assertRedirects(response, reverse("events:event_list"))
+        self.assertRedirects(response, reverse("accounts:verify_email"))
 
 
 class ClientIpTests(TestCase):
@@ -1104,6 +1114,331 @@ class ProfileAddressStateTests(TestCase):
         self.assertIsNotNone(finders.find("contact/address_state_toggle.js"))
         self.assertIsNone(finders.find("contact/admin/address_state_toggle.js"))
         self.assertIn("contact/address_state_toggle.js", ContactAdmin.Media.js)
+
+
+class EmailVerificationFlowTests(TestCase):
+    """注册之后要去邮箱收验证码（2026-08-19）。
+
+    在这之前，注册就是「填完表单 → 建号 → 当场登录」，地址是什么就是什么。
+    两件事因此一直是可能的，而且都不报错：打错一个字母的人从此收不到任何东西
+    （重置链接、报名确认、活动改期），而故意填别人地址的人让这个系统去给陌生人
+    发信。
+
+    口径是最严的那一档（2026-08-19 拍板）：**验过才能登录**。
+    """
+
+    URL = reverse_lazy("accounts:register")
+
+    def register(self, **overrides):
+        payload = {"email": "lisi@example.com", "password": "a-good-long-password",
+                   "legal_last_name": "李", "legal_first_name": "四"}
+        payload.update(overrides)
+        return self.client.post(self.URL, payload)
+
+    def code_from_the_email(self):
+        """把信里那六位数抠出来 —— 从**信本身**，不从数据库。
+
+        ⚠️ 这一条很要紧：库里存的是哈希，所以任何「直接读一下码」的写法都必须
+           去读那封信。测试因此走的是真人走的那条路，而不是一条只有测试能走的。
+        """
+        self.assertTrue(mail.outbox, "没有发出验证码邮件")
+        found = re.search(r"\b(\d{6})\b", mail.outbox[-1].body)
+        self.assertIsNotNone(found, mail.outbox[-1].body)
+        return found.group(1)
+
+    def test_registering_creates_the_account_but_signs_nobody_in(self):
+        response = self.register()
+        self.assertRedirects(response, reverse("accounts:verify_email"))
+        user = User.objects.get(email="lisi@example.com")
+        self.assertFalse(user.email_verified)
+        self.assertIsNone(self.client.session.get("_auth_user_id"))
+
+    def test_the_code_arrives_by_email_and_is_not_in_the_subject(self):
+        self.register()
+        code = self.code_from_the_email()
+        # ⚠️ 手机锁屏会把主题整条显示出来 —— 码写进主题等于贴在任何路过的人
+        #    都看得见的屏幕上。
+        self.assertNotIn(code, mail.outbox[-1].subject)
+        self.assertEqual(mail.outbox[-1].to, ["lisi@example.com"])
+
+    def test_typing_the_code_confirms_the_address_and_signs_them_in(self):
+        self.register()
+        response = self.client.post(reverse("accounts:verify_email"),
+                                    {"code": self.code_from_the_email()})
+        self.assertRedirects(response, reverse("events:event_list"))
+        user = User.objects.get(email="lisi@example.com")
+        self.assertTrue(user.email_verified)
+        self.assertEqual(self.client.session.get("_auth_user_id"), str(user.pk))
+
+    def test_the_stored_code_is_not_the_code(self):
+        """⚠️ 库里存哈希。六位数只有一百万种，所以这不是护城河 ——
+
+        真正的防线是 15 分钟有效期加 5 次上限。它买到的是：备份、psql、
+        带着一行数据的报错页，都不会顺手交给别人一个还能用的码。
+        """
+        self.register()
+        code = self.code_from_the_email()
+        row = EmailVerification.objects.get()
+        self.assertNotIn(code, row.code_hash)
+        self.assertTrue(check_password(code, row.code_hash))
+
+    def test_a_wrong_code_is_refused_and_costs_a_try(self):
+        self.register()
+        response = self.client.post(reverse("accounts:verify_email"), {"code": "000000"})
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "That code is wrong")
+        self.assertEqual(EmailVerification.objects.get().attempts, 1)
+        self.assertFalse(User.objects.get(email="lisi@example.com").email_verified)
+
+    def test_a_code_stops_working_after_too_many_wrong_guesses(self):
+        """⭐ 六位数是一百万种，5 次尝试不是难点 —— 难点是有效期。
+
+        这条上限挡住的是「慢慢猜一千次」，那正是光有有效期挡不住的形状。
+        """
+        self.register()
+        code = self.code_from_the_email()
+        for _ in range(EmailVerification.MAX_ATTEMPTS):
+            self.client.post(reverse("accounts:verify_email"), {"code": "000000"})
+        # 连**对的**码都不行了 —— 这才叫这一码作废，而不是「再猜一次要等等」。
+        response = self.client.post(reverse("accounts:verify_email"), {"code": code})
+        self.assertContains(response, "expired or has already been used")
+        self.assertFalse(User.objects.get(email="lisi@example.com").email_verified)
+
+    def test_an_expired_code_is_refused(self):
+        self.register()
+        code = self.code_from_the_email()
+        EmailVerification.objects.update(expires_at=local_now() - datetime.timedelta(seconds=1))
+        response = self.client.post(reverse("accounts:verify_email"), {"code": code})
+        self.assertContains(response, "expired or has already been used")
+
+    def test_a_code_works_once(self):
+        self.register()
+        code = self.code_from_the_email()
+        self.client.post(reverse("accounts:verify_email"), {"code": code})
+        self.client.logout()
+        # 再拿同一个码走一遍：连页面都进不去了（没有待验证的账号）。
+        response = self.client.post(reverse("accounts:verify_email"), {"code": code})
+        self.assertRedirects(response, reverse("accounts:login"))
+
+    def test_asking_for_a_new_code_kills_the_old_one(self):
+        """⚠️ 两个活的码意味着**旧那封信还有效**。
+
+        于是「我怀疑有人看到了第一封信，所以重发一次」这个动作什么也没换来。
+
+        ⚠️ 代价说清楚：重发之后再去照着第一封信打字，那**算一次错猜**（比的是
+           当前那个码），而不是「这个码作废了」。分辨得出来的话要拿输入去和
+           所有作废的行逐个哈希比一遍 —— 为了一句更好的提示，给每次输入加上
+           一串哈希运算。不划算，所以没做，写在这里免得以后当成 bug 修。
+        """
+        self.register()
+        first = self.code_from_the_email()
+        EmailVerification.objects.update(
+            created_at=local_now() - EmailVerification.RESEND_AFTER)
+        self.client.post(reverse("accounts:resend_verification"))
+        self.assertEqual(len(mail.outbox), 2)
+        response = self.client.post(reverse("accounts:verify_email"), {"code": first})
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(User.objects.get(email="lisi@example.com").email_verified)
+        # 而新的那个码照常好用。
+        self.assertRedirects(
+            self.client.post(reverse("accounts:verify_email"),
+                             {"code": self.code_from_the_email()}),
+            reverse("events:event_list"))
+
+    def test_the_resend_button_is_rationed(self):
+        # 被限住的表现是**不发信**，不是一句好话。
+        self.register()
+        self.client.post(reverse("accounts:resend_verification"))
+        self.assertEqual(len(mail.outbox), 1)
+
+    def test_resending_is_post_only(self):
+        # ⚠️ 一个 GET 就能发信的端点，离「被链接预览自己触发一次」只差一次预取。
+        self.register()
+        self.assertEqual(
+            self.client.get(reverse("accounts:resend_verification")).status_code, 405)
+
+    def test_the_page_shows_the_address_it_sent_to(self):
+        # 收不到信最可能的原因就是地址打错了，而看不到地址的人没法发现自己写了 .con。
+        self.register(email="typo@example.con")
+        self.assertContains(self.client.get(reverse("accounts:verify_email")),
+                            "typo@example.con")
+
+    def test_the_page_is_not_reachable_without_a_pending_account(self):
+        # ⚠️ 谁在等验证码由 session 说，不由 URL 说 —— URL 上带 user id 的话，
+        #    那就是一个谁都能替别人打开的页面。
+        self.assertRedirects(self.client.get(reverse("accounts:verify_email")),
+                             reverse("accounts:login"))
+
+    def test_the_code_only_proves_the_address_it_was_sent_to(self):
+        """⚠️ 码验的是**那封信寄到的那个地址**，不是「这个账号当前的地址」。
+
+        中途改了地址，那个码就什么也没证明 —— 拿它去比 `user.email` 的写法
+        会悄悄说它证明了。
+        """
+        self.register()
+        code = self.code_from_the_email()
+        User.objects.filter(email="lisi@example.com").update(email="other@example.com")
+        response = self.client.post(reverse("accounts:verify_email"), {"code": code})
+        self.assertContains(response, "no longer applies")
+        self.assertFalse(User.objects.get(email="other@example.com").email_verified)
+
+    def test_spaces_and_dashes_in_a_pasted_code_are_forgiven(self):
+        # 人从邮件客户端里粘出来的东西经常带空格。拒绝它只教会人「这个框很挑」。
+        self.register()
+        code = self.code_from_the_email()
+        response = self.client.post(reverse("accounts:verify_email"),
+                                    {"code": f"{code[:3]} {code[3:]}"})
+        self.assertRedirects(response, reverse("events:event_list"))
+
+    def test_a_code_that_starts_with_zero_survives_the_round_trip(self):
+        """⚠️ 前导零。码当成整数走一圈的话，「004821」会变成 4821，
+
+        然后照着信打字的人被告知打错了 —— 而信上写的就是那个。
+        """
+        user = register_account(email="zero@example.com", password="a-good-long-password",
+                                legal_first_name="Ping", legal_last_name="Mei")
+        with mock.patch("accounts.services._new_code", return_value="004821"):
+            send_verification_code(user)
+        self.assertIn("004821", mail.outbox[-1].body)
+        session = self.client.session
+        session["pending_verification_user"] = user.pk
+        session.save()
+        response = self.client.post(reverse("accounts:verify_email"), {"code": "004821"})
+        self.assertRedirects(response, reverse("events:event_list"))
+
+
+class UnverifiedLoginTests(TestCase):
+    """没验证的账号登不进来 —— 但也不能被关在门外没有路（2026-08-19）。"""
+
+    def setUp(self):
+        self.user = register_account(
+            email="mei@example.com", password="a-good-long-password",
+            legal_first_name="Ping", legal_last_name="Mei")
+
+    def login(self):
+        return self.client.post(reverse("accounts:login"), {
+            "username": "mei@example.com", "password": "a-good-long-password"})
+
+    def test_an_unverified_account_cannot_log_in(self):
+        response = self.login()
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "has not been confirmed")
+        self.assertIsNone(self.client.session.get("_auth_user_id"))
+
+    def test_being_refused_leaves_a_way_forward(self):
+        """⚠️ 被拦下的是一个真人：密码是对的，只是没开过那封信。
+
+        所以拦下的同时要把他标进 session，让验证页认得他 —— 否则「关掉标签页
+        的人」在这个最严的流程里根本没有门。
+        """
+        self.login()
+        page = self.client.get(reverse("accounts:verify_email"))
+        self.assertEqual(page.status_code, 200)
+        self.assertContains(page, "mei@example.com")
+
+    def test_a_verified_account_logs_in_as_before(self):
+        mark_email_verified(self.user)
+        self.assertRedirects(self.login(), reverse("events:event_list"))
+
+    def test_the_wrong_password_is_still_just_the_wrong_password(self):
+        """🔴 这条钉的是那个检查**放在哪一层**。
+
+        如果「没验证」在密码之前判，登录框就成了一个查询工具：随便打一个地址，
+        看它回「没验证」还是「用户名或密码不对」，就能问出这个地址有没有注册过。
+        `confirm_login_allowed` 跑在密码验过之后，所以问不出来。
+        """
+        response = self.client.post(reverse("accounts:login"), {
+            "username": "mei@example.com", "password": "wrong-password"})
+        self.assertNotContains(response, "has not been confirmed")
+
+    def test_a_password_reset_also_confirms_the_address(self):
+        """⚠️ 点开重置链接**证明的是同一件事**：这个人读到了寄到那儿的信。
+
+        不认这一份证明的话，「注册了没验证 → 忘了密码 → 重置」的人会拿着
+        从那个收件箱里点出来的链接，设完新密码，然后在登录框被拦下。
+        """
+        self.client.post(reverse("accounts:password_reset"), {"email": "mei@example.com"})
+        link = re.search(r"https?://[^/]+(/password-reset/[^\s]+)", mail.outbox[-1].body)
+        self.assertIsNotNone(link, mail.outbox[-1].body)
+        follow = self.client.get(link.group(1), follow=True)
+        self.client.post(follow.redirect_chain[-1][0] if follow.redirect_chain else link.group(1),
+                         {"new_password1": "another-good-password",
+                          "new_password2": "another-good-password"})
+        self.user.refresh_from_db()
+        self.assertTrue(self.user.email_verified)
+
+
+class GoogleRegistrationVerificationTests(TestCase):
+    """Google 已经验过的地址不必再验一次 —— 但只有它自己那个地址（2026-08-19）。"""
+
+    IDENTITY = {"email": "mei@example.com", "legal_first_name": "Ping",
+                "legal_last_name": "Mei", "email_verified": True}
+
+    def prefill(self, identity=None):
+        with mock.patch("accounts.views.identity_from",
+                        return_value=dict(identity or self.IDENTITY)):
+            return self.client.post(reverse("accounts:register_with_google"),
+                                    {"credential": "any"})
+
+    def register(self, email="mei@example.com"):
+        return self.client.post(reverse("accounts:register"), {
+            "email": email, "password": "a-good-long-password",
+            "legal_last_name": "Mei", "legal_first_name": "Ping"})
+
+    def test_a_google_verified_address_skips_the_code(self):
+        self.prefill()
+        response = self.register()
+        self.assertRedirects(response, reverse("events:event_list"))
+        self.assertEqual(mail.outbox, [])
+        self.assertTrue(User.objects.get(email="mei@example.com").email_verified)
+
+    def test_typing_a_different_address_over_it_does_not(self):
+        """🔴 地址那一格是**可以改的**。
+
+        Google 用一个账号登进来、然后把别人的地址打上去 —— 如果这里认的是
+        「这次注册来自 Google」而不是「Google 认的就是这个地址」，那任何人
+        都能拿任何一个 Google 账号去注册别人的邮箱。
+        """
+        self.prefill()
+        response = self.register(email="somebody-else@example.com")
+        self.assertRedirects(response, reverse("accounts:verify_email"))
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertFalse(User.objects.get(email="somebody-else@example.com").email_verified)
+
+    def test_google_saying_the_address_is_unverified_is_believed(self):
+        # ⚠️ Google 账号也可以挂着一个没验过的地址。
+        self.prefill({**self.IDENTITY, "email_verified": False})
+        self.assertRedirects(self.register(), reverse("accounts:verify_email"))
+        self.assertEqual(len(mail.outbox), 1)
+
+    def test_the_claim_is_not_taken_from_the_browser(self):
+        """⚠️ 「这个地址已验证」放在 **session** 里，不放在表单的隐藏字段里。
+
+        隐藏字段是浏览器发回来的值 —— 那等于给了任何人一个「我已验证」的勾。
+        这条钉的是：不经过 Google 那一步、自己 POST 一个字段，是不管用的。
+        """
+        response = self.client.post(reverse("accounts:register"), {
+            "email": "mei@example.com", "password": "a-good-long-password",
+            "legal_last_name": "Mei", "legal_first_name": "Ping",
+            "email_verified": "true", "google_verified_email": "mei@example.com",
+        })
+        self.assertRedirects(response, reverse("accounts:verify_email"))
+        self.assertFalse(User.objects.get(email="mei@example.com").email_verified)
+
+
+class SuperuserVerificationTests(TestCase):
+    """createsuperuser 在一个收不到信的终端上跑。"""
+
+    def test_a_superuser_is_verified_by_construction(self):
+        # ⚠️ 不这样的话，一个刚部署好的站点的唯一管理员登不进自己的站 ——
+        #    而那不是一条安全性质。能跑这个命令的人已经拿着数据库了。
+        user = User.objects.create_superuser(email="root@example.com", password="x")
+        self.assertTrue(user.email_verified)
+
+    def test_an_ordinary_new_account_is_not(self):
+        user = register_account(email="mei@example.com", password="a-good-long-password",
+                                legal_first_name="Ping", legal_last_name="Mei")
+        self.assertFalse(user.email_verified)
 
 
 class PasswordResetTests(TestCase):

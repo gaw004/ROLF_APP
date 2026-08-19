@@ -33,14 +33,23 @@ class UserAdmin(BaseUserAdmin):
     autocomplete_fields = ["contact"]
 
     ordering = ["email"]
-    list_display = ["email", "first_name", "last_name", "is_staff"]
+    list_display = ["email", "first_name", "last_name", "email_verified", "is_staff"]
+    # 想找出「注册了但没验证邮箱」的人，只有这一个入口 —— 那批人登不进来，
+    # 也不会自己来问。
+    list_filter = [*BaseUserAdmin.list_filter, "email_verified"]
     search_fields = ["email", "first_name", "last_name"]
 
     fieldsets = (
         (None, {"fields": ["email", "password"]}),
         ("Personal info", {"fields": ["first_name", "last_name"]}),
         ("Permissions", {
-            "fields": ["is_active", "is_staff", "is_superuser", "groups", "user_permissions"],
+            # ⚠️ `email_verified` 在这里而不是在「Personal info」里：它决定这个
+            #    账号能不能登录，那是一条权限。
+            #    ⚠️ 它是**可改的**，而且必须是：唯一能把「注册时把地址打错了」
+            #       的人救回来的办法，就是有人在这里改地址、然后让他重新验证。
+            #       改动会留在 admin 的操作日志里。
+            "fields": ["is_active", "email_verified", "is_staff", "is_superuser",
+                       "groups", "user_permissions"],
         }),
         ("Important dates", {"fields": ["last_login", "date_joined"]}),
         ("Foundation record", {

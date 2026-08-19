@@ -2,7 +2,7 @@
 
 from django.conf import settings
 from django.contrib import messages
-from django.contrib.auth import login, update_session_auth_hash
+from django.contrib.auth import get_user_model, login, update_session_auth_hash
 from django.contrib.auth.decorators import login_required
 from django.contrib.auth.views import (
     LoginView,
@@ -15,6 +15,7 @@ from django.contrib.auth.views import (
 from django.core.exceptions import PermissionDenied
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404, redirect, render
+from django.views.decorators.http import require_POST
 from django.urls import reverse, reverse_lazy
 from django.utils.decorators import method_decorator
 from django_ratelimit.decorators import ratelimit
@@ -25,6 +26,7 @@ from core.ratelimit import (
     registration_rate_per_ip,
     registration_rate_site,
     site_wide,
+    verification_rate_per_ip,
 )
 from org.permissions import SCOPED_DENIAL
 
@@ -33,10 +35,19 @@ from .forms import (
     EmergencyContactForm,
     ProfileForm,
     RegistrationForm,
+    VerificationCodeForm,
+    VolunteerAuthenticationForm,
     VolunteerPasswordChangeForm,
     VolunteerSetPasswordForm,
 )
-from .services import register_account
+from .services import (
+    VerificationError,
+    check_verification_code,
+    mark_email_verified,
+    register_account,
+    seconds_until_resend,
+    send_verification_code,
+)
 
 
 @ratelimit(key="ip", rate=registration_rate_per_ip, method="POST", block=False)
@@ -71,8 +82,22 @@ def register(request):
         form = RegistrationForm(request.POST)
         if form.is_valid():
             user = register_account(**form.cleaned_data)
-            login(request, user)
-            return redirect("events:event_list")
+            # 🔴 **No login() here any more** (2026-08-19). The account exists;
+            #    nobody is signed in until the address has been proved. That is
+            #    the strict shape of this flow, decided the same day: an
+            #    unconfirmed address is one this application cannot reach, and
+            #    "you are in, but we may never be able to write to you" is the
+            #    state that produces a volunteer who never hears about the
+            #    event they signed up for.
+            if _google_verified(request, user.email):
+                # The one address we do not have to ask about: Google already
+                # proved it, and the person did not change the box afterwards.
+                mark_email_verified(user)
+                login(request, user)
+                return redirect("events:event_list")
+            send_verification_code(user)
+            request.session[PENDING_SESSION_KEY] = user.pk
+            return redirect("accounts:verify_email")
     else:
         form = RegistrationForm()
 
@@ -123,6 +148,25 @@ def register_with_google(request):
             "You can still register by filling the form in yourself.")
         return render(request, "accounts/register.html", _register_context(RegistrationForm()))
 
+    # What Google is willing to vouch for, kept for the POST that follows
+    # (2026-08-19). Registration reads it back and skips the emailed code — but
+    # only if the address is still the one Google named, because the box is
+    # editable and somebody may type a different address over it.
+    #
+    # ⚠️ In the **session**, not in a hidden field on the form. A hidden field
+    #    is a value the browser sends back, so "this address is verified" would
+    #    be a checkbox anybody could tick with a POST.
+    #
+    # ⚠️ Only when Google says `email_verified`. A Google account can exist with
+    #    an unproved address, and this is exactly the branch where that
+    #    distinction stops being academic — see accounts/google.py, whose old
+    #    note said the flag was ignored because nothing here confirmed addresses
+    #    at all. Now something does.
+    if identity.pop("email_verified", False):
+        request.session[GOOGLE_VERIFIED_SESSION_KEY] = identity.get("email", "")
+    else:
+        request.session.pop(GOOGLE_VERIFIED_SESSION_KEY, None)
+
     # ⚠️ `initial`, not `data`. Binding it would run validation on a form the
     #    person has not filled in yet — so they would arrive at their own
     #    registration page with "This field is required" under the password box,
@@ -131,10 +175,141 @@ def register_with_google(request):
                   _register_context(RegistrationForm(initial=identity)))
 
 
+# --- C3.x · Confirming the email address (2026-08-19) -------------------------
+#
+# Two views and one session key. The session key is what makes this reachable at
+# all: the person is **not logged in** — that is the whole point — so "which
+# account is waiting on a code" has to be carried somewhere, and a URL carrying
+# a user id would be a page anybody could open for anybody.
+
+#: Named once, in the form, and imported here. Three places read it.
+PENDING_SESSION_KEY = VolunteerAuthenticationForm.PENDING_SESSION_KEY
+#: The address Google vouched for during a prefill, if it did.
+GOOGLE_VERIFIED_SESSION_KEY = "google_verified_email"
+
+
+def _google_verified(request, email):
+    """Did Google prove *this* address during this registration?
+
+    ⚠️ The comparison matters as much as the flag. The address box is editable
+       after a Google prefill, so somebody can sign in with Google and then type
+       a different address over it — and skipping the code there would let
+       anybody with any Google account register somebody else's address.
+    """
+    vouched = request.session.pop(GOOGLE_VERIFIED_SESSION_KEY, None)
+    return bool(vouched) and vouched.strip().lower() == (email or "").strip().lower()
+
+
+def _pending_user(request):
+    """The account waiting on a code, or None."""
+    pk = request.session.get(PENDING_SESSION_KEY)
+    if not pk:
+        return None
+    user = get_user_model().objects.filter(pk=pk).first()
+    if user is None or user.email_verified:
+        # Already done, or the row is gone. Either way there is nothing to wait
+        # for, and leaving the key in place would strand the next visit here.
+        request.session.pop(PENDING_SESSION_KEY, None)
+        return None
+    return user
+
+
+@ratelimit(key="ip", rate=verification_rate_per_ip, method="POST", block=False)
+def verify_email(request):
+    """Type the six digits. On success the person is logged in — not before.
+
+    ⚠️ Limited per IP, and what it protects is the guessing: six digits is a
+       million-wide space, and MAX_ATTEMPTS only ends *one* code. Without a
+       limit here somebody could resend and guess, resend and guess.
+
+    ⚠️ A GET with no pending account is a redirect to the login page, not a 404.
+       The person who lands here is either done already or arrived from a stale
+       tab, and both of those want the same thing next.
+    """
+    if request.user.is_authenticated:
+        return redirect("events:event_list")
+
+    user = _pending_user(request)
+    if user is None:
+        return redirect("accounts:login")
+
+    form = VerificationCodeForm(request.POST or None)
+    if request.method == "POST":
+        if getattr(request, "limited", False):
+            # Before the code is even read, so a refused attempt costs the
+            # person nothing — no attempt spent, no row touched. 429 for the
+            # same reason registration uses it: "not now", not "not you".
+            return render(request, "accounts/verify_email.html",
+                          _verify_context(request, user, form,
+                                          rate_limited=True), status=429)
+        if form.is_valid():
+            try:
+                check_verification_code(user, form.cleaned_data["code"])
+            except VerificationError as refusal:
+                form.add_error("code", str(refusal))
+            else:
+                request.session.pop(PENDING_SESSION_KEY, None)
+                login(request, user)
+                messages.success(
+                    request, "Your email address is confirmed. Welcome.")
+                return redirect("events:event_list")
+
+    return render(request, "accounts/verify_email.html",
+                  _verify_context(request, user, form))
+
+
+def _verify_context(request, user, form, rate_limited=False):
+    return {
+        "form": form,
+        # ⚠️ The address is shown back. A typo is the most likely reason no mail
+        #    arrived, and somebody staring at "we sent you a code" with no
+        #    address on the page has no way to notice they typed .con.
+        "email": user.email,
+        "resend_in": seconds_until_resend(user),
+        "rate_limited": rate_limited,
+    }
+
+
+@require_POST
+@ratelimit(key="ip", rate=verification_rate_per_ip, method="POST", block=False)
+def resend_verification(request):
+    """Send another code, at most one per cooldown.
+
+    ⚠️ POST only. A resend sends mail, and a GET that sends mail is one prefetch
+       or one link-preview away from sending itself.
+
+    ⚠️ Two limits doing different jobs, and neither replaces the other: the
+        per-account cooldown stops one person's held-down button becoming the
+        mail bill, and the per-IP limit stops one machine walking through
+        accounts to make *us* mail other people.
+    """
+    user = _pending_user(request)
+    if user is None:
+        return redirect("accounts:login")
+    if getattr(request, "limited", False):
+        messages.error(request, "Too many attempts just now. Try again shortly.")
+        return redirect("accounts:verify_email")
+
+    wait = seconds_until_resend(user)
+    if wait > 0:
+        messages.info(
+            request, f"A code was just sent. You can ask for another in {wait} seconds.")
+    else:
+        send_verification_code(user)
+        messages.success(request, f"A new code is on its way to {user.email}.")
+    return redirect("accounts:verify_email")
+
+
 class VolunteerLoginView(LoginView):
-    """Django's own view; only the template and the destination are ours."""
+    """Django's own view; the template, the destination and one refusal are ours.
+
+    ⚠️ The refusal (an unconfirmed address cannot log in) lives in the **form**,
+       not here — see VolunteerAuthenticationForm for why it has to run after
+       the password check rather than before it.
+    """
 
     template_name = "accounts/login.html"
+    authentication_form = VolunteerAuthenticationForm
     redirect_authenticated_user = True
 
     def get_success_url(self):
@@ -196,12 +371,27 @@ class VolunteerPasswordResetDoneView(PasswordResetDoneView):
 
 
 class VolunteerPasswordResetConfirmView(PasswordResetConfirmView):
-    """Set the new password. The link's validity is checked by Django."""
+    """Set the new password. The link's validity is checked by Django.
+
+    ⚠️ Following this link also confirms the address (2026-08-19), because it
+       **proves exactly the same thing** the six-digit code does: somebody read
+       mail sent there. Without this, a person who registered, never opened the
+       confirmation mail, and later used "forgot password" would set a new
+       password and still be refused at the login box — holding a link from
+       that very inbox. Two proofs of one fact, one of them not counted.
+    """
 
     template_name = "accounts/password_reset_confirm.html"
     # Capped, unlike SetPasswordForm — see the form's docstring.
     form_class = VolunteerSetPasswordForm
     success_url = reverse_lazy("accounts:password_reset_complete")
+
+    def form_valid(self, form):
+        # ⚠️ After the password is actually set, not before: `self.user` is
+        #    populated by Django's dispatch, but the link is only spent here.
+        response = super().form_valid(form)
+        mark_email_verified(self.user)
+        return response
 
 
 class VolunteerPasswordResetCompleteView(PasswordResetCompleteView):

@@ -11,12 +11,17 @@
    Verifying it anyway (below) costs one call and means the boxes are not a place
    to inject arbitrary strings.
 
-⚠️ It does not check `email_verified`, deliberately. Google returns it, and acting
-   on it would mean silently refusing to fill the box for some accounts — while
-   anyone can type any address into that box by hand, and this project does not
-   confirm addresses at registration yet either (phase-c.md's known gaps). A
-   check that changes nothing about what is possible, in exchange for a blank box
-   nobody can explain, is not a check worth having.
+⚠️ **This changed on 2026-08-19.** It used to ignore Google's `email_verified`
+   claim, and the reason it gave was sound at the time: nothing here confirmed
+   addresses at all, so acting on that flag would have blanked a box for some
+   people while changing nothing about what was possible.
+
+   Registration now asks for an emailed code, so the flag has stopped being
+   decorative: it is exactly the question "has somebody already proved they can
+   read mail at this address". It is still **not** used to fill or blank
+   anything — the boxes are filled the same way for everybody — it is passed
+   along so that registration can skip the code for an address Google has
+   already proved. Everything above still holds: this is not a way to log in.
 """
 
 import urllib.request
@@ -101,6 +106,11 @@ def identity_from(credential):
        Google's own `given_name` / `family_name` — would need a translation table
        somewhere, and that table is exactly the sort of thing that gets updated
        on one side only.
+
+    ⚠️ Plus `email_verified` (2026-08-19), which is **not** a form field: the
+       view pops it off before the form ever sees it. It is Google's own claim
+       about whether that address was proved, and it is now the one thing that
+       lets a registration skip the emailed code — see views.register.
     """
     if not is_configured() or not credential:
         return None
@@ -117,4 +127,8 @@ def identity_from(credential):
         "email": (claims.get("email") or "").strip().lower(),
         "legal_first_name": claims.get("given_name") or "",
         "legal_last_name": claims.get("family_name") or "",
+        # ⚠️ `is True`, not truthiness. Google sends a JSON boolean, but a claim
+        #    that arrived as the string "false" is truthy in Python — and that
+        #    mistake reads as "verified" for every account.
+        "email_verified": claims.get("email_verified") is True,
     }

@@ -1,0 +1,22 @@
+{% autoescape off %}{% comment %}
+⚠️ 纯文本，一个地址加一句话 —— 同 D22 对通知内容的口径，也同密码重置那封信：
+   离开这个库的东西不带姓名、不带活动、不带任何别人的信息。
+
+⚠️ 收件人可能是**未成年志愿者本人**，所以不出现「你的孩子」之类的话。
+
+⚠️ 最后那段不能省。收到这封信的人有可能压根没注册过 —— 别人打错了地址，
+   或者故意用了他的。那种情况下他需要知道的是「不用做任何事」，
+   而不是一封只说「你的验证码是 123456」的信。
+{% endcomment %}Somebody registered a River of Life Foundation account with this address ({{ email }}).
+
+Your confirmation code is:
+
+    {{ code }}
+
+Type it on the page that asked for it. The code works for {{ minutes }} minutes,
+and only once.
+
+If this was not you, you can ignore this message. The account cannot be used
+until somebody types that code, and nobody can do that without reading this
+email.
+{% endautoescape %}

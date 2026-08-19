@@ -1,8 +1,14 @@
 """The volunteer-facing account forms. Plain django.forms, no admin (D18)."""
 
+import re
+
 from django import forms
 from django.contrib.auth import get_user_model, password_validation
-from django.contrib.auth.forms import PasswordChangeForm, SetPasswordForm
+from django.contrib.auth.forms import (
+    AuthenticationForm,
+    PasswordChangeForm,
+    SetPasswordForm,
+)
 from django.core.exceptions import ValidationError
 from django.core.validators import MaxLengthValidator
 from phonenumber_field.formfields import PhoneNumberField
@@ -10,6 +16,8 @@ from phonenumber_field.formfields import PhoneNumberField
 from contact.forms import us_state_choices_json
 from contact.models import Contact, EmergencyContact, RelationshipType
 from core.limits import EMAIL, PASSWORD
+
+from .models import EmailVerification
 
 
 class RegistrationForm(forms.Form):
@@ -148,6 +156,84 @@ class VolunteerSetPasswordForm(SetPasswordForm):
             self.fields[name].label = label
             self.fields[name].max_length = PASSWORD
             self.fields[name].validators.append(MaxLengthValidator(PASSWORD))
+
+
+class VerificationCodeForm(forms.Form):
+    """The six-digit box (2026-08-19). Shape only — the code is checked in services.
+
+    ⚠️ It does **not** know whether the code is right, and must not learn: that
+       answer depends on the account, on how many tries the code has taken and
+       on the clock, all of which are `check_verification_code`'s to hold. This
+       class stops the obvious rubbish from costing an attempt at all.
+    """
+
+    code = forms.CharField(
+        label="Confirmation code",
+        # ⚠️ **No min_length/max_length of CODE_LENGTH here**, deliberately.
+        #    People paste "048 213" out of a mail client — eight characters —
+        #    and a hard max would refuse it before `clean_code` ever gets to
+        #    forgive the space. The length is checked there, after normalising.
+        max_length=32,
+        # ⚠️ `inputmode`, not `type="number"`. A number input strips the leading
+        #    zero from "004821", drops what was typed on a scroll wheel, and
+        #    hands us a spinner nobody wants — while `inputmode` is what
+        #    actually brings up the digit keypad on a phone.
+        #    ⚠️ `autocomplete="one-time-code"` is what makes iOS and Android
+        #       offer the code from the mail app. Free, and it is the difference
+        #       between a tap and retyping six digits from another screen.
+        widget=forms.TextInput(attrs={
+            "inputmode": "numeric",
+            "autocomplete": "one-time-code",
+            "autofocus": "autofocus",
+        }),
+        help_text="Six digits, from the email we just sent you.",
+    )
+
+    def clean_code(self):
+        """Digits only, spaces and dashes forgiven.
+
+        People paste "048 213" out of a mail client, and refusing that teaches
+        them nothing except that this box is fussy.
+        """
+        code = re.sub(r"[\s-]", "", self.cleaned_data["code"])
+        if not code.isdigit() or len(code) != EmailVerification.CODE_LENGTH:
+            raise ValidationError(
+                f"The code is {EmailVerification.CODE_LENGTH} digits.")
+        return code
+
+
+class VolunteerAuthenticationForm(AuthenticationForm):
+    """Django's login form, plus one refusal: an unverified address cannot log in.
+
+    🔴 The check goes **here**, in `confirm_login_allowed`, and not in the view.
+       That hook runs after the password has been checked, which is the only
+       place it can go without turning the login box into a way to ask "does
+       this address have an unverified account?" — a stranger typing addresses
+       would otherwise be told which ones exist.
+
+    ⚠️ It also leaves a way forward. Somebody refused here is a real person with
+       the right password and an inbox they have not opened, so the session is
+       marked with their id and the message points at the page that will send
+       them a new code. Without that, the strict flow (decided 2026-08-19) has
+       no door at all for anybody who closed the tab.
+    """
+
+    #: The session key that says which account is waiting on a code. Named once,
+    #: because three views read it and a typo in any of them is a page that
+    #: silently redirects to registration.
+    PENDING_SESSION_KEY = "pending_verification_user"
+
+    def confirm_login_allowed(self, user):
+        super().confirm_login_allowed(user)
+        if user.email_verified:
+            return
+        if self.request is not None:
+            self.request.session[self.PENDING_SESSION_KEY] = user.pk
+        raise ValidationError(
+            "This address has not been confirmed yet. We can send you a new "
+            "code — open the confirmation page and ask for one.",
+            code="email_not_verified",
+        )
 
 
 class ProfileForm(forms.ModelForm):

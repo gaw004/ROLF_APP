@@ -1,0 +1,7 @@
+{% comment %}
+⚠️ 一行。Django 不管这个，是我们自己 `.strip()` 的 —— 但主题里带换行的信在某些
+   客户端会被截断，而截断的位置看起来像是我们写错了。
+
+⚠️ 验证码**不放进主题**。手机锁屏上的通知会把主题整条显示出来，那等于把码
+   贴在一块任何路过的人都看得见的屏幕上。
+{% endcomment %}Confirm your River of Life Foundation email address

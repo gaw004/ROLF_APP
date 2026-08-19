@@ -9,6 +9,12 @@ urlpatterns = [
     # ⚠️ It **prefills** the registration form and creates nothing. The account
     #    is still made by register() above, with a password. See accounts/google.py.
     path("register/google/", views.register_with_google, name="register_with_google"),
+    # C3.x — 确认邮箱地址（2026-08-19）。两条路由，都**不要求登录**：
+    # 整个流程的前提就是「还没登录」。谁在等验证码由 session 说，不由 URL 说 ——
+    # URL 上带 user id 的话，那就是一个谁都能替别人打开的页面。
+    path("register/verify/", views.verify_email, name="verify_email"),
+    path("register/verify/resend/", views.resend_verification,
+         name="resend_verification"),
     path("login/", views.VolunteerLoginView.as_view(), name="login"),
     path("logout/", views.VolunteerLogoutView.as_view(), name="logout"),
     # C0.2.5 — until this existed a wrong birth date, email or phone was

@@ -212,6 +212,10 @@ REGISTRATION_RATELIMIT_SITE = env("REGISTRATION_RATELIMIT_SITE", "100/h")
 # ⚠️ Tuning these means asking what the mail plan allows per day, not what feels
 #    safe. The failure is not an error page: it is the day's remaining messages
 #    being gone, and the people who needed them hearing nothing.
+# Typing or asking for an email confirmation code. Tighter than the reset limits
+# on purpose: this one is guessed at, not merely triggered — see
+# core.ratelimit.verification_rate_per_ip.
+VERIFICATION_RATELIMIT_PER_IP = env("VERIFICATION_RATELIMIT_PER_IP", "20/h")
 PASSWORD_RESET_RATELIMIT_PER_IP = env("PASSWORD_RESET_RATELIMIT_PER_IP", "10/h")
 PASSWORD_RESET_RATELIMIT_SITE = env("PASSWORD_RESET_RATELIMIT_SITE", "60/h")
 

@@ -1,4 +1,4 @@
-{% extends "core/base.html" %}
+{% extends "core/base.html" %}{% load static %}
 {% block title %}My Profile{% endblock %}
 {% comment %}
 两个版心（2026-08-06）：**堆叠时 672px，两栏时 896px**。
@@ -147,4 +147,22 @@
   </div>
 
   </div>
+
+  {% comment %}
+  Country 选了 United States 时，State 那一格换成 50 个州的下拉（2026-08-19）。
+
+  ⚠️ **和 Contact admin 用的是同一个文件**，不是抄一份到前端的 bundle 里。
+     两份实现意味着两条规则，而没人盯着的那一份会先走样 —— 用户报上来的正是
+     「my profile 应该像 django admin 的 contact 一样」，把它抄一遍等于承认
+     以后还会再不一样一次。选项清单由 `contact.forms.us_state_choices_json()`
+     从 localflavor 生成，挂在 State 那个 input 的 `data-us-states` 上。
+
+  ⚠️ 不进 `assets/js/app.js`：那是 esbuild 打的包，admin 页面读不到它。
+     一个 `<script defer>` 标签是这两页共用一份代码的**唯一**办法。
+
+  ⚠️ 渐进增强，而且必须一直是：没有 JS 时那就是一个普通文本框，照样能填、
+     照样能存。这里没有任何校验规则 —— 州从来不是必填，而且非美国地址要能
+     写「Ontario」。
+  {% endcomment %}
+  <script defer src="{% static 'contact/address_state_toggle.js' %}"></script>
 {% endblock %}

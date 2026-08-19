@@ -7,6 +7,7 @@ from django.core.exceptions import ValidationError
 from django.core.validators import MaxLengthValidator
 from phonenumber_field.formfields import PhoneNumberField
 
+from contact.forms import us_state_choices_json
 from contact.models import Contact, EmergencyContact, RelationshipType
 from core.limits import EMAIL, PASSWORD
 
@@ -171,8 +172,16 @@ class ProfileForm(forms.ModelForm):
         fields = [
             "legal_first_name", "legal_last_name", "email", "phone",
             "birth_date", "preferred_communication_method", "preferred_language",
+            # 🔴 **Country first** (2026-08-19), matching the Contact admin's
+            #    fieldset. It is the field the next one depends on: pick United
+            #    States and "State or province" becomes a dropdown of the 50
+            #    states. Asked last, somebody types their state into a free-text
+            #    box and then watches it turn into a dropdown underneath them —
+            #    or, worse, fills the whole address in and never learns the
+            #    dropdown existed.
+            "address_country",
             "address_street", "address_city", "address_state",
-            "address_postal_code", "address_country",
+            "address_postal_code",
         ]
         widgets = {"birth_date": forms.DateInput(attrs={"type": "date"})}
         labels = {
@@ -248,6 +257,20 @@ class ProfileForm(forms.ModelForm):
         for name in ["address_street", "address_city", "address_state",
                      "address_postal_code", "address_country"]:
             self.fields[name].required = False
+        # The US state picker, same as the Contact admin's (2026-08-19).
+        #
+        # ⚠️ The column stays free text and this stays optional — a dropdown of
+        #    US states cannot say "Ontario", and somebody with a foreign address
+        #    must not be pushed into picking a wrong answer or leaving it blank.
+        #    The dropdown is drawn by contact/static/contact/address_state_toggle.js
+        #    only while the country is US, and it writes into this box rather
+        #    than submitting anything of its own.
+        #
+        # ⚠️ `data-us-states` is data handed to a script, not styling — which is
+        #    what the styling-lives-in-CSS rule for widget attrs is about. Same
+        #    attribute, same source (contact.forms.us_state_choices_json), so
+        #    the two pages cannot come to different lists of states.
+        self.fields["address_state"].widget.attrs["data-us-states"] = us_state_choices_json()
 
     def clean_email(self):
         """The address is the login name, so it has to stay unique across accounts.

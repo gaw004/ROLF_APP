@@ -128,6 +128,33 @@ Django 是会在 ModelForm 里校验约束的 —— 但它**会跳过任何提�
 ⚠️ 守卫有一条钉的是**构建产物**：页面读的是 `static/css/app.css`，源文件里写对了
    而没有 `npm run build:css`，屏幕上一点变化都没有 —— 而两个文件单看都是对的。
 
+### ⑤ My profile 的 Country → State，和 admin 用同一份实现
+
+原来只有 Contact admin 有这个联动，My profile 的州是个纯文本框，而且
+**country 排在整段地址的最后** —— 正好和「先填国家」反了。
+
+三件事：
+
+1. `ProfileForm` 的地址段重排，`address_country` 提到最前，和 admin 的
+   fieldset 一致。⚠️ 顺序本身就是功能：它是下一格依赖的那一格。排在最后的话，
+   人会先把州名打进文本框、然后眼看着它在底下变成下拉；更常见的是整个地址
+   填完了，压根不知道有个下拉。
+2. `address_state_toggle.js` 从 `contact/static/contact/admin/` 挪到
+   `contact/static/contact/` —— **两页共用一份**，admin 靠 `Media` 加载，
+   My profile 靠一个 `<script defer>`。抄一份到前端 bundle 里是更省事的写法，
+   但用户报的原话就是「my profile 应该像 django admin 的 contact 一样」，
+   抄一遍等于承认以后还会再不一样一次。
+   ⚠️ 不进 `assets/js/app.js`：那是 esbuild 打的包，admin 页面读不到它。
+3. 州清单收进 `contact.forms.us_state_choices_json()`，两个表单都从这里拿 ——
+   抄一份的代价是 localflavor 加了个属地之后，没人看的那一份先过期，
+   而两页都不会报错。
+
+⚠️ **下拉是增强，不是校验规则**：列仍是自由文本（非美国地址要写得下
+   「Ontario」），州仍然不必填（只想改个手机号的人不该被一个不相干的必填项
+   拦住），没有 JS 时那就是一个普通文本框。已在浏览器里逐条验过：选 US 出现
+   60 个选项的下拉、文本框隐藏；切到 Canada 文本框回来且值还在；先打
+   「Ontario」再切回 US，它作为一个额外选项留着而不是被静默丢掉。
+
 ---
 
 ## 四十七、2026-08-19 第三十批：活动详情不再是一个目的地；报名也进面板；那「1 秒」是页面自己在滑

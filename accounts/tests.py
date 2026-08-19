@@ -1,3 +1,4 @@
+import json
 import re
 from unittest import mock
 
@@ -8,6 +9,10 @@ from django.db import IntegrityError, transaction
 from django.test import RequestFactory, TestCase, override_settings
 from django.urls import reverse
 
+from django.contrib.staticfiles import finders
+
+from contact.admin import ContactAdmin
+from contact.forms import ContactAdminForm
 from contact.models import Contact, EmergencyContact, Language, RelationshipType
 from core.ratelimit import client_ip
 
@@ -1027,6 +1032,78 @@ class DuplicateEmergencyContactTests(TestCase):
         # 文案来自约束的 violation_error_message，不是这里第二次写下的规则；
         # 它落在 name 那一格靠 CONSTRAINT_FIELD["emergency_contact_duplicate"]。
         self.assertContains(response, "This emergency contact is already recorded for them.")
+
+
+class ProfileAddressStateTests(TestCase):
+    """先填 country，是 US 时 state 变成下拉 —— 和 Contact admin 一样（2026-08-19）。
+
+    用户报的原话是「my profile 应该像 django admin 的 contact 一样」。所以这里
+    做的**不是**再实现一遍，而是让两页读同一个文件、同一份州清单。
+    """
+
+    def setUp(self):
+        self.user = register_account(
+            email="mei@example.com", password="a-good-long-password",
+            legal_first_name="Ping", legal_last_name="Mei")
+        self.client.force_login(self.user)
+        self.page = self.client.get(reverse("accounts:profile"))
+
+    def test_country_is_asked_before_the_rest_of_the_address(self):
+        """⚠️ 顺序本身就是功能：它是下一格依赖的那一格。
+
+        排在最后的话，人会先把州名打进一个文本框，然后眼看着它在底下变成下拉；
+        或者更常见 —— 整个地址填完了，压根不知道有个下拉。
+        """
+        order = list(self.page.context["form"].fields)
+        address = [name for name in order if name.startswith("address_")]
+        self.assertEqual(address[0], "address_country")
+        self.assertLess(order.index("address_country"), order.index("address_state"))
+
+    def test_the_state_box_carries_the_list_the_picker_needs(self):
+        widget = self.page.context["form"].fields["address_state"].widget
+        states = json.loads(widget.attrs["data-us-states"])
+        self.assertIn(["CA", "California"], states)
+        # 50 个州 + DC + 属地 + 军邮 —— 不在这里写死数量，写死的是「不是空的」
+        # 和「确实是从 localflavor 来的」。
+        self.assertGreater(len(states), 50)
+
+    def test_both_pages_are_handed_the_same_list(self):
+        """一份清单，两个表单。抄一份的代价是 localflavor 加了个属地之后，
+        没人看的那一份先过期，而两页都不会报错。
+        """
+        admin_widget = ContactAdminForm().fields["address_state"].widget
+        self.assertEqual(admin_widget.attrs["data-us-states"],
+                         self.page.context["form"].fields["address_state"].widget.attrs["data-us-states"])
+
+    def test_the_page_loads_the_same_script_the_admin_does(self):
+        self.assertContains(self.page, "contact/address_state_toggle.js")
+
+    def test_the_state_is_still_free_text_and_still_optional(self):
+        """⚠️ 下拉是**增强**，不是校验规则。
+
+        列是自由文本，所以非美国地址写得下「Ontario」；而且它不必填 ——
+        只想改个手机号的人不该被一个不相干的必填项拦住。
+        """
+        form = self.page.context["form"]
+        self.assertFalse(form.fields["address_state"].required)
+        response = self.client.post(reverse("accounts:profile"), {
+            "action": "save", "legal_first_name": "Ping", "legal_last_name": "Mei",
+            "email": "mei@example.com", "address_country": "CA",
+            "address_state": "Ontario",
+        })
+        self.assertEqual(response.status_code, 302)
+        self.user.contact.refresh_from_db()
+        self.assertEqual(self.user.contact.address_state, "Ontario")
+
+    def test_the_script_is_not_an_admin_asset_any_more(self):
+        """它现在两页共用，所以它不在 admin/ 下面 —— 而 admin 也得跟着改路径。
+
+        ⚠️ 这条钉的是**两边都指着同一个文件**。少改一处的表现是 admin 的州下拉
+           静默消失（404 的 <script> 不报任何东西给用户），而 My profile 完全正常。
+        """
+        self.assertIsNotNone(finders.find("contact/address_state_toggle.js"))
+        self.assertIsNone(finders.find("contact/admin/address_state_toggle.js"))
+        self.assertIn("contact/address_state_toggle.js", ContactAdmin.Media.js)
 
 
 class PasswordResetTests(TestCase):

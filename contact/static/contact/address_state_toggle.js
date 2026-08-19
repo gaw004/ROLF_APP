@@ -1,10 +1,29 @@
 /*
- * Contact admin: the state field is stored as free text so non-US addresses keep
- * their province/region. For United States addresses we swap in a dropdown of the
- * 50 states (plus DC, territories and armed forces codes), whose options are handed
- * to us on the text input's data-us-states attribute (see forms.ContactAdminForm).
+ * Country first, then state: for a United States address the free-text state box
+ * is swapped for a dropdown of the 50 states (plus DC, territories and armed
+ * forces codes). The column stays free text so a non-US address keeps its own
+ * province or region — "Ontario", "Jalisco" — which a dropdown of US states
+ * cannot express.
  *
- * The text input stays the single source of truth: the dropdown writes into it.
+ * The text input stays the single source of truth: the dropdown writes into it,
+ * and the dropdown itself has no `name`, so it never submits anything.
+ *
+ * ⚠️ **Two pages load this file, deliberately one copy** (2026-08-19): the
+ *    Contact admin (via ContactAdminForm.Media) and the volunteer's own
+ *    "My profile" page (a <script> tag on the page). It used to live under
+ *    contact/static/contact/admin/ and only the admin had the behaviour — which
+ *    is exactly the report this move answers ("my profile should work like the
+ *    django admin contact"). Copying it into the front-end bundle instead would
+ *    have left two implementations of one rule, and the one nobody is looking at
+ *    is the one that drifts.
+ *
+ * ⚠️ Both pages feed it the same way: the option list arrives as JSON on the
+ *    text input's `data-us-states` attribute, built by
+ *    contact.forms.us_state_choices_json(). Neither form spells the list out.
+ *
+ * ⚠️ Progressive enhancement, and it has to stay that way: with no JavaScript
+ *    the text box is a perfectly good state field. Nothing here is a validation
+ *    rule — the column accepts anything either way.
  */
 (function () {
     "use strict";

@@ -7,6 +7,17 @@ from localflavor.us.us_states import STATE_CHOICES
 from .models import Contact
 
 
+def us_state_choices_json():
+    """The US state list the state picker reads, as JSON.
+
+    One function because two forms hand it to the same script: this app's admin
+    form and accounts.ProfileForm. Written out in either of them would be two
+    copies of a list that has to agree — and the copy nobody is looking at is
+    the one that goes stale when localflavor adds a territory.
+    """
+    return json.dumps([[code, str(name)] for code, name in STATE_CHOICES])
+
+
 class ContactAdminForm(forms.ModelForm):
     """Form for Contact — currently shown by the admin, not written for it.
 
@@ -30,9 +41,7 @@ class ContactAdminForm(forms.ModelForm):
         super().__init__(*args, **kwargs)
         # address_state is a plain text field so non-US regions can be typed in.
         # address_state_toggle.js builds the US-state dropdown from this list.
-        self.fields["address_state"].widget.attrs["data-us-states"] = json.dumps(
-            [[code, str(name)] for code, name in STATE_CHOICES]
-        )
+        self.fields["address_state"].widget.attrs["data-us-states"] = us_state_choices_json()
         # ⚠️ The checkbox appears or hides here, decided from the submitted data
         #    — NOT by editing self.fields[...].widget inside clean() and then
         #    raising. On a second submission carrying some other validation

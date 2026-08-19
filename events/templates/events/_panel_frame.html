@@ -1,0 +1,37 @@
+{% comment %}
+右面板里那一块内容的外框（2026-08-19 抽出来）。
+
+面板里现在可能装两种东西 —— 活动详情，和报名表单 —— 而它们**共用**这一层：
+同一个几何（`.schedule-detail` 的 zoom 和高度）、同一颗右上角的 ×、同一个
+`data-schedule-detail` 钩子。
+
+⚠️ 抽出来的理由和 `_event_detail_body.html` 那次一样，**不是复用，是不许有第二份**：
+   两份外框会在第二次改动之后长得不一样（一个 × 在右上、一个在左上；一个有
+   zoom、一个没有），而两边都渲染成功。
+
+参数：
+  body  要画在框里的模板路径。调用方给，这里不认识它是什么。
+
+⚠️ `{% templatetag openblock %} include body {% templatetag closeblock %}` 吃的是一个**变量**，而这个变量只能由模板自己给
+   （见 `_schedule_detail.html` / `_schedule_signup.html`），不许来自请求 ——
+   一个从查询串里取出来的模板路径就是任意文件读取。
+{% endcomment %}
+<div class="schedule-detail" data-schedule-detail>
+  {% comment %}
+  ⚠️ `type="button"`：它长在 Alpine 的作用域里而不是表单里，但下一个人很容易把它
+     搬到别处 —— 默认的 submit 在表单里会变成一次提交。button.html 的 `toggles`
+     强制这一条也是同一个理由。
+
+  🔴 **报名表单在框里的时候，这颗 × 关掉的是整块面板，不是「退回详情」。**
+     退回详情那件事由表单里那颗 Back 负责。两者都画在框里、都往左上角挤的话，
+     人分不清哪个是「算了不报」哪个是「关掉右边」——所以 × 永远只有一个意思。
+
+  ⚠️ 关掉只是把这一块藏起来，**不清空**。日程那一块一直原样待在旁边（见
+     event_list.html），所以关掉之后回到的是你翻到的那个窗口、那个滚动位置 ——
+     重新取一次的话，人会发现自己被送回了今天。
+  {% endcomment %}
+  <button type="button" class="schedule-detail-close"
+          x-on:click="closeDetail()" aria-label="Close event">&times;</button>
+
+  {% include body %}
+</div>

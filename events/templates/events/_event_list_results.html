@@ -121,9 +121,45 @@ event_list 的结果区。整页和 HTMX 片段渲染的是同一份 —— 视�
 
             ⚠️ 文字走 `get_status_display`，不在模板里拼 —— label 的英文口径归模型管。
             {% endcomment %}
+            {% comment %}
+            🔴 **「Open for signup」那一格是一个链接，直通报名**（2026-08-19）。
+
+            这一页在问「我还能不能参加」，而这个标签正是回答「能」的那一格 ——
+            于是它同时也是最短的一条路：点它直接开报名表单，不必先读一遍详情
+            再去找按钮。宽屏在右面板里开，窄屏跳整页报名（和整卡点击同一个判据）。
+
+            ⚠️ **只有 `open` 那一档是链接。** 其余状态照旧是纯文字标签 ——
+               一个点了会 404 的标签（满员、已取消、已结束在 `open_for_signup()`
+               那道门前都是 404）读起来是「站坏了」，而不是「这场报不了」。
+
+            🔴 **它能不能被点到，全靠 app.css 里那两条 `pointer-events`。**
+               整卡的点击区（`.event-row-link`）是一层铺满整行的绝对定位元素，
+               压在所有内容上面。做法是：卡片**画**在遮罩上面、**点**穿过去，
+               而这一格自己把 `pointer-events` 收回来。
+               ⚠️ 靠 z-index 是**不行的**（试过）：卡片上那条入场动画让它永久
+                  成为一个层叠上下文，里面任何 z-index 都出不了这张卡。
+                  表现是「点报名标签开出了详情」，而控制台一声不吭。
+               守卫：events.tests.SignupBadgeLinkTests.test_the_badge_can_actually_be_clicked_through_the_card_overlay
+
+            ⚠️ 它**不是** `.event-row-link` 的后代，所以整卡那一层的 htmx 不会
+               跟着响一次（htmx 只听自己和自己的后代）。也因此这里要自己写一份
+               `x-on:click`：整卡那一层的那份翻不到这一次点击。
+
+            ⚠️ `aria-label` 把话说全。屏幕上「Open for signup」配着活动名读得通，
+               而读屏软件按链接列表跳的时候听到的是一串一模一样的
+               「Open for signup」——分不出是哪一场。
+            {% endcomment %}
             <span class="shrink-0">
               {% if event.status == "open" %}
-                {% include "core/components/badge.html" with label=event.get_status_display tone="success" %}
+                <a href="{% url 'events:event_signup' event.pk %}"
+                   class="event-row-badge-link"
+                   aria-label="Sign up for {{ event.name }}"
+                   hx-get="{% url 'events:event_signup' event.pk %}"
+                   hx-target="#schedule-detail" hx-swap="innerHTML"
+                   hx-trigger="click[panelFits()]"
+                   x-on:click="detail = true">
+                  {% include "core/components/badge.html" with label=event.get_status_display tone="success" %}
+                </a>
               {% else %}
                 {% include "core/components/badge.html" with label=event.get_status_display %}
               {% endif %}
@@ -140,38 +176,49 @@ event_list 的结果区。整页和 HTMX 片段渲染的是同一份 —— 视�
           </p>
         </div>
         {% comment %}
-        整张卡的点击区。⭐ `href` 永远是那条真路：没有 JS、或者日程关着的时候，
-        点下去就是跳到活动详情页（D24）。
+        整张卡的点击区。⭐ `href` 永远是那条真路：没有 JS、或者屏幕窄到装不下
+        面板的时候，点下去就是跳到活动详情页（D24）。
 
-        🔴 **日程开着时改成就地在面板里打开**，靠的是 `hx-trigger` 上那个事件
-           过滤器，而不是两套标记。过滤器为假时 htmx **完全不接管**这次点击，
-           于是浏览器照常跟着 `href` 走 —— 一份标记，两种行为，没有一个分支
-           需要知道另一个的存在。
+        🔴 **装得下面板时一律就地在面板里打开**（2026-08-19 改）。此前的条件是
+           「日程开着吗」，现在是「这块屏幕装得下吗」—— 也就是说日程**关着**时
+           点卡片同样在右边开，壳自己撑开。活动详情不再是从这一页点出去的一个
+           目的地。
 
-        ⚠️ 过滤器读的是 `.events-shell.is-open`，也就是 Alpine 写在外壳上的那个
-           class。不读 Alpine 的变量本身：那要 `$data` 之类的作用域穿透，而这个
-           链接在外壳里、却不在面板的作用域里。
+        🔴 **窄屏仍然跳整页，这不是妥协。** 窄于断点时左边这一列本来就被整个
+           藏起来（app.css 那条 `display: none`），面板会占满屏幕；而面板里那份
+           详情是**不画返回链接**的（见 `_event_detail_body.html` 的 `in_panel`），
+           于是唯一的出路是一颗几十像素的 ×。那是拿一个更差的东西换掉一个
+           好好的页面。
 
-        🔴 **那两个 `!!` 不是洁癖，少了它这个链接完全不发请求。** htmx 判断
+        ⚠️ 靠的仍然是 `hx-trigger` 上那个事件过滤器，而不是两套标记。过滤器
+           为假时 htmx **完全不接管**这次点击，于是浏览器照常跟着 `href` 走 ——
+           一份标记，两种行为，没有一个分支需要知道另一个的存在。
+
+        ⚠️ 断点**不在这里**，也不在 JS 里：`panelFits()` 读的是 app.css 在那个
+           媒体查询里点亮的 `--panel-fits`。样式表说了算，两处分家的表现是
+           某个宽度上点卡片既不开面板、也不跳页。
+
+        🔴 **过滤器必须求值成真布尔，少了它这个链接完全不发请求。** htmx 判断
            「这次事件要不要放行」用的是**严格相等**：
 
                return eventFilter.call(elt, evt) !== true
 
-           `querySelector` 返回的是一个**元素** —— truthy，但 `!== true`，
-           于是每一次点击都被过滤掉。而 `x-on:click` 照常把面板翻开，
-           表现就是「点了左边，右边那张卡是空的」，且**控制台一声不吭**。
+           所以 truthy 是不够的：`querySelector` 返回的元素 truthy 但 `!== true`，
+           于是每一次点击都被过滤掉。而 `x-on:click` 照常把面板翻开，表现就是
+           「点了左边，右边那张卡是空的」，且**控制台一声不吭**。
+           `panelFits()` 因此在自己内部用 `!!` 收口（见 app.js）。
            守卫：events.tests.SchedulePanelTests.test_the_trigger_filter_returns_a_real_boolean
 
         ⚠️ 查询串要带上（`{% templatetag openblock %} querystring {% templatetag closeblock %}`）——
            那一次请求还要算「这一场在第几页」，而那取决于当前筛选和页码。
 
-        ⚠️ `x-on:click` 不加条件：日程关着时这一行根本不会执行到（htmx 没接管，
+        ⚠️ `x-on:click` 不加条件：窄屏上这一行根本不会执行到（htmx 没接管，
            页面已经跳走了）。加了反而要在两处各写一遍同一个判断。
         {% endcomment %}
         <a href="{% url 'events:event_detail' event.pk %}" class="event-row-link"
            hx-get="{% url 'events:event_detail_panel' event.pk %}{% querystring from_list=1 %}"
            hx-target="#schedule-detail" hx-swap="innerHTML"
-           hx-trigger="click[!!document.querySelector('.events-shell.is-open')]"
+           hx-trigger="click[panelFits()]"
            x-on:click="detail = true">
           <span class="sr-only">{{ event.name }}</span>
         </a>

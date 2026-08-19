@@ -543,7 +543,21 @@
   /* 并排的两档。⚠️ 列宽写在这里而不是写在 `.is-open` 的通则里 ——
    *    64rem 以下没有「列」这回事（列是藏起来的），给它一个 34rem 的基准
    *    只会在动画的中途露出一列被压扁的卡片。 */
+  /* 🔴 **这一格是「装得下右面板吗」的唯一答案。**（2026-08-19）
+   *
+   *    app.js 的 `panelFits()` 读它，活动卡片上那个 hx-trigger 的过滤器再据此
+   *    决定「就地开面板」还是「跳整页详情」。写在这里而不是在 JS 里再写一个
+   *    `matchMedia("(min-width: 64rem)")`：两处迟早会分家，而分家的表现是某个
+   *    宽度上点卡片**既不开面板、也不跳页** —— 两边都以为对方管了。
+   *
+   * ⚠️ 它必须和下面那条 `display: none`（窄屏藏起左列）同一个断点。那条是
+   *    「窄屏没有左列」，这条是「窄屏别在面板里开」，说的是同一件事的两面。
+   */
   @media (width >= 64rem) {
+    .events-shell {
+      --panel-fits: 1;
+    }
+
     .events-shell.is-open {
       width: 62rem;
       margin-left: -4rem;
@@ -698,6 +712,50 @@
    * ⚠️ 代价如实说：`zoom` 之后这一块里所有的 CSS 像素都不再等于设备像素，
    *    所以任何拿 `getBoundingClientRect` 在这里面算位置的 JS 都要小心。
    *    目前没有 —— 日程的那几段 JS 全在另一块 pane 里。 */
+  /* 🔴 **面板里的卡片不投影，改用一条细线。**（2026-08-19）
+   *
+   *    成因：`.schedule-detail` 是 `overflow-y: auto`，而按 CSS 规范，一轴不是
+   *    `visible` 时另一轴的**使用值**也会变成裁剪 —— 所以这一层横向同样裁。
+   *    而卡片**正好和它一样宽**（量出来两边都是 1343），于是那两层落影往左右扩散
+   *    的部分被齐齐切掉，只剩往下那一条：屏幕上是一个硬边的方块，不是落影。
+   *    ⚠️ 这个错在「样式对不对」这一层完全看不出来：`box-shadow` 的计算值是对的，
+   *       卡片本身也没有任何异常。是量了 `cardRight === wrapRight` 才看出来的。
+   *
+   *    试过让卡片往里缩一点（`margin-inline`）把地方让出来 —— 撤了：卡片因此
+   *    比「Roles」那些标题和下面的表格窄一圈，量出来错开 8px，读起来是没对齐。
+   *
+   * 🔴 所以换的是**材质**，不是尺寸：这一档里卡片不投影，用一条细线划边界。
+   *    线的颜色和粗细直接取 `.table-wrap` 那一条 —— 那张表就在同一个面板里、
+   *    紧挨着这些卡片，两处用同一根线才不会读成「两种盒子」。
+   *
+   * ⚠️ 关影子写 `0 0 #0000`，**不能写 `none`** —— 这个变量会被代进一串逗号分隔的
+   *    影子列表里，而 `none` 在列表中间是语法错误，浏览器会丢掉整条声明。
+   *    （`.card` 那一段上写着这条，深色下的霓虹光圈就是这么消失过一次。）
+   *
+   * ⚠️ 边框走 `--panel-hairline` 而不是直接写颜色：深色那一档要换色，而
+   *    `.dark.has-hero .card:not(.border)` 的权重比这里高，直接写 `border-color`
+   *    会被它压掉。自定义属性在**取值时**解析，绕开了这场权重比拼。
+   *
+   * ⚠️ 预览那个警示框（`.card` + Tailwind 的 `border-warning-fg/30`）不受影响：
+   *    工具类在 utilities 层，压得过这里。它的黄边还是黄的。
+   *
+   * ⚠️ 尺寸一点没变：`box-sizing: border-box`，1px 的边画在盒子里面。 */
+  .schedule-detail .card {
+    --panel-hairline: var(--color-ink-200);
+    --card-elevation: 0 0 #0000;
+    border: 1px solid var(--panel-hairline);
+  }
+
+  .dark .schedule-detail .card {
+    --panel-hairline: var(--color-ink-700);
+  }
+
+  /* 深色 + 大图那一档给卡片的是「外围一圈更暗的晕」，同样会被裁成硬边。
+   * ⚠️ 选择器要够重才压得过 `.dark.has-hero .card:not(.border)`（0-4-0）。 */
+  .dark.has-hero .schedule-detail .card:not(.border) {
+    --card-elevation: 0 0 #0000;
+  }
+
   .schedule-detail {
     zoom: 0.85;
     /* 🔴 `height: 100%`，**不是** `calc(100% / 0.85)`。
@@ -1391,8 +1449,29 @@
     height: var(--event-row-height);
   }
 
+  /* 🔴 **卡片画在整卡遮罩上面，但不接鼠标**（2026-08-19）。
+   *
+   *    整卡的点击区（`.event-row-link`）是一层铺满整行的绝对定位元素，`z-index: 1`。
+   *    而卡片里现在有了一个**要能单独点**的东西（「Open for signup」那一格直通
+   *    报名）。两件事要同时成立：整行随便哪儿点都开详情，而那一格点了开报名。
+   *
+   *    靠 z-index 排不出来：卡片上那条入场动画带 `animation-fill-mode: both`，
+   *    于是它永久是一个层叠上下文，里面任何 z-index 都出不了这张卡。
+   *    （踩过，见 `.event-row-badge-link` 那一段。）
+   *
+   *    所以改成两件独立的事：**画**在上面（`z-index: 2`），**点**穿过去
+   *    （`pointer-events: none`），而那一格自己把 `pointer-events` 收回来。
+   *    这个写法不依赖层叠顺序，将来加任何动画或滤镜都推不翻它。
+   *
+   * ⚠️ 代价如实说：卡片里的文字**选不中了**。而这一条不是新增的 ——
+   *    遮罩本来就盖在文字上面，在此之前同样选不中。
+   *
+   * ⚠️ `overflow: hidden` 为什么在卡片上而不在行上，见上面那一大段。
+   */
   .event-row > .card {
     overflow: hidden;
+    z-index: 2;
+    pointer-events: none;
   }
 
   @media (width >= 40rem) {
@@ -1433,6 +1512,41 @@
     z-index: 1;
     border-radius: 0.5rem;
   }
+
+  /* 「Open for signup」那一格外面的链接（2026-08-19）。
+   *
+   * 🔴 **它能不能被点到，不靠 z-index —— 靠上面那两条 `pointer-events`。**
+   *
+   *    第一版是靠层叠的（给它 `z-index: 2`，比整卡遮罩的 1 高），而它**不работа**：
+   *    `.event-row > .card` 上那条入场动画带 `animation-fill-mode: both`，
+   *    而一个正在动画（或永久填充）`opacity` / `translate` 的元素**始终是一个
+   *    层叠上下文** —— 于是这个 2 只在卡片内部排序，卡片自己是 `z-index: auto`，
+   *    整个被压在遮罩底下。
+   *    ⚠️ 屏幕上的表现：链接画得出来、看得见、鼠标也变手型，**点下去开出的是
+   *       详情而不是报名**。控制台一声不吭，两个链接的标记单看都没有问题，
+   *       两条 z-index 单看也都对。是 `document.elementFromPoint()` 问出来的。
+   *
+   * ⚠️ 所以这里只剩一条 `pointer-events: auto` —— 它把卡片那条 `none` 收回来。
+   *    这个写法和层叠顺序无关，也就不会被将来任何一条新的动画或滤镜悄悄推翻。
+   *
+   * ⚠️ 自己**不画任何外观**：颜色、圆角、字号全在里面那个 badge 上。这一层只管
+   *    「可点」和「焦点看得见」。给它加背景或边框会变成一个套在标签外面的第二个
+   *    形状，而 badge.html 上写着 badge 保持 `rounded-md` 正是为了让「能按的」
+   *    和「不能按的」长得不一样 —— 这里再套一层就把那条抹平了。
+   *
+   * ⚠️ 焦点环用 `outline` 而不是 `ring`（box-shadow）：badge 自己有圆角背景，
+   *    box-shadow 会被相邻的标签盖住一截，而 outline 画在最上层。 */
+  .event-row-badge-link {
+    pointer-events: auto;
+    display: inline-flex;
+    border-radius: 0.375rem;
+  }
+
+  .event-row-badge-link:focus-visible {
+    outline: 2px solid var(--color-brand-600);
+    outline-offset: 2px;
+  }
+
 
   /* 活动名。**默认没有下划线**，鼠标进入整行时从左画进来，离开时向右滑走。
    *

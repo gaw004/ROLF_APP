@@ -263,6 +263,57 @@ window.onGoogleCredential = function (response) {
 };
 
 // ---------------------------------------------------------------------------
+// Events 那一页的外壳（2026-08-19 把散在模板里的两个布尔收拢成一个组件）
+//
+// 右面板是**两层**，而左边那颗开关只管底下那一层：
+//
+//   schedule   底层：日程画不画
+//   detail     上层：右边有没有正开着一场活动（详情，或报名表单）
+//   isOpen     = schedule || detail —— 决定**版面**（壳多宽、列收到多窄、
+//                筛选卡钉不钉），也就是 `.is-open` 那个 class
+//
+// 🔴 **版面归 isOpen，不归 schedule。** 这是 2026-08-19 那批的地基：从今以后
+//    点活动卡片一律在右边开，日程关着时也要把壳撑开。写成「schedule 决定版面」
+//    的话，日程关着时点一张卡，面板是 `visibility: hidden` + 宽度 0 ——
+//    请求发出去了、内容也换进去了，屏幕上什么都没有。
+//
+// ⚠️ 为什么是 `$watch` 而不是 `x-effect`：两条规则各自只关心**一个**变量的变化，
+//    而 x-effect 会把它读到的所有东西都变成依赖。把两条写进一个 x-effect 里，
+//    `detail = true` 会把 effect 重新跑一遍，于是「日程开着时点一张卡」会被
+//    第一条规则当场关掉 —— 卡片点了就没反应。$watch 只在那一个值真的变了时响。
+Alpine.data("eventsShell", () => ({
+  schedule: false,
+  detail: false,
+
+  get isOpen() {
+    return this.schedule || this.detail;
+  },
+
+  init() {
+    // 规则一：**开日程 = 亮出日程**。详情压在日程上面，所以开着详情时按下
+    // Schedule 而不让位的话，屏幕上一个像素都不动 —— 那是最糟的一种反馈。
+    // ⚠️ 只在**开**的那一下让位。关掉日程时详情留着（2026-08-19 定），
+    //    因为关的是底层，而人正在读的是上层。
+    this.$watch("schedule", (on) => {
+      if (on) this.closeDetail();
+    });
+
+    // 规则二：右边一空，左边那圈高亮就得跟着没。高亮的意思只有一个 ——
+    // 「右边正开着的是这一场」—— 所以它不该活得比面板长。
+    // ⚠️ 走事件而不是直接改 app.js 里那个变量：高亮归下面那一段管，
+    //    而那一段不在 Alpine 的作用域里。$watch 只在真的变了时响，
+    //    所以整页加载时不会白发一次。
+    this.$watch("detail", (on) => {
+      if (!on) this.$dispatch("panel-closed");
+    });
+  },
+
+  closeDetail() {
+    this.detail = false;
+  },
+}));
+
+// ---------------------------------------------------------------------------
 // HTMX 的两条全局约定
 
 // 1. 每个片段请求带上当前主题以外什么都不带 —— CSRF 走 base.html 上那一次
@@ -1198,6 +1249,33 @@ function watchFilterHeight() {
 watchFilterHeight();
 
 // ---------------------------------------------------------------------------
+// 「这块屏幕装得下右面板吗」（2026-08-19）
+//
+// 活动卡片上那个 hx-trigger 的过滤器用它决定：**就地在面板里开**，还是放手
+// 让浏览器跟着 href 跳到整页详情去。宽屏就地开；窄于断点时左边那一列本来就
+// 被整个藏起来（app.css 的 `display: none`），面板会占满屏幕、而里面那份详情
+// 是**不画返回链接**的 —— 于是唯一的出路是一颗几十像素的 ×。那是用一个更差
+// 的东西换掉一个好好的页面，所以窄屏仍然跳整页。
+//
+// 🔴 **断点只有 app.css 一处。** 在这里写第二个 `matchMedia("(min-width: 64rem)")`
+//    的话，两处迟早会分家，而分家的表现是「某个宽度上点卡片既不开面板、
+//    也不跳页」—— 两边各自都认为对方会处理。所以这里读的是 CSS 自己在那个
+//    媒体查询里点亮的一个变量，样式表说了算。
+//
+// 🔴 **返回真布尔。** htmx 的事件过滤器比的是严格相等：
+//
+//        return eventFilter.call(elt, evt) !== true      // htmx.js
+//
+//    truthy 是不够的。这个坑 2026-08-19 找了三轮才找对，表现是每一次点击都被
+//    静默过滤掉、控制台一声不吭。守卫：
+//    events.tests.SchedulePanelTests.test_the_trigger_filter_returns_a_real_boolean
+window.panelFits = function () {
+  const shell = document.querySelector(".events-shell");
+  if (!shell) return false;
+  return !!getComputedStyle(shell).getPropertyValue("--panel-fits").trim();
+};
+
+// ---------------------------------------------------------------------------
 // 点日程上的一张卡：左边翻到那一场、滚进视口、套一圈高亮（2026-08-18）
 //
 // 服务端在那一次请求里已经把左边换成了正确的一页、并且画上了 `is-picked`。
@@ -1222,6 +1300,53 @@ function paintPicked() {
   }
 }
 
+// 吸顶导航栏挡住的那一条。⚠️ 和 app.css 的 `--top-bar-h` 是同一件事，
+//    但这里要的是**像素**而不是 rem，而那个变量声明在日程面板上（作用域不到
+//    这里）。取 76px 是两档里高的那一档：判「看得见吗」时宁可保守，
+//    多滚一次的代价远小于「明明被盖住却判成可见」。
+const TOP_BAR_PX = 76;
+
+// 视口顶上**一共**被挡住多少 —— 顶栏，加上钉住的筛选卡（如果它此刻钉着）。
+//
+// 🔴 少算筛选卡这一截，就是用户报上来的那个 bug：「点日程里的卡片，左边有高亮，
+//    但卡片藏在 filter 卡片下面」。右面板开着时筛选卡是 `position: sticky`，
+//    约 257px 高；只让开顶栏的话，一行落在它底下会被判成「完整可见」，于是
+//    下面那句 `return` 直接不滚了 —— 高亮画上了，人却看不见那一行。
+//
+// ⚠️ 高度**实测**，不写死：这张卡窄屏上控件换行、表单报错时多一行字，高度会变。
+//    （同一个理由，app.css 那条 `scroll-margin-top` 用的也是实测的 `--filter-h`。）
+// ⚠️ 判「钉着没有」看计算出来的 `position`，不看外壳有没有 `.is-open` ——
+//    钉不钉是样式表的决定（`.events-shell.is-open .filter-card`），
+//    在这里重述一遍那个条件就是第二个会漂移的答案。
+function occludedTop() {
+  const card = document.querySelector(".filter-card");
+  if (card && getComputedStyle(card).position === "sticky") {
+    return Math.max(TOP_BAR_PX, card.getBoundingClientRect().bottom);
+  }
+  return TOP_BAR_PX;
+}
+
+// 🔴 **只有那一行不完整可见时才滚。**（2026-08-19 修）
+//
+//    这个函数原本是给「从日程点过来」写的：那一场可能在列表的另一页、
+//    在屏幕外，不滚过去的话左边看起来毫无反应。而 2026-08-19 给左边那些行
+//    也加上 `data-event` 之后，**从左边点也走这条路** —— 于是点一个就在光标
+//    底下的卡片，页面还要平滑滚几百像素把它挪到正中。
+//
+//    线上量到的：数据 ~175ms 就到位，页面**滑到 1143ms 才停**（772px）。
+//    连点时每一下都从头开始滑，所以越点越像卡死。用户报上来的原话是
+//    「不停点不同的卡片，整个东西特别特别慢，竟然要等 1 秒钟」——
+//    等的不是数据，是这段动画。
+//
+// ⚠️ 判据写成「不完整可见」而不是「点击来自哪一边」：一条规则同时管住两个
+//    入口，不需要在别处记住这次点击是从哪儿来的。从左边点的必然可见（人就是
+//    照着它点的），从日程点的可能不可见 —— 两种情形各自得到对的行为。
+function isFullyVisible(row) {
+  const box = row.getBoundingClientRect();
+  return box.top >= occludedTop()
+    && box.bottom <= (window.innerHeight || document.documentElement.clientHeight);
+}
+
 function scrollPickedIntoView() {
   if (pickedEvent === null) return;
   const row = document.querySelector(
@@ -1230,9 +1355,19 @@ function scrollPickedIntoView() {
   //    全部，列表还带着「今天起」那一刀），窄屏上那一整列更是 display:none。
   //    静静地什么都不做，不是报错。
   if (!row || !row.offsetParent) return;
-  // ⚠️ `block: "center"` 而不是 `"start"` —— start 会把那一行顶到吸顶导航栏
-  //    底下去，正好被盖住一截。
-  row.scrollIntoView({ behavior: "smooth", block: "center" });
+  if (isFullyVisible(row)) return;
+  // 滚到「顶上被挡住的那一截**下面**」，而不是 `scrollIntoView` 的 center。
+  //
+  // ⚠️ center 不够：它把行放在视口正中，而钉住的筛选卡在开着的时候能占到 333px ——
+  //    窗口矮一点（比如 600px 高，正中是 300px）时那一行仍然压在卡片底下。
+  //    ⚠️ 也不能用 `block: "start"`：那会把行顶到视口最上面，正好被顶栏盖住 ——
+  //       这是原来选 center 想躲开的那件事。现在两件一起躲开：明确地滚到
+  //       「第一处没有被挡住的位置」。
+  const gap = 12;
+  window.scrollBy({
+    top: row.getBoundingClientRect().top - occludedTop() - gap,
+    behavior: "smooth",
+  });
 }
 
 // 记下点的是谁。⚠️ 用事件委托挂在 body 上，不是给每张卡各挂一个 ——
@@ -1244,6 +1379,20 @@ document.body.addEventListener("click", (event) => {
   const card = event.target.closest("[data-event]");
   if (!card) return;
   pickedEvent = card.dataset.event;
+});
+
+// 右面板关掉了 —— 高亮跟着没（2026-08-19）。
+//
+// 🔴 高亮的意思**只有一个**：右边正开着的是这一场。所以它不能活得比面板长。
+//    此前没有任何地方清过它，表现是：关掉日程之后左边还圈着一行，而右边
+//    什么都没开着 —— 一个指向空处的记号。
+//
+// ⚠️ 事件由外壳那个 Alpine 组件在 `detail` 变假时发出（见上面 eventsShell）。
+//    在这里监听而不是让 Alpine 直接改 `pickedEvent`：这个变量归这一段管，
+//    而 Alpine 的作用域够不到它。
+document.body.addEventListener("panel-closed", () => {
+  pickedEvent = null;
+  paintPicked();
 });
 
 // 每一次 HTMX 落地之后补一次。⚠️ `afterSettle` 而不是 `afterSwap`：

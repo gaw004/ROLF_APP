@@ -18,6 +18,17 @@ button.html 挑好变体之后落地的那一层。分成两个文件是为了�
 ⚠️ `opens` 和 `confirm` 不能同时给：两者都要写 x-on:click，而「先确认再开弹窗」
    本身也说不通 —— 弹窗里那个提交按钮才是该确认的地方。
 
+⚠️ `hx_get` 只落在**这一支**（`<a>`），而且必须配 `href`（2026-08-19 加）。
+   它的全部意思是「有 htmx 时就地换掉某一块，没有时跳到 href 那一页」——
+   和 `opens` 同一个形状的降级承诺，所以 href 指的那一页得真的存在、真的能
+   完成同一件事。
+   ⚠️ **不许配 `opens`。** `opens` 写的是 `x-on:click.prevent`，而 `.prevent` 在
+      htmx 没接管的那一档会把跳转也拦掉 —— 于是降级路径变成一颗死按钮，
+      而这在有 JS 的开发机上永远看不出来。
+   ⚠️ `hx_target` 必填。漏了的话渲染出 `hx-target=""`，htmx 把它当成没写、
+      于是内容换到**这颗按钮自己**身上：按钮消失，一整块详情长在原地。
+      不报错。
+
 ⚠️ `disabled` 只落在下面 `<button>` 那一支。上面那一支是 `<a>`，而 `<a>` 根本
    没有 disabled 属性 —— 同时给 href 和 disabled 的话，这里不会报任何错，
    渲染出来是一个**看着灰、点了照样跳**的链接。理由和用法写在 button.html。
@@ -26,6 +37,8 @@ button.html 挑好变体之后落地的那一层。分成两个文件是为了�
 {% endcomment %}
 {% if href %}
   <a href="{{ href }}" class="{{ cls }}{% if full %} w-full{% endif %}"
+     {% if hx_get %}hx-get="{{ hx_get }}" hx-target="{{ hx_target }}"
+                    hx-swap="innerHTML"{% endif %}
      {% if opens %}x-on:click.prevent="{{ opens }} = true"{% endif %}
      {% if confirm %}x-on:click="if (!window.confirm('{{ confirm|escapejs }}')) $event.preventDefault()"{% endif %}>{{ label }}</a>
 {% else %}

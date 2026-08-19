@@ -9,22 +9,26 @@
    「面板专用的精简版」—— 两份会在第二次改动之后说两件不一样的事，而两边都
    渲染成功。塞进 680px 靠的是 app.css 里 `.schedule-detail` 那个 `zoom`，
    不是靠删内容。
+
+⚠️ 外框（`.schedule-detail` 那一层和右上角那颗 ×）2026-08-19 抽到了
+   `_panel_frame.html` —— 报名表单进面板之后，那一层有了第二个使用者。
 {% endcomment %}
-<div class="schedule-detail" data-schedule-detail>
+{% include "events/_panel_frame.html" with body="events/_event_detail_body.html" %}
+
+{% if messages_oob %}
   {% comment %}
-  ⚠️ `type="button"`：它长在 Alpine 的作用域里而不是表单里，但下一个人很容易把它
-     搬到别处 —— 默认的 submit 在表单里会变成一次提交。button.html 的 `toggles`
-     强制这一条也是同一个理由。
+  🔴 **只有写操作那条路才带 messages，而这个模板两条路都在用。**
 
-  ⚠️ 关掉只是把这一块藏起来，**不清空**。日程那一块一直原样待在旁边（见
-     event_list.html），所以关掉之后回到的是你翻到的那个窗口、那个滚动位置 ——
-     重新取一次的话，人会发现自己被送回了今天。
+  它平时是**读**操作（点一张卡把详情换进来），而 `_messages_oob.html` 上写着
+  读操作不许 include 它：include 一次就会把 session 里还没显示过的消息提前
+  消费掉，于是用户在另一个页面上看到「You are signed up」。
+
+  但报名成功之后换回来的也是这一份详情，而那一次**是**写操作、确实有话要说。
+  所以这里不是无条件 include，而是由视图给一个标志 —— 谁写谁点亮它。
+  只有 `event_signup` 的成功分支会给。
   {% endcomment %}
-  <button type="button" class="schedule-detail-close"
-          x-on:click="detail = false" aria-label="Close event">&times;</button>
-
-  {% include "events/_event_detail_body.html" %}
-</div>
+  {% include "core/components/_messages_oob.html" %}
+{% endif %}
 
 {% comment %}
 左边那一列。⚠️ 它在 `#schedule-detail` **外面**、和它平级：htmx 只在响应的

@@ -45,7 +45,16 @@
 
   ⚠️ `x-cloak` 不需要：默认状态就是关着的，而关着的样子和没有 JS 时一模一样。
   {% endcomment %}
-  <div class="events-shell" x-data="{ schedule: false }"
+  {% comment %}
+  ⚠️ `detail` 2026-08-19 从面板挪到了**这一层**。理由不是整齐：左边那些活动卡片
+     在日程开着时也要把详情打进面板，而它们在外壳里、却不在面板的作用域里 ——
+     状态留在面板上的话，那一边的 `x-on:click="detail = true"` 找不到这个变量。
+
+  ⚠️ 挪上来之后它仍然在**被 HTMX 换掉的那两块之外**（`#event-results` 和
+     `#schedule`），这才是原来那条规矩要的东西 —— 状态写在被换掉的那块里，
+     等于每换一次自己归零一次。
+  {% endcomment %}
+  <div class="events-shell" x-data="{ schedule: false, detail: false }"
        x-bind:class="schedule ? 'is-open' : ''">
     <h1 class="mb-6 text-2xl font-semibold">Events</h1>
 
@@ -71,8 +80,7 @@
          见 `_schedule.html`。这两件事分开，是「日程是一屏」那条决定的落点。
       {% endcomment %}
       <aside id="schedule-panel" class="schedule-panel card"
-             aria-labelledby="schedule-heading"
-             x-data="{ detail: false }">
+             aria-labelledby="schedule-heading">
         <h2 id="schedule-heading" class="sr-only">Schedule</h2>
 
         {% comment %}
@@ -85,10 +93,11 @@
         ⚠️ `x-show` 用的是 `display: none`，所以藏起来的那一块不在无障碍树里，
            也不在 Tab 顺序里。
 
-        ⚠️ `x-data` 挂在**面板**上，不在里面任何一块上：`#schedule` 会被箭头
-           翻页整个换掉，`#schedule-detail` 会被每次点击换掉 —— 状态写在被换掉
-           的那块上，等于每换一次自己归零一次。和外层 shell 上那个 `schedule`
-           是同一条规矩。
+        ⚠️ `detail` 挂在**外壳**上（2026-08-19 从这里挪上去的），不在里面任何一块
+           上：`#schedule` 会被箭头翻页整个换掉，`#schedule-detail` 会被每次点击
+           换掉 —— 状态写在被换掉的那块上，等于每换一次自己归零一次。
+           挪到外壳还有第二个理由：左边那些活动卡片也要翻这个开关，而它们够不着
+           面板的作用域。
 
         ⚠️ 不需要 `x-cloak`：没有 JS 时两块都显示，而详情那块是空的 ——
            也就是和现在一模一样。

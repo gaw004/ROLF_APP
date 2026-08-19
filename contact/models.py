@@ -282,6 +282,25 @@ class Contact(ConstraintErrorFieldMixin, TimeStampedModel):
                 violation_error_message="An individual needs a legal last name.",
                 violation_error_code="individual_needs_last_name",
             ),
+            # 🔴 The first name is required too, since 2026-08-19. One rule per
+            #    constraint, exactly as the note above says: two names are two
+            #    offending fields, and a code maps to one field.
+            #
+            #    Why it is here and not only on the forms: the last name has
+            #    been a database rule since D9 while the first name was left to
+            #    whoever happened to be typing — so `Register` asked for one and
+            #    `My profile` did not, and the two pages disagreed about the
+            #    same person. Ranking a person by their surname alone is not
+            #    how anybody is addressed, and every list, badge and email in
+            #    this project renders `display_name`, which is built from both.
+            models.CheckConstraint(
+                condition=(
+                    ~models.Q(contact_type="individual") | ~models.Q(legal_first_name="")
+                ),
+                name="contact_individual_has_a_first_name",
+                violation_error_message="An individual needs a legal first name.",
+                violation_error_code="individual_needs_first_name",
+            ),
             models.CheckConstraint(
                 condition=(
                     ~models.Q(contact_type="organization") | ~models.Q(organization_name="")

@@ -41,8 +41,15 @@ class RegistrationForm(forms.Form):
     #    anything. See core/limits.py.
     password = forms.CharField(
         widget=forms.PasswordInput, max_length=PASSWORD, label="Password")
+    # ⚠️ Both required (2026-08-19). The first name used to be optional here
+    #    while the last name was not, which is the shape of a rule nobody
+    #    decided: `Contact` has carried a database constraint on the last name
+    #    since D9 and none on the first, so the form simply inherited that
+    #    asymmetry. Both columns now have one, and this page is where a
+    #    volunteer meets it — the red `*` next to each box comes from
+    #    `required`, via core/components/field.html.
     legal_last_name = forms.CharField(max_length=100, label="Last name")
-    legal_first_name = forms.CharField(max_length=100, required=False, label="First name")
+    legal_first_name = forms.CharField(max_length=100, label="First name")
     phone = PhoneNumberField(region="US", required=False, label="Phone")
     # Collected, and not optional-by-accident: P3's minor check reads it, and
     # is_minor treats a missing date as "unknown", which takes the cautious
@@ -212,6 +219,29 @@ class ProfileForm(forms.ModelForm):
         #    property of accounts, so it is enforced where accounts are made —
         #    RegistrationForm — and here, where their owner edits them.
         self.fields["email"].required = True
+        # 🔴 Both names required, and this line is load-bearing in a way that is
+        #    easy to miss (2026-08-19).
+        #
+        #    The columns are `blank=True` — a ministry admin writing somebody
+        #    down on the day may only have half a name, and an organisation has
+        #    neither — so ModelForm builds both boxes optional. Meanwhile the
+        #    *database* refuses an individual without them. Clearing the last
+        #    name here therefore validated cleanly and blew up at the INSERT:
+        #    an IntegrityError 500 on My profile, from a form that reported no
+        #    error at all.
+        #
+        #    ⚠️ And Django's own constraint validation does not catch it. A
+        #       ModelForm checks constraints in `_post_clean`, but it skips any
+        #       constraint that mentions a field the form does not render — and
+        #       both of these mention `contact_type`, which this form
+        #       deliberately does not offer (see the closing note). So the one
+        #       thing standing between a volunteer and that 500 is this line.
+        #       The admin never hit it only because ContactAdminForm is
+        #       `fields = "__all__"`, so `contact_type` is on it.
+        #
+        #    Guard: accounts.tests.ProfileNameTests.
+        self.fields["legal_first_name"].required = True
+        self.fields["legal_last_name"].required = True
         # The address is optional in full. A postcode without a street is not
         # wrong, it is partial, and refusing it would only teach people to type
         # something false into the other boxes.
@@ -295,3 +325,25 @@ class EmergencyContactForm(forms.ModelForm):
         self.fields["relationship_type"].queryset = (
             RelationshipType.objects.filter(usable_as_emergency_contact=True)
         )
+
+    def _get_validation_exclusions(self):
+        """Keep `person` in play, so the "already recorded" constraint is checked.
+
+        🔴 Found on 2026-08-19 while auditing for the trap that took My profile
+           down, and it is the *same* trap: `emergencycontact_unique_per_person`
+           spans (person, name, phone), `person` is set on the instance rather
+           than rendered, and Django drops any constraint that mentions a field
+           it has excluded from validation. So adding the same person twice —
+           tapping Add twice, or writing Mum down again a year later —
+           validated cleanly and raised IntegrityError at the INSERT: a 500 on
+           My profile, from a form reporting no error.
+
+        ⚠️ The rule itself is not restated here (D14): the one statement of it
+           is the constraint, and putting `person` back is what lets Django ask
+           the constraint. The sentence the volunteer reads is the constraint's
+           own `violation_error_message`, landed on the name box by
+           `CONSTRAINT_FIELD["emergency_contact_duplicate"]`.
+        """
+        exclude = super()._get_validation_exclusions()
+        exclude.discard("person")
+        return exclude

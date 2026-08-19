@@ -61,6 +61,57 @@ EventQuerySet.open_for_signup()  # 同一条判据的集合形态
 跑起来的那个「现在」可能就落在窗口里面。这也正是这个 bug 一直没被列表页自己
 暴露出来的原因。
 
+### ② 在 My profile 里删掉 last name，整个网站就蹦了 —— 而底下那条规则会再犯
+
+三处口径各不相同，而且没人决定过要这样：
+
+| | first name | last name |
+|---|---|---|
+| 数据库 | 无约束 | **有 CheckConstraint**（D9 起） |
+| Register | 选填 | 必填 |
+| My profile | 选填 | 选填 |
+
+`ProfileForm` 是 `Contact` 的 ModelForm，而这两列都是 `blank=True`（当天写下名字的
+志愿者可能只有半个名字，机构则两个都没有），所以两个框天生是选填的。清空姓氏 →
+表单校验通过 → `INSERT` 撞上约束 → IntegrityError → **500，而页面上没有一行字说
+哪里错了**。
+
+#### 🔴 真正的成因不是「表单忘了设必填」
+
+Django 是会在 ModelForm 里校验约束的 —— 但它**会跳过任何提到了表单没有渲染的
+字段的约束**。Contact 那三条约束条件里都写着 `contact_type`，而 `ProfileForm`
+刻意不提供那一格（让志愿者把自己改成「机构」是另一种坏）。于是整条约束被静默
+跳过。admin 一直没事，只是因为 `ContactAdminForm` 是 `fields = "__all__"`。
+
+**这是一个会重犯的坑**，所以顺着它把全部 ModelForm 对着各自模型的约束过了一遍：
+
+| 表单 | 约束提到但表单没有的字段 | 结果 |
+|-----|------------------------|------|
+| `ProfileForm` | `contact_type` | 🔴 就是这个 500 |
+| `EmergencyContactForm` | `person` | 🔴 **同一形状的第二个 500**：同一个紧急联系人加第二次 —— 连点两下 Add，或者一年后又把妈妈写了一遍 |
+| `EventRoleForm` | `event` | 🔴 **第三个**：同一个角色在一场活动上开两次，Edit & Roles 页当场 500 |
+| `EventStatusForm` | `start_time` / `end_time` | 改 status 违反不了「结束不早于开始」，且 `set_status()` 自己跑 `full_clean()` |
+| `ContactAdminForm` / `EventForm` | — | 无缺口 |
+
+后两个 500 的修法是同一行：`_get_validation_exclusions()` 里把那个字段 `discard`
+掉，于是 Django 肯问那条约束了。**规则本身一个字都没有重写**（D14）——
+用户读到的那句话就是约束自己的 `violation_error_message`，落在哪一格由
+`CONSTRAINT_FIELD` 决定。
+
+#### 名字这一层的落点
+
+- **数据库**：新增 `contact_individual_has_a_first_name`，和 last name 那条同一个
+  形状、同一个理由。⚠️ 一条约束一条规则：两个名字是两个出错的字段，而一个 code
+  只能映射到一个字段。
+- **Register / My profile**：两个名字都 `required`。红色的 `*` 是白送的 ——
+  `core/components/field.html` 早就按 `required` 画它。
+- **迁移会在脏数据上当场失败**，那是对的：先查 `legal_first_name=""` 的个人，
+  在 admin 里补，**不要**写 RunPython 自动填 —— 名字是真实信息，没有任何自动值
+  是对的，而占位符事后分不出来。
+
+⚠️ 代价：全项目的测试助手都要给个人补一个名字（785 个用例因此红过一次）。
+   那不是噪音，那正是「这条规则从今天起真的成立」的证据。
+
 ---
 
 ## 四十七、2026-08-19 第三十批：活动详情不再是一个目的地；报名也进面板；那「1 秒」是页面自己在滑

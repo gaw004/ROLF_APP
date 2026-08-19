@@ -44,6 +44,7 @@ class ContactNameByTypeTests(TestCase):
     def test_individual_clears_organization_name_on_save(self):
         contact = Contact.objects.create(
             contact_type=Contact.ContactType.INDIVIDUAL,
+            legal_first_name="Ping",
             legal_last_name="Nguyen",
             organization_name="Red Cross",
         )
@@ -84,7 +85,8 @@ class ContactStringTests(TestCase):
     """
 
     def make(self, **kw):
-        data = {"contact_type": Contact.ContactType.INDIVIDUAL, "legal_last_name": "王强"}
+        data = {"contact_type": Contact.ContactType.INDIVIDUAL,
+                "legal_first_name": "Ping", "legal_last_name": "王强"}
         data.update(kw)
         return Contact.objects.create(**data)
 
@@ -99,7 +101,7 @@ class ContactStringTests(TestCase):
 
     def test_the_pk_is_the_last_resort(self):
         contact = self.make()
-        self.assertEqual(str(contact), f"王强 #{contact.pk}")
+        self.assertEqual(str(contact), f"Ping 王强 #{contact.pk}")
 
     def test_two_organizations_with_the_same_name_stringify_differently(self):
         # The organization branch needs this as much as the person one: two
@@ -126,6 +128,7 @@ class ContactAddressStateTests(TestCase):
     def _form_data(self, **overrides):
         data = {
             "contact_type": Contact.ContactType.INDIVIDUAL,
+            "legal_first_name": "Ping",
             "legal_last_name": "Nguyen",
             "address_country": "CA",
             "address_state": "Ontario",
@@ -190,7 +193,8 @@ class SeededRelationshipTypeTests(TestCase):
     def test_an_emergency_contact_can_be_recorded_with_nothing_else_set_up(self):
         # The whole point, stated as the action it enables.
         person = Contact.objects.create(
-            contact_type=Contact.ContactType.INDIVIDUAL, legal_last_name="Alice")
+            contact_type=Contact.ContactType.INDIVIDUAL,
+            legal_first_name="Ping", legal_last_name="Alice")
         kin = EmergencyContact.objects.create(
             person=person, name="Wang Xiuying", phone="+14085550101",
             email="wang@example.com",
@@ -354,6 +358,7 @@ class ConstraintFieldErrorTests(TestCase):
     # you forgot, rather than just failing a count.
     COVERED = {
         "individual_needs_last_name",
+        "individual_needs_first_name",
         "organization_needs_name",
         "contact_type_unknown",
         "reltype_name_taken",
@@ -380,9 +385,11 @@ class ConstraintFieldErrorTests(TestCase):
 
     def setUp(self):
         self.alice = Contact.objects.create(
-            contact_type=Contact.ContactType.INDIVIDUAL, legal_last_name="Alice")
+            contact_type=Contact.ContactType.INDIVIDUAL,
+            legal_first_name="Ping", legal_last_name="Alice")
         self.bob = Contact.objects.create(
-            contact_type=Contact.ContactType.INDIVIDUAL, legal_last_name="Bob")
+            contact_type=Contact.ContactType.INDIVIDUAL,
+            legal_first_name="Ping", legal_last_name="Bob")
         # The seeded vocabulary (contact/0004), not a second copy of it.
         self.parent_of = RelationshipType.objects.get(code="parent")
 
@@ -398,6 +405,15 @@ class ConstraintFieldErrorTests(TestCase):
         # The sentence comes from violation_error_message, not from a second
         # copy of the rule written out in clean().
         self.assertIn("An individual needs a legal last name.", messages)
+
+    def test_individual_without_a_first_name_points_at_legal_first_name(self):
+        """2026-08-19. One constraint per rule is what makes this possible:
+           two names are two offending fields, and a code maps to one field.
+        """
+        messages = self.assertFieldError(
+            Contact(contact_type=Contact.ContactType.INDIVIDUAL,
+                    legal_last_name="Nguyen"), "legal_first_name")
+        self.assertIn("An individual needs a legal first name.", messages)
 
     def test_organization_without_a_name_points_at_organization_name(self):
         messages = self.assertFieldError(
@@ -451,7 +467,8 @@ class EmergencyContactTests(TestCase):
 
     def setUp(self):
         self.ming = Contact.objects.create(
-            contact_type=Contact.ContactType.INDIVIDUAL, legal_last_name="小明")
+            contact_type=Contact.ContactType.INDIVIDUAL,
+            legal_first_name="Ping", legal_last_name="小明")
         self.mother_of = RelationshipType.objects.create(
             code="mother_of", name_a_to_b="母亲", name_b_to_a="子女",
             usable_as_emergency_contact=True)
@@ -496,7 +513,8 @@ class EmergencyContactTests(TestCase):
         # And this is the accepted cost: two rows, two copies of the number, and
         # nothing tying them together.
         sibling = Contact.objects.create(
-            contact_type=Contact.ContactType.INDIVIDUAL, legal_last_name="小红")
+            contact_type=Contact.ContactType.INDIVIDUAL,
+            legal_first_name="Ping", legal_last_name="小红")
         self.make()
         self.make(person=sibling)
         self.assertEqual(EmergencyContact.objects.filter(name="王秀英").count(), 2)
@@ -532,13 +550,13 @@ class EmergencyContactTests(TestCase):
 class DuplicateDetectionTests(TestCase):
     """B4.3: the rule is same normalised name AND same phone. Three boundaries."""
 
-    def make(self, last_name="王强", first_name="", phone="+14085550101", **kw):
+    def make(self, last_name="王强", first_name="Ping", phone="+14085550101", **kw):
         return Contact.objects.create(
             contact_type=Contact.ContactType.INDIVIDUAL,
             legal_last_name=last_name, legal_first_name=first_name,
             phone=phone, **kw)
 
-    def find(self, last_name="王强", first_name="", phone="+14085550101", **kw):
+    def find(self, last_name="王强", first_name="Ping", phone="+14085550101", **kw):
         return Contact.find_exact_duplicates(
             last_name=last_name, first_name=first_name, phone=phone, **kw)
 
@@ -572,7 +590,7 @@ class DuplicateDetectionTests(TestCase):
 
     def test_find_same_name_ignores_the_phone_entirely(self):
         self.make()
-        namesakes = Contact.find_same_name(last_name="王强", first_name="")
+        namesakes = Contact.find_same_name(last_name="王强", first_name="Ping")
         self.assertEqual(namesakes.count(), 1)
 
 
@@ -582,11 +600,13 @@ class DuplicateInterceptionTests(TestCase):
     def setUp(self):
         self.existing = Contact.objects.create(
             contact_type=Contact.ContactType.INDIVIDUAL,
+            legal_first_name="Ping",
             legal_last_name="王强", phone="+14085550101")
 
     def form_data(self, **overrides):
         data = {
             "contact_type": Contact.ContactType.INDIVIDUAL,
+            "legal_first_name": "Ping",
             "legal_last_name": "王强",
             "phone": "+14085550101",
             "address_country": "US",
@@ -652,13 +672,16 @@ class MergeContactsTests(TestCase):
     def setUp(self):
         self.keep = Contact.objects.create(
             contact_type=Contact.ContactType.INDIVIDUAL,
+            legal_first_name="Ping",
             legal_last_name="王强", phone="+14085550101")
         self.drop = Contact.objects.create(
             contact_type=Contact.ContactType.INDIVIDUAL,
+            legal_first_name="Ping",
             legal_last_name="王强", phone="+14085550101",
             email="qiang@example.com", address_city="Santa Clara")
         self.other = Contact.objects.create(
-            contact_type=Contact.ContactType.INDIVIDUAL, legal_last_name="李梅")
+            contact_type=Contact.ContactType.INDIVIDUAL,
+            legal_first_name="Ping", legal_last_name="李梅")
         self.parent_of = RelationshipType.objects.create(
             code="parent_of", name_a_to_b="父亲", name_b_to_a="儿子",
             usable_as_emergency_contact=True)
@@ -766,9 +789,11 @@ class MergePageTests(TestCase):
     def setUp(self):
         self.keep = Contact.objects.create(
             contact_type=Contact.ContactType.INDIVIDUAL,
+            legal_first_name="Ping",
             legal_last_name="王强", phone="+14085550101")
         self.drop = Contact.objects.create(
             contact_type=Contact.ContactType.INDIVIDUAL,
+            legal_first_name="Ping",
             legal_last_name="王强", phone="+14085550101")
         self.url = f"{reverse('contact:contact_merge')}?keep={self.keep.pk}&drop={self.drop.pk}"
 
@@ -832,6 +857,7 @@ class ChangelistCostTests(TestCase):
         Contact.objects.all().delete()
         Contact.objects.bulk_create([
             Contact(contact_type=Contact.ContactType.INDIVIDUAL,
+                    legal_first_name="Ping",
                     legal_last_name=f"Name{number}", phone=f"+1408555{number:04d}")
             for number in range(count)
         ])
@@ -851,6 +877,7 @@ class ChangelistCostTests(TestCase):
         self.populate(3)
         Contact.objects.create(
             contact_type=Contact.ContactType.INDIVIDUAL,
+            legal_first_name="Ping",
             legal_last_name="Name0", phone="+14085550000")
         page = self.client.get(self.url).content.decode()
         # ⚠️ Counts the merge URL, not the link text. C2.5 translated the label
@@ -866,6 +893,7 @@ class MinorTests(TestCase):
     def make(self, birth_date, last_name="小明"):
         return Contact.objects.create(
             contact_type=Contact.ContactType.INDIVIDUAL,
+            legal_first_name="Ping",
             legal_last_name=last_name, birth_date=birth_date)
 
     def test_is_minor_returns_none_when_the_birth_date_is_unknown(self):
@@ -934,6 +962,7 @@ class ContactHistoryTests(TestCase):
     def setUp(self):
         self.contact = Contact.objects.create(
             contact_type=Contact.ContactType.INDIVIDUAL,
+            legal_first_name="Ping",
             legal_last_name="Nguyen",
         )
 
@@ -968,7 +997,7 @@ class ContactHistoryTests(TestCase):
     def _admin_form_data(self, **overrides):
         data = {
             "contact_type": Contact.ContactType.INDIVIDUAL,
-            "legal_first_name": "",
+            "legal_first_name": "Ping",
             "legal_last_name": "Nguyen",
             "preferred_name": "",
             "organization_name": "",
@@ -1027,6 +1056,7 @@ class ContactHistoryMiddlewareTests(TestCase):
     def setUp(self):
         self.contact = Contact.objects.create(
             contact_type=Contact.ContactType.INDIVIDUAL,
+            legal_first_name="Ping",
             legal_last_name="Nguyen",
         )
         self.user = get_user_model().objects.create_user(
@@ -1061,7 +1091,8 @@ class EmergencyContactReachabilityTests(TestCase):
 
     def make(self, **fields):
         person = Contact.objects.create(
-            contact_type=Contact.ContactType.INDIVIDUAL, legal_last_name="Alice")
+            contact_type=Contact.ContactType.INDIVIDUAL,
+            legal_first_name="Ping", legal_last_name="Alice")
         defaults = {
             "person": person, "name": "Wang Xiuying", "phone": "+14085550101",
             "email": "wang@example.com",
@@ -1090,7 +1121,8 @@ class EmergencyContactReachabilityTests(TestCase):
 
     def test_the_email_is_required_now(self):
         person = Contact.objects.create(
-            contact_type=Contact.ContactType.INDIVIDUAL, legal_last_name="Bob")
+            contact_type=Contact.ContactType.INDIVIDUAL,
+            legal_first_name="Ping", legal_last_name="Bob")
         kin = EmergencyContact(
             person=person, name="Somebody", phone="+14085550102",
             relationship_type=RelationshipType.objects.get(code="parent"))

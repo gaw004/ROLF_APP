@@ -192,7 +192,8 @@ class ActiveQuerySetTests(TestCase):
 
     def setUp(self):
         self.alice = Contact.objects.create(
-            contact_type=Contact.ContactType.INDIVIDUAL, legal_last_name="Alice")
+            contact_type=Contact.ContactType.INDIVIDUAL,
+            legal_first_name="Ann", legal_last_name="Alice")
         self.post = Position.objects.create(code="greeter", name="Greeter")
 
     def tenures(self):
@@ -2853,7 +2854,7 @@ class SiteMenuTests(TestCase):
 
         return register_account(
             email="mei@example.com", password="a-good-long-password",
-            legal_last_name="Mei")
+            legal_first_name="Ann", legal_last_name="Mei")
 
     def test_a_stranger_sees_only_the_public_entries(self):
         # ⚠️ "Past Events" was between Events and Log In until 2026-08-17.

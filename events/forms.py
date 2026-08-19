@@ -421,6 +421,27 @@ class EventRoleForm(forms.ModelForm):
         #    as the other half of a choice.
         self.order_fields(["role", "new_role_name", "needed_count", "notes"])
 
+    def _get_validation_exclusions(self):
+        """Keep `event` in play, so "that role is already open" is checked here.
+
+        🔴 Same trap as ProfileForm's names and EmergencyContactForm's
+           duplicate, found in the same audit (2026-08-19).
+           `eventrole_unique_per_event` spans (event, role); `event` is set on
+           the instance above rather than rendered; and Django skips any
+           constraint mentioning a field it excluded from validation. So
+           opening the same role twice on one event validated cleanly and
+           raised IntegrityError at the INSERT — a 500 on the Edit & Roles
+           page, reachable by ordinary use of the dropdown right above it.
+
+        ⚠️ Note what this does **not** do: the duplicate-*vocabulary* check in
+           clean() below stays exactly where it is. That one is about two rows
+           in ParticipationRole meaning one job, which no constraint expresses
+           (it is a normalised-name comparison). This is about one row twice.
+        """
+        exclude = super()._get_validation_exclusions()
+        exclude.discard("event")
+        return exclude
+
     def clean(self):
         cleaned = super().clean()
         role = cleaned.get("role")

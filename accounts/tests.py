@@ -34,6 +34,7 @@ class CustomUserModelTests(TestCase):
     def test_user_can_be_linked_to_a_contact(self):
         contact = Contact.objects.create(
             contact_type=Contact.ContactType.INDIVIDUAL,
+            legal_first_name="Ping",
             legal_last_name="Nguyen",
         )
         user = User.objects.create_user(email="anguyen@example.com", password="x", contact=contact)
@@ -61,12 +62,13 @@ class RegistrationTests(TestCase):
         with self.assertRaises(IntegrityError), transaction.atomic():
             register_account(
                 email="taken@example.com", password="a-good-long-password",
-                legal_last_name="王")
+                legal_last_name="王", legal_first_name="Ping")
         self.assertEqual(Contact.objects.count(), 0)
 
     def test_a_new_account_is_not_staff(self):
         user = register_account(
-            email="lisi@example.com", password="a-good-long-password", legal_last_name="李")
+            email="lisi@example.com", password="a-good-long-password",
+            legal_last_name="李", legal_first_name="Ping")
         self.assertFalse(user.is_staff)
         self.assertFalse(user.is_superuser)
         self.assertEqual(user.groups.count(), 0)
@@ -82,7 +84,7 @@ class RegistrationTests(TestCase):
         makes the name true.
         """
         register_account(email="lisi@example.com", password="a-good-long-password",
-                         legal_last_name="李")
+                         legal_last_name="李", legal_first_name="Ping")
         self.client.login(email="lisi@example.com", password="a-good-long-password")
         for path in ["/admin/", "/admin/events/event/"]:
             with self.subTest(path=path):
@@ -105,7 +107,7 @@ class RegistrationTests(TestCase):
         # Somebody whose staff flag was removed mid-session must still be able
         # to leave a site that refuses them every other page.
         register_account(email="lisi@example.com", password="a-good-long-password",
-                         legal_last_name="李")
+                         legal_last_name="李", legal_first_name="Ping")
         self.client.login(email="lisi@example.com", password="a-good-long-password")
         self.assertNotEqual(self.client.post("/admin/logout/").status_code, 403)
 
@@ -386,7 +388,7 @@ class RegistrationRateLimitTests(TestCase):
 
     def payload(self, email):
         return {"email": email, "password": "a-good-long-password",
-                "legal_last_name": "李"}
+                "legal_last_name": "李", "legal_first_name": "四"}
 
     def attempt(self, email, ip=None):
         """One registration attempt as a stranger.
@@ -530,14 +532,14 @@ class ProfileEmailIsTheLoginTests(TestCase):
     def setUp(self):
         self.user = register_account(
             email="wrong@example.com", password="a-good-long-password",
-            legal_last_name="Mei",
+            legal_last_name="Mei", legal_first_name="Ping",
         )
         self.client.force_login(self.user)
         self.url = reverse("accounts:profile")
 
     def details(self, **overrides):
         fields = {"action": "save", "legal_last_name": "Mei",
-                  "email": "wrong@example.com"}
+                  "legal_first_name": "Ping", "email": "wrong@example.com"}
         fields.update(overrides)
         return fields
 
@@ -579,7 +581,8 @@ class PasswordChangeTests(TestCase):
 
     def setUp(self):
         self.user = register_account(
-            email="mei@example.com", password=self.OLD, legal_last_name="Mei")
+            email="mei@example.com", password=self.OLD,
+            legal_last_name="Mei", legal_first_name="Ping")
         self.client.force_login(self.user)
         self.url = reverse("accounts:password_change")
 
@@ -668,7 +671,7 @@ class LoginInformationCardTests(TestCase):
     def setUp(self):
         self.user = register_account(
             email="mei@example.com", password="a-good-long-password",
-            legal_last_name="Mei")
+            legal_last_name="Mei", legal_first_name="Ping")
         self.client.force_login(self.user)
 
     def test_it_shows_the_login_address_and_a_way_to_change_the_password(self):
@@ -703,7 +706,7 @@ class PasswordRevealTests(TestCase):
                  ("accounts:password_change", True)]
         user = register_account(
             email="mei@example.com", password="a-good-long-password",
-            legal_last_name="Mei")
+            legal_last_name="Mei", legal_first_name="Ping")
         for name, signed_in in pages:
             with self.subTest(page=name):
                 if signed_in:
@@ -736,7 +739,7 @@ class ProfilePageTests(TestCase):
     def setUp(self):
         self.user = register_account(
             email="mei@example.com", password="a-good-long-password",
-            legal_last_name="Mei",
+            legal_last_name="Mei", legal_first_name="Ping",
         )
         self.client.force_login(self.user)
         self.url = reverse("accounts:profile")
@@ -748,7 +751,7 @@ class ProfilePageTests(TestCase):
     def details(self, **overrides):
         fields = {
             "action": "save",
-            "legal_first_name": "",
+            "legal_first_name": "Ping",
             "legal_last_name": "Mei",
             "email": "mei@example.com",
             "phone": "",
@@ -830,7 +833,7 @@ class ProfilePageTests(TestCase):
     def test_somebody_elses_emergency_contact_cannot_be_removed(self):
         other = register_account(
             email="other@example.com", password="a-good-long-password",
-            legal_last_name="Other",
+            legal_last_name="Other", legal_first_name="Ping",
         )
         theirs = EmergencyContact.objects.create(
             person=other.contact, name="Theirs", phone="+14085550102",
@@ -863,14 +866,14 @@ class ProfileLanguageAndKinEmailTests(TestCase):
     def setUp(self):
         self.user = register_account(
             email="lang@example.com", password="a-good-long-password",
-            legal_last_name="Lang")
+            legal_last_name="Lang", legal_first_name="Ping")
         self.client.force_login(self.user)
         self.url = reverse("accounts:profile")
 
     def test_preferred_language_is_offered_and_saved(self):
         english = Language.objects.get(code="eng")
         response = self.client.post(self.url, {
-            "action": "save", "legal_last_name": "Lang",
+            "action": "save", "legal_last_name": "Lang", "legal_first_name": "Ping",
             "email": "lang@example.com", "preferred_language": english.pk,
         })
         self.assertEqual(response.status_code, 302)
@@ -896,6 +899,134 @@ class ProfileLanguageAndKinEmailTests(TestCase):
             "phone": "+14085550103", "relationship_type": relationship.pk,
         })
         self.assertEqual(self.user.contact.emergency_contacts.count(), 0)
+
+
+class RequiredNameTests(TestCase):
+    """两个名字都必填 —— 而这条守卫真正钉的是「删掉 last name 整个网站就蹦了」。
+
+    起因是三处口径各不相同：数据库自 D9 起就要求个人有 last name，Register 跟着
+    要了，My profile 两个都没要。于是在 My profile 里清空姓氏，表单一声不吭地
+    通过，然后在 INSERT 上炸成 IntegrityError —— 一个 500，而页面上没有任何
+    一行字说哪里错了。
+
+    🔴 而且 Django 自己的约束校验**接不住它**：ModelForm 会跳过任何提到了表单
+       没有渲染的字段的约束，而这三条 Contact 约束都提到 `contact_type`，
+       ProfileForm 刻意不提供那一格。admin 没事只是因为 ContactAdminForm 是
+       `fields = "__all__"`。所以拦住这个 500 的只有 `required = True` 那两行。
+    """
+
+    def setUp(self):
+        self.user = register_account(
+            email="mei@example.com", password="a-good-long-password",
+            legal_first_name="Ping", legal_last_name="Mei")
+        self.client.force_login(self.user)
+        self.url = reverse("accounts:profile")
+
+    def details(self, **overrides):
+        fields = {"action": "save", "legal_first_name": "Ping",
+                  "legal_last_name": "Mei", "email": "mei@example.com"}
+        fields.update(overrides)
+        return fields
+
+    def contact(self):
+        self.user.contact.refresh_from_db()
+        return self.user.contact
+
+    def test_clearing_the_last_name_is_a_form_error_and_not_a_500(self):
+        # ⭐ 报上来的那个崩溃本身。
+        response = self.client.post(self.url, self.details(legal_last_name=""))
+        self.assertEqual(response.status_code, 200)
+        self.assertFormError(response.context["form"], "legal_last_name",
+                             "This field is required.")
+        self.assertEqual(self.contact().legal_last_name, "Mei")
+
+    def test_clearing_the_first_name_is_a_form_error_too(self):
+        response = self.client.post(self.url, self.details(legal_first_name=""))
+        self.assertEqual(response.status_code, 200)
+        self.assertFormError(response.context["form"], "legal_first_name",
+                             "This field is required.")
+        self.assertEqual(self.contact().legal_first_name, "Ping")
+
+    def test_the_database_would_have_refused_it_anyway(self):
+        """约束是那条规则**唯一**的一份声明（D14），表单只是把它提前说出来。
+
+        ⚠️ 这条不是重复上面两条：上面两条钉的是「用户看到一句话」，这一条钉的是
+           「就算绕过表单也写不进去」—— 脚本、bulk_create、psql 都走这里。
+        """
+        for field in ("legal_first_name", "legal_last_name"):
+            with self.subTest(field=field), \
+                    self.assertRaises(IntegrityError), transaction.atomic():
+                Contact.objects.create(**{
+                    "contact_type": Contact.ContactType.INDIVIDUAL,
+                    "legal_first_name": "Ping", "legal_last_name": "Mei",
+                    field: "",
+                })
+
+    def test_both_boxes_are_marked_required_on_the_profile_page(self):
+        # 红色的 * 由 core/components/field.html 按 `required` 画，所以这里只要
+        # 判 `required` 就够 —— 星号的样式归那个组件，它自己有守卫。
+        form = self.client.get(self.url).context["form"]
+        self.assertTrue(form.fields["legal_first_name"].required)
+        self.assertTrue(form.fields["legal_last_name"].required)
+
+    def test_both_boxes_are_marked_required_on_the_register_page(self):
+        self.client.logout()
+        form = self.client.get(reverse("accounts:register")).context["form"]
+        self.assertTrue(form.fields["legal_first_name"].required)
+        self.assertTrue(form.fields["legal_last_name"].required)
+
+    def test_the_red_star_actually_reaches_the_page(self):
+        """⚠️ 一条端到端的，因为「必填」和「看得出必填」是两件事。
+
+        `required` 为真而模板没画星号，是一个在表单层完全测不出来的缺陷。
+        """
+        html = self.client.get(self.url).content.decode()
+        for label in ("First name", "Last name"):
+            with self.subTest(label=label):
+                self.assertRegex(html, label + r'<span class="text-danger-fg[^"]*"[^>]*> \*</span>')
+
+    def test_registering_without_a_first_name_is_refused(self):
+        self.client.logout()
+        response = self.client.post(reverse("accounts:register"), {
+            "email": "new@example.com", "password": "a-good-long-password",
+            "legal_last_name": "李",
+        })
+        self.assertEqual(response.status_code, 200)
+        self.assertFormError(response.context["form"], "legal_first_name",
+                             "This field is required.")
+        self.assertFalse(User.objects.filter(email="new@example.com").exists())
+
+
+class DuplicateEmergencyContactTests(TestCase):
+    """同一个紧急联系人加第二次 —— 也是一个 500，同一个成因（2026-08-19）。
+
+    `emergencycontact_unique_per_person` 横跨 (person, name, phone)，而 `person`
+    是在 `__init__` 里挂到 instance 上的、不是表单渲染的字段 —— 于是 Django 把
+    整条约束跳过了。表现：连点两下 Add，或者一年后又把妈妈写了一遍，页面 500。
+    """
+
+    def setUp(self):
+        self.user = register_account(
+            email="mei@example.com", password="a-good-long-password",
+            legal_first_name="Ping", legal_last_name="Mei")
+        self.client.force_login(self.user)
+        self.url = reverse("accounts:profile")
+        self.parent = RelationshipType.objects.get(code="parent")
+
+    def add(self):
+        return self.client.post(self.url, {
+            "action": "add_kin", "name": "Mum", "phone": "+14085550101",
+            "email": "mum@example.com", "relationship_type": self.parent.pk,
+        })
+
+    def test_adding_the_same_person_twice_is_a_sentence_and_not_a_500(self):
+        self.add()
+        response = self.add()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(EmergencyContact.objects.count(), 1)
+        # 文案来自约束的 violation_error_message，不是这里第二次写下的规则；
+        # 它落在 name 那一格靠 CONSTRAINT_FIELD["emergency_contact_duplicate"]。
+        self.assertContains(response, "This emergency contact is already recorded for them.")
 
 
 class PasswordResetTests(TestCase):
@@ -974,6 +1105,7 @@ class PasswordResetTests(TestCase):
         # somebody entered from a paper list has no password to reset.
         Contact.objects.create(
             contact_type=Contact.ContactType.INDIVIDUAL,
+            legal_first_name="Ping",
             legal_last_name="Paper", email="paper@example.invalid")
         self.ask_for("paper@example.invalid")
         self.assertEqual(mail.outbox, [])

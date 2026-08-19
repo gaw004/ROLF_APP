@@ -96,6 +96,11 @@ DAY = datetime.timedelta(days=1)
 
 
 def make_person(last_name, **kwargs):
+    # ⚠️ A first name by default (2026-08-19): an individual without one is
+    #    refused by `contact_individual_has_a_first_name`, the same way one
+    #    without a last name always was. Tests that are *about* the name pass
+    #    their own.
+    kwargs.setdefault("legal_first_name", "Ping")
     return Contact.objects.create(
         contact_type=Contact.ContactType.INDIVIDUAL, legal_last_name=last_name, **kwargs)
 
@@ -1269,6 +1274,9 @@ class PageTestCase(TestCase):
         # legitimately unreachable, which is a real state but not the one most of
         # these tests are about.
         contact_fields.setdefault("email", f"{handle}@example.com")
+        # A first name too (2026-08-19): an individual without one is refused
+        # by the database, and register_account() writes the Contact directly.
+        contact_fields.setdefault("legal_first_name", "Ping")
         return register_account(
             password="a-good-long-password",
             legal_last_name=last_name, **contact_fields,
@@ -2480,6 +2488,24 @@ class NewParticipationRoleTests(PageTestCase):
         self.assertIn(self.role.role.name, " ".join(errors))
         self.assertEqual(
             ParticipationRole.objects.filter(name__iexact="lifting").count(), 1)
+
+    def test_opening_the_same_role_twice_is_a_sentence_and_not_a_500(self):
+        """🔴 和 My profile 那个 500 同一个成因（2026-08-19 一次审计里找出来的）。
+
+        `eventrole_unique_per_event` 横跨 (event, role)，而 `event` 是挂在
+        instance 上的、不是这张表单渲染的字段 —— Django 会跳过任何提到了表单
+        没有渲染的字段的约束。于是从上面那个下拉框里再选一次同一个角色，表单
+        一声不吭地通过，然后在 INSERT 上炸成 IntegrityError。
+
+        ⚠️ 和上面那条「重名不许进词表」不是一回事：那条管的是 ParticipationRole
+           里两行说同一件事（一次归一化比较，没有约束表达得了），这条管的是
+           同一行开了两次。
+        """
+        response = self.add(role=self.role.role.pk)
+        self.assertEqual(response.status_code, 200)
+        # 文案来自约束自己的 violation_error_message，落在 role 那一格。
+        self.assertContains(response, "This event already has that role open.")
+        self.assertEqual(self.event.roles.filter(role=self.role.role).count(), 1)
 
     def test_only_near_misses_are_caught_not_synonyms(self):
         """The limit, asserted so nobody mistakes it for more than it is.

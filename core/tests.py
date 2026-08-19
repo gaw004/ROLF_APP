@@ -32,6 +32,7 @@ from django.urls import reverse
 
 from core.constraints import CONSTRAINT_FIELD
 from core.health import HEALTH_PATH
+from core.management.commands.check_deployment import DEMO_ADDRESS_SUFFIX
 from core.limits import LONG_TEXT
 from core.models import HomePage
 from core.services import orphaned_home_media
@@ -4836,6 +4837,42 @@ class CheckDeploymentCommandTests(TestCase):
         group, _ = Group.objects.get_or_create(name="foundation_admin")
         user.groups.add(group)
         self.assertNotIn("the only way in is the superuser", self.report())
+
+    def test_a_deployment_carrying_demo_logins_is_told_which_ones(self):
+        # ⚠️ The one line here that is a credential leak rather than a
+        #    misconfiguration: seed_demo's accounts share a password printed in
+        #    this repository, and boss@ is in foundation_admin. Naming them is
+        #    the point — the reader has to go and delete exactly these.
+        get_user_model().objects.create_user(
+            email="boss" + DEMO_ADDRESS_SUFFIX, password="x")
+        text = self.report()
+        self.assertIn("boss" + DEMO_ADDRESS_SUFFIX, text)
+        self.assertIn("printed in this repository", text)
+
+    def test_on_a_deployment_a_leftover_demo_login_counts_as_a_fault(self):
+        # Being mentioned is not enough: this has to reach the list at the
+        # bottom, which is the part somebody actually reads back.
+        get_user_model().objects.create_user(
+            email="boss" + DEMO_ADDRESS_SUFFIX, password="x")
+        with mock.patch.dict(
+                os.environ, {"DJANGO_SETTINGS_MODULE": "config.settings.prod"}):
+            text = self.report()
+        self.assertIn(f"logins at {DEMO_ADDRESS_SUFFIX}: demo accounts", text)
+
+    def test_a_development_machine_is_not_convicted_of_its_own_demo_data(self):
+        # ⚠️ Demo accounts on a laptop are the point of seed_demo, not a fault.
+        #    Without the same downgrade every other line gets, this check would
+        #    make the local report permanently red — and a report that is always
+        #    red is the failure mode C3.4 was written to avoid.
+        get_user_model().objects.create_user(
+            email="boss" + DEMO_ADDRESS_SUFFIX, password="x")
+        self.assertNotIn("thing(s) to fix", self.report())
+
+    def test_a_database_with_no_demo_logins_says_so(self):
+        # Said out loud rather than left blank: "the line is missing" and "the
+        # line is clean" have to look different, or the reset cannot be checked.
+        self.assertIn(f"logins at {DEMO_ADDRESS_SUFFIX}", self.report())
+        self.assertIn("none", self.report())
 
     def test_the_live_send_reports_a_refusal_instead_of_raising(self):
         # The command's whole job is to answer; a traceback answers nothing and

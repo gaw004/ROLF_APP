@@ -82,6 +82,7 @@
 | [C3.11](#c311-邮箱验证注册--改-email) 邮箱验证 | ⬜ | 不再被沙箱堵着了，但按定义要排在 C3.3 **验证通过之后** |
 | [C3.12](#c312-google-预填要的那个-client-id你做的部分) Google Client ID | ✅ | |
 | [C4](#c4--运营功能试点期间并行) 运营功能 | 🟡 | 第 3 项（排行 / 总工时）2026-08-05 提前做了；Ministry 视图、组织架构图、CSV 导出没动 |
+| [C4.5](#c45--demo-数据与上线重置) demo 数据与上线重置 | ⬜ | 重置的顺序和三条守卫已就位（2026-08-18）；demo 数据还没灌 |
 | [C5](#c5--试点) 试点 | ⬜ | ⚠️ 但**域名已经提前挂上了**，那本来是这一步的事 |
 | [C6](#c6--现场扫码自助签到) 现场扫码自助签到 | 🟡 | 五个小节的代码全落地。差 C6.5 那条 staging 压测（200 个并发 POST）—— 在此之前没有 staging 可打 |
 
@@ -1019,8 +1020,73 @@ foundation staff 账号」，字典表那几条查的是行数。
 
 ---
 
+## C4.5 · demo 数据与上线重置
+
+2026-08-18 定的取舍：**不另开一套 demo 环境**，生产站在试点开始前当 staging 用，
+第一天再整个重置。省下的是一份 web + 一份数据库的月费；代价是下面这套顺序必须
+一步不差地走完，而不是"顺手删一删"。
+
+整节建在一句前提上，写下来是免得靠记性：从今天到 [C5](#c5--试点) 试点第一天，
+生产站上**只有一个人在动**，一行真实的人和活动都不会录进去。这句话一旦不成立，
+重置就从"清空一个空库"变成"从真数据里挑假数据"——而 `seed_demo` 自己的 docstring
+说了后者做不到：它造的人按本系统的设计**看起来和真人一模一样**，事后几乎挑不出来。
+
+### 灌 demo 数据
+
+Render 面板 → `rolf-app` → Shell：
+
+```bash
+python manage.py seed_demo --force
+```
+
+⚠️ 用 `--force`，**不要**去面板上把 `DJANGO_DEBUG` 点成 `True`。那个变量在
+`render.yaml` 里是写了 `value:` 的，每次同步 blueprint 都会被写回去 —— 也就是说
+改了可能在你不知道的时候变回来，而中间那段时间里 `DEBUG=True` 的生产站会把
+`SECRET_KEY` 和全部 settings 印在报错页上。`--force` 就是为这个场景留的门。
+
+⚠️ demo 的七个账号全在 `@example.invalid` 下，**收不到任何信**（RFC 2606 保留域名，
+永远没有 MX）。所以密码重置、活动通知这些流程在 demo 上只能验到"发出去了"，
+验不了投递 —— 真实投递那一遍是 [C3.3](#c33-真实发信) 的事，已经单独做过。
+
+顺带：[C6.5](#c65-入口my-signups压测) 欠的那条压测（200 个并发 POST）原话是
+"在此之前没有 staging 可打"。这段窗口就是那个 staging，而且打完会整个重置 ——
+要打就在这段时间打，错过这段就只能打真库。
+
+### 重置：试点第一天，录第一条真实记录之前
+
+⚠️ 顺序本身是有理由的，第 1、2 步尤其不能和后面对调。
+
+| 步 | 做什么 | 为什么在这个位置 |
+|---|---|---|
+| 1 | 跑一次备份，并**真的恢复一遍** | [C3.6](#c36-备份--恢复演练) 至今是 🟡：脚本和本机演练做完了，真 R2 + 真生产库那一遍没走。拿假数据补这一遍，出错的代价是零；等真数据进来再补，就是拿基金会的数据练手 |
+| 2 | 清 R2 的三个桶 | ⚠️ 必须在删库**之前**。桶里的对象是靠库里的行才找得到的 —— `purge_event_images` 是问 ORM"哪些活动结束了"才知道该删哪些 key。库一空，demo 期间传的图就成了谁也指不着的孤儿，只能去面板肉眼认 |
+| 3 | `DROP SCHEMA public CASCADE; CREATE SCHEMA public;` | ⚠️ 不是 `manage.py flush`。flush 只 truncate，**不补回数据迁移造的字典行** —— `contact/0002` 的 7923 行语言、`contact/0004` 的 relationship type、`events/0003` 的 `ParticipationRole(code=general)`。最后那一行是 schema 的不变量（落点表在 [02-roadmap.md](02-roadmap.md)），缺了它 `Participation.event_role` 没地方落，而表现是有人保存报名时才炸 |
+| 4 | `python manage.py migrate` | 数据迁移在这一步重放，字典行自己回来。⚠️ Postgres 15 起，schema 重建后要把 `public` 的权限 grant 回那个 role，否则这一步说没权限建表 |
+| 5 | 建真账号：一个 superuser 救火，一个 `foundation_admin` 组的日常账号 | 漏了这一步的表现是"一切正常"，而基金会从此用 superuser 过日子。[C3.5](#c35-部署到-render) 就是为这件事写的 |
+| 6 | `python manage.py check_deployment` | 它的 "Demo residue (C4.5)" 那一节数 `@example.invalid` 的账号，生产上非零就是红的 |
+| 7 | 拿 `boss@example.invalid` 和仓库里那个共享密码去登录，**必须失败** | 第 6 步查的是库，这一步查的是"库和站是不是同一个"。连错库、改完没重启这类事只有它抓得到 |
+
+⚠️ 第 7 步不是走形式。demo 的七个账号共用一个**印在这个仓库里**的密码，而
+`boss@example.invalid` 在 `foundation_admin` 组里 —— 残留任何一个，等于任何拿到
+这份代码的人都是基金会的最高管理员，而站上看不出任何区别。
+
+### 守着这件事的三条
+
+| 守卫 | 盯的是 |
+|---|---|
+| `core.tests.CheckDeploymentCommandTests.test_on_a_deployment_a_leftover_demo_login_counts_as_a_fault` | 生产上还有 demo 账号时，`check_deployment` 把它列进底下那张"要修的东西"清单，而不只是印一行 |
+| `core.tests.CheckDeploymentCommandTests.test_a_development_machine_is_not_convicted_of_its_own_demo_data` | 本机有 demo 账号是正常的。少了这一条，本机报告永远是红的 —— 而永远红的报告没有人读 |
+| `events.tests.SeedDemoTests.test_every_account_it_makes_is_at_the_invalid_domain` | 那张网是按地址后缀捞的（D17 不许 core 反过来 import events）。`seed_demo` 哪天造一个别的域名下的账号，网就漏了，而漏掉的表现是报告说干净 |
+
+⚠️ 三条守卫加起来仍然只覆盖**账号**。假的人、活动、工时身上没有任何标记 ——
+这正是第 3 步要整个删 schema、而不是逐条删行的理由。
+
+---
+
 ## C5 · 试点
 
+- 第一天的第一件事是 [C4.5](#c45--demo-数据与上线重置) 那套重置，
+  **排在第一条真实记录之前** —— 之后再做就不成立了。
 - **一个 ministry、一场真实活动。** 影响面小、反馈直接。
 - **顺序有依赖**：employee 先注册 → 给他们建 `Assignment` → 再办活动，
   否则 R8 会安静地返回空名单（见

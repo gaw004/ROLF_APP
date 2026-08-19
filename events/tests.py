@@ -3084,6 +3084,29 @@ class SeedDemoTests(TestCase):
             call_command("seed_demo", "--force", verbosity=0)
         self.assertTrue(Event.objects.exists())
 
+    def test_every_account_it_makes_is_at_the_invalid_domain(self):
+        """The other half of check_deployment's demo sweep (C4.5).
+
+        That sweep finds leftover demo logins by their address suffix rather
+        than by this command's own list — D17 keeps core from importing events,
+        and a hardcoded list would miss the accounts somebody makes by hand.
+        The arrangement only holds while everything seeded here is *inside* the
+        net: one account at another domain and the reset reports itself clean
+        with a foundation admin still standing, whose password is printed in
+        this repository.
+        """
+        from core.management.commands.check_deployment import DEMO_ADDRESS_SUFFIX
+
+        with override_settings(DEBUG=True):
+            self.seed()
+        stray = [address for address in
+                 get_user_model().objects.values_list("email", flat=True)
+                 if not address.endswith(DEMO_ADDRESS_SUFFIX)]
+        self.assertEqual(
+            stray, [],
+            f"seed_demo made a login outside {DEMO_ADDRESS_SUFFIX}, which "
+            "check_deployment's C4.5 sweep cannot see")
+
     def test_running_it_twice_does_not_double_anything(self):
         # get_or_create throughout. Three 张三 would set the duplicate warning
         # off on every page from then on.
@@ -6225,6 +6248,15 @@ class SchedulePageTests(PageTestCase):
         列表是分页的（EVENTS_PER_PAGE = 20），日程不是 —— 一个「今天有多少事」
         的答案被翻页截断，是这一块存在的意义本身被截断。
         """
+        # ⚠️ setUp 那一场默认是「明天此刻起三小时」，也就是说**晚上九点之后跑
+        #    这套测试**，它跨过午夜 —— 而日程按 D16 的口径把跨天的活动裁成两天
+        #    各一段、画两张卡 —— `schedule._segments`，而下面那条
+        #    test_this_mornings_event_is_still_on_todays_column 钉的正是那个
+        #    行为。于是这里「卡数 == 活动数」这个等式在 21:00 之后
+        #    自己不成立，测试红在一个和分页毫无关系的地方。先把它按进一天里。
+        self.event.start_time = self.at(9)
+        self.event.end_time = self.at(10)
+        self.event.save()
         for number in range(EVENTS_PER_PAGE + 5):
             make_event(ministry=self.pantry, owner=self.zhang.contact,
                        name=f"Event {number}",

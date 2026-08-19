@@ -34,6 +34,13 @@ from django.core.management.base import BaseCommand
 BORROWED_SENDER_DOMAINS = ("brevo", "sendinblue", "amazonses", "onrender.com",
                            "sendgrid", "mailgun", "postmarkapp")
 
+#: The suffix that marks a login as invented. `.invalid` is reserved by RFC 2606
+#: and can never receive mail, so nobody real is behind one — which is what makes
+#: counting them on a deployment a safe thing to do. seed_demo's seven accounts
+#: all live here, and so do the ones somebody makes by hand while clicking
+#: around; a list of known demo addresses would miss the second kind.
+DEMO_ADDRESS_SUFFIX = "@example.invalid"
+
 OK, WARN, BAD = "  ok  ", " warn ", " WRONG"
 
 
@@ -73,6 +80,7 @@ class Command(BaseCommand):
         self.https()
         self.errors()
         self.readiness()
+        self.demo_residue()
 
         if options["send_to"]:
             self.send_one(options["send_to"])
@@ -253,6 +261,52 @@ class Command(BaseCommand):
                 "" if rows >= minimum else
                 "empty, so the form that needs it offers an empty dropdown — "
                 "no error, just a page nobody can complete")
+
+    def demo_residue(self):
+        """Invented logins, still here on the day the real people arrive (C4.5).
+
+        ⚠️ This is a credential check, not a tidiness one. seed_demo's accounts
+           share one password that is **printed in this repository**, and one of
+           them sits in foundation_admin. A single one left behind means anybody
+           holding a clone of the repository administers the foundation — while
+           the site looks exactly the same as it would with none. That is why it
+           has to be asked rather than noticed.
+
+        ⚠️ The test is the address suffix, not seed_demo's own list. D17 keeps
+           core from importing the business apps, and the suffix is the wider
+           net anyway — see DEMO_ADDRESS_SUFFIX.
+
+        ⚠️ Zero here does not mean the demo data is gone, only that the logins
+           are. The invented contacts, events and hours carry no marker at all —
+           by seed_demo's own warning they look exactly like real ones — which
+           is why C4.5 resets the whole schema instead of deleting rows, and why
+           this line is a last look rather than the procedure.
+        """
+        from django.contrib.auth import get_user_model
+        from django.db.utils import OperationalError, ProgrammingError
+
+        self.section("Demo residue (C4.5)")
+        try:
+            addresses = sorted(
+                get_user_model().objects
+                .filter(email__iendswith=DEMO_ADDRESS_SUFFIX)
+                .values_list("email", flat=True))
+        except (OperationalError, ProgrammingError) as error:
+            self.line(WARN, "database", type(error).__name__, str(error))
+            return
+
+        # Naming them is the point — the reader has to go and delete these — and
+        # an address at a domain that cannot receive mail gives nothing away.
+        shown = ", ".join(addresses[:3])
+        if len(addresses) > 3:
+            shown += f" … and {len(addresses) - 3} more"
+        self.line(
+            BAD if addresses else OK, f"logins at {DEMO_ADDRESS_SUFFIX}",
+            shown if addresses else "none",
+            "" if not addresses else
+            "demo accounts, sharing one password that is printed in this "
+            "repository, one of them a foundation admin. The reset that clears "
+            "them is C4.5, and it runs before the first real record — not after")
 
     def send_one(self, address):
         self.section("Live send")

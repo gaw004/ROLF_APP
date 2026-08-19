@@ -139,7 +139,30 @@ event_list 的结果区。整页和 HTMX 片段渲染的是同一份 —— 视�
             <br>{% if event.location %}{{ event.location }}{% else %}<span class="italic">Location to be announced</span>{% endif %}
           </p>
         </div>
-        <a href="{% url 'events:event_detail' event.pk %}" class="event-row-link">
+        {% comment %}
+        整张卡的点击区。⭐ `href` 永远是那条真路：没有 JS、或者日程关着的时候，
+        点下去就是跳到活动详情页（D24）。
+
+        🔴 **日程开着时改成就地在面板里打开**，靠的是 `hx-trigger` 上那个事件
+           过滤器，而不是两套标记。过滤器为假时 htmx **完全不接管**这次点击，
+           于是浏览器照常跟着 `href` 走 —— 一份标记，两种行为，没有一个分支
+           需要知道另一个的存在。
+
+        ⚠️ 过滤器读的是 `.events-shell.is-open`，也就是 Alpine 写在外壳上的那个
+           class。不读 Alpine 的变量本身：那要 `$data` 之类的作用域穿透，而这个
+           链接在外壳里、却不在面板的作用域里。
+
+        ⚠️ 查询串要带上（`{% templatetag openblock %} querystring {% templatetag closeblock %}`）——
+           那一次请求还要算「这一场在第几页」，而那取决于当前筛选和页码。
+
+        ⚠️ `x-on:click` 不加条件：日程关着时这一行根本不会执行到（htmx 没接管，
+           页面已经跳走了）。加了反而要在两处各写一遍同一个判断。
+        {% endcomment %}
+        <a href="{% url 'events:event_detail' event.pk %}" class="event-row-link"
+           hx-get="{% url 'events:event_detail_panel' event.pk %}{% querystring %}"
+           hx-target="#schedule-detail" hx-swap="innerHTML"
+           hx-trigger="click[document.querySelector('.events-shell.is-open')]"
+           x-on:click="detail = true">
           <span class="sr-only">{{ event.name }}</span>
         </a>
       </li>

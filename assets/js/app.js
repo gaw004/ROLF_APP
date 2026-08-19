@@ -1135,6 +1135,34 @@ function bootSchedules(scope) {
 bootSchedules(document);
 
 // ---------------------------------------------------------------------------
+// 筛选卡钉住之后：把它的实测高度写成 `--filter-h`（2026-08-19）
+//
+// 🔴 **钉住的东西会挡住「滚到这里」。** 翻页用 `show:#event-results:top` 把结果区
+//    顶到视口最上面，而钉住的筛选卡正好压在那儿 —— 翻到下一页，第一张卡完全
+//    看不见。修法是给结果区一段 `scroll-margin-top`，而那段距离要知道卡有多高。
+//
+// ⚠️ 不能写死一个数：这张卡窄屏上控件换行、表单报错时多一行字，高度是会变的。
+//    写死的话那两种情况下要么还挡着、要么下面空一截。
+//
+// ⚠️ 用 ResizeObserver 而不是监听 resize：高度变化有两个来源 —— 拖窗口，
+//    和开关日程时那 560ms 的过渡里列宽变化带来的换行。后者根本不触发 resize，
+//    于是读数会停在过渡前的值，也就是恰好在最需要它的时候是错的。
+//    （同一条理由，上一批那个已删的占位框读数也是这么写的。）
+//
+// ⚠️ 写在 `.events-shell` 上而不是 `:root`：这个变量只有这一页用，
+//    挂到根上就是给全站加一个只有一页认识的全局。
+function watchFilterHeight() {
+  const card = document.querySelector(".filter-card");
+  const shell = document.querySelector(".events-shell");
+  if (!card || !shell || typeof ResizeObserver === "undefined") return;
+  new ResizeObserver(() => {
+    shell.style.setProperty("--filter-h", `${Math.round(card.offsetHeight)}px`);
+  }).observe(card);
+}
+
+watchFilterHeight();
+
+// ---------------------------------------------------------------------------
 // 点日程上的一张卡：左边翻到那一场、滚进视口、套一圈高亮（2026-08-18）
 //
 // 服务端在那一次请求里已经把左边换成了正确的一页、并且画上了 `is-picked`。
@@ -1174,8 +1202,11 @@ function scrollPickedIntoView() {
 
 // 记下点的是谁。⚠️ 用事件委托挂在 body 上，不是给每张卡各挂一个 ——
 //    卡片每次翻页都被整批换掉，逐张挂等于每翻一次页漏一批监听。
+// ⚠️ `[data-event]`，不限于日程上的卡片（2026-08-19）：左边列表那一行也带着它，
+//    而从左边点开的那一场同样要圈住。两处点击是同一件事的两个入口，
+//    「右边正开着的是哪一场」只有一个答案。
 document.body.addEventListener("click", (event) => {
-  const card = event.target.closest("[data-schedule-card][data-event]");
+  const card = event.target.closest("[data-event]");
   if (!card) return;
   pickedEvent = card.dataset.event;
 });

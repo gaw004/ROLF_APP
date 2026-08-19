@@ -4816,7 +4816,11 @@ class EventRowTests(PageTestCase):
         row = re.search(r'<li class="event-row.*?</li>', html, re.S).group(0)
         self.assertEqual(row.count("<a "), 1)
         # And its name is the event's name, carried by the sr-only span.
-        self.assertRegex(row, r'class="event-row-link">\s*<span class="sr-only">')
+        # ⚠️ `[^>]*` 是 2026-08-19 放宽的：那个链接上现在挂着 hx-/x- 属性（日程开着
+        #    时就地打开详情），于是 class 后面不再紧跟 `>`。放宽的是**属性**，
+        #    钉住的仍然是那件要紧的事 —— 这个链接里除了 sr-only 那一个 span
+        #    什么都没有，它的可访问名就只有活动名。
+        self.assertRegex(row, r'class="event-row-link"[^>]*>\s*<span class="sr-only">')
 
     def test_the_event_name_is_no_longer_a_link_of_its_own(self):
         html = self.rows_html("events:event_list")
@@ -5062,7 +5066,7 @@ class ScheduleToggleTests(PageTestCase):
         the first render.
         """
         html = self.page()
-        shell = html.index('x-data="{ schedule: false }"')
+        shell = html.index("schedule: false")
         results = html.index('id="event-results"')
         self.assertLess(shell, results,
                         "the schedule state must be declared before, and outside, "
@@ -6520,9 +6524,51 @@ class SchedulePanelTests(PageTestCase):
         """
         self.login(self.lisi)
         html = self.client.get(reverse("events:event_list")).content.decode()
-        self.assertIn('x-data="{ detail: false }"', html)
+        self.assertIn("detail: false", html)
         self.assertIn('id="schedule-detail"', html)
         self.assertRegex(html, r'x-show="!detail"')
+
+    def test_a_left_hand_card_opens_the_panel_only_while_the_schedule_is_open(self):
+        """🔴 一份标记，两种行为 —— 靠 `hx-trigger` 上的事件过滤器，不是两套标记。
+
+        过滤器为假（日程关着）时 htmx **完全不接管**这次点击，于是浏览器照常
+        跟着 `href` 走，跳到整页详情。⭐ 没有 JS 时也是这条路（D24）。
+
+        ⚠️ 过滤器读的是外壳上的 class，不是 Alpine 的变量：这个链接在外壳里、
+           却不在面板的作用域里。
+        """
+        self.make("Kitchen shift")
+        self.login(self.lisi)
+        html = self.client.get(reverse("events:event_list")).content.decode()
+        link = re.search(r'<a href="/events/\d+/" class="event-row-link".*?>', html, re.S)
+        self.assertIsNotNone(link, "左边卡片的整块点击区没了")
+        opened = link.group(0)
+        self.assertRegex(opened, r'hx-get="/events/\d+/panel/')
+        self.assertIn('hx-target="#schedule-detail"', opened)
+        self.assertIn("events-shell.is-open", opened,
+                      "少了这个过滤器，日程关着时点卡片也不会跳页了")
+
+    def test_both_ways_in_reach_the_same_endpoint(self):
+        """⚠️ 从日程点、从列表点，是**同一场活动**的两个入口。两边打不同的端点，
+           「右边开着的是哪一场」迟早会有两个答案。
+
+        ⚠️ 比的是同一个 pk 的两处。第一版拿整页所有 hx-get 去比，于是页面上有
+           两场活动就当场失败 —— 那测的是「只有一场活动」，不是这里要的东西。
+        """
+        event = self.make("Kitchen shift")
+        self.login(self.lisi)
+        html = self.client.get(reverse("events:event_list")).content.decode()
+        card = re.search(
+            r'<a class="schedule-card.*?data-event="%d"[^>]*>' % event.pk, html, re.S)
+        self.assertIsNotNone(card, "日程上没有这一场的卡片")
+        row = re.search(
+            r'<a href="/events/%d/" class="event-row-link".*?>' % event.pk, html, re.S)
+        self.assertIsNotNone(row, "列表里没有这一场的点击区")
+
+        def endpoint(markup):
+            return re.search(r'hx-get="([^"]+)"', markup).group(1)
+
+        self.assertEqual(endpoint(card.group(0)), endpoint(row.group(0)))
 
     def test_the_detail_state_lives_outside_both_of_the_blocks_it_switches(self):
         """🔴 和外层那个 `schedule` 开关同一条规矩。
@@ -6533,7 +6579,11 @@ class SchedulePanelTests(PageTestCase):
         """
         self.login(self.lisi)
         html = self.client.get(reverse("events:event_list")).content.decode()
-        state = html.index('x-data="{ detail: false }"')
+        # ⚠️ `detail` 2026-08-19 从面板挪到了外壳，和 `schedule` 同一个 x-data ——
+        #    左边那些活动卡片也要翻它，而它们够不着面板的作用域。这条守卫钉的
+        #    仍然是同一件事：它必须在**被换掉的那两块之外**。
+        state = html.index("detail: false")
+        self.assertLess(state, html.index('id="event-results"'))
         self.assertLess(state, html.index('id="schedule"'))
         self.assertLess(state, html.index('id="schedule-detail"'))
 
@@ -6611,6 +6661,29 @@ class ScheduleOpeningViewTests(SimpleTestCase):
         self.assertRegex(self.block(".events-shell.is-open .filter-card"),
                          r"z-index:\s*\d+")
 
+    def test_paging_scrolls_clear_of_the_pinned_filter(self):
+        """🔴 钉住的东西会挡住「滚到这里」。
+
+        翻页用 `show:#event-results:top`，也就是把结果区顶到**视口最上面** ——
+        而钉住的筛选卡正好压在那儿。表现：翻到下一页，第一张卡完全不见了。
+        这是钉住筛选卡那一批引入的，浏览器没做错任何事，只是那个位置底下压着
+        别的东西。
+
+        ⚠️ 让开的距离要含**实测的**卡高（`--filter-h`）—— 那张卡窄屏上换行、
+           报错时多一行字，写死一个数在这两种情况下要么还挡着、要么空一截。
+        """
+        block = self.block(".events-shell.is-open #event-results")
+        self.assertRegex(block, r"scroll-margin-top:\s*calc\(")
+        self.assertIn("var(--filter-h", block)
+        self.assertIn("var(--top-bar-h)", block)
+
+    def test_the_filter_height_is_measured_rather_than_written_down(self):
+        js = self.source("assets", "js", "app.js")
+        self.assertIn("--filter-h", js)
+        # ⚠️ ResizeObserver 而不是 resize 事件：开关日程那 560ms 过渡里列宽变化
+        #    带来的换行根本不触发 resize，于是读数会停在过渡前的值。
+        self.assertRegex(js, r"new ResizeObserver\([^)]*\)[\s\S]{0,200}\.observe\(card\)")
+
     def test_the_hook_is_a_class_of_its_own_not_form_dot_card(self):
         """⚠️ 靠 `form.card` 去匹配会命中将来任何一张长在表单里的卡片。"""
         markup = self.source("events", "templates", "events", "_period_filter.html")
@@ -6639,6 +6712,58 @@ class ScheduleColourTests(SimpleTestCase):
         #    那是 500，不是画得难看，所以这里连着钉。
         filed = [slot for family in schedule.COLOUR_FAMILIES for slot in family]
         self.assertEqual(sorted(filed), list(range(schedule.PALETTE)))
+
+    #: 两格颜色「看起来一样」的判据。HLS 空间，色相加权 ×3（同一亮度下，
+    #: 色相差是人最先看出来的那一维）。0.04 是量出来的：改这张盘的那一天，
+    #: 跨族最近的一对是 0.048，而出问题的那一对是 0.034。
+    SAME_LOOKING = 0.04
+
+    def swatches(self):
+        css = self.source("assets", "app.css")
+        return {int(slot): value for slot, value in
+                re.findall(r"--schedule-fill-(\d+):\s*(#[0-9a-fA-F]{6})", css)}
+
+    def test_two_swatches_that_may_sit_side_by_side_never_look_the_same(self):
+        """🔴 「归对了族」以前只有眼睛看得出来 —— 现在能量了。
+
+        撞色回避只保证**不同族**的两格可以相邻。所以这张表要是把两个长得一样的
+        色值分进了两族，回避就等于没有：它们照样会挨在一起，而测试全绿。
+
+        这不是假想的：2026-08-19 把偏灰的几格兑白之后，薄荷绿（3）和青族那几格
+        变得几乎一样，而它当时归在绿族 —— 也就是**允许相邻**。这条守卫就是那次
+        的产物，它会当场抓住同一类改动。
+
+        ⚠️ 同族内部随便像，它们永远不会相邻。
+        """
+        import colorsys
+        import itertools
+
+        swatches = self.swatches()
+        family_of = {slot: number
+                     for number, family in enumerate(schedule.COLOUR_FAMILIES)
+                     for slot in family}
+
+        def hls(value):
+            red, green, blue = (int(value[at:at + 2], 16) / 255 for at in (1, 3, 5))
+            return colorsys.rgb_to_hls(red, green, blue)
+
+        def apart(one, other):
+            hue, light, sat = hls(one)
+            hue2, light2, sat2 = hls(other)
+            # ⚠️ 色相是环状的，所以走短的那一边 —— 不绕的话红和粉会被算成天差地别。
+            spin = min(abs(hue - hue2), 1 - abs(hue - hue2))
+            return (spin * 3) ** 2 + (light - light2) ** 2 + (sat - sat2) ** 2
+
+        too_close = [
+            (round(apart(swatches[a], swatches[b]), 4), a, swatches[a], b, swatches[b])
+            for a, b in itertools.combinations(sorted(swatches), 2)
+            if family_of[a] != family_of[b]
+            and apart(swatches[a], swatches[b]) < self.SAME_LOOKING
+        ]
+        self.assertEqual(
+            too_close, [],
+            "这两格长得一样却分在两族，于是允许相邻 —— 要么把它们并成一族，"
+            "要么把其中一格调开：\n" + "\n".join(map(str, sorted(too_close))))
 
     def test_dark_mode_does_not_repaint_the_cards(self):
         """🔴 深色下卡片颜色和浅色**一模一样**（2026-08-18 定）。

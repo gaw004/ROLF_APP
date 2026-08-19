@@ -495,6 +495,29 @@
     z-index: 20;
   }
 
+  /* 🔴 **钉住的东西会挡住「滚到这里」。**（2026-08-19 修）
+   *
+   *    翻页用的是 `show:#event-results:top`，也就是把结果区顶到**视口最上面** ——
+   *    而钉住的筛选卡正好盖在那儿。表现：翻到下一页，第一张卡完全不见了，
+   *    连「N events」那行一起。这是上一批钉住筛选卡时引入的，不是 htmx 的问题：
+   *    浏览器把结果区滚到位了，只是那个位置底下压着别的东西。
+   *
+   * ⚠️ `--filter-h` 由 JS 实测（app.js 的「筛选卡钉住之后」那一段）。写死一个
+   *    数不行 —— 这张卡的高度会变：窄一点的屏上控件换行，表单报错时多一行字。
+   *    写死的话，那两种情况下第一张卡要么还被压着，要么下面空一截。
+   *
+   * ⚠️ 只在 `.is-open` 上加，和 sticky 同一个条件。关着的时候什么都没钉住，
+   *    多一段 scroll-margin 会让翻页停在一个莫名其妙的位置。 */
+  .events-shell.is-open #event-results {
+    scroll-margin-top: calc(var(--top-bar-h) + 1rem + var(--filter-h, 0px) + 0.75rem);
+  }
+
+  @media (width >= 40rem) {
+    .events-shell.is-open #event-results {
+      --top-bar-h: 4.75rem;
+    }
+  }
+
   @media (width >= 40rem) {
     .events-shell.is-open .filter-card {
       --top-bar-h: 4.75rem;
@@ -614,19 +637,19 @@
     --schedule-fill-8:  #fcddc8;
     --schedule-fill-9:  #e2f1fa;
     --schedule-fill-10: #f0fad2;
-    --schedule-fill-11: #cff1e7;
-    --schedule-fill-12: #cfd6ef;
-    --schedule-fill-13: #dce1c2;
+    --schedule-fill-11: #d4f2e9;
+    --schedule-fill-12: #d5dbf1;
+    --schedule-fill-13: #e9edd9;
     --schedule-fill-14: #f0cffc;
-    --schedule-fill-15: #cec9ee;
-    --schedule-fill-16: #ecc7de;
-    --schedule-fill-17: #b7ddd4;
+    --schedule-fill-15: #d8d4f2;
+    --schedule-fill-16: #f1d5e6;
+    --schedule-fill-17: #d9ede8;
     --schedule-fill-18: #fdc4d6;
     --schedule-fill-19: #c0d8ed;
     --schedule-fill-20: #fcf6c9;
     --schedule-fill-21: #fddac0;
     --schedule-fill-22: #f6c1c5;
-    --schedule-fill-23: #bcd9e0;
+    --schedule-fill-23: #d9e9ed;
   }
 
   .dark .schedule {

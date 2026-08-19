@@ -33,5 +33,10 @@
 
 ⚠️ 这一份**不带**日程（`schedule_oob` 没给）。这一次请求正是要把日程换成详情，
    顺手再贴一块日程回去等于自己把自己盖掉。
+
+⚠️ 从左边那一列点过来时，这一块**根本不渲染**（视图里那个 `from_list`）：
+   那一列已经停在正确的页上，要变的只有一圈高亮，而 app.js 在
+   `htmx:afterSettle` 上已经做了。少送 40KB。
+   （这里一度写着另一个理由 —— 见 views.py 里那段注释。）
 {% endcomment %}
-{% include "events/_event_list_results.html" %}
+{% if results_oob %}{% include "events/_event_list_results.html" %}{% endif %}

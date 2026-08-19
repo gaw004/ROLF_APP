@@ -423,7 +423,13 @@ def _detail(request, pk):
         "event": event,
         "roles": event.roles.with_signup_counts().select_related("role"),
         "mine": mine,
-        "can_sign_up": event.status in Event.OPEN_FOR_SIGNUP,
+        # ⚠️ The property, not `status in OPEN_FOR_SIGNUP` (2026-08-19). It asks
+        #    the clock as well, exactly as the `open_for_signup()` queryset
+        #    behind event_signup does — and the reason it has to is that the two
+        #    are the same gate seen from two sides. Reading only the status here
+        #    put a Sign up button on events that finished last year, and the
+        #    page it led to had already stopped accepting them.
+        "can_sign_up": event.is_open_for_signup,
         "can_manage": can_manage_event(request.user, event),
         # ⚠️ False on every published event, so the banner is not something a
         #    template has to remember to switch off. It is only ever true for a

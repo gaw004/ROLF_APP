@@ -1,3 +1,68 @@
+## 四十八、2026-08-19 第三十一批：五个用户报来的问题，其中三个底下各有一条看不见的规则
+
+> 「现在 event 分别有多少 status？为什么一个 event 都结束了 status 还可以是
+> "open for signup"，难道不该是 ended 吗？」
+> 「库和 register 页面和 my profile 都变成 first name and last name 必填（页面要有
+> 红色 * 号）。目前 last name register 必填，但是 my profile 不是，结果在 my profile
+> 里删掉 last name，整个 website 就蹦了。」
+> 「register 页面填完以后为什么不需要去邮箱收验证码？」
+> 「所有页面 log out，menu，太阳/月亮，鼠标 hover 在上面为什么鼠标没有变成 click？」
+> 「my profile，应该像 django admin 的 contact 一样，先填 country，如果 country 是
+> united states，States 可以下拉选州。」
+
+### ① 活动结束了还挂着「Open for signup」—— 而那不只是标签的事
+
+五个状态：`Draft / Open for signup / Confirmed / Completed / Cancelled`。
+问题在于 **`status` 是一个纯手填的字段，没有任何东西会在 `end_time` 过去之后
+把它翻过去**。全项目只有两处写它：管理页那个下拉框，和建活动时的默认 `draft`。
+
+而 `open_for_signup()` 是报名路上**唯一**的一道门（`event_signup` 靠它 404，
+详情页那颗按钮靠它画）。于是在有人手动去改那个下拉框之前：
+
+**去年办完的那一场是真的报得上名的** —— 表单打得开，POST 也真的会写进一条
+`Participation`。`services.sign_up()` 从头到尾没有读过一次时间。
+
+守卫：`EndedEventPageTests.test_signing_up_for_a_finished_event_is_a_404`。
+
+#### 修法：问时钟，不加字段，也不加定时任务
+
+```
+Event.is_over                # end_time <= now，问题的唯一答案在这里
+Event.is_open_for_signup     # status 在 OPEN_FOR_SIGNUP 里 **且** 没结束
+Event.status_label           # 志愿者看到的字：结束之后一律 "Ended"
+EventQuerySet.open_for_signup()  # 同一条判据的集合形态
+```
+
+- **没有第二个字段。** 一个 `is_ended` 布尔是能和 `status` 互相矛盾的第二个维度，
+  这个项目已经为这件事付过三次账（见 `EventQuerySet` 的类注释）。
+- **也没有夜里跑的 cron。** 它留下一个最宽可达一天的窗口，在那段时间里页面照
+  样是错的；而且要为了写下一句「旁边两个时间戳已经说了」的话，去重写每一行
+  历史活动（和它们的 simple-history）。
+- 代价，写明：`status` 里仍然躺着一堆过期的 `open`。这是接受的 —— 那一列现在
+  只回答「人打算让它是什么」，「它有没有结束」由 `end_time` 回答，一列一个问题。
+
+#### 三个刻意的边界
+
+| 边界 | 判定 | 为什么 |
+|-----|------|-------|
+| 报名截止卡在 `end_time`，不是 `start_time` | 进行中的活动**仍可报名** | 上午十点走进食物分发点说「我来帮忙」是常态不是异常。卡在 `start_time` 会让这个人在自助界面上无路可走 |
+| `Cancelled` 结束之后**不**塌成 `Ended` | 它说的是时钟说不出的事：没有发生过 | 报了名的人事后和事前一样需要这个词 |
+| 管理列表页**不**走 `status_label` | 那里显示真实 status + 另一枚 `Ended` 标签 | 那一格旁边就是改 status 的下拉框。标签写着一个下拉框里找不到的词，读起来是「我刚才那一下没保存上」 |
+
+⚠️ `visible_to_volunteers()` **没有**跟着加时间条件：报过名的人正是最需要事后还能
+打开那一页的人（P6 的取消链接就指向那儿）。能不能看见 ≠ 能不能报名，这条老分界
+线在时间维度上同样成立。
+
+⚠️ 那枚绿色标签是链接，判据也跟着换成 `is_open_for_signup` —— 否则「画出来的链接
+一定点得通」当场失效，而失效的表现是 404。
+
+⚠️ 列表页测「已结束」必须钉住时钟，没有别的写法：`from_today()` 的下边界是今天
+零点，所以能同时满足「在列表里」和「已经结束」的窗口**只有今天这一天**，而测试
+跑起来的那个「现在」可能就落在窗口里面。这也正是这个 bug 一直没被列表页自己
+暴露出来的原因。
+
+---
+
 ## 四十七、2026-08-19 第三十批：活动详情不再是一个目的地；报名也进面板；那「1 秒」是页面自己在滑
 
 > 「以后 event detail 都没有自己单独的页面了，不管 schedule 有没有开，点 event 卡片

@@ -786,6 +786,115 @@ class VisibilityTests(TestCase):
         )
 
 
+class EndedEventTests(TestCase):
+    """一场活动结束之后，`status` 还停在原地 —— 时间说了算（2026-08-19）。
+
+    起因是一个用户能一眼看穿的问题：「活动都结束了 status 还可以是 Open for
+    signup」。而它不只是标签难看 —— `open_for_signup()` 是报名路上**唯一**的
+    那道门，所以在有人手动去改那个下拉框之前，去年办完的那一场是真的报得上名。
+    """
+
+    def setUp(self):
+        self.ministry = Ministry.objects.create(code="food_pantry", name="Food Pantry")
+
+    def make(self, status=Event.Status.OPEN, *, start, end):
+        return make_event(ministry=self.ministry, status=status,
+                          start_time=start, end_time=end)
+
+    def test_an_event_that_has_ended_is_not_open_for_signup(self):
+        # ⭐ 整件事的核心。status 一个字节都没改，门却关上了。
+        over = self.make(start=NOW - DAY, end=NOW - DAY + 3 * HOUR)
+        self.assertEqual(over.status, Event.Status.OPEN)
+        self.assertNotIn(over, Event.objects.open_for_signup())
+
+    def test_an_event_that_has_started_but_not_finished_is_still_open(self):
+        """⚠️ 截止卡在 end_time，不是 start_time（2026-08-19 拍板）。
+
+        上午十点走进食物分发点说「我来帮忙」的人是常态，不是异常 ——
+        卡在 start_time 会让这个人在自助界面上无路可走。
+        """
+        running = self.make(start=NOW - HOUR, end=NOW + HOUR)
+        self.assertIn(running, Event.objects.open_for_signup())
+
+    def test_a_future_event_is_open_as_before(self):
+        # 这条在的意义是：上面两条不是靠「把门焊死」实现的。
+        self.assertIn(self.make(start=NOW + DAY, end=NOW + DAY + HOUR),
+                      Event.objects.open_for_signup())
+
+    def test_an_ended_event_is_still_visible_to_the_people_who_signed_up(self):
+        """能不能看见 ≠ 能不能报名，这条分界线在时间上也成立。
+
+        ⚠️ `visible_to_volunteers()` **不**读时间：报过名的人正是最需要事后
+           还能打开那一页的人（P6 的取消链接就指向那儿）。
+        """
+        over = self.make(start=NOW - DAY, end=NOW - DAY + HOUR)
+        self.assertIn(over, Event.objects.visible_to_volunteers())
+
+    def test_the_row_and_the_queryset_answer_the_same_question(self):
+        """`is_open_for_signup` 和 `open_for_signup()` 是同一道门的两面。
+
+        ⚠️ 它们分歧的表现是详情页画出一颗点了 404 的 Sign up 按钮，或者藏起
+           一颗本来点得通的 —— 两种都不会报错。所以逐个状态、逐个时段比一遍。
+        """
+        windows = {
+            "past": (NOW - DAY, NOW - DAY + HOUR),
+            "running": (NOW - HOUR, NOW + HOUR),
+            "future": (NOW + DAY, NOW + DAY + HOUR),
+        }
+        for status in Event.Status:
+            for when, (start, end) in windows.items():
+                with self.subTest(status=status, when=when):
+                    event = self.make(status, start=start, end=end)
+                    self.assertEqual(
+                        event.is_open_for_signup,
+                        Event.objects.open_for_signup().filter(pk=event.pk).exists(),
+                    )
+
+    def test_is_over_is_read_off_the_clock_and_never_off_status(self):
+        # 一场已经跑完、但没人去点那个下拉框的活动 —— 也就是本来的样子。
+        self.assertTrue(self.make(start=NOW - DAY, end=NOW - DAY + HOUR).is_over)
+        # 反过来：有人提前点了 Completed，但活动还没到。它没结束。
+        early = self.make(Event.Status.COMPLETED, start=NOW + DAY, end=NOW + DAY + HOUR)
+        self.assertFalse(early.is_over)
+
+    def test_every_status_that_really_happened_reads_Ended_afterwards(self):
+        for status in (Event.Status.OPEN, Event.Status.CONFIRMED,
+                       Event.Status.COMPLETED):
+            with self.subTest(status=status):
+                event = self.make(status, start=NOW - DAY, end=NOW - DAY + HOUR)
+                self.assertEqual(event.status_label, "Ended")
+
+    def test_cancelled_still_says_cancelled_after_the_date(self):
+        """⚠️ 取消说的是时钟说不出的一件事：它没有发生过。
+
+        报了名的人在事后和事前一样需要这个词 —— 「Ended」会让一场根本没办的
+        活动读起来像办过了。
+        """
+        cancelled = self.make(Event.Status.CANCELLED, start=NOW - DAY, end=NOW - DAY + HOUR)
+        self.assertEqual(cancelled.status_label, "Cancelled")
+
+    def test_a_draft_is_not_collapsed_either(self):
+        # 志愿者看不到草稿；看得到它的是正在预览的 admin，而他问的是「发布了没」。
+        draft = self.make(Event.Status.DRAFT, start=NOW - DAY, end=NOW - DAY + HOUR)
+        self.assertEqual(draft.status_label, "Draft")
+
+    def test_before_it_ends_the_label_is_just_the_status(self):
+        for status in Event.Status:
+            with self.subTest(status=status):
+                event = self.make(status, start=NOW + DAY, end=NOW + DAY + HOUR)
+                self.assertEqual(event.status_label, event.get_status_display())
+
+    def test_ends_with_the_clock_is_not_written_as_a_complement(self):
+        # B5 那一课：把状态列全、数一遍。五个 —— 所以 exclude(...) 是错的，
+        # 哪怕它今天给出同一个答案。第六个状态必须在这里红一次。
+        self.assertEqual(
+            Event.ENDS_WITH_THE_CLOCK,
+            frozenset({Event.Status.OPEN, Event.Status.CONFIRMED,
+                       Event.Status.COMPLETED}),
+        )
+        self.assertEqual(len(Event.Status), 5)
+
+
 class FromTodayTests(TestCase):
     """from_today(): still to come or still going, cut at midnight.
 
@@ -3733,6 +3842,76 @@ class SignupBadgeLinkTests(PageTestCase):
                          "卡片不再画在遮罩上面 —— 那一格会被遮罩盖住")
         self.assertIn("pointer-events: auto", block(".event-row-badge-link"),
                       "报名那一格没把 pointer-events 收回来 —— 它点不动")
+class EndedEventPageTests(PageTestCase):
+    """同一件事，从页面上看。"""
+
+    def end_it(self, start=None, hours=3):
+        """把 self.event 挪到过去，status **保持 open** —— 没人去改状态的常态。"""
+        self.event.start_time = start if start is not None else NOW - DAY
+        self.event.end_time = self.event.start_time + hours * HOUR
+        self.event.save(update_fields=["start_time", "end_time"])
+        return self.event
+
+    def test_the_list_says_Ended_and_offers_no_signup_link(self):
+        """列表页上真正会撞见的那一格：**今天上午已经跑完的**那一场。
+
+        ⚠️ 只能是今天的。`from_today()` 的下边界是今天零点，昨天办完的活动
+           根本不在这一页上 —— 那正是这个 bug 一直没被列表页自己暴露出来的
+           原因：能同时满足「在列表里」和「已经结束」的窗口只有今天这一天。
+
+        ⚠️ 这里要一个定死的钟，而且没有别的写法。窗口是「今天零点 ~ 现在」，
+           而测试跑起来的那个「现在」可能就落在窗口里面（比如凌晨一点跑），
+           于是同一段代码在一天里的不同时刻会给出两种结果。所以把
+           `events.models` 那个 `local_now` 钉在今天中午，事件排在上午。
+        """
+        from unittest import mock
+
+        midnight = day_start(local_today())
+        self.end_it(start=midnight + 8 * HOUR, hours=2)
+        self.login(self.lisi)
+        with mock.patch("events.models.local_now", return_value=midnight + 12 * HOUR):
+            html = self.client.get(reverse("events:event_list")).content.decode()
+        self.assertIn(self.event.name, html)
+        self.assertIn("Ended", html)
+        self.assertNotIn("Open for signup", html)
+        self.assertNotIn(f'href="/events/{self.event.pk}/signup/"', html)
+
+    def test_signing_up_for_a_finished_event_is_a_404(self):
+        """⭐ 这是那个洞本身，不是它的显示。
+
+        在这条守卫之前，一场去年办完、status 还停在 `open` 的活动，
+        报名表单打得开、POST 也真的会写进一条 Participation。
+        """
+        self.end_it()
+        self.login(self.lisi)
+        url = reverse("events:event_signup", args=[self.event.pk])
+        self.assertEqual(self.client.get(url).status_code, 404)
+        response = self.client.post(url, {"event_role": self.role.pk})
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(Participation.objects.count(), 0)
+
+    def test_the_detail_page_drops_the_signup_button_but_stays_open(self):
+        # 打得开是要紧的：报过名的人事后要回来看。
+        self.end_it()
+        self.login(self.lisi)
+        response = self.client.get(reverse("events:event_detail", args=[self.event.pk]))
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.context["can_sign_up"])
+        self.assertContains(response, "not taking signups (Ended)")
+
+    def test_the_management_list_keeps_showing_the_real_status(self):
+        """🔴 管理页**不**跟着改口径。
+
+        那一格旁边就是改 status 的下拉框；标签写着一个下拉框里找不到的词，
+        读起来是「我刚才那一下没保存上」。已经结束由另一枚标签单独说。
+        """
+        self.end_it()
+        self.login(self.zhang)
+        html = self.client.get(reverse("events:event_manage_list")).content.decode()
+        self.assertIn("Open for signup", html)
+        self.assertIn("Ended", html)
+
+
 class ManageListStatusTests(PageTestCase):
     """The status dropdown on the manage list, and the two fields it is not.
 

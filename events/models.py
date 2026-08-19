@@ -24,7 +24,7 @@ from contact.models import Contact, RelationshipType
 from core.constraints import ConstraintErrorFieldMixin
 from core.limits import LONG_TEXT, SHORT_TEXT
 from core.models import ImmutableCodeMixin, TimeStampedModel
-from core.timeutils import day_start, local_today
+from core.timeutils import day_start, local_now, local_today
 from org.models import Ministry
 
 
@@ -139,9 +139,36 @@ class EventQuerySet(models.QuerySet):
         """Everything a volunteer may open: published, including full and over."""
         return self.filter(status__in=Event.VISIBLE_TO_VOLUNTEERS)
 
-    def open_for_signup(self):
-        """Everything a volunteer may still sign up for."""
-        return self.filter(status__in=Event.OPEN_FOR_SIGNUP)
+    def open_for_signup(self, now=None):
+        """Everything a volunteer may still sign up for.
+
+        🔴 **Two conditions, not one (2026-08-19): the status *and* the clock.**
+
+           `status` is filled in by hand and nothing moves it on when the day
+           arrives — so an event that ran last year still says "Open for signup"
+           until somebody remembers to go and change it. That is not merely an
+           ugly label: this predicate is the only gate on the signup path
+           (`event_signup` 404s on it, the detail page's button reads it), so
+           for as long as the field said `open`, that finished event was
+           genuinely signable. Somebody could put their name down for last
+           year's Saturday.
+
+           The fix is not a nightly job flipping the column. A cron leaves a
+           window — up to a day wide — in which the page is still wrong, and it
+           would have to rewrite every past event's row (and its history) to say
+           something the two timestamps beside it already said. The question
+           "is it over?" has an exact answer in `end_time`; ask it there.
+
+        ⚠️ The cut is `end_time`, not `start_time` (decided 2026-08-19): an
+           event that has begun but not finished is still signable, because
+           somebody turning up mid-morning to help is the ordinary case at a
+           food distribution, not an anomaly. Same column, same reasoning as
+           `from_today()` — one predicate, one column, one question.
+        """
+        return self.filter(
+            status__in=Event.OPEN_FOR_SIGNUP,
+            end_time__gt=now or local_now(),
+        )
 
     # ⚠️ `upcoming()` (start_time >= now) and `past()` (end_time < now) lived
     #    here until 2026-08-17. They went with their last callers — the Past
@@ -242,7 +269,16 @@ class Event(ConstraintErrorFieldMixin, TimeStampedModel):
     })
     # Cancelled events stay in the visible set on purpose: the people who signed
     # up are exactly the ones who need to see that it is off.
+    #
+    # ⚠️ Membership here is necessary but not sufficient — `open_for_signup()`
+    #    and `is_open_for_signup` also ask the clock. The set alone has never
+    #    been the whole gate since 2026-08-19; read either of those, not this.
     OPEN_FOR_SIGNUP = frozenset({Status.OPEN})
+    # The statuses that stop meaning what they say once `end_time` has passed —
+    # see `status_label`. Listed in full rather than as a complement, for B5's
+    # reason: a sixth status must not be swept in here by default, and the two
+    # left out (draft, cancelled) are each left out for a stated reason.
+    ENDS_WITH_THE_CLOCK = frozenset({Status.OPEN, Status.CONFIRMED, Status.COMPLETED})
 
     name = models.CharField(max_length=200)
     event_type = models.ForeignKey(EventType, on_delete=models.PROTECT, related_name="events")
@@ -319,6 +355,58 @@ class Event(ConstraintErrorFieldMixin, TimeStampedModel):
     def duration(self):
         """R3. Derived, never stored: two columns already say it."""
         return self.end_time - self.start_time
+
+    @property
+    def is_over(self):
+        """Has it finished? Read off the clock, never off `status`.
+
+        The one place the question is answered, so that the badge, the signup
+        gate and any test all mean the same thing by it. `end_time`, matching
+        `EventQuerySet.open_for_signup()` and `from_today()` — an event that is
+        running right now is not over.
+        """
+        return self.end_time <= local_now()
+
+    @property
+    def is_open_for_signup(self):
+        """The row-level twin of `EventQuerySet.open_for_signup()`.
+
+        ⚠️ Written to match that predicate condition for condition. The two
+           being one thought in two places is the risk here: if they ever
+           disagree, the detail page grows a Sign up button leading to a page
+           that 404s, or hides one that would have worked.
+        """
+        return self.status in Event.OPEN_FOR_SIGNUP and not self.is_over
+
+    @property
+    def status_label(self):
+        """What a *volunteer* is told the state is. Not always `status`.
+
+        🔴 **"Ended" beats the stored word once the event is over** (2026-08-19).
+           `status` is hand-filled and nothing moves it on, so a finished event
+           still reads "Open for signup" — the complaint this property exists to
+           answer. Every status that means "this was really going to happen"
+           (open, confirmed, completed) collapses to one word once `end_time`
+           has passed, because to somebody reading the list the difference
+           between "it filled up and then it happened" and "it happened" is not
+           a difference: it is over either way, and there is nothing to do.
+
+        ⚠️ `Cancelled` is **not** collapsed. It says something the clock cannot:
+           it did not take place. The people who signed up need that word, and
+           they need it after the date as much as before it.
+
+        ⚠️ `Draft` is not collapsed either — a volunteer never sees one (it is
+           outside `VISIBLE_TO_VOLUNTEERS`), and the ministry admin previewing
+           it is asking about publication, not about the clock.
+
+        ⚠️ The management list deliberately does **not** use this: that page is
+           where `status` is edited, and showing a word other than the one in
+           the dropdown next to it would make the edit look like it failed.
+           It shows `get_status_display` plus its own "Ended" marker.
+        """
+        if self.is_over and self.status in Event.ENDS_WITH_THE_CLOCK:
+            return "Ended"
+        return self.get_status_display()
 
     def __str__(self):
         # Date and ministry, so two "Food distribution" rows are told apart in

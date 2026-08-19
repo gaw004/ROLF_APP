@@ -441,6 +441,23 @@ def profile(request):
             if form.is_valid():
                 form.save()
                 messages.success(request, "Your details have been saved.")
+                # 🔴 改掉登录地址 = 一个还没证明过的地址（2026-08-19）。
+                #    `set_login_email()` 已经把 `email_verified` 打回 False；
+                #    这里补上「发一封新的码」和「告诉他为什么」。
+                #
+                # ⚠️ **这一次不把人踢出去。** 他改的是自己的账号，当场登出会让
+                #    一次手滑（打错一个字母）变成「我被自己的站锁在外面了」。
+                #    代价说明白：这个会话可以继续用到登出为止 —— 而下一次登录
+                #    会被拦下，直到他验过新地址。所以「占着别人的地址」这件事
+                #    仍然是做不成的，只是不是当场生效。
+                if not request.user.email_verified:
+                    send_verification_code(request.user)
+                    request.session[PENDING_SESSION_KEY] = request.user.pk
+                    messages.info(
+                        request,
+                        f"That is a new email address, so we have sent a code to "
+                        f"{request.user.email}. Confirm it before you next log in — "
+                        f"until then your login will be refused.")
                 return redirect("accounts:profile")
 
     return render(request, "accounts/profile.html", {

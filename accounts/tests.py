@@ -1441,6 +1441,79 @@ class SuperuserVerificationTests(TestCase):
         self.assertFalse(user.email_verified)
 
 
+class ChangingTheLoginAddressTests(TestCase):
+    """改掉登录地址要重新验证 —— 否则注册验证就是白做的（2026-08-19）。
+
+    phase-c.md 早就把这条写下来了：「只做注册验证不做改 email 验证，等于留一道
+    现成的绕路」。绕路长这样：拿一个自己收得到的地址注册、验掉，然后把登录名改成
+    任意地址（包括别人的），而没有任何一处再问一次。
+    """
+
+    def setUp(self):
+        self.user = register_account(
+            email="mei@example.com", password="a-good-long-password",
+            legal_first_name="Ping", legal_last_name="Mei")
+        mark_email_verified(self.user)
+        self.client.force_login(self.user)
+        self.url = reverse("accounts:profile")
+        mail.outbox.clear()
+
+    def save(self, **overrides):
+        payload = {"action": "save", "legal_first_name": "Ping",
+                   "legal_last_name": "Mei", "email": "mei@example.com"}
+        payload.update(overrides)
+        return self.client.post(self.url, payload)
+
+    def test_a_new_address_is_unverified_again_and_gets_a_code(self):
+        self.save(email="new@example.com")
+        self.user.refresh_from_db()
+        self.assertEqual(self.user.email, "new@example.com")
+        self.assertFalse(self.user.email_verified)
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertEqual(mail.outbox[-1].to, ["new@example.com"])
+
+    def test_saving_without_touching_the_address_changes_nothing(self):
+        """⚠️ 这条和上面一样要紧。
+
+        把「保存了资料」当成「改了地址」的话，任何一次改电话都会把自己
+        踢成未验证 —— 而那种失败读起来完全像是站坏了。
+        """
+        self.save(phone="+14085550101")
+        self.user.refresh_from_db()
+        self.assertTrue(self.user.email_verified)
+        self.assertEqual(mail.outbox, [])
+
+    def test_the_next_login_is_refused_until_the_new_address_is_confirmed(self):
+        self.save(email="new@example.com")
+        self.client.logout()
+        response = self.client.post(reverse("accounts:login"), {
+            "username": "new@example.com", "password": "a-good-long-password"})
+        self.assertContains(response, "has not been confirmed")
+
+    def test_the_code_that_arrives_confirms_it(self):
+        self.save(email="new@example.com")
+        code = re.search(r"\b(\d{6})\b", mail.outbox[-1].body).group(1)
+        self.client.logout()
+        # 登录被拦下的同时会把这个账号标进 session，所以验证页认得他。
+        self.client.post(reverse("accounts:login"), {
+            "username": "new@example.com", "password": "a-good-long-password"})
+        response = self.client.post(reverse("accounts:verify_email"), {"code": code})
+        self.assertRedirects(response, reverse("events:event_list"))
+        self.user.refresh_from_db()
+        self.assertTrue(self.user.email_verified)
+
+    def test_the_current_session_is_not_thrown_out(self):
+        """⚠️ 知情的取舍，写下来免得以后当成漏洞修。
+
+        改的是自己的账号，当场登出会把一次手滑（打错一个字母）变成「我被自己的
+        站锁在外面了」。代价：这个会话能用到登出为止。而「占着别人的地址」仍然
+        做不成 —— 只是不是当场生效。
+        """
+        self.save(email="new@example.com")
+        self.assertEqual(
+            self.client.get(reverse("accounts:profile")).status_code, 200)
+
+
 class PasswordResetTests(TestCase):
     """C3.2. Django's flow, this project's templates, and one limit.
 

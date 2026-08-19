@@ -85,8 +85,29 @@ def set_login_email(user, email):
     #    `request.user`, which is a SimpleLazyObject, and `type()` of that is the
     #    wrapper rather than the model. It has no manager, so the normalisation
     #    step turned into an AttributeError on the ordinary save path.
-    user.email = get_user_model().objects.normalize_email(email)
-    user.save(update_fields=["email"])
+    normalised = get_user_model().objects.normalize_email(email)
+    # 🔴 **A new address is an unproved address** (2026-08-19).
+    #
+    #    Registration asks for a code now, and phase-c.md had already written
+    #    down what happens if only half of that is done: "只做注册验证不做改
+    #    email 验证，等于留一道现成的绕路". It is exactly that — register with
+    #    an address you can read, confirm it, then change the login name to
+    #    anything at all, including somebody else's, and nothing asks again.
+    #
+    # ⚠️ Here rather than in the view, because this is the one function that
+    #    knows the address moved — and it is not only the profile page that
+    #    calls it.
+    #
+    # ⚠️ Marking it unverified is all this does. Sending the new code, and
+    #    saying so on the page, belongs to whoever is holding the request; see
+    #    views.profile.
+    changed = normalised != user.email
+    user.email = normalised
+    if changed:
+        user.email_verified = False
+        user.save(update_fields=["email", "email_verified"])
+    else:
+        user.save(update_fields=["email"])
     contact = user.contact
     if contact is not None and contact.email != user.email:
         contact.email = user.email

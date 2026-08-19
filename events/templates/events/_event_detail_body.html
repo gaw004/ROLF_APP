@@ -10,7 +10,10 @@
    不靠删内容。
 
 参数：
-  in_panel  真值 → 这一份画在日程面板里。它只关掉一样东西，见下面那条注释。
+  in_panel  真值 → 这一份画在右面板里。它改三样东西，各自见下面的注释：
+            不画返回链接、活动名降一级标题、报名按钮就地开表单。
+            ⚠️ 除此之外**一个字都不许因为它而变**。它是一个「画在哪儿」的开关，
+               不是一个「精简版」的开关 —— 后者就是本文件第一条规矩要防的那件事。
 {% endcomment %}
   {% comment %}
   草稿预览的警示框（2026-08-06）。
@@ -77,7 +80,18 @@
 
   <div class="card">
     <div class="flex flex-wrap items-start justify-between gap-3">
-      <h1 class="text-2xl font-semibold">{{ event.name }}</h1>
+      {% comment %}
+      ⚠️ 面板里降成 `<h2>`（2026-08-19）。不是排版偏好：面板开在 Events 那一页上，
+         而那一页已经有一个 `<h1>`（Events）—— 一页两个 h1 会让读屏的标题大纲变成
+         两棵并列的树，而右边这一块在结构上是那一页里的一节。
+         ⚠️ 字号两处相同，所以屏幕上看不出差别 —— 这一条只有读屏的人会撞上，
+            也就是最不容易被发现的那一类。
+      {% endcomment %}
+      {% if in_panel %}
+        <h2 class="text-2xl font-semibold">{{ event.name }}</h2>
+      {% else %}
+        <h1 class="text-2xl font-semibold">{{ event.name }}</h1>
+      {% endif %}
       {% include "core/components/badge.html" with label=event.get_status_display %}
     </div>
     <dl class="mt-4 grid gap-x-6 gap-y-2 text-sm sm:grid-cols-2">
@@ -153,8 +167,24 @@
 
   <div class="mt-8">
     {% if can_sign_up %}
+      {% comment %}
+      ⚠️ 面板里这颗按钮把**报名表单**换进面板，不跳整页（2026-08-19）。人已经在
+         右边这一块里读这场活动了，报名理应也在这里发生 —— 跳走一整页再回来，
+         中间会丢掉左边的筛选、页码和滚动位置。
+
+      ⭐ `href` 两条路都给，指的都是那一页真实存在的报名页。htmx 没接管时点下去
+         就是跳过去，而那一页的 POST 是同一个视图的同一条分支（D24）。
+
+      ⚠️ 整页那一档**不给** `hx_get`：那时页面上没有 `#schedule-detail` 这个靶子，
+         而 htmx 找不到靶子时会把内容换到按钮自己身上 —— 一整块表单长在
+         「Sign up」那三个字的位置上，不报错。
+      {% endcomment %}
       {% url 'events:event_signup' event.pk as signup_url %}
-      {% include "core/components/button.html" with label="Sign up" href=signup_url variant="primary" %}
+      {% if in_panel %}
+        {% include "core/components/button.html" with label="Sign up" href=signup_url variant="primary" hx_get=signup_url hx_target="#schedule-detail" %}
+      {% else %}
+        {% include "core/components/button.html" with label="Sign up" href=signup_url variant="primary" %}
+      {% endif %}
     {% elif preview %}
       {% comment %}
       预览时按钮**照画**，只是灰掉、点不动、也进不了 Tab 顺序。

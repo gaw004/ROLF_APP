@@ -486,11 +486,37 @@ def event_detail_panel(request, pk):
 
 @login_required
 def event_signup(request, pk):
-    """P3: join a role. Minors — and unknown birth dates — go through consent."""
+    """P3: join a role. Minors — and unknown birth dates — go through consent.
+
+    2026-08-19 —— 同一个视图现在也是 Events 页右面板里那一块。
+
+    ⭐ **整页那条路一行都没动**，这是 D24 对写操作的硬要求：没有 JS、屏幕窄到
+       装不下面板、或者直接把这个 URL 贴进地址栏，走的都是原来那条 —— GET 画
+       一整页表单，POST 成功之后 302 到活动详情。HTMX 只是它的快路。
+
+    ⚠️ 两条路共用**同一个 `open_for_signup()`、同一个 `SignUpForm`、同一次
+       `sign_up()`**。面板不是一条旁路：满员、取消、草稿在这里一律 404，
+       和整页字节一致。分叉在这里的名字叫「从侧边栏报进了一个已经满了的活动」。
+
+    ⚠️ 成功之后换回去的是**这场活动的详情**，不是一句「报名成功了」。人接着要
+       看的是自己报到了哪个工种，而那件事详情页上那张 `mine` 的表已经在答；
+       换成一块只有一句话的空面板，等于让人再点一次才能确认。
+
+    ⚠️ 面板成功那一次**不重画左边那一列**。报名会让一场活动满员、于是列表上
+       那个绿标签该变成 Confirmed —— 这里没有跟着换。知情的取舍：换它要连着
+       算一次分页（`_page_holding`）并回送 40KB，而那个标签在下一次筛选、翻页
+       或刷新时自然就对了。写下来是因为「点了报名，左边标签没变」看起来像 bug，
+       而它是这一行。
+    """
     event = get_object_or_404(Event.objects.open_for_signup(), pk=pk)
     contact = _my_contact(request)
     if contact is None:
         raise PermissionDenied(SCOPED_DENIAL)
+
+    # ⚠️ 读 header，不读查询串：这一块是不是画在面板里，取决于**谁在问**，
+    #    而不是取决于一个可以被贴进地址栏的参数。带 `?in_panel=1` 打开这个
+    #    URL 的人会拿到一块没有外壳、没有导航的碎片。
+    in_panel = bool(request.headers.get("HX-Request"))
 
     form = SignUpForm(request.POST or None, event=event, contact=contact)
     if request.method == "POST" and form.is_valid():
@@ -510,10 +536,25 @@ def event_signup(request, pk):
             # could not go out. confirm_signup() returns rather than raises.
             confirm_signup(participation)
             messages.success(request, "You are signed up. We have sent a confirmation.")
+            if in_panel:
+                # ⚠️ 上下文走 `_detail()`，和整页详情、和日程点开那一份是同一个 ——
+                #    里面有 `preview` 和 `can_manage` 两个权限判断，而这是第三条
+                #    通往那份正文的路。各建一份的分叉叫「草稿从侧边栏漏出去了」。
+                context = _detail(request, pk)
+                context.update({
+                    "in_panel": True,
+                    # 🔴 这一次**是**写操作，所以 messages 要跟着回去。详情那份
+                    #    模板平时是读路径、不许 include messages（会把还没显示过
+                    #    的消息提前消费掉），所以那里由这个标志点亮。
+                    "messages_oob": True,
+                })
+                return render(request, "events/_schedule_detail.html", context)
             return redirect("events:event_detail", pk=event.pk)
 
-    return render(request, "events/event_signup.html", {
+    return render(request, _template(
+        request, "events/event_signup.html", "events/_schedule_signup.html"), {
         "event": event, "form": form, "needs_consent": form.needs_consent,
+        "in_panel": in_panel,
     })
 
 

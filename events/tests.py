@@ -3508,6 +3508,231 @@ class SignUpAgainAfterCancellingTests(PageTestCase):
                 contact=self.lisi.contact, event_role=self.role).count(), 1)
 
 
+class PanelSignupTests(PageTestCase):
+    """报名在右面板里就地完成（2026-08-19）。
+
+    🔴 报名是**写**操作，所以这一批里最要紧的一条不是「面板能不能用」，而是
+       **整页那条路一个字都没变**：D24 要求每个写操作都有完整的服务端表单路径，
+       而面板只是它的快路。下面第一组测试守的就是这件事。
+    """
+
+    def signup_url(self):
+        return reverse("events:event_signup", args=[self.event.pk])
+
+    def panel_url(self):
+        return reverse("events:event_detail_panel", args=[self.event.pk])
+
+    # --- D24：整页那条路没动 ---------------------------------------------
+
+    def test_the_full_page_post_still_redirects_to_the_event(self):
+        """⭐ 没有 JS、或者窄屏上，报名走的是这一条。它必须**完全**照旧：
+           302 到活动详情，一行 Participation 落库。
+        """
+        self.login(self.lisi)
+        response = self.client.post(self.signup_url(), {"event_role": self.role.pk})
+        self.assertRedirects(
+            response, reverse("events:event_detail", args=[self.event.pk]))
+        self.assertTrue(Participation.objects.filter(
+            contact=self.lisi.contact, event_role=self.role).exists())
+
+    def test_the_full_page_get_is_still_a_whole_page(self):
+        self.login(self.lisi)
+        html = self.client.get(self.signup_url()).content.decode()
+        self.assertIn("<!doctype html>", html.lower())
+        # ⚠️ 整页上**不许**出现面板那个靶子：那一页没有 `#schedule-detail`，
+        #    而 htmx 找不到靶子时会把响应换到发起它的元素身上 —— 一整块表单
+        #    长在「Sign up」那三个字的位置上，不报错。
+        self.assertNotIn('hx-target="#schedule-detail"', html)
+
+    def test_the_form_still_posts_to_the_same_url_without_htmx(self):
+        """⭐ 面板里那一份也是 `method="post"` 的真表单。
+
+        写成 `<div>` 加一颗 `hx-post` 按钮的话，htmx 没加载出来时报名就完全做不了 ——
+        而**页面上看不出任何区别**。
+        """
+        self.login(self.lisi)
+        html = self.client.get(
+            self.signup_url(), headers={"HX-Request": "true"}).content.decode()
+        form = re.search(r"<form[^>]*>", html).group(0)
+        self.assertIn('method="post"', form)
+        self.assertIn(f'action="{self.signup_url()}"', form)
+        self.assertIn(f'hx-post="{self.signup_url()}"', form)
+
+    # --- 面板那条路 -------------------------------------------------------
+
+    def test_a_panel_get_returns_the_form_in_the_panel_frame(self):
+        self.login(self.lisi)
+        html = self.client.get(
+            self.signup_url(), headers={"HX-Request": "true"}).content.decode()
+        self.assertNotIn("<!doctype html>", html.lower())
+        self.assertIn("schedule-detail", html)      # 外框
+        self.assertIn("Confirm signup", html)
+
+    def test_a_panel_post_swaps_the_event_detail_back_in(self):
+        """⚠️ 成功之后换回去的是**这场活动的详情**，不是一句「报名成功了」。
+
+        人接着要看的是自己报到了哪个工种，而详情里那张 `mine` 的表已经在答。
+        换成一块只有一句话的空面板，等于让人再点一次才能确认。
+        """
+        self.login(self.lisi)
+        response = self.client.post(
+            self.signup_url(), {"event_role": self.role.pk},
+            headers={"HX-Request": "true"})
+        self.assertEqual(response.status_code, 200)
+        html = response.content.decode()
+        self.assertIn("What you signed up for", html)
+        self.assertIn(self.role.role.name, html)
+        self.assertTrue(Participation.objects.filter(
+            contact=self.lisi.contact, event_role=self.role).exists())
+
+    def test_a_panel_post_carries_the_message_out_of_band(self):
+        """🔴 少了这一块，`messages.success()` 在面板路径上既不显示、又不消失 ——
+           它躺在 session 里，等下一次整页加载才冒出来，于是用户在**另一个页面**上
+           看到「You are signed up」。比没有提示更让人困惑。
+        """
+        self.login(self.lisi)
+        html = self.client.post(
+            self.signup_url(), {"event_role": self.role.pk},
+            headers={"HX-Request": "true"}).content.decode()
+        self.assertIn('id="messages" hx-swap-oob="true"', html)
+        self.assertIn("You are signed up", html)
+
+    def test_the_read_paths_do_not_carry_messages(self):
+        """🔴 镜像的那个 bug：读路径 include 了 messages 就会把 session 里还没
+           显示过的消息**提前消费掉**。
+
+        面板里的两条读路径 —— 打开详情、打开报名表单 —— 都不许带。
+        """
+        self.login(self.lisi)
+        for url in (self.panel_url(), self.signup_url()):
+            html = self.client.get(
+                url, headers={"HX-Request": "true"}).content.decode()
+            self.assertNotIn('id="messages"', html, url)
+
+    def test_a_rejected_panel_post_comes_back_as_the_form(self):
+        """校验失败换回来的是带着错误的**同一张表单**，不是详情、也不是 500。"""
+        self.login(self.lisi)
+        response = self.client.post(
+            self.signup_url(), {}, headers={"HX-Request": "true"})
+        self.assertEqual(response.status_code, 200)
+        html = response.content.decode()
+        self.assertIn("Confirm signup", html)
+        self.assertNotIn("What you signed up for", html)
+
+    def test_the_panel_path_meets_the_same_gate(self):
+        """🔴 面板不是一条绕过 `open_for_signup()` 的旁路。
+
+        满员 / 已取消 / 草稿在整页上是 404，在这里必须**字节一致**地也是 404。
+        新开一条取数路径正是权限最容易漏掉的地方。
+        """
+        self.login(self.lisi)
+        for status in (Event.Status.CONFIRMED, Event.Status.CANCELLED,
+                       Event.Status.COMPLETED, Event.Status.DRAFT):
+            self.event.status = status
+            self.event.save(update_fields=["status"])
+            for headers in ({}, {"HX-Request": "true"}):
+                response = self.client.get(self.signup_url(), headers=headers)
+                self.assertEqual(response.status_code, 404, f"{status} {headers}")
+                response = self.client.post(
+                    self.signup_url(), {"event_role": self.role.pk}, headers=headers)
+                self.assertEqual(response.status_code, 404, f"{status} {headers}")
+
+    def test_the_panel_response_does_not_resend_the_list(self):
+        # 报名不改筛选结果，也不改「这一场在第几页」。带上就是白送 40KB。
+        self.login(self.lisi)
+        for html in (
+            self.client.get(
+                self.signup_url(), headers={"HX-Request": "true"}).content.decode(),
+            self.client.post(
+                self.signup_url(), {"event_role": self.role.pk},
+                headers={"HX-Request": "true"}).content.decode(),
+        ):
+            self.assertNotIn('id="event-results"', html)
+
+    def test_the_body_is_one_file_shared_with_the_full_page(self):
+        """⚠️ 不许有第二份「面板专用的精简报名」。这张表单带着未成年人同意那一
+           整段，两份说不一样的话的代价不是排版。
+        """
+        for name in ("event_signup.html", "_schedule_signup.html"):
+            markup = (Path(settings.BASE_DIR) / "events" / "templates" / "events"
+                      / name).read_text()
+            self.assertIn("events/_event_signup_body.html", markup, name)
+
+    def test_both_panel_blocks_share_one_frame(self):
+        """⚠️ 详情和报名共用同一层外框（同一颗 ×、同一套几何）。两份外框会在
+           第二次改动之后长得不一样，而两边都渲染成功。
+        """
+        for name in ("_schedule_detail.html", "_schedule_signup.html"):
+            markup = (Path(settings.BASE_DIR) / "events" / "templates" / "events"
+                      / name).read_text()
+            self.assertIn("events/_panel_frame.html", markup, name)
+
+
+class SignupBadgeLinkTests(PageTestCase):
+    """「Open for signup」那一格是一个直通报名的链接（2026-08-19）。"""
+
+    def rows(self):
+        self.login(self.lisi)
+        return self.client.get(reverse("events:event_list")).content.decode()
+
+    def test_the_open_badge_links_straight_to_signup(self):
+        html = self.rows()
+        link = re.search(
+            r'<a href="/events/%d/signup/"[^>]*>' % self.event.pk, html, re.S)
+        self.assertIsNotNone(link, "「Open for signup」没有变成链接")
+        self.assertIn('hx-target="#schedule-detail"', link.group(0))
+        self.assertIn("click[panelFits()]", link.group(0))
+
+    def test_only_the_open_status_is_a_link(self):
+        """⚠️ 一个点了会 404 的标签读起来是「站坏了」，不是「这场报不了」——
+           而满员 / 已取消 / 已结束在 `open_for_signup()` 那道门前都是 404。
+        """
+        for status in (Event.Status.CONFIRMED, Event.Status.CANCELLED,
+                       Event.Status.COMPLETED):
+            self.event.status = status
+            self.event.save(update_fields=["status"])
+            html = self.rows()
+            self.assertIn(self.event.get_status_display(), html, status)
+            self.assertNotIn(
+                f'href="/events/{self.event.pk}/signup/"', html,
+                f"{status} 的标签也变成了报名链接 —— 点下去是 404")
+
+    def test_the_badge_can_actually_be_clicked_through_the_card_overlay(self):
+        """🔴 整卡的点击区是一层铺满整行的绝对定位元素（`z-index: 1`），压在所有
+           内容上面。而卡片里现在有一个**要能单独点**的东西。
+
+        ⚠️ **第一版是靠 z-index 的，而它不成立。** 给标签 `z-index: 2` 比遮罩的 1
+           高 —— 看着对，实际输：`.event-row > .card` 上那条入场动画带
+           `animation-fill-mode: both`，而一个正在动画（或永久填充）`opacity` /
+           `translate` 的元素**始终是一个层叠上下文**，于是那个 2 只在卡片内部排序，
+           卡片自己是 `z-index: auto`，整个被压在遮罩底下。
+
+           屏幕上的表现：链接画得出来、看得见、鼠标也变手型，**点下去开出的是详情
+           而不是报名**。控制台一声不吭，两条 z-index 单看都对。是
+           `document.elementFromPoint()` 问出来的。
+
+        所以现在靠的是两件独立的事，和层叠顺序无关：卡片**画**在上面
+        （`z-index: 2`）、**点**穿过去（`pointer-events: none`），而那一格自己把
+        `pointer-events` 收回来。这条守卫钉的是这个机制本身 —— 只要有人把它改回
+        「比一比 z-index」，上面那个 bug 就会一字不差地回来。
+        """
+        css = re.sub(r"/\*.*?\*/", "",
+                     (Path(settings.BASE_DIR) / "assets" / "app.css").read_text(),
+                     flags=re.S)
+
+        def block(selector):
+            found = re.search(
+                re.escape(selector) + r"\s*\{([^}]*)\}", css, re.S)
+            self.assertIsNotNone(found, f"`{selector}` 从 app.css 里没了")
+            return found.group(1)
+
+        card = block(".event-row > .card")
+        self.assertIn("pointer-events: none", card,
+                      "卡片不再让点击穿过去 —— 整行就只有那一格能点了")
+        self.assertRegex(card, r"z-index:\s*2",
+                         "卡片不再画在遮罩上面 —— 那一格会被遮罩盖住")
+        self.assertIn("pointer-events: auto", block(".event-row-badge-link"),
+                      "报名那一格没把 pointer-events 收回来 —— 它点不动")
 class ManageListStatusTests(PageTestCase):
     """The status dropdown on the manage list, and the two fields it is not.
 
@@ -4827,23 +5052,47 @@ class EventRowTests(PageTestCase):
         self.assertIn("event-row-link", html)
         self.assertIn(reverse("events:event_detail", args=[self.event.pk]), html)
 
-    def test_there_is_exactly_one_link_per_row(self):
+    def test_every_link_in_a_row_has_a_name_of_its_own(self):
         """⭐ The accessibility claim behind the stretched link.
 
         Wrapping the whole card in an `<a>` would have been simpler and would put
         the title, the ministry badge and the times inside one link — which a
-        screen reader then reads out as a single run-on name. One link whose
+        screen reader then reads out as a single run-on name. A link whose
         accessible name is only the event's name is the point of doing it this way.
+
+        ⚠️ **2026-08-19：这条从「一行只有一个链接」改成了「每个链接都得有自己的
+           名字」。** 那天「Open for signup」那一格变成了直通报名的链接，于是一行
+           有两个 —— 而原来那条计数式的守卫会把这件事报成错。
+
+           计数从来不是要守的东西，它只是当时**恰好**等价于要守的东西。真正的
+           判据是这一句：读屏软件按链接列表跳的时候，**每一个都得说得出自己是谁**。
+           两个各有明确名字的链接（「Saturday distribution」和「Sign up for
+           Saturday distribution」）比一个把整张卡念成一长串的链接好，
+           而三个没有名字的链接比两个更糟 —— 所以下面钉的是名字，不是个数。
         """
         html = self.rows_html("events:event_list")
         row = re.search(r'<li class="event-row.*?</li>', html, re.S).group(0)
-        self.assertEqual(row.count("<a "), 1)
-        # And its name is the event's name, carried by the sr-only span.
-        # ⚠️ `[^>]*` 是 2026-08-19 放宽的：那个链接上现在挂着 hx-/x- 属性（日程开着
-        #    时就地打开详情），于是 class 后面不再紧跟 `>`。放宽的是**属性**，
-        #    钉住的仍然是那件要紧的事 —— 这个链接里除了 sr-only 那一个 span
-        #    什么都没有，它的可访问名就只有活动名。
+        links = re.findall(r"<a\s[^>]*>", row)
+        self.assertTrue(links, "整行的点击区没了")
+        for link in links:
+            # 名字来自 aria-label，或者来自里面那个 sr-only 的 span（下面单独钉）。
+            named = "aria-label=" in link or 'class="event-row-link"' in link
+            self.assertTrue(
+                named,
+                f"这一行里有一个说不出自己是谁的链接：{link}")
+
+        # 整卡那一个：里面除了 sr-only 那一个 span 什么都没有，
+        # 所以它的可访问名就只有活动名。
+        # ⚠️ `[^>]*` 是 2026-08-19 放宽的：那个链接上挂着 hx-/x- 属性，
+        #    于是 class 后面不再紧跟 `>`。放宽的是**属性**，钉的仍然是内容。
         self.assertRegex(row, r'class="event-row-link"[^>]*>\s*<span class="sr-only">')
+
+        # 报名那一个：`aria-label` 里必须带上活动名。少了它，读屏软件在链接列表里
+        # 听到的是一串一模一样的「Open for signup」，分不出是哪一场。
+        badge = next(
+            (link for link in links if "event-row-badge-link" in link), None)
+        self.assertIsNotNone(badge, "「Open for signup」那一格不是链接了")
+        self.assertIn(self.event.name, badge)
 
     def test_the_event_name_is_no_longer_a_link_of_its_own(self):
         html = self.rows_html("events:event_list")
@@ -5089,7 +5338,10 @@ class ScheduleToggleTests(PageTestCase):
         the first render.
         """
         html = self.page()
-        shell = html.index("schedule: false")
+        # ⚠️ 2026-08-19：两个布尔搬进了 app.js 的 `Alpine.data("eventsShell")`，
+        #    所以这里查的是**挂上那个组件**的位置，而不是 `schedule: false` 那串
+        #    字面量。规矩一个字没变：声明它的地方必须在被换掉的那块之外。
+        shell = html.index('x-data="eventsShell"')
         results = html.index('id="event-results"')
         self.assertLess(shell, results,
                         "the schedule state must be declared before, and outside, "
@@ -6496,11 +6748,29 @@ class SchedulePanelTests(PageTestCase):
         self.make("Kitchen shift")
         self.login(self.lisi)
         html = self.client.get(reverse("events:event_list")).content.decode()
+        js = (Path(settings.BASE_DIR) / "assets" / "js" / "app.js").read_text()
         for expression in re.findall(r'hx-trigger="[^"]*\[([^\]]+)\]"', html):
-            self.assertRegex(
-                expression.strip(), r"^(!!|!)",
-                f"`{expression.strip()}` 求值出来不是布尔 —— htmx 会静默地"
+            expression = expression.strip()
+            if re.fullmatch(r"!!?.*", expression):
+                continue
+            # ⚠️ 另一种合法写法：调用一个**具名判定函数**（2026-08-19 起
+            #    `panelFits()` 走这条）。这时布尔化的责任挪进了那个函数，
+            #    所以这里跟进去查它自己收没收口 —— 少了这一跟，守卫就退化成
+            #    「只要写成函数调用就放行」，而那正好是它要防的东西。
+            call = re.fullmatch(r"(\w+)\(\)", expression)
+            self.assertIsNotNone(
+                call,
+                f"`{expression}` 求值出来不是布尔 —— htmx 会静默地"
                 f"把每一次事件都过滤掉")
+            name = call.group(1)
+            body = re.search(
+                r"window\.%s = function \(\) \{(.*?)\n\};" % name, js, re.S)
+            self.assertIsNotNone(
+                body, f"过滤器调用了 `{name}()`，但 app.js 里找不到它")
+            self.assertIn(
+                "return !!", body.group(1),
+                f"`{name}()` 没有把返回值收成布尔 —— htmx 比的是严格相等，"
+                f"truthy 是不够的")
 
     def test_the_left_hand_link_asks_for_that_shorter_answer(self):
         # ⚠️ 视图那半边和模板这半边是一对：链接不带 `from_list`，服务端就会
@@ -6614,18 +6884,26 @@ class SchedulePanelTests(PageTestCase):
         """
         self.login(self.lisi)
         html = self.client.get(reverse("events:event_list")).content.decode()
-        self.assertIn("detail: false", html)
+        # ⚠️ 两个布尔 2026-08-19 搬进了 app.js 的 `Alpine.data("eventsShell")`，
+        #    所以这里查的是**挂上那个组件**，而不是 `detail: false` 那串字面量。
+        #    要守的东西没变：两块并存，由一个布尔选。
+        self.assertIn('x-data="eventsShell"', html)
         self.assertIn('id="schedule-detail"', html)
         self.assertRegex(html, r'x-show="!detail"')
 
-    def test_a_left_hand_card_opens_the_panel_only_while_the_schedule_is_open(self):
+    def test_a_left_hand_card_opens_the_panel_wherever_the_panel_fits(self):
         """🔴 一份标记，两种行为 —— 靠 `hx-trigger` 上的事件过滤器，不是两套标记。
 
-        过滤器为假（日程关着）时 htmx **完全不接管**这次点击，于是浏览器照常
-        跟着 `href` 走，跳到整页详情。⭐ 没有 JS 时也是这条路（D24）。
+        ⚠️ **条件 2026-08-19 换了**：原来是「日程开着吗」，现在是「这块屏幕装得下
+           面板吗」。也就是说日程**关着**时点卡片同样在右边就地开，壳自己撑开 ——
+           活动详情不再是从这一页点出去的一个目的地。这条守卫跟着换，是因为它
+           钉的是当天被有意改掉的那条规则本身。
 
-        ⚠️ 过滤器读的是外壳上的 class，不是 Alpine 的变量：这个链接在外壳里、
-           却不在面板的作用域里。
+        过滤器为假（窄屏）时 htmx **完全不接管**这次点击，于是浏览器照常跟着
+        `href` 走，跳到整页详情。⭐ 没有 JS 时也是这条路（D24）。
+
+        ⚠️ 窄屏仍然跳整页不是妥协：那一档左边这一列被整个藏起来，而面板里那份
+           详情不画返回链接，于是唯一的出路是一颗几十像素的 ×。
         """
         self.make("Kitchen shift")
         self.login(self.lisi)
@@ -6635,8 +6913,12 @@ class SchedulePanelTests(PageTestCase):
         opened = link.group(0)
         self.assertRegex(opened, r'hx-get="/events/\d+/panel/')
         self.assertIn('hx-target="#schedule-detail"', opened)
-        self.assertIn("events-shell.is-open", opened,
-                      "少了这个过滤器，日程关着时点卡片也不会跳页了")
+        self.assertIn("click[panelFits()]", opened,
+                      "少了这个过滤器，窄屏上点卡片会开出一个占满屏幕、"
+                      "只能靠一颗 × 退出的面板")
+        self.assertNotIn(
+            "events-shell.is-open", opened,
+            "又回到「日程开着才在面板里开」了 —— 日程关着时点卡片必须也在右边开")
 
     def test_both_ways_in_reach_the_same_endpoint(self):
         """⚠️ 从日程点、从列表点，是**同一场活动**的两个入口。两边打不同的端点，
@@ -6673,13 +6955,176 @@ class SchedulePanelTests(PageTestCase):
         """
         self.login(self.lisi)
         html = self.client.get(reverse("events:event_list")).content.decode()
-        # ⚠️ `detail` 2026-08-19 从面板挪到了外壳，和 `schedule` 同一个 x-data ——
-        #    左边那些活动卡片也要翻它，而它们够不着面板的作用域。这条守卫钉的
-        #    仍然是同一件事：它必须在**被换掉的那两块之外**。
-        state = html.index("detail: false")
+        # ⚠️ `detail` 2026-08-19 从面板挪到了外壳，和 `schedule` 同一个作用域 ——
+        #    左边那些活动卡片也要翻它，而它们够不着面板的作用域。同一天晚些时候
+        #    两个布尔又一起搬进了 app.js 的 `Alpine.data("eventsShell")`，所以这里
+        #    钉的不再是「`detail: false` 这串字出现在哪儿」，而是**声明它们的那个
+        #    `x-data` 在哪儿** —— 规矩没变，写法变了。
+        state = html.index('x-data="eventsShell"')
         self.assertLess(state, html.index('id="event-results"'))
         self.assertLess(state, html.index('id="schedule"'))
         self.assertLess(state, html.index('id="schedule-detail"'))
+
+
+class EventsShellStateTests(TestCase):
+    """右面板那两层的状态机（2026-08-19 第二批）。
+
+    从今以后点活动卡片一律在右边开 —— 日程开着也好、关着也好。这把版面的判据
+    从「日程开了吗」换成了「右面板开了吗」，而这一批的三个 bug 全长在那个换位上。
+    """
+
+    def source(self, *parts):
+        return (Path(settings.BASE_DIR).joinpath(*parts)).read_text()
+
+    def test_the_layout_follows_the_panel_not_the_schedule(self):
+        """🔴 壳上那个 class 必须由 `isOpen` 决定，不是由 `schedule`。
+
+        写成 `schedule ? 'is-open' : ''` 的话，日程关着时点一张卡：htmx 发了请求、
+        内容也换进 `#schedule-detail` 了，但面板此刻是 `visibility: hidden` 且
+        `flex: 0 0 0` —— **屏幕上什么都没有**。而控制台没有任何异常，网络面板里
+        那次请求还是 200。
+        """
+        markup = self.source(
+            "events", "templates", "events", "event_list.html")
+        shell = re.search(r'<div class="events-shell"[^>]*>', markup, re.S)
+        self.assertIsNotNone(shell, "外壳不见了")
+        self.assertIn("isOpen ?", shell.group(0))
+        self.assertNotIn(
+            "schedule ?", shell.group(0),
+            "版面又跟着 schedule 走了 —— 日程关着时点卡片会开出一个不可见的面板")
+
+    def test_opening_the_schedule_gives_way_but_closing_it_does_not(self):
+        """两条方向相反的规则，都在 `eventsShell` 里，缺一条都不报错。
+
+        · **开**日程时详情要让位 —— 否则详情压在日程上面，按下 Schedule
+          屏幕上一个像素都不动，读起来是「这颗按钮坏了」。
+        · **关**日程时详情留着（2026-08-19 定）—— 关的是底层，而人正在读的是
+          上层。一起关掉的话，人只是想收起日程，结果正在读的东西也没了。
+        """
+        js = self.source("assets", "js", "app.js")
+        watch = re.search(
+            r'this\.\$watch\("schedule",(.*?)\}\);', js, re.S)
+        self.assertIsNotNone(watch, "开日程让位那条规则不见了")
+        body = watch.group(1)
+        self.assertIn("if (on)", body,
+                      "让位必须只在**开**的那一下发生，关的时候详情要留着")
+        self.assertIn("closeDetail()", body)
+
+    def test_the_two_rules_use_watch_rather_than_one_effect(self):
+        """🔴 `x-effect` 会把它读到的**所有**东西变成依赖。
+
+        两条规则写进一个 effect 里的话，`detail = true` 会把整个 effect 重新跑
+        一遍，于是「日程开着时点一张卡」当场被第一条规则关掉 —— 表现是卡片
+        点了没反应，而请求其实发出去了、也回来了。
+        """
+        js = self.source("assets", "js", "app.js")
+        shell = re.search(r'Alpine\.data\("eventsShell".*?\n\}\)\);', js, re.S)
+        self.assertIsNotNone(shell, "eventsShell 组件不见了")
+        self.assertNotIn("x-effect", shell.group(0))
+        self.assertEqual(shell.group(0).count("this.$watch("), 2)
+
+    def test_closing_the_panel_takes_the_highlight_with_it(self):
+        """🔴 高亮的意思只有一个：**右边正开着的是这一场**。
+
+        所以它不能活得比面板长。此前没有任何地方清过它，表现是关掉日程之后
+        左边还圈着一行、而右边什么都没开着 —— 一个指向空处的记号。
+        """
+        js = self.source("assets", "js", "app.js")
+        watch = re.search(r'this\.\$watch\("detail",(.*?)\}\);', js, re.S)
+        self.assertIsNotNone(watch, "关面板清高亮那条规则不见了")
+        self.assertIn("panel-closed", watch.group(1))
+
+        listener = re.search(
+            r'addEventListener\("panel-closed",(.*?)\}\);', js, re.S)
+        self.assertIsNotNone(listener, "没有人在听 panel-closed")
+        self.assertIn("pickedEvent = null", listener.group(1))
+
+    def test_being_visible_means_clear_of_the_sticky_filter_card_too(self):
+        """🔴 「高亮画上了，但那一行藏在筛选卡底下。」
+
+        右面板开着时筛选卡是 `position: sticky`，实测能占到约 320–393px。而上面那条
+        「已经完整可见就不滚」如果只让开顶栏的 76px，一行落在筛选卡底下会被判成
+        可见 —— 于是不滚，人看到的是「有高亮，却找不到那一行」。
+
+        ⚠️ 高度必须**实测**（`getBoundingClientRect().bottom`），不能写死：这张卡
+           窄屏上控件换行、表单报错时多一行字，高度会变。
+        ⚠️ 「钉着没有」问计算出来的 `position`，不重述 `.is-open` 那个条件 ——
+           钉不钉是样式表的决定，在 JS 里抄一遍就是第二个会漂移的答案。
+        """
+        js = self.source("assets", "js", "app.js")
+        self.assertIn("function occludedTop()", js)
+        fn = re.search(r"function occludedTop\(\) \{(.*?)\n\}", js, re.S)
+        self.assertIsNotNone(fn)
+        self.assertIn('getComputedStyle(card).position === "sticky"', fn.group(1))
+        self.assertIn("getBoundingClientRect().bottom", fn.group(1))
+
+        vis = re.search(r"function isFullyVisible\(row\) \{(.*?)\n\}", js, re.S)
+        self.assertIsNotNone(vis)
+        self.assertIn("occludedTop()", vis.group(1),
+                      "「可见」的判据又只算顶栏了 —— 行会藏在筛选卡底下")
+
+    def test_it_scrolls_below_whatever_covers_the_top(self):
+        """⚠️ `block: "center"` 不够：窗口矮一点时（600px 高，正中是 300px）
+           那一行仍然压在筛选卡底下（实测卡底可到 393px）。
+
+        ⚠️ `block: "start"` 也不行 —— 那会把行顶到视口最上面、正好被顶栏盖住，
+           而那正是当初选 center 想躲开的事。所以两件一起躲开：明确地滚到
+           「第一处没有被挡住的位置」。
+        """
+        js = self.source("assets", "js", "app.js")
+        fn = re.search(
+            r"function scrollPickedIntoView\(\) \{(.*?)\n\}", js, re.S)
+        self.assertIsNotNone(fn)
+        body = fn.group(1)
+        self.assertIn("occludedTop()", body)
+        code = re.sub(r"//.*", "", body)
+        self.assertNotIn('block: "center"', code,
+                         "又回到 center 了 —— 矮窗口上仍会被筛选卡盖住")
+
+    def test_a_row_already_on_screen_is_not_scrolled_to(self):
+        """🔴 线上量到的「等 1 秒」就是这一条（2026-08-19）。
+
+        `scrollPickedIntoView()` 本是给「从日程点过来」写的：那一场可能在列表的
+        另一页、在屏幕外。而左边那些行拿到 `data-event` 之后，从左边点也走这条
+        路 —— 于是点一个**就在光标底下**的卡片，页面还要平滑滚几百像素把它挪到
+        正中。实测：数据 175ms 到位，页面滑到 1143ms 才停，772px。连点时每一下
+        都从头开始滑。
+
+        ⚠️ 判据是「不完整可见」，**不是**「点击来自哪一边」。一条规则同时管住
+           两个入口，不必在别处记住这次点击是从哪儿来的。
+        """
+        js = self.source("assets", "js", "app.js")
+        fn = re.search(r"function scrollPickedIntoView\(\) \{(.*?)\n\}", js, re.S)
+        self.assertIsNotNone(fn, "scrollPickedIntoView 不见了")
+        self.assertIn("if (isFullyVisible(row)) return;", fn.group(1))
+
+    def test_the_breakpoint_is_declared_once_in_the_stylesheet(self):
+        """🔴 「装得下面板吗」只能有一个答案。
+
+        在 JS 里再写一个 `matchMedia("(min-width: 64rem)")` 的话，两处迟早分家，
+        而分家的表现是某个宽度上点卡片**既不开面板、也不跳页** —— 两边都以为
+        对方管了。所以 JS 读的是 CSS 在那个媒体查询里点亮的变量。
+
+        ⚠️ 它必须和「窄屏藏起左列」同一个断点：那条是「窄屏没有左列」，
+           这条是「窄屏别在面板里开」，说的是同一件事的两面。
+        """
+        css = re.sub(r"/\*.*?\*/", "", self.source("assets", "app.css"), flags=re.S)
+        self.assertIn("--panel-fits: 1", css)
+        self.assertIsNotNone(
+            re.search(
+                r"@media \(width >= 64rem\) \{\s*\.events-shell \{\s*"
+                r"--panel-fits: 1;", css),
+            "--panel-fits 不在 64rem 那个媒体查询里了")
+
+        js = self.source("assets", "js", "app.js")
+        self.assertIn("--panel-fits", js)
+        # ⚠️ 先剥掉注释再查 —— 上面那条禁忌本身就写在 app.js 的注释里（连同
+        #    那串它禁止的写法），不剥的话这条守卫抓到的是那句话，而不是代码。
+        #    和 `test_the_day_columns_are_written_out…` 踩的是同一个坑。
+        code = re.sub(r"//.*", "", js)
+        self.assertNotRegex(
+            code, r"matchMedia\([\"']\(min-width",
+            "断点又在 JS 里抄了一份 —— 它只能由样式表说了算")
 
 
 class ScheduleOpeningViewTests(SimpleTestCase):

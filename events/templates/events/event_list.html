@@ -53,9 +53,19 @@
   ⚠️ 挪上来之后它仍然在**被 HTMX 换掉的那两块之外**（`#event-results` 和
      `#schedule`），这才是原来那条规矩要的东西 —— 状态写在被换掉的那块里，
      等于每换一次自己归零一次。
+
+  🔴 **版面看的是 `isOpen`，不是 `schedule`**（2026-08-19 第二批）。从今以后
+     点活动卡片一律在右边开，**日程关着时也要**把壳撑开。写成 `schedule ?` 的话
+     日程关着时点一张卡，面板是 `visibility: hidden` 且宽度为 0 —— 请求发了、
+     内容也换进去了，屏幕上什么都没有。
+
+  ⚠️ 两个布尔和它们之间那两条规则（开日程要让位、关面板要清高亮）搬进了
+     app.js 的 `Alpine.data("eventsShell")`。搬走的理由不是这里写不下，是
+     那两条规则要用 `$watch` —— 一个 `x-effect` 会把它读到的所有东西都变成
+     依赖，于是「日程开着时点一张卡」会被第一条规则当场关掉。
   {% endcomment %}
-  <div class="events-shell" x-data="{ schedule: false, detail: false }"
-       x-bind:class="schedule ? 'is-open' : ''">
+  <div class="events-shell" x-data="eventsShell"
+       x-bind:class="isOpen ? 'is-open' : ''">
     <h1 class="mb-6 text-2xl font-semibold">Events</h1>
 
     <div class="events-row">

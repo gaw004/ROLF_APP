@@ -1,0 +1,156 @@
+{% comment %}
+报名表单的正文。**两处渲染，同一份**（2026-08-19 抽出来）：
+
+  · `event_signup.html` —— 整页，`method="post"` 的真表单
+  · `_schedule_signup.html` —— Events 页右面板里就地打开的那一份
+
+⚠️ 抽出来的理由和 `_event_detail_body.html` 那次一字不差：**不是复用，是不许有
+   第二份**。一份「面板专用的精简报名」会在第二次改动之后和整页要求不一样的
+   字段 —— 而两边都渲染成功，只有真去报名的人会撞上。这里尤其要紧：这张表单
+   带着未成年人同意那一整段，说错一句的代价不是排版。
+
+⭐ **整页那条路一个字都没动过。** 报名是**写**操作，按 D24 必须有完整的服务端
+   表单路径；面板只是它的快路。没有 JS、或者屏幕窄到装不下面板时走的都是整页。
+
+参数：
+  in_panel  真值 → 这一份画在右面板里。它只改两样东西，各自见下面的注释。
+{% endcomment %}
+{% comment %}
+⚠️ 面板里这个标题是 `<h2>`，整页上是 `<h1>`（2026-08-19）。不是排版偏好：面板
+   开在 Events 那一页上，而那一页已经有一个 `<h1>`（Events）—— 一页两个 h1 会让
+   读屏的标题大纲变成两棵并列的树，而右边这一块在结构上是那一页里的一节。
+{% endcomment %}
+{% if in_panel %}
+  <h2 class="text-2xl font-semibold">Sign Up</h2>
+{% else %}
+  <h1 class="text-2xl font-semibold">Sign Up</h1>
+{% endif %}
+<p class="mt-1 text-sm text-ink-600 dark:text-ink-300">{{ event.name }}</p>
+
+{% if needs_consent %}
+  {% comment %}
+  ⚠️ 「邮箱或电话至少填一个」那句提示**不能丢**。丢了不报错，只是用户不知道
+     为什么提交被拒 —— 而这个分支是整个志愿者路径上唯一的长表单。
+  {% endcomment %}
+  <div class="card mt-6 border border-warning-fg/30 bg-warning-bg dark:border-warning-fg-dark/30 dark:bg-warning-bg-dark">
+    <h3 class="text-lg font-semibold text-warning-fg dark:text-warning-fg-dark">
+      This signup needs a guardian's consent
+    </h3>
+    <p class="mt-2 text-sm text-warning-fg dark:text-warning-fg-dark">
+      You are under 18, or we do not have your date of birth.
+    </p>
+    <p class="mt-2 text-sm text-warning-fg dark:text-warning-fg-dark">
+      The quickest way is to pick one of your emergency contacts below and say how
+      they gave consent. To name somebody else instead, fill in their details —
+      <strong>an email address or a phone number is required</strong>, because they
+      have to be reachable if the event changes.
+    </p>
+  </div>
+{% endif %}
+
+{% comment %}
+🔴 **面板里这仍然是一个 `method="post"` 的真表单，只是多了 hx-post。**
+   htmx 拿不到、或者根本没加载出来时，它照常整页提交到同一个 URL、由同一个
+   视图的同一条分支处理 —— 这就是 D24 那条「写操作必须有服务端形态」的落点。
+   写成 `<div>` 加一颗 `hx-post` 按钮的话，那条降级路径就没了，而**页面上看不
+   出任何区别**。
+
+⚠️ `hx-target` 打的是 `#schedule-detail`，也就是这一块自己所在的容器：
+   校验失败时换回来的是带着错误的同一张表单，成功时换回来的是这场活动的详情。
+   两种都是「右边这一块变了」，所以是同一个靶子。
+
+⚠️ 不写 `hx-trigger` —— 表单的默认触发就是 submit，而这里要的正是它。
+   写成 `click` 会让回车提交绕过 htmx（整页跳走），而那只在用键盘的人身上出现。
+{% endcomment %}
+<form method="post" action="{% url 'events:event_signup' event.pk %}" class="card mt-6"
+      {% if in_panel %}hx-post="{% url 'events:event_signup' event.pk %}"
+      hx-target="#schedule-detail" hx-swap="innerHTML"{% endif %}>
+  {% csrf_token %}
+
+  {% if not needs_consent %}
+    {% comment %}成年人：同意那一段整段是 HiddenInput，交给通用渲染就行。{% endcomment %}
+    {% include "core/components/form_fields.html" %}
+  {% else %}
+    {% comment %}
+    ⚠️ 这一支拆开渲染字段（下面要套 fieldset），用不了 form_fields.html，
+       但整体错误要和别处**长得一样**，所以走同一个片段。
+    {% endcomment %}
+    {% include "core/components/_non_field_errors.html" %}
+
+    {% comment %}
+    选了紧急联系人之后，手填的那四格变灰不可填。
+
+    ⚠️ 这不是界面上偷懒，是**让界面和服务端说同一句话**：
+       SignUpForm.consent() 在选了紧急联系人时，拿的是那个人的姓名 / 关系 / 电话，
+       手填的四格**本来就被忽略**。在此之前它们能填、填了不起作用 ——
+       那比不能填更糟，因为用户以为自己填的东西生效了。
+
+    ⚠️ 用 <fieldset x-bind:disabled>，不给每个 widget 加 x- 属性。两个理由：
+       `disabled` 加在 fieldset 上是**原生 HTML**，浏览器自动禁掉里面所有控件；
+       而给 widget 加属性要走 forms.py 的 widget attrs，那是 phase-c.md
+       落点规矩明确划出去的地方（那里只放 type="date" 这类语义属性）。
+
+    ⚠️ 选择框自己不写 x-model，改成在外面套一层 x-on:change 接事件 ——
+       同一个理由：x-model 必须落在 <select> 标签上，而那个标签是 Django 渲染的。
+
+    ⭐ 关掉 JavaScript 时四个格子照常可填 —— 填了仍然被服务端忽略，行为不变。
+       这符合 D24「只保写操作」的口径：报名本身照样能完成。
+    {% endcomment %}
+    <div x-data="{ kin: '' }">
+      {% include "core/components/field.html" with field=form.event_role %}
+
+      {% comment %}
+      ⚠️ 这层 wrapper 上要自己写 mt-4：app.css 里字段间距靠 `.field + .field`
+         这个**相邻兄弟**选择器，而套一层 div 就把相邻关系打断了 ——
+         表现是这一格和上面那格贴在一起，别处都正常。
+      {% endcomment %}
+      <div class="mt-4" x-on:change="kin = $event.target.value">
+        {% include "core/components/field.html" with field=form.use_emergency_contact %}
+      </div>
+
+      <fieldset class="mt-4 rounded-md border border-ink-200 p-4 transition-opacity dark:border-ink-700"
+                x-bind:disabled="kin !== ''"
+                x-bind:class="kin !== '' ? 'opacity-50' : ''">
+        <legend class="px-1 text-xs font-medium text-ink-600 dark:text-ink-300">
+          Or name somebody else
+        </legend>
+        <p x-cloak x-show="kin !== ''" class="mb-3 text-xs text-ink-600 dark:text-ink-300">
+          Not needed — these come from the emergency contact you picked above.
+        </p>
+        {% include "core/components/field.html" with field=form.consent_given_by %}
+        {% include "core/components/field.html" with field=form.consent_relationship %}
+        {% include "core/components/field.html" with field=form.consent_email %}
+        {% include "core/components/field.html" with field=form.consent_phone %}
+      </fieldset>
+
+      {% comment %}
+      ⚠️ 这一格在 fieldset **外面**。它对两条路径都必填 —— 用紧急联系人也得说清
+         同意是怎么给的 —— 所以它不能跟着上面那一组一起变灰。
+      {% endcomment %}
+      <div class="mt-4">
+        {% include "core/components/field.html" with field=form.consent_method %}
+      </div>
+    </div>
+  {% endif %}
+
+  <div class="mt-6 flex flex-wrap gap-2">
+    {% include "core/components/button.html" with label="Confirm signup" variant="primary" %}
+    {% comment %}
+    「Back」回哪里，是这一份在两处的第二个差别。
+
+    ⚠️ 面板里它必须回到**这场活动的详情面板**，而不是整页详情：人是从右边这一块
+       点进报名的，「返回」理应把右边这一块换回去。指向整页的话，一颗写着 Back
+       的按钮会把整个页面导航走 —— 那是这一屏上最容易点错的东西。
+
+    ⭐ `href` 两条路都给，而且指的是同一页真实存在的详情 —— htmx 没接管时
+       （没有 JS）点下去就是跳过去。
+    {% endcomment %}
+    {% url 'events:event_detail' event.pk as back_url %}
+    {% if in_panel %}
+      {% url 'events:event_detail_panel' event.pk as back_panel_url %}
+      {% include "core/components/button.html" with label="Back" href=back_url variant="ghost" hx_get=back_panel_url|add:"?from_list=1" hx_target="#schedule-detail" %}
+    {% else %}
+      {% include "core/components/button.html" with label="Back" href=back_url variant="ghost" %}
+    {% endif %}
+  </div>
+</form>

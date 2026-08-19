@@ -2463,6 +2463,51 @@ class BorderlessCardTests(TestCase):
         block = re.search(r"\.table-wrap \{(.*?)\n  \}", self.stylesheet(), re.S).group(1)
         self.assertIn("border:", block)
 
+    def test_the_side_panel_swaps_the_shadow_for_a_hairline(self):
+        """🔴 「卡片不画边框、靠落影读成一个物件」那条全站规矩，**在右面板里不成立**。
+
+        面板里那一层（`.schedule-detail`）是 `overflow-y: auto`，而按 CSS 规范，
+        一轴不是 `visible` 时另一轴的**使用值**也会变成裁剪 —— 横向同样裁。而卡片
+        正好和它一样宽（量出来两边都是 1343），于是落影往左右扩散的部分被齐齐
+        切掉，只剩往下那一条：屏幕上是一个硬边的方块，不是落影。
+
+        ⚠️ 这个错在「样式对不对」这一层完全看不出来 —— `box-shadow` 的计算值是对的。
+
+        试过让卡片 `margin-inline` 缩一点把地方让出来，撤了：卡片因此比「Roles」
+        那些标题和下面的表格窄一圈（量出来错开 8px），读起来是没对齐。所以换的是
+        **材质**不是尺寸：这一档不投影，用一条细线，而那条线和 `.table-wrap` 的
+        **同一根** —— 那张表就在同一个面板里、紧挨着这些卡片。
+
+        ⚠️ 关影子必须写 `0 0 #0000`，不能写 `none`：这个变量会被代进一串逗号分隔的
+           影子列表，`none` 在列表中间是语法错误，浏览器丢掉整条声明。
+        """
+        css = self.stylesheet()
+        block = re.search(r"\.schedule-detail \.card \{(.*?)\n  \}", css, re.S)
+        self.assertIsNotNone(block, "面板里那条卡片规则不见了")
+        body = block.group(1)
+        self.assertIn("--card-elevation: 0 0 #0000", body,
+                      "落影没关掉 —— 它会被裁成一条硬边")
+        self.assertNotIn("none", body, "`none` 在影子列表里是语法错误")
+        self.assertIn("border: 1px solid var(--panel-hairline)", body)
+        self.assertNotIn("margin-inline", body,
+                         "又靠缩卡片让位了 —— 那会让卡片和标题、表格错开")
+
+        # 和 table-wrap 用同一根线：粗细和两个模式下的颜色都要对得上
+        table = re.search(r"\.table-wrap \{(.*?)\n  \}", css, re.S).group(1)
+        self.assertIn("1px solid var(--color-ink-200)", table)
+        self.assertIn("--panel-hairline: var(--color-ink-200)", body)
+        dark = re.search(
+            r"\.dark \.schedule-detail \.card \{(.*?)\n  \}", css, re.S)
+        self.assertIsNotNone(dark, "深色那一档的线色不见了")
+        self.assertIn("--panel-hairline: var(--color-ink-700)", dark.group(1))
+
+        # 深色 + 大图那一档的「暗晕」同样会被裁，也要关掉；而它的权重更高
+        glow = re.search(
+            r"\.dark\.has-hero \.schedule-detail \.card:not\(\.border\) \{(.*?)\n  \}",
+            css, re.S)
+        self.assertIsNotNone(glow, "深色+大图那一档没有跟着关掉暗晕")
+        self.assertIn("--card-elevation: 0 0 #0000", glow.group(1))
+
     def test_every_coloured_alert_box_states_its_own_border_width(self):
         offenders = []
         for relative, source in project_template_files():
@@ -3972,9 +4017,13 @@ class SharedFragmentGuardTests(TestCase):
         self.assertIn('tone="info"', mine)
         self.assertNotIn("events/_status_badge.html", mine)
 
+    #: ⚠️ 报名那一份 2026-08-19 从 `event_signup.html` 挪到了
+    #:    `_event_signup_body.html`（整页和右面板共用同一份正文）。守的东西没变 ——
+    #:    换的是那段标记现在住在哪个文件里。指着壳子的话这条守卫会一直是绿的，
+    #:    而它该看的那段标记已经不在那儿了。
     NON_FIELD_ERROR_CALLERS = [
         Path("core") / "templates" / "core" / "components" / "form_fields.html",
-        Path("events") / "templates" / "events" / "event_signup.html",
+        Path("events") / "templates" / "events" / "_event_signup_body.html",
     ]
 
     def test_non_field_errors_are_drawn_by_one_fragment(self):

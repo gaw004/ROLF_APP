@@ -1,0 +1,19 @@
+{% comment %}
+右面板里就地打开的报名表单（2026-08-19）。
+
+⚠️ 外框和活动详情**共用** `_panel_frame.html` —— 同一个几何、同一颗 ×。
+   正文和整页报名共用 `_event_signup_body.html`。这个文件本身因此只剩一行：
+   它存在的意义是「面板里的报名」这件事有一个名字，而不是把两个 include
+   拼在视图里。
+
+⚠️ 它**不带** out-of-band 的左边列表。报名不改这一页的筛选结果，也不改「这一场
+   在第几页」；带上就是白送 40KB。活动满员之后状态标签会变，而那一次变化在
+   报名成功换回详情的那一响应里也没有带 —— 知情的取舍，写在 views.event_signup。
+
+⚠️ 也**不带** messages：这个模板是表单**将要**提交的样子（第一次打开，或者校验
+   失败换回来），不是「刚刚发生了什么」。成功那一次换回来的是详情，
+   messages 由那一份带（见 `_schedule_detail.html` 里那个 `messages_oob`）。
+   ⚠️ 校验失败时如果在这里 include 一次，会把 session 里还没显示过的消息提前
+      消费掉 —— 而错误本身是画在字段上的，不需要 messages。
+{% endcomment %}
+{% include "events/_panel_frame.html" with body="events/_event_signup_body.html" %}

@@ -152,6 +152,23 @@ focus-visible:ring-brand-500 focus-visible:ring-offset-2`。
 
 **不许把焦点环去掉**。键盘用户和读屏用户靠它，而它是最容易在「觉得难看」时被删掉的东西。
 
+### 鼠标指针（2026-08-19 加）
+
+`button` / `[role="button"]` / `summary` / `label[for]` 一律 `cursor: pointer`，
+停用的（`:disabled` 或 `[aria-disabled="true"]`）一律 `cursor: not-allowed`。
+一条 base 层规则，**不许改成在模板上挨个加 `cursor-pointer`**。
+
+🔴 为什么需要这条：**Tailwind v4 的 preflight 不再给 `<button>` 设
+`cursor: pointer`**（v3 设过），而浏览器对 `<button>` 的默认值是箭头。所以在这条
+规则之前，全站每一颗按钮 hover 上去都不变手 —— 顶栏的 Log out / Menu / 主题切换、
+密码框的「看一眼」、所有 Save、报名、翻页。`<a href>` 天生是手型，所以这件事
+看起来只发生在几个地方，实际是全站。
+
+⚠️ 挨个加工具类的下场是漏掉的那一颗谁也不会发现 —— 这个 bug 本身就是这么活下来的。
+
+守卫：`core.tests.ButtonCursorTests`（源文件一条、**构建产物一条** ——
+源里写对了没 `npm run build:css`，屏幕上一点变化都没有）。
+
 ---
 
 ## 二、深色模式

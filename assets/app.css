@@ -208,6 +208,39 @@
     color-scheme: dark;
   }
 
+  /* --- 按钮要变成手型 -------------------------------------------------
+   *
+   * 🔴 **Tailwind v4 的 preflight 不再给 `<button>` 设 `cursor: pointer`**
+   *    （v3 设过），而浏览器对 `<button>` 的默认值是 `default` —— 那个箭头。
+   *    于是全站每一颗按钮 hover 上去都不变手：顶栏的 Log out / Menu /
+   *    太阳月亮、密码框的「看一眼」、所有 Save、报名、翻页……
+   *    `<a href>` 不受影响，所以这件事看起来只发生在几个地方，实际是全站。
+   *
+   * ⚠️ 写在这里而不是每个组件各加一个 `cursor-pointer`：它是浏览器默认值的
+   *    修正，不是某个组件的装饰。挨个加的下场是漏掉的那一颗谁也不会发现 ——
+   *    这个 bug 本身就是这么活下来的。
+   *
+   * ⚠️ `[role="button"]` 一起管：那是一个**看起来是按钮的 div**，它连
+   *    `<button>` 的默认值都没有。
+   *
+   * ⚠️ 停用的按钮走 `not-allowed`，而不是继续变手 —— 手型是「点我」的意思，
+   *    而它恰恰点不了。判据同时看 `:disabled`（真按钮）和
+   *    `[aria-disabled="true"]`（画成停用的链接/div）。
+   *
+   * 守卫：core.tests.ButtonCursorTests
+   */
+  button,
+  [role="button"],
+  summary,
+  label[for] {
+    cursor: pointer;
+  }
+
+  button:disabled,
+  [aria-disabled="true"] {
+    cursor: not-allowed;
+  }
+
   /* 焦点环统一。⚠️ 不许在模板里用 outline-none 关掉它而不给替代 ——
    * 键盘用户和读屏用户靠它，而它是最容易在「觉得难看」时被删掉的东西。 */
   :focus-visible {

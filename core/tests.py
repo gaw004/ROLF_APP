@@ -2428,6 +2428,71 @@ class NativeControlsFollowTheThemeTests(TestCase):
             self.assertNotIn("color-scheme", block)
 
 
+class ButtonCursorTests(TestCase):
+    """按钮 hover 上去要变成手（2026-08-19）。
+
+    🔴 起因是用户报的「Log out、Menu、太阳月亮，鼠标碰上去没变成 click」，而真正
+       的范围比那三个大得多：**Tailwind v4 的 preflight 不再给 `<button>` 设
+       `cursor: pointer`**（v3 设过），浏览器对 `<button>` 的默认值是箭头。于是
+       全站每一颗 `<button>` 都是箭头 —— 密码框的「看一眼」、所有 Save、报名、
+       翻页。`<a href>` 天生是手型，所以这件事看起来只发生在几个地方。
+
+    ⚠️ 所以修法是一条 base 层规则，不是给那三个各加一个工具类。挨个加的下场是
+       漏掉的那一颗谁也不会发现 —— 这个 bug 本身就是这么活下来的。
+    """
+
+    def stylesheet(self):
+        return (Path(settings.BASE_DIR) / "assets" / "app.css").read_text()
+
+    def built(self):
+        path = Path(settings.BASE_DIR) / "static" / "css" / "app.css"
+        if not path.exists():
+            self.skipTest("static/css/app.css is a build product; run npm run build")
+        return path.read_text()
+
+    def test_the_rule_covers_buttons_and_things_dressed_as_buttons(self):
+        rule = re.search(r"\n  button,\n(.*?)\{\s*\n?\s*cursor: pointer;",
+                         self.stylesheet(), re.S)
+        self.assertIsNotNone(rule, "assets/app.css 里没有那条 cursor: pointer 的 base 规则")
+        # `[role="button"]` 是一个**看起来是按钮的 div**：它连 <button> 的默认值
+        # 都没有，所以必须一起管。
+        self.assertIn('[role="button"]', rule.group(1))
+
+    def test_a_disabled_button_says_not_allowed_instead(self):
+        # 手型的意思是「点我」，而停用的按钮恰恰点不了。两种停用都要管：
+        # :disabled 是真按钮，[aria-disabled] 是画成停用的链接/div。
+        block = re.search(r"button:disabled,\s*\[aria-disabled=\"true\"\]\s*\{(.*?)\}",
+                          self.stylesheet(), re.S)
+        self.assertIsNotNone(block)
+        self.assertIn("not-allowed", block.group(1))
+
+    def test_it_actually_survived_the_build(self):
+        """⚠️ 页面读的是 static/css/app.css，不是 assets/app.css。
+
+        源文件里写对了而没有重新 build，屏幕上一点变化都没有 —— 而两个文件
+        单看都是对的。这条钉的就是那个空档。
+        """
+        self.assertRegex(self.built(), r"button,\[role=button\][^}]*cursor:pointer")
+        self.assertRegex(self.built(), r"button:disabled[^}]*cursor:not-allowed")
+
+    def test_the_three_controls_the_user_named_are_real_buttons(self):
+        """那三个之所以中招，是因为它们是 `<button>` 而不是 `<a>` —— 钉住这一点。
+
+        ⚠️ 如果哪天有人把 Log out 改成一个 `<a>` 去「修」手型，那是拿一个真正的
+           bug 换一个显示问题：登出是写操作，必须是带 CSRF 的 POST 表单。
+        """
+        from accounts.services import register_account
+
+        user = register_account(
+            email="mei@example.com", password="a-good-long-password",
+            legal_first_name="Ping", legal_last_name="Mei")
+        self.client.force_login(user)
+        html = self.client.get(reverse("events:event_list")).content.decode()
+        self.assertRegex(html, r'<button type="submit"[^>]*>\s*Log out')
+        self.assertRegex(html, r'<button type="button"[^>]*x-on:click="menu = true"')
+        self.assertRegex(html, r'<button type="button" x-data="themeToggle"')
+
+
 class BorderlessCardTests(TestCase):
     """Cards have no border line (2026-08-06). Two things had to move with that.
 

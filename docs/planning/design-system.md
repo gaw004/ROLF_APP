@@ -2070,8 +2070,14 @@ target（target 是列表），从 target 起扫会正好漏掉日程。
 日程**开着**时，点左边那张活动卡也把详情打进面板（和点日程卡是同一件事、
 同一个端点、同一个 `is-picked`）。日程**关着**时照旧跳整页。
 
-一份标记两种行为，靠的是 `hx-trigger="click[…events-shell.is-open…]"`：
+一份标记两种行为，靠的是 `hx-trigger="click[!!document.querySelector('.events-shell.is-open')]"`：
 过滤器为假时 htmx 完全不接管，浏览器跟着 `href` 走 —— 没有 JS 那条路也一并成立（D24）。
+
+🔴 **那两个 `!!` 少不得。** htmx 判断事件要不要放行用的是严格相等
+（`eventFilter.call(elt, evt) !== true`），而 `querySelector` 返回的是元素 ——
+truthy 但 `!== true`，于是每一次点击都被静默过滤掉，请求根本不发。
+表现是「点了左边，右边那张卡是空的」，控制台一声不吭。守卫：
+`events.tests.SchedulePanelTests.test_the_trigger_filter_returns_a_real_boolean`。
 
 ⚠️ `detail` 这个 Alpine 状态因此从面板挪到了 `.events-shell` —— 左边的卡片够不着
 面板的作用域。它仍然在被 HTMX 换掉的两块之外，那才是原来那条规矩要的东西。

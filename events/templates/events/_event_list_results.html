@@ -152,6 +152,16 @@ event_list 的结果区。整页和 HTMX 片段渲染的是同一份 —— 视�
            class。不读 Alpine 的变量本身：那要 `$data` 之类的作用域穿透，而这个
            链接在外壳里、却不在面板的作用域里。
 
+        🔴 **那两个 `!!` 不是洁癖，少了它这个链接完全不发请求。** htmx 判断
+           「这次事件要不要放行」用的是**严格相等**：
+
+               return eventFilter.call(elt, evt) !== true
+
+           `querySelector` 返回的是一个**元素** —— truthy，但 `!== true`，
+           于是每一次点击都被过滤掉。而 `x-on:click` 照常把面板翻开，
+           表现就是「点了左边，右边那张卡是空的」，且**控制台一声不吭**。
+           守卫：events.tests.SchedulePanelTests.test_the_trigger_filter_returns_a_real_boolean
+
         ⚠️ 查询串要带上（`{% templatetag openblock %} querystring {% templatetag closeblock %}`）——
            那一次请求还要算「这一场在第几页」，而那取决于当前筛选和页码。
 
@@ -159,9 +169,9 @@ event_list 的结果区。整页和 HTMX 片段渲染的是同一份 —— 视�
            页面已经跳走了）。加了反而要在两处各写一遍同一个判断。
         {% endcomment %}
         <a href="{% url 'events:event_detail' event.pk %}" class="event-row-link"
-           hx-get="{% url 'events:event_detail_panel' event.pk %}{% querystring %}"
+           hx-get="{% url 'events:event_detail_panel' event.pk %}{% querystring from_list=1 %}"
            hx-target="#schedule-detail" hx-swap="innerHTML"
-           hx-trigger="click[document.querySelector('.events-shell.is-open')]"
+           hx-trigger="click[!!document.querySelector('.events-shell.is-open')]"
            x-on:click="detail = true">
           <span class="sr-only">{{ event.name }}</span>
         </a>

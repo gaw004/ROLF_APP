@@ -454,11 +454,27 @@ def event_detail_panel(request, pk):
     #    算不出来（那一场不在左边的列表里）时 `page_number` 是 None，
     #    `_page` 就退回默认的第一页，而下面 `picked` 也不会指向任何一行。
     pk = context["event"].pk
+    context.update({"period": period, "in_panel": True})
+
+    # 点击来自左边那一列时，不把列表送回去（2026-08-19）。
+    #
+    # 那一列已经停在正确的页上 —— 人就是从那儿点的。要变的只有一圈高亮，
+    # 而那件事 app.js 在 `htmx:afterSettle` 上已经做了。响应因此从 42KB 降到 2KB。
+    #
+    # ⚠️ 这一段**曾经写着另一个理由**：说是「响应替换掉发起它的元素，htmx 那次
+    #    swap 就落不到面板上」。那是我在没有浏览器时对「右边空白」的猜测，
+    #    而真正的成因是触发器过滤器没返回布尔（见模板里那两个 `!!`）。
+    #    读 htmx 源码也没有找到支持那条机制的地方：目标是在发请求**之前**就
+    #    解析好的，out-of-band 换掉别处不影响它。
+    #    留着这个分支是因为「少送 40KB」本身站得住，不是因为那条机制。
+    #
+    # ⚠️ 日程那边照旧要这一块 —— 它可能得翻到别的页去。
+    if request.GET.get("from_list"):
+        return render(request, "events/_schedule_detail.html", context)
+
     number = _page_holding(_visible_events(period), pk, EVENTS_PER_PAGE)
     context.update(_listing(request, period, page_number=number))
     context.update({
-        "period": period,
-        "in_panel": True,
         # 左边那一列作为 out-of-band 的第二块跟着回去。
         "results_oob": True,
         # 高亮哪一行。⚠️ 算不出页码时是 None —— 模板据此**不画**高亮，

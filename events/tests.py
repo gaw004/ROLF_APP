@@ -6427,6 +6427,64 @@ class SchedulePanelTests(PageTestCase):
         self.assertIn('id="event-results"', html)
         self.assertIn('hx-swap-oob="true"', html)
 
+    def test_a_click_from_the_list_gets_no_list_back(self):
+        """从左边点时不把整列送回来 —— 它不需要，而它不小。
+
+        人就是从那一页点的，那一列已经停在正确的位置；要变的只有一圈高亮，
+        而 app.js 在 `htmx:afterSettle` 上已经做了。响应因此从 42KB 降到 2KB。
+
+        ⚠️ 这条测试**曾经写着一个错误的理由**（2026-08-19）：说是因为「响应
+           替换掉了发起它的元素，htmx 那次 swap 就落不到面板上」。那是我在
+           没有浏览器时对「右边空白」的猜测，而真正的成因是别的
+           （见 `test_the_trigger_filter_returns_a_real_boolean`）。
+           读 htmx 源码之后也没有找到支持那条机制的地方：目标是在发请求前
+           就解析好的，out-of-band 换掉别处不影响它。
+           留下这条测试是因为「少送 40KB」本身站得住，**不是**因为那个机制。
+        """
+        event = self.make("Kitchen shift")
+        response = self.panel(event, from_list="1")
+        html = response.content.decode()
+        self.assertIn("Kitchen shift", html)
+        self.assertNotIn("hx-swap-oob", html)
+        self.assertNotIn('id="event-results"', html)
+
+    def test_the_trigger_filter_returns_a_real_boolean(self):
+        """🔴 htmx 的事件过滤器比的是**严格相等**：
+
+            return eventFilter.call(elt, evt) !== true      // htmx.js
+
+        所以 `[document.querySelector(...)]` 是**不行的** —— 它返回一个元素，
+        truthy 但 `!== true`，于是每一次点击都被过滤掉、请求根本不发。
+        而 `x-on:click` 照常把面板翻开，表现是「点了左边，右边那张卡是空的」，
+        **控制台一声不吭**：htmx 认为这是一次正常的「不该触发」。
+
+        ⚠️ 这个坑找了三轮才找对，前两轮的猜测都写进过代码注释。所以钉的是
+           「过滤器必须求值成布尔」这件事本身，而不是某一处写法。
+        """
+        self.make("Kitchen shift")
+        self.login(self.lisi)
+        html = self.client.get(reverse("events:event_list")).content.decode()
+        for expression in re.findall(r'hx-trigger="[^"]*\[([^\]]+)\]"', html):
+            self.assertRegex(
+                expression.strip(), r"^(!!|!)",
+                f"`{expression.strip()}` 求值出来不是布尔 —— htmx 会静默地"
+                f"把每一次事件都过滤掉")
+
+    def test_the_left_hand_link_asks_for_that_shorter_answer(self):
+        # ⚠️ 视图那半边和模板这半边是一对：链接不带 `from_list`，服务端就会
+        #    照旧把列表送回来，而那正是让这次点击整个失效的东西。
+        self.make("Kitchen shift")
+        self.login(self.lisi)
+        html = self.client.get(reverse("events:event_list")).content.decode()
+        link = re.search(r'<a href="/events/\d+/" class="event-row-link".*?>', html, re.S)
+        self.assertIn("from_list=1", link.group(0))
+
+    def test_a_click_from_the_schedule_still_gets_the_list(self):
+        # 日程那边照旧要它 —— 点开的那一场可能在别的页上。
+        event = self.make("Kitchen shift")
+        html = self.panel(event).content.decode()
+        self.assertIn("hx-swap-oob", html)
+
     def test_the_list_it_returns_is_the_page_that_event_is_on(self):
         """左边要翻到**那一场所在的**那一页，不是第一页。"""
         # 第一页塞满，把目标顶到第二页去。
@@ -6552,7 +6610,11 @@ class SchedulePanelTests(PageTestCase):
         """⚠️ 从日程点、从列表点，是**同一场活动**的两个入口。两边打不同的端点，
            「右边开着的是哪一场」迟早会有两个答案。
 
-        ⚠️ 比的是同一个 pk 的两处。第一版拿整页所有 hx-get 去比，于是页面上有
+        ⚠️ 比的是**路径**，不含查询串：列表那一边多一个 `from_list`，而那是刻意的
+           （见 `test_a_click_from_the_list_gets_no_list_back`）。比整串的话，这条
+           守卫会在一个正确的差别上报警。
+
+        ⚠️ 也只比同一个 pk 的两处。第一版拿整页所有 hx-get 去比，于是页面上有
            两场活动就当场失败 —— 那测的是「只有一场活动」，不是这里要的东西。
         """
         event = self.make("Kitchen shift")
@@ -6566,7 +6628,7 @@ class SchedulePanelTests(PageTestCase):
         self.assertIsNotNone(row, "列表里没有这一场的点击区")
 
         def endpoint(markup):
-            return re.search(r'hx-get="([^"]+)"', markup).group(1)
+            return re.search(r'hx-get="([^"?]+)', markup).group(1)
 
         self.assertEqual(endpoint(card.group(0)), endpoint(row.group(0)))
 
@@ -6616,6 +6678,34 @@ class ScheduleOpeningViewTests(SimpleTestCase):
         js = self.source("assets", "js", "app.js")
         self.assertIn("const SCHEDULE_OPENS_AT_HOUR = 7;", js)
         self.assertIn("SCHEDULE_OPENS_AT_HOUR * hourPx", js)
+
+    def test_it_waits_for_the_panel_to_open_before_positioning(self):
+        """🔴 面板默认是**关着**的，而关着时它零尺寸。
+
+        在那一刻定位，`scrollHeight - clientHeight` 是 0，夹完之后 scrollTop 一定
+        是 0 —— 日程打开时停在凌晨，一天里空的那一段。屏幕上读起来是
+        「日程里什么都没有」，而卡片全在 DOM 里。
+
+        ⚠️ 这个 bug 在我第一次浏览器验证时**没被发现**：那份快照把日程改成了
+           默认打开（为了截图方便），正好绕开这条路 —— 而这条路是每一次真实
+           页面加载都会走的那条。所以守卫钉两件事：零高度时不定位，
+           以及**那时不许标记成已定位**（标记了就等于永远停在凌晨）。
+        """
+        js = self.source("assets", "js", "app.js")
+        self.assertIn("if (!scroller.clientHeight) return false;", js)
+        # 标记「已定位」必须在定位**成功之后**，不能无条件先标。
+        self.assertRegex(
+            js,
+            r'if \(scrollScheduleIntoView\(root\)\) \{\s*'
+            r'root\.dataset\.scheduleLive = "1";')
+        self.assertRegex(js, r"waiting\.observe\(scroller\)")
+
+    def test_the_waiting_observer_lets_go_when_its_block_is_swapped_out(self):
+        """⚠️ 翻页会把整块日程换掉，旧的那棵树就此脱离文档。不断开的话，
+           每翻一页留下一个永远等不到张开的 observer。
+        """
+        js = self.source("assets", "js", "app.js")
+        self.assertRegex(js, r"if \(!root\.isConnected\) \{\s*waiting\.disconnect\(\);")
 
     def test_now_is_a_floor_on_that_and_never_pulls_it_earlier(self):
         """⚠️ 两条规则取**更晚**的那个：7am 打底，而傍晚打开时窗口跟着「现在」走。

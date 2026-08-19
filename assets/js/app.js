@@ -1076,9 +1076,19 @@ function remainingText(ms) {
 //    往上滚一下就看得见，而不可预测的起点是每次都要重新找位置。
 const SCHEDULE_OPENS_AT_HOUR = 7;
 
+// 返回「定位成功了没有」—— 调用方靠它决定要不要再等一次。
 function scrollScheduleIntoView(root) {
   const scroller = root.querySelector("[data-schedule-scroll]");
-  if (!scroller) return;
+  if (!scroller) return false;
+  // 🔴 **面板关着的时候什么都别做。** 关着时它是 `flex: 0 0 0` + `visibility:
+  //    hidden`，可视高度为 0，于是下面那个 `scrollHeight - clientHeight` 是 0，
+  //    夹完之后 scrollTop 一定是 0 —— 日程打开时停在凌晨，一天里空的那一段，
+  //    看起来像「日程里什么都没有」。
+  //
+  //    ⚠️ 而默认就是关着的，所以这条路是**每一次真实页面加载**都会走的那条。
+  //       我第一次验证时把日程改成了默认打开（为了截图方便），正好绕开它 ——
+  //       测试装置把 bug 藏了。
+  if (!scroller.clientHeight) return false;
   const hourPx = scheduleHourPx(root);
   let top = SCHEDULE_OPENS_AT_HOUR * hourPx;
 
@@ -1094,6 +1104,7 @@ function scrollScheduleIntoView(root) {
   //    写下来是因为将来若要「记住滚动位置」，那件事会从这里开始出错。
   scroller.scrollTop = Math.max(
     0, Math.min(top, scroller.scrollHeight - scroller.clientHeight));
+  return true;
 }
 
 // 🔴 **一个计时器、一个监听，挂在文档上，不是一块日程一份。**
@@ -1123,9 +1134,33 @@ document.addEventListener("visibilitychange", () => {
 //    （主体一次，out-of-band 一次），少了它，人刚拖到的位置会被第二回拽回去。
 function startSchedule(root) {
   if (root.dataset.scheduleLive) return;
-  root.dataset.scheduleLive = "1";
   paintSchedule(root);
-  scrollScheduleIntoView(root);
+  if (scrollScheduleIntoView(root)) {
+    root.dataset.scheduleLive = "1";
+    return;
+  }
+
+  // 面板还关着（零尺寸）。⚠️ **不能就此作罢，也不能标记成已定位** ——
+  // 默认就是关着的，标记了就等于「日程永远停在凌晨」。等它第一次张开。
+  //
+  // ⚠️ 用 ResizeObserver 而不是监听那颗按钮：张开是 Alpine 翻一个 class、
+  //    再由 560ms 的过渡把宽度撑开的，按钮按下的那一刻高度还是 0。
+  //    盯尺寸才是盯到「真的能滚了」这件事本身。
+  const scroller = root.querySelector("[data-schedule-scroll]");
+  if (!scroller || typeof ResizeObserver === "undefined") return;
+  const waiting = new ResizeObserver(() => {
+    // ⚠️ 翻页会把整块日程换掉，旧的那棵树就此脱离文档 —— 不在这里断开的话，
+    //    每翻一页留下一个永远等不到张开的 observer。
+    if (!root.isConnected) {
+      waiting.disconnect();
+      return;
+    }
+    if (scrollScheduleIntoView(root)) {
+      root.dataset.scheduleLive = "1";
+      waiting.disconnect();
+    }
+  });
+  waiting.observe(scroller);
 }
 
 function bootSchedules(scope) {

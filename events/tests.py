@@ -49,8 +49,9 @@ from org.permissions import foundation_admin_group
 
 from .management.commands.seed_demo import demo_login
 
-from . import tokens
+from . import schedule, tokens
 from .forms import EventForm, EventPeriodForm, SignUpForm
+from .views import EVENTS_PER_PAGE
 from .models import (
     Event,
     EventNotification,
@@ -786,14 +787,12 @@ class VisibilityTests(TestCase):
 
 
 class FromTodayTests(TestCase):
-    """from_today(): which day is it on, cut at midnight (2026-08-17).
+    """from_today(): still to come or still going, cut at midnight.
 
-    ⚠️ A third question, not a rewording of the two this replaced. upcoming()
-       and past() both read "is it over" off start_time / end_time and left a
-       running event between them on purpose; both were deleted on 2026-08-17
-       once nothing called them. This one asks which **day** an event belongs
-       to, and answers it off start_time so that "today" means the same thing
-       here as it does in in_period().
+    2026-08-18: **reads end_time** (it read start_time for one day). The row
+    that changed is the overnight one below, and it changed because the
+    schedule drew that event on today's column while the list beside it did
+    not have it — clicking the card led nowhere.
     """
 
     def setUp(self):
@@ -822,16 +821,32 @@ class FromTodayTests(TestCase):
         event = self.make("Yesterday", self.midnight - HOUR)
         self.assertNotIn(event, Event.objects.from_today())
 
-    def test_an_overnight_event_belongs_to_the_day_it_started(self):
-        """⚠️ The stated cost of reading off start_time.
+    def test_an_event_that_began_last_night_and_is_still_running_is_in(self):
+        """🔴 The row that 2026-08-18 changed.
 
-        Something that began at 22:00 yesterday and ends at 02:00 today drops
-        off the page at midnight, while it is still running. Accepted rather
-        than fixed: the alternative — end_time — would keep last month's
-        three-day trip on the page for as long as it ran over, and "which day
-        is this on" would stop meaning the same thing here and in in_period().
+        Started 22:00 yesterday, ends 02:00 today. Under the start_time reading
+        it dropped off the page at midnight **while it was still running** —
+        and the schedule beside the list went on drawing it on today's column,
+        so clicking that card asked the list for a row it did not have.
         """
         event = self.make("Overnight", self.midnight - 2 * HOUR, hours=4)
+        self.assertIn(event, Event.objects.from_today())
+
+    def test_a_multi_day_event_stays_until_it_actually_ends(self):
+        """The stated cost: it is on the list every day it runs.
+
+        ⚠️ And it sorts to the **top**, because the page orders by start_time.
+           Deliberate — it is the one in progress.
+        """
+        event = self.make("Retreat", self.midnight - 2 * DAY, hours=96)
+        self.assertIn(event, Event.objects.from_today())
+
+    def test_a_multi_day_event_that_is_over_is_out(self):
+        """⚠️ The thing the old comment feared, checked rather than assumed:
+           reading end_time does **not** keep last month's trip on the page.
+           A finished event has end_time in the past, so it is out.
+        """
+        event = self.make("Old retreat", self.midnight - 30 * DAY, hours=72)
         self.assertNotIn(event, Event.objects.from_today())
 
     def test_the_day_can_be_handed_in(self):
@@ -5003,8 +5018,10 @@ class LiveFilterTests(PageTestCase):
 class ScheduleToggleTests(PageTestCase):
     """The Schedule button and the shell it moves (2026-08-17).
 
-    The calendar itself is not built yet — this is the button, the room it
-    makes, and the two structural facts that room depends on.
+    The room, not what is in it — the calendar itself is SchedulePageTests
+    (2026-08-18). The split is worth keeping: everything here is about what
+    happens to the *list* when the panel opens, and it stayed true when the
+    placeholder inside became a real schedule.
     """
 
     def page(self):
@@ -5067,10 +5084,19 @@ class ScheduleToggleTests(PageTestCase):
         self.assertNotIn('id="schedule-panel"', fragment)
         self.assertNotIn("schedule: false", fragment)
 
-    def test_the_placeholder_says_what_it_is_and_leaves_room_for_the_readout(self):
+    def test_the_panel_is_named_by_a_real_heading_now_that_it_has_contents(self):
+        """2026-08-18：占位框那一版用的是 `aria-label`。
+
+        ⚠️ 当时的理由是「一个指向空盒子的标题，在读屏的标题列表里是条死线索」。
+           盒子里现在有东西了，所以那条理由反过来成立：一整块日历必须在标题
+           列表里有一条，否则读屏用户只能一路 Tab 过去才知道它在。
+        """
         html = self.page()
-        self.assertIn("data-size-readout", html)
-        self.assertIn("data-size-readout-value", html)
+        self.assertIn('aria-labelledby="schedule-heading"', html)
+        self.assertIn('id="schedule-heading"', html)
+        # ⚠️ 仍然是 sr-only：屏幕上那块日历自己说得出自己是什么（星期、日期、
+        #    格子），再画一行「Schedule」是给已经看得见的人重复一遍。
+        self.assertRegex(html, r'id="schedule-heading" class="sr-only"')
 
 
 class PastEventsIsGoneTests(PageTestCase):
@@ -5793,3 +5819,967 @@ class CheckInDisplayTests(PageTestCase):
         self.login(self.lisi)
         self.assertNotContains(
             self.client.get(reverse("events:event_manage_list")), qr_link)
+
+
+class ScheduleLayoutTests(TestCase):
+    """把活动摆进格子里（2026-08-18）。
+
+    这一整组测的是 events/schedule.py，不碰 URL —— 摆放是算术，而算术错了的
+    表现全都是「画面上差一点」，不报错、不 500，只有量一量才看得出来。
+    """
+
+    def setUp(self):
+        self.ministry = Ministry.objects.create(code="food_pantry", name="Food Pantry")
+        self.today = local_today()
+
+    def at(self, day, hour, minute=0):
+        return day_start(day) + datetime.timedelta(hours=hour, minutes=minute)
+
+    def event(self, start, end, **kwargs):
+        return make_event(ministry=self.ministry, start_time=start, end_time=end, **kwargs)
+
+    def one_column(self, day=None, now=None):
+        day = day or self.today
+        events = list(Event.objects.all())
+        return schedule.columns(events, [day], now=now or local_now())[0]
+
+    def test_a_card_starts_and_ends_where_its_hours_say(self):
+        self.event(self.at(self.today, 15), self.at(self.today, 17))
+        card = self.one_column().cards[0]
+        self.assertEqual(card.top, 15 * schedule.PX_PER_HOUR)
+        self.assertEqual(card.height, 2 * schedule.PX_PER_HOUR)
+
+    def test_a_very_short_event_still_has_a_card_you_can_see(self):
+        """⚠️ 十分钟的活动按比例是 8px —— 一条线。下限存在的理由是它仍然要能
+           被读出来是一张卡；代价是它的高度不再等于它的时长。
+        """
+        self.event(self.at(self.today, 9), self.at(self.today, 9, 10))
+        self.assertEqual(self.one_column().cards[0].height, schedule.MIN_CARD_PX)
+
+    def test_a_zero_length_event_is_still_drawn(self):
+        """模型只约束 end >= start，所以 end == start 是合法的一行数据。
+
+        ⚠️ 它会被「相交」那条判断判掉（end 不大于这一天的开始），所以 _segments
+           里专门有一条补丁。少了那条，这样一场活动在日程上**根本不存在**，
+           而它在左边的列表里好端端地列着。
+        """
+        moment = self.at(self.today, 14)
+        self.event(moment, moment)
+        self.assertEqual(len(self.one_column().cards), 1)
+
+    def test_a_zero_length_event_at_midnight_is_the_case_that_needed_the_patch(self):
+        """⚠️ 14:00 那一场其实走不到那条补丁上 —— 真正被「相交」判断判掉的是
+           **正好在零点**的那一场：它的 end 不大于这一天的开始。
+           这条测试和上面那条是一对，少了它，补丁可以被整段删掉而测试全绿。
+        """
+        moment = day_start(self.today)
+        self.event(moment, moment)
+        column = self.one_column()
+        self.assertEqual(len(column.cards), 1)
+        self.assertEqual(column.cards[0].top, 0)
+        self.assertEqual(column.cards[0].height, schedule.MIN_CARD_PX)
+
+    def test_a_card_never_hangs_below_its_own_day(self):
+        # 23:50 的十分钟活动：下限会把它撑到 23:52，多出来的两像素就画在
+        # 第二天的位置上了。
+        self.event(self.at(self.today, 23, 50), self.at(self.today, 23, 59))
+        card = self.one_column().cards[0]
+        self.assertLessEqual(card.top + card.height, schedule.DAY_PX)
+
+    def test_an_overnight_event_gets_one_card_in_each_day(self):
+        tomorrow = self.today + datetime.timedelta(days=1)
+        self.event(self.at(self.today, 22), self.at(tomorrow, 1))
+        events = list(Event.objects.all())
+        first, second = schedule.columns(events, [self.today, tomorrow])
+
+        self.assertEqual(len(first.cards), 1)
+        self.assertEqual(len(second.cards), 1)
+        # 第一段裁到当天末尾，第二段从零点开始。
+        self.assertEqual(first.cards[0].top + first.cards[0].height, schedule.DAY_PX)
+        self.assertEqual(second.cards[0].top, 0)
+        self.assertTrue(first.cards[0].continues_after)
+        self.assertTrue(second.cards[0].continues_before)
+
+    def test_both_halves_of_an_overnight_event_say_the_real_hours(self):
+        """⚠️ 第二天那张写「12am – 1am」是错的：人是拿这行字安排时间的，
+           而那场活动是**昨晚十点**开始的。
+        """
+        tomorrow = self.today + datetime.timedelta(days=1)
+        self.event(self.at(self.today, 22), self.at(tomorrow, 1))
+        events = list(Event.objects.all())
+        first, second = schedule.columns(events, [self.today, tomorrow])
+        self.assertEqual(first.cards[0].label, "10pm – 1am")
+        self.assertEqual(second.cards[0].label, first.cards[0].label)
+
+    def test_an_event_that_ends_at_midnight_does_not_leak_into_the_next_day(self):
+        tomorrow = self.today + datetime.timedelta(days=1)
+        self.event(self.at(self.today, 22), day_start(tomorrow))
+        events = list(Event.objects.all())
+        self.assertEqual(len(schedule.columns(events, [tomorrow])[0].cards), 0)
+
+    def test_two_events_at_exactly_the_same_time_do_not_cover_each_other(self):
+        """你说的那一条：完全重叠时上面那张往右下偏一点。"""
+        start, end = self.at(self.today, 15), self.at(self.today, 17)
+        self.event(start, end, name="First")
+        self.event(start, end, name="Second")
+        depths = [card.depth for card in self.one_column().cards]
+        self.assertEqual(depths, [0, 1])
+
+    def test_a_partial_overlap_offsets_by_the_same_rule(self):
+        self.event(self.at(self.today, 15), self.at(self.today, 17))
+        self.event(self.at(self.today, 16), self.at(self.today, 18))
+        self.assertEqual([card.depth for card in self.one_column().cards], [0, 1])
+
+    def test_events_that_only_touch_are_not_treated_as_overlapping(self):
+        # 3–5pm 和 5–7pm 是接着的，不是叠着的。都偏移的话，一整天连着排的
+        # 活动会像楼梯一样一路往右下跑。
+        self.event(self.at(self.today, 15), self.at(self.today, 17))
+        self.event(self.at(self.today, 17), self.at(self.today, 19))
+        self.assertEqual([card.depth for card in self.one_column().cards], [0, 0])
+
+    def test_the_offset_stops_before_it_walks_off_the_column(self):
+        start, end = self.at(self.today, 9), self.at(self.today, 12)
+        for number in range(6):
+            self.event(start, end, name=f"Event {number}")
+        depths = [card.depth for card in self.one_column().cards]
+        self.assertEqual(max(depths), schedule.MAX_DEPTH)
+        self.assertEqual(depths, [0, 1, 2, 3, 3, 3])
+
+    def test_a_cascade_counts_layers_not_neighbours(self):
+        """⚠️ 「跟几张卡相交」和「压在第几层」是两个数。
+
+        三张互不相交、但都跟第一张相交的卡，按张数算全部落在第 1 档 ——
+        于是它们三张**完全重合**，而这正是偏移要解决的那件事。
+        """
+        self.event(self.at(self.today, 9), self.at(self.today, 18), name="All day")
+        self.event(self.at(self.today, 10), self.at(self.today, 11), name="A")
+        self.event(self.at(self.today, 12), self.at(self.today, 13), name="B")
+        by_name = {card.event.name: card.depth for card in self.one_column().cards}
+        self.assertEqual(by_name["All day"], 0)
+        self.assertEqual(by_name["A"], 1)
+        self.assertEqual(by_name["B"], 1)
+
+    def test_the_order_of_two_identical_events_does_not_wander(self):
+        """⚠️ 同一分钟开始、同样长的两场活动，排序键少了 pk 就是并列的 ——
+           而并列的顺序取决于查询回来的次序，于是偏移和颜色会在两次请求之间
+           自己换位。屏幕上是「刷新一下两张卡对调了」。
+        """
+        start, end = self.at(self.today, 15), self.at(self.today, 17)
+        first = self.event(start, end, name="First")
+        second = self.event(start, end, name="Second")
+        forwards = schedule.columns([first, second], [self.today])[0]
+        backwards = schedule.columns([second, first], [self.today])[0]
+        self.assertEqual([card.event.pk for card in forwards.cards],
+                         [card.event.pk for card in backwards.cards])
+
+    # --- 颜色 ---------------------------------------------------------------
+
+    def test_an_event_keeps_its_colour_across_windows(self):
+        """「每场活动固定一色」（2026-08-18 拍板）。"""
+        event = self.event(self.at(self.today, 15), self.at(self.today, 17))
+        first = schedule.columns([event], [self.today])[0].cards[0].colour
+        second = schedule.columns([event], [self.today])[0].cards[0].colour
+        self.assertEqual(first, second)
+
+    def test_the_colour_does_not_depend_on_a_salted_hash(self):
+        """🔴 内置的 `hash()` 对 str 加了每进程的随机盐。
+
+        用它的话同一场活动在两个 gunicorn worker 上是两个颜色 —— 刷新一下就变，
+        而本机单进程跑起来一切正常，测试也全绿。这里钉的是「同一个 pk 永远
+        算出同一个格子」这件事本身。
+        """
+        self.assertEqual(schedule._base_colour(4321), schedule._base_colour(4321))
+        self.assertNotEqual(
+            {schedule._base_colour(pk) for pk in range(1, 40)}, {0},
+            "整盘颜色只用到了一格")
+
+    def test_every_swatch_is_filed_under_a_family(self):
+        """🔴 回避撞色比的是**色族**，不是格子的下标。
+
+        盘里有四个粉。按下标算它们是四个不同的颜色，屏幕上是同一个 ——
+        两张挨着的卡各配一个，读起来仍然像一张。第一版就是这么错的，
+        而它**通过了**下面那条「不撞色」的测试。
+
+        ⚠️ 这条守卫钉得住「每一格都归了族、没有重复」，钉不住「归对了族」——
+           后者只有眼睛看得出来，改色值时得重新看一遍。
+        """
+        filed = [slot for family in schedule.COLOUR_FAMILIES for slot in family]
+        self.assertEqual(sorted(filed), list(range(schedule.PALETTE)))
+        self.assertEqual(len(filed), len(set(filed)), "有格子归进了两个族")
+
+    def test_neighbours_never_share_a_colour_family(self):
+        """你说的那一条：不跟临近的活动撞色。
+
+        ⚠️ 比的是族。写成 `assertNotEqual(colour, colour)` 的话，两张挨着的
+           粉卡会通过 —— 那正是第一版在浏览器里被看出来的样子。
+        """
+        for hour in range(9, 20):
+            self.event(self.at(self.today, hour), self.at(self.today, hour + 1))
+        cards = self.one_column().cards
+        for earlier, later in zip(cards, cards[1:]):
+            self.assertNotEqual(
+                schedule._FAMILY_OF[earlier.colour],
+                schedule._FAMILY_OF[later.colour],
+                f"{earlier.event.name} 和紧跟着它的那一场是同一族颜色")
+
+    def test_neighbours_never_share_a_colour(self):
+        """族之外，格子本身也不该重复。"""
+        for hour in range(9, 20):
+            self.event(self.at(self.today, hour), self.at(self.today, hour + 1))
+        cards = self.one_column().cards
+        for earlier, later in zip(cards, cards[1:]):
+            self.assertNotEqual(
+                earlier.colour, later.colour,
+                f"{earlier.event.name} 和紧跟着它的那一场同色")
+
+    def test_overlapping_events_never_share_a_colour(self):
+        start, end = self.at(self.today, 15), self.at(self.today, 17)
+        for number in range(4):
+            self.event(start, end, name=f"Event {number}")
+        colours = [card.colour for card in self.one_column().cards]
+        self.assertEqual(len(set(colours)), len(colours))
+        families = [schedule._FAMILY_OF[colour] for colour in colours]
+        self.assertEqual(len(set(families)), len(families))
+
+    def test_more_overlaps_than_families_still_never_repeats_a_swatch(self):
+        """⚠️ 九张互相挨着的卡，八个族不够分。退而求其次是「至少不同格」——
+           直接退回本命色的话，第九张会和第一张**完全**同色，而它们正挨着。
+        """
+        start, end = self.at(self.today, 9), self.at(self.today, 18)
+        for number in range(len(schedule.COLOUR_FAMILIES) + 1):
+            self.event(start, end, name=f"Event {number}")
+        colours = [card.colour for card in self.one_column().cards]
+        self.assertEqual(len(set(colours)), len(colours), "两张重叠的卡拿到了同一格")
+
+    def test_a_cancelled_event_gets_no_colour_at_all(self):
+        """⚠️ 照常上色是会主动误导人的：报过名的人正是需要看见它黄了的人，
+           而一张和旁边一样实的浅色卡读起来是「照常举行」。
+        """
+        self.event(self.at(self.today, 15), self.at(self.today, 17),
+                   status=Event.Status.CANCELLED)
+        card = self.one_column().cards[0]
+        self.assertIsNone(card.colour)
+        self.assertTrue(card.is_cancelled)
+
+    def test_a_cancelled_event_does_not_use_up_a_colour_its_neighbour_wanted(self):
+        # 它不参与配色，所以也不该占着一个格子让旁边那张躲开。
+        self.event(self.at(self.today, 15), self.at(self.today, 17),
+                   status=Event.Status.CANCELLED)
+        live = self.event(self.at(self.today, 15), self.at(self.today, 17))
+        cards = {card.event.pk: card for card in self.one_column().cards}
+        self.assertEqual(cards[live.pk].colour, schedule._base_colour(live.pk))
+
+    # --- 现在几点 -----------------------------------------------------------
+
+    def test_an_event_that_is_over_is_drawn_faded(self):
+        now = self.at(self.today, 18)
+        self.event(self.at(self.today, 15), self.at(self.today, 17))
+        self.assertTrue(self.one_column(now=now).cards[0].is_past)
+
+    def test_an_event_still_running_is_not_faded(self):
+        now = self.at(self.today, 16)
+        self.event(self.at(self.today, 15), self.at(self.today, 17))
+        self.assertFalse(self.one_column(now=now).cards[0].is_past)
+
+    def test_the_red_line_only_exists_on_today(self):
+        tomorrow = self.today + datetime.timedelta(days=1)
+        today_column, tomorrow_column = schedule.columns([], [self.today, tomorrow])
+        self.assertIsNotNone(today_column.now_top)
+        self.assertIsNone(tomorrow_column.now_top,
+                          "一条画在明天上的「现在」是一句假话")
+
+    def test_the_countdown_names_the_event_that_finishes_first(self):
+        """⚠️ 红线同时压着三张卡时，一卡一个倒计时就是三个互相矛盾的数字并排。
+           写的是最快结束的那一场 —— 唯一一个「马上要发生变化」的数。
+        """
+        now = self.at(self.today, 16)
+        self.event(self.at(self.today, 15), self.at(self.today, 18), name="Long")
+        self.event(self.at(self.today, 15), self.at(self.today, 16, 42), name="Short")
+        self.assertEqual(self.one_column(now=now).now_left, "42m left")
+
+    def test_there_is_no_countdown_when_the_line_crosses_nothing(self):
+        now = self.at(self.today, 20)
+        self.event(self.at(self.today, 15), self.at(self.today, 17))
+        self.assertIsNone(self.one_column(now=now).now_left)
+
+    def test_the_countdown_rounds_up_so_it_never_reads_zero_while_running(self):
+        """⚠️ 向下取整的话最后 59 秒写的是「0m left」，而那一分钟活动还在进行。
+           一个写着 0 的倒计时读起来是「已经结束了」。
+        """
+        self.assertEqual(schedule.remaining(datetime.timedelta(seconds=1)), "1m left")
+        self.assertEqual(schedule.remaining(datetime.timedelta(minutes=81)),
+                         "1h 21m left")
+        self.assertEqual(schedule.remaining(datetime.timedelta(hours=2)), "2h left")
+
+    def test_the_clock_reads_the_way_the_reference_does(self):
+        self.assertEqual(schedule.clock(datetime.time(15, 0)), "3pm")
+        self.assertEqual(schedule.clock(datetime.time(10, 15)), "10:15am")
+        # 中午和午夜是这个写法唯一两个容易写反的地方。
+        self.assertEqual(schedule.clock(datetime.time(0, 0)), "12am")
+        self.assertEqual(schedule.clock(datetime.time(12, 0)), "12pm")
+
+
+class ScheduleWindowTests(TestCase):
+    """窗口停在哪几天，箭头能翻到哪儿（2026-08-18 拍板：一次四天，不早于今天）。"""
+
+    def setUp(self):
+        self.today = local_today()
+
+    def test_the_window_opens_on_today(self):
+        self.assertEqual(schedule.first_day(None, schedule.floor_day()), self.today)
+
+    def test_it_covers_four_days(self):
+        days = schedule.window(self.today)
+        self.assertEqual(len(days), 4)
+        self.assertEqual(days[-1], self.today + datetime.timedelta(days=3))
+
+    def test_a_day_in_the_past_is_pulled_forward_to_today(self):
+        """左边的列表是「今天零点起」的。日程翻得比它早，翻出来的活动在左边
+        永远找不到 —— 两块并排的东西就不再答同一个问题了。
+        """
+        asked = self.today - datetime.timedelta(days=10)
+        self.assertEqual(schedule.first_day(asked, schedule.floor_day()), self.today)
+
+    def test_a_day_in_the_future_is_honoured(self):
+        asked = self.today + datetime.timedelta(days=10)
+        self.assertEqual(schedule.first_day(asked, schedule.floor_day()), asked)
+
+    def test_a_later_filter_start_carries_the_window_with_it(self):
+        """筛 From=下个月，日程就该跳到下个月 —— 否则左边整屏九月、右边四天空白。"""
+        later = day_start(self.today + datetime.timedelta(days=30))
+        floor = schedule.floor_day(later)
+        self.assertEqual(schedule.first_day(None, floor), local_date_of(later))
+
+    def test_an_earlier_filter_start_does_not_drag_the_window_back(self):
+        """⚠️ 单向夹紧。往回拽的话，「改一个筛选」就等于「丢掉我翻到的位置」。"""
+        parked = self.today + datetime.timedelta(days=20)
+        floor = schedule.floor_day(day_start(self.today))
+        self.assertEqual(schedule.first_day(parked, floor), parked)
+
+    def test_a_filter_start_in_the_past_never_unlocks_the_past(self):
+        past = day_start(self.today - datetime.timedelta(days=30))
+        self.assertEqual(schedule.floor_day(past), self.today)
+
+    def test_a_broken_date_in_the_url_falls_back_instead_of_exploding(self):
+        # 这个参数会出现在分享出去的链接里，而链接是会被人手改的。
+        for raw in ["banana", "", None, "2026-13-45"]:
+            self.assertIsNone(schedule.parse_day(raw))
+
+    def test_there_is_one_pair_of_arrows_for_each_width(self):
+        """🔴 一次翻几天 = 那一档**看得见**几列，而那是 CSS 说了算的 ——
+           所以三档各有一对自己的箭头，目标日期由服务端算好。
+        """
+        nav = schedule.navigation(self.today, self.today)
+        self.assertEqual([tier["days"] for tier in nav], list(schedule.VISIBLE_DAYS))
+        for tier in nav:
+            self.assertEqual(
+                tier["next"], self.today + datetime.timedelta(days=tier["days"]))
+
+    def test_the_range_label_covers_only_the_days_that_show(self):
+        """⚠️ 中间那档只画两列，标题写四天的范围就是一句屏幕当场证伪的话。"""
+        nav = {tier["days"]: tier for tier in schedule.navigation(self.today, self.today)}
+        self.assertEqual(nav[2]["upto"], self.today + datetime.timedelta(days=1))
+        self.assertEqual(nav[4]["upto"], self.today + datetime.timedelta(days=3))
+
+    def test_the_left_arrow_is_spent_at_the_floor(self):
+        for tier in schedule.navigation(self.today, self.today):
+            self.assertIsNone(tier["prev"])
+
+    def test_the_left_arrow_never_steps_past_the_floor(self):
+        first = self.today + datetime.timedelta(days=2)
+        for tier in schedule.navigation(first, self.today):
+            self.assertEqual(tier["prev"], self.today,
+                             "往回一步跨过了今天")
+
+
+class SchedulePageTests(PageTestCase):
+    """日程作为页面的一部分（2026-08-18）。"""
+
+    def setUp(self):
+        super().setUp()
+        self.today = local_today()
+
+    def at(self, hour, minute=0, day=None):
+        return day_start(day or self.today) + datetime.timedelta(hours=hour, minutes=minute)
+
+    def page(self, **params):
+        self.login(self.lisi)
+        return self.client.get(reverse("events:event_list"), params).content.decode()
+
+    def cards(self, html):
+        return re.findall(r'<a class="schedule-card[^"]*"[^>]*>(.*?)</a>', html, re.S)
+
+    def test_the_panel_holds_a_schedule_now_and_not_a_placeholder(self):
+        html = self.page()
+        self.assertIn('id="schedule"', html)
+        self.assertNotIn("schedule-placeholder", html)
+        self.assertNotIn("data-size-readout", html)
+
+    def test_the_schedule_is_not_limited_to_one_page_of_the_list(self):
+        """🔴 你说的那一条：左边二十条，右边该是那几天的**全部**。
+
+        列表是分页的（EVENTS_PER_PAGE = 20），日程不是 —— 一个「今天有多少事」
+        的答案被翻页截断，是这一块存在的意义本身被截断。
+        """
+        for number in range(EVENTS_PER_PAGE + 5):
+            make_event(ministry=self.pantry, owner=self.zhang.contact,
+                       name=f"Event {number}",
+                       start_time=self.at(9), end_time=self.at(10))
+        html = self.page()
+        # ⚠️ 期望值从数据库来，不写死一个数：PageTestCase 自己还建了一场活动，
+        #    而一个手抄的常数会在下一个人往 setUp 里加东西时无声地对不上。
+        expected = Event.objects.visible_to_volunteers().count()
+        self.assertGreater(expected, EVENTS_PER_PAGE, "这个测试要先撑破一页才有意义")
+        self.assertEqual(html.count("data-schedule-card"), expected)
+
+    def test_the_schedule_follows_the_search_box(self):
+        """2026-08-18 拍板：跟筛选，不跟分页。"""
+        make_event(ministry=self.pantry, owner=self.zhang.contact, name="Kitchen shift",
+                   start_time=self.at(9), end_time=self.at(10))
+        make_event(ministry=self.pantry, owner=self.zhang.contact, name="Garden day",
+                   start_time=self.at(11), end_time=self.at(12))
+        html = self.page(q="kitchen")
+        self.assertEqual(html.count("data-schedule-card"), 1)
+        self.assertIn("Kitchen shift", "".join(self.cards(html)))
+
+    def test_the_schedule_follows_the_ministry_dropdown(self):
+        make_event(ministry=self.tax, owner=self.zhang.contact, name="Tax clinic",
+                   start_time=self.at(9), end_time=self.at(10))
+        html = self.page(ministry=self.pantry.pk)
+        self.assertNotIn("Tax clinic", "".join(self.cards(html)))
+
+    def test_a_draft_never_reaches_the_schedule(self):
+        """⚠️ 同一道门（visible_to_volunteers），不是一条绕过草稿的旁路。
+           这一块是新的，而新的取数路径正是权限最容易被漏掉的地方。
+        """
+        make_event(ministry=self.pantry, owner=self.zhang.contact, name="Secret plan",
+                   start_time=self.at(9), end_time=self.at(10),
+                   status=Event.Status.DRAFT)
+        self.assertNotIn("Secret plan", self.page())
+
+    def test_this_mornings_event_is_still_on_todays_column(self):
+        """⚠️ 日程的查询里**没有** from_today()：那条按 start_time 切，会切掉
+           「昨晚开始、今天早上才结束」的那一场 —— 而它在今天这一列上是要画的。
+        """
+        yesterday = self.today - datetime.timedelta(days=1)
+        make_event(ministry=self.pantry, owner=self.zhang.contact, name="Overnight watch",
+                   start_time=self.at(22, day=yesterday), end_time=self.at(2))
+        self.assertIn("Overnight watch", self.page())
+
+    def test_the_filter_carries_the_window_as_a_form_field(self):
+        """⚠️ `method="get"` 的表单只带它自己的字段。窗口位置不作为字段待在
+           表单里的话，翻到第三屏之后随便改一个筛选，日程就自己弹回起点 ——
+           而列表看起来完全正常。`scope` 当初栽的是同一个跟头。
+        """
+        html = self.page()
+        self.assertIn('name="from"', html)
+        self.assertIn('id="schedule-from"', html)
+
+    def test_filtering_brings_a_fresh_schedule_back_with_it(self):
+        """🔴 筛选换掉的是 `#event-results`，而日程在它外面。
+
+        少了 out-of-band 那一块，筛完之后左边是新结果、右边还是上一次的日程，
+        而两边**各自**看起来都正常 —— 只有并排读才会发现它们答的不是同一个问题。
+        """
+        self.login(self.lisi)
+        fragment = self.client.get(
+            reverse("events:event_list"), HTTP_HX_REQUEST="true").content.decode()
+        self.assertIn('id="schedule"', fragment)
+        self.assertIn('hx-swap-oob="true"', fragment)
+        # ⚠️ 它必须和 #event-results **平级**：htmx 只在响应顶层找 oob，
+        #    写在里面不报错，那一整块日程会被当成普通内容贴进活动卡片中间。
+        self.assertLess(fragment.index("</div>"), fragment.index('id="schedule"'))
+
+    def test_the_whole_page_does_not_carry_two_copies_of_it(self):
+        html = self.page()
+        self.assertEqual(html.count('id="schedule"'), 1)
+        self.assertNotIn('hx-swap-oob', html)
+
+    def test_the_arrows_are_real_links_as_well_as_htmx(self):
+        """⭐ D24 的渐进增强：关掉 JS 照样翻，只是整页重来。"""
+        html = self.page()
+        arrow = re.search(r'<a class="schedule-arrow"[^>]*>', html).group(0)
+        self.assertIn('href="/events/?', arrow)
+        self.assertIn('hx-get="/events/schedule/?', arrow)
+
+    def test_the_arrow_endpoint_returns_the_block_and_moves_the_hidden_field(self):
+        self.login(self.lisi)
+        target = self.today + datetime.timedelta(days=4)
+        html = self.client.get(
+            reverse("events:event_schedule"), {"from": target.isoformat()},
+        ).content.decode()
+        self.assertIn('id="schedule"', html)
+        # ⚠️ 翻页要顺手把筛选卡里那个 from 也改掉，否则「先翻页、再筛选」
+        #    会退回翻页之前的窗口。
+        self.assertIn('id="schedule-from"', html)
+        self.assertIn(f'value="{target.isoformat()}"', html)
+        # 而它自己**不是** oob —— 它就是被换掉的那一块。
+        block = html[html.index('id="schedule"') - 40:html.index('id="schedule"') + 200]
+        self.assertNotIn("hx-swap-oob", block)
+
+    def test_the_schedule_needs_a_login_like_every_other_page_here(self):
+        response = self.client.get(reverse("events:event_schedule"))
+        self.assertEqual(response.status_code, 302)
+        self.assertIn("/login", response["Location"])
+
+    def test_today_is_marked_on_the_column_and_on_its_heading(self):
+        html = self.page()
+        self.assertIn("schedule-day is-today", html)
+        self.assertIn("schedule-col is-today", html)
+
+
+class ScheduleGeometryGuardTests(SimpleTestCase):
+    """🔴 每小时多少像素这个数**存在三份**，而三份之间没有任何东西连着。
+
+    Python 算卡片的 top/height，CSS 画格线，JS 摆红线。对不上的表现不是报错，
+    是每张卡都和它自己的时间差半格 —— 而这在只有一场活动的开发数据上看不出来。
+    """
+
+    def source(self, *parts):
+        return (Path(settings.BASE_DIR).joinpath(*parts)).read_text()
+
+    def test_the_stylesheet_agrees_with_python_about_the_hour(self):
+        css = self.source("assets", "app.css")
+        self.assertIn(f"--schedule-hour: {schedule.PX_PER_HOUR}px", css)
+
+    def test_the_clock_is_one_timer_on_the_document_not_one_per_block(self):
+        """🔴 翻页和筛选每次都把整块日程换成新的 DOM。
+
+        计时器挂在「一块日程」上的话，旧的那份既不会被回收也没人停得掉 ——
+        翻五十次页就是五十个 `setInterval` 对着五十棵脱离文档的树跑，外加
+        五十个永远摘不掉的 `visibilitychange`。⚠️ 画面全对，只有页面开久了
+        才慢慢变卡，所以这一条只能靠守卫钉着。
+        """
+        js = self.source("assets", "js", "app.js")
+        self.assertIn("setInterval(paintAllSchedules", js)
+        self.assertNotRegex(
+            js, r"setInterval\(\(\) => paintSchedule\(root\)",
+            "计时器又挂回单块日程上了")
+
+    def test_the_script_falls_back_to_the_same_hour(self):
+        # JS 是从 CSS 变量里读的，这个数字只是读不到时的兜底 —— 但兜底错了
+        # 同样是「差半格」，而且只在样式表没加载出来的那一刻。
+        js = self.source("assets", "js", "app.js")
+        self.assertIn(f"|| {schedule.PX_PER_HOUR};", js)
+
+    def test_an_offset_card_narrows_instead_of_leaving_its_own_day(self):
+        """🔴 第一版把整张卡 `translate` 过去，第三档就探进了隔壁那一列 ——
+           读起来像是那天的活动。
+
+        ⚠️ 这个错**在这一层的测试里没有任何表现**：top / height / depth 全是对的，
+           是浏览器里看出来的。所以钉的是写法本身：右边缘不许参与偏移。
+        """
+        css = re.sub(r"/\*.*?\*/", "", self.source("assets", "app.css"), flags=re.S)
+        block = re.search(r"\.schedule-card \{(.*?)\}", css, re.S).group(1)
+        self.assertRegex(block, r"left:\s*calc\([^)]*var\(--depth")
+        self.assertRegex(block, r"right:\s*[\d.]+rem;",
+                         "右边缘必须是定值 —— 它一动，卡片就会走出自己那一列")
+        self.assertRegex(block, r"translate:\s*0 ",
+                         "水平方向不许再用 translate")
+
+    def test_the_day_columns_are_written_out_rather_than_repeated_from_a_variable(self):
+        """⚠️ `repeat(var(--n), …)` 不报错，它**整条声明失效** —— 四列会叠成
+           一列。列数因此写死在每个断点里。
+        """
+        # ⚠️ 先剥注释再查 —— 上面那条禁忌本身就写在 app.css 的注释里，
+        #    不剥的话这条守卫抓到的是那句话，而不是代码。
+        css = re.sub(r"/\*.*?\*/", "", self.source("assets", "app.css"), flags=re.S)
+        self.assertNotIn("repeat(var(", css)
+        for count in schedule.VISIBLE_DAYS:
+            self.assertIn(f"repeat({count}, minmax(0, 1fr))", css)
+
+
+class SchedulePanelTests(PageTestCase):
+    """点日程上的一张卡：详情就地打开，左边跟着翻页并高亮（2026-08-18）。"""
+
+    def setUp(self):
+        super().setUp()
+        self.today = local_today()
+
+    def at(self, hour, day_offset=0):
+        return day_start(self.today + datetime.timedelta(days=day_offset)) + hour * HOUR
+
+    def make(self, name, hour=9, day_offset=0, **kwargs):
+        return make_event(
+            ministry=self.pantry, owner=self.zhang.contact, name=name,
+            start_time=self.at(hour, day_offset),
+            end_time=self.at(hour + 1, day_offset), **kwargs)
+
+    def panel(self, event, user=None, **params):
+        self.login(user or self.lisi)
+        return self.client.get(
+            reverse("events:event_detail_panel", args=[event.pk]), params,
+        )
+
+    def test_it_returns_the_detail_and_the_list_in_one_response(self):
+        """🔴 一次请求，两块东西。
+
+        分成两次的话，慢网下它们会先后落地，而中间那一下是「右边已经是新活动、
+        左边还高亮着上一个」—— 一个自相矛盾的画面，而且只在慢网上出现。
+        """
+        event = self.make("Kitchen shift")
+        html = self.panel(event).content.decode()
+        self.assertIn("Kitchen shift", html)
+        self.assertIn('id="event-results"', html)
+        self.assertIn('hx-swap-oob="true"', html)
+
+    def test_the_list_it_returns_is_the_page_that_event_is_on(self):
+        """左边要翻到**那一场所在的**那一页，不是第一页。"""
+        # 第一页塞满，把目标顶到第二页去。
+        for number in range(EVENTS_PER_PAGE):
+            self.make(f"Filler {number}", hour=8)
+        target = self.make("Late in the list", hour=23, day_offset=6)
+        html = self.panel(target).content.decode()
+        self.assertIn("Late in the list", html)
+        self.assertIn("Page 2 of", html)
+
+    def test_the_row_for_that_event_carries_the_highlight(self):
+        event = self.make("Kitchen shift")
+        html = self.panel(event).content.decode()
+        row = re.search(r'<li class="event-row[^"]*"\s+data-event="%d"' % event.pk, html)
+        self.assertIsNotNone(row, "找不到那一行")
+        self.assertIn("is-picked", row.group(0))
+
+    def test_only_that_one_row_is_highlighted(self):
+        event = self.make("Kitchen shift")
+        self.make("Another one", hour=11)
+        html = self.panel(event).content.decode()
+        self.assertEqual(html.count("is-picked"), 1)
+
+    def test_an_event_the_list_cannot_show_opens_without_highlighting_anybody(self):
+        """⚠️ 日程画的是「那几天里全部的活动」，列表还带着筛选。两边天然可以
+           不重合 —— 这时候要开的是详情，**不是**高亮一个碰巧在第一页的别人。
+        """
+        event = self.make("Kitchen shift")
+        self.make("Garden day", hour=11)
+        # 筛掉它自己：日程上点得到，列表里没有。
+        html = self.panel(event, q="garden").content.decode()
+        self.assertIn("Kitchen shift", html)        # 详情照开
+        self.assertNotIn("is-picked", html)         # 但没人被圈上
+
+    def test_the_page_is_computed_under_the_filter_that_is_on(self):
+        """⚠️ 卡片的 hx-get 带着当前查询串，因为「第几页」取决于筛选。
+           不带的话左边会翻到「没有筛选时的第几页」，也就是错的一页。
+        """
+        for number in range(EVENTS_PER_PAGE):
+            self.make(f"Filler {number}", hour=8)
+        target = self.make("Kitchen shift", hour=23, day_offset=6)
+        # 筛掉那二十条之后，它是唯一一条，因此在第一页。
+        html = self.panel(target, q="kitchen").content.decode()
+        self.assertNotIn("Page 2 of", html)
+        self.assertIn("is-picked", html)
+
+    def test_a_draft_is_a_404_here_too(self):
+        """⚠️ 面板是一条**新开的取数路径**，而新开的取数路径正是权限最容易漏掉
+           的地方。它和整页共用 `_detail()`，这条测试钉的就是那次共用。
+        """
+        draft = self.make("Secret plan", status=Event.Status.DRAFT)
+        self.assertEqual(self.panel(draft).status_code, 404)
+
+    def test_it_needs_a_login(self):
+        event = self.make("Kitchen shift")
+        response = self.client.get(
+            reverse("events:event_detail_panel", args=[event.pk]))
+        self.assertEqual(response.status_code, 302)
+        self.assertIn("/login", response["Location"])
+
+    def test_the_panel_copy_leaves_out_the_back_link(self):
+        """⚠️ 这是那一份正文在两处唯一的差别。面板里那条链接会把整页导航走，
+           而人只是想关掉右边那一块 —— 而关掉的 × 就在几十像素之外。
+        """
+        event = self.make("Kitchen shift")
+        panel = self.panel(event).content.decode()
+        self.login(self.lisi)
+        page = self.client.get(
+            reverse("events:event_detail", args=[event.pk])).content.decode()
+        self.assertIn("&larr; Events", page)
+        self.assertNotIn("&larr; Events", panel)
+
+    def test_the_body_is_one_file_shared_with_the_full_page(self):
+        """⚠️ 不许有第二份「面板专用的精简详情」：两份会在第二次改动之后说两件
+           不一样的事，而两边都渲染成功。守卫钉的是**两处 include 同一个文件**。
+        """
+        for name in ("event_detail.html", "_schedule_detail.html"):
+            markup = (Path(settings.BASE_DIR) / "events" / "templates" / "events"
+                      / name).read_text()
+            self.assertIn("events/_event_detail_body.html", markup, name)
+
+    def test_the_card_is_a_real_link_as_well_as_an_htmx_target(self):
+        """⭐ D24 的渐进增强：没有 JS 时点一张日程卡就是整页跳到详情去。"""
+        self.make("Kitchen shift")
+        self.login(self.lisi)
+        html = self.client.get(reverse("events:event_list")).content.decode()
+        card = re.search(r'<a class="schedule-card[^>]*>', html, re.S).group(0)
+        self.assertRegex(card, r'href="/events/\d+/"')
+        self.assertRegex(card, r'hx-get="/events/\d+/panel/')
+        self.assertIn('hx-target="#schedule-detail"', card)
+
+    def test_the_panel_holds_the_schedule_and_the_detail_side_by_side(self):
+        """⚠️ 日程那一块是**藏起来**，不是换掉 —— 关掉详情要回到你翻到的那个
+           窗口、那个滚动位置。所以两块都在 DOM 里，由一个 Alpine 布尔选。
+        """
+        self.login(self.lisi)
+        html = self.client.get(reverse("events:event_list")).content.decode()
+        self.assertIn('x-data="{ detail: false }"', html)
+        self.assertIn('id="schedule-detail"', html)
+        self.assertRegex(html, r'x-show="!detail"')
+
+    def test_the_detail_state_lives_outside_both_of_the_blocks_it_switches(self):
+        """🔴 和外层那个 `schedule` 开关同一条规矩。
+
+        `#schedule` 会被箭头翻页整个换掉，`#schedule-detail` 会被每次点击换掉。
+        状态声明在被换掉的那块里，等于每换一次自己归零一次 —— 而这件事只在
+        真站上发生，读第一次渲染的单元测试永远看不到。
+        """
+        self.login(self.lisi)
+        html = self.client.get(reverse("events:event_list")).content.decode()
+        state = html.index('x-data="{ detail: false }"')
+        self.assertLess(state, html.index('id="schedule"'))
+        self.assertLess(state, html.index('id="schedule-detail"'))
+
+
+class ScheduleOpeningViewTests(SimpleTestCase):
+    """打开时停在哪儿，以及日程开着时钉住的筛选卡（2026-08-18）。
+
+    两件事都是「不报错的」那一类：滚动位置错了只是第一眼看到一片空白，
+    sticky 少一个条件只是「没钉住」，看起来都像本来就这样。
+    """
+
+    def source(self, *parts):
+        return (Path(settings.BASE_DIR).joinpath(*parts)).read_text()
+
+    def styles(self):
+        return re.sub(r"/\*.*?\*/", "", self.source("assets", "app.css"), flags=re.S)
+
+    def block(self, selector):
+        found = [body for sel, body in
+                 re.findall(r"([^{}]+?)\{([^{}]*?)\}", self.styles(), re.S)
+                 if selector in {one.strip() for one in sel.split(",")}]
+        self.assertTrue(found, f"`{selector}` 从 app.css 里没了")
+        return "\n".join(found)
+
+    def test_it_opens_on_the_morning_not_on_midnight(self):
+        """🔴 一天里最不可能有活动的正是凌晨那几小时。从 0:00 开始的话，
+           日程第一眼是一块空白，人得先自己往下拖才知道有没有东西 ——
+           而一屏日历的全部意义就是不必先做这一步。
+        """
+        js = self.source("assets", "js", "app.js")
+        self.assertIn("const SCHEDULE_OPENS_AT_HOUR = 7;", js)
+        self.assertIn("SCHEDULE_OPENS_AT_HOUR * hourPx", js)
+
+    def test_now_is_a_floor_on_that_and_never_pulls_it_earlier(self):
+        """⚠️ 两条规则取**更晚**的那个：7am 打底，而傍晚打开时窗口跟着「现在」走。
+
+        写成「有红线就跟红线」的话（2026-08-18 之前就是），早上八点打开会停在
+        凌晨 5 点半 —— 比 7am 还早，正是这次要改掉的那件事。
+        """
+        js = self.source("assets", "js", "app.js")
+        self.assertRegex(js, r"top = Math\.max\(top, parseFloat\(line\.style\.top\)")
+
+    def test_an_early_event_does_not_drag_the_opening_position_around(self):
+        """⚠️ 凌晨的活动**不会**把窗口往上拽（2026-08-18 明确选择）。
+
+        宁可让那种少见的情况多滚一下，也不要「每翻一页起点都不一样」——
+        不可预测的起点是每次都要重新找位置。所以那段「找最早一张卡」的兜底
+        连同它的 8am 常数一起删了。
+        """
+        js = self.source("assets", "js", "app.js")
+        self.assertNotIn("Math.min(...tops)", js)
+        self.assertNotIn("8 * scheduleHourPx", js)
+
+    def test_the_filter_card_is_pinned_only_while_the_schedule_is_open(self):
+        """⚠️ 关着那一档是全站最常打开的默认视图，而它现在没有人抱怨 ——
+           「关着时逐像素等于改之前」那条决定在这里同样成立。
+        """
+        css = self.styles()
+        pinned = re.findall(r"([^{}]*\.filter-card)\s*\{([^}]*position:\s*sticky[^}]*)\}",
+                            css, re.S)
+        self.assertTrue(pinned, "筛选卡没有被钉住的规则了")
+        for selector, _ in pinned:
+            self.assertIn(".is-open", selector,
+                          f"`{selector.strip()}` 在日程关着的时候也钉住了")
+
+    def test_it_hangs_below_the_same_top_bar_the_panel_clears(self):
+        # 两块并排的东西钉在不同的高度上，是一眼看得出来的错位。
+        block = self.block(".events-shell.is-open .filter-card")
+        self.assertRegex(block, r"top:\s*calc\(var\(--top-bar-h\)")
+
+    def test_it_stacks_above_the_rows_that_scroll_under_it(self):
+        """⚠️ 活动行带 `relative`（模板上那个 class），也就是它们参与层叠。
+           少了 z-index，滚上来的卡片会从筛选卡**上面**穿过去。
+        """
+        self.assertRegex(self.block(".events-shell.is-open .filter-card"),
+                         r"z-index:\s*\d+")
+
+    def test_the_hook_is_a_class_of_its_own_not_form_dot_card(self):
+        """⚠️ 靠 `form.card` 去匹配会命中将来任何一张长在表单里的卡片。"""
+        markup = self.source("events", "templates", "events", "_period_filter.html")
+        self.assertIn('class="filter-card card', markup)
+        self.assertNotIn("form.card", self.styles())
+
+
+class ScheduleColourTests(SimpleTestCase):
+    """那 24 格颜色：够不够、归没归族、深色下变不变。"""
+
+    def source(self, *parts):
+        return (Path(settings.BASE_DIR).joinpath(*parts)).read_text()
+
+    def test_every_slot_in_the_palette_has_a_colour_and_a_class(self):
+        """⚠️ 少一格，尾巴上那个颜色会落到 `--schedule-fill` 的兜底值上 ——
+           一张灰卡混在彩色里。多一格则是那个变量根本没定义，CSS 不报错，
+           它渲染成一张**透明**的卡。
+        """
+        css = self.source("assets", "app.css")
+        for slot in range(schedule.PALETTE):
+            self.assertIn(f"--schedule-fill-{slot}:", css)
+            self.assertIn(f".schedule-card--{slot}", css)
+        self.assertNotIn(f"--schedule-fill-{schedule.PALETTE}:", css)
+        # ⚠️ 色族表是**对这些色值的判断**，所以它和上面那 24 行是一对：
+        #    加一格颜色而忘了归族，配到它的活动会在 `_FAMILY_OF` 上 KeyError ——
+        #    那是 500，不是画得难看，所以这里连着钉。
+        filed = [slot for family in schedule.COLOUR_FAMILIES for slot in family]
+        self.assertEqual(sorted(filed), list(range(schedule.PALETTE)))
+
+    def test_dark_mode_does_not_repaint_the_cards(self):
+        """🔴 深色下卡片颜色和浅色**一模一样**（2026-08-18 定）。
+
+        日程是这一页唯一的彩色信息载体，而「这一场是什么颜色」必须在两个模式下
+        是同一个答案 —— 白天记住的粉色，晚上还得是那个粉色。
+
+        ⚠️ 连带的一条：文字必须留在深色。浅底白字在这里不是「看不清」，是几乎
+           看不见 —— 而这个项目深色模式下别处的规矩全是「文字翻白」，所以这条
+           是最可能被下一个人顺手改掉的。
+        """
+        css = re.sub(r"/\*.*?\*/", "", self.source("assets", "app.css"), flags=re.S)
+        # ⚠️ 连 `.is-cancelled` 一起查 —— 它是这条规矩最容易被开的一个例外，
+        #    而第一版正是在它身上破的功。
+        for selector, block in re.findall(
+                r"(\.dark [^{]*\.schedule-card[^{]*)\{([^}]*)\}", css):
+            self.assertNotIn("background-color", block,
+                             f"`{selector.strip()}` 在深色下又换了一次底色")
+            self.assertNotIn("color:", block,
+                             f"`{selector.strip()}` 在深色下又换了一次字色")
+
+
+class ScheduleLooksLikeCardsGuardTests(SimpleTestCase):
+    """竖线去掉、整块坐在卡片上（2026-08-18）。全是「不报错的」那一类。"""
+
+    def source(self, *parts):
+        return (Path(settings.BASE_DIR).joinpath(*parts)).read_text()
+
+    def styles(self):
+        return re.sub(r"/\*.*?\*/", "", self.source("assets", "app.css"), flags=re.S)
+
+    def block(self, selector):
+        css = self.styles()
+        found = [body for sel, body in re.findall(r"([^{}]+?)\{([^{}]*?)\}", css, re.S)
+                 if selector in {one.strip() for one in sel.split(",")}]
+        self.assertTrue(found, f"`{selector}` 从 app.css 里没了")
+        return "\n".join(found)
+
+    def test_the_columns_are_not_separated_by_a_line(self):
+        # 竖线会把四天读成一张表格，而它们是四叠并排的卡片。
+        self.assertNotRegex(self.block(".schedule-col"), r"border-left")
+
+    def test_they_are_separated_by_a_gap_instead(self):
+        # ⚠️ 去掉线之后，分开两天的**只剩这道缝** —— 它不能也一起没了。
+        css = self.styles()
+        self.assertRegex(css, r"--schedule-column-gap:\s*[\d.]+rem")
+        # ⚠️ 表头和格子必须用**同一个**变量：两行用不同的缝，星期几就会和它
+        #    底下那一列错开，而错开一两像素看起来只是「字没对齐」。
+        self.assertEqual(css.count("column-gap: var(--schedule-column-gap)"), 1,
+                         "两行的缝不是同一条声明给的")
+
+    def test_the_hour_lines_are_painted_across_the_whole_grid(self):
+        """⚠️ 画在**列**上的话，每道竖缝都会把横线切断一截 —— 一条断成四段的线
+           读起来不是刻度，是四个盒子各自的边框，正好把刚去掉的竖线暗示回来。
+        """
+        self.assertIn("repeating-linear-gradient", self.block(".schedule-grid"))
+        self.assertNotIn("repeating-linear-gradient", self.block(".schedule-col"))
+
+    def test_the_panel_is_the_card_component_rather_than_a_second_copy_of_it(self):
+        """⚠️ 浅色白卡、深色 ink-900、有大图时的毛玻璃，全部由现成的 `.card` 给。
+           在这里另写一套颜色就是分叉的开始。
+        """
+        markup = self.source("events", "templates", "events", "event_list.html")
+        self.assertIn('class="schedule-panel card"', markup)
+        block = self.block(".schedule-panel")
+        self.assertNotRegex(block, r"background-color",
+                            "面板不该自己写底色 —— 那是 .card 的事")
+
+    def test_the_card_component_does_not_quietly_unpin_the_panel(self):
+        """🔴 `.card` 在 app.css 里排在 `.schedule-panel` **后面**，而它带着
+           `position: relative`。同特异性、后来者胜 —— 于是日程会跟着列表一路
+           滚出屏幕，而不是钉在顶栏底下。不报错，看起来像「本来就这样」。
+
+        所以按回去的是 `.schedule-panel.card`（0-2-0），不是源码顺序：
+        顺序会被下一个人重排，特异性不会。
+        """
+        self.assertRegex(self.block(".schedule-panel.card"), r"position:\s*sticky")
+        css = self.styles()
+        self.assertLess(css.index("  .schedule-panel {"), css.index("  .card {"),
+                        "两条规则的先后变了 —— 这条守卫的前提没了，重新想一遍")
+
+    def test_the_detail_does_not_divide_by_its_own_zoom(self):
+        """🔴 `height: 100%`，不是 `calc(100% / 0.85)`。
+
+        百分比在**已经缩放过的**坐标系里解析，所以 100% 渲染出来正好等于父元素
+        的高度；再除一次是重复计算，详情比面板高出 84px（量出来的），多出来的
+        那一截被面板的 `overflow: hidden` 裁掉**而且滚不到** —— 屏幕上看起来
+        只是「这个活动没写那么多」。
+        """
+        block = self.block(".schedule-detail")
+        self.assertRegex(block, r"height:\s*100%")
+        self.assertNotRegex(block, r"height:\s*calc\(100%\s*/")
+
+    def test_the_detail_scrolls_inside_itself(self):
+        # 面板是一屏（上一批的决定），装不下的归里面这一层滚。
+        self.assertRegex(self.block(".schedule-detail"), r"overflow-y:\s*auto")
+
+    def test_the_neon_ring_keeps_the_cards_own_elevation(self):
+        """🔴 光圈和「悬浮」共用 `box-shadow` 这一个属性，而它不能累加。
+
+        直接写第二条会把卡片那两层悬浮影整个换掉 —— 选中的那张当场变平，
+        而周围每一张都还浮着。所以光圈那几层后面必须跟着 `var(--card-elevation)`。
+
+        ⚠️ 上一版用的是 `outline`，理由正是「box-shadow 那一格被占着」。
+           变量把那条约束解掉了，而 outline **画不出辉光**：它只有宽度和颜色，
+           没有模糊半径。
+        """
+        for selector in (".event-row.is-picked > .card",
+                         ".dark .event-row.is-picked > .card"):
+            block = self.block(selector)
+            self.assertIn("var(--card-elevation)", block,
+                          f"{selector} 把卡片的悬浮影冲掉了")
+            self.assertIn("box-shadow", block)
+
+    def test_the_no_shadow_case_is_a_transparent_shadow_not_none(self):
+        """🔴 `--card-elevation` 会被代进一串逗号分隔的影子列表里，而 `none`
+           在列表中间是**语法错误** —— 浏览器丢掉整条声明，霓虹光圈在深色模式下
+           一起消失。不报错，只是「深色下这个功能没了」。
+        """
+        self.assertRegex(self.block(".dark .card"),
+                         r"--card-elevation:\s*0 0 #0000")
+        self.assertNotRegex(self.block(".dark .card"),
+                            r"--card-elevation:\s*none")
+
+    def test_the_glow_is_not_drawn_on_a_pseudo_element(self):
+        """🔴 `.event-row > .card` 是 `overflow: hidden` 的，伪元素的外辉光会被
+           整个裁掉 —— 屏幕上是「有环、没有光」，而 CSS 里每一层都写着。
+           元素**自己**的 box-shadow 不受自己的 overflow 影响。
+
+        ⚠️ 而且 `::after` 那一格已经被深色玻璃的亮边环占着。
+        """
+        css = self.styles()
+        self.assertRegex(css, r"\.event-row > \.card \{[^}]*overflow:\s*hidden",
+                         "这条守卫的前提（卡片自己裁内容）没了，重新想一遍")
+        self.assertNotIn("is-picked > .card::", css)
+        self.assertNotIn("is-picked .card::", css)
+
+    def test_the_ring_is_remembered_by_event_not_by_page_number(self):
+        """🔴 记页码的话，筛选一变，同一个页码指向的是另一批人 ——
+           而高亮会安静地落在一个陌生的活动上。
+        """
+        js = self.source("assets", "js", "app.js")
+        self.assertIn("let pickedEvent = null;", js)
+        self.assertIn("row.dataset.event", js)

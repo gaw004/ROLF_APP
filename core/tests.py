@@ -613,6 +613,14 @@ class DocTestReferenceGuardTests(TestCase):
     ⚠️ The method has to live **in the class named**, not merely somewhere. A
        method that moved class is exactly the case the reader cannot resolve
        alone, and it is one of the two this test caught.
+
+    2026-08-18 — it now reads the **source** as well as the documents. The gap
+    was found the way these usually are: three dangling citations were written
+    into `assets/app.css` and `events/schedule.py` in one afternoon, by somebody
+    who had just read the commit that added this guard. Docs were checked;
+    comments were not, and a comment saying "守卫：X" is the same promise to the
+    same reader. Everything outside this session's three was already clean, so
+    turning it on cost nothing.
     """
 
     REFERENCE = re.compile(r"(?:[a-z_]+\.tests\.)?(\w*Tests)\.(test_[a-z0-9_]+)")
@@ -633,12 +641,27 @@ class DocTestReferenceGuardTests(TestCase):
                     re.findall(r"^    def (test_[a-z0-9_]+)\(", block.group(0), re.M))
         return suites
 
+    def cited_files(self):
+        """The documents, plus the source files that cite guards in comments.
+
+        ⚠️ `*/tests.py` is excluded, and not as an optimisation: those files are
+           full of bare `test_x` names being *defined*, and a test that renames
+           its own neighbour would then have to update a citation of itself.
+        """
+        root = Path(settings.BASE_DIR)
+        skip = {"node_modules", "staticfiles", ".venv", "migrations", "__pycache__"}
+        found = list(root.glob("docs/**/*.md"))
+        for pattern in ("*/*.py", "*/**/*.html", "assets/*.css", "assets/**/*.js"):
+            found += [path for path in root.glob(pattern)
+                      if not skip & set(path.parts) and path.name != "tests.py"]
+        return sorted(set(found))
+
     def test_every_cited_guard_exists(self):
         suites = self.suites()
         self.assertIn("MarkdownLinkGuardTests", suites, "no test suites were found")
 
         problems = []
-        for path in sorted(Path(settings.BASE_DIR).glob("docs/**/*.md")):
+        for path in self.cited_files():
             for number, line in enumerate(path.read_text().split("\n"), 1):
                 for suite, name in self.REFERENCE.findall(line):
                     where = f"{path.relative_to(settings.BASE_DIR)}:{number}"
@@ -2172,6 +2195,13 @@ class ScheduleShellTests(TestCase):
                      flags=re.S)
         self.assertIn("--top-bar-h: 4.25rem", css)   # 36 + 2 × 16
         self.assertIn("--top-bar-h: 4.75rem", css)   # 36 + 2 × 20
+
+        # ⚠️ 2026-08-18 起有**两处**声明它：日程面板，和日程开着时钉住的筛选卡。
+        #    两块并排的东西钉在不同的高度上是一眼看得出来的错位，而各改一处
+        #    不会报错。所以这里钉的是「所有声明只有这两个值」。
+        declared = set(re.findall(r"--top-bar-h:\s*([\d.]+rem)", css))
+        self.assertEqual(declared, {"4.25rem", "4.75rem"},
+                         "有人给 --top-bar-h 加了第三个值，钉在顶上的两块会错开")
 
     def test_the_panel_is_hidden_rather_than_merely_narrow(self):
         # A zero-width panel is still in the accessibility tree and still in the
@@ -3904,8 +3934,11 @@ class SharedFragmentGuardTests(TestCase):
         return re.sub(r"\{%\s*comment\s*%\}.*?\{%\s*endcomment\s*%\}",
                       "", self.markup(path), flags=re.S)
 
+    # ⚠️ 活动详情这一格指的是 `_event_detail_body.html`，不是 `event_detail.html`
+    #    （2026-08-18 正文抽出去了，因为日程面板里就地打开的是同一份）。
+    #    守的是那份**正文**，而不是外面那层壳 —— 壳里现在只有一个 include。
     SIGNUP_LISTS = [
-        Path("events") / "templates" / "events" / "event_detail.html",
+        Path("events") / "templates" / "events" / "_event_detail_body.html",
         Path("events") / "templates" / "events" / "event_registrations.html",
     ]
 

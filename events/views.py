@@ -43,6 +43,7 @@ from org.permissions import (
     ministry_ids_administered_by,
 )
 
+from . import schedule
 from .forms import (
     EventForm,
     EventPeriodForm,
@@ -163,7 +164,7 @@ EVENTS_PER_PAGE = 20
 MANAGED_EVENTS_PER_PAGE = 50
 
 
-def _page(request, events, per_page):
+def _page(request, events, per_page, number=None):
     """One page of a filtered list, ordered so that paging cannot lie.
 
     ⚠️ The ordering **must** end in a unique column. `-start_time` alone is not
@@ -175,9 +176,35 @@ def _page(request, events, per_page):
     ⚠️ The caller keeps the unpaginated queryset. The report is computed from
        **that**, not from this page: a figure that changed when you turned the
        page would mean nothing at all (D27).
+
+    ⚠️ `number` 覆盖 URL 上的 `?page=`（2026-08-18）。它只有一个调用方：日程上
+       点开一场活动时，左边要翻到**那一场所在的**那一页，而那一页是算出来的，
+       不是人点出来的。
     """
     ordered = events.order_by(*events.query.order_by, "-pk")
-    return Paginator(ordered, per_page).get_page(request.GET.get("page"))
+    return Paginator(ordered, per_page).get_page(number or request.GET.get("page"))
+
+
+def _page_holding(events, pk, per_page):
+    """Which page of that list the given event is on. None if it is not on any.
+
+    ⚠️ 这里**必须**用和 `_page` 一模一样的排序，包括结尾那个 `-pk` ——
+       少一截，一分钟内开始的两场活动在这里和在列表里的先后可以不同，
+       于是「跳到那一页」偶尔会跳到相邻的一页。看起来像随机失灵。
+
+    ⚠️ 全量取一次 pk 再 `.index()`，而不是用窗口函数数「有多少行排在它前面」。
+       理由和 forms.py 那条搜索一样：试点期只有几十场活动，这里没有东西要优化；
+       而窗口函数那一版要在两个地方各写一遍同样的排序，也就是上面那条注释
+       防的东西再多一份。
+
+    ⚠️ 返回 None 是一个**正常**结果，不是错误：日程画的是「那几天里全部的活动」，
+       而列表还带着筛选和「今天起」那一刀。两边天然可以不重合。
+    """
+    ordered = events.order_by(*events.query.order_by, "-pk")
+    keys = list(ordered.values_list("pk", flat=True))
+    if pk not in keys:
+        return None
+    return keys.index(pk) // per_page + 1
 
 
 def _my_contact(request):
@@ -217,23 +244,103 @@ def event_list(request):
     status, so the page says which of the two it is instead of hiding one.
     """
     period = EventPeriodForm(request.GET or None)
-    events = (
+    return render(request, _template(
+        request, "events/event_list.html", "events/_event_list_results.html"), {
+        "period": period,
+        **_listing(request, period),
+        # 右边那块日程。⚠️ 它和上面那个 `events` 是**两个不同的集合**，故意的：
+        #    列表是分页的二十条，日程是那几天的全部。两边共用的只有筛选。
+        **_schedule(request, period),
+        # 筛选是 HTMX 换掉 `#event-results`，而日程在那块外面 —— 所以筛选那一次
+        # 请求要把日程作为 out-of-band 的第二块一起带回去，否则右边还画着上一次
+        # 筛选的结果，而它看起来完全正常。
+        #
+        # ⚠️ 翻页走的也是这条路，于是也会重画一次日程。多余，但**不是错的**：
+        #    翻页的链接保留全部查询参数，所以重画出来的是同一个窗口。
+        #    分开处理要在这里判断请求来自哪个控件，而那比多渲染一块贵得多。
+        "schedule_oob": bool(request.headers.get("HX-Request")),
+        "schedule_partial": bool(request.headers.get("HX-Request")),
+    })
+
+
+def _visible_events(period):
+    """左边那一列列的是什么：筛完、排好，还没分页。
+
+    ⚠️ 单独一个函数，因为「第几页」要问它两次（先数出那一场排在第几，再取那
+       一页），而两次必须是**同一个查询** —— 各写一遍的话，两份筛选迟早不一样，
+       于是「跳到那一页」偶尔跳到相邻的一页，看起来像随机失灵。
+    """
+    return period.narrow(
         Event.objects.visible_to_volunteers()
         .from_today()
         .select_related("ministry", "event_type")
         .order_by("start_time")
     )
-    events = period.narrow(events)
-    page = _page(request, events, EVENTS_PER_PAGE)
-    return render(request, _template(
-        request, "events/event_list.html", "events/_event_list_results.html"), {
+
+
+def _listing(request, period, page_number=None):
+    """左边那一列的上下文。event_list 和日程点开的那一次共用。
+
+    ⚠️ 只返回**模板真的要用的**东西。未分页的那个查询集不在里面 —— 需要它的
+       是 `_page_holding`，而那是视图的事；塞进上下文就是把一个没人渲染的
+       完整集合递给模板，正是本文件第一条规矩防的那件事。
+    """
+    page = _page(request, _visible_events(period), EVENTS_PER_PAGE, number=page_number)
+    return {
         "events": page,
         "page": page,
-        "period": period,
         # R1, in the plainest possible form: how many, in the window they asked
         # for. ⚠️ The whole filtered set, not this page — "20 events" under a
         # filter that matched 180 would answer a question nobody asked.
         "total": page.paginator.count,
+    }
+
+
+def _schedule(request, period):
+    """右边那块日程的上下文。event_list 和 event_schedule 共用一份。
+
+    ⚠️ 共用，不是各建各的 —— `_template` 那条注释写的是同一件事：两个分支各自
+       建上下文，迟早会在某个筛选下画出两份不一样的日程，而两边都渲染成功。
+
+    ⚠️ 这里**只做取数和夹紧**，日期运算全在 events/schedule.py（本文件第三条
+       规矩：视图里不算术）。
+    """
+    filter_start, _ = period.bounds()
+    floor = schedule.floor_day(filter_start)
+    first = schedule.first_day(schedule.parse_day(request.GET.get("from")), floor)
+    days = schedule.window(first)
+    start, end = schedule.bounds(days)
+    # ⚠️ `visible_to_volunteers()`，和列表同一道门 —— 日程不是一条绕过草稿的
+    #    旁路。⚠️ 但**不带 `from_today()`**，理由 2026-08-18 换了一个：原来是
+    #    「那条按 start_time 切会切掉跨夜的活动」，而它现在按 end_time 切，
+    #    不再切掉了。剩下的理由是这一条：日程要的是**和窗口相交**的活动，
+    #    而窗口可以翻到下个月 —— 再叠一道「今天起」只会把它自己的下界抄第二遍。
+    events = period.narrow(
+        Event.objects.visible_to_volunteers().select_related("ministry"))
+    events = events.filter(start_time__lt=end, end_time__gte=start).order_by("start_time")
+    return {
+        "schedule_columns": schedule.columns(events, days),
+        "schedule_hours": schedule.hours(),
+        "schedule_nav": schedule.navigation(first, floor),
+        "schedule_from": first,
+        "schedule_day_px": schedule.DAY_PX,
+    }
+
+
+@login_required
+def event_schedule(request):
+    """箭头翻页时换掉的那一块。整页里的是同一份模板，同一份上下文。
+
+    ⚠️ 它是个**读**操作，所以按 D24 可以只有 HTMX 一条路 —— 但它偏偏也不需要：
+       箭头是真的 `<a href>`，没有 JS 时点下去整页重来，日程停在新的窗口上。
+    """
+    period = EventPeriodForm(request.GET or None)
+    return render(request, "events/_schedule.html", {
+        "period": period,
+        # 箭头翻页要顺手把筛选卡里那个隐藏的 `from` 也改掉，否则下一次筛选会
+        # 把窗口拽回起点 —— 见 _period_filter.html 里那一段。
+        "schedule_partial": True,
+        **_schedule(request, period),
     })
 
 
@@ -288,6 +395,17 @@ def event_detail(request, pk):
        adds `postponed` to it, a branch spelled `== DRAFT` would quietly publish
        that event to everybody while this comment still claimed otherwise.
     """
+    return render(request, "events/event_detail.html", _detail(request, pk))
+
+
+def _detail(request, pk):
+    """一场活动详情的上下文。整页和日程面板里那一份**共用**（2026-08-18）。
+
+    ⚠️ 共用的理由和模板那边一样，也和 `_template` 那条注释一样：两处各建一份，
+       迟早会在某个分支上说两件不一样的事，而两边都渲染成功。这里尤其要紧 ——
+       里面有 `preview` 和 `can_manage` 两个**权限**判断，而面板是一条新开的
+       取数路径。分叉在这里的名字叫「草稿从侧边栏漏出去了」。
+    """
     event = get_object_or_404(
         Event.objects.select_related("ministry", "event_type"), pk=pk)
     preview = event.status not in Event.VISIBLE_TO_VOLUNTEERS
@@ -301,7 +419,7 @@ def event_detail(request, pk):
             event_role__event=event, contact=contact,
         ).select_related("event_role__role")
     back_url, back_label = _back_link(request)
-    return render(request, "events/event_detail.html", {
+    return {
         "event": event,
         "roles": event.roles.with_signup_counts().select_related("role"),
         "mine": mine,
@@ -313,7 +431,41 @@ def event_detail(request, pk):
         "preview": preview,
         "back_url": back_url,
         "back_label": back_label,
+    }
+
+
+@login_required
+def event_detail_panel(request, pk):
+    """点日程上的一张卡时换进面板的那一块（2026-08-18）。
+
+    一次请求，两块东西：面板里的详情，以及**左边列表翻到那一场所在的那一页**
+    （out-of-band）。分成两次请求的话，两块会在慢网下先后落地，而中间那一下
+    是「右边已经是新活动、左边还高亮着上一个」。
+
+    ⚠️ 权限走 `_detail()`，和整页同一条 —— 面板是一条新开的取数路径，而新开的
+       取数路径正是权限最容易漏掉的地方。草稿在这里同样是 404。
+
+    ⭐ 它是**读**操作，所以按 D24 可以只有 HTMX 一条路。日程上那张卡仍然是一个
+       真的 `<a href>`，指向整页详情：没有 JS 时点下去就是整页跳过去。
+    """
+    period = EventPeriodForm(request.GET or None)
+    context = _detail(request, pk)
+    # ⚠️ 先算页码，再取那一页 —— 两次都用 `_listing` 的同一份查询。
+    #    算不出来（那一场不在左边的列表里）时 `page_number` 是 None，
+    #    `_page` 就退回默认的第一页，而下面 `picked` 也不会指向任何一行。
+    pk = context["event"].pk
+    number = _page_holding(_visible_events(period), pk, EVENTS_PER_PAGE)
+    context.update(_listing(request, period, page_number=number))
+    context.update({
+        "period": period,
+        "in_panel": True,
+        # 左边那一列作为 out-of-band 的第二块跟着回去。
+        "results_oob": True,
+        # 高亮哪一行。⚠️ 算不出页码时是 None —— 模板据此**不画**高亮，
+        #    而不是高亮一个碰巧在第一页的别人。
+        "picked_pk": pk if number else None,
     })
+    return render(request, "events/_schedule_detail.html", context)
 
 
 @login_required

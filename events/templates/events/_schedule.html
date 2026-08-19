@@ -1,0 +1,167 @@
+{% comment %}
+日程本体（2026-08-18）。整页渲染和箭头翻页换的是同一份，同一份上下文 ——
+理由和 views._template 那条注释一样：两份迟早会在某个筛选下画出不一样的东西，
+而两边都渲染成功。
+
+参数（全部由 views._schedule 给）：
+  schedule_columns   一天一列
+  schedule_hours     左边那条刻度
+  schedule_nav       三档屏幕各自的一对箭头
+  schedule_from      当前窗口的第一天
+  schedule_day_px    一天多高
+  schedule_oob       真值 → 整块作为 out-of-band 贴回去（筛选那条路）
+  schedule_partial   真值 → 这次是 HTMX 片段，要顺手改掉筛选卡里那个隐藏的 from
+
+⚠️ 一天 24 小时全画（2026-08-18 拍板，原本只打算画 12pm 之后）。装不下的部分
+   由**里面**那个 `.schedule-scroll` 滚，不是把面板撑高 —— 面板是一屏，
+   这条写在 app.css 的 `.schedule-panel` 上，是那一批的交付物本身。
+{% endcomment %}
+<div id="schedule" class="schedule" data-schedule
+     {% if schedule_oob %}hx-swap-oob="true"{% endif %}>
+
+  {% comment %}
+  翻页那一行。三对箭头，一档一对，CSS 只显示其中一对。
+
+  🔴 **一次翻几天 = 那一档看得见几列**，而看得见几列是 CSS 说了算的 ——
+     所以目标日期只能由服务端算好三份。让 JS 去 `+4 天` 的话，那个日期没有
+     任何测试看得见，而算错一天的表现是「按一下跳过了一天」，不会有人报上来。
+     （前端不做日期运算，phase-c.md 三。）
+
+  ⭐ 箭头是**真的链接**：`href` 指向整页，`hx-get` 只换这一块。关掉 JS
+     照样翻，只是整页重来（D24 的渐进增强）。
+  {% endcomment %}
+  <div class="schedule-nav">
+    {% for tier in schedule_nav %}
+      <div class="schedule-nav-tier schedule-nav-tier--{{ tier.days }}">
+        {% if tier.prev %}
+          <a class="schedule-arrow"
+             href="{% url 'events:event_list' %}{% querystring from=tier.prev %}"
+             hx-get="{% url 'events:event_schedule' %}{% querystring from=tier.prev %}"
+             hx-target="#schedule" hx-swap="outerHTML"
+             hx-replace-url="{% url 'events:event_list' %}{% querystring from=tier.prev %}"
+             aria-label="Earlier days">&lsaquo;</a>
+        {% else %}
+          {% comment %}
+          ⚠️ 到头时是一个**画出来但按不动**的 span，不是把箭头拿掉。位置一变，
+             另一颗箭头就会跟着挪 —— 而那一颗此刻正在被人连着点。
+          {% endcomment %}
+          <span class="schedule-arrow is-spent" aria-hidden="true">&lsaquo;</span>
+        {% endif %}
+
+        <span class="schedule-range">{{ schedule_from|date:"M j" }} &ndash; {{ tier.upto|date:"M j" }}</span>
+
+        <a class="schedule-arrow"
+           href="{% url 'events:event_list' %}{% querystring from=tier.next %}"
+           hx-get="{% url 'events:event_schedule' %}{% querystring from=tier.next %}"
+           hx-target="#schedule" hx-swap="outerHTML"
+           hx-replace-url="{% url 'events:event_list' %}{% querystring from=tier.next %}"
+           aria-label="Later days">&rsaquo;</a>
+      </div>
+    {% endfor %}
+  </div>
+
+  {% comment %}
+  星期那一行。⚠️ 它在滚动区**外面**：滚到晚上的时候，写着哪一天的那一行必须
+     还在 —— 一屏没有表头的格子说不出自己是哪天。
+  {% endcomment %}
+  <div class="schedule-head">
+    <span class="schedule-gutter" aria-hidden="true"></span>
+    {% for column in schedule_columns %}
+      <div class="schedule-day{% if column.is_today %} is-today{% endif %}">
+        <span class="schedule-day-name">{{ column.day|date:"D" }}</span>
+        <span class="schedule-day-date">{{ column.day|date:"n/j" }}</span>
+      </div>
+    {% endfor %}
+  </div>
+
+  <div class="schedule-scroll" data-schedule-scroll>
+    {% comment %}
+    ⚠️ 高度写在 style 里而不是 CSS 里：它 = 24 × 每小时的像素，而那个数在
+       events/schedule.py。写死在两个地方的表现是卡片和刻度差半格。
+    {% endcomment %}
+    <div class="schedule-grid" style="height: {{ schedule_day_px }}px">
+      <div class="schedule-gutter">
+        {% for hour in schedule_hours %}
+          <span class="schedule-hour" style="top: {{ hour.top }}px">{{ hour.label }}</span>
+        {% endfor %}
+      </div>
+
+      {% for column in schedule_columns %}
+        <div class="schedule-col{% if column.is_today %} is-today{% endif %}">
+          {% for card in column.cards %}
+            {% comment %}
+            ⚠️ 整张卡是一个链接，不是「卡里有一个链接」：160px 宽的东西上再放
+               一个小链接，手指点不中。
+
+            ⚠️ `--depth` 是偏移的档数，像素在 CSS 里。重叠的规则是逻辑（谁压着谁）、
+               偏多远是设计，两件事分开放。
+            {% endcomment %}
+            <a class="schedule-card{% if card.is_cancelled %} is-cancelled{% else %} schedule-card--{{ card.colour }}{% endif %}{% if card.is_past %} is-past{% endif %}"
+               href="{% url 'events:event_detail' card.event.pk %}"
+               {% comment %}
+               ⚠️ `href` 指向整页详情，`hx-get` 就地在面板里开 —— 没有 JS 时
+                  点下去是整页跳转（D24 的渐进增强），有 JS 时页面不动。
+
+               ⚠️ 查询串跟着一起送（`{% templatetag openblock %} querystring {% templatetag closeblock %}`）：那一次请求还要
+                  算「这一场在左边列表的第几页」，而那取决于当前的筛选。
+                  不送的话左边会翻到「未筛选状态下的第几页」，也就是错的一页。
+
+               ⚠️ `x-on:click` 只翻 Alpine 那个布尔，不碰 DOM。它和 hx-get 是
+                  两件事：一个管「露哪一块」，一个管「那一块里是什么」。
+               {% endcomment %}
+               hx-get="{% url 'events:event_detail_panel' card.event.pk %}{% querystring %}"
+               hx-target="#schedule-detail" hx-swap="innerHTML"
+               x-on:click="detail = true"
+               style="top: {{ card.top }}px; height: {{ card.height }}px; --depth: {{ card.depth }}"
+               data-schedule-card data-event="{{ card.event.pk }}"
+               data-start="{{ card.start_ms }}" data-end="{{ card.end_ms }}">
+              <span class="schedule-card-name">{{ card.event.name }}</span>
+              {% comment %}
+              ⚠️ 跨夜的那一段在两列里各有一张卡，而两张写的都是**整场**活动的
+                 起止。第二天那张写「12am – 1am」是错的：人是拿这行字安排时间的。
+                 箭头说明它是从哪一边延过来的。
+              {% endcomment %}
+              <span class="schedule-card-time">
+                {% if card.continues_before %}&larr;&nbsp;{% endif %}{{ card.label }}{% if card.continues_after %}&nbsp;&rarr;{% endif %}
+              </span>
+            </a>
+          {% endfor %}
+
+          {% if column.now_top is not None %}
+            {% comment %}
+            红线。⚠️ 只有今天那一列有 —— 一条画在明天上的「现在」是一句假话。
+            ⚠️ `data-day-start` 是这一列零点的 epoch 毫秒。app.js 用它算位置，
+               于是**不需要知道浏览器在哪个时区**：差值是绝对的。
+               直接在浏览器里取本地午夜的话，一个在纽约的志愿者看到的红线会
+               差三个小时，而基金会的时区是洛杉矶（D16）。
+            {% endcomment %}
+            <div class="schedule-now" data-schedule-now
+                 data-day-start="{{ column.day_start_ms }}"
+                 style="top: {{ column.now_top }}px">
+              {% comment %}
+              「还剩多久」挂在**线**上，不在卡上：线同时压着三张卡时，一卡一个
+              倒计时就是三个互相矛盾的数字并排。写的是最快结束的那一场。
+              服务端渲染打开页面那一刻的值，app.js 每 30 秒重写 —— 没有 JS 的人
+              看到的是一个静止但正确的数。
+              ⚠️ 压不到任何卡时这个 span 不渲染，不是渲染成空的。
+              {% endcomment %}
+              {% if column.now_left %}
+                <span class="schedule-now-left" data-schedule-left>{{ column.now_left }}</span>
+              {% endif %}
+            </div>
+          {% endif %}
+        </div>
+      {% endfor %}
+    </div>
+  </div>
+</div>
+{% if schedule_partial %}
+  {% comment %}
+  ⚠️ 筛选卡里那个隐藏的 `from` 要跟着改。理由和它旁边 `scope` 那一段一模一样：
+     `method="get"` 的表单提交时只带**它自己的字段**，所以窗口位置必须以字段的
+     形式待在表单里，否则翻到第三屏之后随便改一个筛选，日程就自己弹回起点。
+     这里用 out-of-band 把它同步过去 —— 它在 `#schedule` 外面，换不到。
+  {% endcomment %}
+  <input type="hidden" name="from" id="schedule-from"
+         value="{{ schedule_from|date:'Y-m-d' }}" hx-swap-oob="true">
+{% endif %}

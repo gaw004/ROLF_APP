@@ -57,26 +57,54 @@
       </div>
 
       {% comment %}
-      日程面板。**现在还是一个占位框**（2026-08-17）—— 这一批只做按钮和让位的
-      动画，日历本身还没定形，先把它要住的地方腾出来、量出来。
+      日程面板（2026-08-18 画上内容，此前是一个虚线占位框）。
 
-      ⚠️ `aria-label` 而不是 `<h2>`：这一块目前没有内容，一个指向空盒子的标题
-         在读屏的标题列表里是一条死线索。真画上日历时这里换成带标题的结构。
+      ⚠️ `aria-labelledby` 指向里面那个只给读屏看的 `<h2>`。占位框那一版用的是
+         `aria-label`，因为一个指向空盒子的标题在读屏的标题列表里是条死线索 ——
+         现在里面有东西了，标题就该是真的标题。
 
       ⚠️ 关着的时候是 `visibility: hidden`（在 app.css 里），不是只有宽度为 0 ——
-         宽度为 0 的东西仍然在无障碍树和 Tab 顺序里，将来日历上的按钮会变成
-         一串按不到、也看不见的焦点。
+         宽度为 0 的东西仍然在无障碍树和 Tab 顺序里，而日程上现在有箭头和
+         几十张卡片，那会是一长串按不到也看不见的焦点。
+
+      ⚠️ 面板自己**不滚**（app.css 上是 `overflow: hidden`）。滚的是里面那一层，
+         见 `_schedule.html`。这两件事分开，是「日程是一屏」那条决定的落点。
       {% endcomment %}
-      <aside id="schedule-panel" class="schedule-panel" aria-label="Schedule">
-        <div class="schedule-placeholder" data-size-readout>
-          <span>Schedule</span>
-          {% comment %}
-          ⚠️ 这行数字由 JS 填（app.js 的「占位框的尺寸读数」）。服务端填不了 ——
-             它取决于视口宽度。没有 JS 时留一个破折号，而不是留空：
-             空的话看起来像这里本该有字但没渲染出来。
-          {% endcomment %}
-          <span class="schedule-placeholder-size" data-size-readout-value>&mdash;</span>
+      <aside id="schedule-panel" class="schedule-panel card"
+             aria-labelledby="schedule-heading"
+             x-data="{ detail: false }">
+        <h2 id="schedule-heading" class="sr-only">Schedule</h2>
+
+        {% comment %}
+        面板里两块，同一时刻只露一块（2026-08-18）。
+
+        🔴 **日程那一块是藏起来，不是换掉。** 关掉详情时回到的必须是你翻到的
+           那个窗口、那个滚动位置 —— 重新取一次的话，人会发现自己被送回了今天。
+           代价：那块 DOM 一直在（几十张卡片），换来的是「关掉 = 回到原处」。
+
+        ⚠️ `x-show` 用的是 `display: none`，所以藏起来的那一块不在无障碍树里，
+           也不在 Tab 顺序里。
+
+        ⚠️ `x-data` 挂在**面板**上，不在里面任何一块上：`#schedule` 会被箭头
+           翻页整个换掉，`#schedule-detail` 会被每次点击换掉 —— 状态写在被换掉
+           的那块上，等于每换一次自己归零一次。和外层 shell 上那个 `schedule`
+           是同一条规矩。
+
+        ⚠️ 不需要 `x-cloak`：没有 JS 时两块都显示，而详情那块是空的 ——
+           也就是和现在一模一样。
+        {% endcomment %}
+        <div class="schedule-pane" x-show="!detail">
+          {% include "events/_schedule.html" %}
         </div>
+        {% comment %}
+        ⚠️ HTMX 的靶子**就是这一层**，中间不再套一个 div（2026-08-18 改）。
+           套一层的代价不是多一个节点：那一层高度是 auto，于是里面
+           `.schedule-detail` 的 `height: calc(100% / …)` 落在一个 auto 上、
+           整条失效 —— 详情只占面板的一半高，长活动的下半截被面板的
+           `overflow: hidden` 裁掉，**而且滚不到**。屏幕上看起来只是「这个活动
+           没写那么多」。
+        {% endcomment %}
+        <div class="schedule-pane" id="schedule-detail" x-show="detail"></div>
       </aside>
     </div>
   </div>

@@ -152,9 +152,11 @@ class EventQuerySet(models.QuerySet):
     #    mistake is the one R1 recorded, where in_period() sat here with no
     #    caller but the tests and the requirement went unanswered for a month.
     #
-    #    They asked a third question, and that question no longer has a page:
-    #    "is it over yet". What the interface asks now is "which day is it on",
-    #    which is from_today() below.
+    #    ⚠️ 2026-08-18: from_today() below now reads end_time, so it is much
+    #       closer to the `past()` those two deleted predicates split badly —
+    #       and that is the point. Splitting "is it over" across two predicates
+    #       read off two columns is what left a running overnight event falling
+    #       between them. One predicate, one column, one question.
 
     def from_today(self, today=None):
         """Today's events and everything after them — what /events/ is a list of.
@@ -166,25 +168,40 @@ class EventQuerySet(models.QuerySet):
            ended — and the schedule drawn beside it would be showing today with
            its morning missing.
 
-        ⚠️ Read off start_time, so "which day is this event on" is answered by
-           the same column in_period() slices R1 by. The cost, stated: an
-           overnight event that began yesterday and ends this morning counts as
-           yesterday's and leaves at midnight with the rest of yesterday.
+        🔴 **Read off end_time (2026-08-18), not start_time.** The question this
+           answers is "is it still to come, or still going", and end_time is the
+           column that knows. One row of behaviour changed: an event that began
+           at 22:00 yesterday and ends at 02:00 this morning is **in** — it used
+           to drop off the page at midnight while it was still running, and the
+           schedule beside the list drew it on today's column the whole time,
+           so clicking it led to a row the list did not have.
 
-        🔴 **"Which day is it on" and "is it over yet" are two questions, and
-           this method only answers the first.** They come apart on exactly the
-           events where it matters: one that started this morning and runs
-           until tonight is on today (in) and not over (also in, by luck); one
-           that started last night and ends this morning is on yesterday (out)
-           and not over (which this does not ask). Writing the second question
-           as this one's complement is the trap the deleted upcoming()/past()
-           pair was written to avoid — and their comment said so, right up to
-           the day their last caller went away.
+           ⚠️ The comment this replaced argued that end_time "would keep last
+              month's three-day trip on the page for as long as it ran over".
+              That conflated two things: reading end_time, and keeping finished
+              events. A trip that ended last month has `end_time` in the past,
+              so it is out — by this predicate, on the first evaluation. What
+              stays is a multi-day event **while it is still running**, which is
+              the correct answer to "what is on".
 
-        ⚠️ Midnight comes from core.timeutils, never from a naive datetime —
-           D16, and there is a grep guard on it.
+           The cost, stated: such an event sits on the list every day until it
+           ends, and because the page orders by start_time it sorts to the
+           **top** — above things starting later today. That is deliberate; it
+           is the one still in progress.
+
+        ⚠️ So this no longer slices on the same column in_period() does. The two
+           are answering different questions and always were: R1 asks "which
+           events ran in this window" (start_time, matching how a report counts
+           them), this asks "what is on from today". Reading them off one column
+           is what made the overnight case wrong.
+
+        ⚠️ The filter column is **not** the indexed one any more (the indexes are
+           on start_time, and on (status, start_time)). Left alone deliberately:
+           the pilot has tens of events, so there is nothing to optimise yet —
+           the same call this file's search filter makes. When there is, the
+           index to add is (status, end_time), not one on end_time alone.
         """
-        return self.filter(start_time__gte=day_start(today or local_today()))
+        return self.filter(end_time__gt=day_start(today or local_today()))
 
     def in_period(self, start, end):
         """R1: the events that ran in a window, half-open [start, end).

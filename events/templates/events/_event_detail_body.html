@@ -1,0 +1,184 @@
+{% comment %}
+活动详情的正文。**两处渲染，同一份**（2026-08-18 抽出来）：
+
+  · `event_detail.html` —— 整页
+  · `_schedule_detail.html` —— Events 页右边那张日程卡片里就地打开的那一份
+
+⚠️ 抽出来的理由不是复用，是**不许有第二份**。一份「面板专用的精简详情」会在
+   第二次改动之后和整页说两件不一样的事，而两边都渲染得好好的。日程那边靠
+   `zoom` 把这一份塞进 680px（见 app.css 的 `.schedule-detail`），
+   不靠删内容。
+
+参数：
+  in_panel  真值 → 这一份画在日程面板里。它只关掉一样东西，见下面那条注释。
+{% endcomment %}
+  {% comment %}
+  草稿预览的警示框（2026-08-06）。
+
+  ⚠️ **在页面最顶端，在返回链接之上。** 它要回答的问题是「我现在看到的这一页
+     算不算数」，而那个问题必须在人开始读内容之前就答完 —— 放在卡片下面的话，
+     一个 admin 会先把整页当成已发布的读完，再发现它不是。
+
+  ⚠️ `preview` 由视图给，模板不自己判 `event.status == "draft"`。
+     判据挂在 models.py 的 VISIBLE_TO_VOLUNTEERS 上，只有一份，理由写在视图里。
+
+  ⚠️ 没有加 role="alert" / role="status"。这不是「刚刚发生了什么」，
+     是这一页本来就长这样 —— live region 是给动态插进来的东西用的，
+     给静态内容挂上去只会让读屏软件在进页面时打断一次。它是正文的一部分，
+     所以写成正文：颜色之外，字本身把话说全了。
+
+  ⚠️ 「card + 彩色边」必须显式写 `border` —— 卡片自己没有边框了（2026-08-06），
+     `border-warning-fg/30` 只给颜色不给宽度。守卫在 core.tests.BorderlessCardTests。
+  {% endcomment %}
+  {% if preview %}
+    <div class="card mb-4 border border-warning-fg/30 bg-warning-bg dark:border-warning-fg-dark/30 dark:bg-warning-bg-dark">
+      <h2 class="text-lg font-semibold text-warning-fg dark:text-warning-fg-dark">
+        Preview — not published
+      </h2>
+      <p class="mt-2 text-sm text-warning-fg dark:text-warning-fg-dark">
+        This event is <strong>{{ event.get_status_display }}</strong>, so volunteers
+        cannot see this page and nobody can sign up. This is how it will read once
+        you publish it.
+      </p>
+      {% comment %}
+      ⚠️ 这条链接只对能管这场活动的人画。foundation tier 读得了这一页，
+         但 Edit 页对它是 403 —— 画一个拒绝点它的人的链接，读起来是「站坏了」，
+         而不是「这一页不归你」。同 _event_nav.html 里那条规矩。
+      {% endcomment %}
+      {% if can_manage %}
+        <p class="mt-3 text-sm">
+          <a href="{% url 'events:event_update' event.pk %}" class="prose-link">
+            Edit &amp; Roles</a> — change the status there to publish it.
+        </p>
+      {% endif %}
+    </div>
+  {% endif %}
+
+  {% comment %}
+  ⚠️ 返回哪里由**来路**决定，不由身份决定（2026-08-05 改）。
+
+     原来这条链接只看「能不能管理这场活动」，于是一个 ministry admin 从
+     /events/ 点进来，返回按钮把他扔回管理列表 —— 他从来没去过那一页。
+
+     视图的 _back_link() 算好 URL 和文案再交过来。模板不认 ?from=，
+     更不会把它当 URL 用：那个参数只是一个键，映射表写在视图里。
+  {% endcomment %}
+  {% comment %}
+  ⚠️ 面板里**不画这条返回链接**（2026-08-18）—— 它是这一份在两处唯一的差别。
+     在面板里它会把整页导航走，而人只是想关掉右边那一块；关掉那件事由面板
+     右上角那颗 × 负责，就在几十像素之外。
+     两条「回去」的路并排放着、一条会把页面整个换掉，是这一页最容易点错的东西。
+  {% endcomment %}
+  {% if not in_panel %}
+    <p class="mb-4 text-sm">
+      <a href="{{ back_url }}" class="prose-link">&larr; {{ back_label }}</a>
+    </p>
+  {% endif %}
+
+  <div class="card">
+    <div class="flex flex-wrap items-start justify-between gap-3">
+      <h1 class="text-2xl font-semibold">{{ event.name }}</h1>
+      {% include "core/components/badge.html" with label=event.get_status_display %}
+    </div>
+    <dl class="mt-4 grid gap-x-6 gap-y-2 text-sm sm:grid-cols-2">
+      <div>
+        <dt class="text-xs text-ink-600 dark:text-ink-300">Ministry</dt>
+        <dd>
+          {% comment %}
+          ⚠️ 有 website 才渲染成链接，没有就是纯文本 —— **不放占位链接**。
+             一个点了不动的链接读起来不是「这个还没做」，是「这个站坏了」，
+             而 C0.5 整整一步就是在修同一件事。这个字段由基金会自己在 admin 里填。
+
+          ⚠️ 外链要 rel="noopener noreferrer"：少了 noopener，被打开的那个站
+             能通过 window.opener 把这一页导航去别处（反向标签页劫持），
+             而这件事**在本页上看不出任何异常**。
+          {% endcomment %}
+          {% if event.ministry.website %}
+            <a href="{{ event.ministry.website }}" class="prose-link"
+               target="_blank" rel="noopener noreferrer">{{ event.ministry.name }}</a>
+          {% else %}
+            {{ event.ministry.name }}
+          {% endif %}
+        </dd>
+      </div>
+      <div>
+        <dt class="text-xs text-ink-600 dark:text-ink-300">When</dt>
+        <dd>{{ event.start_time }} &ndash; {{ event.end_time }}</dd>
+      </div>
+      {% if event.location %}
+        <div>
+          <dt class="text-xs text-ink-600 dark:text-ink-300">Where</dt>
+          <dd>{{ event.location }}</dd>
+        </div>
+      {% endif %}
+    </dl>
+    {% if event.description %}
+      <p class="mt-4 text-sm text-ink-800 dark:text-ink-100">{{ event.description }}</p>
+    {% endif %}
+  </div>
+
+  <h2 class="mb-3 mt-8 text-lg font-semibold">Roles</h2>
+  {% comment %}
+  零报名的工种照样出现在这张表里 —— 那正是 EventRole 这张表存在的理由。
+  数字来自 with_signup_counts()，不是每行查一次。
+  {% endcomment %}
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Role</th><th>Wanted</th><th>Signed up</th></tr></thead>
+      <tbody>
+        {% for role in roles %}
+          <tr>
+            <td>{{ role.role.name }}</td>
+            <td>{{ role.needed_count|default_if_none:"No limit" }}</td>
+            <td>{{ role.registered_count }}</td>
+          </tr>
+        {% empty %}
+          <tr><td colspan="3" class="text-ink-600 dark:text-ink-300">No roles opened yet.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  {% if mine %}
+    <h2 class="mb-3 mt-8 text-lg font-semibold">What you signed up for</h2>
+    <ul class="space-y-2">
+      {% for row in mine %}
+        <li class="card flex flex-wrap items-center justify-between gap-2 text-sm">
+          <span>{{ row.event_role.role.name }}</span>
+          {% include "events/_status_badge.html" %}
+        </li>
+      {% endfor %}
+    </ul>
+  {% endif %}
+
+  <div class="mt-8">
+    {% if can_sign_up %}
+      {% url 'events:event_signup' event.pk as signup_url %}
+      {% include "core/components/button.html" with label="Sign up" href=signup_url variant="primary" %}
+    {% elif preview %}
+      {% comment %}
+      预览时按钮**照画**，只是灰掉、点不动、也进不了 Tab 顺序。
+
+      ⚠️ 理由是这一页存在的全部意义：admin 要看的是志愿者会看到什么，
+         而报名按钮是这一页上最重要的那个东西。整块藏掉的话，唯一看不出来的
+         恰好是「发布之后这里长什么样」。
+
+      ⚠️ 另一条分支那段文字对 admin 是驴唇不对马嘴 —— 它写的是「你已经报的名
+         还在 My signups 里，可以去那儿取消」，而草稿上根本不可能有任何报名。
+
+      ⚠️ disabled 是**展示**，不是权限。真正拦住报名的是 event_signup 视图的
+         open_for_signup()：草稿在那里是 404，不管这个按钮画成什么样。
+      {% endcomment %}
+      {% include "core/components/button.html" with label="Sign up" variant="primary" type="button" disabled=True %}
+      <p class="mt-2 text-sm text-ink-600 dark:text-ink-300">
+        Volunteers will see this button once you publish the event.
+      </p>
+    {% else %}
+      <p class="text-sm text-ink-600 dark:text-ink-300">
+        This event is not taking signups ({{ event.get_status_display }}). Anything you
+        already signed up for is still under
+        <a href="{% url 'events:my_participations' %}" class="prose-link">My signups</a>,
+        where you can cancel it.
+      </p>
+    {% endif %}
+  </div>

@@ -5,7 +5,7 @@ event_list 的结果区。整页和 HTMX 片段渲染的是同一份 —— 视�
 ⚠️ 条数用 {{ total }}，不是 {{ events|length }}。模板自己数的话，数的可能是
    另一个集合 —— 比如某天有人在循环里加了 {% if %}。R1 的答案不能是这么来的。
 {% endcomment %}
-<div id="event-results">
+<div id="event-results"{% if results_oob %} hx-swap-oob="true"{% endif %}>
   {% comment %}
   ⚠️ 不再写「open for signup」（2026-08-17）。这一页从今天零点起列**全部**
      对志愿者可见的活动，里面有满员的、有取消的、还有今天上午已经跑完的 ——
@@ -50,7 +50,17 @@ event_list 的结果区。整页和 HTMX 片段渲染的是同一份 —— 视�
       ⚠️ `--i` 是这一张卡的序号，逐个入场的延迟由它算（在 app.css 里，不在 JS 里）。
          和菜单那一套用同一个变量名和同一个节奏。
       {% endcomment %}
-      <li class="event-row scroll-breathe relative flex items-stretch gap-6"
+      {% comment %}
+      ⚠️ `data-event` 是**给 JS 找回这一行**用的钩子（2026-08-18）：日程上点了
+         哪一场，左边就给哪一行套高亮圈、并滚进视口。用 pk 而不是序号 ——
+         序号一翻页就换了个人。
+
+      ⚠️ 高亮**同时**由两边给：服务端在这一次请求里画上 `is-picked`（于是没有
+         那 30ms 的空窗），app.js 在之后每一次筛选/翻页之后再补一次（于是它
+         活得比这一次响应长）。两处写的是同一个 class，不是两套。
+      {% endcomment %}
+      <li class="event-row scroll-breathe relative flex items-stretch gap-6{% if event.pk == picked_pk %} is-picked{% endif %}"
+          data-event="{{ event.pk }}"
           style="--i: {{ forloop.counter0 }}">
         {% comment %}
         ⚠️ 这个 div 上**没有尺寸工具类**，是故意的。尺寸全在 app.css 的
@@ -147,3 +157,18 @@ event_list 的结果区。整页和 HTMX 片段渲染的是同一份 —— 视�
   </ul>
   {% include "core/components/pagination.html" %}
 </div>
+{% if schedule_oob %}
+  {% comment %}
+  筛选那一次请求换掉的是上面这块 `#event-results`，而日程在它**外面** ——
+  所以日程作为 out-of-band 的第二块跟着回去（2026-08-18）。少了这一段，
+  筛完之后左边是新结果、右边还是上一次的日程，而两边各自看起来都正常。
+
+  ⚠️ 它在 `#event-results` 的**外面**、和它平级：htmx 只在响应的顶层找
+     `hx-swap-oob`。写进那个 div 里面的话不报错，它会被当成普通内容贴进列表里 ——
+     于是一整块日程出现在活动卡片中间。
+
+  ⚠️ 只在 HTMX 请求里渲染（`schedule_oob` 由视图给）。整页渲染时这一份是多余的，
+     而且会把日程画两遍。
+  {% endcomment %}
+  {% include "events/_schedule.html" %}
+{% endif %}

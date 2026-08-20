@@ -20,6 +20,26 @@ from org.permissions import ministry_ids_administered_by
 from .models import Event, EventRole, Participation, ParticipationRole
 
 
+class RoleChoiceField(forms.ModelChoiceField):
+    """The role dropdown, with "— full" on the ones that cannot take anybody.
+
+    ⚠️ Full roles are **listed, not hidden** (2026-08-19). Dropping them would
+       leave somebody looking at a dropdown missing the job they came to do,
+       with nothing on the page saying why — and an event whose roles are all
+       full would show an empty box. Saying "full" answers the question the
+       absence would raise.
+
+    ⚠️ This is the label only. The refusal itself is `services.sign_up()`'s, and
+       it has to be: this form is not the only door (an admin entering somebody
+       from a paper list meets the same rule), and the last place can go between
+       this page being drawn and the button being pressed.
+    """
+
+    def label_from_instance(self, obj):
+        label = super().label_from_instance(obj)
+        return f"{label} — full" if obj.is_full else label
+
+
 class SignUpForm(forms.Form):
     """Pick a role, and — for a minor — record the guardian's consent.
 
@@ -29,7 +49,7 @@ class SignUpForm(forms.Form):
     paper list. The form only decides what to draw.
     """
 
-    event_role = forms.ModelChoiceField(queryset=EventRole.objects.none(), label="Role")
+    event_role = RoleChoiceField(queryset=EventRole.objects.none(), label="Role")
 
     # The short path, and the one most minors will take: their emergency
     # contact is already on file, so re-typing a guardian's name and number at
@@ -82,7 +102,11 @@ class SignUpForm(forms.Form):
         self.event = event
         self.contact = contact
         self.fields["event_role"].queryset = (
-            event.roles.select_related("role").order_by("role__name")
+            # ⚠️ `with_signup_counts()` 是为了那个 "— full" 后缀能问出答案来
+            #    （2026-08-19）。不带它的话每个选项各查一次，而这里正好是一个
+            #    循环里的每一行。
+            event.roles.with_signup_counts()
+            .select_related("role").order_by("role__name")
         )
         # Asked through services, so the form and the two service-layer gates
         # cannot answer it differently — an event that waives the rule must
@@ -405,7 +429,9 @@ class EventRoleForm(forms.ModelForm):
 
     class Meta:
         model = EventRole
-        fields = ["role", "needed_count", "notes"]
+        # ⚠️ `stop_at_needed_count` 排在数字后面，因为它讲的是那个数字
+        #    （2026-08-19）。它默认勾上 —— 理由写在模型上，那是唯一的一份。
+        fields = ["role", "needed_count", "stop_at_needed_count", "notes"]
 
     def __init__(self, *args, event, **kwargs):
         super().__init__(*args, **kwargs)
@@ -419,7 +445,29 @@ class EventRoleForm(forms.ModelForm):
         #    new kind of role" three boxes below the one it replaces — far
         #    enough down that it reads as a fourth thing to fill in rather than
         #    as the other half of a choice.
-        self.order_fields(["role", "new_role_name", "needed_count", "notes"])
+        self.order_fields(
+            ["role", "new_role_name", "needed_count", "stop_at_needed_count", "notes"])
+
+    def _get_validation_exclusions(self):
+        """Keep `event` in play, so "that role is already open" is checked here.
+
+        🔴 Same trap as ProfileForm's names and EmergencyContactForm's
+           duplicate, found in the same audit (2026-08-19).
+           `eventrole_unique_per_event` spans (event, role); `event` is set on
+           the instance above rather than rendered; and Django skips any
+           constraint mentioning a field it excluded from validation. So
+           opening the same role twice on one event validated cleanly and
+           raised IntegrityError at the INSERT — a 500 on the Edit & Roles
+           page, reachable by ordinary use of the dropdown right above it.
+
+        ⚠️ Note what this does **not** do: the duplicate-*vocabulary* check in
+           clean() below stays exactly where it is. That one is about two rows
+           in ParticipationRole meaning one job, which no constraint expresses
+           (it is a normalised-name comparison). This is about one row twice.
+        """
+        exclude = super()._get_validation_exclusions()
+        exclude.discard("event")
+        return exclude
 
     def clean(self):
         cleaned = super().clean()

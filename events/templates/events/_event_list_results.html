@@ -119,7 +119,8 @@ event_list 的结果区。整页和 HTMX 片段渲染的是同一份 —— 视�
                「这场可以报」，那件事由页面上那颗 Sign up 按钮说。
                语气跟着「这一页在问什么」走，这是 `_status_badge.html` 写下的规矩。
 
-            ⚠️ 文字走 `get_status_display`，不在模板里拼 —— label 的英文口径归模型管。
+            ⚠️ 文字走 `status_label`，不在模板里拼 —— label 的英文口径归模型管。
+               （2026-08-19 从 `get_status_display` 换过来的，理由见那个 property。）
             {% endcomment %}
             {% comment %}
             🔴 **「Open for signup」那一格是一个链接，直通报名**（2026-08-19）。
@@ -128,9 +129,11 @@ event_list 的结果区。整页和 HTMX 片段渲染的是同一份 —— 视�
             于是它同时也是最短的一条路：点它直接开报名表单，不必先读一遍详情
             再去找按钮。宽屏在右面板里开，窄屏跳整页报名（和整卡点击同一个判据）。
 
-            ⚠️ **只有 `open` 那一档是链接。** 其余状态照旧是纯文字标签 ——
+            ⚠️ **只有还能报的那一档是链接。** 其余状态照旧是纯文字标签 ——
                一个点了会 404 的标签（满员、已取消、已结束在 `open_for_signup()`
                那道门前都是 404）读起来是「站坏了」，而不是「这场报不了」。
+               ⚠️ 「还能报」是 `is_open_for_signup`，不是 `status == "open"`：
+                  活动结束之后 `open` 仍然会挂在那儿，而那道门已经关了。
 
             🔴 **它能不能被点到，全靠 app.css 里那两条 `pointer-events`。**
                整卡的点击区（`.event-row-link`）是一层铺满整行的绝对定位元素，
@@ -150,7 +153,17 @@ event_list 的结果区。整页和 HTMX 片段渲染的是同一份 —— 视�
                「Open for signup」——分不出是哪一场。
             {% endcomment %}
             <span class="shrink-0">
-              {% if event.status == "open" %}
+              {% comment %}
+              🔴 判据是 `is_open_for_signup`，**不是** `status == "open"`（2026-08-19）。
+
+                 那个写法只问了状态，而状态是人手填的、活动结束了也不会自己翻页 ——
+                 于是去年办完的活动照样挂着一枚绿色的、点下去直通报名表单的标签，
+                 而且那报名是真的报得上（`sign_up()` 从头到尾没读过一次时间）。
+                 现在这枚标签的判据和 `open_for_signup()` 那道门是同一条，所以
+                 「画出来的链接一定点得通」这件事仍然成立 —— 那正是下面那条
+                 「只有 open 那一档是链接」的注释在守的东西。
+              {% endcomment %}
+              {% if event.accepting_signups %}
                 <a href="{% url 'events:event_signup' event.pk %}"
                    class="event-row-badge-link"
                    aria-label="Sign up for {{ event.name }}"
@@ -158,10 +171,10 @@ event_list 的结果区。整页和 HTMX 片段渲染的是同一份 —— 视�
                    hx-target="#schedule-detail" hx-swap="innerHTML"
                    hx-trigger="click[panelFits()]"
                    x-on:click="detail = true">
-                  {% include "core/components/badge.html" with label=event.get_status_display tone="success" %}
+                  {% include "core/components/badge.html" with label=event.status_label tone="success" %}
                 </a>
               {% else %}
-                {% include "core/components/badge.html" with label=event.get_status_display %}
+                {% include "core/components/badge.html" with label=event.status_label %}
               {% endif %}
             </span>
           </div>

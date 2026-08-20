@@ -76,7 +76,19 @@
                   状态在这里直接改：发布和收尾是最常做的两件事，各自只是一个选项。
                   ⚠️ **时间不在这里改** —— 挪时间要通知已报名的人，所以它走 Edit 页，
                      那条路会把人送到通知页。两个字段，两种后果。
+
+                  🔴 **这一格显示真实 status，不走 `status_label`**（2026-08-19）。
+                     志愿者那边活动一结束就一律显示「Ended」，而这里不行：
+                     这一格旁边就是改 status 的下拉框，标签写着一个下拉框里
+                     找不到的词，读起来是「我刚才那一下没保存上」。
+                     已经结束这件事由下面那枚 Ended 标签单独说 —— 它说的是时间，
+                     不是状态，所以是两枚标签而不是一枚被改写的。
                   {% endcomment %}
+                  {% if event.is_over %}
+                    <span class="mb-1 inline-block">
+                      {% include "core/components/badge.html" with label="Ended" %}
+                    </span>
+                  {% endif %}
                   {% if not can_manage %}
                     {% include "core/components/badge.html" with label=event.get_status_display %}
                   {% else %}

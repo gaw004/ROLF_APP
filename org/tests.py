@@ -36,9 +36,11 @@ YESTERDAY = TODAY - datetime.timedelta(days=1)
 LAST_YEAR = TODAY - datetime.timedelta(days=365)
 
 
-def make_person(last_name):
+def make_person(last_name, first_name="Ping"):
+    # A first name is required of an individual (2026-08-19), same as the last.
     return Contact.objects.create(
-        contact_type=Contact.ContactType.INDIVIDUAL, legal_last_name=last_name)
+        contact_type=Contact.ContactType.INDIVIDUAL,
+        legal_first_name=first_name, legal_last_name=last_name)
 
 
 def make_ministry(code="food_pantry", name="Food Pantry", **kwargs):

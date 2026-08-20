@@ -92,7 +92,15 @@
       {% else %}
         <h1 class="text-2xl font-semibold">{{ event.name }}</h1>
       {% endif %}
-      {% include "core/components/badge.html" with label=event.get_status_display %}
+      {% comment %}
+      🔴 `status_label` 而不是 `get_status_display`（2026-08-19）—— 活动结束之后
+         这两个说的不是同一件事：`status` 是人手填的，没有任何东西会在活动结束
+         那天替它翻页，所以去年办完的活动会一直挂着「Open for signup」。
+         判据在 models.py 的 `status_label` 上，只有一份。
+
+      ⚠️ 管理列表页**不**走它，那一页显示真实 status —— 理由写在那个 property 里。
+      {% endcomment %}
+      {% include "core/components/badge.html" with label=event.status_label %}
     </div>
     <dl class="mt-4 grid gap-x-6 gap-y-2 text-sm sm:grid-cols-2">
       <div>
@@ -205,7 +213,7 @@
       </p>
     {% else %}
       <p class="text-sm text-ink-600 dark:text-ink-300">
-        This event is not taking signups ({{ event.get_status_display }}). Anything you
+        This event is not taking signups ({{ event.status_label }}). Anything you
         already signed up for is still under
         <a href="{% url 'events:my_participations' %}" class="prose-link">My signups</a>,
         where you can cancel it.

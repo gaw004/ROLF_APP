@@ -24,7 +24,7 @@ from contact.models import Contact, RelationshipType
 from core.constraints import ConstraintErrorFieldMixin
 from core.limits import LONG_TEXT, SHORT_TEXT
 from core.models import ImmutableCodeMixin, TimeStampedModel
-from core.timeutils import day_start, local_today
+from core.timeutils import day_start, local_now, local_today
 from org.models import Ministry
 
 
@@ -122,10 +122,10 @@ class ParticipationRole(ImmutableCodeMixin, ConstraintErrorFieldMixin, models.Mo
 class EventQuerySet(models.QuerySet):
     """Two status predicates, because status is answering two different questions.
 
-    Event.status carries the lifecycle (draft → open → confirmed → completed /
+    Event.status carries the lifecycle (draft → open → full → wrapped up /
     cancelled) *and* the visibility of the event to volunteers, and those are
     not the same question. Writing visibility as status == OPEN means that the
-    moment an event is marked confirmed ("full, no more signups") everybody who
+    moment an event is marked full everybody who
     already signed up loses access to its page — and P6's entire scenario ends
     with a notification saying "click here to cancel", a link that would then
     404, on exactly the events that filled up.
@@ -139,9 +139,36 @@ class EventQuerySet(models.QuerySet):
         """Everything a volunteer may open: published, including full and over."""
         return self.filter(status__in=Event.VISIBLE_TO_VOLUNTEERS)
 
-    def open_for_signup(self):
-        """Everything a volunteer may still sign up for."""
-        return self.filter(status__in=Event.OPEN_FOR_SIGNUP)
+    def open_for_signup(self, now=None):
+        """Everything a volunteer may still sign up for.
+
+        🔴 **Two conditions, not one (2026-08-19): the status *and* the clock.**
+
+           `status` is filled in by hand and nothing moves it on when the day
+           arrives — so an event that ran last year still says "Open for signup"
+           until somebody remembers to go and change it. That is not merely an
+           ugly label: this predicate is the only gate on the signup path
+           (`event_signup` 404s on it, the detail page's button reads it), so
+           for as long as the field said `open`, that finished event was
+           genuinely signable. Somebody could put their name down for last
+           year's Saturday.
+
+           The fix is not a nightly job flipping the column. A cron leaves a
+           window — up to a day wide — in which the page is still wrong, and it
+           would have to rewrite every past event's row (and its history) to say
+           something the two timestamps beside it already said. The question
+           "is it over?" has an exact answer in `end_time`; ask it there.
+
+        ⚠️ The cut is `end_time`, not `start_time` (decided 2026-08-19): an
+           event that has begun but not finished is still signable, because
+           somebody turning up mid-morning to help is the ordinary case at a
+           food distribution, not an anomaly. Same column, same reasoning as
+           `from_today()` — one predicate, one column, one question.
+        """
+        return self.filter(
+            status__in=Event.OPEN_FOR_SIGNUP,
+            end_time__gt=now or local_now(),
+        )
 
     # ⚠️ `upcoming()` (start_time >= now) and `past()` (end_time < now) lived
     #    here until 2026-08-17. They went with their last callers — the Past
@@ -203,6 +230,25 @@ class EventQuerySet(models.QuerySet):
         """
         return self.filter(end_time__gt=day_start(today or local_today()))
 
+    def with_capacity(self):
+        """`role_count` and `has_open_role`, so `Event.is_full` costs no query.
+
+        ⚠️ Added for the volunteer list (2026-08-19), which asks every row
+           whether it is full in order to draw the badge. Without this that is
+           one query per row — twenty on a default page, on the most-hit page in
+           the system.
+
+        ⚠️ The condition inside is **not** restated here: the subquery filters
+           on `EventRoleQuerySet.with_signup_counts()`'s own `is_full`
+           annotation. One definition of "full", asked from two directions.
+        """
+        open_role = (EventRole.objects.with_signup_counts()
+                     .filter(event=models.OuterRef("pk"), is_full=False))
+        return self.annotate(
+            role_count=Count("roles", distinct=True),
+            has_open_role=models.Exists(open_role),
+        )
+
     def in_period(self, start, end):
         """R1: the events that ran in a window, half-open [start, end).
 
@@ -227,8 +273,36 @@ class Event(ConstraintErrorFieldMixin, TimeStampedModel):
     class Status(models.TextChoices):
         DRAFT = "draft", "Draft"                      # only this ministry sees it
         OPEN = "open", "Open for signup"              # published, taking signups
-        CONFIRMED = "confirmed", "Confirmed"          # full, no more signups
-        COMPLETED = "completed", "Completed"
+        # 🔴 "Full", not "Confirmed" (2026-08-19), and the stored value changed
+        #    with the label — see migration 0011.
+        #
+        #    "Confirmed" was the wrong word, and the comment that used to sit on
+        #    this line proves it: it read `# full, no more signups`. In event and
+        #    booking English "confirmed" is a statement about *certainty* — a
+        #    confirmed booking, a confirmed date, it is definitely going ahead —
+        #    not about capacity. So a volunteer read good news off the card and
+        #    then found no Sign up button, which reads as a broken page rather
+        #    than as "this one is full".
+        #
+        #    ⚠️ The stored value moved too, rather than relabelling in place.
+        #       A column that says `confirmed` under a page that says Full is
+        #       the same drift this project keeps paying for: the next person
+        #       reads the data, or a log line, and learns a word the interface
+        #       does not use.
+        #
+        #    ⚠️ If signups are ever closed for a reason that is **not** capacity
+        #       — an early cutoff, "we have enough people" — this word becomes a
+        #       lie and the honest one is "Signups closed". Noted 2026-08-19 as
+        #       the boundary of the decision, not as a thing to pre-empt.
+        FULL = "full", "Full"                         # full, no more signups
+        # ⚠️ "Wrapped up", not "Completed" (2026-08-19). Since the same day,
+        #    *whether it is over* is answered by the clock (`is_over`), so this
+        #    status had to stop meaning that or stop meaning anything. It now
+        #    means the follow-up is done — attendance taken, hours recorded —
+        #    which is a thing only a person knows. The time-flavoured word had
+        #    to go with it: "Completed" beside a derived "Ended" is two words
+        #    for what reads as one fact.
+        COMPLETED = "completed", "Wrapped up"
         CANCELLED = "cancelled", "Cancelled"
 
     # ⚠️ Both sets are listed in full, not spelled as exclude(DRAFT), even
@@ -238,11 +312,20 @@ class Event(ConstraintErrorFieldMixin, TimeStampedModel):
     #    and count them: five here, so a complement is wrong, and the day
     #    somebody adds `postponed` a complement would quietly publish it.
     VISIBLE_TO_VOLUNTEERS = frozenset({
-        Status.OPEN, Status.CONFIRMED, Status.COMPLETED, Status.CANCELLED,
+        Status.OPEN, Status.FULL, Status.COMPLETED, Status.CANCELLED,
     })
     # Cancelled events stay in the visible set on purpose: the people who signed
     # up are exactly the ones who need to see that it is off.
+    #
+    # ⚠️ Membership here is necessary but not sufficient — `open_for_signup()`
+    #    and `is_open_for_signup` also ask the clock. The set alone has never
+    #    been the whole gate since 2026-08-19; read either of those, not this.
     OPEN_FOR_SIGNUP = frozenset({Status.OPEN})
+    # The statuses that stop meaning what they say once `end_time` has passed —
+    # see `status_label`. Listed in full rather than as a complement, for B5's
+    # reason: a sixth status must not be swept in here by default, and the two
+    # left out (draft, cancelled) are each left out for a stated reason.
+    ENDS_WITH_THE_CLOCK = frozenset({Status.OPEN, Status.FULL, Status.COMPLETED})
 
     name = models.CharField(max_length=200)
     event_type = models.ForeignKey(EventType, on_delete=models.PROTECT, related_name="events")
@@ -320,6 +403,115 @@ class Event(ConstraintErrorFieldMixin, TimeStampedModel):
         """R3. Derived, never stored: two columns already say it."""
         return self.end_time - self.start_time
 
+    @property
+    def is_over(self):
+        """Has it finished? Read off the clock, never off `status`.
+
+        The one place the question is answered, so that the badge, the signup
+        gate and any test all mean the same thing by it. `end_time`, matching
+        `EventQuerySet.open_for_signup()` and `from_today()` — an event that is
+        running right now is not over.
+        """
+        return self.end_time <= local_now()
+
+    @property
+    def is_open_for_signup(self):
+        """Is the door open — published, and not over yet?
+
+        The row-level twin of `EventQuerySet.open_for_signup()`, written to
+        match that predicate condition for condition. The two being one thought
+        in two places is the risk here: if they ever disagree, the signup page
+        404s for an event whose button was drawn, or refuses one it offered.
+
+        ⚠️ This does **not** ask whether there is any room left — see
+           `accepting_signups` for that, and for why the two are separate.
+        """
+        return self.status in Event.OPEN_FOR_SIGNUP and not self.is_over
+
+    @property
+    def accepting_signups(self):
+        """Is the door open **and** is there room? What a volunteer can act on.
+
+        🔴 Two properties rather than one, and the split is deliberate
+           (2026-08-19). `is_open_for_signup` has to keep meaning exactly what
+           the queryset means, because that queryset is what lets the signup
+           page be opened at all — and a full event's signup page **should**
+           still open. Landing on "all of these are full" is an answer;
+           landing on a 404 reads as a broken site.
+
+           So fullness gates what is *offered* (the Sign up button, the green
+           badge that doubles as a link), not what is *reachable*.
+
+        ⚠️ Anything that draws a way in reads this one. Anything that decides
+           whether a URL exists reads the other.
+        """
+        return self.is_open_for_signup and not self.is_full
+
+    @property
+    def is_full(self):
+        """Is there anywhere left to sign up (2026-08-19)?
+
+        Derived from the roles, never stored — the same decision as `is_over`,
+        for the same reason. Writing `full` into `status` when the last place
+        goes would mean a cancellation has to write it back, and then two
+        writers share one column: the admin who deliberately closed signups
+        gets reopened by a volunteer changing their mind.
+
+        ⚠️ **Every** role has to be closed, and there has to be at least one.
+           One role with no ceiling means this event can always take somebody,
+           so it is not full; an event with no roles at all has nothing to sign
+           up for, but "full" is the wrong word for that and it says so by
+           being False. Whether a signup is actually possible is the roles'
+           question, and it is answered per role in `services.sign_up()`.
+
+        ⚠️ One query, and only when something asks. The volunteer list asks it
+           per row — twenty rows, twenty queries — so that list goes through
+           `with_capacity()`, which hands the answer down as two annotations.
+        """
+        annotated = self.__dict__.get("has_open_role")
+        if annotated is not None:
+            return self.__dict__.get("role_count", 0) > 0 and not annotated
+        roles = self.roles.with_signup_counts()
+        return roles.exists() and not roles.filter(is_full=False).exists()
+
+    @property
+    def status_label(self):
+        """What a *volunteer* is told the state is. Not always `status`.
+
+        🔴 **"Ended" beats the stored word once the event is over** (2026-08-19).
+           `status` is hand-filled and nothing moves it on, so a finished event
+           still reads "Open for signup" — the complaint this property exists to
+           answer. Every status that means "this was really going to happen"
+           (open, full, wrapped up) collapses to one word once `end_time`
+           has passed, because to somebody reading the list the difference
+           between "it filled up and then it happened" and "it happened" is not
+           a difference: it is over either way, and there is nothing to do.
+
+        ⚠️ `Cancelled` is **not** collapsed. It says something the clock cannot:
+           it did not take place. The people who signed up need that word, and
+           they need it after the date as much as before it.
+
+        ⚠️ `Draft` is not collapsed either — a volunteer never sees one (it is
+           outside `VISIBLE_TO_VOLUNTEERS`), and the ministry admin previewing
+           it is asking about publication, not about the clock.
+
+        ⚠️ The management list deliberately does **not** use this: that page is
+           where `status` is edited, and showing a word other than the one in
+           the dropdown next to it would make the edit look like it failed.
+           It shows `get_status_display` plus its own "Ended" marker.
+        """
+        if self.is_over and self.status in Event.ENDS_WITH_THE_CLOCK:
+            return "Ended"
+        # ⚠️ Derived fullness reads as the same word as the hand-set status
+        #    (2026-08-19). To somebody deciding whether to come, "every place
+        #    is taken" and "the organiser closed signups because every place is
+        #    taken" are one fact, and the page should not make them read like
+        #    two. Which of the two it is stays visible where it matters: the
+        #    management list shows the real `status`.
+        if self.status == Event.Status.OPEN and self.is_full:
+            return Event.Status.FULL.label
+        return self.get_status_display()
+
     def __str__(self):
         # Date and ministry, so two "Food distribution" rows are told apart in
         # a dropdown. Same reason Position.__str__ carries its ministry.
@@ -357,7 +549,29 @@ class EventRoleQuerySet(models.QuerySet):
             #    not stay in step; understaffed() below filters on this same
             #    annotation for exactly that reason.
             is_short=Q(needed_count__isnull=False) & Q(registered_count__lt=F("needed_count")),
+            # "Is this role closed?" — the other half of the same number, added
+            # 2026-08-19 with `stop_at_needed_count`.
+            #
+            # ⚠️ **Three conditions, and none of them is optional.** A role with
+            #    no number has no ceiling; a role whose number is a target
+            #    (`stop_at_needed_count` off) has no ceiling either; only the
+            #    third is about how many people turned up. Written as
+            #    `registered_count >= needed_count` alone, every unlimited role
+            #    in the system would close itself the moment it hit its target.
+            #
+            # ⚠️ `is_full` is **not** `~is_short`. They differ on exactly the
+            #    rows that matter: a target-only role that has met its number is
+            #    neither short nor full. Two questions, two annotations.
+            is_full=(
+                Q(needed_count__isnull=False)
+                & Q(stop_at_needed_count=True)
+                & Q(registered_count__gte=F("needed_count"))
+            ),
         )
+
+    def with_room(self):
+        """Roles somebody can still sign up for."""
+        return self.with_signup_counts().filter(is_full=False)
 
     def understaffed(self):
         """Roles with fewer signups than they asked for.
@@ -388,7 +602,36 @@ class EventRole(ConstraintErrorFieldMixin, TimeStampedModel):
     role = models.ForeignKey(ParticipationRole, on_delete=models.PROTECT, related_name="+")
     needed_count = models.PositiveIntegerField(
         null=True, blank=True,
-        help_text="Leave empty for no limit. Advisory only — signups are never blocked.",
+        help_text="How many people this job wants. Leave empty for no limit.",
+    )
+    # 🔴 Is that number a **ceiling**, or a target (2026-08-19)?
+    #
+    #    One number was being asked to answer two questions, and until this
+    #    field existed it only ever answered the first: `needed_count` fed the
+    #    "understaffed" reports and **nothing anywhere refused a signup**. A job
+    #    wanting five people accepted fifty, and the failure showed up on the
+    #    day, in a hall, with forty-five people and nothing for them to do.
+    #
+    #    The second question is real and it is not always "yes" — it came from
+    #    the foundation: *"we need 500, but we would love more"*. That is a
+    #    target with no ceiling, and it is a perfectly ordinary way to run a
+    #    day. So the number stays one number, and this says whether it stops
+    #    anybody.
+    #
+    # ⚠️ **Default True.** The two defaults fail in opposite ways: ticked, the
+    #    failure is somebody who cannot sign up and says so, and an admin who
+    #    unticks a box; unticked, the failure is invisible until the morning of
+    #    the event. Same reasoning, written out in full, as
+    #    Event.requires_guardian_consent.
+    #
+    # ⚠️ Means nothing when `needed_count` is empty — no number, no ceiling.
+    #    Every predicate below checks both, and none of them is written as a
+    #    complement of the other.
+    stop_at_needed_count = models.BooleanField(
+        default=True,
+        verbose_name="Stop signups at this number",
+        help_text="Untick if more people than that are welcome — the number "
+                  "then says what you are aiming for, and nobody is refused.",
     )
     # SHORT_TEXT rather than LONG_TEXT: this is read inside a row of the roles
     # panel, where a screenful in one cell pushes the other roles off the page.
@@ -417,6 +660,17 @@ class EventRole(ConstraintErrorFieldMixin, TimeStampedModel):
                 violation_error_code="eventrole_needed_count_not_positive",
             ),
         ]
+
+    # ⚠️ **There is no `is_full` property here, and that is deliberate.**
+    #    `is_full` exists once, as the annotation in with_signup_counts(), and a
+    #    property of the same name cannot coexist with it anyway: Django sets
+    #    annotations with `setattr`, and a read-only property raises on that —
+    #    so the two would not merely duplicate the rule, they would crash every
+    #    query that asked for it.
+    #
+    #    Whoever needs the answer for one row re-reads that row through the
+    #    annotation; `services.sign_up()` does exactly that, in one query, and
+    #    says why.
 
     def __str__(self):
         return f"{self.role.name} @ {self.event.name}"

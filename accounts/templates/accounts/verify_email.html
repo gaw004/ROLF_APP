@@ -1,0 +1,69 @@
+{% extends "core/base.html" %}
+{% block title %}Confirm your email{% endblock %}
+{% comment %}
+注册流程的第二页（2026-08-19）。
+
+⚠️ 这一页**没有登录**，也不能要求登录 —— 整个流程的前提就是「还没登录」。
+   谁在等验证码由 session 说（见 views._pending_user）。
+
+⚠️ 版心和登录页一致（max-w-md）：这两页在人的心里是同一件事的两步，
+   宽度一跳会读成「换了个网站」。
+{% endcomment %}
+{% block main_width %}max-w-md{% endblock %}
+
+{% block content %}
+  <h1 class="text-2xl font-semibold">Confirm your email</h1>
+
+  {% comment %}
+  ⚠️ 地址要显示回去。收不到信最可能的原因就是打错了，而一个只写着
+     「我们发了一封信」而不说发到哪儿的页面，让人没有任何办法发现自己写的是 .con。
+  {% endcomment %}
+  <p class="mt-3 text-sm text-ink-600 dark:text-ink-300">
+    We sent a six-digit code to <strong class="break-all">{{ email }}</strong>.
+    Type it below to finish setting up your account.
+  </p>
+
+  {% if rate_limited %}
+    <div class="card mt-6 border border-warning-fg/30 bg-warning-bg dark:border-warning-fg-dark/30 dark:bg-warning-bg-dark">
+      <p class="text-sm text-warning-fg dark:text-warning-fg-dark">
+        Too many attempts from this connection just now. Wait a few minutes and
+        try again — your code is still good.
+      </p>
+    </div>
+  {% endif %}
+
+  <form method="post" class="card mt-6">
+    {% csrf_token %}
+    {% include "core/components/form_fields.html" %}
+    <div class="mt-6">
+      {% include "core/components/button.html" with label="Confirm" variant="primary" %}
+    </div>
+  </form>
+
+  {% comment %}
+  ⚠️ 重发是**一张独立的 POST 表单**，不是上面那张表单里的第二颗按钮。
+     同一张表单里的话，点「重发」会连带把验证码那一格提交上去 ——
+     于是一次重发白白吃掉一次尝试次数。
+  {% endcomment %}
+  <form method="post" action="{% url 'accounts:resend_verification' %}"
+        class="mt-4 flex flex-wrap items-center gap-3">
+    {% csrf_token %}
+    {% include "core/components/button.html" with label="Send a new code" variant="secondary" %}
+    {% if resend_in %}
+      <span class="text-xs text-ink-600 dark:text-ink-300">
+        A code was just sent — another can be requested in {{ resend_in }} seconds.
+      </span>
+    {% endif %}
+  </form>
+
+  {% comment %}
+  ⚠️ 这一条不能省。收不到信的第二大原因是地址填错了，而这一页上没有任何办法改它
+     —— 改地址要能登录，而登录正是这一页拦着的事。所以给的是「重新注册一个」，
+     那是这个状态下真正走得通的那条路。
+  {% endcomment %}
+  <p class="mt-6 text-xs text-ink-600 dark:text-ink-300">
+    Wrong address? <a href="{% url 'accounts:register' %}" class="prose-link">Register again</a>
+    with the right one. Nothing has been sent anywhere else, and an account that
+    is never confirmed cannot be used.
+  </p>
+{% endblock %}

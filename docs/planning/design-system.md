@@ -152,6 +152,23 @@ focus-visible:ring-brand-500 focus-visible:ring-offset-2`。
 
 **不许把焦点环去掉**。键盘用户和读屏用户靠它，而它是最容易在「觉得难看」时被删掉的东西。
 
+### 鼠标指针（2026-08-19 加）
+
+`button` / `[role="button"]` / `summary` / `label[for]` 一律 `cursor: pointer`，
+停用的（`:disabled` 或 `[aria-disabled="true"]`）一律 `cursor: not-allowed`。
+一条 base 层规则，**不许改成在模板上挨个加 `cursor-pointer`**。
+
+🔴 为什么需要这条：**Tailwind v4 的 preflight 不再给 `<button>` 设
+`cursor: pointer`**（v3 设过），而浏览器对 `<button>` 的默认值是箭头。所以在这条
+规则之前，全站每一颗按钮 hover 上去都不变手 —— 顶栏的 Log out / Menu / 主题切换、
+密码框的「看一眼」、所有 Save、报名、翻页。`<a href>` 天生是手型，所以这件事
+看起来只发生在几个地方，实际是全站。
+
+⚠️ 挨个加工具类的下场是漏掉的那一颗谁也不会发现 —— 这个 bug 本身就是这么活下来的。
+
+守卫：`core.tests.ButtonCursorTests`（源文件一条、**构建产物一条** ——
+源里写对了没 `npm run build:css`，屏幕上一点变化都没有）。
+
 ---
 
 ## 二、深色模式
@@ -2159,8 +2176,15 @@ isOpen  = schedule || detail        ← 决定版面（壳宽、左列 34rem、�
 做法是两件互不相干的事：卡片**画**在遮罩上面（`z-index: 2`）、**点**穿过去
 （`pointer-events: none`），那一格自己把 `pointer-events` 收回来。
 
-⚠️ 只有 `open` 那一档是链接（其余状态在 `open_for_signup()` 前都是 404，
+⚠️ 只有**还能报的**那一档是链接（其余状态在 `open_for_signup()` 前都是 404，
 一个点了会 404 的标签读起来是「站坏了」）。⚠️ `aria-label` 带活动名。
+
+⚠️ 判据是 `event.is_open_for_signup`，**不是** `status == "open"`（2026-08-19）：
+`status` 是人手填的，活动结束了也不会自己翻页，所以那个写法会给一场已经办完的
+活动画出一枚绿色的、点下去真的报得上名的链接。同一天起，志愿者侧的状态文案
+一律走 `event.status_label` —— 结束之后显示 `Ended`。**管理列表页不走它**，
+那一页显示真实 status（旁边另挂一枚 `Ended`），理由：那一格旁边就是改 status
+的下拉框，标签写着一个下拉框里没有的词，读起来是「我刚才那一下没保存上」。
 
 ### 面板里的卡片不投影，改用一条细线
 

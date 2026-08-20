@@ -445,6 +445,7 @@ class GalleryPermissionTests(TestCase):
     def account(self, handle, last_name):
         return register_account(
             password="a-good-long-password", legal_last_name=last_name,
+            legal_first_name="Ping",
             email=f"{handle}@example.com", birth_date=datetime.date(1980, 1, 1))
 
     def photo(self, ministry):

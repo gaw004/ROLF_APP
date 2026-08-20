@@ -185,7 +185,10 @@ class ContactAdmin(SimpleHistoryAdmin):
     class Media:
         js = [
             "contact/admin/contact_type_toggle.js",
-            "contact/admin/address_state_toggle.js",
+            # ⚠️ Not under admin/ any more (2026-08-19): "My profile" loads the
+            #    same file, so it is not an admin asset. One copy, two loaders —
+            #    see the note at the top of it.
+            "contact/address_state_toggle.js",
         ]
 
 

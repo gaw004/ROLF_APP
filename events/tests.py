@@ -61,6 +61,7 @@ from .models import (
     ParticipationRole,
 )
 from .services import (
+    RoleFull,
     CHECKIN_CREDENTIAL_KEY,
     CREDENTIAL_MAX_AGE,
     ConsentRequired,
@@ -96,6 +97,11 @@ DAY = datetime.timedelta(days=1)
 
 
 def make_person(last_name, **kwargs):
+    # ⚠️ A first name by default (2026-08-19): an individual without one is
+    #    refused by `contact_individual_has_a_first_name`, the same way one
+    #    without a last name always was. Tests that are *about* the name pass
+    #    their own.
+    kwargs.setdefault("legal_first_name", "Ping")
     return Contact.objects.create(
         contact_type=Contact.ContactType.INDIVIDUAL, legal_last_name=last_name, **kwargs)
 
@@ -154,10 +160,11 @@ def give_emergency_contact(contact, name="Emergency Kin", phone="+14085550177"):
     )
 
 
-def make_role(event, code, name=None, needed_count=None):
+def make_role(event, code, name=None, needed_count=None, **fields):
     role, _ = ParticipationRole.objects.get_or_create(
         code=code, defaults={"name": name or code.title()})
-    return EventRole.objects.create(event=event, role=role, needed_count=needed_count)
+    return EventRole.objects.create(
+        event=event, role=role, needed_count=needed_count, **fields)
 
 
 class EventRoleIsARoleEvenWithNobodyInItTests(TestCase):
@@ -749,7 +756,7 @@ class VisibilityTests(TestCase):
         # ⭐ The whole point. Written as status == OPEN, a confirmed event would
         # 404 for the people who already signed up — precisely the ones P6's
         # "click here to cancel" link is sent to.
-        confirmed = self.make(Event.Status.CONFIRMED)
+        confirmed = self.make(Event.Status.FULL)
         self.assertIn(confirmed, Event.objects.visible_to_volunteers())
         self.assertNotIn(confirmed, Event.objects.open_for_signup())
 
@@ -781,9 +788,118 @@ class VisibilityTests(TestCase):
         # exclude(DRAFT) is wrong even though it agrees today.
         self.assertEqual(
             Event.VISIBLE_TO_VOLUNTEERS,
-            frozenset({Event.Status.OPEN, Event.Status.CONFIRMED,
+            frozenset({Event.Status.OPEN, Event.Status.FULL,
                        Event.Status.COMPLETED, Event.Status.CANCELLED}),
         )
+
+
+class EndedEventTests(TestCase):
+    """一场活动结束之后，`status` 还停在原地 —— 时间说了算（2026-08-19）。
+
+    起因是一个用户能一眼看穿的问题：「活动都结束了 status 还可以是 Open for
+    signup」。而它不只是标签难看 —— `open_for_signup()` 是报名路上**唯一**的
+    那道门，所以在有人手动去改那个下拉框之前，去年办完的那一场是真的报得上名。
+    """
+
+    def setUp(self):
+        self.ministry = Ministry.objects.create(code="food_pantry", name="Food Pantry")
+
+    def make(self, status=Event.Status.OPEN, *, start, end):
+        return make_event(ministry=self.ministry, status=status,
+                          start_time=start, end_time=end)
+
+    def test_an_event_that_has_ended_is_not_open_for_signup(self):
+        # ⭐ 整件事的核心。status 一个字节都没改，门却关上了。
+        over = self.make(start=NOW - DAY, end=NOW - DAY + 3 * HOUR)
+        self.assertEqual(over.status, Event.Status.OPEN)
+        self.assertNotIn(over, Event.objects.open_for_signup())
+
+    def test_an_event_that_has_started_but_not_finished_is_still_open(self):
+        """⚠️ 截止卡在 end_time，不是 start_time（2026-08-19 拍板）。
+
+        上午十点走进食物分发点说「我来帮忙」的人是常态，不是异常 ——
+        卡在 start_time 会让这个人在自助界面上无路可走。
+        """
+        running = self.make(start=NOW - HOUR, end=NOW + HOUR)
+        self.assertIn(running, Event.objects.open_for_signup())
+
+    def test_a_future_event_is_open_as_before(self):
+        # 这条在的意义是：上面两条不是靠「把门焊死」实现的。
+        self.assertIn(self.make(start=NOW + DAY, end=NOW + DAY + HOUR),
+                      Event.objects.open_for_signup())
+
+    def test_an_ended_event_is_still_visible_to_the_people_who_signed_up(self):
+        """能不能看见 ≠ 能不能报名，这条分界线在时间上也成立。
+
+        ⚠️ `visible_to_volunteers()` **不**读时间：报过名的人正是最需要事后
+           还能打开那一页的人（P6 的取消链接就指向那儿）。
+        """
+        over = self.make(start=NOW - DAY, end=NOW - DAY + HOUR)
+        self.assertIn(over, Event.objects.visible_to_volunteers())
+
+    def test_the_row_and_the_queryset_answer_the_same_question(self):
+        """`is_open_for_signup` 和 `open_for_signup()` 是同一道门的两面。
+
+        ⚠️ 它们分歧的表现是详情页画出一颗点了 404 的 Sign up 按钮，或者藏起
+           一颗本来点得通的 —— 两种都不会报错。所以逐个状态、逐个时段比一遍。
+        """
+        windows = {
+            "past": (NOW - DAY, NOW - DAY + HOUR),
+            "running": (NOW - HOUR, NOW + HOUR),
+            "future": (NOW + DAY, NOW + DAY + HOUR),
+        }
+        for status in Event.Status:
+            for when, (start, end) in windows.items():
+                with self.subTest(status=status, when=when):
+                    event = self.make(status, start=start, end=end)
+                    self.assertEqual(
+                        event.is_open_for_signup,
+                        Event.objects.open_for_signup().filter(pk=event.pk).exists(),
+                    )
+
+    def test_is_over_is_read_off_the_clock_and_never_off_status(self):
+        # 一场已经跑完、但没人去点那个下拉框的活动 —— 也就是本来的样子。
+        self.assertTrue(self.make(start=NOW - DAY, end=NOW - DAY + HOUR).is_over)
+        # 反过来：有人提前点了 Completed，但活动还没到。它没结束。
+        early = self.make(Event.Status.COMPLETED, start=NOW + DAY, end=NOW + DAY + HOUR)
+        self.assertFalse(early.is_over)
+
+    def test_every_status_that_really_happened_reads_Ended_afterwards(self):
+        for status in (Event.Status.OPEN, Event.Status.FULL,
+                       Event.Status.COMPLETED):
+            with self.subTest(status=status):
+                event = self.make(status, start=NOW - DAY, end=NOW - DAY + HOUR)
+                self.assertEqual(event.status_label, "Ended")
+
+    def test_cancelled_still_says_cancelled_after_the_date(self):
+        """⚠️ 取消说的是时钟说不出的一件事：它没有发生过。
+
+        报了名的人在事后和事前一样需要这个词 —— 「Ended」会让一场根本没办的
+        活动读起来像办过了。
+        """
+        cancelled = self.make(Event.Status.CANCELLED, start=NOW - DAY, end=NOW - DAY + HOUR)
+        self.assertEqual(cancelled.status_label, "Cancelled")
+
+    def test_a_draft_is_not_collapsed_either(self):
+        # 志愿者看不到草稿；看得到它的是正在预览的 admin，而他问的是「发布了没」。
+        draft = self.make(Event.Status.DRAFT, start=NOW - DAY, end=NOW - DAY + HOUR)
+        self.assertEqual(draft.status_label, "Draft")
+
+    def test_before_it_ends_the_label_is_just_the_status(self):
+        for status in Event.Status:
+            with self.subTest(status=status):
+                event = self.make(status, start=NOW + DAY, end=NOW + DAY + HOUR)
+                self.assertEqual(event.status_label, event.get_status_display())
+
+    def test_ends_with_the_clock_is_not_written_as_a_complement(self):
+        # B5 那一课：把状态列全、数一遍。五个 —— 所以 exclude(...) 是错的，
+        # 哪怕它今天给出同一个答案。第六个状态必须在这里红一次。
+        self.assertEqual(
+            Event.ENDS_WITH_THE_CLOCK,
+            frozenset({Event.Status.OPEN, Event.Status.FULL,
+                       Event.Status.COMPLETED}),
+        )
+        self.assertEqual(len(Event.Status), 5)
 
 
 class FromTodayTests(TestCase):
@@ -928,16 +1044,19 @@ class SignUpTests(TestCase):
         with self.assertRaises(ValidationError):
             sign_up(contact=adult, event_role=self.role)
 
-    def test_signing_up_over_needed_count_is_allowed_but_flagged(self):
-        # Advisory, never a limit — the same line taken with duplicate names.
-        # Over-subscription is ordinary; the system's job is to say so, not to
-        # stand in the way.
-        #
-        # Both halves are asserted, because the name promises both: three
-        # people go in against a need of one, the role stops counting as short,
-        # and the count a page renders is high enough for it to say so. Testing
-        # only "allowed" would leave "flagged" as a claim nothing checks.
-        role = make_role(self.event, "welcome", needed_count=1)
+    def test_signing_up_over_a_target_is_allowed_but_flagged(self):
+        """🔴 **2026-08-19 起，这条只对「不设上限」的角色成立。**
+
+        它原来叫 `..._over_needed_count_is_allowed_but_flagged`，断言的是
+        「`needed_count` 只是建议，从不拦人」—— 而那正是被改掉的东西：在那之前
+        **没有任何地方拦过报名**，一个只要 5 个人的活儿能报进 50 个，而这件事
+        直到活动当天早上才看得见。
+
+        「要 500 但越多越好」是真实需求，所以超额仍然要**能**发生 —— 只是现在
+        它是一个勾选出来的选择（`stop_at_needed_count=False`），不再是唯一的行为。
+        """
+        role = make_role(self.event, "welcome", needed_count=1,
+                         stop_at_needed_count=False)
         for index in range(3):
             sign_up(
                 contact=make_person(f"A{index}", birth_date=datetime.date(1980, 1, 1)),
@@ -947,6 +1066,55 @@ class SignUpTests(TestCase):
         self.assertNotIn(role, EventRole.objects.understaffed())
         counted = EventRole.objects.with_signup_counts().get(pk=role.pk)
         self.assertGreater(counted.registered_count, counted.needed_count)
+        # ⚠️ 超了，但**不是** full —— 没有上限的角色永远不满。
+        self.assertFalse(counted.is_full)
+
+    def test_a_capped_role_refuses_the_person_after_the_last_place(self):
+        """⭐ 那道一直不存在的门（2026-08-19）。"""
+        role = make_role(self.event, "capped-lifting", needed_count=1)
+        sign_up(contact=make_person("First", birth_date=datetime.date(1980, 1, 1)),
+                event_role=role)
+        with self.assertRaises(RoleFull):
+            sign_up(contact=make_person("Second", birth_date=datetime.date(1980, 1, 1)),
+                    event_role=role)
+        self.assertEqual(role.participations.count(), 1)
+
+    def test_a_cancelled_signup_gives_the_place_back(self):
+        """⚠️ 满没满数的是**没取消的**那些人。
+
+        数全部报名行的话，一个取消掉的人会永久占着一个位置 —— 而那个位置在
+        页面上看起来是空的（角色面板数的也是没取消的那些）。
+        """
+        role = make_role(self.event, "capped-desk", needed_count=1)
+        first = sign_up(contact=make_person("First", birth_date=datetime.date(1980, 1, 1)),
+                        event_role=role)
+        cancel(first)
+        sign_up(contact=make_person("Second", birth_date=datetime.date(1980, 1, 1)),
+                event_role=role)
+        self.assertEqual(role.participations.exclude(status="cancelled").count(), 1)
+
+    def test_a_role_with_no_number_never_fills_up(self):
+        # 没有数字就没有上限，勾不勾都一样 —— 三个条件缺一不可，这条钉的是第一个。
+        role = make_role(self.event, "greeting", needed_count=None)
+        for index in range(3):
+            sign_up(contact=make_person(f"B{index}", birth_date=datetime.date(1980, 1, 1)),
+                    event_role=role)
+        self.assertFalse(
+            EventRole.objects.with_signup_counts().get(pk=role.pk).is_full)
+
+    def test_full_is_not_the_opposite_of_short(self):
+        """⚠️ `is_full` **不是** `~is_short`，两者在真正要紧的那一行上不同：
+
+        一个「只当目标、不当上限」的角色，人数到了之后既不缺人、也没满。
+        写成互补的那天，所有这样的角色都会在到达目标的那一刻把自己关上。
+        """
+        role = make_role(self.event, "welcome", needed_count=1,
+                         stop_at_needed_count=False)
+        sign_up(contact=make_person("Only", birth_date=datetime.date(1980, 1, 1)),
+                event_role=role)
+        counted = EventRole.objects.with_signup_counts().get(pk=role.pk)
+        self.assertFalse(counted.is_short)
+        self.assertFalse(counted.is_full)
 
 
 class ReportingTests(TestCase):
@@ -1160,6 +1328,9 @@ class PageTestCase(TestCase):
         # legitimately unreachable, which is a real state but not the one most of
         # these tests are about.
         contact_fields.setdefault("email", f"{handle}@example.com")
+        # A first name too (2026-08-19): an individual without one is refused
+        # by the database, and register_account() writes the Contact directly.
+        contact_fields.setdefault("legal_first_name", "Ping")
         return register_account(
             password="a-good-long-password",
             legal_last_name=last_name, **contact_fields,
@@ -1186,7 +1357,7 @@ class VolunteerPageTests(PageTestCase):
         self.assertContains(response, self.event.name)
         self.assertNotContains(response, draft.name)
 
-    def test_a_confirmed_event_is_listed_saying_it_is_confirmed(self):
+    def test_a_full_event_is_listed_saying_it_is_full(self):
         """⭐ Visibility and signability are two questions, and 2026-08-17 moved
            where the *list* stands on the first one.
 
@@ -1197,11 +1368,11 @@ class VolunteerPageTests(PageTestCase):
            open_for_signup(), one layer down where it cannot be styled away.
         """
         self.login(self.lisi)
-        self.event.status = Event.Status.CONFIRMED
+        self.event.status = Event.Status.FULL
         self.event.save()
         listing = self.client.get(reverse("events:event_list"))
         self.assertContains(listing, self.event.name)
-        self.assertContains(listing, "Confirmed")
+        self.assertContains(listing, "Full")
         detail = self.client.get(reverse("events:event_detail", args=[self.event.pk]))
         self.assertEqual(detail.status_code, 200)
         signup = self.client.get(reverse("events:event_signup", args=[self.event.pk]))
@@ -2372,6 +2543,24 @@ class NewParticipationRoleTests(PageTestCase):
         self.assertEqual(
             ParticipationRole.objects.filter(name__iexact="lifting").count(), 1)
 
+    def test_opening_the_same_role_twice_is_a_sentence_and_not_a_500(self):
+        """🔴 和 My profile 那个 500 同一个成因（2026-08-19 一次审计里找出来的）。
+
+        `eventrole_unique_per_event` 横跨 (event, role)，而 `event` 是挂在
+        instance 上的、不是这张表单渲染的字段 —— Django 会跳过任何提到了表单
+        没有渲染的字段的约束。于是从上面那个下拉框里再选一次同一个角色，表单
+        一声不吭地通过，然后在 INSERT 上炸成 IntegrityError。
+
+        ⚠️ 和上面那条「重名不许进词表」不是一回事：那条管的是 ParticipationRole
+           里两行说同一件事（一次归一化比较，没有约束表达得了），这条管的是
+           同一行开了两次。
+        """
+        response = self.add(role=self.role.role.pk)
+        self.assertEqual(response.status_code, 200)
+        # 文案来自约束自己的 violation_error_message，落在 role 那一格。
+        self.assertContains(response, "This event already has that role open.")
+        self.assertEqual(self.event.roles.filter(role=self.role.role).count(), 1)
+
     def test_only_near_misses_are_caught_not_synonyms(self):
         """The limit, asserted so nobody mistakes it for more than it is.
 
@@ -3157,7 +3346,7 @@ class SeedDemoTests(TestCase):
 
         with self.subTest("a draft event and a confirmed one"):
             self.assertTrue(Event.objects.filter(status=Event.Status.DRAFT).exists())
-            confirmed = Event.objects.filter(status=Event.Status.CONFIRMED).first()
+            confirmed = Event.objects.filter(status=Event.Status.FULL).first()
             self.assertIsNotNone(confirmed)
             # And somebody signed up to it, so "still opens once full" is walkable.
             self.assertTrue(
@@ -3412,7 +3601,12 @@ class AcceptanceWalkTests(TestCase):
         # leave P6 nothing to send to.
         self.as_role("volunteer_minor")
         event = self.open_event()
-        role = event.roles.get(role__code="lifting")
+        # ⚠️ `interpreting`，不是 `lifting`（2026-08-19）。seed_demo 里的 lifting
+        #    现在正好卡在上限上 —— 它是专门用来演「满了」的那一格。这条测试问的
+        #    是同意规则，拿一个满的角色来测，测出来的会是容量。
+        #    ⚠️ 也不能用 welcome：这个未成年人在种子数据里**已经报过**那一格，
+        #       于是失败原因会变成重复报名，同样不是这条要问的事。
+        role = event.roles.get(role__code="interpreting")
         url = reverse("events:event_signup", args=[event.pk])
         before = Participation.objects.count()
 
@@ -3626,7 +3820,7 @@ class PanelSignupTests(PageTestCase):
         新开一条取数路径正是权限最容易漏掉的地方。
         """
         self.login(self.lisi)
-        for status in (Event.Status.CONFIRMED, Event.Status.CANCELLED,
+        for status in (Event.Status.FULL, Event.Status.CANCELLED,
                        Event.Status.COMPLETED, Event.Status.DRAFT):
             self.event.status = status
             self.event.save(update_fields=["status"])
@@ -3687,7 +3881,7 @@ class SignupBadgeLinkTests(PageTestCase):
         """⚠️ 一个点了会 404 的标签读起来是「站坏了」，不是「这场报不了」——
            而满员 / 已取消 / 已结束在 `open_for_signup()` 那道门前都是 404。
         """
-        for status in (Event.Status.CONFIRMED, Event.Status.CANCELLED,
+        for status in (Event.Status.FULL, Event.Status.CANCELLED,
                        Event.Status.COMPLETED):
             self.event.status = status
             self.event.save(update_fields=["status"])
@@ -3733,6 +3927,209 @@ class SignupBadgeLinkTests(PageTestCase):
                          "卡片不再画在遮罩上面 —— 那一格会被遮罩盖住")
         self.assertIn("pointer-events: auto", block(".event-row-badge-link"),
                       "报名那一格没把 pointer-events 收回来 —— 它点不动")
+class EndedEventPageTests(PageTestCase):
+    """同一件事，从页面上看。"""
+
+    def end_it(self, start=None, hours=3):
+        """把 self.event 挪到过去，status **保持 open** —— 没人去改状态的常态。"""
+        self.event.start_time = start if start is not None else NOW - DAY
+        self.event.end_time = self.event.start_time + hours * HOUR
+        self.event.save(update_fields=["start_time", "end_time"])
+        return self.event
+
+    def test_the_list_says_Ended_and_offers_no_signup_link(self):
+        """列表页上真正会撞见的那一格：**今天上午已经跑完的**那一场。
+
+        ⚠️ 只能是今天的。`from_today()` 的下边界是今天零点，昨天办完的活动
+           根本不在这一页上 —— 那正是这个 bug 一直没被列表页自己暴露出来的
+           原因：能同时满足「在列表里」和「已经结束」的窗口只有今天这一天。
+
+        ⚠️ 这里要一个定死的钟，而且没有别的写法。窗口是「今天零点 ~ 现在」，
+           而测试跑起来的那个「现在」可能就落在窗口里面（比如凌晨一点跑），
+           于是同一段代码在一天里的不同时刻会给出两种结果。所以把
+           `events.models` 那个 `local_now` 钉在今天中午，事件排在上午。
+        """
+        from unittest import mock
+
+        midnight = day_start(local_today())
+        self.end_it(start=midnight + 8 * HOUR, hours=2)
+        self.login(self.lisi)
+        with mock.patch("events.models.local_now", return_value=midnight + 12 * HOUR):
+            html = self.client.get(reverse("events:event_list")).content.decode()
+        self.assertIn(self.event.name, html)
+        self.assertIn("Ended", html)
+        self.assertNotIn("Open for signup", html)
+        self.assertNotIn(f'href="/events/{self.event.pk}/signup/"', html)
+
+    def test_signing_up_for_a_finished_event_is_a_404(self):
+        """⭐ 这是那个洞本身，不是它的显示。
+
+        在这条守卫之前，一场去年办完、status 还停在 `open` 的活动，
+        报名表单打得开、POST 也真的会写进一条 Participation。
+        """
+        self.end_it()
+        self.login(self.lisi)
+        url = reverse("events:event_signup", args=[self.event.pk])
+        self.assertEqual(self.client.get(url).status_code, 404)
+        response = self.client.post(url, {"event_role": self.role.pk})
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(Participation.objects.count(), 0)
+
+    def test_the_detail_page_drops_the_signup_button_but_stays_open(self):
+        # 打得开是要紧的：报过名的人事后要回来看。
+        self.end_it()
+        self.login(self.lisi)
+        response = self.client.get(reverse("events:event_detail", args=[self.event.pk]))
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.context["can_sign_up"])
+        self.assertContains(response, "not taking signups (Ended)")
+
+    def test_the_management_list_keeps_showing_the_real_status(self):
+        """🔴 管理页**不**跟着改口径。
+
+        那一格旁边就是改 status 的下拉框；标签写着一个下拉框里找不到的词，
+        读起来是「我刚才那一下没保存上」。已经结束由另一枚标签单独说。
+        """
+        self.end_it()
+        self.login(self.zhang)
+        html = self.client.get(reverse("events:event_manage_list")).content.decode()
+        self.assertIn("Open for signup", html)
+        self.assertIn("Ended", html)
+
+
+class FullEventTests(TestCase):
+    """「满员」由人数算出来，不写进 status（2026-08-19）。
+
+    形状和「结束」那一条一模一样，理由也一样：把 `full` 写进 status，就得在有人
+    取消时写回 `open` —— 一列上两个写入者，而管理员特意点下的「停止报名」会被一个
+    志愿者的取消悄悄撤销。
+    """
+
+    def setUp(self):
+        self.event = make_event()
+
+    def fill(self, role, people=1):
+        for index in range(people):
+            sign_up(contact=make_person(f"P{role.pk}{index}",
+                                        birth_date=datetime.date(1980, 1, 1)),
+                    event_role=role)
+
+    def test_an_event_whose_only_role_is_full_is_full(self):
+        self.fill(make_role(self.event, "lifting", needed_count=1))
+        self.assertTrue(self.event.is_full)
+        self.assertEqual(self.event.status_label, "Full")
+        self.assertFalse(self.event.accepting_signups)
+
+    def test_one_role_with_room_is_enough_to_keep_it_open(self):
+        # ⚠️ 「每一个角色都关上」才算满。有一个还能报，这场就还能报。
+        self.fill(make_role(self.event, "lifting", needed_count=1))
+        make_role(self.event, "welcome", needed_count=3)
+        self.assertFalse(self.event.is_full)
+        self.assertEqual(self.event.status_label, "Open for signup")
+        self.assertTrue(self.event.accepting_signups)
+
+    def test_a_role_that_is_only_a_target_never_makes_it_full(self):
+        """⭐ 「我们需要 500 人，但越多越好」—— 这条就是那句话。"""
+        self.fill(make_role(self.event, "lifting", needed_count=1,
+                            stop_at_needed_count=False), people=3)
+        self.assertFalse(self.event.is_full)
+        self.assertTrue(self.event.accepting_signups)
+
+    def test_an_event_with_no_roles_is_not_called_full(self):
+        # 没东西可报，但「满了」是个错的说法 —— 它一个位置都没开过。
+        self.assertFalse(self.event.is_full)
+
+    def test_the_door_and_the_room_are_two_different_questions(self):
+        """🔴 `is_open_for_signup` 和 `accepting_signups` 故意不是一回事。
+
+        前者必须和 `open_for_signup()` 那条 queryset 逐条对齐 —— 它决定报名页
+        **打不打得开**，而一场满员的活动的报名页应该打得开：落在「这些都满了」
+        上是一个回答，落在 404 上读起来是站坏了。
+        """
+        self.fill(make_role(self.event, "lifting", needed_count=1))
+        self.assertTrue(self.event.is_open_for_signup)
+        self.assertFalse(self.event.accepting_signups)
+        self.assertIn(self.event, Event.objects.open_for_signup())
+
+    def test_the_annotation_and_the_property_agree(self):
+        """⚠️ 列表页读注解、别处读 property，两边说的必须是同一件事。
+
+        不一致的表现是：列表上写着 Full 的那一场，点进去有 Sign up 按钮。
+        """
+        self.fill(make_role(self.event, "lifting", needed_count=1))
+        make_event(ministry=self.event.ministry, name="Roomy")
+        for annotated in Event.objects.with_capacity():
+            with self.subTest(event=annotated.name):
+                plain = Event.objects.get(pk=annotated.pk)
+                self.assertEqual(annotated.is_full, plain.is_full)
+
+    def test_the_list_costs_no_query_per_row(self):
+        """⭐ 二十行二十次查询，在全站被打得最多的一页上。
+
+        不比一个定死的数字，比**两种规模下的查询数** —— 那样这条守卫在 Django
+        自己改了基线之后仍然成立，而一旦有人把注解拿掉它当场就红。
+        """
+        for index in range(3):
+            event = make_event(ministry=self.event.ministry, name=f"E{index}")
+            self.fill(make_role(event, f"role{index}", needed_count=1))
+
+        def cost(limit):
+            with CaptureQueriesContext(connection) as captured:
+                for event in Event.objects.with_capacity()[:limit]:
+                    event.is_full
+            return len(captured)
+
+        self.assertEqual(cost(1), cost(3))
+
+
+class FullEventPageTests(PageTestCase):
+    """同一件事，从页面上看。"""
+
+    def fill(self, role, people=1):
+        for index in range(people):
+            sign_up(contact=make_person(f"Q{role.pk}{index}",
+                                        birth_date=datetime.date(1980, 1, 1)),
+                    event_role=role)
+
+    def test_the_list_says_Full_and_does_not_offer_the_signup_link(self):
+        self.fill(self.role, people=self.role.needed_count or 1)
+        self.login(self.lisi)
+        html = self.client.get(reverse("events:event_list")).content.decode()
+        self.assertIn("Full", html)
+        self.assertNotIn("Open for signup", html)
+        self.assertNotIn(f'href="/events/{self.event.pk}/signup/"', html)
+
+    def test_the_signup_page_still_opens_and_says_which_roles_are_full(self):
+        """⚠️ **不是 404。** 落在「这些都满了」上是一个回答；落在 404 上读起来
+           是站坏了 —— 而那两者对着同一个用户操作。
+        """
+        self.fill(self.role, people=self.role.needed_count or 1)
+        self.login(self.lisi)
+        response = self.client.get(
+            reverse("events:event_signup", args=[self.event.pk]))
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "— full")
+
+    def test_posting_into_a_full_role_is_refused_with_a_sentence(self):
+        self.fill(self.role, people=self.role.needed_count or 1)
+        self.login(self.lisi)
+        before = Participation.objects.count()
+        response = self.client.post(
+            reverse("events:event_signup", args=[self.event.pk]),
+            {"event_role": self.role.pk})
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "is full")
+        self.assertEqual(Participation.objects.count(), before)
+
+    def test_the_detail_page_hides_the_button_but_stays_open(self):
+        self.fill(self.role, people=self.role.needed_count or 1)
+        self.login(self.lisi)
+        response = self.client.get(
+            reverse("events:event_detail", args=[self.event.pk]))
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.context["can_sign_up"])
+
+
 class ManageListStatusTests(PageTestCase):
     """The status dropdown on the manage list, and the two fields it is not.
 
@@ -5175,7 +5572,7 @@ class EventRowHeadingTests(PageTestCase):
         """
         self.assertIn("bg-success-bg", self.row())
 
-        for status in [Event.Status.CONFIRMED, Event.Status.CANCELLED,
+        for status in [Event.Status.FULL, Event.Status.CANCELLED,
                        Event.Status.COMPLETED]:
             with self.subTest(status=status):
                 self.event.status = status

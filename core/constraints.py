@@ -28,6 +28,7 @@ CONSTRAINT_FIELD = {
     "user_email_taken": "email",
     # contact.Contact
     "individual_needs_last_name": "legal_last_name",
+    "individual_needs_first_name": "legal_first_name",
     "organization_needs_name": "organization_name",
     "contact_type_unknown": "contact_type",
     # contact.RelationshipType

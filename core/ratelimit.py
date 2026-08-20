@@ -114,3 +114,18 @@ def password_reset_rate_site(group, request):
     against a shared daily allowance that is the shape that actually empties it.
     """
     return settings.PASSWORD_RESET_RATELIMIT_SITE
+
+
+def verification_rate_per_ip(group, request):
+    """Per-IP limit on typing (or asking for) an email confirmation code.
+
+    ⚠️ What this protects is **guessing**. Six digits is a million-wide space
+       and `EmailVerification.MAX_ATTEMPTS` only ends one code — without a limit
+       here, resend-and-guess in a loop is an unbounded number of tries at a
+       six-digit number.
+
+    ⚠️ Not exempted for signed-in users, unlike the registration limits. Nobody
+       reaches either of these views while signed in (both redirect), so an
+       exemption would only be a way to skip the counting.
+    """
+    return settings.VERIFICATION_RATELIMIT_PER_IP

@@ -17,7 +17,13 @@ from core.timeutils import day_start
 from org.models import Ministry
 from org.permissions import ministry_ids_administered_by
 
-from .models import Event, EventRole, Participation, ParticipationRole
+from .models import (
+    SERVED_AS_EXPLANATIONS,
+    Event,
+    EventRole,
+    Participation,
+    ParticipationRole,
+)
 
 
 class RoleChoiceField(forms.ModelChoiceField):
@@ -88,6 +94,22 @@ class SignUpForm(forms.Form):
         choices=[("", "---------"), *Participation.ConsentMethod.choices],
         required=False, label="How consent was given",
     )
+    # D38. Drawn only for somebody the question applies to, and __init__
+    # deletes it outright for everybody else — see there.
+    #
+    # ⚠️ The choices are built from the model's labels plus the gloss beside
+    #    them in events/models.py, never typed out here. This wording appears
+    #    on four screens and D38 section 6 is its only home; a copy in a form
+    #    file is how it comes to say something slightly different in one place.
+    served_as = forms.ChoiceField(
+        choices=[
+            (value, f"{label} — {SERVED_AS_EXPLANATIONS[value]}")
+            for value, label in Participation.ServedAs.choices
+        ],
+        widget=forms.RadioSelect,
+        required=False,
+        label="How were you serving this time?",
+    )
 
     CONSENT_FIELDS = [
         "consent_given_by", "consent_relationship", "consent_method",
@@ -112,6 +134,30 @@ class SignUpForm(forms.Form):
         # cannot answer it differently — an event that waives the rule must
         # waive it on the page too, or the boxes are drawn and then ignored.
         from .services import consent_required_for
+
+        # ⚠️ Asked through services, exactly like consent below it: whether the
+        #    question applies and what it defaults to are one answer, and this
+        #    form is not allowed to work either half out for itself (D38
+        #    section 5).
+        from .services import default_served_as
+
+        self.served_as_default, self.ask_served_as = default_served_as(contact, event)
+        if not self.ask_served_as:
+            # ⚠️ Deleted, not hidden — unlike the consent fields below, which
+            #    stay as hidden inputs. A hidden field posts its value back,
+            #    and an outside volunteer's form must not carry this name at
+            #    all. services.sign_up() re-checks regardless; this is so the
+            #    page is honest, not so the data is safe.
+            del self.fields["served_as"]
+        else:
+            # ⚠️ Pre-*selected*, not pre-filled: both options are drawn and one
+            #    is already chosen. A default that is not shown is a statement
+            #    made on somebody's behalf without telling them, which is the
+            #    whole of D38 section 4. Compare the hours box on the
+            #    attendance page, where a pre-filled number is indistinguishable
+            #    from one a human checked.
+            self.fields["served_as"].initial = self.served_as_default
+            self.fields["served_as"].required = True
 
         self.needs_consent = consent_required_for(contact, event)
         if self.needs_consent:

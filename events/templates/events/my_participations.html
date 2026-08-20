@@ -30,7 +30,25 @@
                  九成，完整时段在详情页上。
               {% endcomment %}
               <td class="whitespace-nowrap">{{ row.event_role.event.start_time }}</td>
-              <td>{{ row.event_role.role.name }}</td>
+              <td>
+                {{ row.event_role.role.name }}
+                {% comment %}
+                ⚠️ 身份和「是谁定的」画在**本人**这一页上，而这一格是 D38 第四节
+                   那条「看得见不可交易」的唯一落点：一个人不应该在不知情的情况下，
+                   被把自己捐出去的一个周末改写成上班。
+
+                ⚠️ 「是谁定的」不能省。只显示身份的话，admin 改过和本人自己填的
+                   长得一模一样 —— 而这两件事在 FLSA 上不是一回事。
+
+                ⚠️ 空值不画。空表示「这一行早于这个字段」，把它画成任何一档
+                   都是替没人核实过的事作证（同旁边签到那一列的处理）。
+                {% endcomment %}
+                {% if row.served_as %}
+                  <span class="block text-xs text-ink-600 dark:text-ink-300">
+                    {{ row.get_served_as_display }}{% if row.served_as_declared_by %} · {{ row.get_served_as_declared_by_display }}{% endif %}
+                  </span>
+                {% endif %}
+              </td>
               <td>
                 {% if row.status == "registered" %}
                   {% include "core/components/badge.html" with label=row.get_status_display tone="success" %}

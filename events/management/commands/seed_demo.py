@@ -32,7 +32,13 @@ from accounts.services import register_account
 from contact.models import Contact, EmergencyContact, RelationshipType
 from core.timeutils import local_now, local_today
 from events.models import Event, EventRole, EventType, Participation, ParticipationRole
-from events.services import check_in, check_out, mark_absent, record_hours
+from events.services import (
+    check_in,
+    check_out,
+    mark_absent,
+    record_hours,
+    set_served_as,
+)
 from org.models import Assignment, EmploymentType, Ministry, MinistryRole, Position
 from org.permissions import foundation_admin_group
 
@@ -71,6 +77,15 @@ DEMO_ACCOUNTS = {
     "volunteer_minor2": (
         "zhaoxiaoyu@example.invalid",
         "under 18, reachable only through her emergency contact"),
+    # ⚠️ An account, not just a Contact, and the reason is an acceptance line
+    #    that cannot otherwise be walked: D38 section 4 says the person whose
+    #    weekend it was must be able to **see** what their identity says and
+    #    who set it. Log in as this one after an admin corrects her on the
+    #    signups page. Every other person in this demo who has an identity has
+    #    no way to look at it.
+    "staff_unpaid": (
+        "ada@example.invalid",
+        "unpaid staff — on the books, not paid; sees her own served-as"),
 }
 
 
@@ -124,7 +139,8 @@ class Command(BaseCommand):
         self.parent_of = RelationshipType.objects.get(code="parent")
         self.full_time, _ = EmploymentType.objects.get_or_create(
             code="full_time", defaults={"name": "Full time"})
-        EmploymentType.objects.get_or_create(code="part_time", defaults={"name": "Part time"})
+        self.part_time, _ = EmploymentType.objects.get_or_create(
+            code="part_time", defaults={"name": "Part time"})
         self.distribution, _ = EventType.objects.get_or_create(
             code="distribution", defaults={"name": "Distribution"})
         EventType.objects.get_or_create(code="class", defaults={"name": "Class"})
@@ -153,23 +169,53 @@ class Command(BaseCommand):
         self.pantry_lead, _ = Position.objects.get_or_create(
             code="pantry_lead",
             defaults={
-                "name": "Food Pantry lead", "kind": Position.Kind.EMPLOYEE,
+                "name": "Food Pantry lead", "kind": Position.Kind.STAFF,
+                "compensation": Position.Compensation.PAID,
                 "ministry": self.pantry, "is_leader": True,
             },
         )
         self.pantry_staff, _ = Position.objects.get_or_create(
             code="pantry_staff",
             defaults={
-                "name": "Food Pantry officer", "kind": Position.Kind.EMPLOYEE,
+                "name": "Food Pantry officer", "kind": Position.Kind.STAFF,
+                "compensation": Position.Compensation.PAID,
                 "ministry": self.pantry, "reports_to": self.pantry_lead,
             },
         )
         # A post nobody holds. Vacancy is a first-class state, and a demo with
         # no vacancy in it cannot show that.
+        #
+        # ⚠️ Unpaid, and a vacancy still says so. Being able to describe an
+        #    empty box — is it budgeted or not — is the reason compensation
+        #    hangs off Position and not off Assignment (D11 / D32 section 2).
         Position.objects.get_or_create(
             code="pantry_driver",
             defaults={
-                "name": "Driver", "kind": Position.Kind.VOLUNTEER,
+                "name": "Driver", "kind": Position.Kind.STAFF,
+                "compensation": Position.Compensation.UNPAID,
+                "ministry": self.pantry, "reports_to": self.pantry_lead,
+            },
+        )
+        # ⚠️ All three compensation values have to exist in the demo data, held
+        #    by people who took part, or a whole acceptance line cannot be
+        #    walked in the browser: R8 has to show paid, unpaid and stipend
+        #    staff side by side (05-roadmap D1.2). Driver above is unpaid but
+        #    deliberately vacant, so the unpaid *person* needs a post of their
+        #    own — this is the "ministry whose members are all volunteers but
+        #    work like employees" that started D32.
+        self.pantry_helper, _ = Position.objects.get_or_create(
+            code="pantry_helper",
+            defaults={
+                "name": "Food Pantry helper", "kind": Position.Kind.STAFF,
+                "compensation": Position.Compensation.UNPAID,
+                "ministry": self.pantry, "reports_to": self.pantry_lead,
+            },
+        )
+        self.pantry_intern, _ = Position.objects.get_or_create(
+            code="pantry_intern",
+            defaults={
+                "name": "Food Pantry intern", "kind": Position.Kind.STAFF,
+                "compensation": Position.Compensation.STIPEND,
                 "ministry": self.pantry, "reports_to": self.pantry_lead,
             },
         )
@@ -302,6 +348,29 @@ class Command(BaseCommand):
             },
         )
 
+        # The two people the axis split was made for: on the books, in post,
+        # and not paid the way an employee is. Before D32 neither of them could
+        # be filed at all without calling them something they are not.
+        self.unpaid_staff = self.account(
+            demo_login("staff_unpaid"), "Okafor", "Ada",
+            birth_date=datetime.date(1979, 6, 12),
+        ).contact
+        Assignment.objects.get_or_create(
+            contact=self.unpaid_staff, position=self.pantry_helper,
+            start_date=local_today() - datetime.timedelta(days=300),
+            defaults={"employment_type": self.part_time},
+        )
+        self.intern = Contact.objects.get_or_create(
+            legal_last_name="Silva", legal_first_name="Rafa",
+            defaults={"contact_type": Contact.ContactType.INDIVIDUAL,
+                      "birth_date": datetime.date(2003, 4, 2)},
+        )[0]
+        Assignment.objects.get_or_create(
+            contact=self.intern, position=self.pantry_intern,
+            start_date=local_today() - datetime.timedelta(days=120),
+            defaults={"employment_type": self.part_time},
+        )
+
     def events(self):
         now = local_now()
 
@@ -371,7 +440,10 @@ class Command(BaseCommand):
         )
         if made:
             past_lifting = self.role(past, self.lifting, 3)
-            past_welcome = self.role(past, self.welcome, 2)
+            # Wanted 4: the paper sign-in plus the two unpaid staff below.
+            # A finished event showing more signups than it asked for is a
+            # different demo story than the one this data is telling.
+            past_welcome = self.role(past, self.welcome, 4)
             self.role(past, self.interpreting, 1)          # zero turnout, still a role
 
             attended = self.signup(self.adult, past_lifting)
@@ -389,6 +461,34 @@ class Command(BaseCommand):
             # Paper sign-in: hours by hand, no timestamps. Still counts.
             paper = self.signup(self.pantry_admin, past_welcome)
             record_hours(paper, Decimal("4.00"))
+
+            # ⚠️ Unpaid and stipend staff on the same event as the paid ones.
+            #    R8 used to answer with the paid two only, and the point of
+            #    D1.2 is that the other two now appear beside them — which
+            #    cannot be seen on a page unless the demo data has them.
+            #
+            # ⚠️ And they answered the identity question differently, which is
+            #    the whole of D38 on one screen: Ada came on her own time, Rafa
+            #    was put on the rota. Same event, same job, two ledgers.
+            #    Without both values in the demo, the column on the report page
+            #    reads as decoration.
+            #
+            # ⚠️ The paid two above are deliberately left without an identity,
+            #    so the third state — "not recorded", which is what every row
+            #    older than D38 looks like — is on the screen as well. A cell
+            #    that only ever appears in production is a cell nobody designs.
+            for person, served_as in [
+                (self.unpaid_staff, Participation.ServedAs.VOLUNTEER),
+                (self.intern, Participation.ServedAs.WORK),
+            ]:
+                row = Participation.objects.create(
+                    contact=person, event_role=past_welcome,
+                    registered_at=past.start_time)
+                set_served_as(
+                    row, served_as,
+                    declared_by=Participation.DeclaredBy.SELF)
+                check_in(row, at=past.start_time)
+                check_out(row, at=past.start_time + 3 * HOUR)
 
         # 5. The tax ministry's own event, so over-reach can be tried against
         #    something that really exists.

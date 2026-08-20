@@ -89,6 +89,8 @@ from .services import (
     reschedule,
     scheduled_hours,
     resolve_recipients,
+    contacts_asked_about_serving,
+    set_served_as,
     set_status,
     sign_up,
     undo_attendance,
@@ -537,6 +539,14 @@ def event_signup(request, pk):
                 contact=contact,
                 event_role=form.cleaned_data["event_role"],
                 consent=form.consent(),
+                # ⚠️ Passed into sign_up() rather than written afterwards: the
+                #    signup and the identity on it are one act, and the version
+                #    where a second call follows this one is the version where
+                #    somebody eventually forgets it (D38). `.get()`, because
+                #    the field is deleted from the form entirely for anybody
+                #    the question does not apply to — and the service re-checks
+                #    that regardless of what arrives here.
+                served_as=form.cleaned_data.get("served_as") or None,
             )
         except (ConsentRequired, ValidationError) as error:
             form.add_error(None, error)
@@ -969,10 +979,49 @@ def role_delete(request, pk):
 
 @login_required
 def event_registrations(request, pk):
-    """P4's first half: who signed up, by role. Read-only, so the read check."""
+    """P4's first half: who signed up, by role — and where an identity is corrected.
+
+    ⚠️ This page used to be read-only and asked only the read check. It now
+       carries one write (D38's correction), so it asks **two** questions, the
+       same split the attendance page already makes: the foundation tier may
+       read any event's signups, only the ministry's own admin may change
+       anything on them. Not drawing the control is interface and keeps nobody
+       out — a POST arriving from anywhere at all looks identical here.
+
+    ⚠️ The correction is one row at a time and there is deliberately no bulk
+       version (D38 section 4's only 🔴). A button that reclassifies thirty
+       people at once takes the evidential value of the column away in a single
+       click, and that value is the entire reason the column has a
+       "who said so" beside it.
+    """
     event = get_object_or_404(Event.objects.select_related("ministry"), pk=pk)
     if not can_view_event_records(request.user, event):
         raise PermissionDenied(SCOPED_DENIAL)
+    can_manage = can_manage_event(request.user, event)
+
+    if request.method == "POST":
+        if not can_manage:
+            raise PermissionDenied(SCOPED_DENIAL)
+        participation = get_object_or_404(
+            Participation.objects.filter(event_role__event=event),
+            pk=request.POST.get("participation"),
+        )
+        # ⚠️ Judged here, not trusted from the form: the question applies to a
+        #    set of people and a POST can name anybody. Asked through the same
+        #    service the form and the backfill ask, so there is one answer.
+        if participation.contact_id in contacts_asked_about_serving(event):
+            value = request.POST.get("served_as")
+            if value in Participation.ServedAs.values:
+                set_served_as(
+                    participation, value,
+                    declared_by=Participation.DeclaredBy.ADMIN,
+                )
+                messages.success(
+                    request,
+                    f"Recorded. {participation.contact} will see on their signups "
+                    "page that an admin set this.",
+                )
+        return redirect("events:event_registrations", pk=event.pk)
 
     roles = event.roles.with_signup_counts().select_related("role").prefetch_related(
         Prefetch(
@@ -984,7 +1033,14 @@ def event_registrations(request, pk):
         "event": event,
         # Drives the shared event nav: Edit and Notify are drawn only for
         # somebody who can actually open them.
-        "can_manage": can_manage_event(request.user, event), "roles": roles,
+        "can_manage": can_manage, "roles": roles,
+        # ⚠️ One query for the whole page, not one per row. The identity
+        #    question applies to the ministry's own people and to nobody else,
+        #    and an outside volunteer's row must not offer a control that would
+        #    be refused — D38 section 5's "the cost falls only on the people it
+        #    is genuinely ambiguous for".
+        "asked_about_serving": contacts_asked_about_serving(event),
+        "served_as_choices": Participation.ServedAs.choices,
     })
 
 

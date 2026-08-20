@@ -13,8 +13,10 @@ import os
 import re
 import tempfile
 from decimal import Decimal
+from importlib import import_module
 from pathlib import Path
 
+from django.apps import apps as django_apps
 from django.conf import settings
 
 from django.contrib.auth import get_user_model
@@ -69,6 +71,7 @@ from .services import (
     apply_scan,
     TurnedUp,
     cancel,
+    contacts_asked_about_serving,
     check_in,
     check_out,
     clear_hours,
@@ -87,6 +90,7 @@ from .services import (
     resolve_recipients,
     scan_targets,
     scheduled_hours,
+    set_served_as,
     sign_up,
     undo_attendance,
 )
@@ -1176,7 +1180,8 @@ class R8Tests(TestCase):
         self.role = make_role(self.event, "lifting")
         self.post = Position.objects.create(
             code="pantry_staff", name="Pantry staff",
-            kind=Position.Kind.EMPLOYEE, ministry=self.pantry,
+            kind=Position.Kind.STAFF, compensation=Position.Compensation.PAID,
+            ministry=self.pantry,
         )
 
     def took_part(self, person):
@@ -1232,7 +1237,8 @@ class R8Tests(TestCase):
         person = make_person("Doubled")
         second = Position.objects.create(
             code="pantry_lead", name="Pantry lead",
-            kind=Position.Kind.EMPLOYEE, ministry=self.pantry,
+            kind=Position.Kind.STAFF, compensation=Position.Compensation.PAID,
+            ministry=self.pantry,
         )
         for post in (self.post, second):
             Assignment.objects.create(
@@ -1246,7 +1252,8 @@ class R8Tests(TestCase):
         person = make_person("TaxStaff")
         other_post = Position.objects.create(
             code="tax_staff", name="Tax staff",
-            kind=Position.Kind.EMPLOYEE, ministry=self.tax,
+            kind=Position.Kind.STAFF, compensation=Position.Compensation.PAID,
+            ministry=self.tax,
         )
         Assignment.objects.create(
             contact=person, position=other_post,
@@ -1255,20 +1262,310 @@ class R8Tests(TestCase):
         self.took_part(person)
         self.assertEqual(list(ministry_staff_participation(self.event)), [])
 
-    def test_a_volunteer_of_the_same_ministry_does_not_appear(self):
-        # R8 asks for employees. A volunteer holding a post in the ministry is
-        # not one, and the kind filter is what keeps them out.
+    def test_an_unpaid_staff_member_of_the_same_ministry_does_appear(self):
+        """⚠️ This test used to assert the opposite, and the reversal is the
+        point — it is the watershed between the old reading of R8 and the new
+        one (D32 section 3). Same person, same post, same event; the only thing
+        that changed is the answer.
+
+        The old version was called
+        `test_a_volunteer_of_the_same_ministry_does_not_appear` and reasoned
+        "R8 asks for employees, and a volunteer is not one". That reading takes
+        the requirement's word literally and loses the people the foundation
+        most wants counted: the unpaid members who hold a fixed post and often
+        run the event. Written down because a reversed test with no explanation
+        reads to the next person as if somebody had got it wrong first time.
+        """
         person = make_person("Helper")
-        volunteer_post = Position.objects.create(
+        unpaid_post = Position.objects.create(
             code="pantry_helper", name="Pantry helper",
-            kind=Position.Kind.VOLUNTEER, ministry=self.pantry,
+            kind=Position.Kind.STAFF, compensation=Position.Compensation.UNPAID,
+            ministry=self.pantry,
         )
         Assignment.objects.create(
-            contact=person, position=volunteer_post,
+            contact=person, position=unpaid_post,
+            start_date=local_today() - datetime.timedelta(days=365),
+        )
+        self.took_part(person)
+        self.assertEqual(
+            [row.contact for row in ministry_staff_participation(self.event)], [person])
+
+    def test_all_three_pay_arrangements_are_listed_together(self):
+        # The new reading, stated once and completely: R8 is about us versus
+        # outside volunteers, so how somebody is paid does not enter into it.
+        people = []
+        for code, compensation in [
+            ("pantry_paid", Position.Compensation.PAID),
+            ("pantry_unpaid", Position.Compensation.UNPAID),
+            ("pantry_stipend", Position.Compensation.STIPEND),
+        ]:
+            post = Position.objects.create(
+                code=code, name=code, kind=Position.Kind.STAFF,
+                compensation=compensation, ministry=self.pantry,
+            )
+            person = make_person(code)
+            Assignment.objects.create(
+                contact=person, position=post,
+                start_date=local_today() - datetime.timedelta(days=365),
+            )
+            self.took_part(person)
+            people.append(person)
+        self.assertEqual(
+            sorted(row.contact.pk for row in ministry_staff_participation(self.event)),
+            sorted(person.pk for person in people))
+
+    def test_a_board_member_of_the_same_ministry_does_not_appear(self):
+        """⚠️ Chosen, not overlooked — which is the only reason this test is
+        here (D32 section 3).
+
+        R8 asks who of the department's own working capacity took part, and a
+        trustee is not that. Without this test the next person to notice a
+        board member missing from the list reads it as a value the axis split
+        forgot to migrate, adds `kind__in=[STAFF, BOARD]`, and changes a
+        reported figure that nobody was looking at.
+        """
+        person = make_person("Trustee")
+        board_post = Position.objects.create(
+            code="pantry_board", name="Pantry board seat",
+            kind=Position.Kind.BOARD, compensation=Position.Compensation.UNPAID,
+            ministry=self.pantry,
+        )
+        Assignment.objects.create(
+            contact=person, position=board_post,
             start_date=local_today() - datetime.timedelta(days=365),
         )
         self.took_part(person)
         self.assertEqual(list(ministry_staff_participation(self.event)), [])
+
+
+class ServedAsTests(TestCase):
+    """D38: was this their own time or their job — asked of the right people.
+
+    Every test here fails silently if it regresses: nothing raises, a column is
+    just filled in with something nobody said, or a question is put to somebody
+    it does not apply to.
+    """
+
+    def setUp(self):
+        self.pantry = Ministry.objects.create(code="food_pantry", name="Food Pantry")
+        self.event = make_event(ministry=self.pantry)
+        self.role = make_role(self.event, "lifting")
+        self.event_day = local_date_of(self.event.start_time)
+
+    def an_adult(self, last_name):
+        # ⚠️ With a birth date. make_person() leaves it unset, which is the
+        #    three-state "unknown" — and unknown counts as a minor, so every
+        #    signup here would be refused for want of a guardian. Nothing in
+        #    this class is about consent.
+        return make_person(last_name, birth_date=datetime.date(1985, 1, 1))
+
+    def a_post(self, code, kind=Position.Kind.STAFF, **fields):
+        fields.setdefault("compensation", Position.Compensation.PAID)
+        return Position.objects.create(
+            code=code, name=code, kind=kind, ministry=self.pantry, **fields)
+
+    def on_the_books(self, person, post, **dates):
+        dates.setdefault("start_date", self.event_day - datetime.timedelta(days=365))
+        return Assignment.objects.create(contact=person, position=post, **dates)
+
+    def form_for(self, person):
+        return SignUpForm(event=self.event, contact=person)
+
+    # --- who gets asked at all ------------------------------------------
+
+    def test_an_outside_volunteer_is_not_asked_and_is_recorded_as_volunteering(self):
+        # The most important row in D38 section 5: almost everybody signing up
+        # is an outside volunteer, and they must not see one extra word.
+        person = self.an_adult("Outsider")
+        self.assertNotIn("served_as", self.form_for(person).fields)
+
+        row = sign_up(contact=person, event_role=self.role)
+        # ⚠️ The value **is** recorded even though nobody was asked — it is what
+        #    the data proves, and R6's volunteer hours are this column. Leaving
+        #    it empty would drop nearly every volunteer out of that figure, and
+        #    would make new rows emptier than the ones migration 0014
+        #    backfilled beside them.
+        self.assertEqual(row.served_as, Participation.ServedAs.VOLUNTEER)
+        # ⚠️ And nobody is credited with saying it. declared_by means "a human
+        #    answered the question"; this person was never shown one. Same line
+        #    the backfill draws, and what keeps this column evidence rather
+        #    than decoration (D38 section 4).
+        self.assertEqual(row.served_as_declared_by, "")
+
+    def test_a_board_member_is_not_asked(self):
+        # "Scheduled work" is meaningless to an unpaid trustee — they are not
+        # an employee and FLSA does not think so either. Asking reads as the
+        # system not knowing who they are.
+        person = self.an_adult("Trustee")
+        self.on_the_books(
+            person,
+            self.a_post("chair", kind=Position.Kind.BOARD,
+                        compensation=Position.Compensation.UNPAID),
+        )
+        self.assertNotIn("served_as", self.form_for(person).fields)
+
+    def test_somebody_whose_tenure_ended_before_the_event_is_not_asked(self):
+        """⚠️ The `on=` trap, second appearance in the same shape (R8 was first).
+
+        Judged against today instead of the event's day, this person is asked
+        about an event they attended as a member of the public.
+        """
+        person = self.an_adult("Leaver")
+        self.on_the_books(
+            person, self.a_post("officer"),
+            end_date=self.event_day - datetime.timedelta(days=1),
+        )
+        self.assertNotIn("served_as", self.form_for(person).fields)
+
+    def test_a_staff_member_is_asked_with_volunteering_pre_selected(self):
+        person = self.an_adult("Staff")
+        self.on_the_books(person, self.a_post("officer"))
+
+        form = self.form_for(person)
+        self.assertIn("served_as", form.fields)
+        # ⚠️ Pre-*selected*, not pre-filled: both options are rendered and one
+        #    is chosen. A default nobody is shown is a statement made on their
+        #    behalf (D38 section 5).
+        self.assertEqual(
+            form.fields["served_as"].initial, Participation.ServedAs.VOLUNTEER)
+        self.assertEqual(len(form.fields["served_as"].choices), 2)
+
+        row = sign_up(
+            contact=person, event_role=self.role,
+            served_as=Participation.ServedAs.WORK,
+        )
+        self.assertEqual(row.served_as, Participation.ServedAs.WORK)
+        self.assertEqual(row.served_as_declared_by, Participation.DeclaredBy.SELF)
+
+    def test_an_identity_posted_for_somebody_who_was_not_asked_is_ignored(self):
+        """⚠️ No page can produce this and that is exactly why it is tested.
+
+        The field is deleted from an outside volunteer's form, so the only way
+        to send one is by hand — and the service, not the form, is what has to
+        refuse it. Without this the column could be set from outside for people
+        it has no meaning for, and the row would look ordinary.
+        """
+        person = self.an_adult("Outsider")
+        row = sign_up(
+            contact=person, event_role=self.role,
+            served_as=Participation.ServedAs.WORK,
+        )
+        self.assertEqual(row.served_as, Participation.ServedAs.VOLUNTEER)
+
+    def test_signing_up_again_after_cancelling_keeps_asking(self):
+        # The reused-row path (C0.2's bug) writes through the same service, so
+        # the identity has to survive it rather than be left on the old value.
+        person = self.an_adult("Staff")
+        self.on_the_books(person, self.a_post("officer"))
+        row = sign_up(contact=person, event_role=self.role)
+        cancel(row)
+        again = sign_up(
+            contact=person, event_role=self.role,
+            served_as=Participation.ServedAs.WORK,
+        )
+        self.assertEqual(again.pk, row.pk)
+        self.assertEqual(again.served_as, Participation.ServedAs.WORK)
+
+    # --- corrections ------------------------------------------------------
+
+    def test_an_admins_correction_says_it_was_an_admin_and_leaves_a_trace(self):
+        person = self.an_adult("Staff")
+        self.on_the_books(person, self.a_post("officer"))
+        row = sign_up(contact=person, event_role=self.role)
+
+        set_served_as(
+            row, Participation.ServedAs.WORK,
+            declared_by=Participation.DeclaredBy.ADMIN,
+        )
+        row.refresh_from_db()
+        self.assertEqual(row.served_as, Participation.ServedAs.WORK)
+        self.assertEqual(row.served_as_declared_by, Participation.DeclaredBy.ADMIN)
+        # ⚠️ The whole story is in the history, newest first, because "it was
+        #    changed, and by whom" is the fact somebody will be asking about —
+        #    not the current value.
+        #
+        # ⚠️ Three entries, not two: signing up writes the row and then the
+        #    identity onto it, so a signup always leaves a blank first version.
+        #    Accepted knowingly — the alternative is a second way to write
+        #    these columns (assign without saving, save later), and one setter
+        #    is the entire point of D38's invariant. Asserted rather than
+        #    tolerated so that a change in this shape has to be deliberate.
+        self.assertEqual(
+            [(entry.served_as, entry.served_as_declared_by)
+             for entry in row.history.all()],
+            [
+                (Participation.ServedAs.WORK, Participation.DeclaredBy.ADMIN),
+                (Participation.ServedAs.VOLUNTEER, Participation.DeclaredBy.SELF),
+                ("", ""),
+            ],
+        )
+
+    def test_the_correction_control_is_offered_only_for_the_ministrys_own_people(self):
+        staff = self.an_adult("Staff")
+        self.on_the_books(staff, self.a_post("officer"))
+        outsider = self.an_adult("Outsider")
+        asked = contacts_asked_about_serving(self.event)
+        self.assertIn(staff.pk, asked)
+        self.assertNotIn(outsider.pk, asked)
+
+    # --- the backfill -----------------------------------------------------
+
+    def run_backfill(self):
+        """The migration's own function, over the real app registry.
+
+        ⚠️ Called directly rather than re-implemented here. What this is really
+           testing is the rule the migration applies, and a second copy of that
+           rule in the test would agree with itself forever.
+        """
+        # import_module, because a module name starting with a digit cannot
+        # be written as an import statement.
+        migration = import_module("events.migrations.0014_backfill_served_as")
+        migration.backfill(django_apps, None)
+
+    def old_row(self, person):
+        # Straight to the table: these rows are meant to predate the service
+        # that fills the column in.
+        return Participation.objects.create(contact=person, event_role=self.role)
+
+    def test_the_backfill_proves_the_outsiders_and_leaves_the_rest_empty(self):
+        outsider = self.old_row(self.an_adult("Outsider"))
+        staff_person = self.an_adult("Staff")
+        self.on_the_books(staff_person, self.a_post("officer"))
+        staff = self.old_row(staff_person)
+
+        self.run_backfill()
+        outsider.refresh_from_db()
+        staff.refresh_from_db()
+
+        self.assertEqual(outsider.served_as, Participation.ServedAs.VOLUNTEER)
+        # ⚠️ Empty, not "volunteer". This is the row nobody can speak for, and
+        #    it belongs in its own cell on a report rather than on either side.
+        self.assertEqual(staff.served_as, "")
+        # ⚠️ And not one row gets a declared_by: nobody stated any of this.
+        self.assertEqual(outsider.served_as_declared_by, "")
+        self.assertEqual(staff.served_as_declared_by, "")
+
+    def test_the_backfill_treats_a_board_members_old_row_as_volunteering(self):
+        """⚠️ The 2026-08-19 narrowing, and the reason it exists.
+
+        Read literally, D38 section 9 said "any active Assignment" and would
+        leave this row empty — while section 5 says a trustee is never asked
+        this question at all, so a *new* row for the same person comes out as
+        volunteering. One person, one situation, two answers. The predicate is
+        `kind=staff` in both places now, and this test is what holds them
+        together.
+        """
+        trustee = self.an_adult("Trustee")
+        self.on_the_books(
+            trustee,
+            self.a_post("chair", kind=Position.Kind.BOARD,
+                        compensation=Position.Compensation.UNPAID),
+        )
+        row = self.old_row(trustee)
+
+        self.run_backfill()
+        row.refresh_from_db()
+        self.assertEqual(row.served_as, Participation.ServedAs.VOLUNTEER)
 
 
 class DictionaryTableTests(TestCase):
@@ -3472,9 +3769,13 @@ class AcceptanceWalkTests(TestCase):
             reverse("events:event_report", args=[self.past_event().pk]))
         summary = response.context["summary"]
         self.assertEqual(summary["role_count"], 3)          # R4 — 翻译 had nobody
-        self.assertEqual(summary["total_hours"], Decimal("9.00"))   # R6: 3 + 2 + 4
+        # R6: 3 + 2 + 4, plus 3 + 3 for the unpaid and stipend staff the demo
+        # data gained with the axis split (D32) — R8 has to be able to show all
+        # three pay arrangements side by side, and that means all three took
+        # part in something.
+        self.assertEqual(summary["total_hours"], Decimal("15.00"))
 
-    def test_r8_lists_the_employee_who_has_since_left(self):
+    def test_r8_lists_the_staff_member_who_has_since_left(self):
         # The clock is the day of the event. Asked with today's date this list
         # would be short by one, and would say nothing about it.
         self.as_role("pantry_admin")
@@ -3482,6 +3783,78 @@ class AcceptanceWalkTests(TestCase):
             reverse("events:event_report", args=[self.past_event().pk]))
         names = {row.contact.legal_last_name for row in response.context["staff"]}
         self.assertIn("Sun", names)
+
+    def test_r8_lists_paid_unpaid_and_stipend_staff_side_by_side(self):
+        """The acceptance line for the widened R8, walked over the real page.
+
+        ⚠️ Over the page rather than over the service, because that is where
+           this could still fail after the query is right: the heading used to
+           say "Employees of this ministry", and two thirds of this list are
+           not employees (D32 section 4 — the wording is what the other side
+           quotes in a dispute, so it is not decoration).
+        """
+        self.as_role("pantry_admin")
+        response = self.client.get(
+            reverse("events:event_report", args=[self.past_event().pk]))
+        names = {row.contact.legal_last_name for row in response.context["staff"]}
+        self.assertIn("Sun", names)         # paid, and has since left
+        self.assertIn("Okafor", names)      # unpaid — invisible to R8 until now
+        self.assertIn("Silva", names)       # stipend
+        self.assertNotContains(response, "Employees of this ministry")
+
+    def test_an_admin_can_correct_an_identity_and_the_person_sees_who_did_it(self):
+        """D38 walked end to end, over the pages, because that is where it fails.
+
+        ⚠️ The two columns are readonly in the admin, so if this route did not
+           exist nothing in the entire system could change one — a service with
+           no door, which this project has now shipped three times. Half of
+           what this test is for is proving the door is there.
+
+        ⚠️ The other half is the half D38 calls non-negotiable: the person whose
+           weekend it was can see, on their own page, both what it now says and
+           that it was an admin who said it.
+        """
+        signup = Participation.objects.filter(
+            contact__legal_last_name="Okafor").first()
+        self.assertEqual(signup.served_as, Participation.ServedAs.VOLUNTEER)
+
+        self.as_role("pantry_admin")
+        response = self.client.post(
+            reverse("events:event_registrations", args=[signup.event_role.event_id]),
+            {"participation": signup.pk, "served_as": Participation.ServedAs.WORK},
+            follow=True,
+        )
+        self.assertEqual(response.status_code, 200)
+        signup.refresh_from_db()
+        self.assertEqual(signup.served_as, Participation.ServedAs.WORK)
+        self.assertEqual(
+            signup.served_as_declared_by, Participation.DeclaredBy.ADMIN)
+
+        # And now from the other side, on the page that belongs to the person.
+        self.client.logout()
+        self.assertTrue(self.client.login(
+            email=demo_login("staff_unpaid"), password=self.PASSWORD))
+        mine = self.client.get(reverse("events:my_participations"))
+        self.assertContains(mine, "Scheduled work")
+        # ⚠️ And that it was not her who said so. Showing the value alone makes
+        #    "I said this" and "somebody changed this on me" look identical,
+        #    and those are not the same fact — in FLSA terms least of all.
+        self.assertContains(mine, "Set by an admin")
+
+    def test_a_volunteer_cannot_correct_an_identity(self):
+        # ⚠️ Posted, not merely "the button is not drawn". Not drawing a control
+        #    is interface, and a POST from anywhere at all arrives here looking
+        #    exactly the same.
+        signup = Participation.objects.filter(
+            contact__legal_last_name="Okafor").first()
+        self.as_role("volunteer_adult")
+        response = self.client.post(
+            reverse("events:event_registrations", args=[signup.event_role.event_id]),
+            {"participation": signup.pk, "served_as": Participation.ServedAs.WORK},
+        )
+        self.assertEqual(response.status_code, 403)
+        signup.refresh_from_db()
+        self.assertEqual(signup.served_as, Participation.ServedAs.VOLUNTEER)
 
     def test_the_notification_preview_has_all_three_groups(self):
         # ⭐ P6. The third group is the one that fails silently: a green

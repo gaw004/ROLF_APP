@@ -13,7 +13,36 @@
 参数：field（一个 bound field）。
 {% endcomment %}
 <div class="field {% if field.errors %}field-invalid{% endif %}">
-  {% if field.field.widget.input_type == "checkbox" %}
+  {% if field.field.widget.input_type == "radio" %}
+    {% comment %}
+    单选组：`<fieldset>` + `<legend>`，不是一个 `<label>` 指着第一颗单选钮。
+
+    ⚠️ 这不是讲究：一个 `<label for>` 只能指向**一个**控件，所以读屏软件念到第二、
+       第三个选项时，那句「你这次以什么身份参加？」已经不在了 —— 人听到的是两个
+       没有问题的答案。`<legend>` 是唯一一个会跟着每个选项一起被念出来的结构。
+
+    ⚠️ 每一项的外形和扫码打卡那一屏的工种选择**共用同一套 class**
+       （`label.card` 包着原生 `input[type=radio]`）。那一处是模板里手写的、
+       不在 `.field` 里，而 app.css 里那条 accent-color 的注释已经点名说
+       「写两遍就会分叉」—— 这里是第二处，所以形状照抄，不另立一种。
+
+    ⚠️ 每个选项一整块可点（`label` 包着 `input`），而不是只有那个小圆点。
+       手机上点不中的选项和禁用的选项，用起来是一回事。
+    {% endcomment %}
+    <fieldset>
+      <legend class="block text-sm font-medium text-ink-800 dark:text-ink-100">
+        {{ field.label }}{% if field.field.required %}<span class="text-danger-fg dark:text-danger-fg-dark" aria-hidden="true"> *</span>{% endif %}
+      </legend>
+      <div class="mt-2 flex flex-col gap-2">
+        {% for option in field %}
+          <label class="card flex cursor-pointer items-center gap-3">
+            {{ option.tag }}
+            <span>{{ option.choice_label }}</span>
+          </label>
+        {% endfor %}
+      </div>
+    </fieldset>
+  {% elif field.field.widget.input_type == "checkbox" %}
     <div class="flex items-start gap-2">
       {{ field }}
       <label for="{{ field.id_for_label }}" class="text-sm text-ink-800 dark:text-ink-100">

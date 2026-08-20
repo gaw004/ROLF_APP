@@ -56,26 +56,47 @@
     answers “how many were opened” rather than “how many got takers”.
   </p>
 
-  <h2 class="mb-3 mt-8 text-lg font-semibold">Employees of this ministry who took part (R8)</h2>
+  <h2 class="mb-3 mt-8 text-lg font-semibold">This ministry's own people who took part (R8)</h2>
   {% if staff %}
     <ul class="space-y-2">
       {% for row in staff %}
         <li class="card flex flex-wrap items-center justify-between gap-2 text-sm">
           <span class="font-medium">{{ row.contact }}</span>
-          <span class="text-ink-600 dark:text-ink-300">{{ row.event_role.role.name }}</span>
+          <span class="text-ink-600 dark:text-ink-300">
+            {{ row.event_role.role.name }}
+            {% comment %}
+            ⚠️ D32 第三节末尾那句「R8 名单还要加一列身份」的落点。
+               「我们自己人参加了」和「我们自己人是被派来上班的」是基金会
+               分开问的两件事 —— 少了这一列，这份名单答的还是第一个问题。
+
+            ⚠️ 空的写「Not recorded」，不写成任何一档，也不留空白：
+               留空白的话，「没记过」和「这一列还没渲染出来」长得一样，
+               而回填留下的那一批正是空的（D38 第九节）。
+            {% endcomment %}
+            · {{ row.get_served_as_display|default:"Not recorded" }}
+          </span>
         </li>
       {% endfor %}
     </ul>
   {% else %}
     {% comment %}
     ⚠️ 空名单在试点初期是**正常**的，不是坏了：R8 要 join Assignment，
-       而 employee 得先注册、再建 Assignment，才会出现在这里。
+       而人得先注册、再建 Assignment，才会出现在这里。
        所以这句空状态说的是「怎么会空」，不是「暂无数据」。
     {% endcomment %}
-    {% include "core/components/empty.html" with message="No employee who was in post on the day took part. If you expected somebody here, check that they have an assignment covering the date of the event — the list joins on that, not on who turned up." %}
+    {% include "core/components/empty.html" with message="Nobody who held a post here on the day took part. If you expected somebody, check that they have an assignment covering the date of the event — the list joins on that, not on who turned up." %}
   {% endif %}
+  {% comment %}
+  ⚠️ 「自己人」这个说法是承重的，不是文案（D32 第三节 · 第四节）：这份名单
+     现在含**无薪和领津贴的在编人员**，而界面上一律不许管无薪的人叫 employee ——
+     真出争议时，机构自己系统里的措辞就是对方的证据。
+     ⚠️ 理事不在这份名单里，也是有意的；那句话写在下面，因为空名单和
+        「你以为该在里面的那个人是理事」长得一模一样。
+  {% endcomment %}
   <p class="mt-2 text-xs text-ink-600 dark:text-ink-300">
-    In post <strong>on the day of the event</strong>, not today — somebody who has
-    left since still counts, and somebody who joined since does not.
+    Anyone holding a post in this ministry — paid, unpaid or on a stipend.
+    In post <strong>on the day of the event</strong>, not today: somebody who has
+    left since still counts, and somebody who joined since does not. Board
+    members are not on this list.
   </p>
 {% endblock %}

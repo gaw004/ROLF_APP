@@ -1,5 +1,6 @@
 import datetime
 import inspect
+from importlib import import_module
 
 from django.apps import apps
 from django.contrib import admin
@@ -262,9 +263,59 @@ class PositionTests(TestCase):
         # not. Nothing may forbid that.
         chair = make_position("chair", "Board Chair", kind=Position.Kind.BOARD, is_leader=True)
         director = make_position(
-            "ed", "Executive Director", kind=Position.Kind.EMPLOYEE, reports_to=chair)
+            "ed", "Executive Director", kind=Position.Kind.STAFF,
+            compensation=Position.Compensation.PAID, reports_to=chair)
         director.full_clean()
         self.assertEqual(director.reports_to, chair)
+
+
+class WorkerAxisSplitTests(TestCase):
+    """D32: `kind` narrowed to two values, pay moved onto its own column.
+
+    ⚠️ Three of these four watch the *vocabulary*, not any particular row. The
+       migration that rewrote the data ran once and will never run again on this
+       database — what can still go wrong is somebody widening the enum back, or
+       editing the mapping table in the migration long after the rows it
+       described were written.
+    """
+
+    def test_the_forward_mapping_is_still_exactly_those_three_rows(self):
+        # Read out of the migration, deliberately: this asserts that the table
+        # somebody could edit has not been edited. It says nothing about data.
+        # import_module, because the module name starts with a digit and so
+        # cannot be written as an import statement.
+        migration = import_module("org.migrations.0008_kind_to_staff_and_compensation")
+        self.assertEqual(migration.FORWARD, {
+            "employee": ("staff", "paid"),
+            "volunteer": ("staff", "unpaid"),
+            "board": ("board", "unpaid"),
+        })
+
+    def test_no_row_anywhere_still_carries_an_old_kind(self):
+        """⚠️ Weaker than it looks, and the weakness is the point.
+
+        Django builds the test database by running the migrations against an
+        empty one, so this proves the data migration does not blow up — not
+        that its mapping is right. The mapping is only really accepted by
+        running it over a database that has old rows in it (seed_demo's), which
+        is the first line of D1's acceptance list and cannot be a unit test.
+        """
+        old = ["employee", "volunteer"]
+        self.assertFalse(Position.objects.filter(kind__in=old).exists())
+        self.assertFalse(
+            Position.history.model.objects.filter(kind__in=old).exists())
+
+    def test_kind_offers_two_values_and_not_a_third(self):
+        # A third value would be somebody folding a pay arrangement back into
+        # this column, which is the mistake the split exists to undo.
+        self.assertEqual(
+            [value for value, _ in Position.Kind.choices], ["staff", "board"])
+
+    def test_a_new_position_is_unpaid_until_somebody_says_otherwise(self):
+        # The safe direction: a wrongly unpaid vacancy costs one question at
+        # hiring time; the other way round invents salaried posts on a report.
+        post = make_position("new_box", "New box", make_ministry())
+        self.assertEqual(post.compensation, Position.Compensation.UNPAID)
 
 
 class BuildOrgTreeTests(TestCase):
@@ -317,7 +368,8 @@ class VacancyTests(TestCase):
     def setUp(self):
         self.ministry = make_ministry()
         self.position = make_position(
-            "coordinator", "Coordinator", self.ministry, kind=Position.Kind.VOLUNTEER)
+            "coordinator", "Coordinator", self.ministry, kind=Position.Kind.STAFF,
+            compensation=Position.Compensation.UNPAID)
         self.person = make_person("王强")
 
     def hold(self, **kwargs):
@@ -336,7 +388,10 @@ class VacancyTests(TestCase):
         # it is would be no use to whoever is trying to fill it.
         junior = make_position("helper", "Helper", self.ministry, reports_to=self.position)
         vacant = Position.objects.vacant().get(pk=self.position.pk)
-        self.assertEqual(vacant.kind, Position.Kind.VOLUNTEER)
+        self.assertEqual(vacant.kind, Position.Kind.STAFF)
+        # ⚠️ The second half is new and is the reason D32 split the axis: a
+        #    vacancy has to be able to say whether it is budgeted.
+        self.assertEqual(vacant.compensation, Position.Compensation.UNPAID)
         self.assertEqual(vacant.ministry, self.ministry)
         self.assertEqual(list(vacant.direct_reports.all()), [junior])
 
@@ -385,7 +440,8 @@ class StaffingTests(TestCase):
     def setUp(self):
         self.ministry = make_ministry()
         self.position = make_position(
-            "pantry_vol", "Pantry Volunteer", self.ministry, kind=Position.Kind.VOLUNTEER)
+            "pantry_vol", "Pantry Volunteer", self.ministry, kind=Position.Kind.STAFF,
+            compensation=Position.Compensation.UNPAID)
 
     def hold(self, last_name, **kwargs):
         return Assignment.objects.create(
@@ -574,16 +630,19 @@ class AssignmentTests(TestCase):
         with self.assertRaises(ProtectedError), transaction.atomic():
             self.person.delete()
 
-    def test_employment_type_on_a_volunteer_position_is_refused_by_clean(self):
-        # Spans two tables (kind is on Position), so no CheckConstraint can see
-        # it — a hint layer, and recorded as one. See goal.md D14.
+    def test_employment_type_is_allowed_on_an_unpaid_position(self):
+        """The rule that used to refuse this is gone, and its absence is tested.
+
+        ⚠️ Deleting the old test would have left nothing saying which way this
+           goes now — and "an unpaid part-timer" is a real arrangement at this
+           foundation, not an edge case. See Assignment's docstring and D37 section 1:
+           how much of a week somebody gives is `fte`'s answer; employment_type
+           went back to meaning the shape of the engagement.
+        """
         full_time = EmploymentType.objects.create(code="full_time", name="Full time")
         assignment = Assignment(
             contact=self.person, position=self.cook, employment_type=full_time)
-        with self.assertRaises(ValidationError) as caught:
-            assignment.full_clean()
-        self.assertIn("employment_type", caught.exception.message_dict)
-
+        assignment.full_clean()      # no raise
 
 class AssignmentStatusTests(TestCase):
     """status and the term are orthogonal — leave never edits the dates."""

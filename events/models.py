@@ -718,6 +718,46 @@ class Participation(ConstraintErrorFieldMixin, TimeStampedModel):
         ADMIN = "admin", "Recorded by an admin"
         SELF_QR = "self_qr", "Self check-in by QR"
 
+    class ServedAs(models.TextChoices):
+        """What this person was doing here: their own time, or their job.
+
+        D38. The same fact is read from both sides — "I can tell which of my
+        weekends I gave away" and "we can tell which of these good deeds were
+        actually shifts" — which is exactly why it is a stored column and not
+        something either page works out for itself.
+
+        ⚠️ Never derive this from anything else. Two derivations look right and
+           are wrong in both directions: from how the row was created (an
+           employee can sign themselves up for work, and an admin can enter a
+           genuine volunteer from a paper list), and from whether they had a
+           shift that day (most unpaid staff have no roster at all, and a
+           Saturday event is nobody's rostered time). D38 sections 1–3 spend a
+           section on each.
+
+        ⚠️ The labels are interface text and D38 section 6 is their only home —
+           do not invent a second wording here or in a template. The
+           explanatory half of each option lives in SERVED_AS_EXPLANATIONS
+           below, beside these, so the two halves cannot drift apart.
+        """
+
+        VOLUNTEER = "volunteer", "Volunteering"
+        WORK = "work", "Scheduled work"
+
+    class DeclaredBy(models.TextChoices):
+        """Who said so. The evidence lives in this column, not the one above.
+
+        A paid employee's "volunteering" means one thing when they said it and
+        something else entirely when their employer ticked it for them — and
+        the second is the shape an inspector looks for first. Reading served_as
+        alone cannot tell them apart.
+
+        Same shape and same reason as checked_in_method beside it: not a new
+        rule, the existing rule applied to a second fact.
+        """
+
+        SELF = "self", "Said by the volunteer"
+        ADMIN = "admin", "Set by an admin"
+
     class ConsentMethod(models.TextChoices):
         # ⚠️ C2.5 改的是**标签**（右边那半，显示给人看的）。左边的 value 一个字
         #    没动，也不许动 —— 它们已经写在库里了，改 value 是一次数据迁移，
@@ -758,6 +798,32 @@ class Participation(ConstraintErrorFieldMixin, TimeStampedModel):
     checked_in_method = models.CharField(
         max_length=20, choices=CheckInMethod.choices, blank=True,
     )
+    # --- D38: was this their own time, or their job? ----------------------
+    #
+    # 🔴 blank, and deliberately **no default** — the same objection as
+    #    checked_in_method above, in the same words. A default of "volunteer"
+    #    would back-date a claim onto every historical row, vouching for
+    #    something nobody checked; and this particular claim is the one the
+    #    foundation would be relying on if it ever had to show that its unpaid
+    #    hours were genuinely unpaid.
+    #
+    # ⚠️ Empty means one thing only: the row predates D38 and the backfill
+    #    could not prove anything about it (migration 0014). Every row written
+    #    since goes through services.set_served_as(), which writes both columns
+    #    together or neither.
+    #
+    # ⚠️ No CheckConstraint tying the two together, and it is worth saying why
+    #    because it looks like an obvious one to add: "if served_as is set then
+    #    declared_by must be too" is violated by the backfill itself, which
+    #    writes `volunteer` with nobody's name on it — that combination is
+    #    "provable from the data, claimed by no one", and it is legitimate.
+    served_as = models.CharField(
+        max_length=20, choices=ServedAs.choices, blank=True,
+    )
+    served_as_declared_by = models.CharField(
+        max_length=20, choices=DeclaredBy.choices, blank=True,
+    )
+
     # Decimal, never Float: hours may end up attached to recognition, and floats
     # drift when summed. null=True because signed-up-but-not-yet-happened is not
     # the same fact as turned-up-and-did-zero.
@@ -864,6 +930,21 @@ class Participation(ConstraintErrorFieldMixin, TimeStampedModel):
 
     def __str__(self):
         return f"{self.contact} — {self.event_role}"
+
+
+#: The second half of each served_as option, for when somebody is being *asked*
+#: rather than shown a value: "Volunteering — my own time". Kept here rather
+#: than in the template so the term and its gloss cannot drift apart, and
+#: because D38 section 6 is the single home for both halves.
+#:
+#: ⚠️ Both entries must read as equally respectable. A layout or a wording that
+#:    makes volunteering the nicer answer turns this column into one everybody
+#:    fills in the same way, and then **both** figures are wrong. No test can
+#:    watch for that; D38 section 10 records it as review's job.
+SERVED_AS_EXPLANATIONS = {
+    Participation.ServedAs.VOLUNTEER: "my own time",
+    Participation.ServedAs.WORK: "counts as my work time",
+}
 
 
 class EventNotification(ConstraintErrorFieldMixin, TimeStampedModel):

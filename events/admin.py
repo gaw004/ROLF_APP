@@ -145,3 +145,17 @@ class ParticipationAdmin(SimpleHistoryAdmin):
     ]
     autocomplete_fields = ["contact", "event_role", "consent_relationship"]
     list_select_related = ["contact", "event_role__event", "event_role__role"]
+    # ⚠️ The admin is a write path that exists without anybody writing code for
+    #    it, and the guard that keeps served_as to one setter greps source —
+    #    it cannot see a form somebody fills in here. What comes out of that
+    #    form is not a wrong value, it is a value with **no declared_by on it**:
+    #    reports file it under "identity not recorded", the FLSA prompt cannot
+    #    say who claimed it, and the page looks completely normal. D38 §4.
+    #
+    # ⚠️ checked_in_method is on this list for the same reason and always
+    #    should have been (D28 §4) — the same rule, applied to the second fact
+    #    on this table that records *who said so*.
+    #
+    #    Corrections go through the action on the signups page, which calls
+    #    services.set_served_as() and stamps declared_by=admin.
+    readonly_fields = ["served_as", "served_as_declared_by", "checked_in_method"]

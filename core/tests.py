@@ -378,6 +378,106 @@ class PermissionGuardTests(TestCase):
         )
 
 
+class ReportFigureNamesGuardTests(TestCase):
+    """Lint-as-test: no figure on the ministry report is named after volunteering
+    unless somebody put it on the list below on purpose.
+
+    ⚠️ The risk this watches is specific, and it is a naming risk rather than a
+       computation one. `ministry_report()` counts distinct contacts over every
+       participation — **paid staff included** — and that figure was called
+       `volunteers` until 2026-08-20. D1.4 adds a genuine volunteer figure
+       (`served_as=volunteer`) to the same report. Two numbers on one screen,
+       one name, two definitions, and neither of them raising: that is the
+       failure this project has already convicted three times.
+
+    So the rule is not "never say volunteer" — D1.4's figure has every right to
+    the word. The rule is that claiming it has to be a **visible act**: adding a
+    row to ALLOWED below, in a diff somebody reviews.
+
+    ⚠️ Deliberately narrow. A guard that scanned the whole file for the word
+       would be red every day (the docstrings discuss it constantly) and would
+       be widened until it meant nothing — the failure mode
+       05-roadmap.md warns about for whitelists.
+    """
+
+    #: Figure keys that may carry the word, and why. Empty today; D1.4's
+    #: volunteer-hours figure is the first legitimate entry, and adding it here
+    #: is how that decision becomes visible rather than incidental.
+    ALLOWED: set[str] = set()
+
+    def test_no_figure_key_says_volunteer_without_being_listed(self):
+        from events.services import ministry_report
+        from events.models import Event
+
+        figures = ministry_report(Event.objects.none())["figures"]
+        offenders = sorted(
+            key for key in figures
+            if "volunteer" in key.lower() and key not in self.ALLOWED
+        )
+        self.assertEqual(
+            offenders,
+            [],
+            "A report figure named after volunteering has to be one on purpose "
+            "— add it to ALLOWED with a reason, or name it for what it counts:\n"
+            + "\n".join(offenders),
+        )
+
+
+class ServedAsWriteGuardTests(TestCase):
+    """Lint-as-test: the identity on a signup is written in exactly one place.
+
+    D38's invariant. Three write paths were planned for this column (the signup
+    form, an admin's correction, and D3's invitation reply) and each of them
+    arrives with its own idea of what the default should be — so the default
+    rules end up in three places, disagreeing about the board member and about
+    the person whose tenure ended last year, silently.
+
+    ⚠️ The grep half of this guard cannot see the fourth path, and the fourth
+       path is the one that exists without anybody writing a line of code:
+       Django's admin. Hence the second test below, which is an assertion
+       rather than a search.
+    """
+
+    # Escaped and written only here, so this file never contains the literal
+    # text it hunts for and the guard can scan itself.
+    ASSIGNMENT = r"\.served_as(_declared_by)?\s*="
+    # Where it is legitimately assigned: the setter, and the backfill that
+    # predates it. Both are named, so widening this list is a visible act.
+    ALLOWED = [
+        "events/services.py",
+        "events/migrations/0014_backfill_served_as.py",
+    ]
+
+    def test_only_set_served_as_writes_the_identity_columns(self):
+        hits = offending_lines(self.ASSIGNMENT, skip=self.ALLOWED)
+        self.assertEqual(
+            hits,
+            [],
+            "Write the identity through events.services.set_served_as(), which "
+            "stamps who said so at the same time:\n" + "\n".join(hits),
+        )
+
+    def test_the_admin_cannot_edit_the_identity_columns(self):
+        """⚠️ An assertion, not a grep, because there is nothing to grep.
+
+        A field is editable in the admin by default — the write path is created
+        by *not* writing code, which is precisely what a source search cannot
+        see. And what comes out of it is not a wrong value but a value with no
+        declared_by beside it: reports file the row under "identity not
+        recorded", the FLSA prompt cannot say who claimed it, and every page
+        looks entirely normal.
+        """
+        from events.admin import ParticipationAdmin
+
+        for field in ["served_as", "served_as_declared_by", "checked_in_method"]:
+            with self.subTest(field=field):
+                self.assertIn(
+                    field, ParticipationAdmin.readonly_fields,
+                    f"{field} records who said something; the admin form must "
+                    "not be able to change it without saying who.",
+                )
+
+
 class NotificationBackendGuardTests(TestCase):
     """Lint-as-test: a delivery backend knows an address, a channel and words.
 

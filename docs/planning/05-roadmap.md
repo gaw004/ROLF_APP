@@ -27,7 +27,7 @@
    **能不改口径就不改口径，比改完再配一条测试便宜**；
 4. **[D18 的落点规矩](decisions/D18-admin-boundary.md)** 照旧：
    逻辑进 `services.py`，权限只在 `org/permissions.py`，统计在 queryset，视图是薄壳。
-   本轮新增六条守卫，见[守卫测试](#本轮新增的守卫测试)。
+   本轮新增**九条**守卫，见[守卫测试](#本轮新增的守卫测试)。
 
 ## 交付节奏：四批，中间留一次反馈
 
@@ -55,128 +55,602 @@
 
 ## D1.1 拆轴：`kind` 收窄 + `compensation`（[D32](decisions/D32-worker-axes-schedule-and-assignment.md)）
 
-**schema 和数据分两个 migration**（初版是一个，改了 —— 出事时能单独回滚数据那一半）：
+### 落库的形状，照抄进 `org/models.py`
 
 ```python
-# migration ①  schema
-Position.Kind:  STAFF = "staff" · BOARD = "board"        # EMPLOYEE / VOLUNTEER 去掉
-Position.kind          default = Kind.STAFF              # ⚠️ 旧的 default 是 VOLUNTEER
-Position.compensation = paid | unpaid | stipend          # TextChoices（D5：有 branch）
-                       default = "unpaid"                # ⚠️ 见下
+class Kind(models.TextChoices):
+    STAFF = "staff", "Staff"
+    BOARD = "board", "Board member"          # EMPLOYEE / VOLUNTEER 去掉
 
-# migration ②  RunPython，带反向函数
+class Compensation(models.TextChoices):
+    PAID = "paid", "Paid"
+    UNPAID = "unpaid", "Unpaid"
+    STIPEND = "stipend", "Stipend"
+
+kind = models.CharField(max_length=20, choices=Kind.choices,
+                        default=Kind.STAFF)          # ⚠️ 旧的 default 是 VOLUNTEER
+compensation = models.CharField(
+    max_length=20, choices=Compensation.choices,
+    default=Compensation.UNPAID,                     # ⚠️ 见下
+    help_text="Whether this post is paid. Unpaid staff are still staff.",
+)
 ```
 
-⚠️ **两个 default 都要在这一步定死**，而且它们和同一轮 `served_as`
-「不许有 default」的规矩**方向相反** —— 正因为相反才要各写一次：
-`compensation` 是编制的属性（一个岗位必然有报酬状态），
-`served_as` 是一句声明（可以没有人说过）。
-`compensation` 默认 `unpaid` 而不是 `paid`：新建的空缺岗位默认无薪更安全 ——
+三件事写在这里，因为每一件都被问过一次：
+
+1. 为什么是 `TextChoices` 而不是字典表 —— [D5 的判定规则](decisions/D05-lookup-tables-not-enums.md)：
+   有代码 branch 就用 `TextChoices`。`compensation` 被志愿小时数的口径
+   （[D38 第七节](decisions/D38-served-as-volunteer-or-work.md)）和 FLSA 提示
+   （[D38 第八节](decisions/D38-served-as-volunteer-or-work.md)）直接 branch。
+   反方向的例子就在隔壁：`EmploymentType` 没有任何 branch，所以它是表；
+2. `max_length=20` 跟着 `kind` 现有的宽度走，不动 —— 最长的值 `stipend` 是 7 个字符，
+   改宽度会多一次 `AlterField`，而它一个字节都不换来；
+3. `choices` 的 label 就是 UI 文案。界面上不许管无薪的人叫 employee
+   （[D32 第四节](decisions/D32-worker-axes-schedule-and-assignment.md)），
+   而 `Staff (unpaid)` 这种组合写法在页面上拼，不塞进 label —— 塞进去的那一刻，
+   `board` + `unpaid` 也会跟着显示成 "Staff (unpaid)"。
+
+两个 default 都在这一步定死，而且它们和同一轮 `served_as`「不许有 default」的规矩
+方向相反 —— 正因为相反才要各写一次：`compensation` 是编制的属性（一个岗位必然有
+报酬状态），`served_as` 是一句声明（可以没有人说过）。
+默认 `unpaid` 而不是 `paid`：新建的空缺岗位默认无薪更安全 ——
 错了是招人时被问一句，反过来是报表上凭空多一批薪资岗。
 
-| 旧 | 新 |
-|---|---|
-| `kind=employee` | `kind=staff`, `compensation=paid` |
-| `kind=volunteer` | `kind=staff`, `compensation=unpaid` |
-| `kind=board` | `kind=board`, `compensation=unpaid` |
+### 两个 migration，以及为什么可以分开
 
-⚠️ **反向函数写不全，要写清楚它写不全**：`staff` + `unpaid` 回不去 `volunteer`
-还是回不去 `employee` —— 信息在正向是增加的。反向一律映射回 `volunteer`，
-并在 docstring 里注明这是有损的。
+```
+org/migrations/0007_position_compensation.py            # schema
+org/migrations/0008_kind_to_staff_and_compensation.py   # RunPython，带反向
+```
 
-跟着改的地方，**一个都不能漏**。
-⚠️ **只 grep `Kind.EMPLOYEE` 是漏的**，`Kind.VOLUNTEER` 也要一起：
+⚠️ 分开的前提是一件 Django 的事实，写下来免得有人以为中间态是坏的：
+`choices` 不落到 Postgres 上（`CharField` 不生成 CHECK，也不是 enum 类型）。
+所以 0007 跑完、0008 还没跑的那一刻，库里仍然是 `employee` / `volunteer`，
+读写都正常，只是 `get_kind_display()` 回显原始值。
+「出事时能单独回滚数据那一半」靠的就是这一点。
+
+0007 里 `makemigrations` 会生成**四个** operation —— `Position` 和
+`HistoricalPosition` 各一次 `AddField` 加一次 `AlterField`。
+⚠️ 影子表那两个不是噪音，不要手工删掉：0008 要在两张表上跑同一张映射表。
+
+### 映射表（正向），两张表逐字相同
+
+| 旧 `kind` | 新 `kind` | 新 `compensation` |
+|---|---|---|
+| `employee` | `staff` | `paid` |
+| `volunteer` | `staff` | `unpaid` |
+| `board` | `board` | `unpaid` |
+
+写法定死成一个模块级常量加三句 `update()`，两张表共用同一段代码：
+
+```python
+FORWARD = {                       # 旧 kind → (新 kind, compensation)
+    "employee":  ("staff", "paid"),
+    "volunteer": ("staff", "unpaid"),
+    "board":     ("board", "unpaid"),
+}
+
+def forwards(apps, schema_editor):
+    for label in ("Position", "HistoricalPosition"):
+        model = apps.get_model("org", label)
+        for old, (kind, compensation) in FORWARD.items():
+            model.objects.filter(kind=old).update(kind=kind, compensation=compensation)
+```
+
+- 用 queryset 的 `update()` 而不是逐行 `save()`：三条 UPDATE 一次跑完，
+  并且不依赖「迁移里的 fake model 不挂 simple-history 的 signal」这个细节 ——
+  依赖它是对的，但写成不需要知道它更好；
+- ⚠️ 影子表一起迁，理由不是「历史也要好看」，是**不迁会更糟**：
+  0007 给历史行的 `compensation` 填的是字段默认值 `unpaid`，于是一条去年的历史行
+  会写着 `employee` 加 `unpaid` —— 一个自相矛盾、而且看起来像事实的组合。
+  按映射表迁则两列同时对上：「当年这是带薪雇员岗」这个事实由
+  (`staff`, `paid`) 原样保住，换掉的只是词汇表，不是事实；
+- 现存的历史行全是试点前的测试数据（2026-08-19 与基金会侧确认，上线前会清空），
+  所以这一步在真实数据上的风险是零。函数照写 —— 上线之后不会再有第二次机会。
+
+### 反向函数，以及它到底丢了什么
+
+```python
+BACKWARD = {                      # (kind, compensation) → 旧 kind
+    ("staff", "paid"):    "employee",
+    ("staff", "stipend"): "employee",   # 报表上它跟 paid 归堆（D32 第二节）
+    ("staff", "unpaid"):  "volunteer",
+}
+# board 一律回 board，compensation 丢掉
+```
+
+docstring 里要写明两句有损，第二句比第一句要紧：
+
+1. `staff` 加 `unpaid` 一律回 `volunteer` —— 它原来是 `employee` 还是 `volunteer`，
+   信息在正向是增加的，回不去；
+2. `stipend` 这一档**在旧词汇表里根本不存在**，回滚时按保守口径落到 `employee`。
+   于是回滚之后再正向跑一次，那个人会从 `stipend` 变成 `paid`，而两次都不报错。
+   所以反向函数是止血手段，**不是一扇可以来回走的门**。
+
+### 跟着改的地方，逐个点名（漏了大多不报错）
+
+⚠️ 只 grep `Kind.EMPLOYEE` 是漏的，`Kind.VOLUNTEER` 要一起：
 
 ```
 grep -rn "Kind.EMPLOYEE\|Kind.VOLUNTEER" --include="*.py" --include="*.html" .
 ```
 
+改完这条命令必须**零命中**（迁移文件里写的是字符串字面量 `"employee"`，不是枚举）。
+
 | 在哪 | 改什么 |
 |---|---|
-| `events/services.py::ministry_staff_participation()` | `EMPLOYEE` → `STAFF`（见 D1.2，⚠️ 不报错） |
-| `org/models.py::Position.kind` | `default=Kind.VOLUNTEER` → `STAFF` |
-| `org/models.py::Assignment.clean()` | 那条 `employment_type` 规则整条删（见 D1.6） |
-| `events/management/commands/seed_demo.py` | 两处 `EMPLOYEE` + 一处 `VOLUNTEER`（Driver） |
-| `org/tests.py` / `events/tests.py` | 两个词一起 grep，共约七处 |
+| `org/models.py::Position.Kind` | 删两档、加 `Compensation`、`default` 改 `STAFF` |
+| `org/models.py::Assignment.clean()` | 那条 `employment_type` 规则整条删，⚠️ 必须在**这一步**删，见下 |
+| `org/admin.py::PositionInline.fields` | 加 `compensation` —— 建岗位那一屏就要填，它是编制的属性 |
+| `org/admin.py::PositionAdmin` | `list_display` 与 `list_filter` 各加 `compensation` |
+| `org/admin.py::AssignmentAdmin.list_filter` | `position__kind` 旁边加 `position__compensation` |
+| `events/services.py::ministry_staff_participation()` | 改成 `kind=STAFF` **且** `compensation=PAID`，见下 —— ⚠️ 这一步**一个答案都不改** |
+| `events/management/commands/seed_demo.py` | 三处（两个 `EMPLOYEE` 加 Driver 那个 `VOLUNTEER`），并补一个 `stipend` 岗位，见下 |
+| `org/tests.py` | 六处（263 / 265 / 320 / 339 / 388 / 532 行附近） |
+| `events/tests.py` | 四处（1179 / 1235 / 1249 / 1264），⚠️ 最后一处要整条反转，见 D1.2 |
 
-**测试**：迁移前后各建一批行，断言映射表逐行成立；
-断言 `Position.Kind` 只剩两档（防止以后有人偷偷加回第三档）。
+⚠️ `Assignment.clean()` 那条规则**在这一步删，不能等 D1.6**：`Kind.EMPLOYEE`
+在这一步就不存在了，留着它整个文件 import 不了。删它的理由是
+[D37 第一节](decisions/D37-hris-fields-and-credentials.md)（`fte` 接管了「每周来几天」，
+`employment_type` 回到合同形态的字面意思），连同 `org/tests.py` 里那条测试一起删。
+
+⚠️ 而删完之后 `clean()` 里只剩 `super().clean()` —— 那就把整个方法删掉，
+不要留一个只调父类的空壳（下一个人会以为那里本来有东西、被删漏了）。
+D37 第一节说「在 `clean()` 的 docstring 里写明为什么删」，方法都没有了就没有那个
+docstring：**那句话改写进 `Assignment` 的类 docstring**，
+它本来就是讲这张表的字段边界的那一段。
+
+⚠️ `seed_demo.py` 要造得出三档，否则 D1.2 的验收在浏览器里走不出来：
+`pantry_lead` 与 `pantry_staff` 是 `paid`，Driver 那个空缺岗是 `unpaid`
+（空缺也说得出自己有没有预算，正是 D11 拆表的理由），
+再补一个 `stipend` 的（例如带津贴的 `pantry_intern`，并给它一个在职的人）。
+
+### R8 那一行必须在这一步动，但它不许改变答案
+
+⚠️ D1.1 的表里原来写着「见 D1.2，不在这一步顺手改」。**那句话执行不了**：
+`Kind.EMPLOYEE` 在这一步就消失了，不动那一行的话 `events/services.py`
+整个 import 不了。
+
+处置（2026-08-20 落地时定）：这一步把它写成**两个条件**，
+合起来和旧的 `kind=employee` 一字不差：
+
+```python
+position__kind=Position.Kind.STAFF,
+position__compensation=Position.Compensation.PAID,     # ← D1.2 删掉的正是这一行
+```
+
+于是拆轴这一步真正做到了「一个答案都不改」——
+迁移前后 R8 返回同一批人，既有那条 volunteer 的测试照样绿。
+**D1.2 于是变成一次真正的一行改动**：删掉 `compensation` 那半个条件，
+名单当场变宽，而那一行就是口径的分水岭。
+
+### 索引与约束：一个字不动，而这是结论不是遗漏
+
+`Position` 现有的 `Index(fields=["ministry", "kind", "is_active"])` 继续成立 ——
+R8 和员工名册都按 (ministry, kind) 收窄，`compensation` 只在结果集里分组；
+一张几十行的表上再加一个索引是纯成本。
+`compensation` 也不加任何 `CheckConstraint`：它没有跨列规则 ——
+`board` 加 `paid` 是合法的（带薪理事在别的机构里存在），
+`staff` 加 `unpaid` 正是需求原文 ① 那批人。
+
+### 测试（四条，都在 `org/tests.py`）
+
+1. 映射表逐行：把 `FORWARD` 从迁移模块 import 进测试，断言它就是上面那三行。
+   ⚠️ 这一条盯的不是数据，是**那张表本身没有被人改过**；
+2. 迁移后的库里没有旧值：`Position.objects.filter(kind__in=["employee", "volunteer"])`
+   为空，`HistoricalPosition` 上同样断言一次；
+3. `Position.Kind` 只剩两档（`len(Position.Kind.choices) == 2`）——
+   防的是以后有人偷偷加回第三档，加回去拆轴就白拆了；
+4. 新建一个 `Position` 不传 `compensation` → 值是 `unpaid` 而不是 `paid`。
+
+⚠️ 第 2 条有一个必须说破的局限：Django 的测试库是**按迁移建起来的空库**，
+所以它证明的是「迁移在空库上没炸」，不是「映射对不对」。
+真正的映射验收只有一条路 —— 在一份**有旧数据**的库上跑一次（拿 `seed_demo`
+造的那份，验收第一条就是它）。这两件事很容易被当成一件，写下来。
 
 ## D1.2 R8 换口径（单独一步，因为它改的是答案）
 
-`ministry_staff_participation()` 里 `position__kind=Position.Kind.EMPLOYEE` → `STAFF`。
+`events/services.py::ministry_staff_participation()` 里**删掉一行**
+（D1.1 留下的那个占位条件，见上）：
 
-这一步之后 R8 会返回**不同的名单**，而且两次都不报错。
-配一条固定新口径的测试：同一 ministry 下建 `paid` / `unpaid` / `stipend`
-三个在编人员，都参加同一场活动，断言三个人**都在** R8 的结果里。
+```python
+position__kind=Position.Kind.STAFF,
+position__compensation=Position.Compensation.PAID,     # ← 删掉这一行，就是全部改动
+```
 
-⚠️ 保留原来那两条坑的测试：`.active(on=活动当天)` 不是 `.active()`，
-`.active()` 不是 `.serving()`。它们和本步无关，但改这个函数时最容易碰坏。
+⚠️ 同一个 filter 里另外两个条件一个字不动，而且都不是摆设：
+`position__ministry=event.ministry`（问的是**办这场活动的**那个 ministry）、
+`position__is_active=True`（退休的岗位不算）。
+上面那三条 `.active(on=…)` / `.distinct()` 的注释同样一个字不动。
+
+这一步之后 R8 会返回**不同的名单**，而且改之前和改之后都不报错。
+
+### 既有的那条测试要整条反转，这是本轮唯一一条
+
+`events/tests.py::R8Tests::test_a_volunteer_of_the_same_ministry_does_not_appear`
+（1257 行附近）断言的正是旧口径。改法不是删，是**反转并改名**：
+
+```
+test_a_volunteer_of_the_same_ministry_does_not_appear
+    → test_an_unpaid_staff_member_of_the_same_ministry_appears
+```
+
+⚠️ 反转的是它的结论，不是它的形状：同样一个人、同样一个岗位、同样一场活动，
+断言从「不在名单里」变成「在名单里」。注释里写明它是口径的分水岭 ——
+一条被反转过的测试，如果没有人写下它为什么反转，
+下一个人只会以为当初写错了。
+
+### 新加的两条测试
+
+1. 同一个 ministry 下建 `paid` / `unpaid` / `stipend` 三个在编人员，
+   都参加同一场活动 → 三个人**都在** R8 的结果里（D32 第三节的新口径）；
+2. 同一个 ministry 下的理事（`kind=board`）参加同一场活动 → **不在**名单里。
+
+⚠️ 第 2 条不是补漏，是把一个**有意的选择**钉住（2026-08-19 确认）：
+R8 问的是「办这场活动的部门里，我们自己的工作力量谁参与了」，
+理事不是那个部门的工作力量，而且理事的岗位多半挂在基金会层面
+（`Position.ministry` 可空），本来也过不了 ministry 那个条件。
+没有这条测试，将来有人发现「理事不在名单上」会当成拆轴时漏改的 bug 顺手改掉 ——
+而那是一次静默的口径变更。
+
+### 保留原来那三条坑的测试，一个字不动
+
+`.active(on=活动当天)` 不是 `.active()`；`.active()` 不是 `.serving()`；
+`.distinct()` 不是可选的。它们和本步无关，但改这个函数时最容易碰坏 ——
+`test_somebody_who_left_before_the_event_does_not_appear` 那一条尤其，
+因为 D1.3 的 `default_served_as()` 马上要在**同一个形状**上再踩一次同一个坑。
+
+### R8 的**页面**也要改，而这一格差点被漏掉
+
+改完查询，`events/templates/events/event_report.html` 上那个小标题还写着
+「Employees of this ministry who took part」—— 而这份名单现在有三分之二不是 employee。
+[D32 第四节](decisions/D32-worker-axes-schedule-and-assignment.md) 那条
+「界面上不要管无薪的人叫 employee」正是为这一格写的：
+真出争议时，机构自己系统里的措辞就是对方的证据。
+
+三处一起改，缺一处就留一句反例：
+
+| 在哪 | 改成 |
+|---|---|
+| 小标题 | This ministry's own people who took part (R8) |
+| 空名单那句 | 不再出现 employee 这个词（「Nobody who held a post here on the day…」） |
+| 底下那行注脚 | 明写这份名单含 paid / unpaid / stipend，**并且明写理事不在里面** |
+
+⚠️ 最后那半句是新加的，理由很具体：**空名单和「你以为该在里面的那个人是理事」
+在页面上长得一模一样**。查询里那条有意的排除，如果页面上一个字都不说，
+它就只在代码和决策文档里存在 —— 而看这一页的人两样都不会读。
+
+⚠️ 这一步的验收测试**打在页面上而不是打在服务层**：查询对了之后，
+还能错的地方就只剩措辞了（`assertNotContains(response, "Employees of this ministry")`）。
+
+### 「身份」那一列不在这一步
+
+[D32 第三节](decisions/D32-worker-axes-schedule-and-assignment.md) 末尾要求 R8 名单加一列身份，
+而那个字段 D1.3 才存在。所以这一步只换 filter，
+名单上那一列跟着 D1.3 一起做（见下），
+⚠️ 写在这里是因为「R8 那一列呢」这个问题**一定**会在 review 时被问一次。
 
 ## D1.3 ⭐ 身份轴 `served_as`（[D38](decisions/D38-served-as-volunteer-or-work.md)）
 
-本轮的核心一步。同样是**两个 migration**。
+本轮的核心一步。同样是两个 migration，同样一张影子表要一起过。
+
+### 落库的形状
 
 ```python
-# ① schema —— 两个字段都 blank=True，⚠️ 都没有 default
-Participation.served_as             = volunteer | work
-Participation.served_as_declared_by = self | admin
+class ServedAs(models.TextChoices):
+    VOLUNTEER = "volunteer", "Volunteering"      # ⚠️ 措辞见下
+    WORK = "work", "Scheduled work"
 
-# ② RunPython 回填，⚠️ 只回填能从数据里证出来的那一半
+class DeclaredBy(models.TextChoices):
+    SELF = "self", "Said by the volunteer"
+    ADMIN = "admin", "Set by an admin"
+
+served_as = models.CharField(max_length=20, choices=ServedAs.choices, blank=True)
+served_as_declared_by = models.CharField(
+    max_length=20, choices=DeclaredBy.choices, blank=True)
 ```
 
-| 旧行 | 回填 `served_as` | 回填 `declared_by` |
+🔴 **两个字段都没有 `default`。** 给 `served_as` 加 `default="volunteer"`
+是替没有人核实过的事作证 —— 同 `Participation.checked_in_method` 已经写在模型里的
+那条（"A default of ADMIN would back-date a claim onto every historical row"）。
+一模一样的形状，抄那条的处理，**并且把那句话的出处写进这两个字段的注释里**：
+空值只可能来自下面那一次回填。
+
+⚠️ 考虑过并否决：给这两列加一条「有身份就必须有声明人」的 `CheckConstraint`
+（`Q(served_as="") | ~Q(served_as_declared_by="")`）。看起来完全符合
+[D9](decisions/D09-rules-in-db-constraints.md)，而且挡的正是 D38 第四节点名的那个坏形状。
+**不行** —— 回填出来的行恰恰是 (`volunteer`, 空)：身份从数据里证得出来，
+但没有任何人声明过。约束会当场挡住那次迁移。
+记在这里，因为这是一个看起来很对、下一个人一定会想加的约束。
+
+### 措辞：这一步不许自己定一版
+
+[D38 第六节](decisions/D38-served-as-volunteer-or-work.md) 是这两档措辞的**唯一落点**，
+最终英文措辞还没和基金会过（`goal.md` 待定表第 5 条），先用那一节写下的工作默认值：
+
+```
+How were you serving this time?
+  ● Volunteering — my own time
+  ○ Scheduled work — counts as my work time
+```
+
+⚠️ 它出现在报名表单、`/me/participations/`、R8 名单和（D3 之后的）邀请页上，
+改一次是四处 —— 定下来写回 D38 第六节，不要在模板里各写一版。
+模板里一个汉字都不许有（`core.tests.InterfaceLanguageGuardTests` 盯着）。
+
+### 迁移 ①：schema
+
+```
+events/migrations/0013_participation_served_as.py
+```
+
+四个 operation：`Participation` 和 `HistoricalParticipation` 各两个 `AddField`。
+
+### 迁移 ②：回填，只填能从数据里证出来的那一半
+
+```
+events/migrations/0014_backfill_served_as.py
+```
+
+| 旧行的情况 | 回填 `served_as` | 回填 `declared_by` |
 |---|---|---|
-| 活动当天**没有**在职 `Assignment` | `volunteer` —— 证得出来：他当时没有在编路径 | 不填 |
-| 活动当天**有**在职 `Assignment` | **不填** —— 这才是真的不知道 | 不填 |
+| 活动当天没有在职的 `kind=staff` 任职 | `volunteer` —— 证得出来：他当时没有在编路径 | 不填 |
+| 活动当天有在职的 `kind=staff` 任职 | 不填 —— 这才是真的不知道 | 不填 |
 
-🔴 **不许给字段加 `default`。** 那是替没人核实过的事作证 ——
-同 `Participation.checked_in_method` 已经写在模型里的那条
-（"A default of ADMIN would back-date a claim onto every historical row"）。
-一模一样的形状，抄那条的处理。
+⚠️ 判据里那半句「`kind=staff`」是 2026-08-19 定的，
+它消掉了 D38 自己的一处不一致：第九节的回填表只说「有没有在职 `Assignment`」，
+而第五节说理事根本不该被问这个问题。按第九节的字面，一个理事的旧行会进
+「身份未记录」；按这里的判据，它回填成 `volunteer`，和新行的规则一字不差。
+⚠️ 结论：**回填和 `default_served_as()` 用的是同一个判据**，
+所以那个判据只写一次（见下），迁移 import 它。
 
-**唯一的写入处**（守卫盯着）：
+⚠️ 回填一个字都不写 `declared_by`（D38 第九节）：那批行没有人声明过任何事，
+写 `admin` 是在说「某个管理员判断过」，写 `self` 更糟。
+
+写法（不许一行一个查询，几千行会跑到天亮）：
 
 ```python
+# ① 一次查出所有 staff 任职的 (contact_id, start_date, end_date)
+# ② 一次查出所有 Participation 的 (pk, contact_id, event.start_time)
+# ③ 在 Python 里判：local_date_of(start_time) 落在那个人的任一区间里吗
+# ④ 判不出在编的那一批 → bulk_update(served_as="volunteer")，一次
+```
+
+⚠️ 第 ③ 步的日期只能用 `core.timeutils.local_date_of()`，
+不许写 `start_time.date()` —— 那是 UTC 的那一天，
+而 `core.tests.TimeSourceGuardTests` 扫**所有** `.py` 文件，迁移不例外。
+这不是守卫多事：R8 当年就是在这一行上错了一天（[D16](decisions/D16-time-and-dates.md)）。
+
+### 唯一的写入处，和它的两个函数
+
+```python
+events/services.py::default_served_as(contact, event) -> (value, ask)
+    # ⚠️ 一对，不是一个值加一个 None —— 见下
 events/services.py::set_served_as(participation, value, *, declared_by)
-events/services.py::default_served_as(contact, event) -> str | None
-    # None = 这个人在这场活动上根本不该被问这个问题
+    # 唯一写这两列的地方（守卫七盯着）
 ```
 
-⚠️ **「默认值是什么」和「问不问」是同一个函数的一个返回值**，
-不许表单自己判一次、服务层再判一次 —— 两处判断会各走散一次，
-而走散的形状是「表单没问、服务层写了个默认值」，不报错。
+#### ⚠️ 返回值是一对，`-> str | None` 那个签名是错的（2026-08-20 实现时发现）
 
-四条默认规则（[D38 第五节](decisions/D38-served-as-volunteer-or-work.md)）：
+D38 第五节那张表**有两列**，而且两列的答案不一样：外部志愿者「默认 `volunteer`」
+**并且**「问题完全不出现」。写成 `-> str | None`、用 `None` 表示「不问」，
+就把不问的那批人的**值**一起丢掉了。代价有两条，都不报错：
 
-| 谁 | 返回 | 问不问 |
-|---|---|---|
-| 没有在编身份的人 | `volunteer` | 不问 |
-| 理事（`kind=board`） | `volunteer` | **不问** —— 无薪理事不是雇员，「工作安排」这一档对他没有意义 |
-| `kind=staff` + 自己报名 | `volunteer` | 问 |
-| `kind=staff` + 被指派 | `work` | 问（D3 才有这条路） |
+- R6 的志愿者工时口径是 `served_as=volunteer`（D1.4），而外部志愿者是这个数的
+  绝大部分 —— 他们会**一个不剩地掉出去**；
+- 回填迁移正好把这批人写成 `volunteer`（数据证得出来）。于是新写进去的行
+  **比它旁边那些历史行还要空**。
 
-⚠️ **「有没有在编身份」按活动那一天判断**：`Assignment.objects.active(on=活动日期)`，
-不是 `active()`。按今天判断两个方向都错 —— 去年离职的人今天报名会被问，
-今天入职的人报去年的活动不会被问。（同 R8 那个 `on=` 的老坑，第二次出现在同一个形状上。）
+改成返回 `(value, ask)`：表单读 `ask` 决定画不画，服务层读 `value` 决定写什么。
+⚠️ D38 第五节真正要的那条「必须是同一个函数的返回值」**没有被破坏** ——
+理事那一格和离职那一天仍然只有一处判断。
 
-**表单**：报名表单上加一个 radio，显示条件就是 `default_served_as() is not None`。
-措辞照 [D38 第六节](decisions/D38-served-as-volunteer-or-work.md)**逐字抄**，
-⚠️ 包括"两档排版必须中性"那一条 —— 它没有测试盯得住，只能靠 review。
+#### `declared_by` 只在真的问过的时候才写
 
-**admin**：⚠️ `served_as` / `served_as_declared_by` 在 `ParticipationAdmin` 里
-**`readonly_fields`**。守卫 grep 的是代码里的赋值，**admin 表单它一个字都拦不住**，
-而从那里改出来的行 `declared_by` 是空的 —— 报表把它当「身份未记录」，
-FLSA 提示读不到是谁说的，页面上却一切正常。
+顺着上面那条推下来的一条口径：**「不问」的人照样落值，但 `declared_by` 留空。**
 
-**测试**（六条，都是不报错的那类）：
-外部志愿者报名 → 表单上没有那个问题、值是 `volunteer`；
-**理事报名 → 同样没有那个问题**；
-在编人员报名 → 有问题、默认 `volunteer`、`declared_by=self`；
-**去年离职的人今天报名 → 没有那个问题**（`on=` 那一条）；
-admin 改一个人的身份 → `declared_by` 变 `admin` 且 history 里查得到，
-**且 `ParticipationAdmin.readonly_fields` 里有这两个字段**（一条断言，不是 grep）；
-回填后有在职任职的旧行 → `served_as` 为空，**且报表把它算进「身份未记录」而不是任何一边**。
+`declared_by` 的意思因此变得很干净：**有人回答过这个问题**。
+外部志愿者没被问过，所以没有人替他声明 —— 这和回填迁移
+「一个字都不写 `declared_by`」画的是同一条线，理由也一样：
+「某人说过」和「数据证得出来」是两种不同的事实，只有前一种是证据。
+
+⚠️ 「默认值是什么」和「问不问」是**同一个函数的一个返回值**，
+不许表单自己判一次、服务层再判一次 —— 两处判断会在理事那一格、
+在离职那一天各走散一次，而走散的形状是「表单没问、服务层写了个默认值」，不报错。
+
+`default_served_as()` 本轮的全部内容：
+
+```python
+def default_served_as(contact, event):
+    on = local_date_of(event.start_time)          # ⚠️ 不是 event.start_time.date()
+    on_the_books = Assignment.objects.active(on=on).filter(
+        contact=contact,
+        position__kind=Position.Kind.STAFF,       # 理事因此不被问
+        position__is_active=True,
+    )
+    if not on_the_books.exists():
+        return None                               # 外部志愿者 / 理事 / 那天不在编的人
+    return Participation.ServedAs.VOLUNTEER       # 自己报名的，推定是爱心
+```
+
+- ⚠️ `active(on=活动那一天)`，不是 `active()`。按今天判断两个方向都错 ——
+  去年离职的人今天报名会被问，今天入职的人报去年的活动不会被问。
+  这是 R8 那个 `on=` 老坑第二次出现在同一个形状上，
+  而 D1.2 特意留下的那条测试就是它的前哨；
+- ⚠️ `position__is_active=True` 和 R8 同款：退休的岗位不算在编路径；
+- ⚠️ [D38 第五节](decisions/D38-served-as-volunteer-or-work.md) 那张表有四行，
+  这个函数本轮只实现得出两行 —— 「被指派 → `work`」那一行**没有输入**，
+  因为指派这条路 D3 才有。**不要**现在写一个读不出「被指派」的分支，
+  也不要预留一个没有调用者的参数；docstring 里写明第四条规则在 D3.2 补，
+  而且**必须补在这个函数里**（D3.2 那一步的清单里也记一笔）。
+
+`set_served_as()` 的全部内容：
+
+```python
+def set_served_as(participation, value, *, declared_by):
+    if value is None:                     # 不该被问的人，一个字都不写
+        return participation
+    participation.served_as = value
+    participation.served_as_declared_by = declared_by
+    participation.save(update_fields=["served_as", "served_as_declared_by", "updated_at"])
+    return participation
+```
+
+⚠️ `update_fields` 里带 `updated_at`，照 `mark_absent()` 现有的写法 ——
+漏掉它这一行的更新时间就停在上一次，而 simple-history 里那条新记录的时间是对的，
+两个时间从此不一样。
+⚠️ 这个函数**不做任何推断**：推断在 `default_served_as()` 里，这里只落值。
+一个函数既推断又落值，就是把「默认规则」复制了一份。
+
+### 报名路径怎么接：`sign_up()` 多收一个关键字，内部落值
+
+```python
+def sign_up(*, contact, event_role, consent=None, served_as=None):
+    ...
+    participation.save()
+    set_served_as(participation, resolved, declared_by=DeclaredBy.SELF)
+```
+
+⚠️ **不要**在视图里写「先 `sign_up()`、再 `set_served_as()`」——
+那是「两个动作必须配对」，本项目为这个病判过一次
+（[D35 第二节](decisions/D35-event-assignment-path.md) 说的正是它），
+而漏掉第二句的表现是一行没有身份的报名，不报错。
+
+`resolved` 由服务层自己算，**不信表单送上来的值**：
+
+```python
+default = default_served_as(contact, event_role.event)
+resolved = None if default is None else (served_as or default)
+```
+
+两个方向都要挡住，而且都会真的发生：
+
+- 外部志愿者的表单里根本没有这个 name，但**直接 POST 一个 `served_as=work` 上来**
+  是几秒钟的事 —— `default is None` 于是一个字都不写；
+- 表单画了这个问题、人没选（浏览器禁用 JS、或者被绕过）→ 落默认值，
+  不留空。留空的行会掉进「身份未记录」那一格，而那一格的意思是
+  「这一行早于本轮，没人问过」，不是「有人没答」。
+
+⚠️ 两句写在同一个 `transaction.atomic()` 里 —— 报名成立而身份没落地，
+比两件事都没发生更糟。
+
+### 表单
+
+`events/forms.py::SignUpForm` 加一个字段，落点只有这一个类
+（整页报名和右面板报名共用同一个 form 和同一份 `_event_signup_body.html`）：
+
+```python
+served_as = forms.ChoiceField(
+    choices=Participation.ServedAs.choices,
+    widget=forms.RadioSelect, required=False,
+)
+```
+
+`__init__` 里：
+
+```python
+default = default_served_as(contact, event)          # ⚠️ 同一个函数，不重判
+if default is None:
+    del self.fields["served_as"]                     # ⚠️ 删掉，不是 HiddenInput
+else:
+    self.fields["served_as"].initial = default       # 预选，不是预填
+    self.fields["served_as"].required = True
+```
+
+- ⚠️ 用 `del` 而不是 `HiddenInput`（consent 那几个字段用的是后者）：
+  hidden 的字段会把值提交上来，而这一个字段外部志愿者**根本不该有**。
+  服务层那一道复核仍然留着 —— 表单决定画什么，服务层决定写什么；
+- ⚠️ 「预选而不是预填」（[D38 第五节](decisions/D38-served-as-volunteer-or-work.md)）：
+  两个选项都画出来，其中一个已选中。藏起来的默认值等于替人做了声明；
+- ⚠️ 两档的排版必须中性 —— 不许把「志愿服务」那一档做得更醒目、更值得表扬
+  （[D38 第六节](decisions/D38-served-as-volunteer-or-work.md) 第 3 条）。
+  这条**没有测试盯得住，只能靠 review**，写进这一步的 PR 检查项。
+
+### admin：两列 readonly，而这挡住的不是错值
+
+```python
+events/admin.py::ParticipationAdmin.readonly_fields = [
+    "served_as", "served_as_declared_by",
+]
+```
+
+⚠️ Django admin 是一条**不写代码就存在**的写入路径，守卫七 grep 的是代码里的赋值，
+admin 表单它一个字都拦不住。从那里改出来的行 `declared_by` 是空的 ——
+报表把它当「身份未记录」，FLSA 提示读不到是谁说的，而页面上一切正常。
+⚠️ 顺带把 `checked_in_method` 一起设成 readonly：同一条规矩用在第二个事实上，
+[D28 第四节](decisions/D28-qr-checkin.md) 立那个字段时就该有这一行。
+
+### 更正身份的入口：报名管理页，一次一行
+
+⚠️ 这一格不是可选的。两列 readonly 之后，如果这一批不做页面动作，
+**全系统就没有任何一条路径能更正身份** —— 而那正是本项目栽过三次的病
+（服务层写好了、没有页面）。2026-08-19 定的落点：
+
+| 五列 | 内容 |
+|---|---|
+| 页面 | 报名管理页 `/events/<pk>/registrations/` 上每一行一个动作 |
+| URL | `events/registrations/<int:pk>/served-as/`，POST only |
+| 谁能进 | 该活动 ministry 的 admin（`can_manage_event`） |
+| 从哪里点进去 | 报名管理页每一行 |
+| 批次 | D1 |
+
+三条实现要点：
+
+1. ⚠️ 那一页现在是**只读**的，权限是 `can_view_event_records`（foundation tier
+   看得到任何活动）。加了写动作之后按考勤页现成的形状分成两问：
+   读用 `can_view_event_records`，**POST 用 `can_manage_event`**。
+   不画按钮是界面，界面挡不住任何人 —— 从别处 POST 过来的表单形状一模一样；
+2. 调 `set_served_as(participation, value, declared_by=ADMIN)`，
+   HTMX 换回那一行，照 `_attendance_row_swap.html` 现成的做法；
+3. 🔴 **不做批量改身份的入口**（[D38 第四节](decisions/D38-served-as-volunteer-or-work.md)）。
+   一次改一行、留痕、本人看得见 —— 批量按钮会让这个字段在一次点击里
+   失去全部证据价值。
+
+### 本人看得见：`/me/participations/` 每一行
+
+D38 第四节那条「看得见不可交易」在这一批的落点是**我的报名**那一页
+（My Schedule 要到 D2a 才有）。每一行写两件事：
+
+```
+Volunteering — my own time          You said this
+Scheduled work — counts as my work  Set by an admin
+```
+
+⚠️ 验收清单里原来写的是「我的资料」，改成这一页 —— 身份是挂在**报名行**上的，
+`/me/profile/` 上没有一行报名可以挂它。
+
+### R8 名单加「身份」一列
+
+D1.2 欠的那一列在这一步补：`ministry_staff_participation()` 的结果已经带着
+`Participation`，模板直接读 `served_as` 和 `served_as_declared_by`，
+不加查询、不加服务函数。空值显示「Not recorded」，⚠️ 不显示成任何一档。
+
+### 守卫七这一步就要落地
+
+「身份只有一处写入」那条守卫（见[本轮新增的守卫测试](#本轮新增的守卫测试)）
+和字段同期，不等 D3：除 `events/services.py::set_served_as()` 外
+没有别处赋值 `served_as`，外加一条断言 ——
+`ParticipationAdmin.readonly_fields` 里有这两个字段（断言，不是 grep）。
+⚠️ 白名单里要写上那两个迁移文件，否则守卫会挡住回填自己。
+按项目惯例做一次双向验证：故意在视图里写一行赋值，确认它真的打红。
+
+### 测试（九条，都是不报错的那一类）
+
+1. 外部志愿者报名 → 表单上**没有**那个问题，落库的值是 `volunteer`、
+   `declared_by=self`；
+2. 理事（`kind=board`）报名 → 同样没有那个问题（D38 第五节那一格）；
+3. 在编 `staff` 报名 → 有问题、预选 `volunteer`、`declared_by=self`；
+4. 去年离职的人今天报名 → 没有那个问题（`active(on=活动日期)` 那一条）；
+5. 外部志愿者**直接 POST** `served_as=work` → 库里那两列仍然是空
+   （服务层那道复核，⚠️ 这一条没有 UI 能测出来）；
+6. admin 从报名管理页改一个人的身份 → `declared_by` 变 `admin`、
+   simple-history 里查得到，且本人在 `/me/participations/` 上看到的是新值加
+   「Set by an admin」；
+7. `ParticipationAdmin.readonly_fields` 里有这两个字段；
+8. 回填后：活动当天有在职 `staff` 任职的旧行 `served_as` 为空，
+   且报表把它算进「身份未记录」而**不是**任何一边；
+9. 回填后：一个**理事**的旧行 `served_as` 是 `volunteer`
+   （2026-08-19 那个判据的分水岭，⚠️ 按 D38 第九节的字面它会是空的）。
 
 ## D1.4 R6 / R7 换成一个 filter（第三处静默语义变更）
 
@@ -1026,9 +1500,9 @@ ParticipationQuerySet.notifiable()   # exclude(CANCELLED, DECLINED)           �
 | 落点 | 现在 | 不改会怎样 |
 |---|---|---|
 | `EventRoleQuerySet.with_signup_counts()` | `~CANCELLED` | 满员率、`is_short`、`understaffed()` 把待答复的人算成已报名 |
-| `ministry_report()` 的 `parts` | `.notifiable()` | `signups` / `volunteers` / `repeat_rate` 虚高；⚠️ **`hours_missing` 尤其难看** —— 被邀请的人永远不会有 hours，那个"缺多少条工时记录"会跟着待答复人数涨 |
+| `ministry_report()` 的 `parts` | `.notifiable()` | `signups` / `participants` / `repeat_rate` 虚高；⚠️ **`hours_missing` 尤其难看** —— 被邀请的人永远不会有 hours，那个"缺多少条工时记录"会跟着待答复人数涨 |
 | `_absence()` 的分母 | 同上 | 同上 |
-| `_top_volunteers()` · `_monthly_series()` · `_role_gap()` | 同上 | 排行榜、月度图、工种缺口图各错一点 |
+| `_top_participants()` · `_monthly_series()` · `_role_gap()` | 同上 | 排行榜、月度图、工种缺口图各错一点 |
 | 🔴 **`resolve_recipients()`** | `.notifiable()`（只排 `CANCELLED`） | **已经拒绝的人还会收到"活动改期"通知**。`DECLINED` 要和 `CANCELLED` 一样出局，⚠️ 而 `INVITED` 要留下 —— 他还没答复，改期正是他需要知道的 |
 | 报表面板 | — | **并排加一个数「待答复 M 人」**（藏起来的话，「没人答应」和「还没问」长得一模一样） |
 
@@ -1050,7 +1524,23 @@ ParticipationQuerySet.notifiable()   # exclude(CANCELLED, DECLINED)           �
 
 # 本轮新增的守卫测试
 
-现有 12 条之外加 9 条，都放 `core/tests.py`（和既有的汇报链守卫同一处）：
+现有守卫之外加 9 条，都放 `core/tests.py`（和既有的汇报链守卫同一处）。
+
+> ### 进度（2026-08-20）
+>
+> 九条里**两条已落地**：`ServedAsWriteGuardTests`（身份只有一处写入，含 admin
+> `readonly_fields` 那条断言）和 `DecisionSectionReferenceGuardTests`（「第 N 节」
+> 引用）。两条都做过双向验证。
+>
+> ⚠️ 另外**多出计划外的一条**：`ReportFigureNamesGuardTests` —— 报表 `figures`
+> 里任何含 `volunteer` 的键必须在点名白名单上。它不在原来这张表里，是称谓统一
+> 那一轮长出来的（见 [`participants.md`](participants.md) 第十节），
+> 而 D1.4 那个志愿工时正是白名单的第一个合法条目。
+>
+> ⚠️ 守卫类的总数不要拿来当进度：`core/tests.py` 里有 25 个 `*GuardTests`，
+> 其中一批是行为守卫（对比度、部署蓝图、健康检查），和这张表说的 grep 守卫不是
+> 一回事。**按这张表逐行勾，别数类。**
+
 
 | 守卫 | 盯什么 | 不守会怎样 |
 |---|---|---|
@@ -1098,7 +1588,9 @@ ParticipationQuerySet.notifiable()   # exclude(CANCELLED, DECLINED)           �
 - [ ] R8：`paid` / `unpaid` / `stipend` 三个在编人员都在名单里，**且名单上有「身份」一列**
 - [ ] 外部志愿者报名 → 页面上**看不到**身份那个问题
 - [ ] 在编人员报名 → 看得到、默认「志愿服务」、`declared_by=self`
-- [ ] admin 改一个人的身份 → 本人在「我的资料」上看得到是管理员设置的
+- [ ] admin 从**报名管理页**改一个人的身份 → 本人在「我的报名」（`/me/participations/`）上看得到是管理员设置的
+- [ ] 理事参加了活动 → **不在** R8 名单里（口径是有意的，D1.2）
+- [ ] 外部志愿者**直接 POST** 一个 `served_as=work` → 库里那两列仍然是空
 - [ ] 回填：有在职任职的旧行 `served_as` 为空，报表上进「身份未记录」而**不是**任何一边
 - [ ] 本 ministry 带薪员工 `served_as=volunteer` 参加活动 → 工时**进** R6，且**出一条 FLSA 提示**
 - [ ] 报表上写的是「志愿者工时 X（**其中**在编人员 Y）」，**不是三个并排的数**
@@ -1113,7 +1605,7 @@ ParticipationQuerySet.notifiable()   # exclude(CANCELLED, DECLINED)           �
 
 错了之后：
 
-- [ ] admin 把一个人的身份**改错了再改回来** → 两次改动在 simple-history 里都查得到，本人在「我的资料」上看到的是最新那次**和是谁设的**
+- [ ] admin 把一个人的身份**改错了再改回来** → 两次改动在 simple-history 里都查得到，本人在「我的报名」上看到的是最新那次**和是谁设的**
 - [ ] 证照的有效期录错了 → 改得动（`default_valid_days` 是**预填不是写死**），且名册上那条到期提示跟着变
 
 ## D2a
@@ -1215,6 +1707,94 @@ ParticipationQuerySet.notifiable()   # exclude(CANCELLED, DECLINED)           �
 > 实施时才发现的坑写在这里。**这一节是这个项目最贵的资产之一**，
 > 每个 roadmap 都留着它，不要因为"这次很顺"就不写。
 
-（待填 —— 但[开工前那一轮自查](phase-d.md#六自查这一轮砍掉和补上的东西)
-已经先记了一批，那是**文档自己的坑**：初版把十一个页面全做成了管理侧、
-把代理变量当成了事实、把「见 D32 第五节末尾」指到了一段不存在的内容上。）
+[开工前那一轮自查](phase-d.md#六自查这一轮砍掉和补上的东西)已经先记了一批，
+那是**文档自己的坑**：初版把十一个页面全做成了管理侧、把代理变量当成了事实、
+把「见 D32 第五节末尾」指到了一段不存在的内容上。下面是动手之后才发现的。
+
+## D1.1 · 「这一步不改 R8」这句话执行不了（2026-08-20）
+
+D1.1 的改动表里原来写着「`ministry_staff_participation()` 见 D1.2，
+不在这一步顺手改」。⚠️ 那是**照着做会卡住**的一句话：`Kind.EMPLOYEE`
+在 D1.1 就从枚举里消失了，那一行不动，`events/services.py` 整个 import 不了。
+
+改法和它带来的好处都写在 D1.1 里了 —— 用两个条件（`STAFF` 且 `PAID`）
+把旧语义原样接住，于是拆轴那一步真的一个答案都没改，
+而 D1.2 变成删掉一行的一次纯粹口径变更。
+
+**教训不是「文档写错了」**，是：一条「这一步不要动 X」的指示，
+要先问一句「不动它，这一步编译得过吗」。
+
+## D1.1 · 一个 `docstring` 的落点跟着方法一起没了（2026-08-20）
+
+[D37 第一节](decisions/D37-hris-fields-and-credentials.md) 写着
+「连同它的测试一起删，并在 `clean()` 的 docstring 里写明为什么删」。
+而删掉那条规则之后 `Assignment.clean()` 只剩 `super().clean()` ——
+方法整个该删，于是那句话没有地方可写。
+
+处置：写进 `Assignment` 的类 docstring（它本来就是讲这张表字段边界的那一段），
+并且在那里明说「没有 `clean()` 是一个决定，不是删漏了」。
+⚠️ 顺带把那条测试**改**了而不是删：`test_employment_type_is_allowed_on_an_unpaid_position`
+——「无薪的兼职」在这个基金会里是真实存在的安排，
+而只删不改会让「现在到底允不允许」没有任何一处说得出来。
+
+## D1.1 · 演示数据一动，验收走查测试跟着红（2026-08-20）
+
+给 seed 加了两个人（无薪 + 津贴各一，因为 D1.2 的验收要三档并排看得见），
+`events.tests.AcceptanceWalkTests` 里那条 `total_hours == 9.00` 当场变成 15.00。
+
+⚠️ 这不是坏事，是**耦合本来就该被看见**：那条测试断言的是演示数据的属性，
+所以演示数据长了，它就该跟着改，并且在注释里写明那 6 小时是谁的。
+记在这里是因为下一次往 seed 里加人时，第一个红的还会是它。
+
+## D1.3 · `-> str | None` 那个签名和 D38 自己的表打架（2026-08-20）
+
+最贵的一条，而且**是测试逼出来的，不是读文档读出来的**。全文在 D1.3 那一节
+和 [D38 第五节](decisions/D38-served-as-volunteer-or-work.md) 的更正框里。
+一句话：那张表有两列（默认值 · 问不问），一个返回值装不下两列，
+而装不下的那一半正好是志愿者工时那个数的绝大部分。
+
+⚠️ 记在这里是因为**这类错只有实现能发现**：文档里那个签名读起来完全合理，
+D38 写完之后被读过至少三遍（含开工前那两轮自查），没有一次看出问题。
+第六节那两把尺子（「这行数据有没有人读」「这个人做错了会怎样」）都量不到它 ——
+它要的是第三把：**照着这个签名写一遍，能不能把表里每一格都表达出来**。
+
+## D1.3 · 一个通用组件缺一档，而缺的那一档正好是本轮要用的（2026-08-20）
+
+`core/components/field.html` 只认 checkbox 和「其它」两支，没有单选组 ——
+而单选组走「其它」那一支的结果是一个 `<label for>` 指着**第一颗**单选钮：
+读屏念到第二个选项时，那句问题已经不在了，人听到的是两个没有问题的答案。
+
+处置：给那个组件补一支 `<fieldset>` + `<legend>`，形状照抄扫码打卡那一屏
+现成的单选样式（`label.card` 包着原生 radio）——
+`app.css` 里那条 accent-color 的注释早就写着「写两遍就会分叉」，这是第二处。
+
+## D1.3 · 演示数据里那个人没有账号，于是那条验收根本走不了（2026-08-20）
+
+D38 第四节把「本人看得见」写成不可交易的一条，D1 的验收里也有它。
+写测试时才发现：演示数据里唯一有身份的无薪在编成员 **Ada 没有登录账号** ——
+admin 改完之后没有任何办法以她的身份打开「我的报名」看一眼。
+
+给她开了一个 demo 账号（`ada@example.invalid`）。⚠️ 这一条和 D1.1 那条
+「演示数据一动，走查测试跟着红」是**同一件事的两面**：
+演示数据不是装饰，它决定了哪些验收走得了、哪些走不了。
+
+## D1.3 · 一次报名留两条历史（主动接受）（2026-08-20）
+
+`sign_up()` 先 `save()` 建行、再由 `set_served_as()` 写身份，
+于是每一次报名在 `HistoricalParticipation` 里留下两行 ——
+第一行的身份是空的。
+
+⚠️ 主动接受，并且**用断言钉住**（`ServedAsTests` 里那条历史测试写死了三条记录）。
+换掉它的唯一办法是让 `set_served_as()` 多一个「只赋值不落库」的模式，
+而那就是第二条写入路径 —— D38 整条不变量防的正是它。
+钉住是为了让以后改这个形状的人必须是**故意**的。
+
+## D1.1 · 迁移的真验收只能在有旧数据的库上做（2026-08-20）
+
+单元测试建的是**按迁移跑出来的空库**，证明不了映射对不对（这一点 D1.1 里
+先写下来了，动手时确认属实）。实际做法：建一个一次性的 `rolf_migcheck`
+库，迁到 0006、灌进三行旧数据、再迁到 0008。两张表六行全部落在映射表上。
+
+⚠️ 顺带把反向也走了一遍，而 docstring 里预告的那个有损边界**真的复现了**：
+一行 `stipend` 反向成 `employee`，再正向一次变成 `paid`，两趟都不报错。
+文档里那句「反向是止血手段，不是一扇可以来回走的门」现在有实测撑着。

@@ -50,7 +50,7 @@ class StaffOnlyAdminMiddleware:
             and not request.user.is_staff
         ):
             raise PermissionDenied(
-                "The admin is for staff accounts. Volunteer accounts use the "
+                "The admin is for staff accounts. Everyone else uses the "
                 "self-service pages at /events/."
             )
         return self.get_response(request)

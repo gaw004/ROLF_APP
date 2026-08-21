@@ -227,16 +227,65 @@ class Position(ImmutableCodeMixin, ConstraintErrorFieldMixin, TimeStampedModel):
     """
 
     class Kind(models.TextChoices):
-        EMPLOYEE = "employee", "Employee"
-        VOLUNTEER = "volunteer", "Volunteer"
+        """Is there a box for this person on the chart at all, and whose kind.
+
+        Two values, not three. "Employee" and "Volunteer" used to live here and
+        carried two independent facts at once — whether somebody has a standing
+        post, and whether the post is paid. The foundation's own sentence is
+        what broke it: "they are all volunteers, but they work like employees —
+        fixed meeting times, a fixed post each; I want them filed as employees
+        but written as unpaid." That is one axis saying two things. See D32.
+
+        ⚠️ Never add a third value for a pay arrangement. That is what
+           `compensation` below is for, and folding it back in here is the exact
+           mistake this split was made to undo.
+        """
+
+        STAFF = "staff", "Staff"
         BOARD = "board", "Board member"
+
+    class Compensation(models.TextChoices):
+        """Whether the post is paid. Unpaid staff are still staff.
+
+        A TextChoices and not a dictionary table, which is the opposite call
+        from EmploymentType next door — D5's own rule is that code branching on
+        the values makes it an enum. This one is branched on by the printable
+        volunteer-hours figure (D38 section 7) and by the FLSA prompt (D38
+        section 8).
+
+        ⚠️ `stipend` groups with `paid`, and that is a policy choice this
+           project made on the foundation's behalf, not a legal fact: 29 CFR
+           553.106's "a nominal fee does not defeat volunteer status" covers
+           **public agencies only**. See D32 section 2 — the note there is what stops
+           the next person from reading this line as settled law.
+        """
+
+        PAID = "paid", "Paid"
+        UNPAID = "unpaid", "Unpaid"
+        STIPEND = "stipend", "Stipend"
 
     code = models.SlugField(
         max_length=50,
         help_text="Stable identifier used by code. Lowercase, cannot be changed later.",
     )
     name = models.CharField(max_length=100, help_text='e.g. "Program Director".')
-    kind = models.CharField(max_length=20, choices=Kind.choices, default=Kind.VOLUNTEER)
+    # ⚠️ default=STAFF, where it used to be VOLUNTEER — the old default is not
+    #    one of the values any more. A new box is a staff post until somebody
+    #    says otherwise; board seats are the rare, deliberate ones.
+    kind = models.CharField(max_length=20, choices=Kind.choices, default=Kind.STAFF)
+    # ⚠️ default=UNPAID, and the direction is the safe one: a new vacancy that
+    #    is wrongly unpaid gets one question asked when somebody hires for it,
+    #    where the other way round invents a batch of salaried posts on a
+    #    report. Note this is the *opposite* of the same round's `served_as`,
+    #    which is forbidden a default — and the two are not inconsistent:
+    #    compensation is a property of the box (every post has some pay status),
+    #    served_as is a statement somebody makes (nobody may have made it).
+    compensation = models.CharField(
+        max_length=20,
+        choices=Compensation.choices,
+        default=Compensation.UNPAID,
+        help_text="Whether this post is paid. Unpaid staff are still staff.",
+    )
     ministry = models.ForeignKey(
         Ministry,
         on_delete=models.PROTECT,
@@ -370,6 +419,19 @@ class Assignment(ConstraintErrorFieldMixin, DateRangeMixin, TimeStampedModel):
     Postgres refuses it. It is also unnecessary — a stale status=on_leave on an
     expired term is inert, because serving() ANDs the dates first and the
     person is already out.
+
+    ⚠️ There is no clean() any more, and its absence is the decision. It held
+       one rule — "employment_type only means anything on kind=employee" — and
+       both halves of that sentence are gone: `kind` no longer has an
+       `employee` value (D32), and how much of a week somebody gives is now
+       `fte`'s answer, not a full-time/part-time label's (D37 section 1). What
+       is left for employment_type is what it literally says, the shape of the
+       engagement, and that is as true of an unpaid post as a paid one — a
+       volunteer coordinator can perfectly well be "part-time".
+
+       Deleted rather than rewritten against `compensation`, and not left as a
+       clean() that only calls super(): an empty override reads to the next
+       person as something that lost its body by accident.
     """
 
     class Status(models.TextChoices):
@@ -449,27 +511,6 @@ class Assignment(ConstraintErrorFieldMixin, DateRangeMixin, TimeStampedModel):
         # position + status + end_date covers serving() in one index; active()
         # uses the leftmost column and is happy with the same one.
         indexes = [models.Index(fields=["position", "status", "end_date"])]
-
-    def clean(self):
-        """The one rule that spans two tables, and therefore cannot be a constraint.
-
-        employment_type only means anything for a paid post, but kind lives on
-        Position and employment_type lives here — a CheckConstraint cannot see
-        across the join. So it is a hint, and D14 says to record it as a hint
-        rather than dress it up: bulk_create walks past this.
-        """
-        super().clean()
-        if (
-            self.employment_type_id
-            and self.position_id
-            and self.position.kind != Position.Kind.EMPLOYEE
-        ):
-            raise ValidationError({
-                "employment_type": (
-                    "Employment type only applies to employee positions "
-                    f"(this one is {self.position.get_kind_display()})."
-                )
-            })
 
     def __str__(self):
         return f"{self.contact} — {self.position}"

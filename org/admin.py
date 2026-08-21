@@ -18,7 +18,10 @@ class PositionInline(admin.TabularInline):
 
     model = Position
     extra = 0
-    fields = ["name", "code", "kind", "is_leader", "is_active"]
+    # ⚠️ compensation is on this inline, not only on the position's own page:
+    #    a vacancy has to be able to say whether it is a paid post (D11), and
+    #    the moment to say so is while the box is being drawn.
+    fields = ["name", "code", "kind", "compensation", "is_leader", "is_active"]
     show_change_link = True
 
 
@@ -87,11 +90,14 @@ class PositionAdmin(SimpleHistoryAdmin):
         "code",
         "ministry",
         "kind",
+        "compensation",
         "is_leader",
         "is_active",
         "reports_to",
     ]
-    list_filter = ["ministry", "kind", "is_leader", "is_active", StaffingFilter]
+    list_filter = [
+        "ministry", "kind", "compensation", "is_leader", "is_active", StaffingFilter,
+    ]
     # Needed by the autocomplete on Position.reports_to, and by the one on
     # Assignment.position.
     search_fields = ["name", "code"]
@@ -144,7 +150,13 @@ class AssignmentAdmin(SimpleHistoryAdmin):
         "contact", "position", "employment_type", "status",
         "start_date", "end_date", "is_currently_active",
     ]
-    list_filter = [InEffectFilter, "status", "position__ministry", "position__kind"]
+    list_filter = [
+        InEffectFilter, "status", "position__ministry",
+        # Both axes, because they are two questions now: "is there a box for
+        # them" and "is the box paid". One filter answering both is what D32
+        # took apart.
+        "position__kind", "position__compensation",
+    ]
     search_fields = [
         "contact__legal_last_name", "contact__legal_first_name",
         "contact__preferred_name", "position__name",

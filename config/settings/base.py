@@ -167,9 +167,9 @@ NOVU_WORKFLOW = env("NOVU_WORKFLOW", "event-change")
 # exist, and no test followed the redirect far enough to notice.
 #
 # ⚠️ Only LOGIN_URL. LOGIN_REDIRECT_URL / LOGOUT_REDIRECT_URL stay unset on
-#    purpose: VolunteerLoginView.get_success_url() and VolunteerLogoutView.
-#    next_page already answer "where to afterwards", and a setting saying the
-#    same thing is a second copy that nothing reads until the day it disagrees.
+#    purpose: SiteLoginView.get_success_url() and SiteLogoutView.next_page
+#    already answer "where to afterwards", and a setting saying the same thing
+#    is a second copy that nothing reads until the day it disagrees.
 LOGIN_URL = "/login/"
 
 # --- Google sign-in (prefill only) -------------------------------------------

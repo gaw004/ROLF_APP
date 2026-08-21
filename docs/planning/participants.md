@@ -1,0 +1,475 @@
+# 参与者：称谓、身份、以及 Event 成为全机构的参与中枢
+
+> 这一份和 [`phase-b.md`](phase-b.md) / [`phase-c.md`](phase-c.md) / [`phase-d.md`](phase-d.md)
+> 并列，但它不是一个阶段 —— 它是**一次范围扩张**：`Event` 从「志愿者报名页」
+> 变成「机构里所有人的参与中枢」。
+>
+> 装齐四样东西：**需求原文 · 框架 · 解决办法 · 改口与缺口**。
+> 最后更新：2026-08-20（本文件建立当天）
+
+## 一、起因（一句话，不要转述）
+
+> 「所有词代表外部人员都换成 public_participator or external_participator 会不会更好？
+> **统一叫外部人员 volunteer 会缩小应用范围。**」
+
+追下去之后它不是一个改名问题。`Event` 建立在一个**从没说出口的假设**上：
+
+> 每一个角色都是「要找人来干的活」，任何登录用户都看得见、都报得上。
+
+而基金会实际要用它装**三类人**：外部志愿者（一直如此）、**受助者**、
+**参加内部活动的员工**（而且不一定是为了工作）。
+
+⚠️ 查证的结论要写在最前面：`Event.VISIBLE_TO_VOLUNTEERS` 是一个**状态**集合
+（哪几档生命周期可见），**不是受众集合**。`event_list` 没有任何按人收窄 ——
+**任何登录用户看得见任何一场已发布的活动，一处收窄都没有**。
+
+这不是新需求带来的洞，**是今天就存在的洞**，只是今天所有活动碰巧都对外，所以没人撞上。
+
+## 二、需求原文（九条，2026-08-20，照 phase-d.md 的规矩不转述）
+
+> **1** 所有词代表外部人员都换成 …… 统一叫外部人员 volunteer 会缩小应用范围。
+>
+> **2** event 到时候也会被用作给 beneficiary 报名的地方。……
+> 一个能同时装下两者（以及以后别的服务形态）的统一模型。
+>
+> **3** 更是 foundation 内部员工可以 sign up 内部活动的地方。……
+> 内部员工可见可参加的 event 也可以是团建出去玩的项目，**不一定为了工作**。
+>
+> **4** 我需要让每个 event 都有是否是 recurring 的属性。
+>
+> **5** 一个 event，我希望他可以选择被谁看到：（1）foundation 内部所有的 staff
+> （也就是所有有 current assignment 的人）（2）foundation 内部单个相同 ministry 下的 staff
+> （3）外部的 volunteers and participators 看到（也就是没有 current assignment 的人）。
+>
+> **6** 一个 event 下面的 role 也分能不能被外部人员看到：如果只能给（1）或（2）看到，
+> 那么 role 也只能给（1）或（2）signup；如果可以给（3）看到，那所有人都可以 signup。
+>
+> **7** 假设我是内部员工，我可以看到一个 event，**并不代表我可以 signup 下面的 role**，
+> 因为也许我不是这个特定的 ministry 下面的员工。
+>
+> **8** 假设我是 ministry admin，我发布一个 event，**只要一次发布**，我即可以招外部的人，
+> 也可以招内部的人，不需要同一个 event 发布两次。同一个 event，internal roles 只会显示给
+> internal 的人，external roles 则显示给所有人看。
+>
+> **9** 把……全部都写到一起，放在一个专门的 doc 里。
+
+后来补的两句澄清，它们比原文更要紧，因为它们拆开了两个被压在一起的概念：
+
+> **有些 event 是只需要让大家知道有这个东西，不需要 sign up，想来就来**，
+> 有些活动**不算工时**，但是大家可能作为员工想要自我提升的兴趣。
+>
+> 一个 event 也许不是不需要 signup，**而是不需要记录工时，因为一个人需要知道自己是否参加**。
+> 那种完全不需要 sign up 也许叫做公告？又是另一回事。
+
+## 三、六层框架
+
+一次「参与」可以拆成四个互相独立的问题，活动本身还有一个和它们全部正交的问题，
+外加一层贯穿全部的词汇。**现在的系统把它们全部压在第一节那个假设上。**
+
+| 层 | 它回答什么 | 现在的答案 | 有机器吗 |
+|---|---|---|---|
+| L0 · 词汇 | 这些人**统称**什么？ | `volunteer` | 🔄 本轮做 |
+| L1 · 性质 | 这个角色的人是来**提供**的还是来**接受**的？ | 硬编码「都是来提供的」 | ❌ 无 |
+| L2 · 资格 | **谁报得上**这个角色？ | 硬编码「任何登录用户」 | ⚠️ 判据的数据全有，判断没有 |
+| L3 · 可见性 | **谁看得见**这场活动？ | 硬编码「可见 = 已发布」，与人无关 | ❌ 一处都没有 |
+| L4 · 记账 | 这一次的投入**进哪个账本**？ | 两档：志愿服务 / 工作安排 | ⚠️ 有，但装不下团建 |
+| L5 · 时间 | 这场活动**重复**吗？ | — | ⚠️ 一半有（生成器在 `Shift` 那边） |
+
+### 九条需求 → 层的映射
+
+| 需求 | L0 | L1 | L2 | L3 | L4 | L5 |
+|---|:-:|:-:|:-:|:-:|:-:|:-:|
+| 1 改名 | ● | | | | | |
+| 2 受助者 | ✓ | ● | | | ✓ | |
+| 3 内部员工 / 团建 | ✓ | ✓ | ● | ✓ | ● | |
+| 4 recurring | | | | | | ● |
+| 5 活动可见性三档 | | | ✓ | ● | | |
+| 6 role 分内外 | | ✓ | ● | ● | | |
+| 7 看得见 ≠ 报得上 | | | ● | ● | | |
+| 8 一次发布招内外 | | | ✓ | ● | | |
+
+**读法**：需求 5·6·7·8 不是四条需求，是同一层（L2 + L3）的四个面。
+真正把新层顶开的是需求 2 和 3。
+
+### 🔴 L2 和 L3 必须拆开
+
+需求 7 和需求 6 合起来逼出一句精确的话，两半都要成立：
+
+> 在活动这一层，看得见 ≠ 报得上；在角色这一层，看得见 = 报得上。
+
+## ⭐ 四、唯一的不变量：轴贴在角色上，永远不贴在人上
+
+🔴 **不许出现 `Contact.is_beneficiary` 之类的字段。**
+
+同一个人这个月来领物资、下个月来做志愿者、后个月被派去干活 —— 在小机构里这是常态，
+而且**正是基金会最想促成的事**。给人贴类型标签，等于把「他是什么」和「他这一次来做什么」
+重新合并成一个字段，而 [D38](decisions/D38-served-as-volunteer-or-work.md) 整条决策
+就是为这个区别写的（「前三个轴描述他是什么，第四个描述这一次是什么」）。
+
+推论：**活动列表按角色筛，不按人筛。**
+
+第二条同源的不变量：资格的判据**只能建立在已有的在编路径上**
+（在职 `Assignment` + 岗位的 ministry），不另建人员分类 ——
+这正是需求 5 自己的措辞（「有 current assignment 的人」），
+也是 [D32](decisions/D32-worker-axes-schedule-and-assignment.md) 的唯一不变量。
+
+## 五、`volunteer` 这个词在仓库里有四个意思，只有三个能改
+
+调查结果（代码约 350 处、文档约 400 处）：
+
+| 类 | 例子 | 它的意思 | 处置 |
+|---|---|---|---|
+| **A** 身份轴 | `ServedAs.VOLUNTEER`、"Volunteering — my own time" | 这一次我给的是**自己的时间**，对立面是 `work`，**带薪员工也用它** | 🔴 一个字不动 |
+| **B** 系统角色义 | `visible_to_volunteers()`、`VolunteerLoginView`、`volunteer_adult` | 「一个普通的非管理员用户」 | 改 |
+| **C** 报表口径义 | `figures["volunteers"]`、`hours_per_volunteer` | 所有参与过的人，含带薪员工 | 改，且这是口径修正 |
+| **D** 兜底工种名 | `ParticipationRole` 的 "General volunteer" | 「没有特定工种」 | 改（数据迁移） |
+
+### A 组为什么一个字都不许动 —— 两条独立理由，各自都足够
+
+1. **轴会被重新合并。** `served_as=volunteer` 的对立面是 `work`，不是 `internal`。
+   换成 `external_participant`，「拿不拿钱 / 里人外人 / 这一次算什么」又挤回一个字段 ——
+   而 D32 整条决策就是为了拆开它们；
+2. **它有法律含义。** FLSA 判的就是 volunteer 身份，而
+   [D32 第四节](decisions/D32-worker-axes-schedule-and-assignment.md) 明写
+   「真出争议时，机构自己系统里的措辞就是对方的证据」。一个真的在做志愿服务的人，
+   在记录上就该叫 volunteer；把它中性化是**丢掉精度**，不是获得通用性。
+
+### 为什么是 `participant`，且不加 `external_` / `public_` 前缀
+
+`participant` 是标准英文名词，且和仓库已有的 `Participation` / `ParticipationRole`
+同词根。不加前缀，因为 **B / C 两处的轴根本不是里人/外人** ——
+`figures["volunteers"]` 含带薪员工，登录视图在编成员也在用。叫它们 `external_*`
+会比现在还错一层。
+
+⚠️ 一个必须写死的定义：**在非营利行业里，"participant" 最常被读成「被服务的人」**
+（programme participant）。本文件用它作**中性总称**，涵盖来提供的人和来接受的人 ——
+这一条要写进界面文案的说明里，否则基金会会按行业习惯读窄。
+
+## 六、L1～L5 的解决办法
+
+### L1 · 性质：`helping` / `attending`，落在 `ParticipationRole`
+
+用 [D10](decisions/D10-person-role-position-assignment.md) 的判据推
+（「换个人来做这条信息还成立的，属于编制」）：「ESL 座位」不管谁来坐都是来接受的，
+「搬运」不管谁来干都是来提供的 → **属于角色类型自身**，不是某一场活动对它的一次开设。
+
+落在 `ParticipationRole`（字典表）上。**先例现成**：
+`RelationshipType.usable_as_emergency_contact` 就是字典表上一个被代码读的判断列。
+
+好处：它**不可能在两场活动之间被设成不一致**，`EventRole` 一个字不动。
+
+### L2 · 资格：`EventRole` 上「谁报得上」
+
+三档，取值直接来自需求 5 的措辞：
+
+| 档 | 判据 |
+|---|---|
+| 所有人 | 不判断 |
+| 全体在编 | 活动当天有在职 `Assignment` |
+| 本 ministry 在编 | 且岗位的 ministry = `Event.ministry` |
+
+⚠️ 「本 ministry」是**相对于活动自己的 ministry**（`Event.ministry` 非空），
+所以不需要额外的外键。判据的数据全都现成：`Assignment.active(on=)` 已经被 R8 和
+`default_served_as()` 在用。
+
+### L3 · 可见性：`Event` 上「谁看得见」，同样三档
+
+🔴 **两组独立设置，不从角色推导。** 推导派有一个它答不出来的情况，而那个情况
+恰好就是基金会要的公告：
+
+> 「从角色推」= 你看得见一场活动，当且仅当它至少有一个你看得见的角色。
+> 而**公告没有任何角色** → 输入是空集 → 要么对所有人可见（做不到「只给内部看」），
+> 要么对所有人不可见（等于不存在）。
+
+⚠️ 唯一的补救是给公告也建一个谁都不能报的假角色 ——
+**纯粹为了让推导成立而造数据**，正是本项目反复判过的形状。
+
+另外两条理由：可见性讲的是**这场活动的信息**（「李四的欢送会」这个标题本身就可能
+不该给外部人看到，和有没有角色无关）；以及发布的人应当在一个地方回答一个问题，
+而不是在心里跑一遍「我开了哪些角色 ⇒ 于是谁能看见」。
+
+### 🔴 L2 × L3 的不变量：角色资格不能比活动可见性宽
+
+两组设置真正的代价是两处可能打架。处置不是靠约定，是靠一条写死的规则：
+
+> 活动说「仅本 ministry 员工可见」，就不可能有一个「任何人可报」的角色。
+
+进约束或服务层校验（[D9](decisions/D09-rules-in-db-constraints.md)：规则能进约束就进约束），
+于是打架在结构上不可能发生。
+
+需求 8（一次发布同时招内外）在这个形状下是这样成立的：
+
+```
+活动可见性 = 所有人
+  ├─ 角色 A「搬运」      资格 = 所有人   → 外部人看得见、报得上
+  └─ 角色 B「现场协调」  资格 = 仅在编   → 外部人看得见活动，这个位置报不上
+```
+
+而这正好也是需求 7（看得见 ≠ 报得上）在结构上的落点。
+
+### L4 · 记账：两轴一交叉，四格全都有真实例子
+
+需求 3 的澄清（团建、讲座、欢送会）暴露的不是「D38 少了一档」，
+而是 **D38 的标签把两个轴写在了一个词里**。
+
+D38 那两档的**注解**（不是标签）是 `my own time` / `counts as my work time` ——
+⚠️ **一个字都没提「帮别人」**。也就是说 D38 的轴本来就是**时间归属**，
+只是标签（「志愿服务」）把 L1 偷偷焊了进去。
+
+|  | 自己的时间 | 工作时间 |
+|---|---|---|
+| helping | 志愿服务 —— 周末来帮忙 | 被派去发放日 |
+| attending | 自愿讲座、兴趣培训 | 必修培训、全员会、欢送会 |
+
+上面一行正是 D38 现在的两档；下面一行是本轮顶出来的。
+
+#### 一条很干净的规则
+
+> `attending` 类的角色，活动侧一律不记工时。
+
+| 格 | 工时记在哪 |
+|---|---|
+| helping + 自己的时间 | `Participation.hours` → 志愿者工时（R6） |
+| helping + 工作时间 | `Participation.hours` → 工作投入，不进志愿口径 |
+| attending + 工作时间 | 🔴 不记 —— 他本来就在上班，那段时间 `Shift` 已经覆盖 |
+| attending + 自己的时间 | 🔴 不记 —— 本来就不算工时 |
+
+三个好处，每一个都不是硬凑的：它正是基金会的直觉（「欢送会可以当没发生过」）；
+它顺手修掉一个静默 bug（`hours_missing = signups − hours_records` 现在会把每一个
+不记工时的人算成「缺一条工时记录」，而那个数会一直涨）；
+它让 [D36 第一节](decisions/D36-two-hour-ledgers.md) 那条「两个账本永远不相加」
+保持成立，因为 `attending` 根本不产生第三个工时数。
+
+#### D38 因此不需要改口
+
+时间归属**只在要记工时的时候才需要问**，而 `attending` 一律不记工时
+→ 不问、不存、不需要第三档。五个例子（志愿者 / 被派去干活 / 自愿讲座 /
+欢送会 / 受助者）全过，D38 一个字不用动。
+
+#### 「我们服务了多少人」不需要新字段
+
+> `attending` 的参与 × 活动当天没有在职 `Assignment` 的人
+
+⚠️ 乘号右边是必须的：没有它，来听讲座的员工会被算进「我们服务了 N 位社区成员」——
+一个会印进年报和 grant 申请的数字，凭空多出一批自己人。
+
+这是本轮**第一次让这个数字答得出来**，而每一份 grant 申请都问它。
+
+### L5 · 时间：一张表同时承载重复规则和系列身份
+
+需求 4 要的是**两件**：按规则生成多场 + 多场归成一组。
+
+⚠️ [推迟清单](deferred.md)里 `Event.parent`（活动系列）写的是
+「按 D15 三条件检验 → 自引用 FK 正是对的载体」，其中第二条是**关系自己没有属性**。
+而**生成规则就是属性** —— [D15](decisions/D15-relationship-carriers.md) 自己盯着这一格，
+明写「条件破了就必须升级成表」。
+
+**所以出栏的同时，载体判定作废。** 正确形状仓库里已经有了一份：
+[D33](decisions/D33-work-schedule.md) 的 `WorkPattern`（规则一张表）→ 生成 `Shift` 行
+→ [D40](decisions/D40-undo-a-pattern-batch.md) 的 `PatternBatch` 标识一批。
+业界结论也是同一个（近期物化 + 例外单独存）。
+
+#### 🔴 边界：例会是 `Shift`，`Event` 不装它
+
+> 有固定岗位 + 按周重复 + 机构对他的时间有承诺 → `Shift`
+> 一次性、要人自己决定来不来、可以不来 → `Event`
+
+不画线的后果具体有两条：同一个周二会议存在两处，工时进两个不同的账本（而 D36
+明写两个账本永远不相加）；以及 [D39](decisions/D39-scheduling-conflicts.md) 的
+`conflicts_for()` 第一类正是「班次撞活动」——
+员工报名自己排班时段里的内部会议，系统会判它和自己冲突。
+
+### 公告：可见 + 不开角色，不是新实体
+
+「报名」其实扛着四个功能，现在被压成了一个：
+
+| # | 报名在承担什么 | 自愿讲座 | 公告 |
+|---|---|:-:|:-:|
+| 1 | 机构知道要来几个人 | 也许 | ✗ |
+| 2 | 本人知道自己承诺了什么 | ✓ | ✗ |
+| 3 | 出勤和工时的载体 | ✗ | ✗ |
+| 4 | 改期时的通知范围 | ✓ | ✗ |
+
+第 2 条是基金会自己点出来的（「一个人需要知道自己是否参加」），
+而它有现成落点：My Signups、[My Schedule](phase-d.md)、`.ics` 日历。
+一个不记工时、也不用来凑人数的报名，是有读者的。
+
+`Participation.status` 和 `hours` 本来就是两个独立字段，所以「报了名、来了、
+不记工时」现在就能存。⚠️ 卡住的只有报表那个分母。
+
+而公告 = 可见但不开任何角色。⚠️ 它有一处必须处理：现在没有角色的活动显示的是
+"No roles opened yet. Volunteers cannot sign up until there is at least one job" ——
+这句话把**故意不收报名的公告**和**还没建完的半成品**写成了同一个样子，
+正是 [D27](decisions/D27-ministry-report.md) 那条「没有和没算不能长得一样」。
+
+### `EventType`：用起来
+
+现状查证：字典表 `code / name / is_active`，`Event.event_type` 非空必填，
+**没有一处代码 branch 它，前台模板命中 0 次** —— 唯一的读者是 admin 的一个过滤器，
+而 R1–R8 / P1–P6 里一条都没提到活动分类。
+
+处置：**上页面 + 可按类型筛选**，让它有真读者。
+
+⚠️ 但要先分清三件很容易被塞进同一个字段的事：
+
+| 字段 | 回答 |
+|---|---|
+| `EventType` | 这是**哪一类**活动（发放 / 课程 / 培训 / 团建） |
+| L3 | 这场**给谁看** |
+| L1 | 这个角色是来**给**还是来**受** |
+
+## ⭐ 七、行业对照（本轮查证七个产品）
+
+### 受助者和志愿者是不是同一套对象
+
+| 产品 | 结论 |
+|---|---|
+| CiviCRM | 同一场 Event（参与者带 role：Attendee / Volunteer / Host / Speaker）——⚠️ 但**只在一次性参与这一层**；长期客户关系走 CiviCase，是另一套 |
+| Salesforce NPC / PMM | 分离对象图：Program → ProgramEngagement → ServiceSchedule → ServiceSession → ServiceDelivery |
+| Bonterra Apricot | 分离：program enrollment 和 attendance 是两套（用户反馈证实两者会不一致） |
+| Better Impact | 分离模块：Client Impact 与 Volunteer Impact 并列 |
+| Neon CRM | 人的记录统一，但 events / volunteers 模块分开，且区分「event-specific volunteer roles」与「ongoing operational program opportunities」 |
+| Planning Center | 按功能拆成独立产品（Registrations / Calendar / Groups / Services） |
+| Rosterfy | 志愿者专用平台，没有受助者模块 |
+
+查实的六个里**只有 CiviCRM 一个**把两者放进同一个 event 对象，而且它自己也只在
+一次性参与这一层统一。
+
+### 真正的分界线不是「志愿者 vs 受助者」
+
+几乎每一家的分界线都落在**同一条线**上：
+
+| | (a) 一次性、按场次 | (b) 长期项目关系 |
+|---|---|---|
+| 形状 | 一个人 + 一个场次 + 来没来 | 一段关系 + 起止 + 产出 |
+| CiviCRM | CiviEvent | CiviCase |
+| Apricot | attendance | enrollment |
+| Neon CRM | event-specific | ongoing program |
+| 判据 | 每场都要报一次 | 报一次，之后各场不用再报 |
+
+**这验证了「先统一」是对的**：基金会举过的例子里，发放日 / 讲座 / 团建 / 全员会
+全是 (a)，`Event` 撑得住；只有课程花名册是 (b)。
+
+### 可见性与公告
+
+**ChurchSuite** 把它做成两组互相独立的设置（Visibility：显不显示、可按 tag 限制；
+Sign-Up：能不能报名），文档原话几乎是需求 3 的翻译：
+*"Events are not always public-facing or open to sign-up — perhaps an internal reminder
+in the Calendar module of the weekly staff meeting"*。
+
+**Planning Center** 走到同一个地方，而且是**被 bug 逼过去的**：他们专门加了
+「turn off RSVPs for events」的开关，起因是有人以为在 Groups 里 RSVP 了就等于报名了。
+⚠️ 他们踩过的坑正是「RSVP 和报名长得一样」。
+
+## 八、改口清单
+
+| 文档 | 改什么 |
+|---|---|
+| [`deferred.md`](deferred.md) | `Event.parent`（活动系列）出栏；⚠️ 并注明载体判定作废的理由 |
+| [D19](decisions/D19-event-role.md) | `EventRole` 长出 L1 / L2 两个轴 |
+| [D27](decisions/D27-ministry-report.md) | 指标改名 + 拆成「帮忙的人」和「被服务的人」两组，🔴 并排不相加 |
+| [D38](decisions/D38-served-as-volunteer-or-work.md) | **不改口**（结论），但补一句：`attending` 类不问身份 |
+| [`phase-b.md`](phase-b.md) 可见性那一节 | 补 L3 这一维 |
+| [D5](decisions/D05-lookup-tables-not-enums.md) | `EventType` 从「没有 branch」变成「有读者」 |
+| [`05-roadmap.md`](05-roadmap.md) | 加本轮步骤 |
+
+### 一处更正（2026-08-20 定案时发生的）
+
+讨论中一度写过「`Event.audience` 就是 `revisions.md` 那笔旧账（给 status 加第二个维度）」。
+**那句话不准确，收回。**
+
+旧账的具体内容是 `status` 一个字段**同时装了生命周期和可见性**，两者会**互相矛盾**
+（活动一 `confirmed`，已报名的人就打不开了）。而 `audience` 和 `status`
+**正交、不矛盾**：一个答「发布了没有」，一个答「发给谁看」。
+把「第二个字段」和「一个字段的第二个维度」混为一谈，正是那笔旧账本身要区分的东西。
+
+## 九、已知缺口（主动接受，各带重启条件）
+
+| 缺口 | 什么时候再看 |
+|---|---|
+| 🔴 `Event` 装不下 (b) 类：**跨多个场次的长期报名关系**（一期课程的花名册、持续几个月的服务对象）—— 一场 `Event` 只有一个时刻，表达不了「他从 3 月到 6 月在这个项目里」 | **「他报一次之后，后面每一场都不用再报」这句话成立时** → 参考 Salesforce PMM / Apricot 的分离形状出栏。⚠️ 这是行业主分界线，不是我们的特例 |
+| 统一进 Event 的代价：志愿者和受助者共用活动级设置（报名期、取消政策）—— CiviCRM 自陈的那条 | 真的需要给受助者单独的报名期或取消政策时 |
+| 公告型活动**没有收件人** —— 没有报名行，D22 的通知机制找不到人可通知 | 出现「公告改期了没人知道」时 |
+| 匿名 / 不登记的服务（现场 120 户不留名）装不下 —— `Participation` 要求一个 `Contact` | 基金会要报「服务人次」而不是「服务人数」时 |
+| 不来活动的服务（上门送餐、个案跟进）没有落点 | 出现这类服务时 |
+| ⚠️ 「participant」在非营利行业里常被读成「受助者」 | 定义写死在界面说明里；出现基金会读窄时重新审视 |
+| ⚠️ 受助者进 `Contact` 之后，任何一处 `Contact.objects.filter()` 忘了收窄，就可能把志愿者通讯发给受助者 | 需要一条守卫；⚠️ 现有的收件人解析走 `Participation` 而不是 `Contact`，所以今天还不漏 |
+
+## 十、执行记录
+
+### 第一批：改名（B / C / D 三组）—— 2026-08-20 落地
+
+| 组 | 做了什么 |
+|---|---|
+| C 报表 | `figures` 的四个键改名（`participants` / `hours_per_participant` / `repeat_participants` / `top_participants`）+ 服务函数 `_top_participants()` + 报表页文案 + `Participation Report` 标题 |
+| B 系统角色义 | `visible_to_participants()` / `VISIBLE_TO_PARTICIPANTS`；`accounts` 九个类改成 `Site*`；demo 角色键 `participant_*`；六处面向用户的文案 |
+| D 兜底工种名 | 迁移 `0015_general_role_is_a_participant`，`code="general"` 一个字不动 |
+
+三件配套的事，缺一件这次改名就只是换字：
+
+1. **一条测试钉住 C 组的口径**（`test_paid_staff_are_counted_among_the_participants`）——
+   这个数一直含带薪员工，而**在此之前没有任何测试说得出这件事**。名字谁都能改回去，
+   一条关于「谁在这个数里面」的断言改不回去；
+2. **一条守卫**（`core.tests.ReportFigureNamesGuardTests`）：`figures` 里任何含
+   `volunteer` 的键必须在点名白名单上（现在是空的）。⚠️ 它**故意很窄** ——
+   扫全文件的版本会天天红，然后被加白名单加到失效；
+3. `visible_to_participants()` 的 docstring 现在写明**它不是受众**：
+   过滤的只有生命周期状态，任何登录用户都看得见每一场已发布活动。
+   改名让这个洞更显眼了，而不是把它藏起来。
+
+⚠️ **A 组一个字没动**，这是这次改名的重点而不是遗漏：`served_as=volunteer`、
+`ServedAs.VOLUNTEER`、`Volunteering — my own time` 原样保留。
+改完之后仓库里剩下的 `volunteer` 分两类 —— A 组的标识符，
+以及散文里真的在讲志愿者的那些句子。
+
+### 浏览器验收（2026-08-20，dev 库真数据）
+
+五条走完，全过：
+
+| 验的 | 结果 |
+|---|---|
+| 报表页 | Participation Report · Participants · Hours per participant |
+| R8 名单 | 三档并排 —— San Zhang（paid）· Ada（unpaid）· Rafa（stipend）· Former Sun（当天在职、之后离职）；身份列三种状态齐全（Volunteering / Scheduled work / Not recorded） |
+| 更正入口 | foundation tier 只读；ministry admin 有下拉 + Save；改完提示「本人会在自己的报名页上看到是管理员设的」 |
+| ⭐ 本人看得见 | Ada 登录后看到 `Scheduled work · Set by an admin` —— D38 那条不可交易的条款在浏览器里成立 |
+| A 组保留 | 在编成员的报名表单上仍然是 `Volunteering — my own time` / `Scheduled work — counts as my work time`；**外部志愿者那一张表单上一个字都没有** |
+
+⚠️ 顺带在 dev 库上又跑了一次迁移（那是第三次真数据验证，前两次是拆轴和回填各一次的
+scratch 库）：三个岗位的拆轴映射全对，54 条报名回填成 52 volunteer / 2 空，
+`declared_by` 一条都没写。
+
+### ⚠️ 验收过程里撞出两个 seed_demo 的 bug，都不是这一轮引入的
+
+两个都会让演示当场走不下去，而两个测试都抓不到。
+
+1. **seed 出来的账号登录不了。** `email_verified` 默认 `False`，
+   `register_account()` 不设它 —— 所以今天 seed 出来的**任何**账号都被登录页拒绝。
+   🔴 测试抓不到的原因值得写下来：`client.login()` 走 `ModelBackend`，
+   而那道门在 `SiteAuthenticationForm.confirm_login_allowed()` —— **表单层**。
+   于是验收走查测试全绿，而真实登录页一个都进不去。**只有浏览器看得见**；
+2. **已存在的账号密码从不重设。** `account()` 遇到已有的行直接返回，
+   而命令接着把 `PASSWORD` 当成「进得去的密码」打印出来 ——
+   早一轮 seed 建的账号于是带着一个不工作的密码列在那张表上。
+
+两个都修了：seed 现在 `mark_email_verified()` 并重设密码。
+
+### 还没做的
+
+L1～L5 的实现（性质轴 / 资格 / 可见性 / 记账 / 时间）**本轮不做**，
+形状已经在第六节定下来。⚠️ 它是新一轮的工程量（两个新字段 + 一张新表 +
+可见性收窄 + 报表拆分），和改名混在一个 diff 里会让两边都读不懂。
+
+## 十一、验收
+
+- [ ] 全量测试绿，且**测试数只增不减**
+- [ ] 带薪员工参加活动 → **算进** `participants`（钉住 C 组那个口径修正）
+- [ ] `grep -rn "volunteer"` 剩下的每一处都说得出它是 A 组
+- [ ] 报表页写 Participants / Hours per participant；**报名表单上仍然是 Volunteering / Scheduled work**
+- [ ] 一场活动同时开一个「所有人可报」和一个「仅在编可报」的角色 → 外部账号看得见活动、看得见前者、报不上后者
+- [ ] 给一个「仅本 ministry 可见」的活动加一个「所有人可报」的角色 → **被拦住**（L2×L3 不变量）
+- [ ] 别的 ministry 的在编成员打开一场「仅本 ministry 在编可报」的活动 → 看得见，报不上
+- [ ] 一场没有角色的公告 → 页面上说得出它**是故意不收报名**，不是没建完
+- [ ] `attending` 类的参与**不进** `hours_missing` 的分母
+- [ ] 「我们服务了多少人」这个数**不含**来听讲座的在编员工
+- [ ] 一门课按规则生成 N 场，N 场归成一组；改规则只动未来的场次
+- [ ] 三条文档守卫绿

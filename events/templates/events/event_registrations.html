@@ -26,9 +26,54 @@
         </p>
         <ul class="mt-3 space-y-1 text-sm">
           {% for row in role.participations.all %}
-            <li class="flex flex-wrap items-center justify-between gap-2 border-t border-ink-200 py-2 dark:border-ink-700">
-              <span>{{ row.contact }}</span>
-              {% include "events/_status_badge.html" %}
+            <li class="border-t border-ink-200 py-2 dark:border-ink-700">
+              <div class="flex flex-wrap items-center justify-between gap-2">
+                <span>{{ row.contact }}</span>
+                {% include "events/_status_badge.html" %}
+              </div>
+              {% comment %}
+              身份那一行（D38）。⚠️ **只画给那天在编的自己人** ——
+              外部志愿者这一行一个字都不多，那正是 D38 第五节的取舍：
+              成本只压在真有歧义的那批人身上。
+
+              ⚠️ 判断用视图传下来的那个集合（一次查询），不是在模板里问每一行。
+                 而**能不能改**由视图的 POST 分支说了算，这里不画只是不给一颗
+                 按不动的按钮 —— 同考勤页那一格的注释。
+
+              ⚠️ 两档在这里是一个 `<select>`，两个选项一样长、一样重。
+                 D38 第六节第 3 条：任何把「志愿服务」做得更醒目的排版，
+                 都会让这个字段变成一个大家都往一边填的字段，两个数字同时失真。
+                 这条**没有测试盯得住**，改这一段的人自己盯。
+              {% endcomment %}
+              {% if row.contact_id in asked_about_serving %}
+                <div class="mt-1 flex flex-wrap items-center gap-2 text-xs text-ink-600 dark:text-ink-300">
+                  {% if can_manage %}
+                    <form method="post" class="flex flex-wrap items-center gap-2">
+                      {% csrf_token %}
+                      <input type="hidden" name="participation" value="{{ row.pk }}">
+                      <label for="served-as-{{ row.pk }}">Served as</label>
+                      <select name="served_as" id="served-as-{{ row.pk }}"
+                              class="rounded-md border border-ink-300 bg-white px-2 py-1 text-xs text-ink-900 dark:border-ink-600 dark:bg-ink-800 dark:text-ink-50">
+                        {% comment %}
+                        ⚠️ 空选项排第一，而且它是**没有记录过**的意思，不是第三档。
+                           一行还没有身份的记录（回填留空的那一批）如果被迫显示成
+                           两档之一，那就是替没有人核实过的事作证 —— 整条 D38 第九节。
+                        {% endcomment %}
+                        <option value="">— not recorded —</option>
+                        {% for value, label in served_as_choices %}
+                          <option value="{{ value }}" {% if row.served_as == value %}selected{% endif %}>{{ label }}</option>
+                        {% endfor %}
+                      </select>
+                      {% include "core/components/button.html" with label="Save" variant="ghost" %}
+                    </form>
+                  {% else %}
+                    <span>Served as {{ row.get_served_as_display|default:"— not recorded —" }}</span>
+                  {% endif %}
+                  {% if row.served_as_declared_by %}
+                    <span>({{ row.get_served_as_declared_by_display }})</span>
+                  {% endif %}
+                </div>
+              {% endif %}
             </li>
           {% empty %}
             <li class="border-t border-ink-200 py-2 text-ink-600 dark:border-ink-700 dark:text-ink-300">

@@ -28,8 +28,15 @@
     <dd class="text-xl font-semibold">{{ report.figures.signups }}</dd>
   </div>
   <div>
-    <dt class="text-xs text-ink-600 dark:text-ink-300">Volunteers</dt>
-    <dd class="text-xl font-semibold">{{ report.figures.volunteers }}</dd>
+    {% comment %}
+    ⚠️ 「Participants」不是「Volunteers」的同义词替换（2026-08-20）。这个数一直是
+       Count(contact, distinct) over 所有报名 —— **含带薪员工**，只是以前叫错了名字。
+       D1.4 会在旁边放一个真正的志愿者工时（served_as=volunteer），那时两个数
+       并排、口径不同、名字却一样，就是本项目判过三次的那个病。
+       口径没有变，变的是它现在叫得对了。见 participants.md 第五节。
+    {% endcomment %}
+    <dt class="text-xs text-ink-600 dark:text-ink-300">Participants</dt>
+    <dd class="text-xl font-semibold">{{ report.figures.participants }}</dd>
     <dd class="text-xs text-ink-600 dark:text-ink-300">different people</dd>
   </div>
   <div>
@@ -45,9 +52,9 @@
     </dd>
   </div>
   <div>
-    <dt class="text-xs text-ink-600 dark:text-ink-300">Hours per volunteer</dt>
+    <dt class="text-xs text-ink-600 dark:text-ink-300">Hours per participant</dt>
     <dd class="text-xl font-semibold">
-      {{ report.figures.hours_per_volunteer|floatformat:2|default_if_none:"—" }}
+      {{ report.figures.hours_per_participant|floatformat:2|default_if_none:"—" }}
     </dd>
   </div>
   <div>
@@ -56,7 +63,7 @@
       {% if report.figures.repeat_rate is None %}—{% else %}{{ report.figures.repeat_rate }}%{% endif %}
     </dd>
     <dd class="text-xs text-ink-600 dark:text-ink-300">
-      {{ report.figures.repeat_volunteers }} of {{ report.figures.volunteers }}, in this period
+      {{ report.figures.repeat_participants }} of {{ report.figures.participants }}, in this period
     </dd>
   </div>
   <div>
@@ -101,6 +108,6 @@
   {% include "events/_bar_chart.html" with chart=report.charts.events_by_month %}
   {% include "events/_bar_chart.html" with chart=report.charts.hours_by_month %}
   {% include "events/_paired_bar_chart.html" with chart=report.charts.role_gap %}
-  {% include "events/_bar_chart.html" with chart=report.charts.top_volunteers %}
+  {% include "events/_bar_chart.html" with chart=report.charts.top_participants %}
   {% include "events/_bar_chart.html" with chart=report.charts.hours_by_role %}
 </div>

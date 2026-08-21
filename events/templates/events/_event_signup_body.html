@@ -100,6 +100,24 @@
       {% include "core/components/field.html" with field=form.event_role %}
 
       {% comment %}
+      ⚠️ 身份那一问在这一支要**显式画一次**：成年人那一支走 form_fields.html
+         自动渲染全部字段，这一支是手写的，漏掉就是「未成年在编人员报名时没人问过他」——
+         而那一行会带着服务层补的默认值落库，页面上看不出任何异样。
+
+      ⚠️ 用 `form.ask_served_as` 判断，不是 `{% if form.served_as %}`：
+         那个字段在不该问的时候是被 `del` 掉的，模板里取一个不存在的字段
+         静默出空串，于是这里会画出一个没有标题、没有选项的空框。
+         ⚠️ 也不是 `form.served_as_default` —— 那一个**永远为真**
+            （外部志愿者也有默认值，只是不问他）。用它做判断的表现是
+            这个问题画给了每一个人。
+      {% endcomment %}
+      {% if form.ask_served_as %}
+        <div class="mt-4">
+          {% include "core/components/field.html" with field=form.served_as %}
+        </div>
+      {% endif %}
+
+      {% comment %}
       ⚠️ 这层 wrapper 上要自己写 mt-4：app.css 里字段间距靠 `.field + .field`
          这个**相邻兄弟**选择器，而套一层 div 就把相邻关系打断了 ——
          表现是这一格和上面那格贴在一起，别处都正常。

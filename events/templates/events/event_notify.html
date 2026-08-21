@@ -1,10 +1,10 @@
 {% extends "core/base.html" %}
-{% block title %}Notify Volunteers — {{ event.name }}{% endblock %}
+{% block title %}Notify Participants — {{ event.name }}{% endblock %}
 
 {% block content %}
   {% include "events/_event_nav.html" with current="notify" %}
 
-  <h1 class="text-2xl font-semibold">Notify Volunteers</h1>
+  <h1 class="text-2xl font-semibold">Notify Participants</h1>
   <p class="mt-1 text-sm text-ink-600 dark:text-ink-300">{{ event.name }}</p>
 
   {% if previous %}
@@ -44,7 +44,7 @@
   <div class="mt-6 grid gap-4 lg:grid-cols-3">
     <section class="card">
       <h2 class="text-sm font-semibold">
-        Going to the volunteer ({{ recipients|length }})
+        Going to the person ({{ recipients|length }})
       </h2>
       <ul class="mt-3 space-y-2 text-sm">
         {% for row in recipients %}

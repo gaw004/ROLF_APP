@@ -88,7 +88,101 @@ CONSENT_FIELDS = (
 )
 
 
-def sign_up(*, contact, event_role, consent=None):
+def _on_the_books(event):
+    """The tenures that make somebody one of the foundation's own on this day.
+
+    ⚠️ One predicate, and everything that asks "does the identity question
+       apply to this person" goes through it: the default below, the signup
+       form, the correction control on the signups page, and the backfill
+       migration. Written out a second time it would eventually forget the
+       board members, or forget `on=`, in one place and not the other — and
+       both mistakes are silent (D38 section 5).
+
+    `kind=staff`, so board members are outside it. A trustee is not an
+    employee, was never going to be one, and "scheduled work" is a question
+    that reads to them as though the system does not know who they are.
+    """
+    return Assignment.objects.active(on=local_date_of(event.start_time)).filter(
+        position__kind=Position.Kind.STAFF, position__is_active=True,
+    )
+
+
+def default_served_as(contact, event):
+    """(what to record, whether to put the question to them) for this signup.
+
+    ⚠️ A pair, and it has to be — D38 section 5's table has two columns and
+       they do not agree with each other. An outside volunteer is recorded as
+       `volunteer` **and** is never shown the question; a staff member is
+       recorded as `volunteer` **and** is asked. Collapsing the two into one
+       return value (the `-> str | None` this was first written as, where None
+       meant "do not ask") loses the value for everybody who is not asked, and
+       what that costs is not small:
+
+       - R6's volunteer hours are `served_as=volunteer`, and outside volunteers
+         are almost all of them. They would every one of them fall out;
+       - migration 0014 backfills exactly these people as `volunteer` because
+         the data proves it. New rows would come out **emptier than the
+         historical ones they sit next to**.
+
+       Both failures are silent. Found by the tests for this step, on 2026-08-20.
+
+    ⚠️ Still one function, which is the part D38 section 5 actually cares
+       about: the form asks it whether to draw the question and the service
+       asks it what to write, so the two cannot disagree about the board
+       member or about somebody whose tenure ended last year.
+
+    ⚠️ The day is the event's, not today. Judged against today, somebody who
+       left last year gets asked about an event they worked, and somebody who
+       started this morning does not get asked about one they volunteered at.
+       Both directions wrong, neither raising. Same trap as R8's, second
+       appearance in the same shape.
+
+    Only two of that table's four rows can be reached from here, and that is
+    not an omission: the other two describe somebody *assigned* to an event,
+    and nothing can assign anybody until D3 builds that path. When it does, the
+    rule belongs **in this function** — an assignment page working out its own
+    default is the second copy this docstring is about.
+    """
+    on_the_books = _on_the_books(event).filter(contact=contact).exists()
+    return Participation.ServedAs.VOLUNTEER, on_the_books
+
+
+def contacts_asked_about_serving(event):
+    """The contact ids the identity question applies to, for a page of rows.
+
+    The set form of default_served_as()'s first half, so a list of signups can
+    decide what to draw in one query instead of one per row.
+    """
+    return set(_on_the_books(event).values_list("contact_id", flat=True))
+
+
+def set_served_as(participation, value, *, declared_by):
+    """Write the identity and who said so. The only place either column is set.
+
+    ⚠️ A guard watches for a second one (core.tests.ServedAsWriteGuardTests),
+       and the admin — which needs no code to become a write path — is held off
+       with readonly_fields rather than by the guard, because grep cannot see a
+       form somebody fills in.
+
+    `declared_by` may legitimately be empty, and that is not a missing
+    argument: it means the value follows from the data rather than from
+    anybody's statement — an outside volunteer who was never shown the
+    question, matching how migration 0014 treats the rows that predate it.
+    Non-empty means a human answered, which is what makes the column evidence.
+
+    ⚠️ No defaulting logic here. Deciding the value is default_served_as()'s
+       job; doing both in one function is how the default rules end up with two
+       implementations.
+    """
+    participation.served_as = value
+    participation.served_as_declared_by = declared_by
+    participation.save(update_fields=[
+        "served_as", "served_as_declared_by", "updated_at",
+    ])
+    return participation
+
+
+def sign_up(*, contact, event_role, consent=None, served_as=None):
     """Sign `contact` up for `event_role`. Returns the new Participation.
 
     ⚠️ This is a hint layer, not enforcement, and is not dressed up as more.
@@ -108,6 +202,20 @@ def sign_up(*, contact, event_role, consent=None):
        the guardian at all — the signup would be recorded already doomed to be
        unreachable, which is the failure this project keeps convicting: nothing
        raises, the person simply never hears.
+
+    ⚠️ `served_as` is a parameter here rather than something the caller writes
+       afterwards, and that is not tidiness. "Call sign_up(), then call
+       set_served_as()" is a pair of actions that must always happen together —
+       the shape this project has already been bitten by — and the half that
+       gets forgotten is the second one, leaving a signup with no identity on
+       it and nothing raising.
+
+    ⚠️ What the caller passes is a request, not an instruction: the value is
+       checked against default_served_as() below, so a POST that carries an
+       identity for somebody who should never have been asked writes nothing,
+       and a form that was rendered with the question but came back without an
+       answer still lands on the default rather than empty. Empty means "this
+       row predates D38", and nothing else may be allowed to mean it.
     """
     consent = dict(consent or {})
 
@@ -209,7 +317,24 @@ def sign_up(*, contact, event_role, consent=None):
     # full_clean() rather than a bare save(): the uniqueness of (event_role,
     # contact) has to come back as a form error, not as an IntegrityError 500.
     participation.full_clean(exclude=["registered_at"])
-    participation.save()
+
+    default, asked = default_served_as(contact, event_role.event)
+    # ⚠️ `served_as` from the caller counts only if they were actually asked.
+    #    Otherwise the form carried no such field and whatever arrived was
+    #    hand-made — and the recorded value is the one the data proves.
+    #
+    # ⚠️ declared_by is stamped only when a human answered the question. Not
+    #    asked means nobody claimed anything, so that column stays empty — the
+    #    same distinction migration 0014 draws for the historical rows, and the
+    #    reason it exists at all: "somebody said this" and "this follows from
+    #    the data" are different kinds of fact, and only the first is evidence.
+    with transaction.atomic():
+        participation.save()
+        set_served_as(
+            participation,
+            (served_as or default) if asked else default,
+            declared_by=Participation.DeclaredBy.SELF if asked else "",
+        )
     return participation
 
 
@@ -698,7 +823,20 @@ def event_summary(event):
 
 
 def ministry_staff_participation(event):
-    """R8: which employees of the ministry running this event took part, doing what.
+    """R8: which of the running ministry's own people took part, doing what.
+
+    ⚠️ "Its own people", not "its employees", and the difference is the answer.
+       The requirement's word was "employee", but what the foundation is asking
+       is **us versus outside volunteers** — not paid versus unpaid. Read
+       literally it would leave out the unpaid core members even on a day one
+       of them ran the whole event, which is precisely the group D32 was
+       written for. So the filter is `kind=staff` and compensation is not
+       consulted: paid, unpaid and stipend all count.
+
+       Board members do **not** count, and that is chosen rather than
+       overlooked — see D32 section 3, and the test that pins it. A trustee is
+       not the department's working capacity, and their post usually hangs off
+       the foundation rather than any ministry anyway.
 
     Three traps in this one query, all of them silent:
 
@@ -706,11 +844,11 @@ def ministry_staff_participation(event):
        default about last year's event drops everybody who has left since, and
        reports a smaller number without a word. That is what the `on` parameter
        exists for (D16, layer 2).
-    2. .active(), not .serving(). The question is "were they an employee of this
-       ministry at the time", not "could they work a shift today" — somebody on
-       leave who came along still counts.
-    3. .distinct() is not optional. One person may hold two employee posts in
-       one ministry (D11's central case), and the join would list their
+    2. .active(), not .serving(). The question is "were they on the books here
+       at the time", not "could they work a shift today" — somebody on leave
+       who came along still counts.
+    3. .distinct() is not optional. One person may hold two posts in one
+       ministry (D11's central case), and the join would list their
        participation twice — the headcount quietly gains a person.
 
     ⚠️ And the day itself comes from local_date_of(), never from asking the
@@ -720,15 +858,19 @@ def ministry_staff_participation(event):
        for about an hour; see 02-roadmap.md「计划外（B12）」.
     """
     on = local_date_of(event.start_time)
-    employed_here = Assignment.objects.active(on=on).filter(
-        position__kind=Position.Kind.EMPLOYEE,
+    on_the_books_here = Assignment.objects.active(on=on).filter(
+        # ⚠️ No condition on compensation, and its absence is the whole of this
+        #    step. It said `PAID` for exactly one commit — long enough for the
+        #    axis split to change no answers — and deleting that line is what
+        #    changed R8's answer. See the docstring above.
+        position__kind=Position.Kind.STAFF,
         position__ministry=event.ministry,
         position__is_active=True,
     )
     return (
         Participation.objects.filter(
             event_role__event=event,
-            contact__assignments__in=employed_here,
+            contact__assignments__in=on_the_books_here,
         )
         .select_related("contact", "event_role__role")
         .distinct()
@@ -880,7 +1022,14 @@ def ministry_report(events):
     event_count = events.count()
     totals = parts.aggregate(
         signups=Count("pk"),
-        volunteers=Count("contact", distinct=True),
+        # ⚠️ Everybody who took part, **including paid staff** — this counts
+        #    distinct contacts over every participation, and always has. It was
+        #    called `volunteers` until 2026-08-20, which was wrong in the one
+        #    way that matters: D1.4 adds a genuine volunteer figure
+        #    (`served_as=volunteer`) beside it, and two numbers with one name
+        #    and two definitions on one report is the mistake this project has
+        #    already convicted three times. See participants.md section 5.
+        participants=Count("contact", distinct=True),
         # ⚠️ `hours_total`, not `hours`. An alias that repeats a field name wins
         #    over the field for every later argument in the same aggregate(),
         #    so `hours=Sum("hours")` next to `Count("hours")` makes the second
@@ -892,7 +1041,7 @@ def ministry_report(events):
         hours_records=Count("hours"),
     )
     hours = totals["hours_total"] or Decimal("0")
-    volunteers = totals["volunteers"]
+    participants = totals["participants"]
 
     repeat = (
         parts.values("contact_id").annotate(n=Count("pk")).filter(n__gte=2).count()
@@ -930,13 +1079,13 @@ def ministry_report(events):
     figures = {
         "events": event_count,
         "signups": totals["signups"],
-        "volunteers": volunteers,
+        "participants": participants,
         "hours": hours,
         "hours_records": totals["hours_records"],
         "hours_missing": totals["signups"] - totals["hours_records"],
-        "hours_per_volunteer": (hours / volunteers) if volunteers else None,
-        "repeat_volunteers": repeat,
-        "repeat_rate": _percent(repeat, volunteers),
+        "hours_per_participant": (hours / participants) if participants else None,
+        "repeat_participants": repeat,
+        "repeat_rate": _percent(repeat, participants),
         "fully_staffed": fully_staffed,
         "staffable_events": len(staffable),
         "fully_staffed_rate": _percent(fully_staffed, len(staffable)),
@@ -1024,7 +1173,7 @@ def _report_charts(events, parts):
                  "out read as zero.",
         ),
         "role_gap": _role_gap(events, parts),
-        "top_volunteers": _top_volunteers(parts),
+        "top_participants": _top_participants(parts),
         "hours_by_role": _chart(
             "Recorded hours by role",
             list(
@@ -1131,7 +1280,7 @@ def _role_gap(events, parts):
     )
 
 
-def _top_volunteers(parts, limit=10):
+def _top_participants(parts, limit=10):
     """C3: who did the most, by recorded hours then by number of events.
 
     ⚠️ `nulls_last`. Postgres sorts NULL first on a descending order, so the

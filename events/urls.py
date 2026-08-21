@@ -48,6 +48,11 @@ urlpatterns = [
     path("events/<int:pk>/edit/", views.event_update, name="event_update"),
     path("events/<int:pk>/roles/", views.event_roles, name="event_roles"),
     path("events/roles/<int:pk>/delete/", views.role_delete, name="role_delete"),
+    # D38 — the only way to correct somebody's identity, and it has to exist:
+    # the two columns are readonly in the admin, so without this route nothing
+    # anywhere can change one. That is the failure this project has shipped
+    # three times — a service with no door — so the route and the service land
+    # together.
     path(
         "events/<int:pk>/registrations/",
         views.event_registrations,

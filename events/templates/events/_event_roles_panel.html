@@ -52,7 +52,7 @@
       </table>
     </div>
   {% else %}
-    {% include "core/components/empty.html" with message="No roles opened yet. Volunteers cannot sign up until there is at least one job to sign up for." %}
+    {% include "core/components/empty.html" with message="No roles opened yet. Nobody can sign up until there is at least one job to sign up for." %}
   {% endif %}
 
   <form method="post" action="{% url 'events:event_roles' event.pk %}"

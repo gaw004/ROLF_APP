@@ -28,7 +28,7 @@ from django.contrib.auth import get_user_model
 from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
 
-from accounts.services import register_account
+from accounts.services import mark_email_verified, register_account
 from contact.models import Contact, EmergencyContact, RelationshipType
 from core.timeutils import local_now, local_today
 from events.models import Event, EventRole, EventType, Participation, ParticipationRole
@@ -230,13 +230,37 @@ class Command(BaseCommand):
            person a ministry admin writes down on the day.
         """
         user = get_user_model().objects.filter(email__iexact=email).first()
-        if user:
-            return user
-        return register_account(
-            email=email, password=PASSWORD,
-            legal_last_name=last_name, legal_first_name=first_name,
-            **contact_fields,
-        )
+        if user is None:
+            user = register_account(
+                email=email, password=PASSWORD,
+                legal_last_name=last_name, legal_first_name=first_name,
+                **contact_fields,
+            )
+        else:
+            # ⚠️ Reset the password on an account this command made earlier.
+            #    Without it, `account()` returns any existing row untouched
+            #    while the command goes on to **print PASSWORD as the way in** —
+            #    so an account seeded before the password changed is listed with
+            #    credentials that do not work. Found in the browser on
+            #    2026-08-20: one demo login worked and another was refused, and
+            #    the only difference was which run had created it.
+            user.set_password(PASSWORD)
+            user.save(update_fields=["password"])
+
+        # ⚠️ Demo accounts are pre-verified, and without this **none of them can
+        #    log in** — `email_verified` defaults to False and register_account()
+        #    leaves it that way, because the real flow proves the address with a
+        #    six-digit code. A demo whose printed account list is unusable is
+        #    worse than no demo.
+        #
+        # ⚠️ No test catches this, and the reason is worth writing down:
+        #    `client.login()` authenticates through ModelBackend, while the
+        #    refusal lives in SiteAuthenticationForm.confirm_login_allowed() —
+        #    the *form*. So the acceptance walk stays green while every one of
+        #    these accounts is refused at the real login page. Found in the
+        #    browser on 2026-08-20, which is the only place it was visible.
+        mark_email_verified(user)
+        return user
 
     def accounts(self):
         self.boss = self.account(

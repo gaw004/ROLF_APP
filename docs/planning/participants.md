@@ -422,6 +422,37 @@ in the Calendar module of the weekly staff meeting"*。
 改完之后仓库里剩下的 `volunteer` 分两类 —— A 组的标识符，
 以及散文里真的在讲志愿者的那些句子。
 
+### 浏览器验收（2026-08-20，dev 库真数据）
+
+五条走完，全过：
+
+| 验的 | 结果 |
+|---|---|
+| 报表页 | Participation Report · Participants · Hours per participant |
+| R8 名单 | 三档并排 —— San Zhang（paid）· Ada（unpaid）· Rafa（stipend）· Former Sun（当天在职、之后离职）；身份列三种状态齐全（Volunteering / Scheduled work / Not recorded） |
+| 更正入口 | foundation tier 只读；ministry admin 有下拉 + Save；改完提示「本人会在自己的报名页上看到是管理员设的」 |
+| ⭐ 本人看得见 | Ada 登录后看到 `Scheduled work · Set by an admin` —— D38 那条不可交易的条款在浏览器里成立 |
+| A 组保留 | 在编成员的报名表单上仍然是 `Volunteering — my own time` / `Scheduled work — counts as my work time`；**外部志愿者那一张表单上一个字都没有** |
+
+⚠️ 顺带在 dev 库上又跑了一次迁移（那是第三次真数据验证，前两次是拆轴和回填各一次的
+scratch 库）：三个岗位的拆轴映射全对，54 条报名回填成 52 volunteer / 2 空，
+`declared_by` 一条都没写。
+
+### ⚠️ 验收过程里撞出两个 seed_demo 的 bug，都不是这一轮引入的
+
+两个都会让演示当场走不下去，而两个测试都抓不到。
+
+1. **seed 出来的账号登录不了。** `email_verified` 默认 `False`，
+   `register_account()` 不设它 —— 所以今天 seed 出来的**任何**账号都被登录页拒绝。
+   🔴 测试抓不到的原因值得写下来：`client.login()` 走 `ModelBackend`，
+   而那道门在 `SiteAuthenticationForm.confirm_login_allowed()` —— **表单层**。
+   于是验收走查测试全绿，而真实登录页一个都进不去。**只有浏览器看得见**；
+2. **已存在的账号密码从不重设。** `account()` 遇到已有的行直接返回，
+   而命令接着把 `PASSWORD` 当成「进得去的密码」打印出来 ——
+   早一轮 seed 建的账号于是带着一个不工作的密码列在那张表上。
+
+两个都修了：seed 现在 `mark_email_verified()` 并重设密码。
+
 ### 还没做的
 
 L1～L5 的实现（性质轴 / 资格 / 可见性 / 记账 / 时间）**本轮不做**，

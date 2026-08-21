@@ -27,7 +27,7 @@
    **能不改口径就不改口径，比改完再配一条测试便宜**；
 4. **[D18 的落点规矩](decisions/D18-admin-boundary.md)** 照旧：
    逻辑进 `services.py`，权限只在 `org/permissions.py`，统计在 queryset，视图是薄壳。
-   本轮新增六条守卫，见[守卫测试](#本轮新增的守卫测试)。
+   本轮新增**九条**守卫，见[守卫测试](#本轮新增的守卫测试)。
 
 ## 交付节奏：四批，中间留一次反馈
 
@@ -1500,9 +1500,9 @@ ParticipationQuerySet.notifiable()   # exclude(CANCELLED, DECLINED)           �
 | 落点 | 现在 | 不改会怎样 |
 |---|---|---|
 | `EventRoleQuerySet.with_signup_counts()` | `~CANCELLED` | 满员率、`is_short`、`understaffed()` 把待答复的人算成已报名 |
-| `ministry_report()` 的 `parts` | `.notifiable()` | `signups` / `volunteers` / `repeat_rate` 虚高；⚠️ **`hours_missing` 尤其难看** —— 被邀请的人永远不会有 hours，那个"缺多少条工时记录"会跟着待答复人数涨 |
+| `ministry_report()` 的 `parts` | `.notifiable()` | `signups` / `participants` / `repeat_rate` 虚高；⚠️ **`hours_missing` 尤其难看** —— 被邀请的人永远不会有 hours，那个"缺多少条工时记录"会跟着待答复人数涨 |
 | `_absence()` 的分母 | 同上 | 同上 |
-| `_top_volunteers()` · `_monthly_series()` · `_role_gap()` | 同上 | 排行榜、月度图、工种缺口图各错一点 |
+| `_top_participants()` · `_monthly_series()` · `_role_gap()` | 同上 | 排行榜、月度图、工种缺口图各错一点 |
 | 🔴 **`resolve_recipients()`** | `.notifiable()`（只排 `CANCELLED`） | **已经拒绝的人还会收到"活动改期"通知**。`DECLINED` 要和 `CANCELLED` 一样出局，⚠️ 而 `INVITED` 要留下 —— 他还没答复，改期正是他需要知道的 |
 | 报表面板 | — | **并排加一个数「待答复 M 人」**（藏起来的话，「没人答应」和「还没问」长得一模一样） |
 
@@ -1524,7 +1524,23 @@ ParticipationQuerySet.notifiable()   # exclude(CANCELLED, DECLINED)           �
 
 # 本轮新增的守卫测试
 
-现有 12 条之外加 9 条，都放 `core/tests.py`（和既有的汇报链守卫同一处）：
+现有守卫之外加 9 条，都放 `core/tests.py`（和既有的汇报链守卫同一处）。
+
+> ### 进度（2026-08-20）
+>
+> 九条里**两条已落地**：`ServedAsWriteGuardTests`（身份只有一处写入，含 admin
+> `readonly_fields` 那条断言）和 `DecisionSectionReferenceGuardTests`（「第 N 节」
+> 引用）。两条都做过双向验证。
+>
+> ⚠️ 另外**多出计划外的一条**：`ReportFigureNamesGuardTests` —— 报表 `figures`
+> 里任何含 `volunteer` 的键必须在点名白名单上。它不在原来这张表里，是称谓统一
+> 那一轮长出来的（见 [`participants.md`](participants.md) 第十节），
+> 而 D1.4 那个志愿工时正是白名单的第一个合法条目。
+>
+> ⚠️ 守卫类的总数不要拿来当进度：`core/tests.py` 里有 25 个 `*GuardTests`，
+> 其中一批是行为守卫（对比度、部署蓝图、健康检查），和这张表说的 grep 守卫不是
+> 一回事。**按这张表逐行勾，别数类。**
+
 
 | 守卫 | 盯什么 | 不守会怎样 |
 |---|---|---|

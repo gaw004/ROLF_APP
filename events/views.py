@@ -886,7 +886,7 @@ def event_update(request, pk):
             # Straight to the notice, with the reason already chosen. Whoever
             # moved an event that people signed up for is one click from telling
             # them, instead of having to know that the page exists.
-            messages.success(request, "Time changed. Tell the volunteers who signed up.")
+            messages.success(request, "Time changed. Tell the people who signed up.")
             return redirect(
                 f"{reverse('events:event_notify', args=[event.pk])}"
                 f"?reason={EventNotification.Reason.TIME_CHANGED}"

@@ -1665,7 +1665,7 @@ class PageTestCase(TestCase):
         return user
 
 
-class VolunteerPageTests(PageTestCase):
+class ParticipantPageTests(PageTestCase):
     """P3, tested by hitting URLs — the isolation is in the query, not the page."""
 
     def test_anonymous_visitors_are_redirected_to_login(self):

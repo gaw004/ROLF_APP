@@ -71,7 +71,7 @@ class SignUpForm(forms.Form):
         max_length=200, required=False, label="Guardian's name")
     consent_relationship = forms.ModelChoiceField(
         queryset=RelationshipType.objects.filter(usable_as_emergency_contact=True),
-        required=False, label="They are the volunteer's…",
+        required=False, label="They are the participant's…",
     )
     # ⚠️ At least one of these two. Consent carrying only a *name* satisfies the
     #    paperwork and leaves P6 with no address to send anything to, so the

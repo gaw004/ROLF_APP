@@ -67,14 +67,14 @@ DEMO_ACCOUNTS = {
     "tax_admin": (
         "chensi@example.invalid",
         "administers Tax Help (use this one to try over-reach)"),
-    "volunteer_adult": (
+    "participant_adult": (
         "lisi@example.invalid", "an ordinary volunteer"),
-    "volunteer_minor": (
+    "participant_minor": (
         "xiaoming@example.invalid",
         "under 18; signing up needs a guardian's consent"),
-    "volunteer_unknown": (
+    "participant_unknown": (
         "wang@example.invalid", "no date of birth; treated as a minor"),
-    "volunteer_minor2": (
+    "participant_minor2": (
         "zhaoxiaoyu@example.invalid",
         "under 18, reachable only through her emergency contact"),
     # ⚠️ An account, not just a Contact, and the reason is an acceptance line
@@ -269,15 +269,15 @@ class Command(BaseCommand):
         )
 
         self.adult = self.account(
-            demo_login("volunteer_adult"), "Li", "Si",
+            demo_login("participant_adult"), "Li", "Si",
             phone="+14085550101", birth_date=datetime.date(1990, 2, 2))
         self.minor = self.account(
-            demo_login("volunteer_minor"), "Xiao", "Ming",
+            demo_login("participant_minor"), "Xiao", "Ming",
             birth_date=local_today() - datetime.timedelta(days=365 * 15))
         # Unknown birth date: the cautious branch of the three-state. Signing
         # up asks for consent, and notifications go to the guardian.
         self.unknown = self.account(
-            demo_login("volunteer_unknown"), "Wang", "Unknown",
+            demo_login("participant_unknown"), "Wang", "Unknown",
             birth_date=None)
         # ⚠️ Both of these need somebody to call: sign_up() refuses a minor —
         #    and an unknown birth date counts as one — with no emergency
@@ -318,7 +318,7 @@ class Command(BaseCommand):
         #    contact.tests.EmergencyContactReachabilityTests 覆盖得到它 ——
         #    演示数据不再制造一个模型自己会拒绝的行。
         self.minor_emergency = self.account(
-            demo_login("volunteer_minor2"), "Zhao", "Xiaoyu",
+            demo_login("participant_minor2"), "Zhao", "Xiaoyu",
             birth_date=local_today() - datetime.timedelta(days=365 * 16))
         EmergencyContact.objects.get_or_create(
             person=self.minor_emergency.contact, name="Zhao's mother", phone="+14085550188",

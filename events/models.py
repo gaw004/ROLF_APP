@@ -105,7 +105,7 @@ class ParticipationRole(ImmutableCodeMixin, ConstraintErrorFieldMixin, models.Mo
     def seed_general(cls):
         """The catch-all role, created if it is not there yet."""
         role, _ = cls.objects.get_or_create(
-            code=cls.GENERAL_CODE, defaults={"name": "General volunteer"},
+            code=cls.GENERAL_CODE, defaults={"name": "General participant"},
         )
         return role
 
@@ -135,9 +135,18 @@ class EventQuerySet(models.QuerySet):
     already paid three times.
     """
 
-    def visible_to_volunteers(self):
-        """Everything a volunteer may open: published, including full and over."""
-        return self.filter(status__in=Event.VISIBLE_TO_VOLUNTEERS)
+    def visible_to_participants(self):
+        """Everything a signed-in person may open: published, including full and over.
+
+        ⚠️ This filters on **lifecycle status only** — it is not an audience.
+           Every signed-in account sees every published event, staff and
+           outsiders alike, because nothing anywhere narrows by who is asking.
+           That is a real gap rather than a design (participants.md section 1):
+           the first staff-only event to go up would appear on every outside
+           volunteer's list. Renamed from `visible_to_volunteers` on 2026-08-20
+           so the name stops implying an audience it never had.
+        """
+        return self.filter(status__in=Event.VISIBLE_TO_PARTICIPANTS)
 
     def open_for_signup(self, now=None):
         """Everything a volunteer may still sign up for.
@@ -311,7 +320,7 @@ class Event(ConstraintErrorFieldMixin, TimeStampedModel):
     #    into the wrong bucket by exactly that. The test is to list the states
     #    and count them: five here, so a complement is wrong, and the day
     #    somebody adds `postponed` a complement would quietly publish it.
-    VISIBLE_TO_VOLUNTEERS = frozenset({
+    VISIBLE_TO_PARTICIPANTS = frozenset({
         Status.OPEN, Status.FULL, Status.COMPLETED, Status.CANCELLED,
     })
     # Cancelled events stay in the visible set on purpose: the people who signed
@@ -492,7 +501,7 @@ class Event(ConstraintErrorFieldMixin, TimeStampedModel):
            they need it after the date as much as before it.
 
         ⚠️ `Draft` is not collapsed either — a volunteer never sees one (it is
-           outside `VISIBLE_TO_VOLUNTEERS`), and the ministry admin previewing
+           outside `VISIBLE_TO_PARTICIPANTS`), and the ministry admin previewing
            it is asking about publication, not about the clock.
 
         ⚠️ The management list deliberately does **not** use this: that page is

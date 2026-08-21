@@ -15,8 +15,8 @@ urlpatterns = [
     path("register/verify/", views.verify_email, name="verify_email"),
     path("register/verify/resend/", views.resend_verification,
          name="resend_verification"),
-    path("login/", views.VolunteerLoginView.as_view(), name="login"),
-    path("logout/", views.VolunteerLogoutView.as_view(), name="logout"),
+    path("login/", views.SiteLoginView.as_view(), name="login"),
+    path("logout/", views.SiteLogoutView.as_view(), name="logout"),
     # C0.2.5 — until this existed a wrong birth date, email or phone was
     # uncorrectable from outside the admin site.
     path("me/profile/", views.profile, name="profile"),
@@ -32,13 +32,13 @@ urlpatterns = [
     # ⚠️ The names are ours, but the **shape** of the confirm route is Django's:
     #    `<uidb64>/<token>` is what PasswordResetConfirmView reads, and its own
     #    email template builds the link from exactly those two names.
-    path("password-reset/", views.VolunteerPasswordResetView.as_view(),
+    path("password-reset/", views.SitePasswordResetView.as_view(),
          name="password_reset"),
-    path("password-reset/sent/", views.VolunteerPasswordResetDoneView.as_view(),
+    path("password-reset/sent/", views.SitePasswordResetDoneView.as_view(),
          name="password_reset_done"),
     path("password-reset/<uidb64>/<token>/",
-         views.VolunteerPasswordResetConfirmView.as_view(),
+         views.SitePasswordResetConfirmView.as_view(),
          name="password_reset_confirm"),
-    path("password-reset/done/", views.VolunteerPasswordResetCompleteView.as_view(),
+    path("password-reset/done/", views.SitePasswordResetCompleteView.as_view(),
          name="password_reset_complete"),
 ]

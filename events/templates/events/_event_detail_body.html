@@ -23,7 +23,7 @@
      一个 admin 会先把整页当成已发布的读完，再发现它不是。
 
   ⚠️ `preview` 由视图给，模板不自己判 `event.status == "draft"`。
-     判据挂在 models.py 的 VISIBLE_TO_VOLUNTEERS 上，只有一份，理由写在视图里。
+     判据挂在 models.py 的 VISIBLE_TO_PARTICIPANTS 上，只有一份，理由写在视图里。
 
   ⚠️ 没有加 role="alert" / role="status"。这不是「刚刚发生了什么」，
      是这一页本来就长这样 —— live region 是给动态插进来的东西用的，
@@ -39,9 +39,9 @@
         Preview — not published
       </h2>
       <p class="mt-2 text-sm text-warning-fg dark:text-warning-fg-dark">
-        This event is <strong>{{ event.get_status_display }}</strong>, so volunteers
-        cannot see this page and nobody can sign up. This is how it will read once
-        you publish it.
+        This event is <strong>{{ event.get_status_display }}</strong>, so nobody
+        else can see this page and nobody can sign up. This is how it will read
+        once you publish it.
       </p>
       {% comment %}
       ⚠️ 这条链接只对能管这场活动的人画。foundation tier 读得了这一页，
@@ -209,7 +209,7 @@
       {% endcomment %}
       {% include "core/components/button.html" with label="Sign up" variant="primary" type="button" disabled=True %}
       <p class="mt-2 text-sm text-ink-600 dark:text-ink-300">
-        Volunteers will see this button once you publish the event.
+        People will see this button once you publish the event.
       </p>
     {% else %}
       <p class="text-sm text-ink-600 dark:text-ink-300">

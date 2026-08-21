@@ -378,6 +378,51 @@ class PermissionGuardTests(TestCase):
         )
 
 
+class ReportFigureNamesGuardTests(TestCase):
+    """Lint-as-test: no figure on the ministry report is named after volunteering
+    unless somebody put it on the list below on purpose.
+
+    ⚠️ The risk this watches is specific, and it is a naming risk rather than a
+       computation one. `ministry_report()` counts distinct contacts over every
+       participation — **paid staff included** — and that figure was called
+       `volunteers` until 2026-08-20. D1.4 adds a genuine volunteer figure
+       (`served_as=volunteer`) to the same report. Two numbers on one screen,
+       one name, two definitions, and neither of them raising: that is the
+       failure this project has already convicted three times.
+
+    So the rule is not "never say volunteer" — D1.4's figure has every right to
+    the word. The rule is that claiming it has to be a **visible act**: adding a
+    row to ALLOWED below, in a diff somebody reviews.
+
+    ⚠️ Deliberately narrow. A guard that scanned the whole file for the word
+       would be red every day (the docstrings discuss it constantly) and would
+       be widened until it meant nothing — the failure mode
+       05-roadmap.md warns about for whitelists.
+    """
+
+    #: Figure keys that may carry the word, and why. Empty today; D1.4's
+    #: volunteer-hours figure is the first legitimate entry, and adding it here
+    #: is how that decision becomes visible rather than incidental.
+    ALLOWED: set[str] = set()
+
+    def test_no_figure_key_says_volunteer_without_being_listed(self):
+        from events.services import ministry_report
+        from events.models import Event
+
+        figures = ministry_report(Event.objects.none())["figures"]
+        offenders = sorted(
+            key for key in figures
+            if "volunteer" in key.lower() and key not in self.ALLOWED
+        )
+        self.assertEqual(
+            offenders,
+            [],
+            "A report figure named after volunteering has to be one on purpose "
+            "— add it to ALLOWED with a reason, or name it for what it counts:\n"
+            + "\n".join(offenders),
+        )
+
+
 class ServedAsWriteGuardTests(TestCase):
     """Lint-as-test: the identity on a signup is written in exactly one place.
 

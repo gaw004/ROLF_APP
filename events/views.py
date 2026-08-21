@@ -225,7 +225,7 @@ def _my_contact(request):
 def event_list(request):
     """P3: what is on, from today forward.
 
-    visible_to_volunteers() + from_today() (2026-08-17). It used to be
+    visible_to_participants() + from_today() (2026-08-17). It used to be
     open_for_signup().upcoming() — that predicate is gone now, deleted with
     past() once neither had a caller left — which is a narrower thing: *only*
     what you
@@ -273,7 +273,7 @@ def _visible_events(period):
        于是「跳到那一页」偶尔跳到相邻的一页，看起来像随机失灵。
     """
     return period.narrow(
-        Event.objects.visible_to_volunteers()
+        Event.objects.visible_to_participants()
         .from_today()
         # ⚠️ 每一行都要问「满了没」来决定那枚标签画不画成链接（2026-08-19）。
         #    不加这个注解的话那是**每行一次查询** —— 一页二十行，在全站被打得
@@ -316,13 +316,13 @@ def _schedule(request, period):
     first = schedule.first_day(schedule.parse_day(request.GET.get("from")), floor)
     days = schedule.window(first)
     start, end = schedule.bounds(days)
-    # ⚠️ `visible_to_volunteers()`，和列表同一道门 —— 日程不是一条绕过草稿的
+    # ⚠️ `visible_to_participants()`，和列表同一道门 —— 日程不是一条绕过草稿的
     #    旁路。⚠️ 但**不带 `from_today()`**，理由 2026-08-18 换了一个：原来是
     #    「那条按 start_time 切会切掉跨夜的活动」，而它现在按 end_time 切，
     #    不再切掉了。剩下的理由是这一条：日程要的是**和窗口相交**的活动，
     #    而窗口可以翻到下个月 —— 再叠一道「今天起」只会把它自己的下界抄第二遍。
     events = period.narrow(
-        Event.objects.visible_to_volunteers().select_related("ministry"))
+        Event.objects.visible_to_participants().select_related("ministry"))
     events = events.filter(start_time__lt=end, end_time__gte=start).order_by("start_time")
     return {
         "schedule_columns": schedule.columns(events, days),
@@ -365,7 +365,7 @@ def event_schedule(request):
 
 @login_required
 def event_detail(request, pk):
-    """visible_to_volunteers(), so a full or finished event still opens.
+    """visible_to_participants(), so a full or finished event still opens.
 
     ⚠️ Written as status == OPEN this page would 404 the moment an event filled
        up — for exactly the people who had signed up, and for P6's "can't make
@@ -395,7 +395,7 @@ def event_detail(request, pk):
        make the narrower rule the confusing one, and it would be a rule no
        reader could guess from the other five pages.
 
-    ⚠️ Keyed on membership of VISIBLE_TO_VOLUNTEERS, never on `== DRAFT`. The
+    ⚠️ Keyed on membership of VISIBLE_TO_PARTICIPANTS, never on `== DRAFT`. The
        set is the model's answer to "who may a volunteer see", listed in full
        for the reason written above it (events/models.py) — and the day somebody
        adds `postponed` to it, a branch spelled `== DRAFT` would quietly publish
@@ -414,7 +414,7 @@ def _detail(request, pk):
     """
     event = get_object_or_404(
         Event.objects.select_related("ministry", "event_type"), pk=pk)
-    preview = event.status not in Event.VISIBLE_TO_VOLUNTEERS
+    preview = event.status not in Event.VISIBLE_TO_PARTICIPANTS
     if preview and not can_view_event_records(request.user, event):
         # Deliberately indistinguishable from "no such event" — see above.
         raise Http404("No event matches the given query.")
@@ -582,7 +582,7 @@ def event_signup(request, pk):
 def my_participations(request):
     """Mine means mine — narrowed in the query, not in the template.
 
-    visible_to_volunteers() as well, which is not belt and braces: every row
+    visible_to_participants() as well, which is not belt and braces: every row
     here links to the detail page, and that page uses the same predicate. A
     signup an admin entered against an unpublished event would otherwise appear
     with a link that 404s — the failure this pair of predicates was written to
@@ -594,7 +594,7 @@ def my_participations(request):
         rows = (
             Participation.objects.filter(
                 contact=contact,
-                event_role__event__in=Event.objects.visible_to_volunteers(),
+                event_role__event__in=Event.objects.visible_to_participants(),
             )
             .select_related("event_role__event__ministry", "event_role__role")
             .order_by("-event_role__event__start_time")
@@ -1278,7 +1278,7 @@ def checkin_confirm(request):
         }, status=400)
 
     event = get_object_or_404(
-        Event.objects.visible_to_volunteers().select_related("ministry"), pk=event_id)
+        Event.objects.visible_to_participants().select_related("ministry"), pk=event_id)
     targets = scan_targets(contact, event, mode) if contact else None
 
     if targets is None or not targets.any_signup:

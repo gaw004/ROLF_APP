@@ -1022,7 +1022,14 @@ def ministry_report(events):
     event_count = events.count()
     totals = parts.aggregate(
         signups=Count("pk"),
-        volunteers=Count("contact", distinct=True),
+        # ⚠️ Everybody who took part, **including paid staff** — this counts
+        #    distinct contacts over every participation, and always has. It was
+        #    called `volunteers` until 2026-08-20, which was wrong in the one
+        #    way that matters: D1.4 adds a genuine volunteer figure
+        #    (`served_as=volunteer`) beside it, and two numbers with one name
+        #    and two definitions on one report is the mistake this project has
+        #    already convicted three times. See participants.md section 5.
+        participants=Count("contact", distinct=True),
         # ⚠️ `hours_total`, not `hours`. An alias that repeats a field name wins
         #    over the field for every later argument in the same aggregate(),
         #    so `hours=Sum("hours")` next to `Count("hours")` makes the second
@@ -1034,7 +1041,7 @@ def ministry_report(events):
         hours_records=Count("hours"),
     )
     hours = totals["hours_total"] or Decimal("0")
-    volunteers = totals["volunteers"]
+    participants = totals["participants"]
 
     repeat = (
         parts.values("contact_id").annotate(n=Count("pk")).filter(n__gte=2).count()
@@ -1072,13 +1079,13 @@ def ministry_report(events):
     figures = {
         "events": event_count,
         "signups": totals["signups"],
-        "volunteers": volunteers,
+        "participants": participants,
         "hours": hours,
         "hours_records": totals["hours_records"],
         "hours_missing": totals["signups"] - totals["hours_records"],
-        "hours_per_volunteer": (hours / volunteers) if volunteers else None,
-        "repeat_volunteers": repeat,
-        "repeat_rate": _percent(repeat, volunteers),
+        "hours_per_participant": (hours / participants) if participants else None,
+        "repeat_participants": repeat,
+        "repeat_rate": _percent(repeat, participants),
         "fully_staffed": fully_staffed,
         "staffable_events": len(staffable),
         "fully_staffed_rate": _percent(fully_staffed, len(staffable)),
@@ -1166,7 +1173,7 @@ def _report_charts(events, parts):
                  "out read as zero.",
         ),
         "role_gap": _role_gap(events, parts),
-        "top_volunteers": _top_volunteers(parts),
+        "top_participants": _top_participants(parts),
         "hours_by_role": _chart(
             "Recorded hours by role",
             list(
@@ -1273,7 +1280,7 @@ def _role_gap(events, parts):
     )
 
 
-def _top_volunteers(parts, limit=10):
+def _top_participants(parts, limit=10):
     """C3: who did the most, by recorded hours then by number of events.
 
     ⚠️ `nulls_last`. Postgres sorts NULL first on a descending order, so the

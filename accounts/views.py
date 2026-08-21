@@ -36,9 +36,9 @@ from .forms import (
     ProfileForm,
     RegistrationForm,
     VerificationCodeForm,
-    VolunteerAuthenticationForm,
-    VolunteerPasswordChangeForm,
-    VolunteerSetPasswordForm,
+    SiteAuthenticationForm,
+    SitePasswordChangeForm,
+    SiteSetPasswordForm,
 )
 from .services import (
     VerificationError,
@@ -183,7 +183,7 @@ def register_with_google(request):
 # a user id would be a page anybody could open for anybody.
 
 #: Named once, in the form, and imported here. Three places read it.
-PENDING_SESSION_KEY = VolunteerAuthenticationForm.PENDING_SESSION_KEY
+PENDING_SESSION_KEY = SiteAuthenticationForm.PENDING_SESSION_KEY
 #: The address Google vouched for during a prefill, if it did.
 GOOGLE_VERIFIED_SESSION_KEY = "google_verified_email"
 
@@ -300,23 +300,23 @@ def resend_verification(request):
     return redirect("accounts:verify_email")
 
 
-class VolunteerLoginView(LoginView):
+class SiteLoginView(LoginView):
     """Django's own view; the template, the destination and one refusal are ours.
 
     ⚠️ The refusal (an unconfirmed address cannot log in) lives in the **form**,
-       not here — see VolunteerAuthenticationForm for why it has to run after
+       not here — see SiteAuthenticationForm for why it has to run after
        the password check rather than before it.
     """
 
     template_name = "accounts/login.html"
-    authentication_form = VolunteerAuthenticationForm
+    authentication_form = SiteAuthenticationForm
     redirect_authenticated_user = True
 
     def get_success_url(self):
         return self.get_redirect_url() or reverse_lazy("events:event_list")
 
 
-class VolunteerLogoutView(LogoutView):
+class SiteLogoutView(LogoutView):
     next_page = reverse_lazy("events:event_list")
 
 
@@ -340,7 +340,7 @@ class VolunteerLogoutView(LogoutView):
 @method_decorator(
     ratelimit(key=site_wide, rate=password_reset_rate_site, method="POST", block=False),
     name="post")
-class VolunteerPasswordResetView(PasswordResetView):
+class SitePasswordResetView(PasswordResetView):
     """Ask for a link. ⚠️ Limited, and not for the reason it looks like.
 
     The link goes to the address on file, so hammering this page reveals
@@ -366,11 +366,11 @@ class VolunteerPasswordResetView(PasswordResetView):
         return super().post(request, *args, **kwargs)
 
 
-class VolunteerPasswordResetDoneView(PasswordResetDoneView):
+class SitePasswordResetDoneView(PasswordResetDoneView):
     template_name = "accounts/password_reset_done.html"
 
 
-class VolunteerPasswordResetConfirmView(PasswordResetConfirmView):
+class SitePasswordResetConfirmView(PasswordResetConfirmView):
     """Set the new password. The link's validity is checked by Django.
 
     ⚠️ Following this link also confirms the address (2026-08-19), because it
@@ -383,7 +383,7 @@ class VolunteerPasswordResetConfirmView(PasswordResetConfirmView):
 
     template_name = "accounts/password_reset_confirm.html"
     # Capped, unlike SetPasswordForm — see the form's docstring.
-    form_class = VolunteerSetPasswordForm
+    form_class = SiteSetPasswordForm
     success_url = reverse_lazy("accounts:password_reset_complete")
 
     def form_valid(self, form):
@@ -394,7 +394,7 @@ class VolunteerPasswordResetConfirmView(PasswordResetConfirmView):
         return response
 
 
-class VolunteerPasswordResetCompleteView(PasswordResetCompleteView):
+class SitePasswordResetCompleteView(PasswordResetCompleteView):
     template_name = "accounts/password_reset_complete.html"
 
 
@@ -465,7 +465,7 @@ def profile(request):
         "kin_form": kin_form,
         # Unbound, and it is the modal's copy. The bound one lives on
         # password_change() — the page never validates a password itself.
-        "password_form": VolunteerPasswordChangeForm(user=request.user),
+        "password_form": SitePasswordChangeForm(user=request.user),
         "kin": contact.emergency_contacts.select_related("relationship_type"),
         # Shown as words, not inferred from a blank box: "we do not know" and
         # "you are an adult" lead to different signup flows, and the person
@@ -499,7 +499,7 @@ def password_change(request):
        looks exactly like the change having failed.
     """
     if request.method == "POST":
-        form = VolunteerPasswordChangeForm(user=request.user, data=request.POST)
+        form = SitePasswordChangeForm(user=request.user, data=request.POST)
         if form.is_valid():
             form.save()
             update_session_auth_hash(request, form.user)
@@ -510,7 +510,7 @@ def password_change(request):
                 return response
             return redirect("accounts:profile")
     else:
-        form = VolunteerPasswordChangeForm(user=request.user)
+        form = SitePasswordChangeForm(user=request.user)
 
     # ⚠️ The invalid POST comes back as the form fragment, which HTMX swaps in
     #    place — so the modal stays open, with the error under the box that

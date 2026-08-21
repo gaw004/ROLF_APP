@@ -43,7 +43,7 @@
   {% else %}
     <div class="mt-6">
       {% url 'events:event_roles' event.pk as roles_url %}
-      {% include "core/components/empty.html" with message="Nobody has signed up yet. If the event is still a draft, volunteers cannot see it at all." action_label="Open roles" action_href=roles_url %}
+      {% include "core/components/empty.html" with message="Nobody has signed up yet. If the event is still a draft, nobody can see it at all." action_label="Open roles" action_href=roles_url %}
     </div>
   {% endif %}
 

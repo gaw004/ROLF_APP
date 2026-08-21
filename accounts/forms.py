@@ -1,4 +1,13 @@
-"""The volunteer-facing account forms. Plain django.forms, no admin (D18)."""
+"""The site's own account forms — everyone who signs in here uses them.
+
+⚠️ `Site*`, not `Volunteer*` (renamed 2026-08-20). These are not the volunteer
+   half of anything: staff, ministry admins and outside volunteers all log in
+   through the same pages. What the prefix distinguishes is **this site's
+   login** from Django admin's, which is a different question from who the
+   person is. See participants.md section 5.
+
+Plain django.forms, no admin (D18).
+"""
 
 import re
 
@@ -100,7 +109,7 @@ class RegistrationForm(forms.Form):
         return password
 
 
-class VolunteerPasswordChangeForm(PasswordChangeForm):
+class SitePasswordChangeForm(PasswordChangeForm):
     """Django's own change form, relabelled and capped.
 
     Subclassed rather than used directly for two reasons, neither cosmetic:
@@ -132,16 +141,16 @@ class VolunteerPasswordChangeForm(PasswordChangeForm):
             self.fields[name].validators.append(MaxLengthValidator(PASSWORD))
 
 
-class VolunteerSetPasswordForm(SetPasswordForm):
+class SiteSetPasswordForm(SetPasswordForm):
     """The form behind a reset link. Same two caps as the change form.
 
     ⚠️ The cap is the whole reason this class exists, and it is the same hole
-       VolunteerPasswordChangeForm was written to close: `SetPasswordForm`'s two
+       SitePasswordChangeForm was written to close: `SetPasswordForm`'s two
        fields carry **no max_length**, so a submitted megabyte is hashed. That
        one is reachable while logged in; this one is reachable by anybody
        holding a link, which is the wider door of the two.
 
-    ⚠️ Subclassed rather than reusing VolunteerPasswordChangeForm: that one also
+    ⚠️ Subclassed rather than reusing SitePasswordChangeForm: that one also
        asks for the current password, and somebody arriving here is precisely
        the person who does not have it.
     """
@@ -202,7 +211,7 @@ class VerificationCodeForm(forms.Form):
         return code
 
 
-class VolunteerAuthenticationForm(AuthenticationForm):
+class SiteAuthenticationForm(AuthenticationForm):
     """Django's login form, plus one refusal: an unverified address cannot log in.
 
     🔴 The check goes **here**, in `confirm_login_allowed`, and not in the view.

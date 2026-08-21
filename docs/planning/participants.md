@@ -395,7 +395,40 @@ in the Calendar module of the weekly staff meeting"*。
 | ⚠️ 「participant」在非营利行业里常被读成「受助者」 | 定义写死在界面说明里；出现基金会读窄时重新审视 |
 | ⚠️ 受助者进 `Contact` 之后，任何一处 `Contact.objects.filter()` 忘了收窄，就可能把志愿者通讯发给受助者 | 需要一条守卫；⚠️ 现有的收件人解析走 `Participation` 而不是 `Contact`，所以今天还不漏 |
 
-## 十、验收
+## 十、执行记录
+
+### 第一批：改名（B / C / D 三组）—— 2026-08-20 落地
+
+| 组 | 做了什么 |
+|---|---|
+| C 报表 | `figures` 的四个键改名（`participants` / `hours_per_participant` / `repeat_participants` / `top_participants`）+ 服务函数 `_top_participants()` + 报表页文案 + `Participation Report` 标题 |
+| B 系统角色义 | `visible_to_participants()` / `VISIBLE_TO_PARTICIPANTS`；`accounts` 九个类改成 `Site*`；demo 角色键 `participant_*`；六处面向用户的文案 |
+| D 兜底工种名 | 迁移 `0015_general_role_is_a_participant`，`code="general"` 一个字不动 |
+
+三件配套的事，缺一件这次改名就只是换字：
+
+1. **一条测试钉住 C 组的口径**（`test_paid_staff_are_counted_among_the_participants`）——
+   这个数一直含带薪员工，而**在此之前没有任何测试说得出这件事**。名字谁都能改回去，
+   一条关于「谁在这个数里面」的断言改不回去；
+2. **一条守卫**（`core.tests.ReportFigureNamesGuardTests`）：`figures` 里任何含
+   `volunteer` 的键必须在点名白名单上（现在是空的）。⚠️ 它**故意很窄** ——
+   扫全文件的版本会天天红，然后被加白名单加到失效；
+3. `visible_to_participants()` 的 docstring 现在写明**它不是受众**：
+   过滤的只有生命周期状态，任何登录用户都看得见每一场已发布活动。
+   改名让这个洞更显眼了，而不是把它藏起来。
+
+⚠️ **A 组一个字没动**，这是这次改名的重点而不是遗漏：`served_as=volunteer`、
+`ServedAs.VOLUNTEER`、`Volunteering — my own time` 原样保留。
+改完之后仓库里剩下的 `volunteer` 分两类 —— A 组的标识符，
+以及散文里真的在讲志愿者的那些句子。
+
+### 还没做的
+
+L1～L5 的实现（性质轴 / 资格 / 可见性 / 记账 / 时间）**本轮不做**，
+形状已经在第六节定下来。⚠️ 它是新一轮的工程量（两个新字段 + 一张新表 +
+可见性收窄 + 报表拆分），和改名混在一个 diff 里会让两边都读不懂。
+
+## 十一、验收
 
 - [ ] 全量测试绿，且**测试数只增不减**
 - [ ] 带薪员工参加活动 → **算进** `participants`（钉住 C 组那个口径修正）

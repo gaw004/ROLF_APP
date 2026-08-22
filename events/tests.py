@@ -63,6 +63,7 @@ from .models import (
     ParticipationRole,
 )
 from .services import (
+    NoHoursHere,
     RoleFull,
     CHECKIN_CREDENTIAL_KEY,
     CREDENTIAL_MAX_AGE,
@@ -71,7 +72,7 @@ from .services import (
     apply_scan,
     TurnedUp,
     cancel,
-    contacts_asked_about_serving,
+    signups_asked_about_serving,
     check_in,
     check_out,
     clear_hours,
@@ -164,9 +165,18 @@ def give_emergency_contact(contact, name="Emergency Kin", phone="+14085550177"):
     )
 
 
-def make_role(event, code, name=None, needed_count=None, **fields):
+def make_role(event, code, name=None, needed_count=None, nature=None, **fields):
+    """⚠️ `nature` lands on the ParticipationRole, not on the EventRole — L1's
+    axis belongs to the kind of job, not to one event's opening of it. Defaults
+    to helping, matching the column's own default.
+    """
     role, _ = ParticipationRole.objects.get_or_create(
-        code=code, defaults={"name": name or code.title()})
+        code=code,
+        defaults={
+            "name": name or code.title(),
+            **({"nature": nature} if nature else {}),
+        },
+    )
     return EventRole.objects.create(
         event=event, role=role, needed_count=needed_count, **fields)
 
@@ -248,6 +258,32 @@ class ParticipationTests(TestCase):
         Participation.objects.create(contact=self.wang, event_role=self.welcome)
         self.assertEqual(self.wang.participations.count(), 2)
 
+    def test_changing_the_nature_of_a_role_with_signups_is_refused(self):
+        """L1. Flipping the axis rewrites what existing rows mean.
+
+        An attending signup carries served_as=not_applicable and is counted
+        under "people served"; both were written under what this column said at
+        the time. So once anybody has come through a role, the way to fix a
+        mistake is another dictionary row, not this one.
+        """
+        Participation.objects.create(contact=self.wang, event_role=self.lifting)
+        role = self.lifting.role
+        role.nature = ParticipationRole.Nature.ATTENDING
+        with self.assertRaises(ValidationError) as caught:
+            role.full_clean()
+        self.assertIn("nature", caught.exception.message_dict)
+
+    def test_changing_the_nature_of_a_role_nobody_used_is_allowed(self):
+        # The other half, and the reason the admin leaves this column editable:
+        # a role opened under the wrong kind has to be fixable until somebody
+        # has relied on it.
+        role = self.welcome.role
+        role.nature = ParticipationRole.Nature.ATTENDING
+        role.full_clean()
+        role.save()
+        role.refresh_from_db()
+        self.assertEqual(role.nature, ParticipationRole.Nature.ATTENDING)
+
     def test_the_same_person_cannot_sign_up_for_one_role_twice(self):
         Participation.objects.create(contact=self.wang, event_role=self.lifting)
         with self.assertRaises(IntegrityError), transaction.atomic():
@@ -259,6 +295,45 @@ class ParticipationTests(TestCase):
                 contact=self.wang, event_role=self.lifting,
                 status=Participation.Status.ATTENDED, hours=Decimal("-1"),
             )
+
+    def test_the_database_refuses_hours_on_a_row_marked_not_applicable(self):
+        """L1.2's whole point: a rule that used to be unenforceable.
+
+        "A place somebody attends records no hours" reads across two tables —
+        the hours here, the nature of the role on ParticipationRole — so no
+        CheckConstraint could see it. Storing the fact on the row moves the
+        test onto the row, and this asserts it from the one direction that
+        proves it is the database talking: a bare create(), no service layer.
+        """
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            Participation.objects.create(
+                contact=self.wang, event_role=self.lifting,
+                status=Participation.Status.ATTENDED,
+                served_as=Participation.ServedAs.NOT_APPLICABLE,
+                hours=Decimal("2"),
+            )
+
+    def test_zero_hours_are_refused_on_a_not_applicable_row_too(self):
+        # ⚠️ Deliberately narrower than the constraint beside it, which does
+        #    allow 0. Zero hours is a statement — "they came and did none" —
+        #    and this row is saying something else: hours are not a question
+        #    here. The two constraints are about different things.
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            Participation.objects.create(
+                contact=self.wang, event_role=self.lifting,
+                status=Participation.Status.ATTENDED,
+                served_as=Participation.ServedAs.NOT_APPLICABLE,
+                hours=Decimal("0"),
+            )
+
+    def test_a_not_applicable_row_with_no_hours_saves(self):
+        # The other half. Without it the two above would also pass if the row
+        # were being refused for some entirely unrelated reason.
+        row = Participation.objects.create(
+            contact=self.wang, event_role=self.lifting,
+            served_as=Participation.ServedAs.NOT_APPLICABLE,
+        )
+        self.assertIsNone(row.hours)
 
     def test_hours_on_a_non_attended_row_are_rejected(self):
         # "No-show, 5 hours" is the same self-contradiction as is_active=True
@@ -312,6 +387,48 @@ class CheckInAndHoursTests(TestCase):
         check_in(self.participation, at=NOW)
         self.participation.refresh_from_db()
         self.assertEqual(self.participation.status, Participation.Status.ATTENDED)
+
+    # --- L4: a place somebody attends records no hours -------------------
+
+    def a_seat_signup(self, **fields):
+        seat = make_role(
+            self.event, "esl-seat", name="ESL seat",
+            nature=ParticipationRole.Nature.ATTENDING)
+        return Participation.objects.create(
+            contact=self.wang, event_role=seat, **fields)
+
+    def test_recording_hours_on_a_place_somebody_attends_is_refused(self):
+        row = self.a_seat_signup(served_as=Participation.ServedAs.NOT_APPLICABLE)
+        with self.assertRaises(NoHoursHere):
+            record_hours(row, Decimal("2"))
+        row.refresh_from_db()
+        self.assertIsNone(row.hours)
+
+    def test_a_row_on_an_attending_role_with_no_identity_written_is_still_refused_hours(self):
+        """⚠️ The entire reason the service asks the role and not this column.
+
+        A row that never had `served_as` written — a bulk_create, an importer,
+        anything older than this rule — does not say `not_applicable`, so the
+        CheckConstraint has nothing to catch it by. The service layer is
+        deliberately the wider of the two checks; delete this test and swapping
+        the predicate back to `served_as` would go unnoticed.
+        """
+        row = self.a_seat_signup()
+        self.assertEqual(row.served_as, "")
+        with self.assertRaises(NoHoursHere):
+            record_hours(row, Decimal("2"))
+
+    def test_checking_out_of_an_attending_role_records_the_time_but_no_hours(self):
+        row = self.a_seat_signup(served_as=Participation.ServedAs.NOT_APPLICABLE)
+        check_in(row, at=NOW)
+        check_out(row, at=NOW + HOUR)
+        row.refresh_from_db()
+        # They came and they left; both timestamps are true.
+        self.assertIsNotNone(row.checked_in_at)
+        self.assertIsNotNone(row.checked_out_at)
+        self.assertEqual(row.status, Participation.Status.ATTENDED)
+        # The hours are not a question there.
+        self.assertIsNone(row.hours)
 
     def test_check_out_writes_hours(self):
         check_in(self.participation, at=NOW)
@@ -471,6 +588,137 @@ class MinistryReportTests(TestCase):
         self.signup(self.wang)
         self.signup(staff)
         self.assertEqual(self.report()["figures"]["participants"], 2)
+
+    # --- L4: the axis reaches four of these figures, and misses four ------
+
+    def a_seat(self, event=None):
+        """⚠️ Idempotent: (event, role) is unique, so two learners in one class
+        are two signups on **one** EventRole, not two roles.
+        """
+        event = event or self.event
+        role, _ = ParticipationRole.objects.get_or_create(
+            code="esl-seat",
+            defaults={"name": "ESL seat",
+                      "nature": ParticipationRole.Nature.ATTENDING})
+        seat, _ = EventRole.objects.get_or_create(event=event, role=role)
+        return seat
+
+    def a_staff_post(self, code="officer", ministry=None):
+        return Position.objects.create(
+            code=code, name=code, kind=Position.Kind.STAFF,
+            compensation=Position.Compensation.PAID,
+            ministry=ministry or self.pantry)
+
+    def employ(self, person, post, **dates):
+        dates.setdefault(
+            "start_date",
+            local_date_of(self.event.start_time) - datetime.timedelta(days=30))
+        return Assignment.objects.create(contact=person, position=post, **dates)
+
+    def test_attending_signups_are_not_counted_as_missing_hours(self):
+        """The silent bug this step exists to fix.
+
+        `hours_missing` is printed as a caveat on the hours total — "how much of
+        this period is unaccounted for". Counting learners in it makes the
+        figure climb every time the foundation runs a class, for a reason that
+        is not a data quality problem at all, and nothing anywhere says so.
+        """
+        self.signup(self.wang, hours=Decimal("3.00"))
+        self.signup(self.li, role=self.a_seat())
+        figures = self.report()["figures"]
+        self.assertEqual(figures["hours_records"], 1)
+        self.assertEqual(figures["hours_missing"], 0)
+
+    def test_hours_per_participant_counts_only_people_who_helped(self):
+        # A learner can never contribute to the numerator — the constraint
+        # forbids hours on that row — so leaving them in the denominator
+        # dilutes the average with every class.
+        self.signup(self.wang, hours=Decimal("4.00"))
+        self.signup(self.li, role=self.a_seat())
+        figures = self.report()["figures"]
+        self.assertEqual(figures["participants"], 2)
+        self.assertEqual(figures["helpers"], 1)
+        self.assertEqual(figures["hours_per_participant"], Decimal("4.00"))
+
+    def test_participants_still_counts_everybody(self):
+        # Pinned alongside the two above: this figure did **not** move. It
+        # counts everyone who took part, and the narrower counts sit beside it.
+        self.signup(self.wang)
+        self.signup(self.li, role=self.a_seat())
+        self.assertEqual(self.report()["figures"]["participants"], 2)
+
+    def test_people_served_counts_the_esl_class(self):
+        self.signup(self.wang, role=self.a_seat())
+        self.signup(self.li, role=self.a_seat())
+        self.assertEqual(self.report()["figures"]["people_served"], 2)
+
+    def test_people_served_excludes_staff_who_came_to_the_lecture(self):
+        """⚠️ The half of the rule that cannot be dropped.
+
+        Without it, every employee who sat in on a lecture is counted as a
+        community member the foundation served — and this number goes into the
+        annual report and into grant applications.
+        """
+        self.employ(self.wang, self.a_staff_post())
+        self.signup(self.wang, role=self.a_seat())
+        self.signup(self.li, role=self.a_seat())
+        self.assertEqual(self.report()["figures"]["people_served"], 1)
+
+    def test_people_served_judges_staff_on_the_day_of_the_event_not_today(self):
+        """⚠️ Same trap as R8's, third appearance in the same shape.
+
+        This event ran a month ago. Somebody hired last week was not staff on
+        the day, so they were served — judged against today they would vanish
+        from the figure, and nothing would report it.
+        """
+        self.employ(
+            self.wang, self.a_staff_post(),
+            start_date=local_today() - datetime.timedelta(days=7))
+        self.signup(self.wang, role=self.a_seat())
+        self.assertEqual(self.report()["figures"]["people_served"], 1)
+
+    def test_people_served_counts_somebody_with_two_posts_once(self):
+        # ⚠️ A person may hold several posts at once (D32). The predicate asks
+        #    whether *a* qualifying tenure exists, so two of them must not turn
+        #    one excluded person into two — nor make the Exists match twice and
+        #    change the count.
+        self.employ(self.wang, self.a_staff_post("officer"))
+        self.employ(self.wang, self.a_staff_post("driver"))
+        self.signup(self.wang, role=self.a_seat())
+        self.signup(self.li, role=self.a_seat())
+        self.assertEqual(self.report()["figures"]["people_served"], 1)
+
+    def test_a_class_that_did_not_fill_is_not_counted_as_understaffed(self):
+        """⚠️ D27's own footnote for this figure, applied to the new axis.
+
+        "A denominator polluted with events that cannot be measured drags the
+        rate down, which reads as a shortage of people." Twelve seats with
+        three learners is not a shortage of helpers, and this is the figure the
+        foundation reads as "are we short".
+        """
+        klass = make_event(ministry=self.pantry, name="ESL class")
+        make_role(klass, "esl-seat", name="ESL seat", needed_count=12,
+                  nature=ParticipationRole.Nature.ATTENDING)
+        self.signup(self.wang)
+        figures = self.report()["figures"]
+        # Only the original event, whose lifting role asked for a number.
+        self.assertEqual(figures["staffable_events"], 1)
+
+    def test_a_mixed_event_is_still_judged_on_its_helping_roles(self):
+        # The other half: a class that also opened an interpreter's post is
+        # measurable — on the interpreter, never on the seats.
+        klass = make_event(ministry=self.pantry, name="ESL class")
+        make_role(klass, "esl-seat", name="ESL seat", needed_count=12,
+                  nature=ParticipationRole.Nature.ATTENDING)
+        interpreting = make_role(klass, "interpreting", needed_count=1)
+        self.signup(self.wang, role=interpreting)
+        figures = self.report()["figures"]
+        self.assertEqual(figures["staffable_events"], 2)
+        # The seats are empty and the interpreter turned up, so it counts as
+        # fully staffed — which is the whole point.
+        self.assertIn(klass.pk, set(
+            Event.objects.filter(ministry=self.pantry).values_list("pk", flat=True)))
+        self.assertEqual(figures["fully_staffed"], 1)
 
     def test_hours_carry_what_they_were_counted_from(self):
         # The total is biased low by whoever forgot to check people out, and
@@ -1398,6 +1646,74 @@ class ServedAsTests(TestCase):
     def form_for(self, person):
         return SignUpForm(event=self.event, contact=person)
 
+    # --- the third value is never offered to anybody ---------------------
+
+    def test_the_signup_form_offers_only_the_two_identities_a_person_can_claim(self):
+        """L1.2. `not_applicable` is a member of the enum and not an identity.
+
+        Built from askable_served_as() rather than from ServedAs.choices, so a
+        value with no wording for asking about it cannot reach a dropdown by
+        anybody forgetting to exclude it.
+        """
+        person = self.an_adult("Staffer")
+        self.on_the_books(person, self.a_post("coordinator"))
+        offered = [value for value, _ in self.form_for(person).fields["served_as"].choices]
+        self.assertEqual(
+            offered,
+            [Participation.ServedAs.VOLUNTEER, Participation.ServedAs.WORK],
+        )
+
+    # --- a place somebody attends: the question does not arise -----------
+
+    def a_seat(self):
+        return make_role(
+            self.event, "esl-seat", name="ESL seat",
+            nature=ParticipationRole.Nature.ATTENDING)
+
+    def test_the_identity_question_is_not_asked_when_every_role_is_attending(self):
+        """D38 section 5's new first row: the role decides before the person does.
+
+        A staff member signing up for a seat in a class is neither volunteering
+        nor working — there is no true answer, so the question must not appear.
+        """
+        self.role.delete()
+        self.a_seat()
+        person = self.an_adult("Staffer")
+        self.on_the_books(person, self.a_post("coordinator"))
+        self.assertNotIn("served_as", self.form_for(person).fields)
+
+    def test_the_identity_question_still_appears_when_one_role_is_a_helping_one(self):
+        """The mixed event, and the cost this design accepts out loud.
+
+        The question is drawn per form and the event has both kinds of role, so
+        somebody who then picks the seat answers a question that is discarded.
+        The field's help text says which roles it is about; making it appear and
+        disappear as the dropdown changes would be browser-side state (D24).
+        """
+        self.a_seat()
+        person = self.an_adult("Staffer")
+        self.on_the_books(person, self.a_post("coordinator"))
+        self.assertIn("served_as", self.form_for(person).fields)
+
+    def test_signing_up_for_an_attending_role_records_not_applicable_and_credits_nobody(self):
+        person = self.an_adult("Learner")
+        row = sign_up(contact=person, event_role=self.a_seat())
+        self.assertEqual(row.served_as, Participation.ServedAs.NOT_APPLICABLE)
+        # ⚠️ Nobody is credited, and for a stronger reason than the outside
+        #    volunteer beside them: there is no statement to attribute. The
+        #    question never arose.
+        self.assertEqual(row.served_as_declared_by, "")
+
+    def test_choosing_an_attending_role_ignores_an_identity_sent_by_hand(self):
+        # The form may have drawn the question (mixed event), or the POST may be
+        # hand-made. Either way the role decides.
+        person = self.an_adult("Staffer")
+        self.on_the_books(person, self.a_post("coordinator"))
+        row = sign_up(
+            contact=person, event_role=self.a_seat(),
+            served_as=Participation.ServedAs.WORK)
+        self.assertEqual(row.served_as, Participation.ServedAs.NOT_APPLICABLE)
+
     # --- who gets asked at all ------------------------------------------
 
     def test_an_outside_volunteer_is_not_asked_and_is_recorded_as_volunteering(self):
@@ -1531,9 +1847,31 @@ class ServedAsTests(TestCase):
         staff = self.an_adult("Staff")
         self.on_the_books(staff, self.a_post("officer"))
         outsider = self.an_adult("Outsider")
-        asked = contacts_asked_about_serving(self.event)
-        self.assertIn(staff.pk, asked)
-        self.assertNotIn(outsider.pk, asked)
+        mine = sign_up(contact=staff, event_role=self.role)
+        theirs = sign_up(contact=outsider, event_role=self.role)
+        asked = signups_asked_about_serving(self.event)
+        self.assertIn(mine.pk, asked)
+        self.assertNotIn(theirs.pk, asked)
+
+    def test_the_correction_control_is_not_offered_on_a_place_somebody_attends(self):
+        """The second half of the question, added when it became per row.
+
+        ⚠️ Signups, not contacts: the same staff member can be helping at the
+           welcome desk and sitting in on the class at one event. One of those
+           rows has an identity to correct and the other cannot have one — so
+           the answer belongs to the row, and asking it of the person would put
+           a control on a row where every option is wrong.
+        """
+        staff = self.an_adult("Staff")
+        self.on_the_books(staff, self.a_post("officer"))
+        seat = make_role(
+            self.event, "esl-seat", name="ESL seat",
+            nature=ParticipationRole.Nature.ATTENDING)
+        helping = sign_up(contact=staff, event_role=self.role)
+        attending = sign_up(contact=staff, event_role=seat)
+        asked = signups_asked_about_serving(self.event)
+        self.assertIn(helping.pk, asked)
+        self.assertNotIn(attending.pk, asked)
 
     # --- the backfill -----------------------------------------------------
 
@@ -1615,6 +1953,26 @@ class DictionaryTableTests(TestCase):
         second = ParticipationRole.seed_general()
         self.assertEqual(first.pk, second.pk)
         self.assertEqual(first.code, "general")
+
+    def test_a_new_role_defaults_to_helping(self):
+        # L1. The default restates what is already true of every row in the
+        # database rather than assuming anything — which is why this column may
+        # have one at all, where served_as may not (D38 section 9).
+        role = ParticipationRole.objects.create(code="lifting", name="Lifting")
+        self.assertEqual(role.nature, ParticipationRole.Nature.HELPING)
+
+    def test_the_catch_all_role_is_a_helping_one(self):
+        """"No particular job" means no particular job *helping*.
+
+        Worth pinning rather than leaving implied: "a beneficiary with no
+        particular role" therefore has nowhere to land yet, and the answer when
+        it is needed is a second catch-all row, not flipping this one — every
+        signup ever made through it was a helping one.
+        """
+        self.assertEqual(
+            ParticipationRole.seed_general().nature,
+            ParticipationRole.Nature.HELPING,
+        )
 
     def test_the_general_role_is_already_there_after_migrating(self):
         # This database was built by the migrations and nothing else, so the
@@ -2789,6 +3147,19 @@ class MergedEditAndRolesPageTests(PageTestCase):
         self.assertContains(response, "Roles for this event")
         self.assertContains(response, self.role.role.name)
 
+    def test_the_roles_panel_says_which_kind_each_role_is(self):
+        """L1 on the screen where roles are opened.
+
+        The column decides whether the people in that row record hours and
+        which of the report's two groups they land in, so whoever opens a role
+        should see which one they opened — then, not at the end of the month.
+        """
+        self.role.role.nature = ParticipationRole.Nature.ATTENDING
+        self.role.role.save()
+        self.login(self.zhang)
+        response = self.client.get(self.edit_url())
+        self.assertContains(response, ParticipationRole.Nature.ATTENDING.label)
+
     def test_the_old_roles_url_sends_you_to_the_edit_page(self):
         # Kept rather than deleted: the roles form still posts here, and
         # templates, tests and bookmarks point at it.
@@ -2843,16 +3214,60 @@ class NewParticipationRoleTests(PageTestCase):
     """
 
     def add(self, **payload):
+        """A well-formed submission. ⚠️ `new_role_nature` is in the defaults so
+        the tests below stay about what their names say; the requirement itself
+        is asserted by test_adding_a_role_from_the_page_asks_which_kind_it_is.
+        """
         self.login(self.zhang)
         return self.client.post(
             reverse("events:event_roles", args=[self.event.pk]),
-            {"needed_count": 1, **payload})
+            {
+                "needed_count": 1,
+                "new_role_nature": ParticipationRole.Nature.HELPING,
+                **payload,
+            })
 
     def test_a_new_name_becomes_a_role_and_gets_opened(self):
         self.add(new_role_name="Sound desk")
         created = ParticipationRole.objects.get(name="Sound desk")
         self.assertEqual(created.code, "sound-desk")
         self.assertTrue(self.event.roles.filter(role=created).exists())
+
+    def test_adding_a_role_from_the_page_asks_which_kind_it_is(self):
+        """L1, and the reason it is asked rather than defaulted.
+
+        This is the one live path a ministry admin adds a job through. Left to
+        the model's default, the first ESL seat created here would be filed as
+        helping — it would ask its students to record hours and would count
+        them among the people who helped. Neither of those raises anything.
+        """
+        response = self.add(new_role_name="ESL seat", new_role_nature="")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("new_role_nature", response.context["role_form"].errors)
+        self.assertFalse(ParticipationRole.objects.filter(name="ESL seat").exists())
+
+    def test_a_role_added_from_the_page_records_the_kind_that_was_chosen(self):
+        self.add(
+            new_role_name="ESL seat",
+            new_role_nature=ParticipationRole.Nature.ATTENDING)
+        self.assertEqual(
+            ParticipationRole.objects.get(name="ESL seat").nature,
+            ParticipationRole.Nature.ATTENDING)
+
+    def test_a_duplicate_name_says_what_kind_the_existing_role_is(self):
+        """⚠️ The duplicate check ignores `nature`, so the message must not.
+
+        Somebody adding an attending "Lifting" while a helping one exists is
+        refused — correctly, two rows of one name split a report column in two.
+        Without the kind in the message they are sent to a dropdown entry that
+        is not the thing they were trying to make, with nothing saying why.
+        """
+        response = self.add(
+            new_role_name="lifting",
+            new_role_nature=ParticipationRole.Nature.ATTENDING)
+        errors = " ".join(response.context["role_form"].errors["new_role_name"])
+        self.assertIn(
+            ParticipationRole.Nature.HELPING.label, errors)
 
     def test_a_duplicate_is_refused_and_names_the_one_that_exists(self):
         """⚠️ The existing name is the whole content of the error.
@@ -2992,6 +3407,94 @@ class PrefilledHoursTests(PageTestCase):
         response = self.client.get(self.url)
         self.assertEqual(response.context["scheduled_hours"],
                          scheduled_hours(self.event))
+
+
+class AttendingRolePageTests(PageTestCase):
+    """L4 on the three pages that would otherwise ask a question with no answer.
+
+    All four failures here are silent ones: a box that invites an hours figure
+    into a column the report divides by, a control offering to file a class
+    seat as "volunteering", and somebody's own signups page telling them their
+    participation was "Not applicable".
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.seat = make_role(
+            self.event, "esl-seat", name="ESL seat",
+            nature=ParticipationRole.Nature.ATTENDING)
+        self.attending = sign_up(contact=self.lisi.contact, event_role=self.seat)
+        self.helping = sign_up(contact=self.lisi.contact, event_role=self.role)
+
+    def test_the_attendance_page_offers_no_hours_box_for_a_place_somebody_attends(self):
+        self.login(self.zhang)
+        page = self.client.get(
+            reverse("events:event_attendance", args=[self.event.pk])).content.decode()
+        # The helping row still has one — otherwise this would pass with the
+        # whole column missing.
+        self.assertIn(f'id="hours-{self.helping.pk}"', page)
+        self.assertNotIn(f'id="hours-{self.attending.pk}"', page)
+
+    def test_the_attendance_page_says_why_the_hours_box_is_absent(self):
+        """⚠️ A control that vanishes without explanation reads as a broken page.
+
+        Somebody refreshes, then goes looking for the box on another screen.
+        Saying "no hours — this is a place people attend" costs one line and
+        ends the search.
+        """
+        self.login(self.zhang)
+        response = self.client.get(
+            reverse("events:event_attendance", args=[self.event.pk]))
+        self.assertContains(response, "a place people attend")
+
+    def test_the_signups_page_offers_no_identity_control_on_an_attending_row(self):
+        # The person here is not on the books at all, so the control would not
+        # be drawn either way — put them on the books, so this test is about the
+        # role rather than about the person.
+        post = Position.objects.create(
+            code="officer", name="Officer", kind=Position.Kind.STAFF,
+            ministry=self.pantry, compensation=Position.Compensation.PAID)
+        Assignment.objects.create(
+            contact=self.lisi.contact, position=post,
+            start_date=local_date_of(self.event.start_time) - DAY)
+
+        self.login(self.zhang)
+        asked = self.client.get(
+            reverse("events:event_registrations", args=[self.event.pk]),
+        ).context["asked_about_serving"]
+        self.assertIn(self.helping.pk, asked)
+        self.assertNotIn(self.attending.pk, asked)
+
+    def test_an_admin_cannot_correct_the_identity_on_an_attending_row(self):
+        """⚠️ Posted, not merely "the control is not drawn".
+
+        Not drawing one is interface and interface keeps nobody out. Accepted,
+        this would file a class seat as volunteering — and that row's hours are
+        excluded from the report, so the figure and the label would disagree
+        with nothing to say they had.
+        """
+        self.login(self.zhang)
+        self.client.post(
+            reverse("events:event_registrations", args=[self.event.pk]),
+            {
+                "participation": self.attending.pk,
+                "served_as": Participation.ServedAs.VOLUNTEER,
+            },
+            follow=True,
+        )
+        self.attending.refresh_from_db()
+        self.assertEqual(
+            self.attending.served_as, Participation.ServedAs.NOT_APPLICABLE)
+
+    def test_my_signups_does_not_print_not_applicable(self):
+        self.login(self.lisi)
+        response = self.client.get(reverse("events:my_participations"))
+        # The row is there…
+        self.assertContains(response, self.seat.role.name)
+        # …but it does not tell its owner their participation was "Not
+        # applicable", which reads as the system not recognising them.
+        self.assertNotContains(
+            response, Participation.ServedAs.NOT_APPLICABLE.label)
 
 
 class EventUpdatePageTests(PageTestCase):
@@ -3742,6 +4245,22 @@ class AcceptanceWalkTests(TestCase):
     def other_event(self):
         return Event.objects.get(name="Tax clinic")
 
+    def adas_helping_signup(self):
+        """Ada's row on the past distribution — the one with an identity on it.
+
+        ⚠️ Named rather than `filter(last_name="Okafor").first()`, which is what
+           these tests used until 2026-08-21. She has two signups now: this one,
+           and a seat in the ESL class that is deliberately `not_applicable`.
+           The loose selector silently started returning the wrong one the day
+           the demo grew, and three tests failed with a message about identities
+           rather than about their fixture. A test that means "her helping row"
+           has to say so.
+        """
+        return Participation.objects.get(
+            contact__legal_last_name="Okafor",
+            event_role__event=self.past_event(),
+        )
+
     # --- ① the foundation-wide role ---------------------------------------
 
     def test_the_foundation_admin_can_appoint_and_revoke_a_ministry_admin(self):
@@ -3841,8 +4360,7 @@ class AcceptanceWalkTests(TestCase):
            weekend it was can see, on their own page, both what it now says and
            that it was an admin who said it.
         """
-        signup = Participation.objects.filter(
-            contact__legal_last_name="Okafor").first()
+        signup = self.adas_helping_signup()
         self.assertEqual(signup.served_as, Participation.ServedAs.VOLUNTEER)
 
         self.as_role("pantry_admin")
@@ -3868,12 +4386,45 @@ class AcceptanceWalkTests(TestCase):
         #    and those are not the same fact — in FLSA terms least of all.
         self.assertContains(mine, "Set by an admin")
 
+    def test_the_correction_dropdown_does_not_offer_not_applicable(self):
+        # L1.2. The enum has a third member that is not an identity, and this
+        # control is where an admin would meet it.
+        signup = self.adas_helping_signup()
+        self.as_role("pantry_admin")
+        response = self.client.get(
+            reverse("events:event_registrations", args=[signup.event_role.event_id]))
+        offered = [value for value, _ in response.context["served_as_choices"]]
+        self.assertEqual(
+            offered,
+            [Participation.ServedAs.VOLUNTEER, Participation.ServedAs.WORK],
+        )
+
+    def test_the_registrations_page_refuses_a_posted_not_applicable(self):
+        """⚠️ The half the test above cannot cover.
+
+        Leaving an option out of a `<select>` is interface, and interface keeps
+        nobody out — a POST naming it arrives at the view looking exactly like
+        any other. Accepted, it would erase a real answer and replace it with
+        "this question does not arise", on a row where it plainly does.
+        """
+        signup = self.adas_helping_signup()
+        self.as_role("pantry_admin")
+        self.client.post(
+            reverse("events:event_registrations", args=[signup.event_role.event_id]),
+            {
+                "participation": signup.pk,
+                "served_as": Participation.ServedAs.NOT_APPLICABLE,
+            },
+            follow=True,
+        )
+        signup.refresh_from_db()
+        self.assertEqual(signup.served_as, Participation.ServedAs.VOLUNTEER)
+
     def test_a_volunteer_cannot_correct_an_identity(self):
         # ⚠️ Posted, not merely "the button is not drawn". Not drawing a control
         #    is interface, and a POST from anywhere at all arrives here looking
         #    exactly the same.
-        signup = Participation.objects.filter(
-            contact__legal_last_name="Okafor").first()
+        signup = self.adas_helping_signup()
         self.as_role("participant_adult")
         response = self.client.post(
             reverse("events:event_registrations", args=[signup.event_role.event_id]),

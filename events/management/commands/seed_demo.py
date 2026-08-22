@@ -38,6 +38,7 @@ from events.services import (
     mark_absent,
     record_hours,
     set_served_as,
+    sign_up,
 )
 from org.models import Assignment, EmploymentType, Ministry, MinistryRole, Position
 from org.permissions import foundation_admin_group
@@ -143,7 +144,10 @@ class Command(BaseCommand):
             code="part_time", defaults={"name": "Part time"})
         self.distribution, _ = EventType.objects.get_or_create(
             code="distribution", defaults={"name": "Distribution"})
-        EventType.objects.get_or_create(code="class", defaults={"name": "Class"})
+        # Stored on self from 2026-08-21: event 6 below is a class, and the
+        # demo had no event of any type but "distribution".
+        self.klass, _ = EventType.objects.get_or_create(
+            code="class", defaults={"name": "Class"})
         # The catch-all role has to exist: event_role is not nullable, so "no
         # particular job" needs somewhere to land.
         self.general = ParticipationRole.seed_general()
@@ -153,6 +157,19 @@ class Command(BaseCommand):
             code="welcome", defaults={"name": "Welcome desk"})
         self.interpreting, _ = ParticipationRole.objects.get_or_create(
             code="interpreting", defaults={"name": "Interpreting"})
+        # ⚠️ L1's whole point on one row: the first role in this system where
+        #    the person is receiving rather than giving. Without one in the
+        #    demo, every screen the axis touches — the Kind column, the report's
+        #    two groups — has nothing to show, and a cell that only ever appears
+        #    in production is a cell nobody designs. Same argument as the three
+        #    identity states on the past event below.
+        self.esl_seat, _ = ParticipationRole.objects.get_or_create(
+            code="esl-seat",
+            defaults={
+                "name": "ESL seat",
+                "nature": ParticipationRole.Nature.ATTENDING,
+            },
+        )
 
     def ministries_and_posts(self):
         # ⚠️ One with a website and one without, deliberately: the ministry's
@@ -525,6 +542,60 @@ class Command(BaseCommand):
             },
         )
 
+        # 6. A class somebody attends rather than helps at — the first event in
+        #    the demo whose roles are not all "come and give us a hand".
+        #
+        # ⚠️ It opens **two** roles, and that pairing is the demo: the seats are
+        #    attending, the interpreter beside them is helping. One event, both
+        #    halves of L1, which is exactly the shape participants.md says the
+        #    foundation needs (a single publish covering both).
+        #
+        # ⚠️ Added after event 5 on purpose. The ids of the five above are named
+        #    in the C0.3 acceptance checklist, so a new event goes at the end of
+        #    this list and never in the middle of it.
+        esl, made = Event.objects.get_or_create(
+            name="ESL class",
+            defaults={
+                "event_type": self.klass, "ministry": self.pantry,
+                "start_time": now + 4 * DAY, "end_time": now + 4 * DAY + 2 * HOUR,
+                "location": "Room 1A", "owner": self.pantry_admin.contact,
+                "status": Event.Status.OPEN,
+            },
+        )
+        if made:
+            seats = self.role(esl, self.esl_seat, 12)
+            interpreting = self.role(esl, self.interpreting, 1)
+
+            # ⭐ Ada and Rafa are **both on the books**, both at this one event,
+            #    and the page treats them oppositely — Ada gets no hours box and
+            #    no identity question, Rafa gets both. The only difference is
+            #    the role they took. That is participants.md section 4's
+            #    invariant ("the axis is on the role, never on the person")
+            #    made visible on one screen, and no amount of documentation
+            #    does the same work.
+            # ⚠️ Through services.sign_up(), unlike the fixtures above, and the
+            #    difference is the whole value of this block: the service is
+            #    what writes `not_applicable` onto a seat and leaves declared_by
+            #    empty. Built with the plain helper these rows would carry a
+            #    **blank** identity — which means "predates D38" and is a state
+            #    only an importer produces. Demo data has to be data the system
+            #    actually makes, or it demonstrates the wrong thing.
+            #
+            #    Idempotency still holds: this whole block is inside `if made`.
+            self.joins(self.unpaid_staff, seats)
+            self.joins(self.intern, interpreting)
+
+            # ⚠️ Both of these have logins, and that is the point rather than a
+            #    coincidence: without one, "their own signups page does not
+            #    print an identity for a seat" is an acceptance line nobody can
+            #    walk. Exactly what went wrong for Ada in the previous round
+            #    (participants.md section 10) — see DEMO_ACCOUNTS above.
+            self.joins(self.adult, seats)
+            # No login, and that is fine here — he is only making up the
+            # numbers, so that the report reads "3 signed up" beside "People
+            # served: 2". The missing one is Ada, who is one of ours.
+            self.joins(self.silent, seats)
+
         self.filler_events(now)
 
     #: Enough events that the two public lists actually scroll (2026-08-05).
@@ -667,6 +738,24 @@ class Command(BaseCommand):
             event=event, role=participation_role,
             defaults={"needed_count": needed_count, **fields},
         )[0]
+
+    def joins(self, who, event_role):
+        """Sign somebody up the way the site does — through services.sign_up().
+
+        ⚠️ Not the same thing as signup() below, and the difference matters for
+           anything the identity axis touches: this one goes through the rule
+           that decides what `served_as` should say, so a seat comes out
+           `not_applicable` and a helping role comes out with a real identity.
+           signup() writes the row directly and leaves that column blank, which
+           is a state meaning "predates D38".
+
+        ⚠️ Not idempotent — sign_up() refuses a second signup for the same role
+           by design. Only call it from inside an `if made:` block.
+        """
+        return sign_up(
+            contact=who.contact if hasattr(who, "contact") else who,
+            event_role=event_role,
+        )
 
     def signup(self, who, event_role, **consent):
         contact = who.contact if hasattr(who, "contact") else who

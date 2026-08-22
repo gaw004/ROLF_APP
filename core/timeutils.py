@@ -8,6 +8,7 @@ grep guard in core/tests.py can enforce it for everyone else.
 
 import datetime
 
+from django.db.models.functions import TruncDate
 from django.utils import timezone
 
 
@@ -45,6 +46,29 @@ def local_date_of(moment):
        caught it (see 02-roadmap.md「计划外（B12）」).
     """
     return timezone.localtime(moment).date()
+
+
+def local_day(field):
+    """The same question as local_date_of(), asked of a column instead of a value.
+
+    Returns a database expression: which day, in the foundation's timezone, the
+    instant in `field` fell on. Used to annotate a queryset before a correlated
+    subquery asks "was this person on the books that day" over a set of events
+    that each have their own day.
+
+    ⚠️ Two implementations of one rule, deliberately adjacent to the one above —
+       the discipline core/querysets.py states for active() and
+       is_currently_active(): "change one, change the other" should be a glance
+       rather than a promise.
+
+    ⚠️ The whole reason this is a function and not a bare TruncDate at the call
+       site is `tzinfo`. Left off, Postgres truncates the UTC value, so an event
+       at 6pm Pacific reports the following day — and nothing raises, the count
+       is simply against the wrong day. That is D16's subject, and R8 shipped
+       exactly this bug once already. Wrapped here, there is nowhere to forget
+       it.
+    """
+    return TruncDate(field, tzinfo=timezone.get_current_timezone())
 
 
 def local_month_of(moment):

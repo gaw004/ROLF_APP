@@ -53,7 +53,14 @@ from .forms import (
     NotifyForm,
     SignUpForm,
 )
-from .models import Event, EventNotification, EventRole, Participation
+from .models import (
+    SERVED_AS_EXPLANATIONS,
+    Event,
+    EventNotification,
+    EventRole,
+    Participation,
+    askable_served_as,
+)
 from .tokens import (
     CHECK_IN,
     MODES,
@@ -89,7 +96,7 @@ from .services import (
     reschedule,
     scheduled_hours,
     resolve_recipients,
-    contacts_asked_about_serving,
+    signups_asked_about_serving,
     set_served_as,
     set_status,
     sign_up,
@@ -1009,9 +1016,14 @@ def event_registrations(request, pk):
         # ⚠️ Judged here, not trusted from the form: the question applies to a
         #    set of people and a POST can name anybody. Asked through the same
         #    service the form and the backfill ask, so there is one answer.
-        if participation.contact_id in contacts_asked_about_serving(event):
+        if participation.pk in signups_asked_about_serving(event):
             value = request.POST.get("served_as")
-            if value in Participation.ServedAs.values:
+            # ⚠️ Against the identities somebody may be **asked** about, not
+            #    against the whole enum. `not_applicable` is a member of it and
+            #    means "this question does not arise here" — a POST that named
+            #    it would erase a real answer, and no control anywhere offers
+            #    it. Not drawing a control keeps nobody out; this line does.
+            if value in SERVED_AS_EXPLANATIONS:
                 set_served_as(
                     participation, value,
                     declared_by=Participation.DeclaredBy.ADMIN,
@@ -1039,8 +1051,11 @@ def event_registrations(request, pk):
         #    and an outside volunteer's row must not offer a control that would
         #    be refused — D38 section 5's "the cost falls only on the people it
         #    is genuinely ambiguous for".
-        "asked_about_serving": contacts_asked_about_serving(event),
-        "served_as_choices": Participation.ServedAs.choices,
+        "asked_about_serving": signups_asked_about_serving(event),
+        # ⚠️ Not `ServedAs.choices` — see the POST branch above. The dropdown
+        #    offers the identities a person can claim, and the enum holds one
+        #    more value than that.
+        "served_as_choices": askable_served_as(),
     })
 
 
@@ -1121,6 +1136,11 @@ def event_attendance(request, pk):
     rows = (
         Participation.objects.filter(event_role__event=event)
         .notifiable()
+        # ⚠️ `event_role__role` is load-bearing beyond the role's name in the
+        #    heading: every row asks `records_hours`, which reads the role's
+        #    nature to decide whether to draw an hours box at all. Without it
+        #    that is a query per row, on the page somebody has open while
+        #    checking forty people in.
         .select_related("contact", "event_role__role")
         .prefetch_related("contact__emergency_contacts")
         .order_by("event_role__role__name", "contact")

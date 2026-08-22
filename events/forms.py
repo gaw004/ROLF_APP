@@ -18,11 +18,13 @@ from org.models import Ministry
 from org.permissions import ministry_ids_administered_by
 
 from .models import (
+    NATURE_EXPLANATIONS,
     SERVED_AS_EXPLANATIONS,
     Event,
     EventRole,
     Participation,
     ParticipationRole,
+    askable_served_as,
 )
 
 
@@ -101,14 +103,27 @@ class SignUpForm(forms.Form):
     #    them in events/models.py, never typed out here. This wording appears
     #    on four screens and D38 section 6 is its only home; a copy in a form
     #    file is how it comes to say something slightly different in one place.
+    # ⚠️ Built from askable_served_as(), **not** from ServedAs.choices. The
+    #    enum has a third member (not_applicable) that nobody may be offered,
+    #    and iterating the choices here would not merely show it — it would
+    #    raise KeyError on the gloss lookup below, in a class body, so the app
+    #    would stop importing. That is the good version of this mistake; the
+    #    bad version is the two places in views.py that would have shown it.
     served_as = forms.ChoiceField(
         choices=[
             (value, f"{label} — {SERVED_AS_EXPLANATIONS[value]}")
-            for value, label in Participation.ServedAs.choices
+            for value, label in askable_served_as()
         ],
         widget=forms.RadioSelect,
         required=False,
         label="How were you serving this time?",
+        # ⚠️ One sentence, and it is doing real work. An event may open both
+        #    kinds of role at once, and this question is drawn per form rather
+        #    than per option — so somebody picking a place to attend answers it
+        #    and the service then ignores the answer. Saying so is cheaper and
+        #    steadier than making the question appear and disappear as the
+        #    dropdown changes, which would be browser-side state (D24).
+        help_text="Only asked about roles where you are giving your time.",
     )
 
     CONSENT_FIELDS = [
@@ -139,9 +154,28 @@ class SignUpForm(forms.Form):
         #    question applies and what it defaults to are one answer, and this
         #    form is not allowed to work either half out for itself (D38
         #    section 5).
-        from .services import default_served_as
+        from .services import default_served_as, is_on_the_books
 
-        self.served_as_default, self.ask_served_as = default_served_as(contact, event)
+        # ⚠️ The question is per **role** now (2026-08-21), and this form covers
+        #    several roles at once. It is drawn when any role in the dropdown
+        #    would ask it; if the role finally chosen turns out to be one that
+        #    would not, services.sign_up() discards the answer and records
+        #    not_applicable. The field's help text says so on the page — the
+        #    alternative, making the question appear and disappear as the
+        #    dropdown changes, is browser-side state (D24) for one sentence.
+        #
+        # ⚠️ "Is this person on the books" is asked once and handed to each
+        #    call. Left to default_served_as() it would be a query per role.
+        #    The judgement itself does not move: that function is still the only
+        #    place that decides, exactly as D38 section 5 requires.
+        on_the_books = is_on_the_books(contact, event)
+        answers = [
+            default_served_as(contact, role, on_the_books=on_the_books)
+            for role in self.fields["event_role"].queryset
+        ]
+        asked = [value for value, ask in answers if ask]
+        self.ask_served_as = bool(asked)
+        self.served_as_default = asked[0] if asked else ""
         if not self.ask_served_as:
             # ⚠️ Deleted, not hidden — unlike the consent fields below, which
             #    stay as hidden inputs. A hidden field posts its value back,
@@ -472,6 +506,28 @@ class EventRoleForm(forms.ModelForm):
         required=False, max_length=100, label="…or add a new kind of role",
         help_text="Only if none of the above fits. Everyone will see it from then on.",
     )
+    # L1. Required only when a new role is being added — clean() enforces that,
+    # because "required together with another field" is not something a field
+    # can say about itself.
+    #
+    # ⚠️ No default, and no empty option that quietly means helping. Filed
+    #    wrongly, an ESL seat would ask its students to record hours and would
+    #    count them among the people who helped — neither of which raises
+    #    anything. Making it a choice somebody has to make is the whole point.
+    # ⚠️ The wording is built from the model's labels plus the gloss beside them
+    #    in events/models.py, never typed out here — the same rule the served_as
+    #    field two hundred lines up follows, and for the same reason: a copy in
+    #    a form file is how the two come to say slightly different things.
+    new_role_nature = forms.ChoiceField(
+        required=False,
+        choices=[
+            ("", "---------"),
+            *((value, f"{label} — {NATURE_EXPLANATIONS[value]}")
+              for value, label in ParticipationRole.Nature.choices),
+        ],
+        label="…and what people in it are doing",
+        help_text="Everybody at an event is a participant — this says which kind.",
+    )
 
     class Meta:
         model = EventRole
@@ -491,8 +547,13 @@ class EventRoleForm(forms.ModelForm):
         #    new kind of role" three boxes below the one it replaces — far
         #    enough down that it reads as a fourth thing to fill in rather than
         #    as the other half of a choice.
-        self.order_fields(
-            ["role", "new_role_name", "needed_count", "stop_at_needed_count", "notes"])
+        # ⚠️ `new_role_nature` goes directly after the name it belongs to. It is
+        #    declared after it too, but declaration order is not render order —
+        #    that is what this call exists for, and the comment above says why.
+        self.order_fields([
+            "role", "new_role_name", "new_role_nature",
+            "needed_count", "stop_at_needed_count", "notes",
+        ])
 
     def _get_validation_exclusions(self):
         """Keep `event` in play, so "that role is already open" is checked here.
@@ -529,15 +590,29 @@ class EventRoleForm(forms.ModelForm):
         if new_name:
             from .services import matching_participation_role
 
+            if not cleaned.get("new_role_nature"):
+                # ⚠️ Asked, never defaulted. See the field above: the failure of
+                #    a default is an ESL seat that asks its students for hours,
+                #    and nothing about that shows up until the report is wrong.
+                self.add_error("new_role_nature", forms.ValidationError(
+                    "Say what people in this new role are doing."))
+
             existing = matching_participation_role(new_name)
             if existing is not None:
                 # ⚠️ Named in the message. "That already exists" leaves the
                 #    person hunting a dropdown of thirty entries for something
                 #    they may have spelled differently; the name they need to
                 #    look for is the whole content of this error.
+                #
+                # ⚠️ And its kind is named too, because the duplicate check
+                #    ignores `nature` (see services.matching_participation_role).
+                #    Somebody adding an attending "ESL seat" while a helping one
+                #    exists is refused, and without this half the message sends
+                #    them to a dropdown entry that is not the thing they wanted.
                 self.add_error("new_role_name", forms.ValidationError(
-                    f"There is already a role called “{existing.name}”. "
-                    f"Pick it from the list above instead of adding a second one."))
+                    f"There is already a role called “{existing.name}” "
+                    f"({existing.get_nature_display()}). Pick it from the list "
+                    f"above instead of adding a second one."))
         return cleaned
 
     def save(self, commit=True):
@@ -546,7 +621,8 @@ class EventRoleForm(forms.ModelForm):
         if new_name:
             from .services import create_participation_role
 
-            self.instance.role = create_participation_role(new_name)
+            self.instance.role = create_participation_role(
+                new_name, nature=self.cleaned_data["new_role_nature"])
         return super().save(commit=commit)
 
 

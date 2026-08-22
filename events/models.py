@@ -79,7 +79,41 @@ class ParticipationRole(ImmutableCodeMixin, ConstraintErrorFieldMixin, models.Mo
 
     One row must always exist with code="general": Participation.event_role is
     not nullable, so "no particular job" needs somewhere to land.
+
+    ⚠️ That catch-all row is a **helping** one (see `nature` below), so
+       "a beneficiary with no particular role" has nowhere to land yet. No
+       second catch-all is seeded, deliberately: a ministry admin can add one
+       from the roles panel in a single click, and goal.md 零 asks which
+       requirement's query a row would appear in before it is created.
     """
+
+    class Nature(models.TextChoices):
+        """Are they here to give, or to receive? A property of the job itself.
+
+        D10's test decides where this lives: an ESL seat is somewhere a service
+        is received no matter who sits in it, and lifting is somewhere time is
+        given no matter who does it. So it belongs to the *kind* of job, not to
+        one event's decision to open it — which is why it is here and EventRole
+        is untouched. The payoff is that it cannot be set inconsistently
+        between two events. See participants.md L1.
+
+        ⚠️ TextChoices rather than a column the foundation fills in, because
+           code branches on it (the identity question, the refusal to record
+           hours, and two denominators on the report). D5's test, and it does
+           not contradict this being a dictionary table: the foundation owns the
+           rows, the code owns which of the two halves a row is in.
+
+        ⚠️ One word each, with the explanation kept beside them in
+           NATURE_EXPLANATIONS rather than inside the label — the same split
+           SERVED_AS_EXPLANATIONS makes, for the same reason. A label carrying
+           its own gloss reads well on the form that asks and badly in the
+           table cell that reports, and the version of this that trimmed the
+           gloss back off in a template would stop trimming, silently, the day
+           somebody reworded it.
+        """
+
+        HELPING = "helping", "Helping"
+        ATTENDING = "attending", "Attending"
 
     GENERAL_CODE = "general"
 
@@ -88,6 +122,26 @@ class ParticipationRole(ImmutableCodeMixin, ConstraintErrorFieldMixin, models.Mo
         help_text="Stable identifier used by code. Lowercase, cannot be changed later.",
     )
     name = models.CharField(max_length=100)
+    # ⚠️ A default is right here, and it is worth writing down why — because the
+    #    same round's `served_as` forbids one (D38 section 9). The two are
+    #    opposites: a default identity would vouch for a claim nobody made,
+    #    while `helping` is a fact already true of every row in the database
+    #    today. A default that restates the present is not an assumption.
+    nature = models.CharField(
+        max_length=20,
+        choices=Nature.choices,
+        default=Nature.HELPING,
+        verbose_name="What somebody in this role is doing",
+        # ⚠️ The first sentence is the definition participants.md section 9
+        #    names as the mitigation for a known gap, not politeness: in this
+        #    sector "participant" is usually read as "the person being served",
+        #    and this is the first screen where the two halves are named side by
+        #    side. Without it the foundation reads the word narrowly and then
+        #    goes looking for another one to cover the people who came to help.
+        help_text="Everybody at an event is a participant — this says which "
+                  "kind. Lifting, interpreting and the welcome desk are "
+                  "helping; an ESL seat or a food parcel is attending.",
+    )
     is_active = models.BooleanField(default=True)
 
     class Meta:
@@ -110,13 +164,59 @@ class ParticipationRole(ImmutableCodeMixin, ConstraintErrorFieldMixin, models.Mo
         return role
 
     def clean(self):
+        """`code` is immutable, and `nature` becomes immutable once it is used.
+
+        The second half is new (2026-08-21). Flipping `nature` after people have
+        signed up rewrites what their rows mean: an attending signup carries
+        `served_as=not_applicable` and is counted under "people served", and
+        both of those were written under what this column said at the time. A
+        dictionary row is cheap — add another one instead.
+
+        ⚠️ A hint layer, not a rule, and D14 asks for that to be said plainly:
+           `ParticipationRole.objects.update(nature=…)` walks straight past
+           this. It cannot become a CheckConstraint either, for the same reason
+           the L2×L3 invariant cannot — the test is in another table (does any
+           Participation point at me), and a check constraint cannot see it.
+
+        ⚠️ The admin needs no `readonly_fields` here, unlike `served_as`
+           (D38 section 4). That one had to be frozen because the guard greps
+           source and the admin form exists without anybody writing code; this
+           rule lives in `clean()`, which the admin's ModelForm calls. So the
+           column stays editable — fixing a role opened under the wrong kind,
+           before anybody has used it, is exactly what should be allowed.
+        """
         super().clean()
         error = self.code_change_error()
         if error:
             raise ValidationError({"code": error})
+        if self.pk is None:
+            return
+        was = (type(self).objects.filter(pk=self.pk)
+               .values_list("nature", flat=True).first())
+        if was is None or was == self.nature:
+            return
+        # Participation is declared further down this module; a name looked up
+        # inside a method resolves at call time, so this is fine here and would
+        # not be in the class body.
+        if Participation.objects.filter(event_role__role_id=self.pk).exists():
+            raise ValidationError({"nature": (
+                "People have already signed up through this role, and their "
+                "records were written under what it says now. Add a new role "
+                "instead — a dictionary row is cheap."
+            )})
 
     def __str__(self):
         return self.name
+
+
+#: The other half of each Nature option, for when somebody is being *asked*
+#: rather than shown a value: "Attending — they receive a service". Beside the
+#: enum rather than in a form or a template, so the term and its gloss cannot
+#: drift apart. Same shape and same reason as SERVED_AS_EXPLANATIONS below.
+NATURE_EXPLANATIONS = {
+    ParticipationRole.Nature.HELPING: "they give their time",
+    ParticipationRole.Nature.ATTENDING: "they receive a service",
+}
 
 
 class EventQuerySet(models.QuerySet):
@@ -685,7 +785,41 @@ class EventRole(ConstraintErrorFieldMixin, TimeStampedModel):
         return f"{self.role.name} @ {self.event.name}"
 
 
+#: "This signup is on a place somebody attends." Written once, read in both
+#: directions by the two predicates below — so the pair cannot come to disagree
+#: about which rows they are talking about.
+ON_AN_ATTENDING_ROLE = models.Q(
+    event_role__role__nature=ParticipationRole.Nature.ATTENDING)
+
+
 class ParticipationQuerySet(models.QuerySet):
+    def recording_hours(self):
+        """The rows where hours are a question at all — L4's rule, as a filter.
+
+        ⚠️ This and `Participation.records_hours` below are two implementations
+           of one rule, and they sit deliberately close together for the reason
+           core/querysets.py gives about active() and is_currently_active():
+           "change one, change the other" should be a glance rather than a
+           promise. One row asks the property; a page of rows asks this, in one
+           query instead of one per row.
+        """
+        return self.exclude(ON_AN_ATTENDING_ROLE)
+
+    def attending(self):
+        """The other side: rows where somebody was receiving a service.
+
+        The exact complement of recording_hours() today, because `nature` has
+        two values — and named for the axis rather than for the consequence,
+        because that is the question the report asks of it ("how many people
+        did we serve", not "whose hours are missing").
+
+        ⚠️ Unlike EventRole's is_full / is_short, these two really are
+           complements, so they share one Q above rather than each spelling the
+           condition. Two spellings of one filter is how the pair would end up
+           disagreeing about a row.
+        """
+        return self.filter(ON_AN_ATTENDING_ROLE)
+
     def notifiable(self):
         """Everyone a change to this event still concerns.
 
@@ -747,10 +881,28 @@ class Participation(ConstraintErrorFieldMixin, TimeStampedModel):
            do not invent a second wording here or in a template. The
            explanatory half of each option lives in SERVED_AS_EXPLANATIONS
            below, beside these, so the two halves cannot drift apart.
+
+        ⚠️ Two of these three are identities. The third is not — read its
+           comment before treating them as a set of three.
         """
 
         VOLUNTEER = "volunteer", "Volunteering"
         WORK = "work", "Scheduled work"
+        # 🔴 Not a third identity: "this question does not arise on this row".
+        #
+        #    A role people *attend* (ParticipationRole.Nature.ATTENDING) records
+        #    no hours, so whose time it was is not asked and not stored. The
+        #    obvious place to put that is blank — and blank is taken. It means
+        #    one thing already, "this row predates D38 and the backfill could
+        #    not prove anything about it" (migration 0014), and two different
+        #    facts sharing one absence is how a column stops being evidence.
+        #
+        # ⚠️ Never offered to anybody. It is not in SERVED_AS_EXPLANATIONS, and
+        #    askable_served_as() is built from that dict rather than from these
+        #    choices, so it cannot reach a dropdown by anybody forgetting to
+        #    exclude it. Written only by services.set_served_as(), with
+        #    declared_by left empty: nobody claimed this, the structure did.
+        NOT_APPLICABLE = "not_applicable", "Not applicable"
 
     class DeclaredBy(models.TextChoices):
         """Who said so. The evidence lives in this column, not the one above.
@@ -905,6 +1057,38 @@ class Participation(ConstraintErrorFieldMixin, TimeStampedModel):
                 violation_error_message="Check-out cannot be before check-in.",
                 violation_error_code="participation_checkout_before_checkin",
             ),
+            # L1/L4: a place somebody attends does not record hours.
+            #
+            # ⭐ The rule this project could not previously express. "Attending
+            #    roles record no hours" reads across two tables — the hours are
+            #    here, the nature of the role is on ParticipationRole — and a
+            #    CheckConstraint cannot see another table, the same corner D19
+            #    put Participation.event in. Storing `not_applicable` on the row
+            #    moves the test onto this row, so the rule becomes something the
+            #    database enforces on every write path rather than something
+            #    services.py asks nicely (D9: if it can be a constraint, it is).
+            #
+            # ⚠️ Zero is refused along with everything else, deliberately. Zero
+            #    hours is a statement — "they came and did none" — and this row
+            #    is saying something different: hours are not a question here.
+            #    The constraint above it does allow 0, because it is about a
+            #    different thing (you cannot have hours without attending).
+            #
+            # ⚠️ What it does not cover, stated rather than implied (D14): a
+            #    bulk_create that writes a blank served_as against an attending
+            #    role walks straight past this, because the row never says
+            #    not_applicable. Keeping that from happening is
+            #    services.sign_up()'s job, and it is a hint layer.
+            models.CheckConstraint(
+                condition=(
+                    ~models.Q(served_as="not_applicable")
+                    | models.Q(hours__isnull=True)
+                ),
+                name="participation_no_hours_when_not_applicable",
+                violation_error_message="A place somebody attends does not record "
+                                        "hours — they were not giving their time.",
+                violation_error_code="participation_hours_when_not_applicable",
+            ),
             # "Did they turn up" may only ever have one answer.
             models.CheckConstraint(
                 condition=models.Q(checked_in_at__isnull=True) | ~models.Q(status="absent"),
@@ -918,6 +1102,33 @@ class Participation(ConstraintErrorFieldMixin, TimeStampedModel):
     def event(self):
         """Read-only convenience. The column deliberately does not exist."""
         return self.event_role.event
+
+    @property
+    def records_hours(self):
+        """False on a place somebody attends: the event side records no hours.
+
+        ⭐ The one spelling of L4's rule. Everything that has to know — the two
+           refusals in services.py, the hours box on the attendance page, the
+           identity line on somebody's own signups page — asks this.
+
+        ⚠️ It reads the **role**, not this row's `served_as`, and that is the
+           whole point. `not_applicable` is the recorded *consequence* of being
+           on an attending role, so a row that never had it written (a
+           bulk_create, an importer, anything older than this rule) would slip
+           past a served_as test and collect hours — and the CheckConstraint
+           would not catch it either, because that row does not claim to be
+           not_applicable. So the service layer asks the question at its source
+           and is deliberately the wider of the two checks; the constraint is
+           the backstop for rows that did get the value. Two vantage points on
+           one rule, not two rules.
+
+        ⚠️ Reads through event_role.role, so anything rendering this per row
+           must select_related("event_role__role") — the attendance page and
+           the signups page both do. Same trap EventRole.is_full sidesteps by
+           being an annotation; this one is a boolean off a dictionary row
+           rather than a count, so a property is the honest shape for it.
+        """
+        return self.event_role.role.nature != ParticipationRole.Nature.ATTENDING
 
     @property
     def guardian_address(self):
@@ -950,10 +1161,32 @@ class Participation(ConstraintErrorFieldMixin, TimeStampedModel):
 #:    makes volunteering the nicer answer turns this column into one everybody
 #:    fills in the same way, and then **both** figures are wrong. No test can
 #:    watch for that; D38 section 10 records it as review's job.
+#:
+#: ⚠️ Its keys are also **the whole list of identities a human may be offered**.
+#:    NOT_APPLICABLE has no wording here because nobody is ever asked about it,
+#:    and askable_served_as() below reads this dict rather than the enum — so
+#:    a value with no way of being asked cannot appear in a dropdown by
+#:    somebody forgetting to filter it out. The opposite construction (all the
+#:    choices, minus the ones we exclude) makes every future value offerable by
+#:    default, which is the wrong default for a column that is evidence.
 SERVED_AS_EXPLANATIONS = {
     Participation.ServedAs.VOLUNTEER: "my own time",
     Participation.ServedAs.WORK: "counts as my work time",
 }
+
+
+def askable_served_as():
+    """The identities somebody may be offered, as (value, label) pairs.
+
+    Exactly the keys of SERVED_AS_EXPLANATIONS, in their order: a value with no
+    wording for asking about it is not a value anybody is asked about. Both the
+    signup form and the correction control on the signups page read this, so
+    neither of them holds its own idea of which options exist.
+    """
+    return [
+        (value, Participation.ServedAs(value).label)
+        for value in SERVED_AS_EXPLANATIONS
+    ]
 
 
 class EventNotification(ConstraintErrorFieldMixin, TimeStampedModel):

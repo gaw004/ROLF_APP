@@ -40,21 +40,51 @@
     <dd class="text-xs text-ink-600 dark:text-ink-300">different people</dd>
   </div>
   <div>
+    {% comment %}
+    ⭐ 每一份 grant 申请都问的那个数，这是系统第一次答得出来（L4）。
+
+    🔴 它和左边那个 Participants **永远不相加** —— 一个数的是所有参与过的人
+       （含来帮忙的、含带薪员工），一个数的是来接受服务的社区成员，两者相交。
+       相加出来是一个没有定义的数，而一定会有人去加，所以它俩并排放着、
+       各自带一句说明。这是 D36「两个账本永远不相加」在报表上的第二次落点。
+
+    ⚠️ 下面那句「不含在编人员」不是客套：没有那半个判据，来听讲座的自己人会
+       被算进「我们服务了 N 位社区成员」，而这个数会印进年报。
+    {% endcomment %}
+    <dt class="text-xs text-ink-600 dark:text-ink-300">People served</dt>
+    <dd class="text-xl font-semibold">{{ report.figures.people_served }}</dd>
+    <dd class="text-xs text-ink-600 dark:text-ink-300">
+      came to receive something; excludes staff on the day
+    </dd>
+  </div>
+  <div>
     <dt class="text-xs text-ink-600 dark:text-ink-300">Recorded hours</dt>
     <dd class="text-xl font-semibold">{{ report.figures.hours|floatformat:2 }}</dd>
     {% comment %}
     ⚠️ 这一行不是补充说明，是这个数字能不能用的前提。没有它，一个只记了三条
        工时的月份和一个认真记满的月份长得一模一样。
     {% endcomment %}
+    {% comment %}
+    ⚠️ 「helping signup」而不是「signup」（2026-08-21）。分母现在只数「会记工时的
+       那些报名」—— 来上课的人不记工时，把他们算成「缺一条工时记录」会让这个
+       数字一直涨，而它印在这里正是为了让人判断上面那个总数可不可信。
+    {% endcomment %}
     <dd class="text-xs text-ink-600 dark:text-ink-300">
       from {{ report.figures.hours_records }} record{{ report.figures.hours_records|pluralize }};
-      {{ report.figures.hours_missing }} signup{{ report.figures.hours_missing|pluralize }} with none
+      {{ report.figures.hours_missing }} helping signup{{ report.figures.hours_missing|pluralize }} with none
     </dd>
   </div>
   <div>
     <dt class="text-xs text-ink-600 dark:text-ink-300">Hours per participant</dt>
     <dd class="text-xl font-semibold">
       {{ report.figures.hours_per_participant|floatformat:2|default_if_none:"—" }}
+    </dd>
+    {% comment %}
+    ⚠️ 分母要写出来。它是「帮忙的人」，不是上面那个 Participants ——
+       两个数并排放着而分母不同，不说的话读者会自己拿 Participants 去乘。
+    {% endcomment %}
+    <dd class="text-xs text-ink-600 dark:text-ink-300">
+      over {{ report.figures.helpers }} who gave time
     </dd>
   </div>
   <div>

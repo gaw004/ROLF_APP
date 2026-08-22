@@ -26,11 +26,18 @@ class EventTypeAdmin(admin.ModelAdmin):
 
 @admin.register(ParticipationRole)
 class ParticipationRoleAdmin(admin.ModelAdmin):
-    list_display = ["name", "code", "is_active"]
-    list_filter = ["is_active"]
+    list_display = ["name", "code", "nature", "is_active"]
+    list_filter = ["nature", "is_active"]
     search_fields = ["name", "code"]
 
     def get_readonly_fields(self, request, obj=None):
+        # ⚠️ `nature` is deliberately not frozen here — unlike Participation's
+        #    served_as, whose rule could only be enforced by making the admin
+        #    form unable to touch it. This one's rule is in
+        #    ParticipationRole.clean(), which the admin's ModelForm calls, so
+        #    it refuses exactly the change that matters (flipping a role people
+        #    have already signed up through) and allows the one that should be
+        #    allowed: correcting a role opened under the wrong kind.
         return ["code"] if obj else []
 
 

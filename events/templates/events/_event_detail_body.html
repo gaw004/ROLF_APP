@@ -146,16 +146,21 @@
   {% endcomment %}
   <div class="table-wrap">
     <table>
-      <thead><tr><th>Role</th><th>Wanted</th><th>Signed up</th></tr></thead>
+      <thead><tr><th>Role</th><th>Kind</th><th>Wanted</th><th>Signed up</th></tr></thead>
       <tbody>
         {% for role in roles %}
           <tr>
             <td>{{ role.role.name }}</td>
+            {% comment %}
+            L1。看这一页的人要分得出「来帮忙的位置」和「来接受服务的位置」——
+            同一场发放日上两者会并排列在这张表里。
+            {% endcomment %}
+            <td class="text-ink-600 dark:text-ink-300">{{ role.role.get_nature_display }}</td>
             <td>{{ role.needed_count|default_if_none:"No limit" }}</td>
             <td>{{ role.registered_count }}</td>
           </tr>
         {% empty %}
-          <tr><td colspan="3" class="text-ink-600 dark:text-ink-300">No roles opened yet.</td></tr>
+          <tr><td colspan="4" class="text-ink-600 dark:text-ink-300">No roles opened yet.</td></tr>
         {% endfor %}
       </tbody>
     </table>

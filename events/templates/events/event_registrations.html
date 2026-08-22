@@ -45,7 +45,14 @@
                  都会让这个字段变成一个大家都往一边填的字段，两个数字同时失真。
                  这条**没有测试盯得住**，改这一段的人自己盯。
               {% endcomment %}
-              {% if row.contact_id in asked_about_serving %}
+              {% comment %}
+              ⚠️ 按**报名行**问，不是按人问（2026-08-21）。同一个在编成员在同一场
+                 活动里可以既在欢迎台帮忙、又坐在课上 —— 前一行要问身份，后一行
+                 问不出来（L4：来参加的位置不记工时，也就没有身份可言）。
+                 两个条件都在 services.signups_asked_about_serving() 里，
+                 模板不写第二个判断。
+              {% endcomment %}
+              {% if row.pk in asked_about_serving %}
                 <div class="mt-1 flex flex-wrap items-center gap-2 text-xs text-ink-600 dark:text-ink-300">
                   {% if can_manage %}
                     <form method="post" class="flex flex-wrap items-center gap-2">

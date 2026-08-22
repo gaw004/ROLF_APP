@@ -73,7 +73,12 @@
                留空白的话，「没记过」和「这一列还没渲染出来」长得一样，
                而回填留下的那一批正是空的（D38 第九节）。
             {% endcomment %}
-            · {{ row.get_served_as_display|default:"Not recorded" }}
+            {% comment %}
+            ⚠️ 来参加的位置上这一列是 `not_applicable`，那不是一档身份，
+               也不是「没记过」—— 两个都写错。所以那一类行**整条不画身份**
+               （2026-08-21）。
+            {% endcomment %}
+            {% if row.records_hours %}· {{ row.get_served_as_display|default:"Not recorded" }}{% endif %}
           </span>
         </li>
       {% endfor %}

@@ -52,7 +52,7 @@ from org.permissions import foundation_admin_group
 from .management.commands.seed_demo import demo_login
 
 from . import schedule, tokens
-from .forms import EventForm, EventPeriodForm, SignUpForm
+from .forms import AudienceFormMixin, EventForm, EventPeriodForm, SignUpForm
 from .views import EVENTS_PER_PAGE
 from .models import (
     Event,
@@ -2040,6 +2040,206 @@ class DictionaryTableTests(TestCase):
         self.assertEqual(theirs.name, "Whatever we call it here")
 
 
+class AudienceShapeTests(TestCase):
+    """L2.1: who an event is for, as a set of ticks rather than one tier.
+
+    Every failure in this class is silent if it regresses — an event published
+    to nobody, or to more people than anybody chose.
+    """
+
+    def setUp(self):
+        self.pantry = Ministry.objects.create(code="food_pantry", name="Food Pantry")
+        self.tax = Ministry.objects.create(code="tax_help", name="Tax Help")
+        self.retired = Ministry.objects.create(
+            code="closed", name="Closed programme", is_active=False)
+        self.zhang = register_account(
+            password="a-good-long-password", email="zhang@example.com",
+            legal_last_name="Zhang", legal_first_name="San")
+        MinistryRole.objects.create(contact=self.zhang.contact, ministry=self.pantry)
+        self.event_type, _ = EventType.objects.get_or_create(
+            code="distribution", defaults={"name": "Distribution"})
+
+    def payload(self, **extra):
+        return {
+            "name": "Soup run", "event_type": self.event_type.pk,
+            "ministry": self.pantry.pk,
+            "start_time": "2026-09-01T09:00", "end_time": "2026-09-01T12:00",
+            "status": Event.Status.OPEN,
+            **extra,
+        }
+
+    def save(self, form):
+        """⚠️ `owner` is not a form field — event_create() sets it after
+        commit=False, so a test calling form.save() straight through hits a
+        NOT NULL. Same two lines as the view, on purpose.
+        """
+        event = form.save(commit=False)
+        event.owner = self.zhang.contact
+        event.save()
+        form.save_m2m()
+        return event
+
+    # --- the shape itself -------------------------------------------------
+
+    def test_an_event_can_be_for_two_ministries_at_once(self):
+        """⭐ The sentence the three-tier enum could not say, and the whole
+           reason it was replaced: "the food pantry **and** the tax clinic,
+           nobody else".
+        """
+        form = EventForm(
+            self.payload(visible_to_ministries=[self.pantry.pk, self.tax.pk]),
+            user=self.zhang)
+        self.assertTrue(form.is_valid(), form.errors)
+        event = self.save(form)
+        self.assertEqual(
+            set(event.visible_to_ministries.values_list("code", flat=True)),
+            {"food_pantry", "tax_help"},
+        )
+
+    def test_outsiders_is_not_the_widest_setting(self):
+        """⚠️ Pinned because it reads like the widest one and is not.
+
+        "People with no current post" is a food handout for the people it
+        serves — staff are **excluded**, not included. "Everyone" is this plus
+        all-staff, which is why the form offers a convenience tick that stores
+        those two rather than a third value of its own.
+        """
+        form = EventForm(self.payload(visible_to_outsiders=True), user=self.zhang)
+        self.assertTrue(form.is_valid(), form.errors)
+        event = self.save(form)
+        self.assertTrue(event.visible_to_outsiders)
+        self.assertFalse(event.visible_to_all_staff)
+
+    def test_a_role_carries_the_same_three(self):
+        # L2 and L3 are the same three questions asked of two rows, so they are
+        # the same three columns — declared once on the Audience mixin.
+        event = make_event(ministry=self.pantry)
+        role = make_role(event, "lifting")
+        role.visible_to_all_staff = True
+        role.save()
+        role.visible_to_ministries.add(self.tax)
+        role.refresh_from_db()
+        self.assertTrue(role.visible_to_all_staff)
+        self.assertEqual(role.visible_to_ministries.count(), 1)
+
+    # --- rule 1: somebody has to be able to see it ------------------------
+
+    def test_an_event_visible_to_nobody_is_refused(self):
+        """Published and visible to nobody is a draft, and draft is a status.
+
+        ⚠️ The error goes on a field, not on the form. "Say who this is for" at
+           the top of a long publish form leaves somebody hunting for the box.
+        """
+        form = EventForm(self.payload(), user=self.zhang)
+        self.assertFalse(form.is_valid())
+        self.assertIn("visible_to_outsiders", form.errors)
+        self.assertFalse(form.non_field_errors())
+
+    def test_ministries_alone_are_enough(self):
+        # ⚠️ The half a CheckConstraint could never express: neither boolean is
+        #    set and the event is perfectly legal.
+        form = EventForm(
+            self.payload(visible_to_ministries=[self.pantry.pk]), user=self.zhang)
+        self.assertTrue(form.is_valid(), form.errors)
+
+    # --- rule 2: one state, one spelling ---------------------------------
+
+    def test_all_staff_together_with_a_named_ministry_is_refused(self):
+        """⚠️ The form greys the ministries out; greying keeps nobody out.
+
+        Refused rather than quietly normalised: the two mean the same thing
+        today and stop meaning it the moment a third ministry is created, so
+        which was meant is a question only the person submitting can answer.
+        """
+        form = EventForm(
+            self.payload(visible_to_all_staff=True,
+                         visible_to_ministries=[self.pantry.pk]),
+            user=self.zhang)
+        self.assertFalse(form.is_valid())
+        self.assertIn("visible_to_ministries", form.errors)
+
+    def test_outsiders_together_with_all_staff_is_how_everyone_is_stored(self):
+        # ⭐ Decision 11: "Everyone" is a convenience on the form, never a third
+        #    stored value — otherwise one state would have two spellings, which
+        #    is the very thing rule 2 above exists to prevent.
+        form = EventForm(
+            self.payload(visible_to_outsiders=True, visible_to_all_staff=True),
+            user=self.zhang)
+        self.assertTrue(form.is_valid(), form.errors)
+
+    # --- the defaults ----------------------------------------------------
+
+    def test_a_new_event_starts_with_only_the_publishers_own_ministry(self):
+        """🔴 The expensive decision on this form.
+
+        Defaulting to everyone would match today's behaviour and cost nothing —
+        and its failure is a leaving party published to every outside volunteer
+        because nobody changed a default. This default goes the other way: the
+        narrowest useful start.
+        """
+        form = EventForm(user=self.zhang)
+        self.assertEqual(form.initial["visible_to_ministries"], [self.pantry.pk])
+        self.assertFalse(form.initial.get("visible_to_outsiders"))
+        self.assertFalse(form.initial.get("visible_to_all_staff"))
+
+    def test_editing_does_not_re_tick_the_publishers_ministry(self):
+        # ⚠️ On an edit the stored audience is the answer. Re-ticking would
+        #    quietly widen an event somebody had deliberately narrowed.
+        event = make_event(ministry=self.pantry)
+        event.visible_to_outsiders = True
+        event.save()
+        form = EventForm(instance=event, user=self.zhang)
+        # ⚠️ Empty, not absent. ModelForm fills `initial` from the instance, so
+        #    the key is always there — what matters is that the pre-tick did not
+        #    put their own ministry into it.
+        self.assertEqual(form.initial["visible_to_ministries"], [])
+
+    def test_a_retired_ministry_is_not_offered(self):
+        form = EventForm(user=self.zhang)
+        offered = form.fields["visible_to_ministries"].queryset
+        self.assertNotIn(self.retired, offered)
+        self.assertIn(self.tax, offered)
+
+    # --- the admin is a door of its own ----------------------------------
+
+    def test_the_admin_form_refuses_an_empty_audience_too(self):
+        """🔴 Without its own form the admin has no audience check at all.
+
+        The rules cannot live in Model.clean() — a ManyToMany is written after
+        save() while full_clean() runs before it — so a model-layer check would
+        have covered nothing here.
+        """
+        from events.admin import EventAdmin
+
+        self.assertTrue(issubclass(EventAdmin.form, AudienceFormMixin))
+
+    # --- history ---------------------------------------------------------
+
+    def test_changing_who_can_see_it_is_recorded(self):
+        """Who an event was published to is the same kind of promise as when.
+
+        ⚠️ The ministry list needs simple-history's m2m_fields to be recorded at
+           all. Without it the two booleans would appear in the history and the
+           list would not — half a record, which reads as a whole one.
+        """
+        event = make_event(ministry=self.pantry)
+        event.visible_to_all_staff = True
+        event.save()
+        event.visible_to_all_staff = False
+        event.save()
+        event.visible_to_ministries.add(self.pantry)
+
+        flags = [entry.visible_to_all_staff for entry in event.history.all()]
+        self.assertIn(True, flags)
+        self.assertIn(False, flags)
+        # And the M2M has a historical table of its own, populated by the add().
+        newest = event.history.first()
+        self.assertEqual(
+            list(newest.visible_to_ministries.values_list("ministry__code", flat=True)),
+            ["food_pantry"],
+        )
+
+
 class PageTestCase(TestCase):
     """Shared cast: two ministries, one admin of each, one plain volunteer.
 
@@ -2224,7 +2424,7 @@ class MinistryAdminPageTests(PageTestCase):
         response = self.client.post(reverse("events:event_create"), {
             "name": "Sneaky", "event_type": event_type.pk, "ministry": self.tax.pk,
             "start_time": "2026-09-01T09:00", "end_time": "2026-09-01T12:00",
-            "status": Event.Status.DRAFT,
+            "status": Event.Status.DRAFT, "visible_to_outsiders": True,
         })
         self.assertIn(response.status_code, (403, 200))
         self.assertFalse(Event.objects.filter(name="Sneaky").exists())
@@ -2243,6 +2443,11 @@ class MinistryAdminPageTests(PageTestCase):
             "ministry": self.pantry.pk,
             "start_time": "2026-09-01T09:00", "end_time": "2026-09-01T12:00",
             "status": Event.Status.OPEN,
+        # ⚠️ L2.1 rule 1: the form refuses an audience nobody is in, so
+        #    every well-formed POST carries one. Public, because that is
+        #    what these events were before the field existed and none of
+        #    these tests is about the audience.
+        "visible_to_outsiders": True,
         })
         self.assertEqual(response.status_code, 302)
         self.assertTrue(Event.objects.filter(name="Saturday pantry").exists())
@@ -3230,7 +3435,7 @@ class MergedEditAndRolesPageTests(PageTestCase):
             "name": "Soup run", "event_type": EventType.objects.first().pk,
             "ministry": self.pantry.pk,
             "start_time": "2026-09-01T09:00", "end_time": "2026-09-01T12:00",
-            "status": Event.Status.OPEN,
+            "status": Event.Status.OPEN, "visible_to_outsiders": True,
         })
         created = Event.objects.get(name="Soup run")
         self.assertRedirects(
@@ -3588,6 +3793,11 @@ class EventUpdatePageTests(PageTestCase):
             "location": self.event.location,
             "status": self.event.status,
             "description": self.event.description,
+        # ⚠️ L2.1 rule 1: the form refuses an audience nobody is in, so
+        #    every well-formed POST carries one. Public, because that is
+        #    what these events were before the field existed and none of
+        #    these tests is about the audience.
+        "visible_to_outsiders": True,
         }
         fields.update(overrides)
         return fields
@@ -6184,6 +6394,8 @@ class EventImageUploadTests(PageTestCase):
                 "ministry": self.pantry.pk,
                 "start_time": "2026-09-01T09:00", "end_time": "2026-09-01T12:00",
                 "status": Event.Status.OPEN,
+                # ⚠️ L2.1 rule 1 — see EventUpdatePageTests.payload().
+                "visible_to_outsiders": True,
             },
             {"image": upload},
             user=self.zhang,
@@ -6374,6 +6586,8 @@ class EventImageUploadTests(PageTestCase):
             "ministry": self.pantry.pk,
             "start_time": "2026-09-01T09:00", "end_time": "2026-09-01T12:00",
             "status": Event.Status.OPEN,
+            # ⚠️ L2.1 rule 1 — see EventUpdatePageTests.payload().
+            "visible_to_outsiders": True,
         }, user=self.zhang)
         self.assertTrue(form.is_valid(), form.errors)
 

@@ -884,15 +884,86 @@ class Event(...):
     #: 全体在编看得见。⚠️ 它和下面那张多对多是包含关系，不是并列
     visible_to_all_staff = models.BooleanField(default=False)
     #: 具体哪几个 ministry 的在编看得见
-    visible_to_ministries = models.ManyToManyField(Ministry, blank=True, related_name="+")
+    visible_to_ministries = models.ManyToManyField(
+        Ministry, blank=True, related_name="+",
+        limit_choices_to={"is_active": True},
+    )
+
+    history = HistoricalRecords(m2m_fields=["visible_to_ministries"])
 ```
 
-`EventRole` 三个同名的字段，语义从「看得见」换成「报得上」。
+`EventRole` 三个同名的字段。
 
 ⚠️ **两个布尔 + 一张多对多，而不是一张 `AudienceRule` 表。** 前者的三行读起来就是
 界面上那三类勾选，后者要为「外部人员」和「全体在编」各造一行没有 ministry 的记录 ——
 [D15](decisions/D15-relationship-carriers.md) 的载体判据里，那属于「为了让结构统一
 而造数据」。真到了要给可见性加属性（比如「从哪天起可见」）的那天再升级成表。
+
+### ⚠️ 三处实测出来的机制，写进形状里而不是等实现时撞
+
+**`m2m_fields` 不是可选的。** `HistoricalRecords()` **默认不跟踪 M2M**
+（实测 simple-history 3.13 支持 `m2m_fields`，但要显式传）。不传的话，两个布尔进历史、
+那张多对多不进 —— **一半有一半没有，比全都没有更糟**：翻历史的人会以为自己看到了
+完整的受众变更。而「谁看得见这场活动」正是 `Event` 挂历史的那条理由
+（「改时间改地点必须事后答得出来」）所属的那一类。
+
+**`limit_choices_to={"is_active": True}`。** 退休的 ministry 不该出现在勾选框里 ——
+同 `Participation.consent_relationship` 那一处的做法。
+
+⚠️ **删掉一个 ministry 会静默收窄活动。** M2M 的中间行没有 `on_delete`，
+被引用的 ministry 一删，那几行直接消失，活动因此变窄而没有任何提示。
+`Ministry` 今天靠 `Event.ministry` / `Position.ministry` 的 `PROTECT` 挡着，
+但一个**只被受众引用**的 ministry 不在那道保护里。
+主动接受：退休走 `is_active=False`（那是这张表本来的路），删除本来就不该发生。
+写下来是因为它是这个形状唯一一处会静默丢信息的地方。
+
+### 🔴 `Model.clean()` 验不了 M2M —— 实测，而它推翻了下面一句话
+
+```
+ValueError: 'Event' instance needs to have a primary key value
+            before this relationship can be used.
+```
+
+M2M 在 `save()` **之后**才写，`full_clean()` 在**之前**跑。所以：
+
+> 「至少勾一项」和「角色 ⊆ 活动」**进不了 `Model.clean()`**。
+
+⚠️ 更坏的是改一个已存在的对象时它**不报错**：`self.visible_to_ministries.all()`
+读得出来，读到的是**库里那份旧值**，而不是正在提交的新值。一条读着合理、
+验的是过期数据的校验 —— 比直接抛异常危险得多。
+
+于是 [L2.3](#l23-不变量角色勾的每一项活动都必须勾了) 那张表里
+「`EventRole.clean()` · 模型层，所以 admin 的 inline 和表单两条路一起覆盖」
+**这句话作废**。规则的落点改成：
+
+| 层 | 管什么 |
+|---|---|
+| `EventForm` / `EventRoleForm` 的 `clean()` | 真正的把关。表单读得到 `cleaned_data` 里那份**新**的 M2M |
+| `services` | 非表单路径（以后的导入、API）走这里 |
+| admin | ⚠️ **要自己的 `form = `**，否则 admin 那条路一道校验都没有 |
+
+⚠️ 按 [D14](decisions/D14-constraint-is-the-only-rule.md)：这里**一条数据库约束都没有**，
+而且不是偷懒 —— 「至少勾一项」的第三个析取项（有没有 ministry 行）在另一张表上，
+`CheckConstraint` 看不见；而更弱的版本（比如「两个布尔至少一个真」）是**错的**，
+因为只勾了 ministry 的活动完全合法。所以这一整条规则只有提示层，`bulk_create` 走得过去。
+
+### ⚠️ 角色那一组是「看得见」，不是只有「报得上」—— 这一格我原来写反了
+
+本节初稿写的是「`EventRole` 三个同名的字段，**语义从看得见换成报得上**」。错。
+两条原文各自都足够：
+
+- 需求 8：「同一个 event，internal roles **只会显示给** internal 的人」
+- [`participants.md` 第三节](participants.md)的 🔴：「在角色这一层，**看得见 = 报得上**」
+
+所以角色要**按看的人过滤掉**，不是列出来带一句「你报不上」。
+
+⚠️ 于是多出一种空状态：**别的 ministry 的在编成员打开活动，看到零个角色** ——
+和「还没建完」「这是一条公告」长得一模一样。[L2.5](#l25-公告) 因此要从两句话变三句，
+而这正是 [D27](decisions/D27-ministry-report.md) 那条「没有和没算不能长得一样」。
+
+⚠️ [`participants.md` 第六节](participants.md)那个示意框写的是「外部人看得见活动，
+这个位置报不上」，和它自己第三节的 🔴 打架。需求原文 + 第三节的不变量，二比一，
+按这两条走 —— 那份文档要补一句更正。
 
 ### 五条规则，全部落在服务层 / 表单，逐条写出来
 
@@ -912,10 +983,20 @@ class Event(...):
 ⚠️ 规则 2 的置灰只是界面。**服务层必须自己拒绝手工造出来的冗余组合**，
 否则那道置灰谁都拦不住 —— 同这个项目一直在说的「不画控件是界面，界面挡不住任何人」。
 
+⚠️ **没有 `Contact` 的登录用户按定义就是外部人员**（他不可能有在职任职），
+所以他落进「外部人员」那一支，不是单独一个分支。⚠️ 这一句要写进
+`for_audience()` 的 docstring：超级管理员就是这种账号（[D12](decisions/D12-user-on-contact.md)：
+`User.contact` 可空），而「超管看不见内部活动」第一次遇到会被当成 bug。
+
 ### 发布者自己的 ministry：可以不勾，但表单预勾上
 
 「食物银行为报税志愿者办一场培训」是真实场景，所以**不强制包含自己**。
 但新建时把发布者自己的 ministry 预勾上 —— 内部活动最常见的情形就是给自己人看。
+
+⚠️ 「自己的 ministry」在一个人管两个 ministry 时是两个。预勾**他管的全部** ——
+判据走 `ministry_ids_administered_by(user)`，也就是那份表单的 ministry 下拉框
+已经在用的同一个集合。不另判一次，理由同这个项目一直在说的：
+两处判断迟早会在某一格上走散。
 
 ⚠️ 于是规则 4 有一个例外：这一项是预勾的。它不违反规则 4 的用意 ——
 规则 4 防的是「默认对外公开」，而预勾自己的 ministry 是默认**最窄**。
@@ -995,7 +1076,7 @@ def refuse_wider_than_event(*, event, role_flags, role_ministries):
 
 | 调用方 | 挡的方向 |
 |---|---|
-| `EventRole.clean()` | 建角色 / 改角色时。⚠️ 模型层，所以 admin 的 inline 和表单两条路一起覆盖 |
+| `EventRoleForm.clean()` | 建角色 / 改角色时。⚠️ **不是** `EventRole.clean()` —— 模型层读不到还没保存的 M2M，实测见 [L2.1](#-modelclean-验不了-m2m--实测而它推翻了下面一句话)。admin 因此要自己的 `form = ` |
 | `EventForm.clean()` | 活动改窄时。错误消息要点名是哪几个角色挡住了它，否则人只知道被拒绝、不知道去改什么 |
 | `services.sign_up()` | 见下一步。它挡的不是配置，是报名 |
 
@@ -1025,14 +1106,22 @@ def refuse_wider_than_event(*, event, role_flags, role_ministries):
 `eligible_role_ids(contact, event)` 返回一个集合，一次查询 ——
 集合天然去重，所以一人多岗不会让同一个角色的 id 出现两次。
 
-### 页面：看得见、报不上
+### 页面：角色**按人过滤掉**，不是列出来带一句「你报不上」
 
-`_event_detail_body.html` 的角色表加一列/一行说明：没有资格的角色**照样列出来**，
-带一句为什么。这就是需求 7 在界面上的落点，也是
-[`participants.md` 第三节](participants.md) 那句「在活动这一层，看得见 ≠ 报得上」的唯一可见证据。
+> ⚠️ 本节初稿写的是「照样列出来，带一句为什么」。**错**，理由和更正见
+> [L2.1 末尾那一节](#-角色那一组是看得见不是只有报得上-这一格我原来写反了)：
+> 需求 8 原文说 internal roles「只会显示给 internal 的人」，
+> 而 `participants.md` 第三节的 🔴 说「在角色这一层，看得见 = 报得上」。
 
-`SignUpForm` 的 `event_role` queryset 只放有资格的 —— 手工构造的 POST 因此拿到一条
-真正的校验错误，而不是 500。
+`_event_detail_body.html` 的角色表和 `SignUpForm` 的 `event_role` queryset
+**收同一个集合**：这个人看得见的那些角色。手工构造的 POST 因此拿到一条真正的
+校验错误，而不是 500。
+
+需求 7（看得见 ≠ 报得上）在这个形状下仍然成立，只是落在**活动**这一层：
+别的 ministry 的在编成员**打得开这场活动**，只是里面一个角色都没有给他的。
+
+⚠️ 于是那一页要说得出「这里有角色，只是没有一个是给你的」——
+见 [L2.5](#l25-公告)，那里现在有三种空状态要区分。
 
 ## L2.5 公告
 
@@ -1568,3 +1657,39 @@ self.assertNotIn("empty, so the form that needs it", text)          # 加了一�
 ⚠️ 顺带一句判断，不改：**要让它幂等，就得让 `joins()` 先查一次「报过没有」** ——
 而那正是 `sign_up()` 故意不做的事（「你已经报过这个角色了」是一条要说给人听的话，
 不是一个静默跳过）。演示脚本的方便，不值得让那条规矩多一个例外。
+
+## L2.1 · 一条新规则红了 13 条老测试，而那 13 条都在替我说同一句话（2026-08-26）
+
+「至少勾一项」落地之后，全量跑下来 13 条红的，全是**往建/改活动的表单 POST、
+但 payload 里没有受众**的测试。
+
+它们不是被误伤 —— 它们精确地演示了这条规则要防的那件事：
+一个手工拼出来的 POST，**可以造出一场谁都看不见的已发布活动**。
+真实浏览器不会（表单会把勾选框渲染出来、一起提交），而脚本、导入、
+以及以后的 API 会。
+
+处置不是逐条加一个字段了事，是给那几个 payload 助手补上，
+并在每一处写明为什么补：`visible_to_outsiders=True` ——
+因为这些活动在这个字段存在之前**本来就是所有人可见的**，
+而这些测试没有一条是在测受众。
+
+⚠️ 记下来是因为它是这个项目一直在讲的那件事的一次正面例子：
+新规则打红老测试，第一反应应该是**「它抓到什么了」而不是「怎么让它绿」**。
+这一次答案是「什么都没抓到，那 13 处本来就该带这个字段」——
+但那句话得先问出来才知道。
+
+## L2.1 · admin 那条路差点一道校验都没有（2026-08-26）
+
+规则进不了 `Model.clean()`（M2M 在 `save()` 之后才写，实测见 L2.1）。
+而**管理后台自己建表单** —— 它不会用站点的 `EventForm`。
+
+也就是说：如果只把规则写进 `EventForm`，那么**从 admin 建一场活动，
+可以一项都不勾**，而页面上什么都不会说。
+
+处置：`AudienceAdminForm` 复用同一个 mixin（不是抄一份规则），
+放在 `forms.py` 而不是 `admin.py` —— 后者按 D18 不许持有逻辑，
+在那边它只剩一行 `form = `。
+
+⚠️ 这一格是「模型层校验覆盖所有入口」这个直觉的反例，而那个直觉在这个项目里
+一直是对的（`ParticipationRole.nature` 那条就是靠它覆盖 admin 的）。
+M2M 是它唯一不成立的地方，所以值得单独记住。

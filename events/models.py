@@ -259,6 +259,134 @@ NATURE_EXPLANATIONS = {
 }
 
 
+class Audience(models.Model):
+    """Who this is for: outsiders, all staff, or the staff of named ministries.
+
+    L3 on an Event ("who can see it") and L2 on an EventRole ("who can sign up
+    for it") are the same three questions, so they are the same three columns,
+    declared once. See participants.md L2/L3 and 06-roadmap.md L2.1.
+
+    ⚠️ Three tick-boxes rather than one three-valued column, and the reason is
+       a sentence the enum could not say: "the food pantry **and** the tax
+       clinic, nobody else". Joint training and cross-ministry outings are real,
+       and an enum with a "this ministry" tier cannot express two of them.
+
+    ⚠️ `visible_to_outsiders` is **not** the widest setting. It means only the
+       people with no current post — a food handout for the people it serves,
+       which staff should not be filling up. "Everyone" is this plus
+       `visible_to_all_staff`, which is why the form offers an "Everyone" tick
+       that stores those two rather than a third value of its own: one state,
+       one spelling.
+
+    ⚠️ `visible_to_all_staff` **contains** every ministry, so the two must not
+       both be set — see `refuse_redundant_audience()`. They agree today and
+       stop agreeing the moment a new ministry is created, which is exactly the
+       kind of drift a second spelling produces.
+    """
+
+    class Meta:
+        abstract = True
+
+    #: The three, named once. Every form and the admin build their field list
+    #: from this, so no screen can quietly offer two of the three.
+    AUDIENCE_FIELDS = (
+        "visible_to_outsiders", "visible_to_all_staff", "visible_to_ministries",
+    )
+
+    visible_to_outsiders = models.BooleanField(
+        default=False,
+        verbose_name="People with no current post",
+        help_text="Outside volunteers and the people the foundation serves.",
+    )
+    visible_to_all_staff = models.BooleanField(
+        default=False,
+        verbose_name="Everybody on the books",
+        help_text="Anyone holding a post on the day — paid or not.",
+    )
+    visible_to_ministries = models.ManyToManyField(
+        Ministry,
+        blank=True,
+        related_name="+",
+        # A retired ministry must not be offered — same trick as
+        # Participation.consent_relationship's limit_choices_to.
+        limit_choices_to={"is_active": True},
+        verbose_name="Only these ministries' staff",
+    )
+
+    @property
+    def audience_is_empty(self):
+        """Nobody at all. ⚠️ Costs a query for the M2M — do not call it per row."""
+        return not (
+            self.visible_to_outsiders
+            or self.visible_to_all_staff
+            or self.visible_to_ministries.exists()
+        )
+
+
+# --- The two rules an audience has to obey on its own -----------------------
+#
+# 🔴 Neither of these can live in Model.clean(), and that is a mechanic rather
+#    than a preference. A ManyToMany is written **after** save(); full_clean()
+#    runs **before** it. On a new object the field cannot even be read —
+#
+#        ValueError: 'Event' instance needs to have a primary key value
+#                    before this relationship can be used
+#
+#    — and on an existing one it reads the row already in the database, not the
+#    values being submitted. That second case is the dangerous one: a check that
+#    looks right and validates last week's data.
+#
+#    So both are plain functions taking loose values, called from:
+#      · the ModelForms      — the real gate; they hold the submitted M2M
+#      · services            — for anything not coming through a form
+#      · the admin's own form — ⚠️ without one, the admin has no check at all
+#
+# ⚠️ And there is no database constraint behind either, which D14 asks to be
+#    said rather than implied. "At least one" has a third disjunct living in
+#    another table (are there any ministry rows?), which a CheckConstraint
+#    cannot see; and the weaker version a constraint *could* express — "one of
+#    the two booleans" — is simply wrong, because an event ticked for two
+#    ministries and nothing else is perfectly legal. bulk_create walks past
+#    both of these.
+
+
+def refuse_empty_audience(*, outsiders, all_staff, ministries):
+    """Nobody ticked. Raises ValidationError; returns nothing.
+
+    Published and visible to nobody is indistinguishable from a draft — and a
+    draft already has a status of its own. Two fields saying one thing is the
+    bill this project has paid three times.
+
+    ⚠️ Takes loose values rather than an instance, because the only layer that
+       can see the **submitted** M2M is the form (see the module note on
+       refuse_redundant_audience below).
+    """
+    if outsiders or all_staff or ministries:
+        return
+    raise ValidationError(
+        "Say who this is for. Something published that nobody can see is a "
+        "draft, and there is already a status for that."
+    )
+
+
+def refuse_redundant_audience(*, all_staff, ministries):
+    """"Everybody on the books" plus a named ministry — one state, two spellings.
+
+    ⚠️ The form greys the ministries out once the box is ticked, and greying is
+       interface: it keeps nobody out. This is the half that does.
+
+    Refused rather than quietly normalised: "everybody on the books" and "these
+    four ministries" mean the same thing today and stop meaning it the moment a
+    fifth ministry is created — so which one was meant is a question only the
+    person submitting can answer.
+    """
+    if all_staff and ministries:
+        raise ValidationError(
+            "“Everybody on the books” already includes every ministry — untick "
+            "it, or untick the ministries."
+        )
+
+
 class EventQuerySet(models.QuerySet):
     """Two status predicates, because status is answering two different questions.
 
@@ -408,7 +536,7 @@ class EventQuerySet(models.QuerySet):
         return self.filter(start_time__gte=start, start_time__lt=end)
 
 
-class Event(ConstraintErrorFieldMixin, TimeStampedModel):
+class Event(Audience, ConstraintErrorFieldMixin, TimeStampedModel):
     """One occasion: a food distribution on Saturday morning.
 
     Several shifts are several Events, not one Event plus a shift table: the
@@ -526,7 +654,14 @@ class Event(ConstraintErrorFieldMixin, TimeStampedModel):
 
     # Published to the outside world: a change of time or place has to be
     # answerable for afterwards.
-    history = HistoricalRecords()
+    #
+    # ⚠️ `m2m_fields` is not optional here. simple-history does **not** track a
+    #    ManyToMany unless it is named, so without this the two audience
+    #    booleans would appear in the history and the list of ministries would
+    #    not — half a record of who could see this, which reads as a whole one.
+    #    Who an event was published to is the same kind of promise as when and
+    #    where it was, which is the reason this table has history at all.
+    history = HistoricalRecords(m2m_fields=["visible_to_ministries"])
 
     objects = models.Manager.from_queryset(EventQuerySet)()
 
@@ -738,7 +873,7 @@ class EventRoleQuerySet(models.QuerySet):
         return self.with_signup_counts().filter(is_short=True)
 
 
-class EventRole(ConstraintErrorFieldMixin, TimeStampedModel):
+class EventRole(Audience, ConstraintErrorFieldMixin, TimeStampedModel):
     """This event opened this job, and wants this many people for it.
 
     It exists with nobody signed up, and that is the point: an event that
@@ -788,7 +923,8 @@ class EventRole(ConstraintErrorFieldMixin, TimeStampedModel):
 
     # needed_count is a promise published to volunteers ("we need 5 for
     # lifting"), so changing it has to be traceable — same reason as Event.
-    history = HistoricalRecords()
+    # ⚠️ m2m_fields for the same reason as Event's; see there.
+    history = HistoricalRecords(m2m_fields=["visible_to_ministries"])
 
     objects = models.Manager.from_queryset(EventRoleQuerySet)()
 

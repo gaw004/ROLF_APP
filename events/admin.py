@@ -9,7 +9,15 @@ from django.contrib import admin
 from django.db.models import Count
 from simple_history.admin import SimpleHistoryAdmin
 
-from .models import Event, EventRole, EventType, Participation, ParticipationRole
+from .forms import AudienceAdminForm
+from .models import (
+    Audience,
+    Event,
+    EventRole,
+    EventType,
+    Participation,
+    ParticipationRole,
+)
 
 
 @admin.register(EventType)
@@ -45,8 +53,9 @@ class EventRoleInline(admin.TabularInline):
     """Open the jobs while setting the event up — P2's "say how many you need"."""
 
     model = EventRole
+    form = AudienceAdminForm
     extra = 0
-    fields = ["role", "needed_count", "notes"]
+    fields = ["role", "needed_count", "notes", *Audience.AUDIENCE_FIELDS]
     autocomplete_fields = ["role"]
     show_change_link = True
 
@@ -66,10 +75,11 @@ class EventAdmin(SimpleHistoryAdmin):
     # column, R3 from duration — which is why all three are here rather than on
     # a page of their own. The foundation-wide role in the acceptance walk reads
     # them from this changelist.
+    form = AudienceAdminForm
     list_display = [
         "name", "ministry", "event_type", "status", "start_time", "end_time", "duration",
     ]
-    list_filter = ["status", "ministry", "event_type"]
+    list_filter = ["status", "ministry", "event_type", "visible_to_outsiders"]
     search_fields = ["name", "location"]
     date_hierarchy = "start_time"
     autocomplete_fields = ["event_type", "ministry", "owner"]
@@ -126,6 +136,7 @@ class UnderstaffedFilter(admin.SimpleListFilter):
 
 @admin.register(EventRole)
 class EventRoleAdmin(SimpleHistoryAdmin):
+    form = AudienceAdminForm
     list_display = ["role", "event", "needed_count"]
     list_filter = ["event__ministry", "role", UnderstaffedFilter]
     search_fields = ["event__name", "role__name"]

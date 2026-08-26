@@ -8,6 +8,7 @@ reaching into a request. Phase C's views construct the same classes unchanged.
 import datetime
 
 from django import forms
+from django.core.exceptions import ValidationError
 from django.conf import settings
 from django.db.models import Q
 
@@ -20,11 +21,14 @@ from org.permissions import ministry_ids_administered_by
 from .models import (
     NATURE_EXPLANATIONS,
     SERVED_AS_EXPLANATIONS,
+    Audience,
     Event,
     EventRole,
     Participation,
     ParticipationRole,
     askable_served_as,
+    refuse_empty_audience,
+    refuse_redundant_audience,
 )
 
 
@@ -251,7 +255,72 @@ class SignUpForm(forms.Form):
         }
 
 
-class EventForm(forms.ModelForm):
+class AudienceFormMixin:
+    """The two rules an audience obeys on its own, for any form that edits one.
+
+    🔴 This is where they live, and not in `Model.clean()`, because a
+       ManyToMany is written after save() while full_clean() runs before it: on
+       a new object the field cannot be read at all, and on an existing one it
+       reads the row already in the database rather than what is being
+       submitted. A form is the first layer that holds the new value. The full
+       working is in events/models.py, above refuse_empty_audience().
+
+    ⚠️ So the admin needs `form = ` pointing at a subclass of this, or the admin
+       has no check whatsoever. Not drawing a control keeps nobody out; this
+       does.
+    """
+
+    def audience(self):
+        """(outsiders, all_staff, ministries) as submitted."""
+        return (
+            self.cleaned_data.get("visible_to_outsiders"),
+            self.cleaned_data.get("visible_to_all_staff"),
+            self.cleaned_data.get("visible_to_ministries"),
+        )
+
+    def clean_audience(self):
+        """Run both rules, putting each message where the reader can act on it.
+
+        ⚠️ Errors land on a **field**, never on the form as a whole. "Say who
+           this is for" at the top of a long publish form leaves somebody
+           hunting for which box it means.
+        """
+        outsiders, all_staff, ministries = self.audience()
+        try:
+            refuse_empty_audience(
+                outsiders=outsiders, all_staff=all_staff, ministries=ministries)
+        except ValidationError as error:
+            self.add_error("visible_to_outsiders", error)
+        try:
+            refuse_redundant_audience(all_staff=all_staff, ministries=ministries)
+        except ValidationError as error:
+            self.add_error("visible_to_ministries", error)
+
+
+class AudienceAdminForm(AudienceFormMixin, forms.ModelForm):
+    """The admin's form for anything carrying an audience.
+
+    🔴 Without it the admin has **no audience check at all** — the two rules
+       cannot live in Model.clean() (a ManyToMany is written after save() while
+       full_clean() runs before it; the working is in events/models.py above
+       refuse_empty_audience()), and the admin builds its own forms.
+
+    ⚠️ It lives here rather than in admin.py so that admin.py keeps holding no
+       logic of its own (D18) — over there it is one `form = ` line. And it
+       reuses the mixin rather than repeating the two calls, so the admin and
+       the site can never come to different conclusions about the same event.
+    """
+
+    class Meta:
+        widgets = {"visible_to_ministries": forms.CheckboxSelectMultiple}
+
+    def clean(self):
+        cleaned = super().clean()
+        self.clean_audience()
+        return cleaned
+
+
+class EventForm(AudienceFormMixin, forms.ModelForm):
     """P2: publish an event. The ministry dropdown lists only the ones they run.
 
     ⚠️ The dropdown is there to stop a slip, not to stop an attack — a POST can
@@ -263,12 +332,18 @@ class EventForm(forms.ModelForm):
         model = Event
         fields = [
             "name", "event_type", "ministry", "start_time", "end_time",
-            "location", "status", "requires_guardian_consent", "description",
-            "image",
+            "location", "status", "requires_guardian_consent",
+            # L3. Right after the lifecycle fields and before the prose, because
+            # "who is this for" is a publishing decision rather than a detail.
+            *Audience.AUDIENCE_FIELDS,
+            "description", "image",
         ]
         widgets = {
             "start_time": forms.DateTimeInput(attrs={"type": "datetime-local"}),
             "end_time": forms.DateTimeInput(attrs={"type": "datetime-local"}),
+            # Tick-boxes, not a multi-select list: every option has to be
+            # visible at once for the containment between them to be readable.
+            "visible_to_ministries": forms.CheckboxSelectMultiple,
             # `accept` is a semantic attribute, not styling — it tells the file
             # picker what to offer, the same exception type="date" gets under
             # phase-c.md's placement rules. It is a convenience and never a
@@ -307,9 +382,34 @@ class EventForm(forms.ModelForm):
 
     def __init__(self, *args, user, **kwargs):
         super().__init__(*args, **kwargs)
-        self.fields["ministry"].queryset = Ministry.objects.filter(
-            id__in=ministry_ids_administered_by(user)
-        )
+        administered = ministry_ids_administered_by(user)
+        self.fields["ministry"].queryset = Ministry.objects.filter(id__in=administered)
+        # ⚠️ Same set the dropdown above is built from, not a second lookup.
+        #    Two answers to "which ministries are theirs" would drift apart on
+        #    exactly the account where it matters.
+        self.fields["visible_to_ministries"].queryset = Ministry.objects.filter(
+            is_active=True).order_by("name")
+
+        # ⭐ Nothing else is pre-ticked, and that is the expensive decision of
+        #    this form. Defaulting to everyone would match today's behaviour and
+        #    make the migration free — and its failure mode is publishing a
+        #    leaving party to every outside volunteer because somebody did not
+        #    change a default. Nothing raises; nobody finds out.
+        #
+        #    The one exception is their own ministries, and it goes the other
+        #    way: it is the **narrowest** useful start, and an internal event is
+        #    the commonest reason to be narrowing at all.
+        #
+        # ⚠️ Only when adding. On an edit the stored audience is the answer, and
+        #    re-ticking their own ministry would quietly widen an event somebody
+        #    had deliberately narrowed.
+        if self.instance.pk is None:
+            self.initial.setdefault("visible_to_ministries", list(administered))
+
+    def clean(self):
+        cleaned = super().clean()
+        self.clean_audience()
+        return cleaned
 
     def time_changed(self):
         """Did this submission actually move the event?

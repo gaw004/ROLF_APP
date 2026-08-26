@@ -446,6 +446,15 @@ class Command(BaseCommand):
         )
 
     def events(self):
+        """⚠️ Every event here is `visible_to_outsiders=True` — L3 (2026-08-26).
+
+        That is what all of them meant before the field existed, and without it
+        an event is visible to nobody and every demo page 404s. It is **not**
+        "everyone": staff-only and ministry-only events are what batch two's
+        acceptance walk needs, and they arrive with the rest of that batch
+        rather than being retro-fitted onto events that exist to demonstrate
+        something else.
+        """
         now = local_now()
 
         # 1. Open, taking signups — three roles, one of them filled, one half
@@ -458,6 +467,7 @@ class Command(BaseCommand):
                 "start_time": now + 7 * DAY, "end_time": now + 7 * DAY + 3 * HOUR,
                 "location": "Church ground floor", "owner": self.pantry_admin.contact,
                 "status": Event.Status.OPEN,
+                "visible_to_outsiders": True,
             },
         )
         # 🔴 三个角色，现在**各演一种容量**（2026-08-19，`stop_at_needed_count`
@@ -485,6 +495,7 @@ class Command(BaseCommand):
                 "event_type": self.distribution, "ministry": self.pantry,
                 "start_time": now + 30 * DAY, "end_time": now + 30 * DAY + 2 * HOUR,
                 "owner": self.pantry_admin.contact, "status": Event.Status.DRAFT,
+                "visible_to_outsiders": True,
             },
         )
 
@@ -497,6 +508,7 @@ class Command(BaseCommand):
                 "event_type": self.distribution, "ministry": self.pantry,
                 "start_time": now + 3 * DAY, "end_time": now + 3 * DAY + 2 * HOUR,
                 "owner": self.pantry_admin.contact, "status": Event.Status.FULL,
+                "visible_to_outsiders": True,
             },
         )
         if made:
@@ -510,6 +522,7 @@ class Command(BaseCommand):
                 "event_type": self.distribution, "ministry": self.pantry,
                 "start_time": now - 30 * DAY, "end_time": now - 30 * DAY + 3 * HOUR,
                 "owner": self.pantry_admin.contact, "status": Event.Status.COMPLETED,
+                "visible_to_outsiders": True,
             },
         )
         if made:
@@ -584,6 +597,7 @@ class Command(BaseCommand):
                 "event_type": self.distribution, "ministry": self.tax,
                 "start_time": now + 5 * DAY, "end_time": now + 5 * DAY + 2 * HOUR,
                 "owner": self.tax_admin.contact, "status": Event.Status.OPEN,
+                "visible_to_outsiders": True,
             },
         )
 
@@ -605,6 +619,7 @@ class Command(BaseCommand):
                 "start_time": now + 4 * DAY, "end_time": now + 4 * DAY + 2 * HOUR,
                 "location": "Room 1A", "owner": self.pantry_admin.contact,
                 "status": Event.Status.OPEN,
+                "visible_to_outsiders": True,
             },
         )
         if made:
@@ -704,6 +719,7 @@ class Command(BaseCommand):
                     "end_time": now + days * DAY + 3 * HOUR,
                     "location": place, "owner": owner.contact,
                     "status": Event.Status.OPEN,
+                    "visible_to_outsiders": True,
                 },
             )
         past = []
@@ -718,6 +734,7 @@ class Command(BaseCommand):
                     "end_time": now - days * DAY + 3 * HOUR,
                     "location": place, "owner": owner.contact,
                     "status": Event.Status.COMPLETED,
+                    "visible_to_outsiders": True,
                 },
             )
             past.append(event)

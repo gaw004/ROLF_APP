@@ -24,8 +24,9 @@ from contact.models import Contact, RelationshipType
 from core.constraints import ConstraintErrorFieldMixin
 from core.limits import LONG_TEXT, SHORT_TEXT
 from core.models import ImmutableCodeMixin, TimeStampedModel
-from core.timeutils import day_start, local_now, local_today
-from org.models import Ministry
+from core.querysets import in_effect_on
+from core.timeutils import day_start, local_day, local_now, local_today
+from org.models import Assignment, Ministry, Position
 
 
 class EventType(ImmutableCodeMixin, ConstraintErrorFieldMixin, models.Model):
@@ -259,6 +260,54 @@ NATURE_EXPLANATIONS = {
 }
 
 
+# --- Who counts as one of the foundation's own, on a given day ---------------
+#
+# ⚠️ These live here rather than in services.py (where they were until
+#    2026-08-26) because EventQuerySet.for_audience() below needs them, and
+#    services.py already imports this module — the other direction would be a
+#    circular import. Moving them keeps one definition and keeps the dependency
+#    pointing one way, services → models.
+
+
+def on_the_books_q(on):
+    """"Counts as one of the foundation's own on this day", as a Q over Assignment.
+
+    The predicate itself, extracted 2026-08-21 so the three shapes below are
+    three callers rather than three copies. `on` is a date, or a database
+    expression naming one (see on_the_books_exists).
+
+    ⚠️ Existence, never identity: a person may hold several posts at once
+       (D32's invariant is about there being one structure, not one row), so
+       every caller asks whether *a* qualifying tenure exists.
+    """
+    return (
+        models.Q(position__kind=Position.Kind.STAFF)
+        & models.Q(position__is_active=True)
+        & in_effect_on(on=on)
+    )
+
+
+def on_the_books_exists(*, contact_ref, day_ref):
+    """The same predicate as a correlated subquery, for a set of rows at once.
+
+    Where _on_the_books() answers for one event's day, this answers for a
+    queryset whose rows each carry their own day — the report counting people
+    served across a month of events, and the audience filter in batch two.
+
+    ⚠️ `day_ref` is an OuterRef onto a day the **outer** query annotated with
+       core.timeutils.local_day(). It cannot be a TruncDate over an OuterRef
+       here: TruncDate reads its operand's output_field while resolving, and a
+       ResolvedOuterRef has none — that raises AttributeError outright. Found by
+       running it (2026-08-21); see 06-roadmap.md L1.4.
+
+       Annotating outside also puts the timezone conversion at the call site,
+       where a reader can see which column is being turned into a local day.
+    """
+    return models.Exists(
+        Assignment.objects.filter(models.Q(contact_id=contact_ref) & on_the_books_q(day_ref))
+    )
+
+
 class Audience(models.Model):
     """Who this is for: outsiders, all staff, or the staff of named ministries.
 
@@ -306,7 +355,17 @@ class Audience(models.Model):
     visible_to_ministries = models.ManyToManyField(
         Ministry,
         blank=True,
-        related_name="+",
+        # ⚠️ A real reverse name, not "+". `for_audience()` asks the question
+        #    from the Assignment end — "does this person hold a post in a
+        #    ministry this event is open to" — and with the reverse disabled
+        #    that lookup does not exist (FieldError, verified). The alternative
+        #    is a subquery over the through table with two nested OuterRefs,
+        #    which gives the same answer and reads far worse.
+        #
+        # ⚠️ Ministry therefore has two entrances that must not be confused:
+        #    `ministry.events` (the ones it runs) and `ministry.event_audience`
+        #    (the ones it can see). Different questions, similar names.
+        related_name="%(class)s_audience",
         # A retired ministry must not be offered — same trick as
         # Participation.consent_relationship's limit_choices_to.
         limit_choices_to={"is_active": True},
@@ -415,6 +474,64 @@ class EventQuerySet(models.QuerySet):
            so the name stops implying an audience it never had.
         """
         return self.filter(status__in=Event.VISIBLE_TO_PARTICIPANTS)
+
+    def for_audience(self, contact):
+        """Narrow to what this person may see. L3.
+
+        ⚠️ A **second** predicate, always written beside visible_to_participants()
+           and never folded into it. That one answers "is it published", this one
+           answers "is it for them", and until 2026-08-26 the second question had
+           no answer anywhere: every signed-in account saw every published event
+           (participants.md section 1).
+
+        The three branches are the three kinds of tick, and each is judged on
+        **the day of the event** — the same clock L2's eligibility uses. Two
+        different clocks would produce "visible but not signable on the day" and
+        "signable on the day but invisible today", and neither has an
+        explanation a person would accept.
+
+        ⚠️ All three ask whether *a* qualifying tenure **exists**, never which
+           one it is: somebody may hold posts in two ministries at once (D32's
+           invariant is about there being one structure, not one row), and an
+           event ticked for either is one they can see.
+
+        🔴 The ministry branch is an Exists, never a join. Written as
+           `filter(visible_to_ministries__in=…)` an event ticked for two
+           ministries comes back **twice** for somebody on the books in both —
+           verified, and it corrupts paging and every count downstream while
+           looking on the page like a row that got listed twice.
+
+        ⚠️ `contact is None` is not an error and not a special case: an account
+           with no Contact cannot hold a post, so it *is* an outsider. That
+           includes every superuser (D12 keeps User.contact nullable because a
+           superuser matches no real person) — so a superuser does not see
+           staff-only events, which is correct and reads like a bug the first
+           time somebody meets it. Do not "fix" it by exempting them; that would
+           open a hole straight through this whole layer, exactly as
+           org/permissions.py says about its own checks.
+        """
+        outsiders = Q(visible_to_outsiders=True)
+        if contact is None:
+            return self.filter(outsiders)
+
+        on_the_books = Assignment.objects.filter(
+            on_the_books_q(models.OuterRef("event_day")), contact_id=contact.pk)
+        # ⚠️ The reverse name on the M2M is what lets this be one Exists rather
+        #    than a subquery over the through table with two nested OuterRefs.
+        #    See the field's own comment.
+        in_a_ticked_ministry = on_the_books.filter(
+            position__ministry__event_audience=models.OuterRef("pk"))
+
+        dated = self.annotate(event_day=local_day("start_time"))
+        return dated.filter(
+            # ⚠️ `~Exists`, checked against `exclude(Exists(...))` on both a
+            #    staff member and a genuine outsider — the two agree. Testing it
+            #    with a staff member alone returns nothing either way and proves
+            #    nothing, which is how the first attempt at this went.
+            (outsiders & ~models.Exists(on_the_books))
+            | (Q(visible_to_all_staff=True) & models.Exists(on_the_books))
+            | models.Exists(in_a_ticked_ministry)
+        )
 
     def open_for_signup(self, now=None):
         """Everything a volunteer may still sign up for.

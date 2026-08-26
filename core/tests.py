@@ -9,6 +9,7 @@ import colorsys
 import datetime
 import io
 import os
+import ast
 import re
 import shutil
 import smtplib
@@ -420,6 +421,78 @@ class ReportFigureNamesGuardTests(TestCase):
             "A report figure named after volunteering has to be one on purpose "
             "— add it to ALLOWED with a reason, or name it for what it counts:\n"
             + "\n".join(offenders),
+        )
+
+
+class AudienceIsAskedGuardTests(TestCase):
+    """Lint-as-test: nobody narrows an event list by status and forgets the person.
+
+    ⭐ L3's whole risk in one sentence. `visible_to_participants()` answers "is
+       it published"; `for_audience()` answers "is it for them". They are two
+       predicates on purpose, and the failure mode of using only the first is
+       the exact hole participants.md section 1 found: every signed-in account
+       seeing every published event, with nothing raising and every page
+       looking normal.
+
+    ⚠️ Deliberately narrow — it reads **function bodies**, not whole files. A
+       file-wide version would go red on every docstring that discusses the two
+       predicates (there are several, including this one), and a guard that is
+       red every day gets whitelisted until it means nothing. Same reasoning
+       ReportFigureNamesGuardTests writes out above.
+    """
+
+    NARROWS = "visible_to_participants("
+    ASKS = "for_audience("
+    #: Docstrings discuss this pair at length, so they are stripped before the
+    #: search — matching prose would make the guard lie in both directions.
+    DOCSTRING = re.compile(r'("""|\x27\x27\x27).*?\1', re.S)
+
+    #: Named exemptions. Each is a decision, not an oversight — see the
+    #: docstring at each site, and 06-roadmap.md L2.2.
+    ALLOWED = {
+        # The rows somebody already holds. Narrowing an audience afterwards must
+        # not take away a signup they made while it was still open to them.
+        "my_participations",
+        # The two predicates defining themselves.
+        "visible_to_participants",
+        "for_audience",
+        # ⚠️ Somebody standing in front of the iPad, having already scanned the
+        #    code. It refuses anybody without a signup two lines later, and a
+        #    signup is proof enough that the event was once theirs to join —
+        #    an audience test here could only stop a person who is physically
+        #    present from checking in. Same rule as my_participations above:
+        #    narrowing takes away discovery, never a row somebody holds.
+        "checkin_confirm",
+    }
+
+    def functions(self):
+        """(where, name, source) for every function in our own non-test code."""
+        for relative, source in project_python_files(skip=["tests.py"]):
+            if relative.name == "tests.py":
+                continue
+            try:
+                tree = ast.parse(source)
+            except SyntaxError:  # pragma: no cover - caught by check, not here
+                continue
+            for node in ast.walk(tree):
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    body = ast.get_source_segment(source, node) or ""
+                    yield f"{relative}:{node.lineno} {node.name}()", node.name, body
+
+    def test_narrowing_by_status_always_asks_who_is_looking(self):
+        offenders = [
+            where
+            for where, name, body in self.functions()
+            if name not in self.ALLOWED
+            and self.NARROWS in self.DOCSTRING.sub("", body)
+            and self.ASKS not in self.DOCSTRING.sub("", body)
+        ]
+        self.assertEqual(
+            offenders,
+            [],
+            "Published is not the same question as for-them. Add "
+            "for_audience(contact), or name the function in ALLOWED with a "
+            "reason:\n" + "\n".join(offenders),
         )
 
 

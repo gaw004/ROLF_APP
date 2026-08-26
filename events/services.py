@@ -24,7 +24,6 @@ from PIL import ImageOps as PILImageOps
 from contact.models import Contact, ContactQuerySet
 from core.images import draft_to, stored_size, upright_size
 from core.notifications.base import EMAIL, SMS, Message, get_backend
-from core.querysets import in_effect_on
 from core.timeutils import local_date_of, local_day, local_now
 from org.models import Assignment, Position
 
@@ -35,6 +34,8 @@ from .models import (
     EventRole,
     Participation,
     ParticipationRole,
+    on_the_books_exists,
+    on_the_books_q,
 )
 
 
@@ -97,45 +98,6 @@ def consent_required_for(contact, event):
 CONSENT_FIELDS = (
     "consent_given_by", "consent_method", "consent_email", "consent_phone",
 )
-
-
-def on_the_books_q(on):
-    """"Counts as one of the foundation's own on this day", as a Q over Assignment.
-
-    The predicate itself, extracted 2026-08-21 so the three shapes below are
-    three callers rather than three copies. `on` is a date, or a database
-    expression naming one (see on_the_books_exists).
-
-    ⚠️ Existence, never identity: a person may hold several posts at once
-       (D32's invariant is about there being one structure, not one row), so
-       every caller asks whether *a* qualifying tenure exists.
-    """
-    return (
-        models.Q(position__kind=Position.Kind.STAFF)
-        & models.Q(position__is_active=True)
-        & in_effect_on(on=on)
-    )
-
-
-def on_the_books_exists(*, contact_ref, day_ref):
-    """The same predicate as a correlated subquery, for a set of rows at once.
-
-    Where _on_the_books() answers for one event's day, this answers for a
-    queryset whose rows each carry their own day — the report counting people
-    served across a month of events, and the audience filter in batch two.
-
-    ⚠️ `day_ref` is an OuterRef onto a day the **outer** query annotated with
-       core.timeutils.local_day(). It cannot be a TruncDate over an OuterRef
-       here: TruncDate reads its operand's output_field while resolving, and a
-       ResolvedOuterRef has none — that raises AttributeError outright. Found by
-       running it (2026-08-21); see 06-roadmap.md L1.4.
-
-       Annotating outside also puts the timezone conversion at the call site,
-       where a reader can see which column is being turned into a local day.
-    """
-    return models.Exists(
-        Assignment.objects.filter(models.Q(contact_id=contact_ref) & on_the_books_q(day_ref))
-    )
 
 
 def _on_the_books(event):

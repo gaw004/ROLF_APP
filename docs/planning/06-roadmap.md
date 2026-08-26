@@ -1034,12 +1034,83 @@ M2M 在 `save()` **之后**才写，`full_clean()` 在**之前**跑。所以：
 路径不是条数）。落到语义上：**张三在食物银行和报税互助各有一个岗位，
 一场只勾了「报税互助在编」的活动，他看得见、也报得上。**
 
-⚠️ 第一行那个「没有」是本节最容易写错的一格：它是前两行的**否定**，
-而否定一个 `Exists` 在 SQL 里是 `NOT EXISTS`，写成 `exclude()` 和写成
-`filter(~Exists(...))` 在有 join 的时候不等价。实现时两种都跑一遍对答案。
+### 🔴 第三行**不能写成 join** —— 实测，最自然的那个写法是错的
+
+「勾中的 ministry 里有他的岗位」读起来就是一句 `filter(visible_to_ministries__in=…)`。
+它在 dev 上跑出来是这样：
+
+```
+张三在 Pantry 和 Tax 各有一个岗位
+一场活动同时勾了 Pantry 和 Tax
+→ 结果里那场活动出现了 2 次
+```
+
+多对多是一次 join，两边各命中一行就出两行。**分页、计数、报表全部跟着错**，
+而页面上看起来只是「这场活动怎么列了两遍」。
+
+正确形状是 `Exists`（子查询只问有没有，不产生行）：
+
+```python
+Exists(
+    Assignment.objects
+    .filter(on_the_books_q(OuterRef("event_day")), contact_id=contact.pk)
+    .filter(position__ministry__event_audience=OuterRef("pk"))
+)
+```
+
+⚠️ 最后那一行要求 M2M **有一个反向名字**。L2.1 里我写的是 `related_name="+"`
+（禁用反向），实测直接报 `FieldError: Unsupported lookup 'event_audience'`。
+改成 `related_name="%(class)s_audience"`，于是 `Ministry` 那头有两个入口：
+`ministry.events`（它拥有的活动，早就有）和 `ministry.event_audience`
+（它看得见的活动）。⚠️ 只改 `related_name` **不动数据库**，迁移是纯状态变更。
+
+⚠️ 走 through 表也做得到（`Event.visible_to_ministries.through`），实测同样正确、
+同样不重复，但它要**嵌套两层 `OuterRef`**。两个都能跑的时候选读得懂的那个。
+
+### 三处实测记录，免得下一个人再验一遍
+
+| 问的 | 答案 |
+|---|---|
+| `exclude(Exists(…))` 和 `filter(~Exists(…))` 一样吗 | 一样。⚠️ 第一次只拿一个在编的人试，两边都返回空 —— **那不叫验过**。换一个真外部人再跑，两边都返回那一场，才算 |
+| 重复 `annotate(event_day=…)` 会不会冲突 | 不会。所以 `for_audience()` 可以自己 annotate，不必担心被链式调用两次 |
+| `Model.clean()` 能读 M2M 吗 | 不能，见 [L2.1](#-modelclean-验不了-m2m--实测而它推翻了下面一句话) |
 
 ⚠️ 外层要先 `annotate(event_day=local_day("start_time"))` —— L1.4 已经建好的
 `on_the_books_exists()` 收的是一个已经算好当地日期的 `OuterRef`，理由见那一步。
+
+### ⚠️ `on_the_books_q()` 要从 `services.py` 搬到 `models.py`
+
+`for_audience()` 是 `EventQuerySet` 上的方法（在 `models.py`），而那条判据现在在
+`services.py` —— 而 `services.py` 已经 import 了 `models.py`。**循环 import。**
+
+搬到 `models.py`（它只依赖 `org.models` 和 `core.querysets`，两个 `models.py` 都已经
+import 了），`services.py` 反过来 import 它。判据仍然只有一份，而依赖方向回到
+`services → models` 这一个方向。
+
+⚠️ 不用「在方法里延迟 import」那条路。它能跑，仓库里也有先例，但那是给
+`forms → services` 那个方向用的；让 `models` 反过来伸手进 `services`，
+即使 Python 允许，读起来也是一处味道。
+
+### 要改的读路径，逐个点名 —— 漏一处就是一次静默的泄露
+
+| 位置 | 改法 |
+|---|---|
+| `views.py` · `_visible_events()` | `.visible_to_participants().for_audience(contact)`。⚠️ 它现在只收 `period`，要多收一个 contact |
+| `views.py` · `_schedule()` | 同上。日程和列表共用筛选，不共用这道门就是「列表里没有、日程上画着」 |
+| `views.py` · `_detail()` | 收窄之外还要 **404 而不是 403** —— 和草稿预览同一条理由：不该看见的活动不该暴露自己存在。`can_view_event_records` 仍然是那扇后门 |
+| `views.py` · `event_detail_panel` | 走 `_detail()`，自动覆盖 |
+| `views.py` · `event_signup` | ⚠️ 它今天只走 `open_for_signup()`，一道受众都没有 |
+
+**不改的两处，而这是决定不是遗漏** —— 这段话要写进 docstring：
+
+> 收窄的是**发现**，不是**你已经拥有的行**。受众事后改窄，不该让已经报了名的人
+> 打不开自己的活动页。
+
+| 不改 | 为什么 |
+|---|---|
+| `my_participations` | 他手上就有那一行。⚠️ 守卫一的白名单点名了它，理由就是这一条 |
+| 扫码签到（`checkin_scan` / `checkin_confirm` / `apply_scan`） | 人已经站在现场了。一道受众判断只会让他签不了到 |
+| 管理侧 `_scoped_events()` | 它答的是「我管哪些活动」，和受众正交 |
 
 ### ⭐ 守卫一：受众必问
 
@@ -1693,3 +1764,54 @@ self.assertNotIn("empty, so the form that needs it", text)          # 加了一�
 ⚠️ 这一格是「模型层校验覆盖所有入口」这个直觉的反例，而那个直觉在这个项目里
 一直是对的（`ParticipationRole.nature` 那条就是靠它覆盖 admin 的）。
 M2M 是它唯一不成立的地方，所以值得单独记住。
+
+## L2.2 · 最自然的那个写法会让活动列两遍（2026-08-26）
+
+「勾中的 ministry 里有他的岗位」读起来就是一句
+`filter(visible_to_ministries__in=…)`。跑出来：
+
+```
+张三在 Pantry 和 Tax 各有一个岗位
+一场活动同时勾了这两个 ministry
+→ 它在结果里出现 2 次
+```
+
+多对多是 join，两边各命中一行就出两行。表现不是报错，是**分页、计数、
+报表全部跟着错**，而页面上只是「这场活动怎么列了两遍」。
+
+⚠️ 这一条和 L1.4 那条（`TruncDate(OuterRef(...))` 跑不起来）是**同一类的第三次**：
+文档里的 ORM 代码读起来合理，而它要么跑不起来、要么跑出错答案。
+区别是这一次**跑得起来** —— 所以它比前两次更危险：没有异常，只有一个多出来的行。
+
+教训因此要收紧一格：**不只是「先跑一遍」，是「跑一遍并数一下行数」。**
+一个返回了结果的查询，不等于返回了对的结果。
+
+## L2.2 · `related_name="+"` 挡住了唯一读得懂的写法（2026-08-26）
+
+正确形状是 `Exists`。而写 `Exists` 有两条路：
+
+| 路 | 形状 |
+|---|---|
+| 从 `Assignment` 反查回 `Event` | 一层 `OuterRef`，读起来就是那句话 |
+| 走 through 表 | **两层嵌套 `OuterRef`**，同样正确，没人读得懂 |
+
+第一条需要 M2M 有反向名字，而 L2.1 我写的是 `related_name="+"`（禁用反向），
+实测直接 `FieldError`。
+
+改成 `%(class)s_audience`。⚠️ 这个改动**不产生任何 SQL** ——
+`related_name` 只活在 Django 的状态里。但它仍然要一个迁移（0020），
+而不是去改已经提交的 0019：那条规矩（迁移一旦应用就不再修改）在这里
+「这次无害」，而「这次无害」正是让一条值得保留的规矩慢慢失效的说法。
+
+## L2.2 · 一个 fixture 缺省值，80 条测试（2026-08-26）
+
+`for_audience()` 接进视图之后，全量跑下来 80 条红的。原因只有一个：
+`make_event()` 建出来的活动**没有任何受众**，于是每一页 404。
+
+处置是给那个助手一个缺省值 —— 和迁移给存量行的是同一个值（对外可见），
+理由也是同一条：那是这些活动在这个字段存在之前的意思。
+
+⚠️ 但 `ForAudienceTests` 自己那个建活动的助手**必须显式写全三档**，
+不能继承这个缺省。它是**关于受众**的测试类，一个悄悄带着「对外可见」的
+fixture 会让它一半的用例因为错误的原因通过。
+这是「共用 fixture 省事」和「测试要说得出自己在测什么」之间的一次真实取舍。

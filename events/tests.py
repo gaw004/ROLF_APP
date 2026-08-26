@@ -123,6 +123,16 @@ def make_event(ministry=None, **kwargs):
         "end_time": NOW + DAY + 3 * HOUR,
         "owner": make_person("Owner"),
         "status": Event.Status.OPEN,
+        # ⚠️ L3 (2026-08-26). Without an audience an event is visible to nobody
+        #    and every page 404s, so a fixture that says nothing about who it is
+        #    for gets what these events meant before the field existed: open to
+        #    outsiders. The same value migration 0019 gave every existing row,
+        #    and for the same reason.
+        #
+        # ⚠️ Note it is **not** "everyone" — outsiders only, because that is the
+        #    audience most of these tests act as. Anything about staff visibility
+        #    passes its own flags; see ForAudienceTests.
+        "visible_to_outsiders": True,
     }
     fields.update(kwargs)
     return Event.objects.create(**fields)
@@ -2038,6 +2048,145 @@ class DictionaryTableTests(TestCase):
 
         theirs.refresh_from_db()
         self.assertEqual(theirs.name, "Whatever we call it here")
+
+
+class ForAudienceTests(TestCase):
+    """L3: which events a given person may find. Every failure here is silent.
+
+    ⚠️ The two predicates stay separate throughout — visible_to_participants()
+       answers "is it published", this answers "is it for them". Until
+       2026-08-26 the second question had no answer anywhere.
+    """
+
+    def setUp(self):
+        self.pantry = Ministry.objects.create(code="food_pantry", name="Food Pantry")
+        self.tax = Ministry.objects.create(code="tax_help", name="Tax Help")
+        self.owner = make_person("Owner")
+
+        self.public = self.an_event("Open day", visible_to_outsiders=True)
+        self.staff_only = self.an_event("All-hands", visible_to_all_staff=True)
+        self.pantry_only = self.an_event("Pantry huddle", ministries=[self.pantry])
+        self.both_ministries = self.an_event(
+            "Joint training", ministries=[self.pantry, self.tax])
+
+        self.outsider = make_person("Outsider", birth_date=datetime.date(1985, 1, 1))
+
+    def an_event(self, name, ministries=(), **flags):
+        # ⚠️ Every flag spelled out, never inherited from make_event()'s default.
+        #    This class is *about* the audience, so a fixture quietly carrying
+        #    "open to outsiders" would make half of it pass for the wrong reason.
+        flags.setdefault("visible_to_outsiders", False)
+        event = make_event(ministry=self.pantry, name=name, owner=self.owner, **flags)
+        for ministry in ministries:
+            event.visible_to_ministries.add(ministry)
+        return event
+
+    def a_post(self, code, ministry):
+        return Position.objects.create(
+            code=code, name=code, kind=Position.Kind.STAFF,
+            compensation=Position.Compensation.PAID, ministry=ministry)
+
+    def employ(self, person, ministry, code=None, **dates):
+        dates.setdefault("start_date", local_date_of(self.public.start_time) - DAY)
+        return Assignment.objects.create(
+            contact=person, position=self.a_post(code or ministry.code, ministry),
+            **dates)
+
+    def seen_by(self, contact):
+        return {event.name for event in Event.objects.for_audience(contact)}
+
+    # --- the three branches ----------------------------------------------
+
+    def test_an_outsider_sees_only_what_is_open_to_outsiders(self):
+        self.assertEqual(self.seen_by(self.outsider), {"Open day"})
+
+    def test_staff_see_the_all_hands_and_not_the_public_one(self):
+        """⚠️ "Open to outsiders" is not the widest setting — it **excludes**
+           staff. A food handout for the people it serves is not something the
+           foundation's own people should be filling up.
+        """
+        staffer = make_person("Staffer", birth_date=datetime.date(1985, 1, 1))
+        self.employ(staffer, self.pantry)
+        seen = self.seen_by(staffer)
+        self.assertIn("All-hands", seen)
+        self.assertNotIn("Open day", seen)
+
+    def test_staff_of_a_named_ministry_see_that_ministrys_event(self):
+        staffer = make_person("Staffer", birth_date=datetime.date(1985, 1, 1))
+        self.employ(staffer, self.pantry)
+        self.assertIn("Pantry huddle", self.seen_by(staffer))
+
+    def test_staff_of_another_ministry_do_not(self):
+        staffer = make_person("Elsewhere", birth_date=datetime.date(1985, 1, 1))
+        self.employ(staffer, self.tax)
+        seen = self.seen_by(staffer)
+        self.assertNotIn("Pantry huddle", seen)
+        # …but the joint one names their ministry too.
+        self.assertIn("Joint training", seen)
+
+    # --- the shapes that go wrong quietly ---------------------------------
+
+    def test_an_event_named_for_two_ministries_is_listed_once(self):
+        """🔴 The bug the obvious implementation has.
+
+        Written as `filter(visible_to_ministries__in=…)` this event comes back
+        **twice** for somebody on the books in both — a join producing one row
+        per match. Paging, counts and every report downstream go wrong while
+        the page merely looks like it listed something twice.
+        """
+        both = make_person("Both", birth_date=datetime.date(1985, 1, 1))
+        self.employ(both, self.pantry, code="pantry_post")
+        self.employ(both, self.tax, code="tax_post")
+        names = [event.name for event in Event.objects.for_audience(both)]
+        self.assertEqual(names.count("Joint training"), 1)
+
+    def test_somebody_with_posts_in_two_ministries_sees_both(self):
+        # D32: a person may hold several posts at once, and the predicate asks
+        # whether *a* qualifying one exists rather than which it is.
+        both = make_person("Both", birth_date=datetime.date(1985, 1, 1))
+        self.employ(both, self.pantry, code="pantry_post")
+        self.employ(both, self.tax, code="tax_post")
+        self.assertIn("Pantry huddle", self.seen_by(both))
+        self.assertIn("Joint training", self.seen_by(both))
+
+    def test_an_account_with_no_contact_is_an_outsider(self):
+        """⚠️ Not a special case — it is the definition.
+
+        An account with no Contact cannot hold a post, so it is somebody with
+        no current post. Every superuser is one of these (D12), which is why a
+        superuser does not see staff-only events. Correct, and it reads like a
+        bug the first time somebody meets it.
+        """
+        self.assertEqual(self.seen_by(None), {"Open day"})
+
+    def test_visibility_is_judged_on_the_day_of_the_event(self):
+        """⚠️ Same trap as R8's, and the same clock L2's eligibility uses.
+
+        Somebody whose post ended before this event ran was not staff that day,
+        so a staff-only event is not theirs — judged against today they would
+        appear, and nothing would report it.
+        """
+        left = make_person("Leaver", birth_date=datetime.date(1985, 1, 1))
+        day = local_date_of(self.staff_only.start_time)
+        self.employ(left, self.pantry, start_date=day - 30 * DAY,
+                    end_date=day - DAY)
+        seen = self.seen_by(left)
+        self.assertNotIn("All-hands", seen)
+        # And with no current post at all, they are an outsider.
+        self.assertIn("Open day", seen)
+
+    def test_it_stacks_with_the_published_predicate(self):
+        # ⚠️ Two predicates, never folded into one: a draft open to outsiders
+        #    is still a draft.
+        draft = self.an_event("Not yet", visible_to_outsiders=True,
+                              status=Event.Status.DRAFT)
+        seen = {
+            event.name
+            for event in Event.objects.visible_to_participants()
+            .for_audience(self.outsider)
+        }
+        self.assertNotIn(draft.name, seen)
+        self.assertIn("Open day", seen)
 
 
 class AudienceShapeTests(TestCase):

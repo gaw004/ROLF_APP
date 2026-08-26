@@ -20,7 +20,7 @@
 |---|---|---|
 | D1.4 R6 / R7 换成一个 `served_as=volunteer` 的 filter | 未做 | 正交。本轮让 `attending` 的行**根本没有工时**，D1.4 是把剩下的工时拆成志愿/工作。两步叠加不冲突，顺序也不限定 |
 | D2a `WorkPattern` / `Shift` / `PatternBatch` | 未做，仓库里一行代码都没有 | [`participants.md` 第六节](participants.md) 写「正确形状仓库里已经有了一份」，指的是 [D33](decisions/D33-work-schedule.md) / [D40](decisions/D40-undo-a-pattern-batch.md) 这两份**文档**。批三是这个形状在本仓库的第一次实现 |
-| D3 指派与代录 | 未做 | 它会给 `Participation` 加两档状态，和本轮的 `nature` / `eligibility` 不碰同一列 |
+| D3 指派与代录 | 未做 | 它会给 `Participation` 加两档状态，和本轮的 `nature` / 可见性字段不碰同一列 |
 
 出现出入时，以本文件的实际操作为准，回头改 `05-roadmap.md` 和 `phase-d.md`。
 
@@ -59,6 +59,30 @@
 | 5 | 生成场次的角色从哪来 | `EventSeriesRole` 模板表，生成时逐场复制成真的 `EventRole` |
 | 6 | 可见性判「哪一天在编」 | 活动当天，和 L2 资格同一把尺 |
 | 7 | `attending` 行的 `served_as` | 加第三档 `not_applicable`；`hours_per_participant` 分母改成「帮忙的人」 |
+
+⚠️ 第 1 条的措辞被 2026-08-26 那批改写了：「本 ministry 在编」这一档不存在了，
+现在是显式勾选的 ministry。结论没变 —— 全机构岗位（没有 ministry）落不进任何一个
+具体 ministry 的勾，只满足「全体在编」。
+
+## 又八条（2026-08-26，批二开工前）
+
+批一交付后走查提出来的两件事：兜底工种要分档，可见性要能多选。
+第二件**推翻了上面第 1 条所属的那整套三档枚举**，理由和代价写在
+[L2.1 那一节](#-2026-08-26三档枚举被推翻了改成多选这一节整个重写)。
+
+| # | 问题 | 定案 |
+|---|---|---|
+| 8 | 「没有特定工种」的兜底 | 拆成两行，helping / attending 各一，见 [L1.6](#l16-兜底工种拆成两个2026-08-26-追加) |
+| 9 | 可见性的形状 | 一组勾选，不是三档枚举：外部人员 / 全体在编 / 各 ministry（可多选） |
+| 10 | 「外部人员」这一档的语义 | **只有**没有在职任职的人看得见，在编的人**看不见**。它不是最宽的一档 |
+| 11 | 「所有人」怎么存 | 不存。它是表单上的一个便利勾，库里存的是「外部人员 + 全体在编」两项 |
+| 12 | 一项都不勾 | 拒绝保存 |
+| 13 | 勾了「全体在编」之后各 ministry | 界面置灰，**且服务层拒绝**手工造出来的冗余组合 |
+| 14 | 新建活动的默认可见性 | 空着（只预勾发布者自己的 ministry），逼他选一次 |
+| 15 | 新开角色的默认可报范围 | 等于活动勾了什么 |
+
+⚠️ 第 10 条是原来那三档**没有**的一档，也是这次改动里除了多选之外的第二个新东西：
+「只给受助者的物资发放，不想让员工报名占位」在旧形状里表达不出来。
 
 第 4、5 两条的行业依据：V4S 的 `Job_Recurrence_Schedule__c` 是独立对象、
 规则和「要几个人」都挂在它身上，生成 `Volunteer_Shift__c` 行；
@@ -731,74 +755,141 @@ Rafa 和 Ada **都在编**，都在同一场活动里，而签到页上：
 
 ---
 
+## L1.6 兜底工种拆成两个（2026-08-26 追加）
+
+批一交付之后走查时点出来的一处：库里那行「没有特定工种」的兜底
+（`code="general"`）是 **helping**，于是**说不清具体在接受什么服务的受助者没有位子可落**。
+发放日那种「就是来领东西、没有具体名目」的场合会立刻撞上。
+
+批一里我判过这一格，当时的结论是「不预先建，管理员一次点击就能加」。
+那个判断在**只有一个兜底**的前提下成立；现在看它不成立 —— 让每个基金会自己去发现
+「原来还要再建一行」，等于把一个系统级的缺口摊派给用户。
+
+| code | 名字 | 档位 |
+|---|---|---|
+| `general`（一个字不动） | General participant (helping) | Helping |
+| `general-attending`（新） | General participant (attending) | Attending |
+
+⚠️ 老那行的 `code` 不许改：它是 `ImmutableCodeMixin` 的列，
+`ParticipationRole.GENERAL_CODE` 被代码按名字引用，迁移 0003 的 `get_or_create`
+也是按它匹配的。能改的只有显示名（[D5](decisions/D05-lookup-tables-not-enums.md)：
+显示名归基金会，只有 `code` 是钉死的）。
+
+### 跟着改的地方
+
+| 位置 | 改什么 |
+|---|---|
+| `ParticipationRole.GENERAL_CODE` | 长出一个同伴常量。⚠️ 现在「兜底那一行」这句话有歧义了，凡是读它的地方都要说清是哪一个 |
+| `ParticipationRole.seed_general()` | 同上 —— 它现在要么收一个参数，要么拆成两个方法 |
+| 新迁移（数据迁移） | 建 `general-attending`，并把老那行改名。⚠️ 只改**种子原文**那一个字符串，基金会自己改过名的不动 —— 照抄 0015 的规矩 |
+| `core/management/commands/check_deployment.py` | 那里写着「工种表至少 2 行」，注释解释是「迁移送 1 行 + 基金会自己加了至少 1 行」。⚠️ 送 2 行之后门槛要提到 3，否则这条自检从此什么都不检查，**而且不报错** |
+| `seed_demo.py` | 演示数据里给新那行一个用处，否则它是一行没人读的数据 |
+
+### 测试
+
+- `test_there_is_a_catch_all_role_for_each_kind`
+- `test_the_helping_catch_all_keeps_its_code`
+  —— ⚠️ 这条钉的是「`code="general"` 一个字没动」，而那正是最容易顺手改掉的一格
+- `test_the_deployment_check_still_asks_for_a_role_of_the_foundations_own`
+  —— 门槛从 2 提到 3 那一格，钉住它不是白提的
+
+---
+
 # 批二 · L3 可见性与 L2 资格
 
-## L2.1 一个枚举，两张表共用
+## ⚠️ 2026-08-26：三档枚举被推翻了，改成多选。这一节整个重写
 
-放在 `events/models.py` 模块级：
+批二一行代码都还没写，所以代价只有这份文档。但**推翻的理由要留下**，
+否则下一个人会以为多选是随手定的。
 
-```python
-class Audience(models.TextChoices):
-    """三档，取值直接来自需求 5 的措辞。活动用它答「谁看得见」，角色用它答「谁报得上」。
+原来锁定的是一个字段、三档枚举（所有人 / 全体在编 / 本 ministry 在编），
+其中「本 ministry」是**相对活动自己的 ministry**，所以不需要额外的外键 —— 很省。
 
-    一个枚举而不是两个：不变量的比较因此是同一个枚举里两个值比大小，
-    而不是两套取值之间的一张映射表 —— 映射表是会写错一格的那种东西。
-    """
+它表达不了一句话：**「食物银行 + 报税互助，两个 ministry 一起看，别人不行」。**
 
-    EVERYONE = "everyone", "Anyone signed in"
-    ALL_STAFF = "all_staff", "Foundation staff"
-    MINISTRY_STAFF = "ministry_staff", "This ministry's staff"
+⚠️ 这个代价在调研时就写下来了，原话是「枚举的代价要写下来：表达不了『A 和 B 两个
+ministry 一起看』……出现真实需求时的升级路径是把三档换成 `AudienceRule` 表」。
+所以这不是判断错了，**是那个重启条件到了** —— 联合培训、跨 ministry 的团建，
+基金会说这是真实场景。
 
+同时暴露了原来那三档缺一档：**「只给外部人员看」**。
+原设计里「所有人」是最宽的一档，而基金会要的是一档**只有外部人员看得见、
+在编的人看不见**的（只给受助者的物资发放，不想让员工报名占位）。
+三档枚举里没有这个位置。
 
-#: 宽窄。⚠️ 全仓只有这里定义顺序，`refuse_wider_than_event()` 是唯一的读者。
-AUDIENCE_WIDTH = {
-    Audience.EVERYONE: 2,
-    Audience.ALL_STAFF: 1,
-    Audience.MINISTRY_STAFF: 0,
-}
+## L2.1 可见性是一组勾选，不是一个枚举
+
+### 选项，以及它们之间的包含关系
+
+```
+谁看得见这场活动：
+  ☐ 所有人（外部 + 全体在编）        ← 界面便利勾，见下
+  ☐ 外部人员（没有在职任职的人）
+  ☐ 全体在编                          ← 勾它，下面各 ministry 置灰
+  ☐ Food Pantry 的在编
+  ☐ Tax Help 的在编
+  ☐ …每个在用的 ministry 一行
 ```
 
-两个字段：
+🔴 **「所有人」不是一个存储值。** 它在意思上恰好等于「外部人员 + 全体在编」两个都勾，
+所以存成第三个值就是同一个状态两种写法 —— 而这一节下面那条置灰规则正是为了避免这个。
+
+处置：勾「所有人」= 表单**替你勾上另外两个**，库里存的是那两项。
+按 [D24](decisions/D24-htmx-alpine-tailwind.md) 这是纯界面增强（没有 JS 时手动勾两个，
+一样能用），而「两个都勾了要显示成『所有人』」这个推导写在 Python 里，不写在模板里。
+
+### 落库的形状
 
 ```python
 class Event(...):
-    audience = models.CharField(
-        max_length=20, choices=Audience.choices, default=Audience.EVERYONE,
-        verbose_name="Who can see this event",
-        help_text="Staff means anyone holding a post on the day — paid or not.",
-    )
-    takes_signups = models.BooleanField(
-        default=True,
-        verbose_name="People can sign up",
-        help_text="Untick for an announcement: it appears on the list and in "
-                  "the calendar, and there is nothing to sign up for.",
-    )
-
-class EventRole(...):
-    eligibility = models.CharField(
-        max_length=20, choices=Audience.choices, default=Audience.EVERYONE,
-        verbose_name="Who can sign up for this",
-    )
+    #: 外部人员（没有在职任职的人）看得见
+    visible_to_outsiders = models.BooleanField(default=False)
+    #: 全体在编看得见。⚠️ 它和下面那张多对多是包含关系，不是并列
+    visible_to_all_staff = models.BooleanField(default=False)
+    #: 具体哪几个 ministry 的在编看得见
+    visible_to_ministries = models.ManyToManyField(Ministry, blank=True, related_name="+")
 ```
 
-两个 `default` 都等于今天的行为，所以 `events/migrations/0018_audience_and_signups.py`
-是纯 schema，不回填。
+`EventRole` 三个同名的字段，语义从「看得见」换成「报得上」。
 
-⚠️ 「全机构岗位不满足本 ministry」这条（决定 1）落在 `MINISTRY_STAFF` 的判据里：
-判的是 `position__ministry = event.ministry`，而 `Position.ministry` 可空，
-所以空 ministry 的岗位天然落不进去。这不需要额外代码，但**需要一条测试**，
-否则下一个人会以为那是漏的。
+⚠️ **两个布尔 + 一张多对多，而不是一张 `AudienceRule` 表。** 前者的三行读起来就是
+界面上那三类勾选，后者要为「外部人员」和「全体在编」各造一行没有 ministry 的记录 ——
+[D15](decisions/D15-relationship-carriers.md) 的载体判据里，那属于「为了让结构统一
+而造数据」。真到了要给可见性加属性（比如「从哪天起可见」）的那天再升级成表。
 
-⚠️ 三档全部是**存在性**判断，不是「他那条任职怎么样」——
-一个人可以同时持有多条 `Assignment`
-（[D32](decisions/D32-worker-axes-schedule-and-assignment.md) 那条不变量说的是
-路径不是条数）。落到语义上是这样，而这正是要的答案：
+### 五条规则，全部落在服务层 / 表单，逐条写出来
 
-| 情况 | 结果 |
-|---|---|
-| 张三在食物银行和 ESL 各有一个岗位 | 两个 ministry 的「仅本 ministry」角色他都报得上 |
-| 执行主任（岗位没有 ministry）另外兼一个 ministry 的岗位 | 通过那个兼岗满足「本 ministry」，和决定 1 不冲突 |
-| 一个人在同一个 ministry 里有两个岗位 | 只算一个人。⚠️ 任何用 join 而不是 `Exists` 写出来的版本会把他数两次，而 R8 已经为这件事付过一次 `.distinct()` |
+| # | 规则 | 违反的表现 |
+|---|---|---|
+| 1 | 至少勾一项 | 已发布却谁都看不见 —— 和草稿长得一样，而草稿已经有自己的状态了 |
+| 2 | 勾了「全体在编」，各 ministry 不许再勾 | 同一个可见性两种存法。⚠️ 而且它们**今天等价、明天不等价** —— 新建一个 ministry，「全体在编」自动覆盖它，勾齐的那份不会 |
+| 3 | 角色勾的每一项，活动都必须勾了 | 需求 6 / 7：报得上却看不见 |
+| 4 | 新建活动时**一项都不预勾**（除了发布者自己的 ministry，见下） | 见下面那条 🔴 |
+| 5 | 新开角色时默认 = 活动勾了什么 | 「看得见就报得上」是需求 6 的默认情形；默认最窄会让需求 8 的常见情形每个角色都要改宽 |
+
+🔴 **规则 4 是这五条里最贵的一条。** 默认「所有人」等于今天的行为、迁移也省事 ——
+但它的失败方式是：发一场欢送会忘了改，**就把它公开给了每一个外部志愿者**，
+而这件事不报错、没有任何人会发现。逼发布者选一次的代价是每场活动多一步，
+包括那些本来就对外的；这个代价明说，并且接受。
+
+⚠️ 规则 2 的置灰只是界面。**服务层必须自己拒绝手工造出来的冗余组合**，
+否则那道置灰谁都拦不住 —— 同这个项目一直在说的「不画控件是界面，界面挡不住任何人」。
+
+### 发布者自己的 ministry：可以不勾，但表单预勾上
+
+「食物银行为报税志愿者办一场培训」是真实场景，所以**不强制包含自己**。
+但新建时把发布者自己的 ministry 预勾上 —— 内部活动最常见的情形就是给自己人看。
+
+⚠️ 于是规则 4 有一个例外：这一项是预勾的。它不违反规则 4 的用意 ——
+规则 4 防的是「默认对外公开」，而预勾自己的 ministry 是默认**最窄**。
+
+### 迁移：现有活动全部回填成「外部 + 全体在编」
+
+也就是今天的行为（任何登录用户都看得见）。⚠️ 不回填的后果不是「变严格」，
+是**把库里每一场活动都藏起来**，因为规则 1 说空集不合法。
+
+⚠️ 这和规则 4「新建时空着」不矛盾：迁移在**保住既有行为**，规则 4 在**定新政策**。
+两件事，写在一起是因为它们看起来像互相打架。
 
 ## L2.2 `EventQuerySet.for_audience()`
 
@@ -809,43 +900,28 @@ class EventRole(...):
         判的是**活动当天**在不在编，和 L2 的资格同一把尺 —— 两把尺会造出
         「看得见但当天报不上」和「当天报得上但今天看不见」两种没人解释得清的错位。
         """
-        if contact is None:
-            return self.filter(audience=Audience.EVERYONE)
-        staff = on_the_books_exists(
-            contact_ref=contact.pk, event_ref=models.OuterRef("start_time"))
-        in_ministry = on_the_books_exists(
-            contact_ref=contact.pk, event_ref=models.OuterRef("start_time"),
-            ministry_ref=models.OuterRef("ministry_id"))
-        return self.filter(
-            models.Q(audience=Audience.EVERYONE)
-            | (models.Q(audience=Audience.ALL_STAFF) & staff)
-            | (models.Q(audience=Audience.MINISTRY_STAFF) & in_ministry)
-        )
 ```
 
-`on_the_books_exists()` 因此要多收一个可选的 `ministry_ref`
-（给上就多一个 `position__ministry=` 条件）。它在 L1.4 已经建好，这一步只是加一个参数 ——
-判据仍然只有一份。
+三个分支，对着 L2.1 那三类勾：
 
-⚠️ `Exists` 可以直接进 `filter()` 里和 `Q` 做布尔运算（Django 4 起），不需要先 `annotate`。
-
-### 五条读路径要改，两条不改
-
-| 位置 | 改法 |
+| 勾了 | 这个人要满足 |
 |---|---|
-| `events/views.py` · `_visible_events()` | `.visible_to_participants().for_audience(contact)`。⚠️ 它现在的签名只收 `period`，要多收一个 contact |
-| `events/views.py` · `_schedule()` | 同上。日程和列表共用筛选，不共用这道门就是「列表里没有、日程上画着」 |
-| `events/views.py` · `_detail()` | 收窄之外还要 404（不是 403），和草稿预览同一条理由：不该看见的活动不该暴露自己存在。`can_view_event_records` 仍然是那扇后门 |
-| `events/views.py` · `event_detail_panel` | 走 `_detail()`，自动覆盖 |
-| `events/views.py` · `event_signup` | ⚠️ 它今天只走 `open_for_signup()`，一道受众都没有。要叠上 `.for_audience(contact)` |
-| `my_participations` | 不改 |
-| 扫码签到（`checkin_scan` / `checkin_confirm` / `apply_scan`） | 不改 |
+| 外部人员 | 活动当天**没有**任何合格的在职任职 |
+| 全体在编 | 活动当天**有**任何一条合格的在职任职 |
+| 某几个 ministry | 活动当天有一条合格的在职任职，且岗位的 ministry 在勾中的那几个里 |
 
-后两条写进 docstring，因为它是一条规矩而不是两次遗漏：
+⚠️ 三条都是**存在性**判断（`Exists`），不是「他的那条任职怎么样」——
+一个人可以同时持有多条 `Assignment`
+（[D32](decisions/D32-worker-axes-schedule-and-assignment.md) 那条不变量说的是
+路径不是条数）。落到语义上：**张三在食物银行和报税互助各有一个岗位，
+一场只勾了「报税互助在编」的活动，他看得见、也报得上。**
 
-> 收窄的是**发现**，不是**你已经拥有的行**。受众事后改窄，不该让已经报名的人打不开自己的活动页。
+⚠️ 第一行那个「没有」是本节最容易写错的一格：它是前两行的**否定**，
+而否定一个 `Exists` 在 SQL 里是 `NOT EXISTS`，写成 `exclude()` 和写成
+`filter(~Exists(...))` 在有 join 的时候不等价。实现时两种都跑一遍对答案。
 
-管理侧的 `_scoped_events()` 同样不改：它答的是「我管哪些活动」，和受众正交。
+⚠️ 外层要先 `annotate(event_day=local_day("start_time"))` —— L1.4 已经建好的
+`on_the_books_exists()` 收的是一个已经算好当地日期的 `OuterRef`，理由见那一步。
 
 ### ⭐ 守卫一：受众必问
 
@@ -857,24 +933,26 @@ class EventRole(...):
 然后被加白名单加到失效 —— [`participants.md` 第十节](participants.md)
 对 `ReportFigureNamesGuardTests` 写过同一句话。
 
-## L2.3 `EventRole.eligibility` 与不变量
+## L2.3 不变量：角色勾的每一项，活动都必须勾了
 
-规则只写一处，`events/models.py`：
+从「枚举比大小」变成**集合包含**。规则只写一处：
 
 ```python
-def refuse_wider_than_event(*, event_audience, role_eligibility):
-    """角色的资格不许比活动的可见性宽。两个方向都要调它。
-
-    ⚠️ 这条**不是** CheckConstraint，而这不是偷懒：两个字段在两张表上，
-       跨表条件 CheckConstraint 表达不了 —— 和 D19 判掉 Participation.event、
-       D11 判掉 Assignment.employment_type 是同一格。于是按 D14 的规矩如实说：
-       它是提示层，bulk_create 走得过去。
-
-    ⚠️ 「在 EventRole 上冗余一列 event_audience + 复合外键指回 Event(id, audience)」
-       这条路能进数据库，也被判掉了：Django 5.2 表达不了复合外键，而且它把同一
-       件事记在两处 —— 本项目判过三次的形状。
-    """
+def refuse_wider_than_event(*, event, role_flags, role_ministries):
+    """角色的可报范围不许超出活动的可见范围。两个方向都要调它。"""
 ```
+
+三条要逐条判，因为它们**不是同一种比较**：
+
+| 角色勾了 | 合法当且仅当 |
+|---|---|
+| 外部人员 | 活动也勾了外部人员 |
+| 全体在编 | 活动也勾了全体在编（⚠️ 活动勾齐所有 ministry **不算**，理由同规则 2） |
+| 某几个 ministry | 活动勾了全体在编 **或** 活动勾了这几个 ministry 的超集 |
+
+⚠️ 第三行那个「或」是这条不变量真正的难点，也是原来那个枚举版本没有的 ——
+「全体在编」在包含关系上位于所有 ministry 之上，但它是一个**布尔**不是一个集合，
+所以比较不能只写成一次 `issubset`。
 
 三个调用方：
 
@@ -884,7 +962,13 @@ def refuse_wider_than_event(*, event_audience, role_eligibility):
 | `EventForm.clean()` | 活动改窄时。错误消息要点名是哪几个角色挡住了它，否则人只知道被拒绝、不知道去改什么 |
 | `services.sign_up()` | 见下一步。它挡的不是配置，是报名 |
 
-守卫二：`AUDIENCE_WIDTH` 和这条比较只许出现在 `refuse_wider_than_event()` 里。
+⚠️ 按 [D14](decisions/D14-constraint-is-the-only-rule.md) 如实说：它**不是** CheckConstraint。
+两个字段在两张表上（现在还多一张多对多），跨表条件表达不了 ——
+和 [D19](decisions/D19-event-role.md) 判掉 `Participation.event` 是同一格。
+`bulk_create` 走得过去。
+
+守卫二从「`AUDIENCE_WIDTH` 只有一个读者」改成：**这三条比较只许出现在
+`refuse_wider_than_event()` 里**。⚠️ 多选之后可比的东西变多了，守卫因此比原来更必要。
 
 ## L2.4 报名门
 
@@ -953,24 +1037,49 @@ Planning Center 是被「有人以为在 Groups 里 RSVP 了就等于报名了�
 
 - `test_an_outside_account_does_not_see_a_staff_only_event`
 - `test_a_staff_member_of_another_ministry_sees_but_cannot_sign_up`
-- `test_the_executive_director_sees_all_staff_events_but_not_ministry_only_roles`
-- `test_somebody_with_posts_in_two_ministries_can_sign_up_in_both`
-- `test_the_executive_director_who_also_holds_a_ministry_post_can_sign_up_there`
 - `test_visibility_is_judged_on_the_day_of_the_event`
 - `test_the_schedule_narrows_by_audience_too`
 - `test_signing_up_for_an_event_you_cannot_see_is_a_404`
-- `test_a_role_wider_than_its_event_is_refused`
-- `test_narrowing_an_event_below_its_roles_is_refused_and_names_them`
 - `test_cancelling_visibility_does_not_hide_an_event_you_already_signed_up_for`
 - `test_an_announcement_says_it_takes_no_signups`
 - `test_an_announcement_cannot_have_roles`
 - `test_the_event_list_filters_by_kind`
 
+多选带来的那几条（2026-08-26 加）：
+
+- `test_an_event_can_be_visible_to_two_ministries_at_once`
+  —— ⚠️ 这一条是推翻枚举的**唯一理由**，缺了它那次推翻就没有落点
+- `test_an_outsiders_only_event_is_hidden_from_staff`
+  —— 决定 10：「外部人员」不是最宽的一档
+- `test_an_outsiders_only_event_is_hidden_from_the_admin_who_published_it`
+  —— 同一条规则的刺耳后果，写成测试免得以后被当成 bug「修」掉
+- `test_ticking_everyone_stores_outsiders_and_all_staff`
+  —— 决定 11：「所有人」不落库
+- `test_an_event_visible_to_nobody_is_refused`
+  —— 决定 12
+- `test_all_staff_together_with_a_named_ministry_is_refused_by_the_service`
+  —— 决定 13 的**服务端**那一半。⚠️ 只测置灰等于没测，界面挡不住任何人
+- `test_somebody_with_posts_in_two_ministries_sees_an_event_for_either`
+  —— 一人多岗，决定表第 1 条在多选下的样子
+- `test_the_executive_director_sees_all_staff_events_but_not_ministry_ones`
+- `test_a_new_event_starts_with_only_the_publishers_own_ministry_ticked`
+  —— 决定 14 + 那个例外
+- `test_a_new_role_inherits_what_the_event_can_see`
+  —— 决定 15
+- `test_a_role_wider_than_its_event_is_refused`
+- `test_a_role_for_all_staff_is_refused_even_when_the_event_ticked_every_ministry`
+  —— ⚠️ 包含关系里最容易写错的一格：勾齐所有 ministry **不等于**「全体在编」
+- `test_narrowing_an_event_below_its_roles_is_refused_and_names_them`
+- `test_existing_events_stay_visible_after_the_migration`
+  —— 回填那一条。⚠️ 漏了它，上线那天库里每一场活动都会消失
+
 浏览器验收（dev 库真数据，照 [`participants.md` 第十节](participants.md) 那五条的规矩）：
 
 - 外部账号看不到内部活动
 - 别的 ministry 的在编成员看得见、报不上，且页面说得出为什么
-- 一次发布同时招内外（一个「所有人可报」+ 一个「仅在编可报」）
+- 一次发布同时招内外（一个对外的角色 + 一个仅在编的角色）
+- 一场勾了两个 ministry 的活动，两边的在编都看得见，第三个 ministry 的看不见
+- 勾「所有人」→ 存进去之后再打开，显示的仍然是「所有人」而不是两个分开的勾
 - 把活动改窄 → 被角色挡住，错误里点了名
 - 公告页面说得出它是故意不收报名的
 
@@ -1034,7 +1143,8 @@ class EventSeriesRole(TimeStampedModel):
     series = models.ForeignKey(EventSeries, on_delete=models.CASCADE,
                                related_name="role_templates")
     role = models.ForeignKey(ParticipationRole, on_delete=models.PROTECT, related_name="+")
-    needed_count / stop_at_needed_count / eligibility / notes
+    needed_count / stop_at_needed_count / notes
+    可见性三件套（和 EventRole 同一套字段）
 ```
 
 生成第 N 场时，每条模板建一行真的 `EventRole`。
@@ -1122,7 +1232,7 @@ def _drop_generated_after(series, after):
 | # | 名字 | 盯什么 |
 |---|---|---|
 | 1 | `AudienceIsAskedGuardTests` | 调用 `visible_to_participants()` 的函数体里必须同时调 `for_audience(` |
-| 2 | `AudienceWidthGuardTests` | `AUDIENCE_WIDTH` 只有 `refuse_wider_than_event()` 一个读者 |
+| 2 | `AudienceContainmentGuardTests` | 「角色的范围 ⊆ 活动的范围」那三条比较只许出现在 `refuse_wider_than_event()` 里。⚠️ 改成多选之后可比的东西变多了，这条比枚举时代更必要 |
 | 3 | `HoursWriteGuardTests` | `.hours =` 只出现在 `events/services.py`（现在就成立，这一条是把现状钉住） |
 | 4 | `GeneratedEventDeleteGuardTests` | 生成场次的那三个删除条件只出现在 `_drop_generated_after()` |
 | 5 | `LocalDayInSqlGuardTests` | `TruncDate(` 只出现在 `on_the_books_exists()` 所在的文件，且那一行带 `tzinfo=` |
@@ -1136,12 +1246,12 @@ def _drop_generated_after(series, after):
 
 | 文件 | 批 | 干什么 |
 |---|---|---|
-| `events/models.py` | 一二三 | `nature`、`NOT_APPLICABLE`、新约束、`Audience`、`audience`、`takes_signups`、`eligibility`、`refuse_wider_than_event()`、`for_audience()`、`EventSeries`、`EventSeriesRole`、`Event.series` / `Event.source` |
+| `events/models.py` | 一二三 | `nature`、`NOT_APPLICABLE`、新约束、第二个兜底工种、可见性的两个布尔 + 一张多对多（`Event` / `EventRole` 各一套）、`takes_signups`、`refuse_wider_than_event()`、`for_audience()`、`EventSeries`、`EventSeriesRole`、`Event.series` / `Event.source` |
 | `events/services.py` | 一二三 | `on_the_books_q()` / `on_the_books_exists()`、`default_served_as()`、`record_hours()`、`check_out()`、`create_participation_role()`、`ministry_report()`、`_people_served()`、`eligible()` / `eligible_role_ids()`、`sign_up()`、系列的生成与撤销 |
 | `events/forms.py` | 一二三 | `RoleChoiceField`、`SignUpForm`、`EventRoleForm`、`EventForm`、`EventPeriodForm`、新的 `EventSeriesForm` |
 | `events/views.py` | 一二三 | `_visible_events()`、`_schedule()`、`_detail()`、`event_signup`、`event_registrations`、`event_attendance`、系列的三个视图 |
 | `events/urls.py` | 三 | 系列的三条路由 |
-| `events/admin.py` | 一二三 | `ParticipationRoleAdmin` 加 `nature`；`EventAdmin` 加 `audience` / `takes_signups`；`EventRoleInline` 和 `EventRoleAdmin` 加 `eligibility`；`EventSeries` 注册 |
+| `events/admin.py` | 一二三 | `ParticipationRoleAdmin` 加 `nature`；`EventAdmin` 和 `EventRoleAdmin` 各加三个可见性字段；`EventSeries` 注册 |
 | `events/recurrence.py` | 三 | 新文件，纯函数 |
 | `events/migrations/0016_participationrole_nature.py` | 一 | 新 |
 | `events/migrations/0017_served_as_not_applicable.py` | 一 | 新 |
@@ -1164,14 +1274,19 @@ def _drop_generated_after(series, after):
 | `events/management/commands/seed_demo.py` | 一二三 | ESL 工种与活动；一场内部活动；一个系列 |
 | `docs/planning/diagrams/src/page.html` | 三 | ERD 加三个字段和两张表，DFD 加一条生成的路，表册加两行。⚠️ 改完要按 `docs/planning/diagrams/README.md` 重新生成 `data-and-flow.html`，那一步要 `npm i mermaid puppeteer-core` |
 
+| `core/management/commands/check_deployment.py` | 一 | L1.6：工种表的门槛从 2 提到 3 |
+| `events/migrations/0018_second_catch_all_role.py` | 一 | 新（L1.6），数据迁移 |
+
 ⚠️ 不动的文件，写下来是因为它们看起来该动：
 `org/permissions.py`（受众不是授权，是可见性；授权仍然只有 MinistryRole 那一套）、
 `events/tokens.py` 与扫码那几个视图（收窄的是发现，不是已经拥有的行）、
 `render.yaml`（决定 4 之后不需要第三条 cron，`RenderBlueprintGuardTests` 因此不用改）、
-`core/management/commands/check_deployment.py`（它查的是「字典表空不空」，
-而本轮没有任何一档是上线前必须先有行的 —— 一个基金会完全可以一个 `attending`
-工种都没有）、`gallery/`（Memories 墙没有指向 `Event` 的外键，核对过，
-所以 L3 不会从那边漏出去）。
+`gallery/`（Memories 墙没有指向 `Event` 的外键，核对过，所以 L3 不会从那边漏出去）。
+
+⚠️ `check_deployment.py` 2026-08-26 之前列在上面这一段里，理由写的是
+「本轮没有任何一档是上线前必须先有行的」。那句话本身没错，
+错在它没预料到 L1.6 会让**迁移多送一行** —— 门槛不跟着提，
+那条自检从此什么都不检查，而且不报错。
 
 ### ⚠️ 那张 ERD 已经落后三轮了，这是核对时撞出来的
 
@@ -1195,7 +1310,7 @@ grep 了一遍，它里面搜不到 `served_as`、`stop_at_needed_count`、`comp
 | [`participants.md`](participants.md) | 第八节改口清单里 D38 那一行从「不改口」改成「加一档 `not_applicable`」；第十节加三批的执行记录；第十一节的验收逐条打勾 |
 | [D38](decisions/D38-served-as-volunteer-or-work.md) | 加 `not_applicable` 一档，写明它不是身份、永远不出现在表单上、且它换来了一条真正的约束 |
 | [D27](decisions/D27-ministry-report.md) | 指标拆成两组并排不相加；`hours_per_participant` 的分母改口；新增 People served |
-| [D19](decisions/D19-event-role.md) | `EventRole` 长出 `eligibility`；并写明 L1 落在 `ParticipationRole` 而不是这里，以及为什么 |
+| [D19](decisions/D19-event-role.md) | `EventRole` 长出「谁报得上」那一组勾选（两个布尔 + 一张多对多）；并写明 L1 为什么落在 `ParticipationRole` 而不是这里 |
 | [D5](decisions/D05-lookup-tables-not-enums.md) | `EventType` 从「没有 branch」变成「有页面」；`nature` 作为「字典表上的枚举列」的第二个例子 |
 | [`deferred.md`](deferred.md) | `Event.parent` 出栏，并注明载体判定作废的理由 |
 | [`phase-b.md`](phase-b.md) | 可见性那一节补 L3 这一维 |

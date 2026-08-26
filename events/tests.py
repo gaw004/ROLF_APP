@@ -52,7 +52,13 @@ from org.permissions import foundation_admin_group
 from .management.commands.seed_demo import demo_login
 
 from . import schedule, tokens
-from .forms import AudienceFormMixin, EventForm, EventPeriodForm, SignUpForm
+from .forms import (
+    AudienceFormMixin,
+    EventForm,
+    EventPeriodForm,
+    EventRoleForm,
+    SignUpForm,
+)
 from .views import EVENTS_PER_PAGE
 from .models import (
     Event,
@@ -2050,6 +2056,171 @@ class DictionaryTableTests(TestCase):
         self.assertEqual(theirs.name, "Whatever we call it here")
 
 
+class AudienceContainmentTests(TestCase):
+    """L2×L3: a role may not be open to anybody its event is closed to.
+
+    Requirement 7 from the other side — seeing an event and being able to take
+    a job inside it are different questions, but not independent ones.
+    """
+
+    def setUp(self):
+        self.pantry = Ministry.objects.create(code="food_pantry", name="Food Pantry")
+        self.tax = Ministry.objects.create(code="tax_help", name="Tax Help")
+        self.event = make_event(ministry=self.pantry, visible_to_outsiders=False)
+        self.event.visible_to_ministries.add(self.pantry)
+
+    def role_form(self, event=None, **payload):
+        return EventRoleForm({
+            "role": ParticipationRole.seed_catch_all(
+                ParticipationRole.Nature.HELPING).pk,
+            "needed_count": 2,
+            **payload,
+        }, event=event or self.event)
+
+    # --- the role's own rule, which L2.1 only gave the event ---------------
+
+    def test_a_role_open_to_nobody_is_refused(self):
+        """⚠️ Missing until 2026-08-26 — L2.1 gave this rule to the event only.
+
+        A role nobody can take looks exactly like one that is full, or one
+        somebody forgot to finish (D27).
+        """
+        form = self.role_form()
+        self.assertFalse(form.is_valid())
+        self.assertIn("visible_to_outsiders", form.errors)
+
+    def test_the_two_sides_say_different_things_when_empty(self):
+        # One function, two messages: the failure reads differently from each
+        # side, and a sentence covering both describes neither.
+        role = self.role_form()
+        role.is_valid()
+        self.assertIn("sign up", " ".join(role.errors["visible_to_outsiders"]))
+
+    # --- the containment itself -------------------------------------------
+
+    def test_a_role_wider_than_its_event_is_refused(self):
+        # The event is for the pantry's staff; the role would be open to
+        # outsiders, who cannot see the event at all.
+        form = self.role_form(visible_to_outsiders=True)
+        self.assertFalse(form.is_valid())
+        self.assertIn("visible_to_outsiders", form.errors)
+
+    def test_a_role_for_a_ministry_the_event_left_out_is_refused_and_names_it(self):
+        form = self.role_form(visible_to_ministries=[self.pantry.pk, self.tax.pk])
+        self.assertFalse(form.is_valid())
+        self.assertIn("Tax Help", " ".join(form.errors["visible_to_outsiders"]))
+
+    def test_a_role_narrower_than_its_event_is_fine(self):
+        wide = make_event(ministry=self.pantry, name="Wide",
+                          visible_to_outsiders=True, visible_to_all_staff=True)
+        form = self.role_form(event=wide, visible_to_ministries=[self.pantry.pk])
+        self.assertTrue(form.is_valid(), form.errors)
+
+    def test_a_role_for_one_ministry_is_fine_when_the_event_is_for_all_staff(self):
+        # ⚠️ "All staff" sits above every ministry in the containment — the one
+        #    direction where a boolean beats a set.
+        wide = make_event(ministry=self.pantry, name="Staff wide",
+                          visible_to_outsiders=False, visible_to_all_staff=True)
+        form = self.role_form(event=wide, visible_to_ministries=[self.tax.pk])
+        self.assertTrue(form.is_valid(), form.errors)
+
+    def test_a_role_for_all_staff_is_refused_even_when_the_event_ticked_every_ministry(self):
+        """🔴 The comparison that looks redundant today and is not.
+
+        With two ministries in the database, "every ministry" and "all staff"
+        select the same people — so this refusal is nearly impossible to
+        trigger by hand. It stops being redundant the moment a third ministry
+        exists, and by then nobody would remember to add it.
+        """
+        every = make_event(ministry=self.pantry, name="Every ministry")
+        every.visible_to_ministries.set([self.pantry, self.tax])
+        form = self.role_form(event=every, visible_to_all_staff=True)
+        self.assertFalse(form.is_valid())
+        self.assertIn("added later", " ".join(form.errors["visible_to_outsiders"]))
+
+    # --- the same rule, asked from the event's side ------------------------
+
+    def test_narrowing_an_event_below_its_roles_is_refused_and_names_them(self):
+        wide = make_event(ministry=self.pantry, name="Wide",
+                          owner=self.event.owner, visible_to_outsiders=True)
+        role = EventRole.objects.create(
+            event=wide, role=ParticipationRole.seed_catch_all(
+                ParticipationRole.Nature.HELPING),
+            visible_to_outsiders=True)
+        form = EventForm({
+            "name": wide.name, "event_type": wide.event_type_id,
+            "ministry": wide.ministry_id,
+            "start_time": "2026-09-01T09:00", "end_time": "2026-09-01T12:00",
+            "status": wide.status,
+            # Narrowing: outsiders dropped, staff only.
+            "visible_to_all_staff": True,
+        }, instance=wide, user=self.a_user())
+        self.assertFalse(form.is_valid())
+        self.assertIn(role.role.name, " ".join(form.errors["visible_to_outsiders"]))
+
+    def test_an_empty_event_audience_does_not_also_report_every_role(self):
+        """⚠️ Order: the empty check returns, so containment never runs.
+
+        An event ticked for nobody is narrower than all of its roles, so
+        without the early return one real fault (an empty audience) would be
+        buried under a list of its own consequences.
+        """
+        wide = make_event(ministry=self.pantry, name="Wide",
+                          owner=self.event.owner, visible_to_outsiders=True)
+        EventRole.objects.create(
+            event=wide, role=ParticipationRole.seed_catch_all(
+                ParticipationRole.Nature.HELPING),
+            visible_to_outsiders=True)
+        form = EventForm({
+            "name": wide.name, "event_type": wide.event_type_id,
+            "ministry": wide.ministry_id,
+            "start_time": "2026-09-01T09:00", "end_time": "2026-09-01T12:00",
+            "status": wide.status,
+        }, instance=wide, user=self.a_user())
+        self.assertFalse(form.is_valid())
+        messages = " ".join(form.errors["visible_to_outsiders"])
+        self.assertIn("Say who this is for", messages)
+        self.assertNotIn("Narrow those roles first", messages)
+
+    def test_a_new_event_has_no_roles_to_compare(self):
+        # ⚠️ roles.all() raises outright on an unsaved instance (verified), so
+        #    the pk check is not defensive tidiness.
+        form = EventForm({
+            "name": "Brand new", "event_type": self.event.event_type_id,
+            "ministry": self.pantry.pk,
+            "start_time": "2026-09-01T09:00", "end_time": "2026-09-01T12:00",
+            "status": Event.Status.OPEN, "visible_to_outsiders": True,
+        }, user=self.a_user())
+        self.assertTrue(form.is_valid(), form.errors)
+
+    # --- decision 15: a new role inherits ---------------------------------
+
+    def test_a_new_role_inherits_what_the_event_can_see(self):
+        wide = make_event(ministry=self.pantry, name="Wide",
+                          visible_to_outsiders=True, visible_to_all_staff=True)
+        form = EventRoleForm(event=wide)
+        self.assertTrue(form.initial["visible_to_outsiders"])
+        self.assertTrue(form.initial["visible_to_all_staff"])
+
+    def test_editing_a_role_does_not_re_inherit(self):
+        # ⚠️ Re-inheriting would silently widen a role somebody had narrowed.
+        wide = make_event(ministry=self.pantry, name="Wide",
+                          visible_to_outsiders=True, visible_to_all_staff=True)
+        narrow = EventRole.objects.create(
+            event=wide, role=ParticipationRole.seed_catch_all(
+                ParticipationRole.Nature.HELPING),
+            visible_to_all_staff=True)
+        form = EventRoleForm(instance=narrow, event=wide)
+        self.assertFalse(form.initial.get("visible_to_outsiders"))
+
+    def a_user(self):
+        user = register_account(
+            password="a-good-long-password", email="admin@example.com",
+            legal_last_name="Admin", legal_first_name="An")
+        MinistryRole.objects.create(contact=user.contact, ministry=self.pantry)
+        return user
+
+
 class ForAudienceTests(TestCase):
     """L3: which events a given person may find. Every failure here is silent.
 
@@ -3625,9 +3796,17 @@ class NewParticipationRoleTests(PageTestCase):
     """
 
     def add(self, **payload):
-        """A well-formed submission. ⚠️ `new_role_nature` is in the defaults so
-        the tests below stay about what their names say; the requirement itself
-        is asserted by test_adding_a_role_from_the_page_asks_which_kind_it_is.
+        """A well-formed submission.
+
+        ⚠️ `new_role_nature` and the audience are in the defaults so the tests
+           below stay about what their names say. Each requirement has its own
+           test: test_adding_a_role_from_the_page_asks_which_kind_it_is for the
+           first, and AudienceContainmentTests for the second.
+
+        ⚠️ The audience matches what make_event() gives the event in
+           PageTestCase — a role may not be wider than the event it is in, so a
+           fixture that ignored this would be refused for a reason none of
+           these tests is about.
         """
         self.login(self.zhang)
         return self.client.post(
@@ -3635,6 +3814,7 @@ class NewParticipationRoleTests(PageTestCase):
             {
                 "needed_count": 1,
                 "new_role_nature": ParticipationRole.Nature.HELPING,
+                "visible_to_outsiders": True,
                 **payload,
             })
 

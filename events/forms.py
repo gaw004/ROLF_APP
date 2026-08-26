@@ -29,6 +29,7 @@ from .models import (
     askable_served_as,
     refuse_empty_audience,
     refuse_redundant_audience,
+    refuse_wider_than_event,
 )
 
 
@@ -270,31 +271,107 @@ class AudienceFormMixin:
        does.
     """
 
+    #: Which table this form edits, for the messages that differ between them.
+    AUDIENCE_ON = "event"
+
     def audience(self):
-        """(outsiders, all_staff, ministries) as submitted."""
-        return (
-            self.cleaned_data.get("visible_to_outsiders"),
-            self.cleaned_data.get("visible_to_all_staff"),
-            self.cleaned_data.get("visible_to_ministries"),
+        """The submitted audience as an Audience.Spec.
+
+        ⚠️ Built from `cleaned_data`, never from `self.instance` — on an edit
+           the instance still holds the audience already in the database, and
+           validating that is the trap L2.1 records in full.
+        """
+        ministries = self.cleaned_data.get("visible_to_ministries") or []
+        return Audience.Spec(
+            outsiders=bool(self.cleaned_data.get("visible_to_outsiders")),
+            all_staff=bool(self.cleaned_data.get("visible_to_all_staff")),
+            ministries=frozenset(m.pk for m in ministries),
         )
 
+    def refuse_narrowing_below_the_roles(self, event):
+        """L2×L3, asked from the **event's** side: a role must not outlive a narrowing.
+
+        ⚠️ On the mixin rather than on EventForm, because the admin edits events
+           through AudienceAdminForm and would otherwise have this half of the
+           invariant missing — the same hole L2.1 found for the other two rules.
+           EventRoleForm inherits it too and simply has no roles of its own, so
+           the loop below runs zero times.
+
+        ⚠️ Names the roles. "That is not allowed" leaves somebody looking at
+           five roles with no idea which two are the problem — and the fix is on
+           a different page.
+
+        ⚠️ `roles.all()` raises outright on an unsaved instance (verified), and
+           a new event has no roles anyway, so the pk check is not defensive
+           tidiness.
+        """
+        if getattr(self.instance, "pk", None) is None:
+            return
+        roles = getattr(self.instance, "roles", None)
+        if roles is None:
+            return
+        blocked = []
+        for role in roles.select_related("role"):
+            try:
+                refuse_wider_than_event(event=event, role=Audience.Spec.of(role))
+            except ValidationError:
+                blocked.append(role.role.name)
+        if blocked:
+            self.add_error("visible_to_outsiders", ValidationError(
+                "Narrowing this event would leave %(roles)s open to people who "
+                "could no longer see it. Narrow those roles first.",
+                params={"roles": ", ".join(f"“{name}”" for name in blocked)},
+            ))
+
+    def refuse_wider_than_its_event(self, role):
+        """L2×L3, asked from the **role's** side. The other half of the pair above.
+
+        ⚠️ Also on the mixin, and for the same reason: the admin edits roles
+           through AudienceAdminForm. EventForm inherits it and has no event of
+           its own to compare against, so it does nothing there.
+
+        ⚠️ `Spec.of(event)` reads the event's saved audience, which is correct
+           **here** — a role is always added to an event that already exists,
+           so what is in the database is what the event is. It would be wrong
+           in refuse_narrowing_below_the_roles(), where the event's own audience
+           is the thing being changed.
+        """
+        event = getattr(self.instance, "event", None)
+        if event is None or getattr(event, "pk", None) is None:
+            return
+        try:
+            refuse_wider_than_event(event=Audience.Spec.of(event), role=role)
+        except ValidationError as error:
+            self.add_error("visible_to_outsiders", error)
+
     def clean_audience(self):
-        """Run both rules, putting each message where the reader can act on it.
+        """Run the two rules that an audience obeys on its own.
 
         ⚠️ Errors land on a **field**, never on the form as a whole. "Say who
            this is for" at the top of a long publish form leaves somebody
            hunting for which box it means.
+
+        Returns the Spec when it is usable, or None when the audience is empty
+        — ⚠️ so the caller can stop rather than go on to compare an empty
+        audience against things. An event ticked for nobody is wider than
+        nothing, so every one of its roles would also be reported, and the one
+        real fault would be buried under a list of consequences.
         """
-        outsiders, all_staff, ministries = self.audience()
+        spec = self.audience()
+        empty = False
         try:
             refuse_empty_audience(
-                outsiders=outsiders, all_staff=all_staff, ministries=ministries)
+                outsiders=spec.outsiders, all_staff=spec.all_staff,
+                ministries=spec.ministries, on=self.AUDIENCE_ON)
         except ValidationError as error:
             self.add_error("visible_to_outsiders", error)
+            empty = True
         try:
-            refuse_redundant_audience(all_staff=all_staff, ministries=ministries)
+            refuse_redundant_audience(
+                all_staff=spec.all_staff, ministries=spec.ministries)
         except ValidationError as error:
             self.add_error("visible_to_ministries", error)
+        return None if empty else spec
 
 
 class AudienceAdminForm(AudienceFormMixin, forms.ModelForm):
@@ -316,7 +393,14 @@ class AudienceAdminForm(AudienceFormMixin, forms.ModelForm):
 
     def clean(self):
         cleaned = super().clean()
-        self.clean_audience()
+        audience = self.clean_audience()
+        if audience is not None:
+            # ⚠️ Both halves, because the admin edits events **and** roles
+            #    through this one form. On a role the loop finds nothing; on an
+            #    event it is the only thing standing between a narrowing and a
+            #    role left open to people who can no longer see it.
+            self.refuse_narrowing_below_the_roles(audience)
+            self.refuse_wider_than_its_event(audience)
         return cleaned
 
 
@@ -408,7 +492,12 @@ class EventForm(AudienceFormMixin, forms.ModelForm):
 
     def clean(self):
         cleaned = super().clean()
-        self.clean_audience()
+        audience = self.clean_audience()
+        # ⚠️ Only when the audience itself is usable. An event ticked for nobody
+        #    is narrower than every one of its roles, so going on would bury the
+        #    one real fault under a list of its own consequences.
+        if audience is not None:
+            self.refuse_narrowing_below_the_roles(audience)
         return cleaned
 
     def time_changed(self):
@@ -587,7 +676,7 @@ class EventPeriodForm(forms.Form):
         return events
 
 
-class EventRoleForm(forms.ModelForm):
+class EventRoleForm(AudienceFormMixin, forms.ModelForm):
     """Open one job on an event and say how many people it wants.
 
     2026-08-04: it can also **add to the vocabulary**. A ministry admin is not
@@ -633,12 +722,41 @@ class EventRoleForm(forms.ModelForm):
         model = EventRole
         # ⚠️ `stop_at_needed_count` 排在数字后面，因为它讲的是那个数字
         #    （2026-08-19）。它默认勾上 —— 理由写在模型上，那是唯一的一份。
-        fields = ["role", "needed_count", "stop_at_needed_count", "notes"]
+        fields = [
+            "role", "needed_count", "stop_at_needed_count",
+            # L2. Same three columns as the event, answering "who may sign up"
+            # rather than "who may see it".
+            *Audience.AUDIENCE_FIELDS,
+            "notes",
+        ]
+        widgets = {"visible_to_ministries": forms.CheckboxSelectMultiple}
+
+    AUDIENCE_ON = "role"
 
     def __init__(self, *args, event, **kwargs):
         super().__init__(*args, **kwargs)
         self.instance.event = event
         self.fields["role"].queryset = ParticipationRole.objects.filter(is_active=True)
+        self.fields["visible_to_ministries"].queryset = Ministry.objects.filter(
+            is_active=True).order_by("name")
+
+        # ⭐ A new role starts as wide as the event it belongs to — "if you can
+        #    see it you can sign up for it" is requirement 6's ordinary case,
+        #    and it is the only default that cannot violate the invariant below.
+        #
+        #    Starting narrow would make requirement 8 (one publish recruiting
+        #    inside and outside at once) mean widening every role by hand, and
+        #    forgetting shows up as "outside volunteers can see the event and
+        #    sign up for nothing in it" — which raises nothing.
+        #
+        # ⚠️ Only when adding. On an edit the stored answer is the answer;
+        #    re-inheriting would silently widen a role somebody had narrowed.
+        if self.instance.pk is None:
+            inherited = Audience.Spec.of(event)
+            self.initial.setdefault("visible_to_outsiders", inherited.outsiders)
+            self.initial.setdefault("visible_to_all_staff", inherited.all_staff)
+            self.initial.setdefault(
+                "visible_to_ministries", sorted(inherited.ministries))
         # Not required on its own any more: one of `role` and `new_role_name`
         # has to be filled, and clean() is where "one of" can be said.
         self.fields["role"].required = False
@@ -652,7 +770,9 @@ class EventRoleForm(forms.ModelForm):
         #    that is what this call exists for, and the comment above says why.
         self.order_fields([
             "role", "new_role_name", "new_role_nature",
-            "needed_count", "stop_at_needed_count", "notes",
+            "needed_count", "stop_at_needed_count",
+            *Audience.AUDIENCE_FIELDS,
+            "notes",
         ])
 
     def _get_validation_exclusions(self):
@@ -686,6 +806,13 @@ class EventRoleForm(forms.ModelForm):
                 "Pick a role from the list or add a new one — not both.")
         if not role and not new_name:
             raise forms.ValidationError("Pick a role, or add a new one.")
+
+        # L2×L3. ⚠️ Runs before the vocabulary checks below rather than after,
+        #    so that a submission with two faults reports the audience one too
+        #    instead of hiding it behind a name clash.
+        role = self.clean_audience()
+        if role is not None:
+            self.refuse_wider_than_its_event(role)
 
         if new_name:
             from .services import matching_participation_role

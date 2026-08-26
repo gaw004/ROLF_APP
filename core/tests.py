@@ -424,6 +424,42 @@ class ReportFigureNamesGuardTests(TestCase):
         )
 
 
+class AudienceContainmentGuardTests(TestCase):
+    """Lint-as-test: "is this role wider than its event" is compared in one place.
+
+    ⭐ The invariant that keeps requirement 7 honest — somebody who cannot see
+       an event must not be able to sign up for a job inside it. It is three
+       comparisons of three different kinds (two implications and a set
+       containment, with "all staff" sitting above every ministry while being a
+       boolean), which is exactly the shape that grows a second, subtly
+       different implementation the first time somebody needs the answer
+       somewhere else.
+
+    ⚠️ It watches Audience.Spec's three attribute names rather than the model
+       fields. The fields are read all over the place — templates draw them,
+       the admin filters on them — and a guard that went red on those would be
+       widened until it meant nothing. These three names belong to the value
+       object alone, so seeing one outside the two files below means somebody
+       is doing the comparison by hand.
+
+    ⚠️ forms.py is allowed because it *builds* Specs and hands them over;
+       models.py is allowed because refuse_wider_than_event() lives there.
+       Anywhere else is a second implementation.
+    """
+
+    SPEC_ATTRIBUTE = r"\.(outsiders|all_staff|ministries)\b"
+    ALLOWED = ["events/models.py", "events/forms.py"]
+
+    def test_only_one_place_compares_two_audiences(self):
+        hits = offending_lines(self.SPEC_ATTRIBUTE, skip=self.ALLOWED)
+        self.assertEqual(
+            hits,
+            [],
+            "Comparing audiences is events.models.refuse_wider_than_event()'s "
+            "job — one rule, one implementation:\n" + "\n".join(hits),
+        )
+
+
 class AudienceIsAskedGuardTests(TestCase):
     """Lint-as-test: nobody narrows an event list by status and forgets the person.
 

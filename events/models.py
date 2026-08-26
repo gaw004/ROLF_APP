@@ -12,6 +12,8 @@ people in it. The analogy is exact, and this is the second time in this project
 that one had to be split out of the other.
 """
 
+from typing import NamedTuple
+
 from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.db import models
@@ -333,6 +335,49 @@ class Audience(models.Model):
        kind of drift a second spelling produces.
     """
 
+    class Spec(NamedTuple):
+        """One audience, lifted out of wherever it came from.
+
+        🔴 Every rule below takes these rather than a model instance, and that
+           is not tidiness. Narrowing an event means comparing the **submitted**
+           audience against its roles — read off the instance, `ministries`
+           would be the row already in the database, which is the trap L2.1
+           records in full: a check that reads right and validates last week.
+
+        ⚠️ A NamedTuple, so it still unpacks like the plain tuple it replaced.
+        """
+
+        outsiders: bool
+        all_staff: bool
+        ministries: frozenset
+
+        @classmethod
+        def of(cls, instance):
+            """The audience a **saved** row currently has. Never for validation.
+
+            ⚠️ Only safe where the row is not the one being edited — the roles
+               of an event whose own audience is being narrowed, for instance.
+            """
+            return cls(
+                outsiders=instance.visible_to_outsiders,
+                all_staff=instance.visible_to_all_staff,
+                ministries=frozenset(
+                    instance.visible_to_ministries.values_list("pk", flat=True)),
+            )
+
+        def __str__(self):
+            """For error messages: what this audience says, in the page's words."""
+            parts = []
+            if self.outsiders:
+                parts.append("people with no current post")
+            if self.all_staff:
+                parts.append("everybody on the books")
+            if self.ministries:
+                parts.append(
+                    ", ".join(Ministry.objects.filter(pk__in=self.ministries)
+                              .order_by("name").values_list("name", flat=True)))
+            return " + ".join(parts) or "nobody"
+
     class Meta:
         abstract = True
 
@@ -409,12 +454,28 @@ class Audience(models.Model):
 #    both of these.
 
 
-def refuse_empty_audience(*, outsiders, all_staff, ministries):
+#: What "nobody ticked" means on each of the two tables. One function, two
+#: sentences — the failure looks different from each side, and a message that
+#: covers both ends up describing neither.
+EMPTY_AUDIENCE_MESSAGE = {
+    "event": (
+        "Say who this is for. Something published that nobody can see is a "
+        "draft, and there is already a status for that."
+    ),
+    "role": (
+        "Say who may sign up for this. A role nobody can take looks exactly "
+        "like one that is full, or one somebody forgot to finish."
+    ),
+}
+
+
+def refuse_empty_audience(*, outsiders, all_staff, ministries, on="event"):
     """Nobody ticked. Raises ValidationError; returns nothing.
 
-    Published and visible to nobody is indistinguishable from a draft — and a
-    draft already has a status of its own. Two fields saying one thing is the
-    bill this project has paid three times.
+    ⚠️ Both tables use this, and the role side was missing until 2026-08-26 —
+       so a hand-made POST could create a role nobody at all could sign up for,
+       indistinguishable on the page from a full one or an unfinished one
+       (D27: what is missing and what is not counted must not look the same).
 
     ⚠️ Takes loose values rather than an instance, because the only layer that
        can see the **submitted** M2M is the form (see the module note on
@@ -422,10 +483,7 @@ def refuse_empty_audience(*, outsiders, all_staff, ministries):
     """
     if outsiders or all_staff or ministries:
         return
-    raise ValidationError(
-        "Say who this is for. Something published that nobody can see is a "
-        "draft, and there is already a status for that."
-    )
+    raise ValidationError(EMPTY_AUDIENCE_MESSAGE[on])
 
 
 def refuse_redundant_audience(*, all_staff, ministries):
@@ -444,6 +502,67 @@ def refuse_redundant_audience(*, all_staff, ministries):
             "“Everybody on the books” already includes every ministry — untick "
             "it, or untick the ministries."
         )
+
+
+def refuse_wider_than_event(*, event, role):
+    """A role may not be open to anybody the event itself is closed to.
+
+    Requirement 7 read from the other side: seeing an event and being able to
+    take one of its jobs are different questions, but they are not independent
+    — somebody who cannot see the event must not be able to sign up for a job
+    inside it. participants.md's L2×L3 invariant.
+
+    Three comparisons, and they are **not the same kind of comparison** — which
+    is what the old three-tier enum hid behind a single "is this wider than
+    that". Written as one clever expression they come apart on the third:
+
+      · outsiders / all-staff are booleans — implication, one each
+      · ministries is a set — containment
+      · and "all staff" sits **above** every ministry in that containment,
+        while being a boolean rather than a set
+
+    ⚠️ The converse of the second is deliberately refused: an event ticked for
+       every ministry does **not** satisfy a role ticked for all-staff. The two
+       agree today and stop agreeing the moment a ministry is created, which is
+       the same reason refuse_redundant_audience() exists. It is nearly
+       impossible to trigger with two ministries in the database — and that is
+       exactly why it is written down rather than left to be noticed.
+
+    ⚠️ Not a CheckConstraint, and D14 asks for that to be said rather than
+       implied: the fields are on two tables plus a join table, which no check
+       can see. bulk_create walks past it, and what lies on the other side is
+       somebody signed up for an event they cannot see.
+
+       ⚠️ That state is **not** backstopped by sign_up(). The signup path asks
+          whether a *person* may take a *role* (services.eligible), which is a
+          different question with different inputs — having it also re-check
+          this invariant would give one rule two implementations. Stated
+          because "have sign_up() check it too" sounds obviously right.
+    """
+    if role.outsiders and not event.outsiders:
+        raise ValidationError(
+            "This event is not open to people with no current post, so a role "
+            "inside it cannot be either."
+        )
+    if role.all_staff and not event.all_staff:
+        raise ValidationError(
+            "This event is not open to everybody on the books, so a role "
+            "inside it cannot be either. (Ticking every ministry is not the "
+            "same thing — a ministry added later would be covered by one and "
+            "not the other.)"
+        )
+    # A ministry-specific role is fine if the event covers all staff, and
+    # otherwise only if the event names at least those ministries.
+    if role.ministries and not event.all_staff:
+        beyond = role.ministries - event.ministries
+        if beyond:
+            names = ", ".join(
+                Ministry.objects.filter(pk__in=beyond).order_by("name")
+                .values_list("name", flat=True))
+            raise ValidationError(
+                f"This event is not open to {names}, so a role inside it "
+                f"cannot be."
+            )
 
 
 class EventQuerySet(models.QuerySet):

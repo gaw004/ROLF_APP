@@ -150,7 +150,12 @@ class Command(BaseCommand):
             code="class", defaults={"name": "Class"})
         # The catch-all role has to exist: event_role is not nullable, so "no
         # particular job" needs somewhere to land.
-        self.general = ParticipationRole.seed_general()
+        # One catch-all per half of the axis — "no particular job" and "no
+        # particular service" each need a row to land on.
+        self.general = ParticipationRole.seed_catch_all(
+            ParticipationRole.Nature.HELPING)
+        self.general_attending = ParticipationRole.seed_catch_all(
+            ParticipationRole.Nature.ATTENDING)
         self.lifting, _ = ParticipationRole.objects.get_or_create(
             code="lifting", defaults={"name": "Lifting"})
         self.welcome, _ = ParticipationRole.objects.get_or_create(
@@ -367,6 +372,34 @@ class Command(BaseCommand):
                       "email": "zhao.mother@example.invalid"},
         )
 
+        # ⭐ The two people this whole round is about, and until 2026-08-26 the
+        #    demo had none of them: somebody who only ever **receives**.
+        #
+        #    Everybody else in this cast is an admin, a volunteer or a member of
+        #    staff. A food-bank demo without a single person who came to collect
+        #    something was missing the population participants.md was written
+        #    for — and with them missing, "People served" on the report could
+        #    only ever be answered by the ESL class.
+        #
+        # ⚠️ No accounts, and that is honest rather than lazy: somebody
+        #    collecting a food parcel has no reason to have a login, and the
+        #    signup path reaches Contact through Participation, never through
+        #    User. ⚠️ It also means they are invisible to any acceptance line
+        #    that needs somebody to log in — the trap participants.md section 10
+        #    recorded about Ada. Nothing in L1 needs that of them; if a later
+        #    round does, this is the comment to come back to.
+        self.neighbours = [
+            Contact.objects.get_or_create(
+                legal_last_name=last, legal_first_name=first,
+                defaults={"contact_type": Contact.ContactType.INDIVIDUAL,
+                          "birth_date": born},
+            )[0]
+            for last, first, born in [
+                ("Mensah", "Abena", datetime.date(1966, 9, 14)),
+                ("Nakamura", "Hiro", datetime.date(1951, 2, 27)),
+            ]
+        ]
+
         # An employee who was in post on the day of the past event and has
         # since left — R8's clock is the day of the event, and without somebody
         # like this that is untestable by hand.
@@ -502,6 +535,18 @@ class Command(BaseCommand):
             # Paper sign-in: hours by hand, no timestamps. Still counts.
             paper = self.signup(self.pantry_admin, past_welcome)
             record_hours(paper, Decimal("4.00"))
+
+            # ⭐ The other side of the same distribution: two neighbours who came
+            #    to collect. Same event, same afternoon, and the system now
+            #    tells them apart from the people who carried the boxes.
+            #
+            # ⚠️ Checked in but no hours — that is the shape, not an omission.
+            #    They were here (the roster says so, and the no-show rate counts
+            #    them like anybody else); what they did not do is give time.
+            collecting = self.role(past, self.general_attending, None)
+            for neighbour in self.neighbours:
+                came = self.joins(neighbour, collecting)
+                check_in(came, at=past.start_time)
 
             # ⚠️ Unpaid and stipend staff on the same event as the paid ones.
             #    R8 used to answer with the paid two only, and the point of

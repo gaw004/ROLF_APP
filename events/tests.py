@@ -1946,13 +1946,59 @@ class DictionaryTableTests(TestCase):
             event_type.full_clean()
         self.assertIn("code", caught.exception.message_dict)
 
-    def test_the_general_participation_role_can_always_be_had(self):
+    def test_the_catch_all_role_can_always_be_had(self):
         # Participation.event_role is not nullable, so "no particular job" needs
         # a row to land on.
-        first = ParticipationRole.seed_general()
-        second = ParticipationRole.seed_general()
+        first = ParticipationRole.seed_catch_all(ParticipationRole.Nature.HELPING)
+        second = ParticipationRole.seed_catch_all(ParticipationRole.Nature.HELPING)
         self.assertEqual(first.pk, second.pk)
         self.assertEqual(first.code, "general")
+
+    def test_there_is_a_catch_all_role_for_each_kind(self):
+        """L1.6. "No particular job" and "no particular service" are two rows.
+
+        With only the helping one, a beneficiary who came for nothing named had
+        nowhere correct to land — and the answer "an admin can add one" makes
+        every foundation find the same system-level gap for themselves.
+        """
+        roles = {
+            nature: ParticipationRole.seed_catch_all(nature)
+            for nature in ParticipationRole.Nature
+        }
+        self.assertNotEqual(roles[ParticipationRole.Nature.HELPING].pk,
+                            roles[ParticipationRole.Nature.ATTENDING].pk)
+        for nature, role in roles.items():
+            with self.subTest(nature=nature):
+                self.assertEqual(role.nature, nature)
+
+    def test_the_helping_catch_all_keeps_its_code(self):
+        """⚠️ The one thing in this pair that may never be tidied up.
+
+        `code="general"` is frozen in three migrations and read by name in
+        models.py. Renaming it to match its new partner (`general-attending`)
+        is the obvious symmetry and would silently stop every lookup finding a
+        row — so the asymmetry is pinned here rather than explained in a
+        comment somebody can delete.
+        """
+        self.assertEqual(
+            ParticipationRole.seed_catch_all(
+                ParticipationRole.Nature.HELPING).code,
+            "general",
+        )
+
+    def test_both_catch_all_names_say_which_kind_they_are(self):
+        """The entire reason this step exists, and "there are two rows" misses it.
+
+        Side by side in a dropdown, a bare "General participant" next to
+        "General participant (attending)" leaves the first one's half invisible
+        — readable only by knowing that no bracket means helping, a rule nobody
+        is ever told. D27: what is missing and what is not counted must not look
+        the same.
+        """
+        for nature in ParticipationRole.Nature:
+            with self.subTest(nature=nature):
+                name = ParticipationRole.seed_catch_all(nature).name
+                self.assertIn(f"({nature.value})", name)
 
     def test_a_new_role_defaults_to_helping(self):
         # L1. The default restates what is already true of every row in the
@@ -1961,26 +2007,37 @@ class DictionaryTableTests(TestCase):
         role = ParticipationRole.objects.create(code="lifting", name="Lifting")
         self.assertEqual(role.nature, ParticipationRole.Nature.HELPING)
 
-    def test_the_catch_all_role_is_a_helping_one(self):
-        """"No particular job" means no particular job *helping*.
+    def test_both_catch_all_rows_are_already_there_after_migrating(self):
+        """This database was built by the migrations and nothing else.
 
-        Worth pinning rather than leaving implied: "a beneficiary with no
-        particular role" therefore has nowhere to land yet, and the answer when
-        it is needed is a second catch-all row, not flipping this one — every
-        signup ever made through it was a helping one.
+        So the rows can only have come from 0003 and 0018. They used to be
+        created by seed_demo, which refuses to run with DEBUG off — meaning a
+        production database would have come up without the row that "no
+        particular job" has to land on. An invariant of the schema belongs in a
+        migration.
         """
-        self.assertEqual(
-            ParticipationRole.seed_general().nature,
-            ParticipationRole.Nature.HELPING,
-        )
+        for nature in ParticipationRole.Nature:
+            code, _ = ParticipationRole.CATCH_ALL[nature]
+            with self.subTest(nature=nature):
+                self.assertTrue(
+                    ParticipationRole.objects.filter(code=code).exists())
 
-    def test_the_general_role_is_already_there_after_migrating(self):
-        # This database was built by the migrations and nothing else, so the
-        # row can only have come from 0003. It used to be created by seed_demo,
-        # which refuses to run with DEBUG off — meaning a production database
-        # would have come up without the one row that "no particular job" has
-        # to land on. An invariant of the schema belongs in a migration.
-        self.assertTrue(ParticipationRole.objects.filter(code="general").exists())
+    def test_a_foundation_that_renamed_the_catch_all_keeps_its_own_name(self):
+        """0018 renames only the exact seeded text — 0015's rule, applied again.
+
+        A foundation that has already called this row something of its own
+        meant to, and a migration that overwrites that is taking a decision on
+        their behalf months after they made it.
+        """
+        migration = import_module("events.migrations.0018_second_catch_all_role")
+        theirs = ParticipationRole.objects.get(code="general")
+        theirs.name = "Whatever we call it here"
+        theirs.save()
+
+        migration.add_the_other_half(django_apps, None)
+
+        theirs.refresh_from_db()
+        self.assertEqual(theirs.name, "Whatever we call it here")
 
 
 class PageTestCase(TestCase):
@@ -4314,11 +4371,17 @@ class AcceptanceWalkTests(TestCase):
         response = self.client.get(
             reverse("events:event_report", args=[self.past_event().pk]))
         summary = response.context["summary"]
-        self.assertEqual(summary["role_count"], 3)          # R4 — 翻译 had nobody
+        # R4 — 四个工种：搬运、欢迎台、翻译（无人报名），外加 2026-08-26 加的
+        # 那个「没有特定工种（来参加）」，两位来领取的邻居落在它上面。
+        self.assertEqual(summary["role_count"], 4)
         # R6: 3 + 2 + 4, plus 3 + 3 for the unpaid and stipend staff the demo
         # data gained with the axis split (D32) — R8 has to be able to show all
         # three pay arrangements side by side, and that means all three took
         # part in something.
+        #
+        # ⭐ 15.00 一分没变，而**那才是这条断言现在真正钉住的东西**：上面那一行
+        #    从 3 变成 4，多出来的是两个签到过的人 —— 而他们一分钟工时都没加进来。
+        #    「来接受服务的人不进工时账本」这件事，在这里是一个不变的数字。
         self.assertEqual(summary["total_hours"], Decimal("15.00"))
 
     def test_r8_lists_the_staff_member_who_has_since_left(self):

@@ -5032,6 +5032,38 @@ class CheckDeploymentCommandTests(TestCase):
         self.assertIn("EventType", text)
         self.assertIn("empty, so the form that needs it", text)
 
+    def test_the_role_check_still_asks_for_one_of_the_foundations_own(self):
+        """⚠️ This threshold had nothing watching it until 2026-08-26.
+
+        The number is "what the migrations ship, plus one", and the point is to
+        catch a foundation that has entered none of its own participation
+        roles. Set equal to what ships, it passes on an empty installation
+        while still looking like a check — and it silently became that on the
+        day a second catch-all row started shipping (0018). So the assertion is
+        about the relationship, not about the literal 3.
+        """
+        from events.models import ParticipationRole
+
+        # ⚠️ Read this table's own line, not the whole report. "empty, so the
+        #    form that needs it" is the wording **every** dictionary shares, and
+        #    the others are genuinely empty here — asserting on the report as a
+        #    whole passes for the wrong reason in one direction and fails for
+        #    the wrong reason in the other. Found by writing it the loose way.
+        def role_line(text):
+            return next(line for line in text.splitlines()
+                        if "ParticipationRole" in line)
+
+        shipped = ParticipationRole.objects.count()
+        # This database came from the migrations alone, so everything in it is
+        # what ships. A threshold equal to that would pass here — and a check
+        # that passes on an empty installation is a check that checks nothing.
+        self.assertIn("warn", role_line(self.report()))
+
+        ParticipationRole.objects.create(code="lifting", name="Lifting")
+        after = role_line(self.report())
+        self.assertIn(f"{shipped + 1} rows", after)
+        self.assertIn("ok", after)
+
     def test_a_deployment_whose_only_account_is_the_superuser_is_called_out(self):
         # ⭐ The easiest step in C3.5 to skip, and it leaves no trace: everything
         #    works, and "nobody runs the foundation from a superuser" is broken

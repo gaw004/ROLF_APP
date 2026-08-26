@@ -77,14 +77,23 @@ class ParticipationRole(ImmutableCodeMixin, ConstraintErrorFieldMixin, models.Mo
        event → here. Written down because otherwise somebody files event jobs as
        posts and the org chart fills up with "lifting".
 
-    One row must always exist with code="general": Participation.event_role is
-    not nullable, so "no particular job" needs somewhere to land.
+    A catch-all row must always exist for each half of the axis (see CATCH_ALL
+    below): Participation.event_role is not nullable, so "no particular job"
+    and "no particular service" each need somewhere to land.
 
-    ⚠️ That catch-all row is a **helping** one (see `nature` below), so
-       "a beneficiary with no particular role" has nowhere to land yet. No
-       second catch-all is seeded, deliberately: a ministry admin can add one
-       from the roles panel in a single click, and goal.md 零 asks which
-       requirement's query a row would appear in before it is created.
+    ⚠️ There was only one until 2026-08-26, and it was a helping one — so a
+       beneficiary with no particular service had nowhere correct to go. The
+       argument for leaving it that way was "a ministry admin can add one in a
+       single click", which answers the wrong question: it makes every
+       foundation discover a system-level gap for themselves, and then invent
+       the same fix. See 06-roadmap.md L1.6.
+
+    ⚠️ Both names carry their half in brackets, and that is the point of the
+       pair rather than decoration. Left as a bare "General participant" beside
+       "General participant (attending)", the first one's half is **invisible**
+       — readable only by knowing that no bracket means helping, which is a
+       rule nobody is ever told. D27's line: what is missing and what is not
+       counted must not look the same.
     """
 
     class Nature(models.TextChoices):
@@ -115,7 +124,25 @@ class ParticipationRole(ImmutableCodeMixin, ConstraintErrorFieldMixin, models.Mo
         HELPING = "helping", "Helping"
         ATTENDING = "attending", "Attending"
 
+    # ⚠️ Kept under its old name, and it is still the helping one's code. It is
+    #    frozen in three migrations (0003 seeds it, 0005 and 0015 renamed the
+    #    row) and can never change — ImmutableCodeMixin. What moved on
+    #    2026-08-26 is that "the catch-all" is now ambiguous, so read CATCH_ALL
+    #    rather than this constant unless you specifically mean the helping one.
     GENERAL_CODE = "general"
+    ATTENDING_GENERAL_CODE = "general-attending"
+
+    #: The row a signup lands on when nobody picked a specific job or service.
+    #: One per half of the axis, keyed by it, so no caller can ask for "the"
+    #: catch-all without saying which.
+    #:
+    #: ⚠️ The two codes are not symmetrical, and that is not sloppiness: the
+    #:    helping one predates the axis and its code cannot be renamed, so
+    #:    matching it (to "general-helping") is simply not available.
+    CATCH_ALL = {
+        Nature.HELPING: (GENERAL_CODE, "General participant (helping)"),
+        Nature.ATTENDING: (ATTENDING_GENERAL_CODE, "General participant (attending)"),
+    }
 
     code = models.SlugField(
         max_length=50,
@@ -156,10 +183,23 @@ class ParticipationRole(ImmutableCodeMixin, ConstraintErrorFieldMixin, models.Mo
         ]
 
     @classmethod
-    def seed_general(cls):
-        """The catch-all role, created if it is not there yet."""
+    def seed_catch_all(cls, nature):
+        """The catch-all role for one half of the axis, created if it is missing.
+
+        ⚠️ Takes the half rather than defaulting to helping (it was
+           `seed_general()` with no argument until 2026-08-26). A default here
+           would let a caller ask for "the" catch-all and silently get the
+           helping one — which is exactly the bug this pair exists to fix, just
+           moved from the data into the code.
+
+        ⚠️ `defaults` covers the name **and** the nature, so a row created here
+           is complete. Creating it without the nature would give it the field's
+           default — helping — and the attending catch-all would be born as a
+           helping one, which nothing would report.
+        """
+        code, name = cls.CATCH_ALL[nature]
         role, _ = cls.objects.get_or_create(
-            code=cls.GENERAL_CODE, defaults={"name": "General participant"},
+            code=code, defaults={"name": name, "nature": nature},
         )
         return role
 

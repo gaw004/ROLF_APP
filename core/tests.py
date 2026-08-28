@@ -5336,3 +5336,54 @@ class HealthCheckGuardTests(TestCase):
             self.assertEqual(middleware(plain_http.get("/")).status_code, 301)
             self.assertEqual(
                 middleware(plain_http.get("/events/")).status_code, 301)
+
+    # --- The fourth file: the access log that has to skip this same path ------
+
+    def test_the_blueprint_installs_the_logger_that_silences_the_check(self):
+        """⚠️ Without this line the health check *is* the log.
+
+        Render polls healthCheckPath continuously and this service is idle most
+        of the time, so `--access-logfile -` on its own produces thousands of
+        identical 200s and buries everything worth reading. Dropping
+        `--access-logfile` instead would be the other silence — no request
+        record at all on the day something breaks.
+        """
+        start = re.search(r"^\s*startCommand:(.+?)(?=^\s{4}\w)",
+                          self.blueprint, re.M | re.S)
+        self.assertIsNotNone(start, "render.yaml declares no startCommand")
+        command = " ".join(start.group(1).split())
+        self.assertIn("--access-logfile -", command,
+                      "the access log is off, so there is no request record at all")
+        self.assertIn(
+            "--logger-class config.gunicorn_logger.QuietHealthCheckLogger", command,
+            "nothing filters the access log, so the health check will bury it")
+
+    def test_the_logger_drops_the_health_check_and_nothing_else(self):
+        """⭐ The one that catches a path the four files stopped agreeing on.
+
+        Exercised rather than grepped: a logger that silences the wrong path is
+        indistinguishable from a working one until somebody reads the log.
+        Both directions are asserted, because "silence everything" passes the
+        first half on its own — and losing the 500s is the worse of the two
+        failures this guard exists for.
+        """
+        from gunicorn.glogging import Logger
+
+        from config.gunicorn_logger import QuietHealthCheckLogger
+
+        logged = []
+        with mock.patch.object(
+                Logger, "access",
+                lambda self, resp, req, environ, t: logged.append(
+                    environ["PATH_INFO"])):
+            logger = QuietHealthCheckLogger.__new__(QuietHealthCheckLogger)
+            # ⚠️ Both spellings of the health path. render.yaml asks for the one
+            #    without the trailing slash and the URLconf serves the one with
+            #    it, so which of the two reaches the log is not ours to choose.
+            for path in (f"/{HEALTH_PATH}", "/" + HEALTH_PATH.strip("/"),
+                         "/", "/events/"):
+                logger.access(None, None, {"PATH_INFO": path}, 0.0)
+        self.assertEqual(
+            logged, ["/", "/events/"],
+            "the access log either still carries the health check, or has "
+            "stopped carrying the requests somebody will need to read")

@@ -141,6 +141,12 @@ services:
     # ⚠️ --timeout 60 而不是默认的 30：R4–R8 那份能打印的完整版报表是全站最慢的
     #    请求，30 秒会在数据攒起来之后的某一天开始把它掐掉。
     # ⚠️ 两条 log 都打到标准流，Render 才抓得到 —— C3.8 的 LOGGING 兜底靠这个。
+    # ⚠️ --logger-class 是**为了让上面那条 --access-logfile 还有用**：健康检查
+    #    一直在打 healthCheckPath，而这个服务大部分时间是闲的，于是访问日志里
+    #    99% 是同一行 200，真正要读的东西（500、慢报表、出事那会儿谁在站上）
+    #    全被埋掉。它只丢健康检查那一行，别的照旧；错误日志一个字没动。
+    #    ⚠️ 它和 core/health.py 的 HEALTH_PATH 必须对上 —— 对不上不报错，只是
+    #       日志又开始刷屏。HealthCheckGuardTests 现在一起守这第四个文件。
     startCommand: >-
       gunicorn config.wsgi:application
       --bind 0.0.0.0:$PORT
@@ -150,6 +156,7 @@ services:
       --timeout 60
       --access-logfile -
       --error-logfile -
+      --logger-class config.gunicorn_logger.QuietHealthCheckLogger
 
     envVars:
       - fromGroup: rolf-django

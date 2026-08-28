@@ -1,3 +1,99 @@
+## 四十九、2026-08-28：日志里全是健康检查；以及「内存阶跃」查下来不在这次部署里
+
+> 「1，Render 的 logs 里全是 healthz 的 log，压根让我找不到有用信息，有没有可能
+> 弄一个 summary 做 log（一天一个那种）？
+> 2，After 0df0276 is deployed，render 的 memory 上去了特别特别多，你能检查下
+> 发生什么事情了吗？」
+
+两个问题，答案的形状完全不同：第一个是真的、修了；第二个查下来**和那次部署没有
+关系**，而查的过程本身比结论有用。
+
+### ① healthz 刷屏 —— 噪音的出处不是 LOGGING，是 gunicorn
+
+`prod.py` 那份 `LOGGING`（C3.8）只管 Django 侧：`django.request` 的 ERROR 和
+根 logger 的 WARNING。刷屏的那一行它一个字都没经手 —— 是 `render.yaml` 启动
+命令里的 `--access-logfile -`，gunicorn 把**每一条请求**都打到标准流，而
+Render 在不停地打 `healthCheckPath`。试点期这个服务大部分时间是闲的，于是
+访问日志里 99% 是同一行 200。
+
+#### 想做而做不成的那个：「一天一个 summary」
+
+⚠️ **日志没有存下来的地方**，所以「回头汇总昨天的日志」这种东西做不出来 ——
+只能在进程里边跑边数。而那个计数器住在 worker 进程里，有两个，且 gunicorn
+**没有 `--max-requests`**，能清零它的只有重启：一次部署，或者
+[三十五](#三十五2026-08-13一张-3mb-的照片吃掉-238mb--上线第一天的-502)
+那种 OOM 被杀。
+
+> **判据**：一份**会在重启时被悄悄截断**的「日报」比没有日报更坏，因为它读起来
+> 像一份完整的。这和这个项目反复认领的那条是同一条 —— 不报错的错才贵。
+
+按小时 rollup 能把这条风险压到很小（一天 24×2 行，仍然比现在少三个数量级），
+**这次没做**，留着；先做代价最小、立刻见效的那一半。
+
+#### 做的：只丢健康检查那一行
+
+`config/gunicorn_logger.py`，一个 `gunicorn.glogging.Logger` 的子类，只覆盖
+`access()`：`PATH_INFO` 是健康检查就直接 return，别的原样交回父类。
+
+- **不是去掉 `--access-logfile`。** 那是另一种静音：出事那天没有任何请求记录
+  可查。守卫把这两半都钉住了 —— 既要求 `--access-logfile -` 还在，也要求
+  `--logger-class` 在。
+- **错误日志一个字没动。** 静音一个请求不等于不看它。
+- ⚠️ **这是第四个必须和 `core/health.py::HEALTH_PATH` 对上的文件**（前三个见
+  `HealthCheckGuardTests` 的类注释）。它是四个里唯一**响**着坏的 —— 对不上就是
+  「日志又开始刷屏」，不报错，而没人会在需要读日志之前发现这件事。
+- ⚠️ 两种拼写都要匹配：`render.yaml` 要的是 `/healthz`，URLconf 服务的是
+  `healthz/`，中间隔着 APPEND_SLASH 的 301（Render 认 2xx 和 3xx 都算健康）。
+  只匹配带斜杠的那个，等于静音了一行**从来不会被打出来**的日志。
+- ⚠️ 它 `import` 不到任何 Django 的东西：gunicorn 是在解析自己的配置时加载这个
+  类的，比 app、比 settings 都早。`core.health` 之所以能在这么早被 import，正是
+  它自己那份 docstring 说的事。
+
+两条守卫，都做了反向验证（改坏必须变红，且脚本自己 `assert` 确认改动落地了 ——
+[三十五第三节](#三次红绿得不是因为它该红绿同一天)那条教训的第五次应用）。
+
+### ② 「0df0276 之后内存涨」—— 量出来的：不是它
+
+`0df0276` 是 deploy 分支上的构建产物，对应源码 `ad461d2`（PR #21，拆轴/身份轴）。
+`f9b3adc..0df0276` 整个 diff 过了一遍：
+
+- `requirements.txt` 没动，**没有新依赖**；
+- 构建产物 `static/css/app.css` / `static/js/app.js` 与上一次部署**逐字节相同**；
+- 新增的运行时代码（`default_served_as` / `contacts_asked_about_serving` /
+  `set_served_as`、两个新列）全是小查询，而且 `contacts_asked_about_serving()`
+  特意是**每页一次**而不是每行一次；
+- 唯一把整张表读进内存的是 `0014_backfill_served_as` 的 `by_day`，而它跑在
+  `preDeployCommand` 的独立实例上，跑完就没了。
+
+然后**量了**，而不是就这么下结论 —— 两个 commit 各拉一个 worktree，同一个
+解释器、同一份 sqlite，测 `django.setup()` 之后的 RSS：
+
+| | 之前（f9b3adc） | 之后（0df0276） |
+|---|---|---|
+| import 完 | 11.8 MB | 11.8 MB |
+| `django.setup()` 完 | 53.0 MB | 52.9 MB |
+
+**常驻内存没有变。**
+
+#### 那「阶跃上去不回落」是什么
+
+是 CPython 的分配器不把内存还给操作系统 —— 于是**任何一次一次性的大峰值都会
+变成新的地板**，直到进程重启。而 `render.yaml` 里 gunicorn **没有
+`--max-requests`**，worker 从部署起就再也不回收。
+
+这个仓库里唯一那个已知的大峰值就是 Pillow：
+[三十六](#三十六2026-08-13十张照片和那份先留着的全尺寸拷贝)量过，改完之后
+单张 12MP 仍然 92MB、24MP 148MB、49MP 284MB。**传一张手机照片，那个 worker 的
+RSS 就永久抬高一百多 MB。** 阶跃、不回落 —— 形状完全对得上，而且和部署没有
+因果关系，只是时间上撞在一起。
+
+> **提议（未做，等拍板）**：给 gunicorn 加 `--max-requests 300
+> --max-requests-jitter 60`。它**不降低峰值**（512MB 那条线还在，三十六里
+> 「一张 48MP 照片仍然能把实例打掉」那条也还在），它只是不让峰值变成地板。
+> 代价是每 300 个请求换一次 worker；jitter 是为了两个 worker 不同时换。
+
+---
+
 ## 四十八、2026-08-19 第三十一批：五个用户报来的问题，其中三个底下各有一条看不见的规则
 
 > 「现在 event 分别有多少 status？为什么一个 event 都结束了 status 还可以是

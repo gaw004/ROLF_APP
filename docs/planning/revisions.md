@@ -174,6 +174,68 @@ management command、每一次测试、每一个开发服务器。于是 `import
    有答案的问题** —— 拿它做断言的测试没有对错，只有运气。
 4. 把子类搬回 `core/storages.py`，那条子进程守卫立刻红。
 
+### 交上去之后又审出五条，其中一条能让整个网站起不来
+
+`/code-review 0e6690f`。五条全部成立，逐条验过。
+
+#### 🔴 一个可观测性探针把网站弄挂 —— 而入口是「按设计使用那个开关」
+
+```python
+PROBE_SECONDS = int(os.environ.get("MEMORY_PROBE_SECONDS", "300"))
+```
+
+gunicorn 是在 `Application.get_config_from_filename` 里执行这个配置文件的，而那个
+函数 **catch 掉一切异常、打印 "Failed to read config file"、然后 `sys.exit(1)`**。
+所以这一行上的异常不是「探针间隔不对」，是**整个 web 服务起不来**，报出来的错还
+指向一个配置文件而不是那个变量。
+
+而走进去的路正是上一节自己写下的用法：运维为了查别的事想把探针关掉，在面板上把
+值清空 —— Render 会把一个**声明了但为空**的变量传成 `""`，`int("")` 抛
+ValueError。填 `5m` 或 `600s` 一样。
+
+> **判据**：**一个观测用的东西，最坏只能退化成沉默。** 它在 `_probe` 里已经用
+> `except Exception` 保护了运行期，却在 import 期能把站点带走 —— 保护写在了第二
+> 危险的地方。
+
+⚠️ 而且**回退到默认值，不是回退到 0**。「关掉」必须是有人明确要求的；一个拼写
+错误悄悄关掉你正在用它查问题的探针，是这个项目反复认领的那种失败。
+
+#### 🔴 抄上游的时候把它的另一半分支弄丢了
+
+`_create_session()` 只留了「用 key」那一支，丢了 `session_profile` 那一支。而
+上游**明令禁止** profile 和 key 同时给（`ImproperlyConfigured`，s3.py:325），
+所以 profile-only 是受支持的形态，且在那个形态里 key 是 None ——
+`boto3.Session(aws_access_key_id=None, …)` 不会报错，它会**落到 botocore 的默认
+凭据链**（环境变量、实例元数据）去认证成**别人**。
+
+更糟的是缓存键：只用凭据做键的话，每一个 profile 都塌成 `(None, None, None)`，
+**两个配了不同 profile 的 storage 会共用一个 session**。同一个「静默地用错凭据」
+从第二条路又来一次。
+
+`_r2()` 永远给 key、从不给 profile，所以两条今天都到不了。修它是因为这个类的
+docstring 写着要推给上游，而在上游那两种形态都是家常便饭。
+
+#### 其余三条
+
+- **测试线程不是 daemon。**`join(timeout=10)` + `assertFalse(is_alive())` 被
+  写成「防止测试永远挂住」的那道保险 —— 而它只把「挂住」变成「**红了之后再挂
+  住**」：卡住的非守护线程在套件结束后还活着，`threading._shutdown()` 会在解释器
+  退出时 join 它们。⚠️ 这不是推理，是**我自己撞见过的**：反向验证 RLock 那次，
+  跑到 120s 变红之后进程还在跑。加 `daemon=True`，那道保险才真的走完。
+- `mock.patch.object(gunicorn_conf.threading, "Thread", …)` **打的是标准库**。
+  `gunicorn_conf.threading` 就是 `threading` 模块本身，于是那段时间里**全进程**
+  的 `Thread` 都被换成了 mock。改成读 `threading.enumerate()` 里有没有叫
+  `memory-probe` 的线程 —— 不打补丁，而且顺带把反方向也断言了（否则「什么都不
+  起」也能通过）。
+- **一处交叉引用指错了类**，说「`MemoryProbeTests` 钉着它」而真正钉着它的是
+  `SharedS3SessionTests.test_an_ordinary_boot_does_not_import_boto3`。在一个把
+  「去哪找看着这条规则的守卫」写进注释当制度的仓库里，指错的引用会让人得出
+  「这条没人看着」的结论。
+
+三条新守卫都做了反向验证：拿掉 try/except → `ValueError` 变红；拿掉 profile 分支
+→ 报「the profile was dropped」；拿掉 `PROBE_SECONDS <= 0` 那道早退 → 报「the
+probe started with the knob at 0」。
+
 ---
 
 ## 五十、2026-08-28：审查报来五条，四条跑出来复现过 —— 而其中两条只在 admin 里坏

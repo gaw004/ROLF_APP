@@ -5345,12 +5345,47 @@ class MemoryProbeTests(SimpleTestCase):
         """
         from config import gunicorn_conf
 
-        started = []
-        with mock.patch.object(gunicorn_conf, "PROBE_SECONDS", 0), \
-                mock.patch.object(gunicorn_conf.threading, "Thread",
-                                  side_effect=lambda **kw: started.append(kw)):
+        # ⚠️ Read off the thread list rather than by patching Thread. An earlier
+        #    version patched `gunicorn_conf.threading.Thread` — and that
+        #    attribute **is** the stdlib module, so it replaced Thread process
+        #    wide for the duration, handing a mock to anything else that
+        #    happened to start a thread in that window.
+        def probes():
+            return [thread for thread in threading.enumerate()
+                    if thread.name == "memory-probe"]
+
+        before = probes()
+        with mock.patch.object(gunicorn_conf, "PROBE_SECONDS", 0):
             gunicorn_conf.post_fork(None, mock.Mock())
-        self.assertEqual(started, [])
+        self.assertEqual(probes(), before, "the probe started with the knob at 0")
+
+        # ⚠️ And the other direction, or "never starts anything" would pass.
+        with mock.patch.object(gunicorn_conf, "PROBE_SECONDS", 3600):
+            gunicorn_conf.post_fork(None, mock.Mock())
+        self.assertEqual(
+            len(probes()), len(before) + 1, "the probe did not start at all")
+
+    def test_an_unusable_interval_falls_back_rather_than_failing_the_boot(self):
+        """🔴 An exception on that line is not a bad interval — it is no site.
+
+        Gunicorn runs the config file inside `get_config_from_filename`, which
+        catches everything, prints "Failed to read config file" and exits 1. And
+        the way in is the knob being used as intended: turning the probe off
+        from the dashboard leaves the variable declared and empty, Render passes
+        `""`, and `int("")` raises.
+
+        ⚠️ Falls back to the default, not to 0. "Off" must be something somebody
+           asked for — a typo quietly disabling the probe you are mid-
+           investigation with is worse than a probe that keeps talking.
+        """
+        from config.gunicorn_conf import DEFAULT_PROBE_SECONDS, _probe_seconds
+
+        for raw in ("", "5m", "600s", "abc", None):
+            with self.subTest(value=raw):
+                self.assertEqual(_probe_seconds(raw), DEFAULT_PROBE_SECONDS)
+        # A usable value is still honoured, 0 included.
+        self.assertEqual(_probe_seconds("0"), 0)
+        self.assertEqual(_probe_seconds("60"), 60)
 
 
 class SharedS3SessionTests(SimpleTestCase):
@@ -5410,7 +5445,13 @@ class SharedS3SessionTests(SimpleTestCase):
                 for bucket in buckets:
                     self.assertIsNotNone(bucket.connection)
 
-            threads = [threading.Thread(target=touch) for _ in range(4)]
+            # ⚠️ daemon=True, and it is the other half of the join timeout
+            #    below. Without it a stuck thread is still alive when the suite
+            #    ends and `threading._shutdown()` joins it at interpreter exit —
+            #    so the regression is reported red **and then hangs** until CI's
+            #    own timeout. Observed on 2026-08-28 while reverse-checking the
+            #    RLock: the run went red at 120s and the process kept going.
+            threads = [threading.Thread(target=touch, daemon=True) for _ in range(4)]
             for thread in threads:
                 thread.start()
             for thread in threads:
@@ -5449,7 +5490,8 @@ class SharedS3SessionTests(SimpleTestCase):
         #    write it this way is that identity of freed objects is not a
         #    question that has an answer.
         seen = []
-        threads = [threading.Thread(target=lambda: seen.append(bucket.connection))
+        threads = [threading.Thread(target=lambda: seen.append(bucket.connection),
+                                    daemon=True)
                    for _ in range(3)]
         for thread in threads:
             thread.start()
@@ -5488,6 +5530,36 @@ class SharedS3SessionTests(SimpleTestCase):
             result.stdout.strip(), "False",
             "an ordinary boot imports boto3, which costs every management "
             "command and every test run the memory this change was made to save")
+
+    def test_a_named_profile_gets_its_own_session_and_uses_it(self):
+        """⚠️ Upstream's other branch, which the first version of this dropped.
+
+        django-storages refuses `session_profile` together with explicit keys,
+        so profile-only is the supported shape and the keys are None in it.
+        Building a keyless Session there authenticates as whatever botocore's
+        default chain finds — and keyed on the credentials alone, every profile
+        collapses to (None, None, None) and two different profiles share one
+        session. Both failures are silent, and both are wrong credentials.
+
+        Not reachable from this deployment (`_r2()` sets keys, never a profile);
+        asserted because this class is written to be sent upstream.
+        """
+        built = []
+        with mock.patch.object(boto3, "Session",
+                               side_effect=lambda **kw: built.append(kw) or mock.Mock()):
+            first = self.s3.SharedSessionS3Storage(
+                bucket_name="a", endpoint_url=self.OPTIONS["endpoint_url"],
+                session_profile="one")
+            second = self.s3.SharedSessionS3Storage(
+                bucket_name="b", endpoint_url=self.OPTIONS["endpoint_url"],
+                session_profile="two")
+            self.assertIsNot(first._create_session(), second._create_session())
+            # The same profile twice is still one session.
+            first._create_session()
+
+        self.assertEqual([kw.get("profile_name") for kw in built], ["one", "two"],
+                         "the profile was dropped and the default credential "
+                         "chain was used instead")
 
     def test_a_second_credential_gets_a_second_session(self):
         # Keyed by credential, so a future bucket under different keys cannot

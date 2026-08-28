@@ -37,7 +37,37 @@ from core.memory import format_snapshot
 #: been in the one that did.
 #:
 #: 0 turns it off, and that is a supported value rather than a way to break it.
-PROBE_SECONDS = int(os.environ.get("MEMORY_PROBE_SECONDS", "300"))
+DEFAULT_PROBE_SECONDS = 300
+
+
+def _probe_seconds(raw):
+    """The interval, or the default when the variable is unusable.
+
+    🔴 **Never raises, and that is the entire reason this is a function.**
+       Gunicorn executes this file inside `Application.get_config_from_filename`,
+       which catches *every* exception, prints "Failed to read config file" and
+       calls `sys.exit(1)` — so an exception on this line is not a bad probe
+       interval, it is **the web service failing to boot**, reported by an error
+       that names a config file rather than the variable that caused it.
+
+       And the way in is the knob being used exactly as intended: an operator
+       turning the probe off from the dashboard clears the value, Render passes
+       a declared-but-empty variable as `""`, and `int("")` raises ValueError.
+       `5m` and `600s` do the same. An observability probe that can take the
+       site down has inverted its whole purpose — this one may only ever
+       degrade to silence.
+
+    ⚠️ A bad value falls back to the default rather than to 0. "Off" has to be
+       something somebody *asked* for; a typo silently disabling the thing you
+       are mid-investigation with is the failure this project keeps convicting.
+    """
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_PROBE_SECONDS
+
+
+PROBE_SECONDS = _probe_seconds(os.environ.get("MEMORY_PROBE_SECONDS", DEFAULT_PROBE_SECONDS))
 
 
 def _probe(log, seconds):

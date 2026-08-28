@@ -32,7 +32,8 @@
    `django.setup()` in development**, measured, for a class development never
    instantiates. Here nothing imports it until `prod.py`'s dotted BACKEND string
    is resolved, which happens only when the storage is first built.
-   `core.tests.MemoryProbeTests` pins that, because the regression is silent.
+   `core.tests.SharedS3SessionTests.test_an_ordinary_boot_does_not_import_boto3`
+   pins that, because the regression is silent.
 
 ⚠️ **This is a stopgap over an upstream defect**, and should be sent there:
    `S3Storage._create_session` building a session per instance per thread costs
@@ -82,16 +83,41 @@ class SharedSessionS3Storage(S3Storage):
     """
 
     def _create_session(self):
-        """The shared one. Same signature and same contract as upstream's."""
-        key = (self.access_key, self.secret_key, self.security_token)
+        """The shared one. Upstream's two branches, cached instead of rebuilt.
+
+        ⚠️ **The `session_profile` branch is upstream's and is kept**, which the
+           first version of this dropped. Upstream refuses `session_profile`
+           together with explicit keys (`ImproperlyConfigured`, s3.py:325), so
+           profile-only is the supported shape — and in it `access_key` and
+           `secret_key` are None. Building a keyless `boto3.Session` there does
+           not fail: it falls through to botocore's default credential chain
+           (environment, instance metadata) and authenticates as **somebody
+           else**, or fails with an error that never names the profile.
+
+        ⚠️ And the profile is part of the cache key for the same reason. Keyed
+           on the credentials alone, every profile collapses to
+           `(None, None, None)` — two storages configured with two different
+           profiles would share one session, which is the same silent
+           wrong-credentials failure arriving by a second route.
+
+        `_r2()` sets keys and no profile, so neither of these is reachable from
+        this deployment today. They are here because this class is written to
+        be sent upstream, where both shapes are ordinary.
+        """
+        key = (self.session_profile, self.access_key, self.secret_key,
+               self.security_token)
         with _session_lock:
             session = _sessions.get(key)
             if session is None:
-                session = _sessions[key] = boto3.Session(
-                    aws_access_key_id=self.access_key,
-                    aws_secret_access_key=self.secret_key,
-                    aws_session_token=self.security_token,
-                )
+                if self.session_profile:
+                    session = boto3.Session(profile_name=self.session_profile)
+                else:
+                    session = boto3.Session(
+                        aws_access_key_id=self.access_key,
+                        aws_secret_access_key=self.secret_key,
+                        aws_session_token=self.security_token,
+                    )
+                _sessions[key] = session
             return session
 
     @property

@@ -270,7 +270,26 @@ def _r2(bucket, *, public=False, expire=None):
         #    that nobody watches a lightbox 404 mid-browse.
         options["querystring_auth"] = True
         options["querystring_expire"] = expire or 3600
-    return {"BACKEND": "storages.backends.s3.S3Storage", "OPTIONS": options}
+    # ⚠️ **The subclass, not S3Storage itself** (2026-08-28). Upstream builds a
+    #    brand new boto3 Session for every (bucket × thread) pair and keeps it
+    #    for the life of the thread — measured at 200.3 MB per fully warmed
+    #    worker against 97.5 MB sharing one, which on a 512MB instance is the
+    #    difference between 93% and just over half. Three aliases, one endpoint,
+    #    one credential; the whole working is over the class in core/s3.py
+    #    and in revisions.md 五十一.
+    #
+    # ⚠️ Pointing this back at `storages.backends.s3.S3Storage` does not fail,
+    #    it just quietly costs the memory again — which is why
+    #    core.tests.SharedS3SessionTests asserts the property directly.
+    #
+    # ⚠️ `core.s3`, not `core.storages` — that one is imported by the model
+    #    fields and would drag boto3 into every development server and test
+    #    run (+17.6 MB, measured). Nothing imports this module until Django
+    #    resolves the dotted path below.
+    return {
+        "BACKEND": "core.s3.SharedSessionS3Storage",
+        "OPTIONS": options,
+    }
 
 
 STORAGES = {

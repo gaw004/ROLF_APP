@@ -15,7 +15,12 @@ import shutil
 import smtplib
 import tempfile
 from pathlib import Path
+import subprocess
+import sys
+import threading
 from unittest import mock
+
+import boto3
 
 from django.apps import apps
 from django.core.mail.backends.base import BaseEmailBackend
@@ -27,13 +32,14 @@ from django.contrib.staticfiles import finders
 from django.core.files.base import ContentFile
 from django.core.management import call_command
 from django.db import IntegrityError, connection, models
-from django.test import RequestFactory, TestCase, override_settings
+from django.test import RequestFactory, SimpleTestCase, TestCase, override_settings
 from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
 
 from core.constraints import CONSTRAINT_FIELD
 from core.health import HEALTH_PATH
 from core.management.commands.check_deployment import DEMO_ADDRESS_SUFFIX
+from core import memory
 from core.limits import LONG_TEXT
 from core.models import HomePage
 from core.services import orphaned_home_media
@@ -5265,6 +5271,231 @@ class CheckDeploymentCommandTests(TestCase):
                 EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend"):
             call_command("check_deployment", send_to="x@example.invalid", stdout=out)
         self.assertIn("accepted is not delivered", out.getvalue())
+
+
+class MemoryProbeTests(SimpleTestCase):
+    """The probe that would have made 2026-08-28 a grep instead of four rounds.
+
+    ⚠️ Everything here is exercised against **captured text from the live
+       instance** rather than against whatever this machine happens to have.
+       None of these files exist on macOS, so a test that read the real ones
+       would pass vacuously on a laptop and be the only thing standing between
+       the deploy and a probe that reports nothing.
+    """
+
+    # Copied verbatim from rolf-app on 2026-08-28. Trimmed to the lines that
+    # matter, with one unwanted key left in each so the parsing is really doing
+    # something.
+    STATUS = "Name:\tgunicorn\nPid:\t42\nVmPeak:\t  512000 kB\nVmRSS:\t  117340 kB\n"
+    STAT = "anon 239202304\nfile 16666624\nkernel_stack 229376\nslab 25710272\nsock 0\n"
+
+    def test_it_reads_this_process_rather_than_the_container(self):
+        self.assertEqual(memory.process_rss_bytes(self.STATUS), 117340 * 1024)
+
+    def test_it_reports_anon_and_file_separately(self):
+        """🔴 The whole reason this module exists, as an assertion.
+
+        A probe that answered with one total would have reproduced the episode
+        it was written after: `file` is reclaimable and `anon` is not, and the
+        question "is this cache or is it ours" is the one that has to be
+        answerable without a second round trip.
+        """
+        stat = memory.cgroup_stat(self.STAT)
+        self.assertEqual(stat["anon"], 239202304)
+        self.assertEqual(stat["file"], 16666624)
+        self.assertNotIn("sock", stat)
+
+    def test_a_platform_without_any_of_it_reports_nothing_rather_than_raising(self):
+        """⚠️ macOS has none of these paths, and CI may not either.
+
+        A probe that threw would fail on every development machine, and a probe
+        that fails on a laptop gets deleted rather than fixed.
+        """
+        with mock.patch.object(memory, "_read", return_value=None):
+            self.assertIsNone(memory.process_rss_bytes())
+            self.assertEqual(memory.cgroup_stat(), {})
+            self.assertEqual(memory.snapshot(), {})
+            self.assertIn("unavailable", memory.format_snapshot())
+
+    def test_the_line_names_the_process_and_the_percentage(self):
+        # ⚠️ The pid is what answered "which worker is growing" — the master's
+        #    figure did not move all afternoon while the two workers moved by
+        #    different amounts, and that is what identified the ratchet.
+        line = memory.format_snapshot(
+            {"rss": 117340 * 1024, "anon": 239202304, "file": 16666624,
+             "total": 281 * 1024 * 1024, "limit": 512 * 1024 * 1024},
+            pid=42)
+        self.assertIn("pid=42", line)
+        self.assertIn("anon=228.1MB", line)
+        self.assertIn("file=15.9MB", line)
+        self.assertIn("pct=55%", line)
+
+    def test_an_unlimited_cgroup_does_not_produce_a_percentage(self):
+        # memory.max reads "max" when nothing is capped. Returning 0 there
+        # would make every percentage a division by zero.
+        with mock.patch.object(memory, "_read", return_value="max\n"):
+            self.assertIsNone(memory._cgroup_number(memory.CGROUP_MAX))
+
+    def test_the_probe_is_off_when_the_interval_is_zero(self):
+        """⚠️ 0 is a supported value, not a way to break it.
+
+        Turning the probe off has to be something an operator can do from the
+        panel while chasing something else — which is why the interval is an
+        environment variable the blueprint deliberately does not name.
+        """
+        from config import gunicorn_conf
+
+        started = []
+        with mock.patch.object(gunicorn_conf, "PROBE_SECONDS", 0), \
+                mock.patch.object(gunicorn_conf.threading, "Thread",
+                                  side_effect=lambda **kw: started.append(kw)):
+            gunicorn_conf.post_fork(None, mock.Mock())
+        self.assertEqual(started, [])
+
+
+class SharedS3SessionTests(SimpleTestCase):
+    """One boto3 Session for every bucket and every thread, not twelve.
+
+    🔴 This guard is the half of the fix that survives. The subclass hangs off
+       two django-storages internals (`_create_session` and `connection`), and
+       the day either changes shape the subclass stops taking effect **with
+       nothing red** — memory simply climbs back to where it was, which is a
+       thing nobody notices for a week (revisions.md 五十一).
+
+    ⚠️ It asserts the **property**, never a byte count. The measured saving —
+       200.3 MB per warmed worker down to 97.5 MB — moves with the platform,
+       the interpreter and the botocore version; "how many sessions were built"
+       does not.
+    """
+
+    OPTIONS = {
+        "endpoint_url": "https://example.invalid",
+        "access_key": "an-access-key", "secret_key": "a-secret-key",
+        "region_name": "auto", "default_acl": None,
+    }
+
+    def setUp(self):
+        # ⚠️ Imported here, not at the top of this file. `core.s3` pulls in
+        #    boto3, and the guard below asserts that an ordinary boot does not —
+        #    a module-level import here would be measuring this file rather than
+        #    the application.
+        from core import s3 as s3_module
+
+        self.s3 = s3_module
+        # Each test starts from an empty registry, or the second one to run
+        # would pass because the first had already filled it in.
+        s3_module._sessions.clear()
+
+    def three_buckets(self):
+        """Stand-ins for the three R2 aliases: one endpoint, one key, three names."""
+        return [self.s3.SharedSessionS3Storage(bucket_name=name, **self.OPTIONS)
+                for name in ("event-images", "memories", "public")]
+
+    def test_many_threads_and_three_buckets_build_one_session(self):
+        """⭐ The measurement that found the problem, as a test.
+
+        Four threads was the deployed `--threads` value and three is the number
+        of buckets, so twelve is what the unfixed code builds here.
+        """
+        built = []
+        real = boto3.Session
+
+        def counted(**kwargs):
+            built.append(kwargs)
+            return real(**kwargs)
+
+        buckets = self.three_buckets()
+        with mock.patch.object(boto3, "Session", side_effect=counted):
+            def touch():
+                for bucket in buckets:
+                    self.assertIsNotNone(bucket.connection)
+
+            threads = [threading.Thread(target=touch) for _ in range(4)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                # ⚠️ A timeout, because the first version of this deadlocked:
+                #    `connection` took the lock and then reached
+                #    `_create_session()`, which took it again on the same
+                #    thread. Without a timeout that failure is a test run that
+                #    hangs for ever rather than one that goes red.
+                # ⚠️ Ten seconds, not thirty. A healthy run returns instantly
+                #    — this budget is only ever spent by a broken one, and the
+                #    reverse check that proved this guard works took **two
+                #    minutes** to go red at thirty. A guard nobody waits for is
+                #    a guard somebody switches off.
+                thread.join(timeout=10)
+                self.assertFalse(thread.is_alive(), "a thread is stuck on the lock")
+
+        self.assertEqual(
+            len(built), 1,
+            f"{len(built)} boto3 sessions were built where one was expected — "
+            "each carries its own parsed copy of botocore's S3 service model, "
+            "and they are never released")
+
+    def test_every_thread_still_gets_its_own_resource(self):
+        """⚠️ The other half, and the half that is a correctness rule.
+
+        boto3 resources are **not** thread safe. Sharing the session is the
+        optimisation; sharing the resource would be a bug, and a subclass that
+        went one step further would pass the test above while introducing one.
+        """
+        bucket = self.three_buckets()[0]
+        # ⚠️ The objects, not their `id()`s. A thread's local storage is freed
+        #    when the thread ends, and CPython reuses the address — so the first
+        #    version of this collected ids, watched two of the three coincide,
+        #    and reported a resource being shared that never was. Holding a
+        #    reference is also what keeps the ids distinct, but the reason to
+        #    write it this way is that identity of freed objects is not a
+        #    question that has an answer.
+        seen = []
+        threads = [threading.Thread(target=lambda: seen.append(bucket.connection))
+                   for _ in range(3)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=10)
+            self.assertFalse(thread.is_alive(), "a thread is stuck on the lock")
+        self.assertEqual(
+            len({id(resource) for resource in seen}), 3,
+            "two threads share one boto3 resource, and resources are not "
+            "thread safe")
+
+    def test_an_ordinary_boot_does_not_import_boto3(self):
+        """🔴 A regression this change introduced and then had to undo.
+
+        The subclass first went into `core/storages.py` — which is reached from
+        the `FileField(storage=...)` callables, so it loads with the models, on
+        every management command, every test run and every development server.
+        That put `import boto3` on all of them: **+17.6 MB on django.setup() in
+        development**, measured, for a class development never instantiates.
+
+        ⚠️ Run in a subprocess, because it is the only honest way to ask "what
+           does a fresh boot import" — this test process has boto3 loaded
+           already, by the tests above and by whatever imported it first.
+        """
+        probe = (
+            "import django, sys; django.setup(); "
+            "print('boto3' in sys.modules)"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", probe],
+            capture_output=True, text=True, cwd=settings.BASE_DIR,
+            env={**os.environ, "DJANGO_SETTINGS_MODULE": "config.settings.dev"},
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout.strip(), "False",
+            "an ordinary boot imports boto3, which costs every management "
+            "command and every test run the memory this change was made to save")
+
+    def test_a_second_credential_gets_a_second_session(self):
+        # Keyed by credential, so a future bucket under different keys cannot
+        # silently ride on somebody else's session.
+        first = self.s3.SharedSessionS3Storage(bucket_name="a", **self.OPTIONS)
+        other = dict(self.OPTIONS, access_key="another-key")
+        second = self.s3.SharedSessionS3Storage(bucket_name="b", **other)
+        self.assertIsNot(first._create_session(), second._create_session())
 
 
 class HealthCheckGuardTests(TestCase):

@@ -9,12 +9,18 @@ import colorsys
 import datetime
 import io
 import os
+import ast
 import re
 import shutil
 import smtplib
 import tempfile
 from pathlib import Path
+import subprocess
+import sys
+import threading
 from unittest import mock
+
+import boto3
 
 from django.apps import apps
 from django.core.mail.backends.base import BaseEmailBackend
@@ -26,13 +32,14 @@ from django.contrib.staticfiles import finders
 from django.core.files.base import ContentFile
 from django.core.management import call_command
 from django.db import IntegrityError, connection, models
-from django.test import RequestFactory, TestCase, override_settings
+from django.test import RequestFactory, SimpleTestCase, TestCase, override_settings
 from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
 
 from core.constraints import CONSTRAINT_FIELD
 from core.health import HEALTH_PATH
 from core.management.commands.check_deployment import DEMO_ADDRESS_SUFFIX
+from core import memory
 from core.limits import LONG_TEXT
 from core.models import HomePage
 from core.services import orphaned_home_media
@@ -420,6 +427,114 @@ class ReportFigureNamesGuardTests(TestCase):
             "A report figure named after volunteering has to be one on purpose "
             "— add it to ALLOWED with a reason, or name it for what it counts:\n"
             + "\n".join(offenders),
+        )
+
+
+class AudienceContainmentGuardTests(TestCase):
+    """Lint-as-test: "is this role wider than its event" is compared in one place.
+
+    ⭐ The invariant that keeps requirement 7 honest — somebody who cannot see
+       an event must not be able to sign up for a job inside it. It is three
+       comparisons of three different kinds (two implications and a set
+       containment, with "all staff" sitting above every ministry while being a
+       boolean), which is exactly the shape that grows a second, subtly
+       different implementation the first time somebody needs the answer
+       somewhere else.
+
+    ⚠️ It watches Audience.Spec's three attribute names rather than the model
+       fields. The fields are read all over the place — templates draw them,
+       the admin filters on them — and a guard that went red on those would be
+       widened until it meant nothing. These three names belong to the value
+       object alone, so seeing one outside the two files below means somebody
+       is doing the comparison by hand.
+
+    ⚠️ forms.py is allowed because it *builds* Specs and hands them over;
+       models.py is allowed because refuse_wider_than_event() lives there.
+       Anywhere else is a second implementation.
+    """
+
+    SPEC_ATTRIBUTE = r"\.(outsiders|all_staff|ministries)\b"
+    ALLOWED = ["events/models.py", "events/forms.py"]
+
+    def test_only_one_place_compares_two_audiences(self):
+        hits = offending_lines(self.SPEC_ATTRIBUTE, skip=self.ALLOWED)
+        self.assertEqual(
+            hits,
+            [],
+            "Comparing audiences is events.models.refuse_wider_than_event()'s "
+            "job — one rule, one implementation:\n" + "\n".join(hits),
+        )
+
+
+class AudienceIsAskedGuardTests(TestCase):
+    """Lint-as-test: nobody narrows an event list by status and forgets the person.
+
+    ⭐ L3's whole risk in one sentence. `visible_to_participants()` answers "is
+       it published"; `for_audience()` answers "is it for them". They are two
+       predicates on purpose, and the failure mode of using only the first is
+       the exact hole participants.md section 1 found: every signed-in account
+       seeing every published event, with nothing raising and every page
+       looking normal.
+
+    ⚠️ Deliberately narrow — it reads **function bodies**, not whole files. A
+       file-wide version would go red on every docstring that discusses the two
+       predicates (there are several, including this one), and a guard that is
+       red every day gets whitelisted until it means nothing. Same reasoning
+       ReportFigureNamesGuardTests writes out above.
+    """
+
+    NARROWS = "visible_to_participants("
+    ASKS = "for_audience("
+    #: Docstrings discuss this pair at length, so they are stripped before the
+    #: search — matching prose would make the guard lie in both directions.
+    DOCSTRING = re.compile(r'("""|\x27\x27\x27).*?\1', re.S)
+
+    #: Named exemptions. Each is a decision, not an oversight — see the
+    #: docstring at each site, and 06-roadmap.md L2.2.
+    ALLOWED = {
+        # The rows somebody already holds. Narrowing an audience afterwards must
+        # not take away a signup they made while it was still open to them.
+        "my_participations",
+        # The two predicates defining themselves.
+        "visible_to_participants",
+        "for_audience",
+        # ⚠️ Somebody standing in front of the iPad, having already scanned the
+        #    code. It refuses anybody without a signup two lines later, and a
+        #    signup is proof enough that the event was once theirs to join —
+        #    an audience test here could only stop a person who is physically
+        #    present from checking in. Same rule as my_participations above:
+        #    narrowing takes away discovery, never a row somebody holds.
+        "checkin_confirm",
+    }
+
+    def functions(self):
+        """(where, name, source) for every function in our own non-test code."""
+        for relative, source in project_python_files(skip=["tests.py"]):
+            if relative.name == "tests.py":
+                continue
+            try:
+                tree = ast.parse(source)
+            except SyntaxError:  # pragma: no cover - caught by check, not here
+                continue
+            for node in ast.walk(tree):
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    body = ast.get_source_segment(source, node) or ""
+                    yield f"{relative}:{node.lineno} {node.name}()", node.name, body
+
+    def test_narrowing_by_status_always_asks_who_is_looking(self):
+        offenders = [
+            where
+            for where, name, body in self.functions()
+            if name not in self.ALLOWED
+            and self.NARROWS in self.DOCSTRING.sub("", body)
+            and self.ASKS not in self.DOCSTRING.sub("", body)
+        ]
+        self.assertEqual(
+            offenders,
+            [],
+            "Published is not the same question as for-them. Add "
+            "for_audience(contact), or name the function in ALLOWED with a "
+            "reason:\n" + "\n".join(offenders),
         )
 
 
@@ -2559,12 +2674,26 @@ class ButtonCursorTests(TestCase):
         self.assertIn('[role="button"]', rule.group(1))
 
     def test_a_disabled_button_says_not_allowed_instead(self):
-        # 手型的意思是「点我」，而停用的按钮恰恰点不了。两种停用都要管：
-        # :disabled 是真按钮，[aria-disabled] 是画成停用的链接/div。
-        block = re.search(r"button:disabled,\s*\[aria-disabled=\"true\"\]\s*\{(.*?)\}",
-                          self.stylesheet(), re.S)
-        self.assertIsNotNone(block)
-        self.assertIn("not-allowed", block.group(1))
+        """手型的意思是「点我」，而停用的控件恰恰点不了。
+
+        ⚠️ 断言的是**这条规则盖住了哪几种停用**，不是选择器列表的字面文本
+           （2026-08-27 改）。原来的正则把 `button:disabled` 和
+           `[aria-disabled="true"]` 之间的逗号也钉死了，于是往列表里**加**一条
+           选择器 —— 也就是把这条规则变强 —— 会让守卫变红，而下一个人最省事的
+           反应是回头去加一条组件局部规则，正是本类 docstring 反对的那件事。
+
+        ⚠️ 四种都要在：真按钮、真输入框（受众那一组勾选框会被禁用）、
+           包着停用输入框的 `label`（上面那条 `label[for]` 会把它变成手），
+           以及画成停用的链接/div。
+        """
+        block = re.search(r"\n((?:\s*[^{};\n]+,\n)*[^{};\n]*)\{\s*cursor: not-allowed;",
+                          self.stylesheet())
+        self.assertIsNotNone(block, "assets/app.css 里没有那条 cursor: not-allowed 规则")
+        selectors = block.group(1)
+        for wanted in ("button:disabled", "input:disabled",
+                       "label:has(input:disabled)", '[aria-disabled="true"]'):
+            with self.subTest(selector=wanted):
+                self.assertIn(wanted, selectors)
 
     def test_it_actually_survived_the_build(self):
         """⚠️ 页面读的是 static/css/app.css，不是 assets/app.css。
@@ -5032,6 +5161,38 @@ class CheckDeploymentCommandTests(TestCase):
         self.assertIn("EventType", text)
         self.assertIn("empty, so the form that needs it", text)
 
+    def test_the_role_check_still_asks_for_one_of_the_foundations_own(self):
+        """⚠️ This threshold had nothing watching it until 2026-08-26.
+
+        The number is "what the migrations ship, plus one", and the point is to
+        catch a foundation that has entered none of its own participation
+        roles. Set equal to what ships, it passes on an empty installation
+        while still looking like a check — and it silently became that on the
+        day a second catch-all row started shipping (0018). So the assertion is
+        about the relationship, not about the literal 3.
+        """
+        from events.models import ParticipationRole
+
+        # ⚠️ Read this table's own line, not the whole report. "empty, so the
+        #    form that needs it" is the wording **every** dictionary shares, and
+        #    the others are genuinely empty here — asserting on the report as a
+        #    whole passes for the wrong reason in one direction and fails for
+        #    the wrong reason in the other. Found by writing it the loose way.
+        def role_line(text):
+            return next(line for line in text.splitlines()
+                        if "ParticipationRole" in line)
+
+        shipped = ParticipationRole.objects.count()
+        # This database came from the migrations alone, so everything in it is
+        # what ships. A threshold equal to that would pass here — and a check
+        # that passes on an empty installation is a check that checks nothing.
+        self.assertIn("warn", role_line(self.report()))
+
+        ParticipationRole.objects.create(code="lifting", name="Lifting")
+        after = role_line(self.report())
+        self.assertIn(f"{shipped + 1} rows", after)
+        self.assertIn("ok", after)
+
     def test_a_deployment_whose_only_account_is_the_superuser_is_called_out(self):
         # ⭐ The easiest step in C3.5 to skip, and it leaves no trace: everything
         #    works, and "nobody runs the foundation from a superuser" is broken
@@ -5112,6 +5273,303 @@ class CheckDeploymentCommandTests(TestCase):
         self.assertIn("accepted is not delivered", out.getvalue())
 
 
+class MemoryProbeTests(SimpleTestCase):
+    """The probe that would have made 2026-08-28 a grep instead of four rounds.
+
+    ⚠️ Everything here is exercised against **captured text from the live
+       instance** rather than against whatever this machine happens to have.
+       None of these files exist on macOS, so a test that read the real ones
+       would pass vacuously on a laptop and be the only thing standing between
+       the deploy and a probe that reports nothing.
+    """
+
+    # Copied verbatim from rolf-app on 2026-08-28. Trimmed to the lines that
+    # matter, with one unwanted key left in each so the parsing is really doing
+    # something.
+    STATUS = "Name:\tgunicorn\nPid:\t42\nVmPeak:\t  512000 kB\nVmRSS:\t  117340 kB\n"
+    STAT = "anon 239202304\nfile 16666624\nkernel_stack 229376\nslab 25710272\nsock 0\n"
+
+    def test_it_reads_this_process_rather_than_the_container(self):
+        self.assertEqual(memory.process_rss_bytes(self.STATUS), 117340 * 1024)
+
+    def test_it_reports_anon_and_file_separately(self):
+        """🔴 The whole reason this module exists, as an assertion.
+
+        A probe that answered with one total would have reproduced the episode
+        it was written after: `file` is reclaimable and `anon` is not, and the
+        question "is this cache or is it ours" is the one that has to be
+        answerable without a second round trip.
+        """
+        stat = memory.cgroup_stat(self.STAT)
+        self.assertEqual(stat["anon"], 239202304)
+        self.assertEqual(stat["file"], 16666624)
+        self.assertNotIn("sock", stat)
+
+    def test_a_platform_without_any_of_it_reports_nothing_rather_than_raising(self):
+        """⚠️ macOS has none of these paths, and CI may not either.
+
+        A probe that threw would fail on every development machine, and a probe
+        that fails on a laptop gets deleted rather than fixed.
+        """
+        with mock.patch.object(memory, "_read", return_value=None):
+            self.assertIsNone(memory.process_rss_bytes())
+            self.assertEqual(memory.cgroup_stat(), {})
+            self.assertEqual(memory.snapshot(), {})
+            self.assertIn("unavailable", memory.format_snapshot())
+
+    def test_the_line_names_the_process_and_the_percentage(self):
+        # ⚠️ The pid is what answered "which worker is growing" — the master's
+        #    figure did not move all afternoon while the two workers moved by
+        #    different amounts, and that is what identified the ratchet.
+        line = memory.format_snapshot(
+            {"rss": 117340 * 1024, "anon": 239202304, "file": 16666624,
+             "total": 281 * 1024 * 1024, "limit": 512 * 1024 * 1024},
+            pid=42)
+        self.assertIn("pid=42", line)
+        self.assertIn("anon=228.1MB", line)
+        self.assertIn("file=15.9MB", line)
+        self.assertIn("pct=55%", line)
+
+    def test_an_unlimited_cgroup_does_not_produce_a_percentage(self):
+        # memory.max reads "max" when nothing is capped. Returning 0 there
+        # would make every percentage a division by zero.
+        with mock.patch.object(memory, "_read", return_value="max\n"):
+            self.assertIsNone(memory._cgroup_number(memory.CGROUP_MAX))
+
+    def test_the_probe_is_off_when_the_interval_is_zero(self):
+        """⚠️ 0 is a supported value, not a way to break it.
+
+        Turning the probe off has to be something an operator can do from the
+        panel while chasing something else — which is why the interval is an
+        environment variable the blueprint deliberately does not name.
+        """
+        from config import gunicorn_conf
+
+        # ⚠️ Read off the thread list rather than by patching Thread. An earlier
+        #    version patched `gunicorn_conf.threading.Thread` — and that
+        #    attribute **is** the stdlib module, so it replaced Thread process
+        #    wide for the duration, handing a mock to anything else that
+        #    happened to start a thread in that window.
+        def probes():
+            return [thread for thread in threading.enumerate()
+                    if thread.name == "memory-probe"]
+
+        before = probes()
+        with mock.patch.object(gunicorn_conf, "PROBE_SECONDS", 0):
+            gunicorn_conf.post_fork(None, mock.Mock())
+        self.assertEqual(probes(), before, "the probe started with the knob at 0")
+
+        # ⚠️ And the other direction, or "never starts anything" would pass.
+        with mock.patch.object(gunicorn_conf, "PROBE_SECONDS", 3600):
+            gunicorn_conf.post_fork(None, mock.Mock())
+        self.assertEqual(
+            len(probes()), len(before) + 1, "the probe did not start at all")
+
+    def test_an_unusable_interval_falls_back_rather_than_failing_the_boot(self):
+        """🔴 An exception on that line is not a bad interval — it is no site.
+
+        Gunicorn runs the config file inside `get_config_from_filename`, which
+        catches everything, prints "Failed to read config file" and exits 1. And
+        the way in is the knob being used as intended: turning the probe off
+        from the dashboard leaves the variable declared and empty, Render passes
+        `""`, and `int("")` raises.
+
+        ⚠️ Falls back to the default, not to 0. "Off" must be something somebody
+           asked for — a typo quietly disabling the probe you are mid-
+           investigation with is worse than a probe that keeps talking.
+        """
+        from config.gunicorn_conf import DEFAULT_PROBE_SECONDS, _probe_seconds
+
+        for raw in ("", "5m", "600s", "abc", None):
+            with self.subTest(value=raw):
+                self.assertEqual(_probe_seconds(raw), DEFAULT_PROBE_SECONDS)
+        # A usable value is still honoured, 0 included.
+        self.assertEqual(_probe_seconds("0"), 0)
+        self.assertEqual(_probe_seconds("60"), 60)
+
+
+class SharedS3SessionTests(SimpleTestCase):
+    """One boto3 Session for every bucket and every thread, not twelve.
+
+    🔴 This guard is the half of the fix that survives. The subclass hangs off
+       two django-storages internals (`_create_session` and `connection`), and
+       the day either changes shape the subclass stops taking effect **with
+       nothing red** — memory simply climbs back to where it was, which is a
+       thing nobody notices for a week (revisions.md 五十一).
+
+    ⚠️ It asserts the **property**, never a byte count. The measured saving —
+       200.3 MB per warmed worker down to 97.5 MB — moves with the platform,
+       the interpreter and the botocore version; "how many sessions were built"
+       does not.
+    """
+
+    OPTIONS = {
+        "endpoint_url": "https://example.invalid",
+        "access_key": "an-access-key", "secret_key": "a-secret-key",
+        "region_name": "auto", "default_acl": None,
+    }
+
+    def setUp(self):
+        # ⚠️ Imported here, not at the top of this file. `core.s3` pulls in
+        #    boto3, and the guard below asserts that an ordinary boot does not —
+        #    a module-level import here would be measuring this file rather than
+        #    the application.
+        from core import s3 as s3_module
+
+        self.s3 = s3_module
+        # Each test starts from an empty registry, or the second one to run
+        # would pass because the first had already filled it in.
+        s3_module._sessions.clear()
+
+    def three_buckets(self):
+        """Stand-ins for the three R2 aliases: one endpoint, one key, three names."""
+        return [self.s3.SharedSessionS3Storage(bucket_name=name, **self.OPTIONS)
+                for name in ("event-images", "memories", "public")]
+
+    def test_many_threads_and_three_buckets_build_one_session(self):
+        """⭐ The measurement that found the problem, as a test.
+
+        Four threads was the deployed `--threads` value and three is the number
+        of buckets, so twelve is what the unfixed code builds here.
+        """
+        built = []
+        real = boto3.Session
+
+        def counted(**kwargs):
+            built.append(kwargs)
+            return real(**kwargs)
+
+        buckets = self.three_buckets()
+        with mock.patch.object(boto3, "Session", side_effect=counted):
+            def touch():
+                for bucket in buckets:
+                    self.assertIsNotNone(bucket.connection)
+
+            # ⚠️ daemon=True, and it is the other half of the join timeout
+            #    below. Without it a stuck thread is still alive when the suite
+            #    ends and `threading._shutdown()` joins it at interpreter exit —
+            #    so the regression is reported red **and then hangs** until CI's
+            #    own timeout. Observed on 2026-08-28 while reverse-checking the
+            #    RLock: the run went red at 120s and the process kept going.
+            threads = [threading.Thread(target=touch, daemon=True) for _ in range(4)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                # ⚠️ A timeout, because the first version of this deadlocked:
+                #    `connection` took the lock and then reached
+                #    `_create_session()`, which took it again on the same
+                #    thread. Without a timeout that failure is a test run that
+                #    hangs for ever rather than one that goes red.
+                # ⚠️ Ten seconds, not thirty. A healthy run returns instantly
+                #    — this budget is only ever spent by a broken one, and the
+                #    reverse check that proved this guard works took **two
+                #    minutes** to go red at thirty. A guard nobody waits for is
+                #    a guard somebody switches off.
+                thread.join(timeout=10)
+                self.assertFalse(thread.is_alive(), "a thread is stuck on the lock")
+
+        self.assertEqual(
+            len(built), 1,
+            f"{len(built)} boto3 sessions were built where one was expected — "
+            "each carries its own parsed copy of botocore's S3 service model, "
+            "and they are never released")
+
+    def test_every_thread_still_gets_its_own_resource(self):
+        """⚠️ The other half, and the half that is a correctness rule.
+
+        boto3 resources are **not** thread safe. Sharing the session is the
+        optimisation; sharing the resource would be a bug, and a subclass that
+        went one step further would pass the test above while introducing one.
+        """
+        bucket = self.three_buckets()[0]
+        # ⚠️ The objects, not their `id()`s. A thread's local storage is freed
+        #    when the thread ends, and CPython reuses the address — so the first
+        #    version of this collected ids, watched two of the three coincide,
+        #    and reported a resource being shared that never was. Holding a
+        #    reference is also what keeps the ids distinct, but the reason to
+        #    write it this way is that identity of freed objects is not a
+        #    question that has an answer.
+        seen = []
+        threads = [threading.Thread(target=lambda: seen.append(bucket.connection),
+                                    daemon=True)
+                   for _ in range(3)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=10)
+            self.assertFalse(thread.is_alive(), "a thread is stuck on the lock")
+        self.assertEqual(
+            len({id(resource) for resource in seen}), 3,
+            "two threads share one boto3 resource, and resources are not "
+            "thread safe")
+
+    def test_an_ordinary_boot_does_not_import_boto3(self):
+        """🔴 A regression this change introduced and then had to undo.
+
+        The subclass first went into `core/storages.py` — which is reached from
+        the `FileField(storage=...)` callables, so it loads with the models, on
+        every management command, every test run and every development server.
+        That put `import boto3` on all of them: **+17.6 MB on django.setup() in
+        development**, measured, for a class development never instantiates.
+
+        ⚠️ Run in a subprocess, because it is the only honest way to ask "what
+           does a fresh boot import" — this test process has boto3 loaded
+           already, by the tests above and by whatever imported it first.
+        """
+        probe = (
+            "import django, sys; django.setup(); "
+            "print('boto3' in sys.modules)"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", probe],
+            capture_output=True, text=True, cwd=settings.BASE_DIR,
+            env={**os.environ, "DJANGO_SETTINGS_MODULE": "config.settings.dev"},
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout.strip(), "False",
+            "an ordinary boot imports boto3, which costs every management "
+            "command and every test run the memory this change was made to save")
+
+    def test_a_named_profile_gets_its_own_session_and_uses_it(self):
+        """⚠️ Upstream's other branch, which the first version of this dropped.
+
+        django-storages refuses `session_profile` together with explicit keys,
+        so profile-only is the supported shape and the keys are None in it.
+        Building a keyless Session there authenticates as whatever botocore's
+        default chain finds — and keyed on the credentials alone, every profile
+        collapses to (None, None, None) and two different profiles share one
+        session. Both failures are silent, and both are wrong credentials.
+
+        Not reachable from this deployment (`_r2()` sets keys, never a profile);
+        asserted because this class is written to be sent upstream.
+        """
+        built = []
+        with mock.patch.object(boto3, "Session",
+                               side_effect=lambda **kw: built.append(kw) or mock.Mock()):
+            first = self.s3.SharedSessionS3Storage(
+                bucket_name="a", endpoint_url=self.OPTIONS["endpoint_url"],
+                session_profile="one")
+            second = self.s3.SharedSessionS3Storage(
+                bucket_name="b", endpoint_url=self.OPTIONS["endpoint_url"],
+                session_profile="two")
+            self.assertIsNot(first._create_session(), second._create_session())
+            # The same profile twice is still one session.
+            first._create_session()
+
+        self.assertEqual([kw.get("profile_name") for kw in built], ["one", "two"],
+                         "the profile was dropped and the default credential "
+                         "chain was used instead")
+
+    def test_a_second_credential_gets_a_second_session(self):
+        # Keyed by credential, so a future bucket under different keys cannot
+        # silently ride on somebody else's session.
+        first = self.s3.SharedSessionS3Storage(bucket_name="a", **self.OPTIONS)
+        other = dict(self.OPTIONS, access_key="another-key")
+        second = self.s3.SharedSessionS3Storage(bucket_name="b", **other)
+        self.assertIsNot(first._create_session(), second._create_session())
+
+
 class HealthCheckGuardTests(TestCase):
     """Lint-as-test: the health check path, in the three files that must agree.
 
@@ -5181,3 +5639,54 @@ class HealthCheckGuardTests(TestCase):
             self.assertEqual(middleware(plain_http.get("/")).status_code, 301)
             self.assertEqual(
                 middleware(plain_http.get("/events/")).status_code, 301)
+
+    # --- The fourth file: the access log that has to skip this same path ------
+
+    def test_the_blueprint_installs_the_logger_that_silences_the_check(self):
+        """⚠️ Without this line the health check *is* the log.
+
+        Render polls healthCheckPath continuously and this service is idle most
+        of the time, so `--access-logfile -` on its own produces thousands of
+        identical 200s and buries everything worth reading. Dropping
+        `--access-logfile` instead would be the other silence — no request
+        record at all on the day something breaks.
+        """
+        start = re.search(r"^\s*startCommand:(.+?)(?=^\s{4}\w)",
+                          self.blueprint, re.M | re.S)
+        self.assertIsNotNone(start, "render.yaml declares no startCommand")
+        command = " ".join(start.group(1).split())
+        self.assertIn("--access-logfile -", command,
+                      "the access log is off, so there is no request record at all")
+        self.assertIn(
+            "--logger-class config.gunicorn_logger.QuietHealthCheckLogger", command,
+            "nothing filters the access log, so the health check will bury it")
+
+    def test_the_logger_drops_the_health_check_and_nothing_else(self):
+        """⭐ The one that catches a path the four files stopped agreeing on.
+
+        Exercised rather than grepped: a logger that silences the wrong path is
+        indistinguishable from a working one until somebody reads the log.
+        Both directions are asserted, because "silence everything" passes the
+        first half on its own — and losing the 500s is the worse of the two
+        failures this guard exists for.
+        """
+        from gunicorn.glogging import Logger
+
+        from config.gunicorn_logger import QuietHealthCheckLogger
+
+        logged = []
+        with mock.patch.object(
+                Logger, "access",
+                lambda self, resp, req, environ, t: logged.append(
+                    environ["PATH_INFO"])):
+            logger = QuietHealthCheckLogger.__new__(QuietHealthCheckLogger)
+            # ⚠️ Both spellings of the health path. render.yaml asks for the one
+            #    without the trailing slash and the URLconf serves the one with
+            #    it, so which of the two reaches the log is not ours to choose.
+            for path in (f"/{HEALTH_PATH}", "/" + HEALTH_PATH.strip("/"),
+                         "/", "/events/"):
+                logger.access(None, None, {"PATH_INFO": path}, 0.0)
+        self.assertEqual(
+            logged, ["/", "/events/"],
+            "the access log either still carries the health check, or has "
+            "stopped carrying the requests somebody will need to read")

@@ -13,6 +13,7 @@ from decimal import Decimal
 
 from django.core.exceptions import ValidationError
 from django.db import transaction
+from django.db import models
 from django.db.models import Count, F, Q, Sum
 from django.db.models.functions import TruncMonth
 from django.utils import timezone
@@ -23,16 +24,20 @@ from PIL import ImageOps as PILImageOps
 from contact.models import Contact, ContactQuerySet
 from core.images import draft_to, stored_size, upright_size
 from core.notifications.base import EMAIL, SMS, Message, get_backend
-from core.timeutils import local_date_of, local_now
+from core.timeutils import local_date_of, local_day, local_now
 from org.models import Assignment, Position
 
 from . import tokens
 from .models import (
+    Audience,
+    refuse_bad_audience,
     Event,
     EventNotification,
     EventRole,
     Participation,
     ParticipationRole,
+    on_the_books_exists,
+    on_the_books_q,
 )
 
 
@@ -53,6 +58,15 @@ class RoleFull(ValidationError):
     """
 
 
+class NoHoursHere(ValidationError):
+    """Somebody tried to put hours on a place people attend.
+
+    L4's rule reaching the surface. Its own class rather than a bare
+    ValidationError because the page has to show it next to the row it concerns
+    and say what to do instead — which is nothing, and that is the answer.
+    """
+
+
 class TurnedUp(ValidationError):
     """Refusing to mark somebody absent when the record says they were here.
 
@@ -60,6 +74,79 @@ class TurnedUp(ValidationError):
     has to show this one next to the person it concerns rather than as a
     generic failure, because the fix is a different button.
     """
+
+
+@transaction.atomic
+def set_audience(row, spec):
+    """Give an event or a role an audience, refusing an invalid one. Returns the row.
+
+    ⭐ The door for everything that is not a form: the demo seed, the fixtures,
+       an importer, a script, batch three's session generator. The three rules
+       lived on the forms alone until 2026-08-27 — which is every door a person
+       walks through and none of the others, while a comment in models.py said
+       otherwise.
+
+    ⚠️ Refusing, then writing — never the reverse. So a refused audience leaves
+       the row byte-for-byte as it was, which is what the tests here pin.
+
+    ⚠️ `atomic` is for a different failure, and D14's habit says to name the
+       boundary rather than let the decorator imply it is covered: the write is
+       two statements (the columns, then the ministries), so an error **inside**
+       apply_audience — between the save and the set — would leave booleans
+       from the new audience beside ministries from the old. Legal to the
+       database, wrong to everybody. No test here reaches that; taking `atomic`
+       off breaks nothing, which was checked rather than assumed. It stays
+       because the state on the other side has no owner and no alarm.
+
+    ⚠️ It does **not** unpack the Spec, which is why the rules and the write
+       both live elsewhere. Reading the Spec's three fields here trips
+       AudienceContainmentGuardTests, and rightly: that guard exists to stop
+       audience comparisons growing a second implementation, and services.py is
+       exactly where the second one would appear. (It caught this docstring
+       first — it reads lines, not syntax — which is the correct trade for a
+       guard whose misses are silent.)
+
+    ⚠️ The forms do not come through here, and that is deliberate rather than an
+       omission. A ModelForm saves its own instance from cleaned_data, so
+       routing it through this would mean writing the row twice; and the forms
+       need every fault at once, spread across the boxes that caused them,
+       where this needs to stop at the first. Both call the same rule bodies in
+       models.py. See refuse_bad_audience()'s note, and the test that pins the
+       two against each other.
+    """
+    refuse_bad_audience(row=row, spec=spec)
+    row.apply_audience(spec)
+    return row
+
+
+def inherit_audience(row, source):
+    """Give `row` the audience of `source`, but only if it has none. Decision 15.
+
+    ⭐ A role opened on an event starts as wide as the event and no wider: "if
+       you can see it, you can sign up for it" is requirement 6's ordinary case,
+       and it is the only default that cannot violate refuse_wider_than_event().
+       EventRoleForm answers this by filling in `initial`; this is the same rule
+       for the callers with no form — the demo seed, the fixtures, batch three's
+       session generator.
+
+    ⚠️ **Only when the row has none**, which is the judgement worth having in
+       one place. "Nobody at all" is never something somebody chose — it is what
+       three columns defaulting to False/False/none add up to — so filling it in
+       is a repair. Overwriting an audience somebody did choose is not, and a
+       caller that re-runs (the seed uses get_or_create) must not do it.
+
+    ⚠️ Not a column default, which is the first thing one reaches for: a default
+       cannot read another row, and the single value it would have to guess is
+       wrong in the direction that matters. Hard-coding "outsiders" would hand
+       every role on a staff-only event an audience wider than its own event —
+       the invariant, broken by the thing meant to uphold it.
+
+    ⚠️ Here rather than on the model (which is where 06-roadmap.md first put it):
+       it goes through set_audience(), and models.py cannot import services.py.
+    """
+    if row.audience_is_empty:
+        set_audience(row, Audience.Spec.of(source))
+    return row
 
 
 def consent_required_for(contact, event):
@@ -102,13 +189,35 @@ def _on_the_books(event):
     employee, was never going to be one, and "scheduled work" is a question
     that reads to them as though the system does not know who they are.
     """
-    return Assignment.objects.active(on=local_date_of(event.start_time)).filter(
-        position__kind=Position.Kind.STAFF, position__is_active=True,
-    )
+    return Assignment.objects.filter(
+        on_the_books_q(local_date_of(event.start_time)))
 
 
-def default_served_as(contact, event):
+def is_on_the_books(contact, event):
+    """Was this person one of the foundation's own on the day of this event?
+
+    The single-contact form of _on_the_books(), public because the signup form
+    needs the answer once for a page of roles rather than once per role. It is
+    not a second judgement — both it and default_served_as() below go through
+    the same queryset, which is the point _on_the_books() makes about itself.
+    """
+    return _on_the_books(event).filter(contact=contact).exists()
+
+
+def default_served_as(contact, event_role, *, on_the_books=None):
     """(what to record, whether to put the question to them) for this signup.
+
+    ⚠️ Takes an **event_role**, not an event (2026-08-21). The first thing it
+       asks is whether the question arises at all, and that is a property of
+       the role: on a place somebody attends there is no answer — not
+       volunteering, not work — so the value is NOT_APPLICABLE and nobody is
+       asked. That branch comes before anything about the person, because
+       otherwise a staff member signing up for an ESL seat gets asked a
+       question with no true answer. See D38 section 5's table, first row.
+
+    `on_the_books` lets a caller that already knows the answer pass it in — the
+    signup form asks it once for a page of roles instead of once per role. It
+    is not a second rule: the judgement below is still the only one.
 
     ⚠️ A pair, and it has to be — D38 section 5's table has two columns and
        they do not agree with each other. An outside volunteer is recorded as
@@ -143,17 +252,39 @@ def default_served_as(contact, event):
     rule belongs **in this function** — an assignment page working out its own
     default is the second copy this docstring is about.
     """
-    on_the_books = _on_the_books(event).filter(contact=contact).exists()
+    if event_role.role.nature == ParticipationRole.Nature.ATTENDING:
+        return Participation.ServedAs.NOT_APPLICABLE, False
+    if on_the_books is None:
+        on_the_books = is_on_the_books(contact, event_role.event)
     return Participation.ServedAs.VOLUNTEER, on_the_books
 
 
-def contacts_asked_about_serving(event):
-    """The contact ids the identity question applies to, for a page of rows.
+def signups_asked_about_serving(event):
+    """The pks of the signups the identity question applies to, for a page of rows.
 
-    The set form of default_served_as()'s first half, so a list of signups can
+    The set form of default_served_as()'s second half, so a list of signups can
     decide what to draw in one query instead of one per row.
+
+    ⚠️ Signups, not contacts (2026-08-21). The question now has two halves —
+       the person is on the books **and** the role is one where time is given —
+       and they are per row, not per person: the same staff member helping at
+       the welcome desk and sitting in on the class is asked about one and not
+       the other. Returning contact ids would leave the second half to be
+       spelled again by every caller, which is two copies of one rule and the
+       shape this project keeps convicting.
+
+    ⚠️ The rename is deliberate. Keeping `contacts_asked_about_serving` while
+       changing what it returns leaves the next reader a name that lies.
     """
-    return set(_on_the_books(event).values_list("contact_id", flat=True))
+    return set(
+        Participation.objects
+        .filter(
+            event_role__event=event,
+            contact_id__in=_on_the_books(event).values("contact_id"),
+        )
+        .recording_hours()
+        .values_list("pk", flat=True)
+    )
 
 
 def set_served_as(participation, value, *, declared_by):
@@ -169,6 +300,12 @@ def set_served_as(participation, value, *, declared_by):
     anybody's statement — an outside volunteer who was never shown the
     question, matching how migration 0014 treats the rows that predate it.
     Non-empty means a human answered, which is what makes the column evidence.
+
+    ⚠️ `NOT_APPLICABLE` always arrives with an empty `declared_by`, and for a
+       stronger reason than the outside volunteer's: there is no statement to
+       attribute. The row is on a role people attend, so the question never
+       arose. Anything else in that column would be claiming somebody decided
+       this, and D38 section 4 is entirely about that column being evidence.
 
     ⚠️ No defaulting logic here. Deciding the value is default_served_as()'s
        job; doing both in one function is how the default rules end up with two
@@ -318,7 +455,7 @@ def sign_up(*, contact, event_role, consent=None, served_as=None):
     # contact) has to come back as a form error, not as an IntegrityError 500.
     participation.full_clean(exclude=["registered_at"])
 
-    default, asked = default_served_as(contact, event_role.event)
+    default, asked = default_served_as(contact, event_role)
     # ⚠️ `served_as` from the caller counts only if they were actually asked.
     #    Otherwise the form carried no such field and whatever arrived was
     #    hand-made — and the recorded value is the one the data proves.
@@ -431,10 +568,16 @@ def check_out(participation, *, at=None, method=Participation.CheckInMethod.ADMI
     ⚠️ Nor is hours a property over the timestamps. Two fields answering one
        question independently is is_active sitting next to end_date: two
        answers, free to disagree, and nothing to tell you they have.
+
+    ⚠️ On a place somebody attends it writes the time and nothing else (L4).
+       They came and they left — both timestamps are true — but the hours are
+       not a question there, and computing them would put a number into a
+       column the report is about to divide by.
     """
     at = at or local_now()
     participation.checked_out_at = at
-    if participation.checked_in_at and participation.hours is None:
+    if (participation.records_hours
+            and participation.checked_in_at and participation.hours is None):
         elapsed = at - participation.checked_in_at
         participation.hours = Decimal(elapsed.total_seconds()) / Decimal(3600)
         participation.hours = participation.hours.quantize(Decimal("0.01"))
@@ -456,7 +599,17 @@ def record_hours(participation, hours, *, method=Participation.CheckInMethod.ADM
        which is why it records the method too: a row entered from paper has no
        timestamps at all, and leaving the column empty would file it under
        "predates the feature".
+
+    ⚠️ Refuses a place somebody attends (L4). The database refuses it too, but
+       only once the row says `not_applicable` — this check asks the role and
+       so also covers a row whose identity was never written. See
+       Participation.records_hours for why the two differ on purpose.
     """
+    if not participation.records_hours:
+        raise NoHoursHere({"hours": (
+            f"“{participation.event_role.role.name}” is a place people attend, "
+            f"not a job — the event side records no hours for it."
+        )})
     participation.hours = hours
     _record_method(participation, method)
     _mark_attended(participation)
@@ -1008,16 +1161,55 @@ def ministry_report(events):
        here. That makes the figure answer "did this period build a habit",
        which is the question worth asking of a period.
 
-    ⚠️ `fully_staffed_rate` counts only events that opened at least one role
-       with a number on it. An event that opened no roles, or only unlimited
-       ones, cannot be full — including it in the denominator would drag the
-       rate down for being unmeasurable, which reads as a staffing problem.
+    ⚠️ `fully_staffed_rate` counts only events that opened at least one
+       **helping** role with a number on it. An event that opened no roles, or
+       only unlimited ones, cannot be full — including it in the denominator
+       would drag the rate down for being unmeasurable, which reads as a
+       staffing problem. Since 2026-08-21 a class's seats are excluded for the
+       same reason: twelve seats with three learners is not a shortage of
+       helpers, and this figure is the one the foundation reads as "are we
+       short of people".
+
+    ⚠️ Three figures split on L1's axis, and `participants` deliberately does
+       not. It counts everybody who took part — helpers, learners and paid
+       staff alike — which is what its name says. `people_served` sits beside
+       it as a second, narrower count, and the two are **never added**: that is
+       D36's invariant arriving on this page for a second time.
+
+    ⚠️ Every figure and chart mentioning hours is over `helped` (2026-08-27),
+       not only the two denominators L1.4 narrowed. A ratio whose numerator and
+       denominator come from different sets of rows is wrong by construction,
+       and the total had to move with them or the by-month chart would no
+       longer add up to the total printed above it.
+
+       The honest boundary, which D14 asks to be said rather than implied: this
+       therefore **hides** a stray attending row that carries hours instead of
+       reporting it. That is the right trade for a page of ratios, but it means
+       no figure here is a way to notice one. `event_summary()`'s per-event
+       R6 still counts every row and attributes it to its role, which is where
+       such a row is visible — deliberately not changed here, because narrowing
+       it is a change to what R6 means and belongs in a step of its own.
     """
     # Cancelled signups are out of every figure below: that person said they
     # were not coming, and counting them as a volunteer inflates every number
     # on this page. A no-show stays in — they signed up, which is the fact the
     # signup figures are about.
     parts = Participation.objects.filter(event_role__event__in=events).notifiable()
+
+    # L4. The rows where hours are a question at all. **Every** figure and
+    # chart on this page that touches hours is drawn from this and not from
+    # `parts`, which is what keeps a numerator and its denominator over one set
+    # of rows. Asked through the queryset method rather than restated, so this
+    # and the attendance page cannot disagree about which rows those are.
+    #
+    # 🔴 Not merely tidiness, and the reason is written out in full on
+    #    Participation.records_hours: a row on an attending role whose
+    #    `served_as` was never written (a bulk_create, an importer, anything
+    #    older than this rule) can carry hours. The check constraint does not
+    #    stop it — that row does not claim to be `not_applicable` — so "an
+    #    attending row has no hours" is an assumption, not a guarantee, and
+    #    every figure below that relied on it was wrong by one row's worth.
+    helped = parts.recording_hours()
 
     event_count = events.count()
     totals = parts.aggregate(
@@ -1030,6 +1222,20 @@ def ministry_report(events):
         #    and two definitions on one report is the mistake this project has
         #    already convicted three times. See participants.md section 5.
         participants=Count("contact", distinct=True),
+    )
+    # ⚠️ A second aggregate over `helped` rather than three more keys with a
+    #    `filter=` on the one above, and the shape is the point: `totals` is
+    #    what the whole signup list says, this is what the rows recording hours
+    #    say, and which set a figure came from is visible from where it is
+    #    written. Four keys in one call, two of them quietly narrowed, is a
+    #    thing a reader has to check argument by argument.
+    recorded = helped.aggregate(
+        # ⚠️ `helping_signups`, never `signups`. `totals` above has a key by
+        #    that name meaning every signup, and two keys with one name and two
+        #    definitions on one report is the mistake participants.md section 5
+        #    records this page making before. It is also the word the template
+        #    already prints beside the figure.
+        helping_signups=Count("pk"),
         # ⚠️ `hours_total`, not `hours`. An alias that repeats a field name wins
         #    over the field for every later argument in the same aggregate(),
         #    so `hours=Sum("hours")` next to `Count("hours")` makes the second
@@ -1039,9 +1245,20 @@ def ministry_report(events):
         # Count over a nullable column counts the rows that have one: how many
         # records the hours total is built from, not how many signups there are.
         hours_records=Count("hours"),
+        # ⚠️ The denominator of "hours per participant", and it is **not**
+        #    `participants`. A learner in the ESL class is a participant who can
+        #    never contribute to the numerator — the constraint forbids hours on
+        #    that row — so leaving them in dilutes the average every time the
+        #    foundation runs a class, and nothing anywhere says so.
+        # ⚠️ In this aggregate rather than a `.values().distinct().count()` of
+        #    its own: it is over exactly these rows, so a second pass over them
+        #    bought a second query and hid which set it came from — the one
+        #    property this split exists to make visible.
+        helpers=Count("contact_id", distinct=True),
     )
-    hours = totals["hours_total"] or Decimal("0")
+    hours = recorded["hours_total"] or Decimal("0")
     participants = totals["participants"]
+    helpers = recorded["helpers"]
 
     repeat = (
         parts.values("contact_id").annotate(n=Count("pk")).filter(n__gte=2).count()
@@ -1051,11 +1268,22 @@ def ministry_report(events):
     # condition is a NOT EXISTS over an annotated subquery, and the version of
     # it that reads clearly is the one that is wrong. Sets of primary keys over
     # a ministry's events are small — hundreds, not millions.
+    #
+    # ⚠️ Both sets are narrowed to **helping** roles (2026-08-21). A class that
+    #    opened twelve seats and filled three is not a ministry short of
+    #    helpers, and this figure is read as exactly that — the same objection
+    #    D27 already records against letting events with no numbered role into
+    #    the denominator, arriving on a second axis. A mixed event still counts:
+    #    it is judged on its interpreter, not on its seats.
+    helping_roles = EventRole.objects.exclude(
+        role__nature=ParticipationRole.Nature.ATTENDING)
     staffable = set(
-        events.filter(roles__needed_count__isnull=False).values_list("pk", flat=True)
+        events.filter(
+            roles__in=helping_roles.filter(needed_count__isnull=False),
+        ).values_list("pk", flat=True)
     )
     short_events = set(
-        EventRole.objects.understaffed()
+        helping_roles.understaffed()
         .filter(event__in=events)
         .values_list("event_id", flat=True)
     )
@@ -1081,18 +1309,69 @@ def ministry_report(events):
         "signups": totals["signups"],
         "participants": participants,
         "hours": hours,
-        "hours_records": totals["hours_records"],
-        "hours_missing": totals["signups"] - totals["hours_records"],
-        "hours_per_participant": (hours / participants) if participants else None,
+        "hours_records": recorded["hours_records"],
+        # ⚠️ Over the rows that record hours, not over every signup
+        #    (2026-08-21). Before this, every learner in a class counted as
+        #    "a signup with no hours recorded" — a figure printed as a data
+        #    quality warning, quietly climbing for a reason that is not a data
+        #    quality problem at all. The first silent bug this round fixes.
+        #
+        # ⚠️ Both halves come from the same aggregate over the same rows, so
+        #    this cannot go negative. Drawn from `parts` the subtrahend could
+        #    exceed the minuend — a stray attending row carrying hours counts
+        #    as a record without counting as a signup — and "−1 signups with
+        #    no hours" is a sentence the page would print without complaint.
+        "hours_missing": recorded["helping_signups"] - recorded["hours_records"],
+        "hours_per_participant": (hours / helpers) if helpers else None,
+        "helpers": helpers,
         "repeat_participants": repeat,
         "repeat_rate": _percent(repeat, participants),
         "fully_staffed": fully_staffed,
         "staffable_events": len(staffable),
         "fully_staffed_rate": _percent(fully_staffed, len(staffable)),
         "minors_without_consent": minors_without_consent,
+        "people_served": _people_served(parts),
         **absence,
     }
-    return {"figures": figures, "charts": _report_charts(events, parts)}
+    return {"figures": figures, "charts": _report_charts(events, parts=parts, helped=helped)}
+
+
+def _people_served(parts):
+    """How many people came to receive something, not counting our own.
+
+    ⭐ The figure every grant application asks for, and the first time this
+       system can answer it. D38 section 7 named it as one of the two questions
+       the identity axis was supposed to make answerable; this is the second.
+
+    Two conditions, and the second is not optional:
+
+    1. the signup is on a place somebody attends (L1);
+    2. that person held no staff post on **the day of that event**.
+
+    ⚠️ Without the second, every employee who sat in on a lecture is counted as
+       a community member the foundation served — a number that goes into the
+       annual report and into grant applications, inflated by our own people.
+
+    ⚠️ The day is each event's own, which is why this is a correlated subquery
+       rather than one date: a month's report spans many events. The annotation
+       has to be here, on the outer query — see on_the_books_exists().
+
+    ⚠️ Distinct contacts, so somebody who came to four classes is one person
+       served. "How many people" and "how many visits" are different questions
+       and the second one is a known gap (participants.md section 9); this
+       answers the first, which is the one that was asked.
+    """
+    return (
+        parts.attending()
+        .annotate(event_day=local_day("event_role__event__start_time"))
+        .exclude(on_the_books_exists(
+            contact_ref=models.OuterRef("contact_id"),
+            day_ref=models.OuterRef("event_day"),
+        ))
+        .values("contact_id")
+        .distinct()
+        .count()
+    )
 
 
 def _absence(events, parts):
@@ -1148,7 +1427,7 @@ def _percent(part, whole):
     return int(100 * part / whole) if whole else None
 
 
-def _report_charts(events, parts):
+def _report_charts(events, *, parts, helped):
     """The five charts, in the order the panel draws them.
 
     ⚠️ All five are horizontal. Twelve vertical bars in a panel that is half a
@@ -1157,8 +1436,33 @@ def _report_charts(events, parts):
        every label on its own line at its natural size, and the same component
        draws all five — so no chart on this page can end up styled unlike its
        neighbour. Months therefore read top to bottom, oldest first.
+
+    ⚠️ **Two querysets, and which one a chart gets is the whole of L4 here**
+       (2026-08-27). Keyword-only, unlike the other helpers in this module,
+       because these two are the same type and sit next to each other: passed
+       the wrong way round the report is wrong and nothing raises. `helped` is
+       `parts.recording_hours()`; the three charts titled after hours take it,
+       and the two that count signups take `parts`:
+
+       · Recorded hours by month — `helped`. It has to sum to the "Recorded
+         hours" figure printed above it, and that figure is over `helped`.
+         Drawn from `parts` the chart would total more than the number it
+         illustrates, on the same screen.
+       · Most hours — `helped`. Its tiebreak `n` is "how many of these", so
+         over `parts` it counts a learner's seat towards a leaderboard of
+         helpers.
+       · Recorded hours by role — `helped`. An attending role has no hours by
+         definition, so a bar for one is not a fact about that role.
+       · Roles wanted against filled — `parts`. "ESL seat: wanted 12, got 3" is
+         accurate and useful; what goes wrong mixed together is the
+         fully-staffed **ratio**, not this chart. L1.4 said so and it holds.
+       · Events by month — neither. Counted from `events`, no signups involved.
+
+       Passed in rather than each chart calling `recording_hours()` itself: one
+       narrowing, decided at the top of the report, where the reason for it can
+       be read once.
     """
-    monthly = _monthly_series(events, parts)
+    monthly = _monthly_series(events, helped)
     return {
         "events_by_month": _chart(
             "Events by month",
@@ -1173,11 +1477,17 @@ def _report_charts(events, parts):
                  "out read as zero.",
         ),
         "role_gap": _role_gap(events, parts),
-        "top_participants": _top_participants(parts),
+        "top_participants": _top_participants(helped),
         "hours_by_role": _chart(
             "Recorded hours by role",
             list(
-                parts.exclude(hours__isnull=True)
+                # ⚠️ `helped`, and `exclude(hours__isnull=True)` as well. The
+                #    second drops helping rows nobody entered hours for; the
+                #    first drops an attending row that has some anyway. L1.4
+                #    argued this chart needed no narrowing because "an
+                #    attending role cannot have hours" — true of every row the
+                #    service layer writes, and not true of the ones it did not.
+                helped.exclude(hours__isnull=True)
                 .order_by()
                 .values_list("event_role__role__name")
                 .annotate(total=Sum("hours"))
@@ -1188,13 +1498,18 @@ def _report_charts(events, parts):
     }
 
 
-def _monthly_series(events, parts):
+def _monthly_series(events, helped):
     """[(label, event count, recorded hours)] with no month left out.
 
     Two queries, merged here rather than joined in SQL. Joining Event to
     Participation and asking for Count(events) in the same statement multiplies
     the count by the number of signups — the classic multi-table aggregation
     trap, and it produces a plausible number rather than an error.
+
+    ⚠️ `helped`, not every signup (2026-08-27). The months here have to add up
+       to the "Recorded hours" figure printed above the chart, and that figure
+       is over the rows recording hours — see _report_charts(). Named for what
+       it takes so a future caller cannot pass the wrong set without noticing.
     """
     # ⚠️ `.order_by()` with nothing in it, on both, and it is not tidying up.
     #    An **explicit** ordering on the incoming queryset is added to the
@@ -1214,7 +1529,7 @@ def _monthly_series(events, parts):
     }
     hours_by_month = {
         row["month"].date(): row["total"] or Decimal("0")
-        for row in parts.order_by()
+        for row in helped.order_by()
         .annotate(month=TruncMonth("event_role__event__start_time"))
         .values("month").annotate(total=Sum("hours"))
     }
@@ -1280,15 +1595,22 @@ def _role_gap(events, parts):
     )
 
 
-def _top_participants(parts, limit=10):
+def _top_participants(helped, limit=10):
     """C3: who did the most, by recorded hours then by number of events.
 
     ⚠️ `nulls_last`. Postgres sorts NULL first on a descending order, so the
        plain "-hours" puts everybody with no hours recorded at the top of a
        chart titled "most hours" — the exact inversion of what it claims.
+
+    ⚠️ Takes the rows recording hours, not every signup (2026-08-27). L1.4 left
+       this chart alone on the grounds that an attending row's hours are None
+       and `nulls_last` already sorts those out — which covers the row nobody
+       entered hours for and not the one that has some anyway. And the tiebreak
+       `n` was never covered by that argument at all: over `parts` it counts a
+       learner's seat towards the ranking of a chart titled "Most hours".
     """
     rows = list(
-        parts.order_by()
+        helped.order_by()
         .values("contact_id")
         .annotate(total=Sum("hours"), n=Count("pk"))
         .order_by(F("total").desc(nulls_last=True), "-n")[:limit]
@@ -1534,6 +1856,13 @@ def matching_participation_role(name):
        It matters because ParticipationRole is the grouping dimension for R5
        and R7. Two rows meaning one job do not raise anything; they just split
        one column of the report into two, and both halves look plausible.
+
+    ⚠️ `nature` is not part of the comparison, and that is the right answer
+       rather than an omission: two rows both called "ESL seat" are one job
+       whichever half of L1 they were filed under, and letting the name through
+       twice would split that report column exactly as above. What it costs is
+       stated where it lands — the duplicate message names the existing row's
+       kind, so somebody who wanted the other one can see why they are stuck.
     """
     cleaned = (name or "").strip()
     if not cleaned:
@@ -1541,8 +1870,15 @@ def matching_participation_role(name):
     return ParticipationRole.objects.filter(name__iexact=cleaned).first()
 
 
-def create_participation_role(name):
+def create_participation_role(name, *, nature):
     """Add a job to the shared vocabulary. Returns the new ParticipationRole.
+
+    ⚠️ `nature` is required and has no default here, even though the model
+       column has one. The model's default answers "what were the rows that
+       already existed"; this function is the live path a ministry admin adds a
+       job through, and defaulting it would file every ad-hoc role as helping —
+       so the first ESL seat somebody creates from this page would silently ask
+       its students for hours. The caller has to have asked.
 
     ⚠️ `code` is generated from the name and is **immutable afterwards**
        (ImmutableCodeMixin) — the rest of the codebase matches on it, so
@@ -1561,7 +1897,7 @@ def create_participation_role(name):
     while ParticipationRole.objects.filter(code__iexact=code).exists():
         code = f"{base}-{suffix}"
         suffix += 1
-    role = ParticipationRole(code=code, name=cleaned)
+    role = ParticipationRole(code=code, name=cleaned, nature=nature)
     role.full_clean()
     role.save()
     return role

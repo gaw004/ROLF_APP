@@ -224,8 +224,13 @@
    *    `<button>` 的默认值都没有。
    *
    * ⚠️ 停用的按钮走 `not-allowed`，而不是继续变手 —— 手型是「点我」的意思，
-   *    而它恰恰点不了。判据同时看 `:disabled`（真按钮）和
-   *    `[aria-disabled="true"]`（画成停用的链接/div）。
+   *    而它恰恰点不了。判据看三样：`:disabled`（真按钮和真输入框）、
+   *    包着一个停用输入框的 `label`（上面那条 `label[for]` 会把它变成手），
+   *    以及 `[aria-disabled="true"]`（画成停用的链接/div）。
+   *
+   * ⚠️ `input:disabled` 和那条 label 规则是 2026-08-27 加的，而它们**属于这里
+   *    而不是某个组件**：受众那一块原来自带了一条一模一样的 `not-allowed`，
+   *    正是这条守卫的 docstring 点名反对的「挨个加」—— 漏掉的那一个谁也不会发现。
    *
    * 守卫：core.tests.ButtonCursorTests
    */
@@ -237,6 +242,8 @@
   }
 
   button:disabled,
+  input:disabled,
+  label:has(input:disabled),
   [aria-disabled="true"] {
     cursor: not-allowed;
   }
@@ -292,6 +299,18 @@
   .field input::placeholder,
   .field textarea::placeholder {
     color: var(--color-ink-500);
+  }
+
+  /* 被上面那个更宽的勾盖住的受众选项（2026-08-27）。
+   *
+   * ⚠️ 灰掉的必须**连标签一起**。控件由 Django 渲染、模板够不到那个 <input>，
+   *    所以 audienceTicks 那个组件把这个 class 加在包着它的 <label> / `.field`
+   *    上，外观全部落在这里 —— 和这一整段开头那条规矩同一个理由。
+   *
+   * ⚠️ 只是变淡，不是隐藏。一个消失的选项读起来是页面坏了，而这些选项没有坏：
+   *    它们是**已经被包含了**，取消上面那个勾它们立刻回来。 */
+  .audience-covered {
+    opacity: 0.45;
   }
 
   /* 勾选框和单选钮跟着主题色走（2026-08-07）。

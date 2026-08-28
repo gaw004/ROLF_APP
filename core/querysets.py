@@ -17,6 +17,13 @@ def in_effect_on(on=None, prefix=""):
 
     `on` is resolved here, at call time. A default argument holding a date
     would freeze at import and drift further off every day a worker stays up.
+
+    ⚠️ `on` may also be a **database expression** rather than a date — an
+       OuterRef onto a day the outer query annotated, which is how a correlated
+       subquery asks this of a set of events that each have their own day
+       (events.services.on_the_books_exists). The `or` below is safe with one:
+       an expression object is truthy, so it is never silently swapped for
+       today. Checked rather than assumed.
     """
     on = on or local_today()
     start, end = f"{prefix}start_date", f"{prefix}end_date"

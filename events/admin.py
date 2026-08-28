@@ -9,7 +9,15 @@ from django.contrib import admin
 from django.db.models import Count
 from simple_history.admin import SimpleHistoryAdmin
 
-from .models import Event, EventRole, EventType, Participation, ParticipationRole
+from .forms import AudienceAdminForm
+from .models import (
+    Audience,
+    Event,
+    EventRole,
+    EventType,
+    Participation,
+    ParticipationRole,
+)
 
 
 @admin.register(EventType)
@@ -26,11 +34,18 @@ class EventTypeAdmin(admin.ModelAdmin):
 
 @admin.register(ParticipationRole)
 class ParticipationRoleAdmin(admin.ModelAdmin):
-    list_display = ["name", "code", "is_active"]
-    list_filter = ["is_active"]
+    list_display = ["name", "code", "nature", "is_active"]
+    list_filter = ["nature", "is_active"]
     search_fields = ["name", "code"]
 
     def get_readonly_fields(self, request, obj=None):
+        # ⚠️ `nature` is deliberately not frozen here — unlike Participation's
+        #    served_as, whose rule could only be enforced by making the admin
+        #    form unable to touch it. This one's rule is in
+        #    ParticipationRole.clean(), which the admin's ModelForm calls, so
+        #    it refuses exactly the change that matters (flipping a role people
+        #    have already signed up through) and allows the one that should be
+        #    allowed: correcting a role opened under the wrong kind.
         return ["code"] if obj else []
 
 
@@ -38,8 +53,9 @@ class EventRoleInline(admin.TabularInline):
     """Open the jobs while setting the event up — P2's "say how many you need"."""
 
     model = EventRole
+    form = AudienceAdminForm
     extra = 0
-    fields = ["role", "needed_count", "notes"]
+    fields = ["role", "needed_count", "notes", *Audience.AUDIENCE_FIELDS]
     autocomplete_fields = ["role"]
     show_change_link = True
 
@@ -59,10 +75,11 @@ class EventAdmin(SimpleHistoryAdmin):
     # column, R3 from duration — which is why all three are here rather than on
     # a page of their own. The foundation-wide role in the acceptance walk reads
     # them from this changelist.
+    form = AudienceAdminForm
     list_display = [
         "name", "ministry", "event_type", "status", "start_time", "end_time", "duration",
     ]
-    list_filter = ["status", "ministry", "event_type"]
+    list_filter = ["status", "ministry", "event_type", "visible_to_outsiders"]
     search_fields = ["name", "location"]
     date_hierarchy = "start_time"
     autocomplete_fields = ["event_type", "ministry", "owner"]
@@ -119,6 +136,7 @@ class UnderstaffedFilter(admin.SimpleListFilter):
 
 @admin.register(EventRole)
 class EventRoleAdmin(SimpleHistoryAdmin):
+    form = AudienceAdminForm
     list_display = ["role", "event", "needed_count"]
     list_filter = ["event__ministry", "role", UnderstaffedFilter]
     search_fields = ["event__name", "role__name"]

@@ -1,3 +1,453 @@
+## 五十一、2026-08-28：Render 上那 476.8MB 的真相 —— 以及我在同一个问题上错了三次
+
+> 「按你的计算，我最新最完整的代码应该占用多少 render rolf-app 的 memory？
+> 我现在一直在 476.8MB 徘徊。」
+
+查了四轮。**前三轮的结论全是错的，而每一轮都自洽、都引了真数字、都指向一个
+具体的修法。**成因写在下面，但这一条真正值得留下来的是过程。
+
+### 成因：一个有上限的棘轮，每个线程每个桶各建一套 boto3 session
+
+```
+render.yaml        --worker-class gthread --workers 2 --threads 4
+STORAGES           三个 R2 别名（event-images / memories / public）
+                   —— 同一个 endpoint、同一套凭据，只有 bucket 不同
+django-storages    S3Storage.connection 存在 threading.local() 里
+                   _create_session() 每次新建一个 boto3.Session
+gthread            线程长生不死
+```
+
+某个线程第一次服务到某个桶的页面，就现建一套 session + resource，**然后永远
+留着**。上限 `4 线程 × 3 桶 = 每个 worker 12 套`，整个实例 24 套；每套自带一份
+botocore 解析好的 S3 服务模型 JSON，约 15–25MB。
+
+于是曲线的形状是：新实例约 160MB → 一天之内爬到约 460MB → 12 套建满，封顶在
+**476.8MB**，离 512MB 的天花板剩 35MB。⚠️ **它不是泄漏**（会停），所以监控上
+看不出「持续增长」那种典型特征；它只是停在一个刚好够用又毫无余量的地方。
+
+### 实测（重启后翻了几页带图的页面，两分钟）
+
+| | 刚重启 | 浏览之后 | |
+|---|---|---|---|
+| cgroup `anon` | 148.6 MB | 228.1 MB | +79.6 |
+| cgroup `file` | 15.8 MB | 15.9 MB | +0.1 —— 不是页缓存 |
+| master RSS | 94.8 MB | 94.8 MB | 0.0 —— 不服务请求就不涨 |
+| worker A | 101.5 MB | 114.6 MB | +13.1 |
+| worker B | 96.0 MB | 129.6 MB | +33.6 |
+
+三件事同时成立才定的案：没上传没解码而 `anon` 照涨（排除 Pillow）；`file` 不动
+（排除页缓存）；master 一动不动而两个 worker **涨得不一样多**（per-thread 的
+指纹 —— 换成缓存、连接池或碎片，两个 worker 会涨得差不多）。
+
+本机用真实 `config.settings.prod` 量的每 worker 成本：
+
+| | 每 worker |
+|---|---|
+| `django.setup()` 之后 | 71.9 MB |
+| 4 线程 × 3 桶，现状 | 200.3 MB |
+| 4 线程 × 3 桶，共用一个 session | 97.5 MB |
+
+### 同一个系统的三个数字，指三件不同的事
+
+这是这一轮浪费掉最多时间的地方，单独记下来：
+
+| 读数 | 它在数什么 |
+|---|---|
+| 面板 **476.8MB** | Render **按实例各画一条线**，重启后旧实例那条留在图上 —— 看起来像当前值 |
+| `ps` 类的 RSS 求和 **292MB** | **把 fork 之后共享的页重复计算了**，master 和两个 worker 各算一遍 |
+| cgroup **189MB** | 真的，但那是**刚重启的冷读数**，不是稳态 |
+
+⚠️ 「重启之后没有回到 320MB」这句观察，本身就是把旧实例的线读成了当前值 ——
+而我拿它当证据**推翻了一个方向大致正确的假设**，然后又拿冷读数得出「根本没有
+问题」。**一个读错的指标比没有指标更贵**，因为它会主动把你推向反方向。
+
+### 三次走错，各被一次测量杀掉
+
+| 说过的 | 怎么死的 |
+|---|---|
+| 「那次部署抬高了常驻内存」 | 两个 commit 各拉 worktree 量 `django.setup()`：53.0 vs 52.9 MB |
+| 「Pillow 的峰值变成了地板」（写进了[四十九](#四十九2026-08-28日志里全是健康检查以及一个当天就被推翻的内存结论)，当天撤销） | 只翻页、不上传，`anon` 照涨 79.6MB |
+| 「根本没问题，才 189MB」 | 那是冷读数 |
+
+> **判据**：**在拿到目标系统上的实测之前，不要写下成因。** 四十九那一节每一句
+> 都自洽、都引了本仓库量过的真数字 —— 而它是错的。**自洽不是证据。**
+
+> **判据**：**「这个仓库里唯一那个已知的大峰值」这种句子要当红灯读。** 它把
+> 「我想得起来的」当成了「存在的」，而真正的成因在一个从来没进过这份文档的
+> 第三方包里。
+
+### 做的 ②：让下一次这样的问题变成一次 grep
+
+`core/memory.py` + `config/gunicorn_conf.py` 的 `post_fork`：每个 **worker** 每
+五分钟打一行 `[memory] pid=… rss=… anon=… file=… slab=… total=… limit=… pct=…`。
+
+🔴 **三个数分开报，不报一个总数** —— 这是这个模块存在的全部理由。一个只回答
+「memory: 477MB」的探针会把上面那一整段重演一遍：`file` 可回收而 `anon` 不可，
+「这是缓存还是我们自己占的」必须一次问得到。
+
+- ⚠️ **只读 `/proc` 和 `/sys/fs/cgroup`，不引入任何测量库。**内核已经免费说了。
+- ⚠️ **文件不存在时返回 None，不抛。**这些路径在 macOS 上一个都没有 —— 一个在
+  开发机上会崩的探针，会被人删掉而不是修好。
+- ⚠️ **cgroup v2 only**，因为那是 Render 实际在跑的（在实例上验过，不是推测）。
+  v1 上它什么都不报，那是一个没在那儿测过的读取器应该给的诚实答案。
+- ⚠️ **`post_fork`，不是 `AppConfig.ready()`，也不是 `wsgi.py` 的 import 副作用。**
+  只有它的语义正好是「每个 worker、fork 之后、且只在 gunicorn 下」；另外两个会在
+  每一次 management command 和每一次测试里都起一个线程。
+- ⚠️ **走 `worker.log` 而不是 `logging.getLogger()`。**这是关于进程的运维输出，
+  不是关于应用的；而 prod 的 LOGGING 把根 logger 定在 WARNING，一行 INFO 从那条
+  路走会被配置掉，且没有人会知道。
+- ⚠️ **打点间隔 `MEMORY_PROBE_SECONDS` 故意不写进 render.yaml** —— 同
+  `REGISTRATION_RATELIMIT_*` 那条：写进去的话，为查一件事在面板上调过的值会在
+  下一次 blueprint 同步时被静默按回去。0 是受支持的取值，不是一种弄坏它的方式。
+
+五分钟这个数是从被观察的东西推出来的：这次的棘轮以小时计爬升，五分钟画得出形状，
+一天 288 行 × 2 worker —— 在一份不再驮健康检查的日志里这是可读的量级，在四十九
+之前的那份里不是。
+
+### 做的 ③：三个桶共用一个 boto3 session
+
+`core/storages.py` 的 `SharedSessionS3Storage`，`prod.py` 的 `_r2()` 指向它。
+
+| 每 worker（真实 prod 设置，4 线程 × 3 桶全热） | |
+|---|---|
+| 改前 | 200.3 MB |
+| 改后 | 94.1 MB |
+
+而且曲线平了：线程 2/3/4 各只再加约 0.5MB，不是各加 25MB。两个 worker 合计约省
+212MB。
+
+- 🔴 **只共用 `Session`，绝不共用 `resource`。**boto3 的 resource 不是线程安全的
+  —— 上游那层 `threading.local()` 原样保留，每个线程仍然建自己的。共用的是那份被
+  解析了十二遍的服务模型。
+- 🔴 **锁盖住的是 `resource` 的创建，不只是 session 的创建。**boto3 点名的危险
+  正是并发构造 client/resource 时改 session 自己的组件与 loader 缓存；在锁里建
+  session、在锁外建 resource，等于绕过了真正那条竞争。
+- 🔴 **必须是 `RLock`，用 `Lock` 是死锁** —— 这条是多线程守卫第一次跑就抓到的，
+  也正是它存在的理由：`connection` 拿了锁再走进上游的构造器，那里会调
+  `_create_session()` 在同一个线程上再拿一次。用 `Lock` 的表现是**第一个碰到桶的
+  请求永远挂住**，是一个不再应答的 worker，不是一个报错。
+- ⚠️ **双检**：本线程已经有 connection 就完全不进锁。热身之后零争用。
+- ⚠️ **具名子类，不 monkey-patch。**补丁会作用到这个文件从没听说过的 storage 上，
+  而且从选择它的 settings 里 grep 不到。
+- ⚠️ **没有预热**，是决定不是遗漏：锁已经封掉了并发创建，预热只省第一个请求的
+  延迟，代价是给启动路径加一件会失败的事。
+
+⚠️ **这是一个对上游缺陷的过渡措施，应该推上去。**`S3Storage._create_session`
+每实例每线程建一个 session，让每一个 django-storages 用户都在付这笔钱，不只是我们。
+
+### 守卫，以及反向验证抓到的两件事
+
+`SharedS3SessionTests` 钉的是**性质**不是字节数：4 个线程 × 3 个桶，只许建
+**一个** session。字节数随平台、解释器、botocore 版本变，性质不变；而这条守卫真正
+的作用是上游改了那两个内部方法时变红 —— 那种失效是静默的，表现为内存悄悄涨回去。
+
+#### 🔴 而这一轮我自己引入了第四条，也是同一个毛病的第四次
+
+子类第一版放在 `core/storages.py` 里 —— 而**那个文件是被
+`FileField(storage=...)` 的 callable 引到的，所以它和模型一起加载**：每一次
+management command、每一次测试、每一个开发服务器。于是 `import boto3` 上了它们
+全部，量出来是**开发环境 `django.setup()` +17.6MB**（51.9 → 69.5），换来一个
+开发环境从来不会实例化的类。
+
+⚠️ **一个为省内存而做的改动，在另一条路上把内存加了回去** —— 而且加在了每天要跑
+几十次的地方。搬进 `core/s3.py` 单独一个模块，谁都不 import 它，直到 Django 去
+解析 `prod.py` 里那个点分路径。改完 52.3MB，`boto3` 不在 `sys.modules` 里。
+
+守卫是**开子进程**跑的，这是唯一诚实的问法：测试进程自己早就 import 过 boto3 了，
+在进程内问「有没有 import」问的是这个文件而不是这个应用。
+
+反向验证抓到（连同上面那条一共四件）：
+
+1. **撤掉 `_create_session` 覆写，它报「12 != 1」** —— 恰好是 `4 线程 × 3 桶`，
+   等于在测试里把整个诊断又独立证了一遍。
+   ⚠️ 而**第一次反向验证是假的**：我插了一行 `_create_session = S3Storage._create_session`
+   在类体开头，被后面真正的方法定义盖掉了，脚本的 `assert` 只确认了「文本变了」。
+   改成断言「类体里已经没有 `def _create_session`」之后才露馅。三十五第三节那条的
+   第八次发作，而这次栽在**断言了改动发生、没断言改动生效**。
+2. **`join(timeout=30)` 让一个坏掉的构建要两分钟才变红**（4 个线程各等 30 秒）。
+   收到 10 秒：健康的跑法瞬间返回，这份预算只有坏掉的时候才花 —— 而一条没人愿意
+   等的守卫，是一条会被关掉的守卫。
+3. **「每个线程各拿到自己的 resource」那条测试是随机会红的**：它收集的是
+   `id(connection)`，而线程结束时它的 thread-local 被释放、CPython 把地址**重用**
+   了，于是三个 id 里有两个撞在一起，报出一个从未发生过的「共享」。改成持有对象
+   本身。⚠️ 判据不是「持有引用能让 id 不撞」，是**已释放对象的同一性根本不是一个
+   有答案的问题** —— 拿它做断言的测试没有对错，只有运气。
+4. 把子类搬回 `core/storages.py`，那条子进程守卫立刻红。
+
+### 交上去之后又审出五条，其中一条能让整个网站起不来
+
+`/code-review 0e6690f`。五条全部成立，逐条验过。
+
+#### 🔴 一个可观测性探针把网站弄挂 —— 而入口是「按设计使用那个开关」
+
+```python
+PROBE_SECONDS = int(os.environ.get("MEMORY_PROBE_SECONDS", "300"))
+```
+
+gunicorn 是在 `Application.get_config_from_filename` 里执行这个配置文件的，而那个
+函数 **catch 掉一切异常、打印 "Failed to read config file"、然后 `sys.exit(1)`**。
+所以这一行上的异常不是「探针间隔不对」，是**整个 web 服务起不来**，报出来的错还
+指向一个配置文件而不是那个变量。
+
+而走进去的路正是上一节自己写下的用法：运维为了查别的事想把探针关掉，在面板上把
+值清空 —— Render 会把一个**声明了但为空**的变量传成 `""`，`int("")` 抛
+ValueError。填 `5m` 或 `600s` 一样。
+
+> **判据**：**一个观测用的东西，最坏只能退化成沉默。** 它在 `_probe` 里已经用
+> `except Exception` 保护了运行期，却在 import 期能把站点带走 —— 保护写在了第二
+> 危险的地方。
+
+⚠️ 而且**回退到默认值，不是回退到 0**。「关掉」必须是有人明确要求的；一个拼写
+错误悄悄关掉你正在用它查问题的探针，是这个项目反复认领的那种失败。
+
+#### 🔴 抄上游的时候把它的另一半分支弄丢了
+
+`_create_session()` 只留了「用 key」那一支，丢了 `session_profile` 那一支。而
+上游**明令禁止** profile 和 key 同时给（`ImproperlyConfigured`，s3.py:325），
+所以 profile-only 是受支持的形态，且在那个形态里 key 是 None ——
+`boto3.Session(aws_access_key_id=None, …)` 不会报错，它会**落到 botocore 的默认
+凭据链**（环境变量、实例元数据）去认证成**别人**。
+
+更糟的是缓存键：只用凭据做键的话，每一个 profile 都塌成 `(None, None, None)`，
+**两个配了不同 profile 的 storage 会共用一个 session**。同一个「静默地用错凭据」
+从第二条路又来一次。
+
+`_r2()` 永远给 key、从不给 profile，所以两条今天都到不了。修它是因为这个类的
+docstring 写着要推给上游，而在上游那两种形态都是家常便饭。
+
+#### 其余三条
+
+- **测试线程不是 daemon。**`join(timeout=10)` + `assertFalse(is_alive())` 被
+  写成「防止测试永远挂住」的那道保险 —— 而它只把「挂住」变成「**红了之后再挂
+  住**」：卡住的非守护线程在套件结束后还活着，`threading._shutdown()` 会在解释器
+  退出时 join 它们。⚠️ 这不是推理，是**我自己撞见过的**：反向验证 RLock 那次，
+  跑到 120s 变红之后进程还在跑。加 `daemon=True`，那道保险才真的走完。
+- `mock.patch.object(gunicorn_conf.threading, "Thread", …)` **打的是标准库**。
+  `gunicorn_conf.threading` 就是 `threading` 模块本身，于是那段时间里**全进程**
+  的 `Thread` 都被换成了 mock。改成读 `threading.enumerate()` 里有没有叫
+  `memory-probe` 的线程 —— 不打补丁，而且顺带把反方向也断言了（否则「什么都不
+  起」也能通过）。
+- **一处交叉引用指错了类**，说「`MemoryProbeTests` 钉着它」而真正钉着它的是
+  `SharedS3SessionTests.test_an_ordinary_boot_does_not_import_boto3`。在一个把
+  「去哪找看着这条规则的守卫」写进注释当制度的仓库里，指错的引用会让人得出
+  「这条没人看着」的结论。
+
+三条新守卫都做了反向验证：拿掉 try/except → `ValueError` 变红；拿掉 profile 分支
+→ 报「the profile was dropped」；拿掉 `PROBE_SECONDS <= 0` 那道早退 → 报「the
+probe started with the knob at 0」。
+
+---
+
+## 五十、2026-08-28：审查报来五条，四条跑出来复现过 —— 而其中两条只在 admin 里坏
+
+> 「把 1～5 条都修了」
+
+一次 `/code-review` 对本分支七个 commit 的复审。五条，按严重程度：两个 500、
+一条静默失效的规则、一处让整个演示库对自己人空白的种子数据、一个命名坑。
+
+⚠️ **共同点是它们全都躲开了本站自己的页面。** 前三条只能从 Django admin 走到：
+站点自己的 `EventRoleForm` 在 `__init__` 里就把 `instance.event` 设好了，而
+admin 的新增页没有。一整层校验只在一半的门上生效，而那一半恰好是测试最少的。
+
+### ① 只读的改动页是一个 500（`events/forms.py`）
+
+`AudienceFormMixin.__init__` 无条件加那枚「所有人」便利勾，然后
+`order_fields()` 去 `names.index("visible_to_outsiders")` 找它该坐的位置。
+而一个**所有字段都 readonly 的 ModelForm，对 Django 来说是一个没有任何字段的
+表单** —— 只握着 `view_event` 的账号打开改动页拿到的正是它。
+`list.index` 抛 `ValueError`，页面 500。Event 和 EventRole 都是。
+
+修法不是「把勾放到一个安全的位置」，是**不画它**：两个框都不在的时候，一枚填
+它们的便利勾是一个什么都不做的控件，而 `audience()` 本来就是 `.get()` 读它。
+
+### ② 一条读起来像跑过了的规则（`events/forms.py`）
+
+`refuse_wider_than_its_event()` 读 `self.instance.event`。而**新增表单上那个
+外键还只在 `cleaned_data` 里** —— ModelForm 在 `_post_clean` 才把它抄到实例
+上，那是 `clean()` 之后。Django 对未设置的外键抛 `RelatedObjectDoesNotExist`，
+而它继承 **AttributeError**，于是护着这次读的 `getattr(..., None)` 把它吞了，
+规则当作「没有东西要查」返回。
+
+复现：`/admin/events/eventrole/add/` 给一个只对本 ministry 可见的活动加一个
+「对外部人可见」的角色 —— 302，无报错，存进去了。**正是
+`refuse_wider_than_event()` 存在的理由，由防它的那条代码亲手放行。**
+
+而同一个洞还有更难的一半：**活动新增页 + 内联角色**。那里活动还不存在，
+`Spec.of()` 会在未保存实例的多对多上直接抛错，而配对的另一半
+（`refuse_narrowing_below_the_roles`）在 `pk is None` 时提前返回 ——
+**两半同时哑掉**，admin 自己的创建页可以造出这对规则专门禁止的状态。
+
+修法两件：
+- `submitted_event()`，把「活动从哪来」这个三个门三个答案的问题收成一处；
+- `clean_audience()` 把这次提交的 Spec 也写到 `self.instance` 上。
+  这不是上面两行写回 `cleaned_data` 的复制：admin 先校验父表单、再用
+  `instance=form.instance` 建内联 formset —— 同一个对象 —— 所以内联角色能拿到
+  它**即将属于**的那个活动的受众。
+
+### ③ 演示库对自己人是空的（`seed_demo.py`）
+
+种子只写 `visible_to_outsiders=True`，读法是「这是最宽的那个框」。它不是：
+`for_audience()` 的外部人分支是 `visible_to_outsiders & ~Exists(on_the_books)`，
+意思是「**没有**在职任职的人」。
+
+量出来的：27 场活动，而持有任职的两个账号 —— 张三（食物救济负责人）和 Ada
+（帮工）—— **一场都看不见**；Ada 自己的报名页链到一个对她 404 的详情页。
+什么都不报错，只是演示站对着最该看到员工侧的那两个人一片空白。
+
+⚠️ **迁移 0019 早就把这件事写下来了，而这个文件没有跟上**：「Outsiders alone
+would hide every existing event from the foundation's own staff —— and silent.」
+同一句话，同一个错，隔了两天。
+
+守卫不是把这八个字面量钉死，是新加的
+`SeedDemoTests.test_every_seeded_account_can_see_something`：**每一个种子账号都
+必须看得见点什么**。原来那条 `audience_is_empty is False` 是全绿的 ——
+「有人看得见这场活动」和「这个人看得见东西」长得像同一个问题，只有后者能发现
+一整类账号被关在外面。反向验证：撤掉修复，它红，并且把两个账号的名字都点出来。
+
+### ④ 记工时到「来上课」的行上是一个 500（`events/views.py`）
+
+`record_hours()` 会抛 `NoHoursHere`（L4），而唯一的调用方没接 ——
+一个逃出视图的 ValidationError **是 500，不是一句能读的拒绝**。
+上面十二行 `mark_absent()` 的 `TurnedUp` 从写下那天起就是接住的，这一条是后来
+加的，旁边的写法没被抄过来。
+
+模板确实不画那个框，而**不画控件从来拦不住任何人**：端点没变，同样的 POST 从
+哪来都一样。何况正常用法就能走到 —— 页面开着不动，另一个人把那个角色的
+`nature` 改对，这一页再提交就撞上。
+
+### ⑤ 一个被覆盖的局部变量（`events/forms.py`）
+
+`role = self.clean_audience()` 盖掉了十二行上装着 `ParticipationRole` 的同名
+变量。**今天没有任何错误行为**，所以这一条没有测试可写 —— 它下面那段查重名的
+分支正是下一个人会去取 `role` 的地方，而那时拿到的是一个 `Audience.Spec`。
+改名 `audience`。
+
+---
+
+### 这一轮的方法论账
+
+> **一个「拒绝了」的断言必须同时断言**拒绝的**理由**。
+
+②的第一版测试是绿的，而它什么都没验：admin 把 `DateTimeField` 渲染成两个框，
+我的 payload 一个键都没对上，于是那次提交是因为**缺字段**被拒的，和受众规则
+毫无关系。加上「错误必须挂在 `visible_to_outsiders` 上」之后才是真的。
+这是[三十五第三节](#三次红绿得不是因为它该红绿同一天)那条的第六次发作。
+
+五处修复全部做了反向验证（撤掉修复必须变红，且脚本自己 `assert` 确认改动落地
+了），⑤除外 —— 它没有可观察的行为差异，如实记在上面。
+
+## 四十九、2026-08-28：日志里全是健康检查（以及一个当天就被推翻的内存结论）
+
+> 「1，Render 的 logs 里全是 healthz 的 log，压根让我找不到有用信息，有没有可能
+> 弄一个 summary 做 log（一天一个那种）？
+> 2，After 0df0276 is deployed，render 的 memory 上去了特别特别多，你能检查下
+> 发生什么事情了吗？」
+
+两个问题，答案的形状完全不同：第一个是真的、修了；第二个查下来**和那次部署没有
+关系**，而查的过程本身比结论有用。
+
+### ① healthz 刷屏 —— 噪音的出处不是 LOGGING，是 gunicorn
+
+`prod.py` 那份 `LOGGING`（C3.8）只管 Django 侧：`django.request` 的 ERROR 和
+根 logger 的 WARNING。刷屏的那一行它一个字都没经手 —— 是 `render.yaml` 启动
+命令里的 `--access-logfile -`，gunicorn 把**每一条请求**都打到标准流，而
+Render 在不停地打 `healthCheckPath`。试点期这个服务大部分时间是闲的，于是
+访问日志里 99% 是同一行 200。
+
+#### 想做而做不成的那个：「一天一个 summary」
+
+⚠️ **日志没有存下来的地方**，所以「回头汇总昨天的日志」这种东西做不出来 ——
+只能在进程里边跑边数。而那个计数器住在 worker 进程里，有两个，且 gunicorn
+**没有 `--max-requests`**，能清零它的只有重启：一次部署，或者
+[三十五](#三十五2026-08-13一张-3mb-的照片吃掉-238mb--上线第一天的-502)
+那种 OOM 被杀。
+
+> **判据**：一份**会在重启时被悄悄截断**的「日报」比没有日报更坏，因为它读起来
+> 像一份完整的。这和这个项目反复认领的那条是同一条 —— 不报错的错才贵。
+
+按小时 rollup 能把这条风险压到很小（一天 24×2 行，仍然比现在少三个数量级），
+**这次没做**，留着；先做代价最小、立刻见效的那一半。
+
+#### 做的：只丢健康检查那一行
+
+`config/gunicorn_logger.py`，一个 `gunicorn.glogging.Logger` 的子类，只覆盖
+`access()`：`PATH_INFO` 是健康检查就直接 return，别的原样交回父类。
+
+- **不是去掉 `--access-logfile`。** 那是另一种静音：出事那天没有任何请求记录
+  可查。守卫把这两半都钉住了 —— 既要求 `--access-logfile -` 还在，也要求
+  `--logger-class` 在。
+- **错误日志一个字没动。** 静音一个请求不等于不看它。
+- ⚠️ **这是第四个必须和 `core/health.py::HEALTH_PATH` 对上的文件**（前三个见
+  `HealthCheckGuardTests` 的类注释）。它是四个里唯一**响**着坏的 —— 对不上就是
+  「日志又开始刷屏」，不报错，而没人会在需要读日志之前发现这件事。
+- ⚠️ 两种拼写都要匹配：`render.yaml` 要的是 `/healthz`，URLconf 服务的是
+  `healthz/`，中间隔着 APPEND_SLASH 的 301（Render 认 2xx 和 3xx 都算健康）。
+  只匹配带斜杠的那个，等于静音了一行**从来不会被打出来**的日志。
+- ⚠️ 它 `import` 不到任何 Django 的东西：gunicorn 是在解析自己的配置时加载这个
+  类的，比 app、比 settings 都早。`core.health` 之所以能在这么早被 import，正是
+  它自己那份 docstring 说的事。
+
+两条守卫，都做了反向验证（改坏必须变红，且脚本自己 `assert` 确认改动落地了 ——
+[三十五第三节](#三次红绿得不是因为它该红绿同一天)那条教训的第五次应用）。
+
+### ② 「0df0276 之后内存涨」—— 量出来的：不是它
+
+`0df0276` 是 deploy 分支上的构建产物，对应源码 `ad461d2`（PR #21，拆轴/身份轴）。
+`f9b3adc..0df0276` 整个 diff 过了一遍：
+
+- `requirements.txt` 没动，**没有新依赖**；
+- 构建产物 `static/css/app.css` / `static/js/app.js` 与上一次部署**逐字节相同**；
+- 新增的运行时代码（`default_served_as` / `contacts_asked_about_serving` /
+  `set_served_as`、两个新列）全是小查询，而且 `contacts_asked_about_serving()`
+  特意是**每页一次**而不是每行一次；
+- 唯一把整张表读进内存的是 `0014_backfill_served_as` 的 `by_day`，而它跑在
+  `preDeployCommand` 的独立实例上，跑完就没了。
+
+然后**量了**，而不是就这么下结论 —— 两个 commit 各拉一个 worktree，同一个
+解释器、同一份 sqlite，测 `django.setup()` 之后的 RSS：
+
+| | 之前（f9b3adc） | 之后（0df0276） |
+|---|---|---|
+| import 完 | 11.8 MB | 11.8 MB |
+| `django.setup()` 完 | 53.0 MB | 52.9 MB |
+
+**常驻内存没有变。**
+
+#### 那「阶跃上去不回落」是什么
+
+🔴 **这一节的结论是错的，当天就撤销了 —— 真正的原因见
+[五十一](#五十一2026-08-28render-上那-4768mb-的真相--以及我在同一个问题上错了三次)。**
+下面的原文保留不改，因为它是一次**在没有任何实测支撑的情况下**下结论的完整样本，
+而这一轮真正的教训在于此，不在于哪个猜测碰巧接近。
+
+> ~~是 CPython 的分配器不把内存还给操作系统 —— 于是任何一次一次性的大峰值都会
+> 变成新的地板，直到进程重启。而 `render.yaml` 里 gunicorn 没有
+> `--max-requests`，worker 从部署起就再也不回收。~~
+>
+> ~~这个仓库里唯一那个已知的大峰值就是 Pillow：三十六量过，改完之后单张 12MP
+> 仍然 92MB、24MP 148MB、49MP 284MB。传一张手机照片，那个 worker 的 RSS 就永久
+> 抬高一百多 MB。阶跃、不回落 —— 形状完全对得上。~~
+>
+> ~~提议：给 gunicorn 加 `--max-requests 300 --max-requests-jitter 60`。~~
+
+⚠️ **错在哪，逐条**：
+
+- **Pillow 那条被证伪了。**后来在实例上做的验证是「只翻页、不上传、不解码」，
+  而 cgroup 的 `anon` 照样涨了 79.6MB。峰值理论要求有人上传照片，那两分钟里
+  没有。
+- **`--max-requests` 那个提议不但没用，还有害。**真正的成本是**线程热身**
+  （见五十一），定期换 worker 只会让它反复重付这一百多 MB。
+- **而最要命的是「唯一那个已知的大峰值」这句话。**它把「我在这个仓库里想得起来
+  的」当成了「存在的」—— 真正的成因在 `django-storages` 里，一个从来没进过这份
+  文档的第三方包。
+
+> **判据（第七次，也是最贵的一次）**：**在拿到目标系统上的实测之前，不要写下
+> 成因。** 这一节里的每一句都是自洽的、都引了本仓库量过的真数字、也都指向一个
+> 具体的修法 —— 而它是错的。自洽不是证据。三十五那条「任何自动化的检查都要能
+> 证明自己真的做了那件事」，在人身上的对应版本就是这一条。
+
+---
+
 ## 四十八、2026-08-19 第三十一批：五个用户报来的问题，其中三个底下各有一条看不见的规则
 
 > 「现在 event 分别有多少 status？为什么一个 event 都结束了 status 还可以是

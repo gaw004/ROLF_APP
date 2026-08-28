@@ -60,6 +60,7 @@ CONSTRAINT_FIELD = {
     "participation_duplicate": "contact",
     "participation_hours_negative": "hours",
     "participation_hours_without_attendance": "hours",
+    "participation_hours_when_not_applicable": "hours",
     "participation_checkout_before_checkin": "checked_out_at",
     "participation_absent_after_checkin": "status",
     # core.HomePage

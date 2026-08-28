@@ -13,13 +13,30 @@
 参数：field（一个 bound field）。
 {% endcomment %}
 <div class="field {% if field.errors %}field-invalid{% endif %}">
-  {% if field.field.widget.input_type == "radio" %}
+  {% if field.field.widget.use_fieldset %}
     {% comment %}
-    单选组：`<fieldset>` + `<legend>`，不是一个 `<label>` 指着第一颗单选钮。
+    一组选项：`<fieldset>` + `<legend>`，不是一个 `<label>` 指着第一颗。
 
     ⚠️ 这不是讲究：一个 `<label for>` 只能指向**一个**控件，所以读屏软件念到第二、
        第三个选项时，那句「你这次以什么身份参加？」已经不在了 —— 人听到的是两个
        没有问题的答案。`<legend>` 是唯一一个会跟着每个选项一起被念出来的结构。
+
+    ⚠️ 判据是 `use_fieldset` 而不是 `input_type == "radio"`（2026-08-27）。
+       Django 在每个 widget 上都放了这个属性，**就是为了回答这个问题**；
+       而单选钮和一组勾选框的答案都是 True。原来只判 radio 的后果，是一组
+       ministry 勾选框走进了下面那个「单个勾选框」的分支 —— 于是那一组的标题
+       「Only these ministries' staff」被横排在**第一个选项右边**，读起来像是
+       第一个选项的说明，而底下另外两个选项没有任何东西说它们是什么。
+       L2.1 加上那组勾选框时就是这样，一直到这里。
+
+    ⚠️ 不用 `allow_multiple_selected`：那个属性在 `TextInput` /
+       `CheckboxInput` 上**根本不存在**，模板取不到会静默当成假 ——
+       判据要落在一个每个 widget 都有的属性上，而不是靠取不到。
+
+    ⚠️ 里面按控件类型分两种画法，而 `<legend>` 只有一份。分叉了会出事的是
+       无障碍那一半（上面那段），外形那一半分开是对的：单选是一人选一个的
+       卡片，一组勾选框要的是**一眼全看得见**，因为它们之间的包含关系
+       （「全体在编」盖住每一个 ministry）就是靠并排看出来的。
 
     ⚠️ 每一项的外形和扫码打卡那一屏的工种选择**共用同一套 class**
        （`label.card` 包着原生 `input[type=radio]`）。那一处是模板里手写的、
@@ -33,14 +50,23 @@
       <legend class="block text-sm font-medium text-ink-800 dark:text-ink-100">
         {{ field.label }}{% if field.field.required %}<span class="text-danger-fg dark:text-danger-fg-dark" aria-hidden="true"> *</span>{% endif %}
       </legend>
-      <div class="mt-2 flex flex-col gap-2">
-        {% for option in field %}
-          <label class="card flex cursor-pointer items-center gap-3">
-            {{ option.tag }}
-            <span>{{ option.choice_label }}</span>
-          </label>
-        {% endfor %}
-      </div>
+      {% if field.field.widget.input_type == "radio" %}
+        <div class="mt-2 flex flex-col gap-2">
+          {% for option in field %}
+            <label class="card flex cursor-pointer items-center gap-3">
+              {{ option.tag }}
+              <span>{{ option.choice_label }}</span>
+            </label>
+          {% endfor %}
+        </div>
+      {% else %}
+        {% comment %}
+        Django 自己渲染的那一组 —— 每个 `<input>` 已经包在自己的 `<label>` 里，
+        所以这里不重画。⚠️ 而受众那一块的置灰正是靠这一点：`audienceTicks`
+        找的是包着控件的 `<label>`，重画成别的结构会让灰只剩下小方块。
+        {% endcomment %}
+        <div class="mt-2">{{ field }}</div>
+      {% endif %}
     </fieldset>
   {% elif field.field.widget.input_type == "checkbox" %}
     <div class="flex items-start gap-2">

@@ -12,11 +12,14 @@ people in it. The analogy is exact, and this is the second time in this project
 that one had to be split out of the other.
 """
 
+from typing import NamedTuple
+
 from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.db import models
 from django.db.models import Count, F, Q
 from django.db.models.functions import Lower
+from django.utils.text import get_text_list
 from phonenumber_field.modelfields import PhoneNumberField
 from simple_history.models import HistoricalRecords
 
@@ -24,8 +27,9 @@ from contact.models import Contact, RelationshipType
 from core.constraints import ConstraintErrorFieldMixin
 from core.limits import LONG_TEXT, SHORT_TEXT
 from core.models import ImmutableCodeMixin, TimeStampedModel
-from core.timeutils import day_start, local_now, local_today
-from org.models import Ministry
+from core.querysets import in_effect_on
+from core.timeutils import day_start, local_day, local_now, local_today
+from org.models import Assignment, Ministry, Position
 
 
 class EventType(ImmutableCodeMixin, ConstraintErrorFieldMixin, models.Model):
@@ -77,17 +81,98 @@ class ParticipationRole(ImmutableCodeMixin, ConstraintErrorFieldMixin, models.Mo
        event → here. Written down because otherwise somebody files event jobs as
        posts and the org chart fills up with "lifting".
 
-    One row must always exist with code="general": Participation.event_role is
-    not nullable, so "no particular job" needs somewhere to land.
+    A catch-all row must always exist for each half of the axis (see CATCH_ALL
+    below): Participation.event_role is not nullable, so "no particular job"
+    and "no particular service" each need somewhere to land.
+
+    ⚠️ There was only one until 2026-08-26, and it was a helping one — so a
+       beneficiary with no particular service had nowhere correct to go. The
+       argument for leaving it that way was "a ministry admin can add one in a
+       single click", which answers the wrong question: it makes every
+       foundation discover a system-level gap for themselves, and then invent
+       the same fix. See 06-roadmap.md L1.6.
+
+    ⚠️ Both names carry their half in brackets, and that is the point of the
+       pair rather than decoration. Left as a bare "General participant" beside
+       "General participant (attending)", the first one's half is **invisible**
+       — readable only by knowing that no bracket means helping, which is a
+       rule nobody is ever told. D27's line: what is missing and what is not
+       counted must not look the same.
     """
 
+    class Nature(models.TextChoices):
+        """Are they here to give, or to receive? A property of the job itself.
+
+        D10's test decides where this lives: an ESL seat is somewhere a service
+        is received no matter who sits in it, and lifting is somewhere time is
+        given no matter who does it. So it belongs to the *kind* of job, not to
+        one event's decision to open it — which is why it is here and EventRole
+        is untouched. The payoff is that it cannot be set inconsistently
+        between two events. See participants.md L1.
+
+        ⚠️ TextChoices rather than a column the foundation fills in, because
+           code branches on it (the identity question, the refusal to record
+           hours, and two denominators on the report). D5's test, and it does
+           not contradict this being a dictionary table: the foundation owns the
+           rows, the code owns which of the two halves a row is in.
+
+        ⚠️ One word each, with the explanation kept beside them in
+           NATURE_EXPLANATIONS rather than inside the label — the same split
+           SERVED_AS_EXPLANATIONS makes, for the same reason. A label carrying
+           its own gloss reads well on the form that asks and badly in the
+           table cell that reports, and the version of this that trimmed the
+           gloss back off in a template would stop trimming, silently, the day
+           somebody reworded it.
+        """
+
+        HELPING = "helping", "Helping"
+        ATTENDING = "attending", "Attending"
+
+    # ⚠️ Kept under its old name, and it is still the helping one's code. It is
+    #    frozen in three migrations (0003 seeds it, 0005 and 0015 renamed the
+    #    row) and can never change — ImmutableCodeMixin. What moved on
+    #    2026-08-26 is that "the catch-all" is now ambiguous, so read CATCH_ALL
+    #    rather than this constant unless you specifically mean the helping one.
     GENERAL_CODE = "general"
+    ATTENDING_GENERAL_CODE = "general-attending"
+
+    #: The row a signup lands on when nobody picked a specific job or service.
+    #: One per half of the axis, keyed by it, so no caller can ask for "the"
+    #: catch-all without saying which.
+    #:
+    #: ⚠️ The two codes are not symmetrical, and that is not sloppiness: the
+    #:    helping one predates the axis and its code cannot be renamed, so
+    #:    matching it (to "general-helping") is simply not available.
+    CATCH_ALL = {
+        Nature.HELPING: (GENERAL_CODE, "General participant (helping)"),
+        Nature.ATTENDING: (ATTENDING_GENERAL_CODE, "General participant (attending)"),
+    }
 
     code = models.SlugField(
         max_length=50,
         help_text="Stable identifier used by code. Lowercase, cannot be changed later.",
     )
     name = models.CharField(max_length=100)
+    # ⚠️ A default is right here, and it is worth writing down why — because the
+    #    same round's `served_as` forbids one (D38 section 9). The two are
+    #    opposites: a default identity would vouch for a claim nobody made,
+    #    while `helping` is a fact already true of every row in the database
+    #    today. A default that restates the present is not an assumption.
+    nature = models.CharField(
+        max_length=20,
+        choices=Nature.choices,
+        default=Nature.HELPING,
+        verbose_name="What somebody in this role is doing",
+        # ⚠️ The first sentence is the definition participants.md section 9
+        #    names as the mitigation for a known gap, not politeness: in this
+        #    sector "participant" is usually read as "the person being served",
+        #    and this is the first screen where the two halves are named side by
+        #    side. Without it the foundation reads the word narrowly and then
+        #    goes looking for another one to cover the people who came to help.
+        help_text="Everybody at an event is a participant — this says which "
+                  "kind. Lifting, interpreting and the welcome desk are "
+                  "helping; an ESL seat or a food parcel is attending.",
+    )
     is_active = models.BooleanField(default=True)
 
     class Meta:
@@ -102,21 +187,649 @@ class ParticipationRole(ImmutableCodeMixin, ConstraintErrorFieldMixin, models.Mo
         ]
 
     @classmethod
-    def seed_general(cls):
-        """The catch-all role, created if it is not there yet."""
+    def seed_catch_all(cls, nature):
+        """The catch-all role for one half of the axis, created if it is missing.
+
+        ⚠️ Takes the half rather than defaulting to helping (it was
+           `seed_general()` with no argument until 2026-08-26). A default here
+           would let a caller ask for "the" catch-all and silently get the
+           helping one — which is exactly the bug this pair exists to fix, just
+           moved from the data into the code.
+
+        ⚠️ `defaults` covers the name **and** the nature, so a row created here
+           is complete. Creating it without the nature would give it the field's
+           default — helping — and the attending catch-all would be born as a
+           helping one, which nothing would report.
+        """
+        code, name = cls.CATCH_ALL[nature]
         role, _ = cls.objects.get_or_create(
-            code=cls.GENERAL_CODE, defaults={"name": "General participant"},
+            code=code, defaults={"name": name, "nature": nature},
         )
         return role
 
     def clean(self):
+        """`code` is immutable, and `nature` becomes immutable once it is used.
+
+        The second half is new (2026-08-21). Flipping `nature` after people have
+        signed up rewrites what their rows mean: an attending signup carries
+        `served_as=not_applicable` and is counted under "people served", and
+        both of those were written under what this column said at the time. A
+        dictionary row is cheap — add another one instead.
+
+        ⚠️ A hint layer, not a rule, and D14 asks for that to be said plainly:
+           `ParticipationRole.objects.update(nature=…)` walks straight past
+           this. It cannot become a CheckConstraint either, for the same reason
+           the L2×L3 invariant cannot — the test is in another table (does any
+           Participation point at me), and a check constraint cannot see it.
+
+        ⚠️ The admin needs no `readonly_fields` here, unlike `served_as`
+           (D38 section 4). That one had to be frozen because the guard greps
+           source and the admin form exists without anybody writing code; this
+           rule lives in `clean()`, which the admin's ModelForm calls. So the
+           column stays editable — fixing a role opened under the wrong kind,
+           before anybody has used it, is exactly what should be allowed.
+        """
         super().clean()
         error = self.code_change_error()
         if error:
             raise ValidationError({"code": error})
+        if self.pk is None:
+            return
+        was = (type(self).objects.filter(pk=self.pk)
+               .values_list("nature", flat=True).first())
+        if was is None or was == self.nature:
+            return
+        # Participation is declared further down this module; a name looked up
+        # inside a method resolves at call time, so this is fine here and would
+        # not be in the class body.
+        if Participation.objects.filter(event_role__role_id=self.pk).exists():
+            raise ValidationError({"nature": (
+                "People have already signed up through this role, and their "
+                "records were written under what it says now. Add a new role "
+                "instead — a dictionary row is cheap."
+            )})
 
     def __str__(self):
         return self.name
+
+
+#: The other half of each Nature option, for when somebody is being *asked*
+#: rather than shown a value: "Attending — they receive a service". Beside the
+#: enum rather than in a form or a template, so the term and its gloss cannot
+#: drift apart. Same shape and same reason as SERVED_AS_EXPLANATIONS below.
+NATURE_EXPLANATIONS = {
+    ParticipationRole.Nature.HELPING: "they give their time",
+    ParticipationRole.Nature.ATTENDING: "they receive a service",
+}
+
+
+# --- Who counts as one of the foundation's own, on a given day ---------------
+#
+# ⚠️ These live here rather than in services.py (where they were until
+#    2026-08-26) because EventQuerySet.for_audience() below needs them, and
+#    services.py already imports this module — the other direction would be a
+#    circular import. Moving them keeps one definition and keeps the dependency
+#    pointing one way, services → models.
+
+
+def on_the_books_q(on):
+    """"Counts as one of the foundation's own on this day", as a Q over Assignment.
+
+    The predicate itself, extracted 2026-08-21 so the three shapes below are
+    three callers rather than three copies. `on` is a date, or a database
+    expression naming one (see on_the_books_exists).
+
+    ⚠️ Existence, never identity: a person may hold several posts at once
+       (D32's invariant is about there being one structure, not one row), so
+       every caller asks whether *a* qualifying tenure exists.
+    """
+    return (
+        models.Q(position__kind=Position.Kind.STAFF)
+        & models.Q(position__is_active=True)
+        & in_effect_on(on=on)
+    )
+
+
+def on_the_books_exists(*, contact_ref, day_ref):
+    """The same predicate as a correlated subquery, for a set of rows at once.
+
+    Where _on_the_books() answers for one event's day, this answers for a
+    queryset whose rows each carry their own day — the report counting people
+    served across a month of events, and the audience filter in batch two.
+
+    ⚠️ `day_ref` is an OuterRef onto a day the **outer** query annotated with
+       core.timeutils.local_day(). It cannot be a TruncDate over an OuterRef
+       here: TruncDate reads its operand's output_field while resolving, and a
+       ResolvedOuterRef has none — that raises AttributeError outright. Found by
+       running it (2026-08-21); see 06-roadmap.md L1.4.
+
+       Annotating outside also puts the timezone conversion at the call site,
+       where a reader can see which column is being turned into a local day.
+    """
+    return models.Exists(
+        Assignment.objects.filter(models.Q(contact_id=contact_ref) & on_the_books_q(day_ref))
+    )
+
+
+class Audience(models.Model):
+    """Who this is for: outsiders, all staff, or the staff of named ministries.
+
+    L3 on an Event ("who can see it") and L2 on an EventRole ("who can sign up
+    for it") are the same three questions, so they are the same three columns,
+    declared once. See participants.md L2/L3 and 06-roadmap.md L2.1.
+
+    ⚠️ Three tick-boxes rather than one three-valued column, and the reason is
+       a sentence the enum could not say: "the food pantry **and** the tax
+       clinic, nobody else". Joint training and cross-ministry outings are real,
+       and an enum with a "this ministry" tier cannot express two of them.
+
+    ⚠️ `visible_to_outsiders` is **not** the widest setting. It means only the
+       people with no current post — a food handout for the people it serves,
+       which staff should not be filling up. "Everyone" is this plus
+       `visible_to_all_staff`, which is why the form offers an "Everyone" tick
+       that stores those two rather than a third value of its own: one state,
+       one spelling.
+
+    ⚠️ `visible_to_all_staff` **contains** every ministry, so the two must not
+       both be set — see `refuse_redundant_audience()`. They agree today and
+       stop agreeing the moment a new ministry is created, which is exactly the
+       kind of drift a second spelling produces.
+    """
+
+    class Spec(NamedTuple):
+        """One audience, lifted out of wherever it came from.
+
+        🔴 Every rule below takes these rather than a model instance, and that
+           is not tidiness. Narrowing an event means comparing the **submitted**
+           audience against its roles — read off the instance, `ministries`
+           would be the row already in the database, which is the trap L2.1
+           records in full: a check that reads right and validates last week.
+
+        ⚠️ A NamedTuple, so it still unpacks like the plain tuple it replaced.
+
+        ⚠️ **No `__str__`, deliberately** (deleted 2026-08-27). There was one,
+           documented "for error messages", and no error message ever called
+           it — so its three phrases sat beside the ones in
+           refuse_wider_than_event() that people actually read, free to drift
+           apart with nothing to notice. Same reasoning that deleted
+           EventQuerySet's upcoming()/past(): an unused thing has nothing
+           checking it and reads to the next person as a supported way of
+           doing things.
+
+           🔴 And it was worse than merely unused: it ran a **query** for the
+              ministry names. A `__str__` that reaches the database fires
+              wherever anything is printed — a log line, a debugger, a
+              template that renders the value, the repr of a list of them —
+              which is a bad property for a value object and an invisible one.
+              The NamedTuple's own repr shows the raw fields, which is what a
+              person debugging this actually wants.
+
+           If a page ever needs to *say* an audience in words (L2.4's role
+           list, L2.6's event page), take the phrases from where they already
+           have readers rather than writing a second set here, and keep the
+           database out of them.
+        """
+
+        outsiders: bool
+        all_staff: bool
+        ministries: frozenset
+
+        @classmethod
+        def of(cls, instance):
+            """The audience a **saved** row currently has. Never for validation.
+
+            ⚠️ Only safe where the row is not the one being edited — the roles
+               of an event whose own audience is being narrowed, for instance.
+
+            ⚠️ `.all()`, not `.values_list("pk")`, and the difference is a query
+               per call (2026-08-27). `values_list` builds a fresh queryset and
+               therefore **ignores prefetch_related**, so the one caller that
+               reads this in a loop — refuse_narrowing_below_the_roles(), over
+               every role on the event — paid one query per role however it
+               fetched them. Written this way, prefetching at the call site
+               works; written the other way it silently does nothing, which is
+               the worse of the two failures because the fix looks applied.
+
+               Ministry is a table of tens of rows, so pulling whole objects
+               where only the pks are wanted costs nothing measurable, and the
+               alternatives that keep values_list all involve the caller
+               assembling the sets itself.
+            """
+            return cls(
+                outsiders=instance.visible_to_outsiders,
+                all_staff=instance.visible_to_all_staff,
+                ministries=frozenset(
+                    ministry.pk for ministry in instance.visible_to_ministries.all()),
+            )
+
+    class Meta:
+        abstract = True
+
+    #: Which side of the pair this table is, for the messages and rules that
+    #: differ between them. ⚠️ On the model because the model is the thing that
+    #: knows: it was decided by `isinstance(row, EventRole)` in
+    #: refuse_bad_audience() and by a constant on the forms, so one question had
+    #: two mechanisms and a third audience-bearing table (batch three's
+    #: sessions) would have fallen silently into the event branch of one and the
+    #: role branch of the other. Subclasses override it; the forms read it too.
+    AUDIENCE_ON = "event"
+
+    #: The three, named once. Every form and the admin build their field list
+    #: from this, so no screen can quietly offer two of the three.
+    AUDIENCE_FIELDS = (
+        "visible_to_outsiders", "visible_to_all_staff", "visible_to_ministries",
+    )
+
+    visible_to_outsiders = models.BooleanField(
+        default=False,
+        verbose_name="People with no current post",
+        help_text="Outside volunteers and the people the foundation serves.",
+    )
+    visible_to_all_staff = models.BooleanField(
+        default=False,
+        verbose_name="Everybody on the books",
+        help_text="Anyone holding a post on the day — paid or not.",
+    )
+    visible_to_ministries = models.ManyToManyField(
+        Ministry,
+        blank=True,
+        # ⚠️ A real reverse name, not "+". `for_audience()` asks the question
+        #    from the Assignment end — "does this person hold a post in a
+        #    ministry this event is open to" — and with the reverse disabled
+        #    that lookup does not exist (FieldError, verified). The alternative
+        #    is a subquery over the through table with two nested OuterRefs,
+        #    which gives the same answer and reads far worse.
+        #
+        # ⚠️ Ministry therefore has two entrances that must not be confused:
+        #    `ministry.events` (the ones it runs) and `ministry.event_audience`
+        #    (the ones it can see). Different questions, similar names.
+        related_name="%(class)s_audience",
+        # A retired ministry must not be offered — same trick as
+        # Participation.consent_relationship's limit_choices_to.
+        limit_choices_to={"is_active": True},
+        verbose_name="Only these ministries' staff",
+    )
+
+    @property
+    def audience_is_empty(self):
+        """Nobody at all. ⚠️ Costs a query for the M2M — do not call it per row.
+
+        ⚠️ Never a choice somebody made — it is the state
+           `refuse_empty_audience()` exists to forbid, and the state a row
+           created straight through the ORM lands in, because three columns
+           whose defaults are False/False/none add up to nobody. So filling one
+           in is a repair rather than an overwrite, which is what lets the seed
+           and the fixtures ask this before handing the row to
+           services.set_audience(), rather than overwriting an answer somebody
+           gave.
+        """
+        # ⚠️ `.all()`, not `.exists()`, for the reason Spec.of() writes out just
+        #    below: `exists()` builds a fresh queryset and therefore ignores
+        #    prefetch_related. One query either way today — but the day a caller
+        #    prefetches a page of rows, the fix would look applied and do
+        #    nothing, which is the worse of the two failures.
+        return not (
+            self.visible_to_outsiders
+            or self.visible_to_all_staff
+            or bool(self.visible_to_ministries.all())
+        )
+
+    def apply_audience(self, spec):
+        """Write this row's audience. ⚠️ **Checks nothing** — call it through
+        services.set_audience(), which is the door that does.
+
+        Split from the checking on purpose, and the split is why it is safe for
+        this to be so blunt: the rules read a Spec and compare it against other
+        rows, and both of those live where a Spec's fields may be read (see
+        AudienceContainmentGuardTests). Putting the refusals in here instead
+        would make every fixture and every migration that ever needs to write
+        three columns pay for them.
+
+        ⚠️ The row must already be saved. A ManyToMany cannot be written before
+           either end has a primary key — the same mechanic that keeps these
+           rules out of Model.clean() (see the module note below).
+
+        ⚠️ `updated_at` is listed explicitly: it is auto_now, and update_fields
+           silently leaves out any column not named. Same list-it-or-lose-it
+           trap as services.set_served_as().
+        """
+        self.visible_to_outsiders = spec.outsiders
+        self.visible_to_all_staff = spec.all_staff
+        self.save(update_fields=[
+            "visible_to_outsiders", "visible_to_all_staff", "updated_at",
+        ])
+        self.visible_to_ministries.set(spec.ministries)
+
+
+# --- The two rules an audience has to obey on its own -----------------------
+#
+# 🔴 Neither of these can live in Model.clean(), and that is a mechanic rather
+#    than a preference. A ManyToMany is written **after** save(); full_clean()
+#    runs **before** it. On a new object the field cannot even be read —
+#
+#        ValueError: 'Event' instance needs to have a primary key value
+#                    before this relationship can be used
+#
+#    — and on an existing one it reads the row already in the database, not the
+#    values being submitted. That second case is the dangerous one: a check that
+#    looks right and validates last week's data.
+#
+#    So both are plain functions taking loose values, called from:
+#      · the ModelForms      — the gate for every door a person walks through;
+#                              they hold the submitted M2M
+#      · the admin's own form — ⚠️ without one, the admin has no check at all
+#      · services.set_audience() — the gate for the doors nobody walks through:
+#                              the seed, the fixtures, an importer, a script.
+#                              ⚠️ This line was here from the start and was
+#                              **false** until 2026-08-27: services called none
+#                              of them, so bulk_create and every script went
+#                              past all three. A comment promising a lock is
+#                              worse than an unlocked door, because it stops
+#                              anybody looking.
+#
+# ⚠️ And there is no database constraint behind either, which D14 asks to be
+#    said rather than implied. "At least one" has a third disjunct living in
+#    another table (are there any ministry rows?), which a CheckConstraint
+#    cannot see; and the weaker version a constraint *could* express — "one of
+#    the two booleans" — is simply wrong, because an event ticked for two
+#    ministries and nothing else is perfectly legal. bulk_create walks past
+#    both of these.
+
+
+#: What "nobody ticked" means on each of the two tables. One function, two
+#: sentences — the failure looks different from each side, and a message that
+#: covers both ends up describing neither.
+EMPTY_AUDIENCE_MESSAGE = {
+    "event": (
+        "Say who this is for. Something published that nobody can see is a "
+        "draft, and there is already a status for that."
+    ),
+    "role": (
+        "Say who may sign up for this. A role nobody can take looks exactly "
+        "like one that is full, or one somebody forgot to finish."
+    ),
+}
+
+
+def refuse_empty_audience(*, outsiders, all_staff, ministries, on="event"):
+    """Nobody ticked. Raises ValidationError; returns nothing.
+
+    ⚠️ Both tables use this, and the role side was missing until 2026-08-26 —
+       so a hand-made POST could create a role nobody at all could sign up for,
+       indistinguishable on the page from a full one or an unfinished one
+       (D27: what is missing and what is not counted must not look the same).
+
+    ⚠️ Takes loose values rather than an instance, because the only layer that
+       can see the **submitted** M2M is the form (see the module note on
+       refuse_redundant_audience below).
+    """
+    if outsiders or all_staff or ministries:
+        return
+    raise ValidationError(EMPTY_AUDIENCE_MESSAGE[on])
+
+
+#: The same fault named after whichever box the person actually ticked. One
+#: function, two sentences — the same split EMPTY_AUDIENCE_MESSAGE makes, and
+#: for the same reason: "“Everybody on the books” already includes every
+#: ministry" is bewildering to somebody who ticked "Everyone" and never saw
+#: that phrase.
+REDUNDANT_AUDIENCE_MESSAGE = {
+    "all_staff": (
+        "“Everybody on the books” already includes every ministry — untick it, "
+        "or untick the ministries."
+    ),
+    "everyone": (
+        "“Everyone” already includes every ministry — untick it, or untick the "
+        "ministries."
+    ),
+}
+
+
+def refuse_redundant_audience(*, all_staff, ministries, covered_by="all_staff"):
+    """"Everybody on the books" plus a named ministry — one state, two spellings.
+
+    ⚠️ The form greys the ministries out once the box is ticked, and greying is
+       interface: it keeps nobody out. This is the half that does.
+
+    Refused rather than quietly normalised: "everybody on the books" and "these
+    four ministries" mean the same thing today and stop meaning it the moment a
+    fifth ministry is created — so which one was meant is a question only the
+    person submitting can answer.
+
+    ⚠️ `covered_by` names the box that made the ministries redundant, because
+       the "Everyone" tick sets all-staff on the person's behalf — so the
+       refusal has to talk about the box they ticked, not the one it implies.
+    """
+    if all_staff and ministries:
+        raise ValidationError(REDUNDANT_AUDIENCE_MESSAGE[covered_by])
+
+
+#: The sentence all three containment refusals share. The phrase that fills
+#: `%(audience)s` is the half both doors need — the role page prints this whole
+#: sentence, the event page composes its own around the phrase.
+TOO_WIDE_STEM = ("This event is not open to %(audience)s, so a role inside it "
+                 "cannot be either.")
+
+
+def _refuse_too_wide(field, audience, *, stem=TOO_WIDE_STEM, extra=""):
+    """Raise one containment refusal: keyed to a tick, carrying its phrase.
+
+    ⚠️ One constructor rather than three near-identical `raise` statements, and
+       the point is `params` rather than the saving. Two readers index
+       `params["audience"]` — services.refuse_bad_audience() and
+       AudienceFormMixin.refuse_narrowing_below_the_roles() — on nothing but
+       trust that every branch remembered to set it. A fourth branch that
+       forgot would raise KeyError at both of them, on the validation path.
+       Here it is an argument, so it cannot be left out.
+    """
+    raise ValidationError({field: ValidationError(
+        stem + extra, params={"audience": audience})})
+
+
+def refuse_wider_than_event(*, event, role):
+    """A role may not be open to anybody the event itself is closed to.
+
+    Requirement 7 read from the other side: seeing an event and being able to
+    take one of its jobs are different questions, but they are not independent
+    — somebody who cannot see the event must not be able to sign up for a job
+    inside it. participants.md's L2×L3 invariant.
+
+    Three comparisons, and they are **not the same kind of comparison** — which
+    is what the old three-tier enum hid behind a single "is this wider than
+    that". Written as one clever expression they come apart on the third:
+
+      · outsiders / all-staff are booleans — implication, one each
+      · ministries is a set — containment
+      · and "all staff" sits **above** every ministry in that containment,
+        while being a boolean rather than a set
+
+    ⚠️ The converse of the second is deliberately refused: an event ticked for
+       every ministry does **not** satisfy a role ticked for all-staff. The two
+       agree today and stop agreeing the moment a ministry is created, which is
+       the same reason refuse_redundant_audience() exists. It is nearly
+       impossible to trigger with two ministries in the database — and that is
+       exactly why it is written down rather than left to be noticed.
+
+    ⚠️ Not a CheckConstraint, and D14 asks for that to be said rather than
+       implied: the fields are on two tables plus a join table, which no check
+       can see. bulk_create walks past it, and what lies on the other side is
+       somebody signed up for an event they cannot see.
+
+       ⚠️ That state is **not** backstopped by sign_up(). The signup path asks
+          whether a *person* may take a *role* (services.eligible), which is a
+          different question with different inputs — having it also re-check
+          this invariant would give one rule two implementations. Stated
+          because "have sign_up() check it too" sounds obviously right.
+
+    ⚠️ Raises a **field-keyed** ValidationError (2026-08-27), so the caller can
+       put the sentence on the tick it is about rather than on whichever box
+       happens to be first. All three used to land on `visible_to_outsiders`:
+       a role refused for naming a ministry the event left out reported it
+       under "People with no current post", which is the wrong box — and the
+       forms' own rule is that an audience error goes on a field precisely so
+       nobody has to hunt for which one. Pointing at the wrong one is that
+       failure with an extra step.
+
+    ⚠️ First failure only, not all three collected. The caller shows one
+       reason, they fix it, and the next appears if there is one — which is the
+       behaviour this already had. Written down because the dict shape now
+       makes collecting them look easy.
+
+    ⚠️ Every refusal carries `params["audience"]`: the people it is about, as a
+       phrase (2026-08-27). The message here is a whole sentence, which suits
+       the page editing one role and not the page narrowing an event — that one
+       is about a **set** of roles and composes its own sentence, which this
+       rule cannot do because it is handed Specs and never sees a role's name.
+       So the phrase is the half both sides share, and it is interpolated into
+       the sentence below rather than written twice: one spelling for "the
+       people this is about", used by whichever page is asking.
+    """
+    if role.outsiders and not event.outsiders:
+        _refuse_too_wide("visible_to_outsiders", "people with no current post")
+    if role.all_staff and not event.all_staff:
+        _refuse_too_wide(
+            "visible_to_all_staff", "everybody on the books",
+            extra=" (Ticking every ministry is not the same thing — a ministry "
+                  "added later would be covered by one and not the other.)")
+    # A ministry-specific role is fine if the event covers all staff, and
+    # otherwise only if the event names at least those ministries.
+    #
+    # ⚠️ The lookup below is one query, and refuse_narrowing_below_the_roles()
+    #    calls this once per role — so a **rejected** narrowing costs one extra
+    #    query per role blocked on this branch. Measured 2026-08-27: 12 queries
+    #    for 2 roles, 22 for 12. Left alone deliberately, and the number is
+    #    written down so that is a decision rather than a thing nobody looked
+    #    at. It is bounded by the roles on one event (they all fit on one
+    #    screen), it happens only when a submission is being refused, and the
+    #    always-on half of this — reading each role's audience — is now a single
+    #    prefetch (see Spec.of).
+    #
+    #    2026-08-27: these names are now **shown on both pages**, so the lookup
+    #    buys something on every path that pays for it. Until then the narrowing
+    #    page discarded the sentence and read only which field the error was
+    #    keyed to, which made this query pure waste on that path.
+    if role.ministries and not event.all_staff:
+        beyond = role.ministries - event.ministries
+        if beyond:
+            # ⚠️ `get_text_list`, Django's own — "A", "A and B", "A, B and C".
+            #    A bare comma join reads as an unfinished sentence here: the
+            #    role names in these messages are each in quotes and delimit
+            #    themselves, while these sit unquoted inside a phrase. Written
+            #    by hand until 2026-08-27, with a test, for behaviour the
+            #    framework ships and translates.
+            names = get_text_list(
+                list(Ministry.objects.filter(pk__in=beyond).order_by("name")
+                     .values_list("name", flat=True)), "and")
+            # ⚠️ "staff in X", not the bare name. The other two phrases describe
+            #    people and this one has to read the same way in the same slot —
+            #    "open to Tax Help, who could no longer see it" says a
+            #    department cannot see an event.
+            _refuse_too_wide("visible_to_ministries", f"staff in {names}",
+                             stem="This event is not open to %(audience)s, so a "
+                                  "role inside it cannot be.")
+
+
+#: What the **event** side says when narrowing would strand a role. The role
+#: side prints refuse_wider_than_event()'s own sentence instead — see
+#: roles_left_behind() for why the two cannot be one message.
+NARROWING_MESSAGE = ("Narrowing this event would leave %(roles)s open to "
+                     "%(audience)s, who could no longer see it.")
+
+
+def roles_left_behind(event, roles):
+    """Yield (field, audience phrase, role name) for every role this narrowing strands.
+
+    ⭐ The one walk over an event's roles, for the two callers that ask the
+       question from that side: services.set_audience() (stop at the first) and
+       AudienceFormMixin.refuse_narrowing_below_the_roles() (collect them all
+       and group by box). Written out at both until 2026-08-27 — the same
+       queryset hints, the same digging through the raised error, the same
+       sentence stem — which put this diff's own N+1 fix in two places, one of
+       which the next tuning would miss.
+
+    ⚠️ The query hints live here and nowhere else. `select_related` for the name
+       the message prints, `prefetch_related` for each role's audience: one
+       query each for any number of roles, and the second only works because
+       Spec.of() reads the relation with `.all()`.
+
+    ⚠️ It yields rather than raising, because the two callers disagree about
+       what to do with a fault and that disagreement is the point — a person
+       gets every problem at once, spread across the boxes that caused them; a
+       script gets stopped at the first.
+    """
+    for role in roles.select_related("role").prefetch_related(
+            "visible_to_ministries"):
+        try:
+            refuse_wider_than_event(event=event, role=Audience.Spec.of(role))
+        except ValidationError as blocked:
+            # ⚠️ One entry, always: refuse_wider_than_event() raises on the
+            #    first comparison that fails, which its docstring says outright.
+            field, reported = next(iter(blocked.error_dict.items()))
+            yield field, reported[0].params["audience"], role.role.name
+
+
+def refuse_bad_audience(*, row, spec):
+    """Every rule that applies to `row`, for a caller with no form to run them.
+
+    ⭐ The whole of L2/L3's validity in one call, for the paths that reach the
+       database directly: an importer, a script, a data migration, batch three's
+       session generator. Until 2026-08-27 the three rules lived on the forms
+       alone — which covered every door a **person** can walk through, and none
+       of the others. The module note above listed `services` as a place they
+       were enforced, and it was not; this is that sentence becoming true.
+
+    Which rules apply depends on which side `row` is:
+
+    | row       | rules |
+    |-----------|-------|
+    | Event     | not empty · not redundant · no role left wider than it |
+    | EventRole | not empty · not redundant · not wider than its event   |
+
+    ⚠️ Raises on the **first** failure, with the error keyed to the tick it is
+       about (refuse_wider_than_event's shape). A caller reaching the database
+       directly wants to be stopped, not handed a list — the forms are what
+       collect every fault at once, because a person is going to fix them all
+       before pressing the button again.
+
+    🔴 This is a **second composition** of the same rules, not a second
+       implementation of them: each rule below has exactly one body, in this
+       module, and both this and AudienceFormMixin call those bodies. They
+       differ only in what they do with a failure — this one stops, the forms
+       spread the faults across the boxes that caused them and name the roles
+       involved. Unifying them further would mean giving that up, and the
+       error presentation is worth more than the symmetry.
+       AudienceContainmentTests.test_the_service_and_the_forms_refuse_the_same_three_things
+       puts every refusal to both doors so the pair cannot drift — and the walk
+       itself is shared (roles_left_behind), so only the grouping is written
+       twice.
+    """
+    refuse_empty_audience(
+        outsiders=spec.outsiders, all_staff=spec.all_staff,
+        ministries=spec.ministries, on=row.AUDIENCE_ON)
+    refuse_redundant_audience(all_staff=spec.all_staff, ministries=spec.ministries)
+    if row.AUDIENCE_ON == "role":
+        # ⚠️ The event's **saved** audience, which is right here and would be
+        #    wrong on the other branch — a role is always added to an event
+        #    that already exists, so what is in the database is what the event
+        #    is. See AudienceFormMixin.refuse_wider_than_its_event.
+        refuse_wider_than_event(event=Audience.Spec.of(row.event), role=spec)
+        return
+    if row.pk is None:
+        # Nothing to be wider than it yet, and `roles.all()` raises outright on
+        # an unsaved instance — the same check EventForm makes, for the same
+        # reason.
+        return
+    for field, audience, name in roles_left_behind(spec, row.roles):
+        # ⚠️ Re-raised naming the role, because from this side the rule's own
+        #    sentence answers the wrong question. "This event is not open to
+        #    people with no current post" is true and useless to somebody
+        #    narrowing an event: what they need is **which of their roles** is
+        #    in the way, and that is the one thing the rule cannot say — it is
+        #    handed Specs and never sees a name.
+        raise ValidationError({field: ValidationError(
+            NARROWING_MESSAGE,
+            params={"roles": f"“{name}”", "audience": audience},
+        )})
 
 
 class EventQuerySet(models.QuerySet):
@@ -147,6 +860,64 @@ class EventQuerySet(models.QuerySet):
            so the name stops implying an audience it never had.
         """
         return self.filter(status__in=Event.VISIBLE_TO_PARTICIPANTS)
+
+    def for_audience(self, contact):
+        """Narrow to what this person may see. L3.
+
+        ⚠️ A **second** predicate, always written beside visible_to_participants()
+           and never folded into it. That one answers "is it published", this one
+           answers "is it for them", and until 2026-08-26 the second question had
+           no answer anywhere: every signed-in account saw every published event
+           (participants.md section 1).
+
+        The three branches are the three kinds of tick, and each is judged on
+        **the day of the event** — the same clock L2's eligibility uses. Two
+        different clocks would produce "visible but not signable on the day" and
+        "signable on the day but invisible today", and neither has an
+        explanation a person would accept.
+
+        ⚠️ All three ask whether *a* qualifying tenure **exists**, never which
+           one it is: somebody may hold posts in two ministries at once (D32's
+           invariant is about there being one structure, not one row), and an
+           event ticked for either is one they can see.
+
+        🔴 The ministry branch is an Exists, never a join. Written as
+           `filter(visible_to_ministries__in=…)` an event ticked for two
+           ministries comes back **twice** for somebody on the books in both —
+           verified, and it corrupts paging and every count downstream while
+           looking on the page like a row that got listed twice.
+
+        ⚠️ `contact is None` is not an error and not a special case: an account
+           with no Contact cannot hold a post, so it *is* an outsider. That
+           includes every superuser (D12 keeps User.contact nullable because a
+           superuser matches no real person) — so a superuser does not see
+           staff-only events, which is correct and reads like a bug the first
+           time somebody meets it. Do not "fix" it by exempting them; that would
+           open a hole straight through this whole layer, exactly as
+           org/permissions.py says about its own checks.
+        """
+        outsiders = Q(visible_to_outsiders=True)
+        if contact is None:
+            return self.filter(outsiders)
+
+        on_the_books = Assignment.objects.filter(
+            on_the_books_q(models.OuterRef("event_day")), contact_id=contact.pk)
+        # ⚠️ The reverse name on the M2M is what lets this be one Exists rather
+        #    than a subquery over the through table with two nested OuterRefs.
+        #    See the field's own comment.
+        in_a_ticked_ministry = on_the_books.filter(
+            position__ministry__event_audience=models.OuterRef("pk"))
+
+        dated = self.annotate(event_day=local_day("start_time"))
+        return dated.filter(
+            # ⚠️ `~Exists`, checked against `exclude(Exists(...))` on both a
+            #    staff member and a genuine outsider — the two agree. Testing it
+            #    with a staff member alone returns nothing either way and proves
+            #    nothing, which is how the first attempt at this went.
+            (outsiders & ~models.Exists(on_the_books))
+            | (Q(visible_to_all_staff=True) & models.Exists(on_the_books))
+            | models.Exists(in_a_ticked_ministry)
+        )
 
     def open_for_signup(self, now=None):
         """Everything a volunteer may still sign up for.
@@ -268,7 +1039,7 @@ class EventQuerySet(models.QuerySet):
         return self.filter(start_time__gte=start, start_time__lt=end)
 
 
-class Event(ConstraintErrorFieldMixin, TimeStampedModel):
+class Event(Audience, ConstraintErrorFieldMixin, TimeStampedModel):
     """One occasion: a food distribution on Saturday morning.
 
     Several shifts are several Events, not one Event plus a shift table: the
@@ -386,7 +1157,14 @@ class Event(ConstraintErrorFieldMixin, TimeStampedModel):
 
     # Published to the outside world: a change of time or place has to be
     # answerable for afterwards.
-    history = HistoricalRecords()
+    #
+    # ⚠️ `m2m_fields` is not optional here. simple-history does **not** track a
+    #    ManyToMany unless it is named, so without this the two audience
+    #    booleans would appear in the history and the list of ministries would
+    #    not — half a record of who could see this, which reads as a whole one.
+    #    Who an event was published to is the same kind of promise as when and
+    #    where it was, which is the reason this table has history at all.
+    history = HistoricalRecords(m2m_fields=["visible_to_ministries"])
 
     objects = models.Manager.from_queryset(EventQuerySet)()
 
@@ -598,14 +1376,19 @@ class EventRoleQuerySet(models.QuerySet):
         return self.with_signup_counts().filter(is_short=True)
 
 
-class EventRole(ConstraintErrorFieldMixin, TimeStampedModel):
+class EventRole(Audience, ConstraintErrorFieldMixin, TimeStampedModel):
     """This event opened this job, and wants this many people for it.
+
+    ⚠️ `AUDIENCE_ON = "role"`: the other half of the audience pair, and the
+       thing every message and rule that differs between the two reads.
 
     It exists with nobody signed up, and that is the point: an event that
     opened five roles and filled three has five roles, and the two empty ones
     are what P2 wants to see. Merged into Participation there would be no row
     to represent them — the disease D11 convicted once already on Position.
     """
+
+    AUDIENCE_ON = "role"
 
     event = models.ForeignKey(Event, on_delete=models.CASCADE, related_name="roles")
     role = models.ForeignKey(ParticipationRole, on_delete=models.PROTECT, related_name="+")
@@ -648,7 +1431,8 @@ class EventRole(ConstraintErrorFieldMixin, TimeStampedModel):
 
     # needed_count is a promise published to volunteers ("we need 5 for
     # lifting"), so changing it has to be traceable — same reason as Event.
-    history = HistoricalRecords()
+    # ⚠️ m2m_fields for the same reason as Event's; see there.
+    history = HistoricalRecords(m2m_fields=["visible_to_ministries"])
 
     objects = models.Manager.from_queryset(EventRoleQuerySet)()
 
@@ -685,7 +1469,41 @@ class EventRole(ConstraintErrorFieldMixin, TimeStampedModel):
         return f"{self.role.name} @ {self.event.name}"
 
 
+#: "This signup is on a place somebody attends." Written once, read in both
+#: directions by the two predicates below — so the pair cannot come to disagree
+#: about which rows they are talking about.
+ON_AN_ATTENDING_ROLE = models.Q(
+    event_role__role__nature=ParticipationRole.Nature.ATTENDING)
+
+
 class ParticipationQuerySet(models.QuerySet):
+    def recording_hours(self):
+        """The rows where hours are a question at all — L4's rule, as a filter.
+
+        ⚠️ This and `Participation.records_hours` below are two implementations
+           of one rule, and they sit deliberately close together for the reason
+           core/querysets.py gives about active() and is_currently_active():
+           "change one, change the other" should be a glance rather than a
+           promise. One row asks the property; a page of rows asks this, in one
+           query instead of one per row.
+        """
+        return self.exclude(ON_AN_ATTENDING_ROLE)
+
+    def attending(self):
+        """The other side: rows where somebody was receiving a service.
+
+        The exact complement of recording_hours() today, because `nature` has
+        two values — and named for the axis rather than for the consequence,
+        because that is the question the report asks of it ("how many people
+        did we serve", not "whose hours are missing").
+
+        ⚠️ Unlike EventRole's is_full / is_short, these two really are
+           complements, so they share one Q above rather than each spelling the
+           condition. Two spellings of one filter is how the pair would end up
+           disagreeing about a row.
+        """
+        return self.filter(ON_AN_ATTENDING_ROLE)
+
     def notifiable(self):
         """Everyone a change to this event still concerns.
 
@@ -747,10 +1565,28 @@ class Participation(ConstraintErrorFieldMixin, TimeStampedModel):
            do not invent a second wording here or in a template. The
            explanatory half of each option lives in SERVED_AS_EXPLANATIONS
            below, beside these, so the two halves cannot drift apart.
+
+        ⚠️ Two of these three are identities. The third is not — read its
+           comment before treating them as a set of three.
         """
 
         VOLUNTEER = "volunteer", "Volunteering"
         WORK = "work", "Scheduled work"
+        # 🔴 Not a third identity: "this question does not arise on this row".
+        #
+        #    A role people *attend* (ParticipationRole.Nature.ATTENDING) records
+        #    no hours, so whose time it was is not asked and not stored. The
+        #    obvious place to put that is blank — and blank is taken. It means
+        #    one thing already, "this row predates D38 and the backfill could
+        #    not prove anything about it" (migration 0014), and two different
+        #    facts sharing one absence is how a column stops being evidence.
+        #
+        # ⚠️ Never offered to anybody. It is not in SERVED_AS_EXPLANATIONS, and
+        #    askable_served_as() is built from that dict rather than from these
+        #    choices, so it cannot reach a dropdown by anybody forgetting to
+        #    exclude it. Written only by services.set_served_as(), with
+        #    declared_by left empty: nobody claimed this, the structure did.
+        NOT_APPLICABLE = "not_applicable", "Not applicable"
 
     class DeclaredBy(models.TextChoices):
         """Who said so. The evidence lives in this column, not the one above.
@@ -905,6 +1741,38 @@ class Participation(ConstraintErrorFieldMixin, TimeStampedModel):
                 violation_error_message="Check-out cannot be before check-in.",
                 violation_error_code="participation_checkout_before_checkin",
             ),
+            # L1/L4: a place somebody attends does not record hours.
+            #
+            # ⭐ The rule this project could not previously express. "Attending
+            #    roles record no hours" reads across two tables — the hours are
+            #    here, the nature of the role is on ParticipationRole — and a
+            #    CheckConstraint cannot see another table, the same corner D19
+            #    put Participation.event in. Storing `not_applicable` on the row
+            #    moves the test onto this row, so the rule becomes something the
+            #    database enforces on every write path rather than something
+            #    services.py asks nicely (D9: if it can be a constraint, it is).
+            #
+            # ⚠️ Zero is refused along with everything else, deliberately. Zero
+            #    hours is a statement — "they came and did none" — and this row
+            #    is saying something different: hours are not a question here.
+            #    The constraint above it does allow 0, because it is about a
+            #    different thing (you cannot have hours without attending).
+            #
+            # ⚠️ What it does not cover, stated rather than implied (D14): a
+            #    bulk_create that writes a blank served_as against an attending
+            #    role walks straight past this, because the row never says
+            #    not_applicable. Keeping that from happening is
+            #    services.sign_up()'s job, and it is a hint layer.
+            models.CheckConstraint(
+                condition=(
+                    ~models.Q(served_as="not_applicable")
+                    | models.Q(hours__isnull=True)
+                ),
+                name="participation_no_hours_when_not_applicable",
+                violation_error_message="A place somebody attends does not record "
+                                        "hours — they were not giving their time.",
+                violation_error_code="participation_hours_when_not_applicable",
+            ),
             # "Did they turn up" may only ever have one answer.
             models.CheckConstraint(
                 condition=models.Q(checked_in_at__isnull=True) | ~models.Q(status="absent"),
@@ -918,6 +1786,33 @@ class Participation(ConstraintErrorFieldMixin, TimeStampedModel):
     def event(self):
         """Read-only convenience. The column deliberately does not exist."""
         return self.event_role.event
+
+    @property
+    def records_hours(self):
+        """False on a place somebody attends: the event side records no hours.
+
+        ⭐ The one spelling of L4's rule. Everything that has to know — the two
+           refusals in services.py, the hours box on the attendance page, the
+           identity line on somebody's own signups page — asks this.
+
+        ⚠️ It reads the **role**, not this row's `served_as`, and that is the
+           whole point. `not_applicable` is the recorded *consequence* of being
+           on an attending role, so a row that never had it written (a
+           bulk_create, an importer, anything older than this rule) would slip
+           past a served_as test and collect hours — and the CheckConstraint
+           would not catch it either, because that row does not claim to be
+           not_applicable. So the service layer asks the question at its source
+           and is deliberately the wider of the two checks; the constraint is
+           the backstop for rows that did get the value. Two vantage points on
+           one rule, not two rules.
+
+        ⚠️ Reads through event_role.role, so anything rendering this per row
+           must select_related("event_role__role") — the attendance page and
+           the signups page both do. Same trap EventRole.is_full sidesteps by
+           being an annotation; this one is a boolean off a dictionary row
+           rather than a count, so a property is the honest shape for it.
+        """
+        return self.event_role.role.nature != ParticipationRole.Nature.ATTENDING
 
     @property
     def guardian_address(self):
@@ -950,10 +1845,32 @@ class Participation(ConstraintErrorFieldMixin, TimeStampedModel):
 #:    makes volunteering the nicer answer turns this column into one everybody
 #:    fills in the same way, and then **both** figures are wrong. No test can
 #:    watch for that; D38 section 10 records it as review's job.
+#:
+#: ⚠️ Its keys are also **the whole list of identities a human may be offered**.
+#:    NOT_APPLICABLE has no wording here because nobody is ever asked about it,
+#:    and askable_served_as() below reads this dict rather than the enum — so
+#:    a value with no way of being asked cannot appear in a dropdown by
+#:    somebody forgetting to filter it out. The opposite construction (all the
+#:    choices, minus the ones we exclude) makes every future value offerable by
+#:    default, which is the wrong default for a column that is evidence.
 SERVED_AS_EXPLANATIONS = {
     Participation.ServedAs.VOLUNTEER: "my own time",
     Participation.ServedAs.WORK: "counts as my work time",
 }
+
+
+def askable_served_as():
+    """The identities somebody may be offered, as (value, label) pairs.
+
+    Exactly the keys of SERVED_AS_EXPLANATIONS, in their order: a value with no
+    wording for asking about it is not a value anybody is asked about. Both the
+    signup form and the correction control on the signups page read this, so
+    neither of them holds its own idea of which options exist.
+    """
+    return [
+        (value, Participation.ServedAs(value).label)
+        for value in SERVED_AS_EXPLANATIONS
+    ]
 
 
 class EventNotification(ConstraintErrorFieldMixin, TimeStampedModel):

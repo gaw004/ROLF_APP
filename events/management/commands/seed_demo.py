@@ -31,13 +31,21 @@ from django.db import transaction
 from accounts.services import mark_email_verified, register_account
 from contact.models import Contact, EmergencyContact, RelationshipType
 from core.timeutils import local_now, local_today
-from events.models import Event, EventRole, EventType, Participation, ParticipationRole
+from events.models import (
+    Event,
+    EventRole,
+    EventType,
+    Participation,
+    ParticipationRole,
+)
 from events.services import (
     check_in,
     check_out,
     mark_absent,
+    inherit_audience,
     record_hours,
     set_served_as,
+    sign_up,
 )
 from org.models import Assignment, EmploymentType, Ministry, MinistryRole, Position
 from org.permissions import foundation_admin_group
@@ -143,16 +151,37 @@ class Command(BaseCommand):
             code="part_time", defaults={"name": "Part time"})
         self.distribution, _ = EventType.objects.get_or_create(
             code="distribution", defaults={"name": "Distribution"})
-        EventType.objects.get_or_create(code="class", defaults={"name": "Class"})
+        # Stored on self from 2026-08-21: event 6 below is a class, and the
+        # demo had no event of any type but "distribution".
+        self.klass, _ = EventType.objects.get_or_create(
+            code="class", defaults={"name": "Class"})
         # The catch-all role has to exist: event_role is not nullable, so "no
         # particular job" needs somewhere to land.
-        self.general = ParticipationRole.seed_general()
+        # One catch-all per half of the axis — "no particular job" and "no
+        # particular service" each need a row to land on.
+        self.general = ParticipationRole.seed_catch_all(
+            ParticipationRole.Nature.HELPING)
+        self.general_attending = ParticipationRole.seed_catch_all(
+            ParticipationRole.Nature.ATTENDING)
         self.lifting, _ = ParticipationRole.objects.get_or_create(
             code="lifting", defaults={"name": "Lifting"})
         self.welcome, _ = ParticipationRole.objects.get_or_create(
             code="welcome", defaults={"name": "Welcome desk"})
         self.interpreting, _ = ParticipationRole.objects.get_or_create(
             code="interpreting", defaults={"name": "Interpreting"})
+        # ⚠️ L1's whole point on one row: the first role in this system where
+        #    the person is receiving rather than giving. Without one in the
+        #    demo, every screen the axis touches — the Kind column, the report's
+        #    two groups — has nothing to show, and a cell that only ever appears
+        #    in production is a cell nobody designs. Same argument as the three
+        #    identity states on the past event below.
+        self.esl_seat, _ = ParticipationRole.objects.get_or_create(
+            code="esl-seat",
+            defaults={
+                "name": "ESL seat",
+                "nature": ParticipationRole.Nature.ATTENDING,
+            },
+        )
 
     def ministries_and_posts(self):
         # ⚠️ One with a website and one without, deliberately: the ministry's
@@ -350,6 +379,34 @@ class Command(BaseCommand):
                       "email": "zhao.mother@example.invalid"},
         )
 
+        # ⭐ The two people this whole round is about, and until 2026-08-26 the
+        #    demo had none of them: somebody who only ever **receives**.
+        #
+        #    Everybody else in this cast is an admin, a volunteer or a member of
+        #    staff. A food-bank demo without a single person who came to collect
+        #    something was missing the population participants.md was written
+        #    for — and with them missing, "People served" on the report could
+        #    only ever be answered by the ESL class.
+        #
+        # ⚠️ No accounts, and that is honest rather than lazy: somebody
+        #    collecting a food parcel has no reason to have a login, and the
+        #    signup path reaches Contact through Participation, never through
+        #    User. ⚠️ It also means they are invisible to any acceptance line
+        #    that needs somebody to log in — the trap participants.md section 10
+        #    recorded about Ada. Nothing in L1 needs that of them; if a later
+        #    round does, this is the comment to come back to.
+        self.neighbours = [
+            Contact.objects.get_or_create(
+                legal_last_name=last, legal_first_name=first,
+                defaults={"contact_type": Contact.ContactType.INDIVIDUAL,
+                          "birth_date": born},
+            )[0]
+            for last, first, born in [
+                ("Mensah", "Abena", datetime.date(1966, 9, 14)),
+                ("Nakamura", "Hiro", datetime.date(1951, 2, 27)),
+            ]
+        ]
+
         # An employee who was in post on the day of the past event and has
         # since left — R8's clock is the day of the event, and without somebody
         # like this that is untestable by hand.
@@ -396,6 +453,36 @@ class Command(BaseCommand):
         )
 
     def events(self):
+        """⚠️ Every event here is outsiders **and** all staff — L3 (2026-08-26).
+
+        That is what all of them meant before the field existed, and without an
+        audience an event is visible to nobody and every demo page 404s.
+
+        🔴 **Both flags, not just outsiders** (2026-08-28). The first version
+           set `visible_to_outsiders` alone, on the reading that it was the
+           widest box — and it is not: `for_audience()`'s outsider branch is
+           `visible_to_outsiders & ~Exists(on_the_books)`, so it means "people
+           with *no* current post", to the exclusion of the foundation's own.
+           Measured on a freshly seeded database: 27 events, and the two
+           accounts holding a post — Zhang San (pantry lead) and Ada (pantry
+           helper) — saw **nought of them**. Ada's own signups page linked to a
+           detail view that 404ed for her. Nothing raised; the demo simply
+           showed an empty site to exactly the two people it exists to
+           demonstrate the staff side to.
+
+           Migration 0019 had already written this down and this file did not
+           follow it: "Outsiders alone would hide every existing event from the
+           foundation's own staff — and silent." Same sentence, same mistake,
+           two days apart. The guard against the next variant is not these
+           eight literals but SeedDemoTests' "every seeded account can see
+           something", which is what the old assertion (audience_is_empty is
+           False) was too weak to say.
+
+        It is still **not** the "Everyone" of a staff-only or ministry-only
+        event: those are what batch two's acceptance walk needs, and they
+        arrive with the rest of that batch rather than being retro-fitted onto
+        events that exist to demonstrate something else.
+        """
         now = local_now()
 
         # 1. Open, taking signups — three roles, one of them filled, one half
@@ -408,6 +495,8 @@ class Command(BaseCommand):
                 "start_time": now + 7 * DAY, "end_time": now + 7 * DAY + 3 * HOUR,
                 "location": "Church ground floor", "owner": self.pantry_admin.contact,
                 "status": Event.Status.OPEN,
+                "visible_to_outsiders": True,
+                "visible_to_all_staff": True,
             },
         )
         # 🔴 三个角色，现在**各演一种容量**（2026-08-19，`stop_at_needed_count`
@@ -435,6 +524,8 @@ class Command(BaseCommand):
                 "event_type": self.distribution, "ministry": self.pantry,
                 "start_time": now + 30 * DAY, "end_time": now + 30 * DAY + 2 * HOUR,
                 "owner": self.pantry_admin.contact, "status": Event.Status.DRAFT,
+                "visible_to_outsiders": True,
+                "visible_to_all_staff": True,
             },
         )
 
@@ -447,6 +538,8 @@ class Command(BaseCommand):
                 "event_type": self.distribution, "ministry": self.pantry,
                 "start_time": now + 3 * DAY, "end_time": now + 3 * DAY + 2 * HOUR,
                 "owner": self.pantry_admin.contact, "status": Event.Status.FULL,
+                "visible_to_outsiders": True,
+                "visible_to_all_staff": True,
             },
         )
         if made:
@@ -460,6 +553,8 @@ class Command(BaseCommand):
                 "event_type": self.distribution, "ministry": self.pantry,
                 "start_time": now - 30 * DAY, "end_time": now - 30 * DAY + 3 * HOUR,
                 "owner": self.pantry_admin.contact, "status": Event.Status.COMPLETED,
+                "visible_to_outsiders": True,
+                "visible_to_all_staff": True,
             },
         )
         if made:
@@ -485,6 +580,18 @@ class Command(BaseCommand):
             # Paper sign-in: hours by hand, no timestamps. Still counts.
             paper = self.signup(self.pantry_admin, past_welcome)
             record_hours(paper, Decimal("4.00"))
+
+            # ⭐ The other side of the same distribution: two neighbours who came
+            #    to collect. Same event, same afternoon, and the system now
+            #    tells them apart from the people who carried the boxes.
+            #
+            # ⚠️ Checked in but no hours — that is the shape, not an omission.
+            #    They were here (the roster says so, and the no-show rate counts
+            #    them like anybody else); what they did not do is give time.
+            collecting = self.role(past, self.general_attending, None)
+            for neighbour in self.neighbours:
+                came = self.joins(neighbour, collecting)
+                check_in(came, at=past.start_time)
 
             # ⚠️ Unpaid and stipend staff on the same event as the paid ones.
             #    R8 used to answer with the paid two only, and the point of
@@ -522,8 +629,66 @@ class Command(BaseCommand):
                 "event_type": self.distribution, "ministry": self.tax,
                 "start_time": now + 5 * DAY, "end_time": now + 5 * DAY + 2 * HOUR,
                 "owner": self.tax_admin.contact, "status": Event.Status.OPEN,
+                "visible_to_outsiders": True,
+                "visible_to_all_staff": True,
             },
         )
+
+        # 6. A class somebody attends rather than helps at — the first event in
+        #    the demo whose roles are not all "come and give us a hand".
+        #
+        # ⚠️ It opens **two** roles, and that pairing is the demo: the seats are
+        #    attending, the interpreter beside them is helping. One event, both
+        #    halves of L1, which is exactly the shape participants.md says the
+        #    foundation needs (a single publish covering both).
+        #
+        # ⚠️ Added after event 5 on purpose. The ids of the five above are named
+        #    in the C0.3 acceptance checklist, so a new event goes at the end of
+        #    this list and never in the middle of it.
+        esl, made = Event.objects.get_or_create(
+            name="ESL class",
+            defaults={
+                "event_type": self.klass, "ministry": self.pantry,
+                "start_time": now + 4 * DAY, "end_time": now + 4 * DAY + 2 * HOUR,
+                "location": "Room 1A", "owner": self.pantry_admin.contact,
+                "status": Event.Status.OPEN,
+                "visible_to_outsiders": True,
+                "visible_to_all_staff": True,
+            },
+        )
+        if made:
+            seats = self.role(esl, self.esl_seat, 12)
+            interpreting = self.role(esl, self.interpreting, 1)
+
+            # ⭐ Ada and Rafa are **both on the books**, both at this one event,
+            #    and the page treats them oppositely — Ada gets no hours box and
+            #    no identity question, Rafa gets both. The only difference is
+            #    the role they took. That is participants.md section 4's
+            #    invariant ("the axis is on the role, never on the person")
+            #    made visible on one screen, and no amount of documentation
+            #    does the same work.
+            # ⚠️ Through services.sign_up(), unlike the fixtures above, and the
+            #    difference is the whole value of this block: the service is
+            #    what writes `not_applicable` onto a seat and leaves declared_by
+            #    empty. Built with the plain helper these rows would carry a
+            #    **blank** identity — which means "predates D38" and is a state
+            #    only an importer produces. Demo data has to be data the system
+            #    actually makes, or it demonstrates the wrong thing.
+            #
+            #    Idempotency still holds: this whole block is inside `if made`.
+            self.joins(self.unpaid_staff, seats)
+            self.joins(self.intern, interpreting)
+
+            # ⚠️ Both of these have logins, and that is the point rather than a
+            #    coincidence: without one, "their own signups page does not
+            #    print an identity for a seat" is an acceptance line nobody can
+            #    walk. Exactly what went wrong for Ada in the previous round
+            #    (participants.md section 10) — see DEMO_ACCOUNTS above.
+            self.joins(self.adult, seats)
+            # No login, and that is fine here — he is only making up the
+            # numbers, so that the report reads "3 signed up" beside "People
+            # served: 2". The missing one is Ada, who is one of ours.
+            self.joins(self.silent, seats)
 
         self.filler_events(now)
 
@@ -588,6 +753,8 @@ class Command(BaseCommand):
                     "end_time": now + days * DAY + 3 * HOUR,
                     "location": place, "owner": owner.contact,
                     "status": Event.Status.OPEN,
+                    "visible_to_outsiders": True,
+                    "visible_to_all_staff": True,
                 },
             )
         past = []
@@ -602,6 +769,8 @@ class Command(BaseCommand):
                     "end_time": now - days * DAY + 3 * HOUR,
                     "location": place, "owner": owner.contact,
                     "status": Event.Status.COMPLETED,
+                    "visible_to_outsiders": True,
+                    "visible_to_all_staff": True,
                 },
             )
             past.append(event)
@@ -663,10 +832,55 @@ class Command(BaseCommand):
     # --- helpers ---------------------------------------------------------
 
     def role(self, event, participation_role, needed_count, **fields):
-        return EventRole.objects.get_or_create(
+        """One job opened on one event — L3's audience included.
+
+        ⚠️ The audience is taken from the event (decision 15), and it has to be
+           taken from *somewhere*: the three columns default to False/False/
+           none, so a role created straight through the ORM is open to **nobody**
+           — the state rule 1 forbids, and the state every role here was in
+           between 2026-08-26 and this line. Nothing showed it, because no query
+           reads a role's audience until L2.4; the day one does, every signup
+           page in the demo empties at once.
+
+        ⚠️ Inherited rather than hard-coded to "outsiders". The events here are
+           all open to outsiders today, but batch two's walk needs staff-only
+           and ministry-only ones, and a hard-coded value would give their roles
+           an audience wider than the event — refuse_wider_than_event()'s own
+           invariant, broken by the seed.
+
+        ⚠️ Only when the row has no audience at all, so re-seeding does not
+           overwrite one somebody set in the demo database — the same
+           `defaults=` restraint get_or_create is being used for above. "Nobody
+           at all" is never something somebody chose, so filling it in also
+           repairs a database seeded before this line existed.
+        """
+        event_role, _ = EventRole.objects.get_or_create(
             event=event, role=participation_role,
             defaults={"needed_count": needed_count, **fields},
-        )[0]
+        )
+        # ⚠️ Through services, not by assigning the columns — the same choice
+        #    joins() makes about sign_up() a few lines down, and for the same
+        #    reason: the seed should walk the doors the site walks. A demo built
+        #    by writing rows directly is one that cannot show a rule failing.
+        return inherit_audience(event_role, event)
+
+    def joins(self, who, event_role):
+        """Sign somebody up the way the site does — through services.sign_up().
+
+        ⚠️ Not the same thing as signup() below, and the difference matters for
+           anything the identity axis touches: this one goes through the rule
+           that decides what `served_as` should say, so a seat comes out
+           `not_applicable` and a helping role comes out with a real identity.
+           signup() writes the row directly and leaves that column blank, which
+           is a state meaning "predates D38".
+
+        ⚠️ Not idempotent — sign_up() refuses a second signup for the same role
+           by design. Only call it from inside an `if made:` block.
+        """
+        return sign_up(
+            contact=who.contact if hasattr(who, "contact") else who,
+            event_role=event_role,
+        )
 
     def signup(self, who, event_role, **consent):
         contact = who.contact if hasattr(who, "contact") else who

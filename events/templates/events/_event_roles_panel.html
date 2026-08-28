@@ -9,12 +9,20 @@
     <div class="table-wrap">
       <table>
         <thead>
-          <tr><th>Role</th><th>Wanted</th><th>Signed up</th><th>Notes</th><th></th></tr>
+          <tr><th>Role</th><th>Kind</th><th>Wanted</th><th>Signed up</th><th>Notes</th><th></th></tr>
         </thead>
         <tbody>
           {% for role in roles %}
             <tr>
               <td class="font-medium">{{ role.role.name }}</td>
+              {% comment %}
+              L1。这一列不是装饰：它决定这一行的人记不记工时、进报表的哪一个分母。
+              开角色的人应该在开的时候就看见自己开的是哪一档，而不是在月底看报表时。
+              ⚠️ 只画一个词。带说明的那一版（"Attending — they receive a
+                 service"）是给「正在做选择」的人看的，落点在建角色那张表单上；
+                 这一格是既成事实，一个词就够。两半分别存在哪见 models.py。
+              {% endcomment %}
+              <td class="text-ink-600 dark:text-ink-300">{{ role.role.get_nature_display }}</td>
               {% comment %}
               ⚠️ 「要几个」这一格现在还要说**那个数字拦不拦人**（2026-08-19）。
                  光写「2」的话，屏幕上看不出这一格勾没勾「到这个人数就停止报名」——
@@ -55,10 +63,15 @@
     {% include "core/components/empty.html" with message="No roles opened yet. Nobody can sign up until there is at least one job to sign up for." %}
   {% endif %}
 
+  {% comment %}
+  ⚠️ `x-data="audienceTicks"`：和活动那张表单同一个组件、同一条理由（D24 纯增强）。
+     ⚠️ 而这一张是 htmx 换进来的 —— 整个面板 outerHTML 换掉之后 Alpine 会在新的
+        节点上重新初始化，因为 x-data 写在被换掉的这段 HTML 里而不是外面。
+  {% endcomment %}
   <form method="post" action="{% url 'events:event_roles' event.pk %}"
         hx-post="{% url 'events:event_roles' event.pk %}"
         hx-target="#roles-panel" hx-swap="outerHTML"
-        class="card mt-6">
+        class="card mt-6" x-data="audienceTicks">
     {% csrf_token %}
     <h2 class="mb-4 text-lg font-semibold">Add a role</h2>
     {% comment %}

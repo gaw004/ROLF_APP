@@ -53,7 +53,14 @@ from .forms import (
     NotifyForm,
     SignUpForm,
 )
-from .models import Event, EventNotification, EventRole, Participation
+from .models import (
+    SERVED_AS_EXPLANATIONS,
+    Event,
+    EventNotification,
+    EventRole,
+    Participation,
+    askable_served_as,
+)
 from .tokens import (
     CHECK_IN,
     MODES,
@@ -66,6 +73,7 @@ from .tokens import (
 from .services import (
     CHECKIN_CREDENTIAL_KEY,
     ConsentRequired,
+    NoHoursHere,
     CredentialExpired,
     TurnedUp,
     apply_scan,
@@ -89,7 +97,7 @@ from .services import (
     reschedule,
     scheduled_hours,
     resolve_recipients,
-    contacts_asked_about_serving,
+    signups_asked_about_serving,
     set_served_as,
     set_status,
     sign_up,
@@ -246,13 +254,14 @@ def event_list(request):
     status, so the page says which of the two it is instead of hiding one.
     """
     period = EventPeriodForm(request.GET or None)
+    contact = _my_contact(request)
     return render(request, _template(
         request, "events/event_list.html", "events/_event_list_results.html"), {
         "period": period,
-        **_listing(request, period),
+        **_listing(request, period, contact),
         # 右边那块日程。⚠️ 它和上面那个 `events` 是**两个不同的集合**，故意的：
         #    列表是分页的二十条，日程是那几天的全部。两边共用的只有筛选。
-        **_schedule(request, period),
+        **_schedule(request, period, contact),
         # 筛选是 HTMX 换掉 `#event-results`，而日程在那块外面 —— 所以筛选那一次
         # 请求要把日程作为 out-of-band 的第二块一起带回去，否则右边还画着上一次
         # 筛选的结果，而它看起来完全正常。
@@ -265,8 +274,13 @@ def event_list(request):
     })
 
 
-def _visible_events(period):
+def _visible_events(period, contact):
     """左边那一列列的是什么：筛完、排好，还没分页。
+
+    ⚠️ `contact` 是 L3（2026-08-26 加）。**两道门，不是一道**：
+       `visible_to_participants()` 答「发布了没有」，`for_audience()` 答
+       「是不是给他看的」。在此之前第二个问题没有任何地方在答 ——
+       任何登录用户看得见任何一场已发布的活动。
 
     ⚠️ 单独一个函数，因为「第几页」要问它两次（先数出那一场排在第几，再取那
        一页），而两次必须是**同一个查询** —— 各写一遍的话，两份筛选迟早不一样，
@@ -274,6 +288,7 @@ def _visible_events(period):
     """
     return period.narrow(
         Event.objects.visible_to_participants()
+        .for_audience(contact)
         .from_today()
         # ⚠️ 每一行都要问「满了没」来决定那枚标签画不画成链接（2026-08-19）。
         #    不加这个注解的话那是**每行一次查询** —— 一页二十行，在全站被打得
@@ -284,14 +299,15 @@ def _visible_events(period):
     )
 
 
-def _listing(request, period, page_number=None):
+def _listing(request, period, contact, page_number=None):
     """左边那一列的上下文。event_list 和日程点开的那一次共用。
 
     ⚠️ 只返回**模板真的要用的**东西。未分页的那个查询集不在里面 —— 需要它的
        是 `_page_holding`，而那是视图的事；塞进上下文就是把一个没人渲染的
        完整集合递给模板，正是本文件第一条规矩防的那件事。
     """
-    page = _page(request, _visible_events(period), EVENTS_PER_PAGE, number=page_number)
+    page = _page(request, _visible_events(period, contact), EVENTS_PER_PAGE,
+                 number=page_number)
     return {
         "events": page,
         "page": page,
@@ -302,7 +318,7 @@ def _listing(request, period, page_number=None):
     }
 
 
-def _schedule(request, period):
+def _schedule(request, period, contact):
     """右边那块日程的上下文。event_list 和 event_schedule 共用一份。
 
     ⚠️ 共用，不是各建各的 —— `_template` 那条注释写的是同一件事：两个分支各自
@@ -321,8 +337,11 @@ def _schedule(request, period):
     #    「那条按 start_time 切会切掉跨夜的活动」，而它现在按 end_time 切，
     #    不再切掉了。剩下的理由是这一条：日程要的是**和窗口相交**的活动，
     #    而窗口可以翻到下个月 —— 再叠一道「今天起」只会把它自己的下界抄第二遍。
+    # ⚠️ `for_audience()` 和左边那一列同一道门。少了它就是「列表里没有、
+    #    日程上画着」—— 而那是同一份筛选画出来的两个答案。
     events = period.narrow(
-        Event.objects.visible_to_participants().select_related("ministry"))
+        Event.objects.visible_to_participants()
+        .for_audience(contact).select_related("ministry"))
     events = events.filter(start_time__lt=end, end_time__gte=start).order_by("start_time")
     return {
         "schedule_columns": schedule.columns(events, days),
@@ -341,12 +360,13 @@ def event_schedule(request):
        箭头是真的 `<a href>`，没有 JS 时点下去整页重来，日程停在新的窗口上。
     """
     period = EventPeriodForm(request.GET or None)
+    contact = _my_contact(request)
     return render(request, "events/_schedule.html", {
         "period": period,
         # 箭头翻页要顺手把筛选卡里那个隐藏的 `from` 也改掉，否则下一次筛选会
         # 把窗口拽回起点 —— 见 _period_filter.html 里那一段。
         "schedule_partial": True,
-        **_schedule(request, period),
+        **_schedule(request, period, contact),
     })
 
 
@@ -414,11 +434,23 @@ def _detail(request, pk):
     """
     event = get_object_or_404(
         Event.objects.select_related("ministry", "event_type"), pk=pk)
+    contact = _my_contact(request)
     preview = event.status not in Event.VISIBLE_TO_PARTICIPANTS
-    if preview and not can_view_event_records(request.user, event):
+    # L3 (2026-08-26): not for them is the same kind of answer as not published.
+    #
+    # ⚠️ **404, never 403**, matching the draft branch below it and for the same
+    #    reason: a 403 says "there is an event at this id and it is not for you",
+    #    which is exactly the sentence a staff-only event exists to withhold.
+    #    The foundation tier keeps its back door — it can already open this
+    #    event's signups, attendance and report, so making the event page the
+    #    one thing it cannot see would be a rule nobody could guess.
+    #
+    # ⚠️ Asked with `.filter(pk=…).exists()` rather than by re-fetching, so this
+    #    stays one extra query and the row above is still the one rendered.
+    for_them = Event.objects.filter(pk=pk).for_audience(contact).exists()
+    if (preview or not for_them) and not can_view_event_records(request.user, event):
         # Deliberately indistinguishable from "no such event" — see above.
         raise Http404("No event matches the given query.")
-    contact = _my_contact(request)
     mine = Participation.objects.none()
     if contact is not None:
         mine = Participation.objects.filter(
@@ -461,6 +493,7 @@ def event_detail_panel(request, pk):
        真的 `<a href>`，指向整页详情：没有 JS 时点下去就是整页跳过去。
     """
     period = EventPeriodForm(request.GET or None)
+    contact = _my_contact(request)
     context = _detail(request, pk)
     # ⚠️ 先算页码，再取那一页 —— 两次都用 `_listing` 的同一份查询。
     #    算不出来（那一场不在左边的列表里）时 `page_number` 是 None，
@@ -484,8 +517,8 @@ def event_detail_panel(request, pk):
     if request.GET.get("from_list"):
         return render(request, "events/_schedule_detail.html", context)
 
-    number = _page_holding(_visible_events(period), pk, EVENTS_PER_PAGE)
-    context.update(_listing(request, period, page_number=number))
+    number = _page_holding(_visible_events(period, contact), pk, EVENTS_PER_PAGE)
+    context.update(_listing(request, period, contact, page_number=number))
     context.update({
         # 左边那一列作为 out-of-band 的第二块跟着回去。
         "results_oob": True,
@@ -520,10 +553,15 @@ def event_signup(request, pk):
        或刷新时自然就对了。写下来是因为「点了报名，左边标签没变」看起来像 bug，
        而它是这一行。
     """
-    event = get_object_or_404(Event.objects.open_for_signup(), pk=pk)
     contact = _my_contact(request)
     if contact is None:
         raise PermissionDenied(SCOPED_DENIAL)
+    # ⚠️ Two gates, and until 2026-08-26 there was only the first: this view ran
+    #    `open_for_signup()` and nothing else, so a staff-only event was signable
+    #    by anybody who typed its id. Same 404 as the detail page — an event
+    #    somebody may not see must not confirm that it exists.
+    event = get_object_or_404(
+        Event.objects.open_for_signup().for_audience(contact), pk=pk)
 
     # ⚠️ 读 header，不读查询串：这一块是不是画在面板里，取决于**谁在问**，
     #    而不是取决于一个可以被贴进地址栏的参数。带 `?in_panel=1` 打开这个
@@ -1009,9 +1047,14 @@ def event_registrations(request, pk):
         # ⚠️ Judged here, not trusted from the form: the question applies to a
         #    set of people and a POST can name anybody. Asked through the same
         #    service the form and the backfill ask, so there is one answer.
-        if participation.contact_id in contacts_asked_about_serving(event):
+        if participation.pk in signups_asked_about_serving(event):
             value = request.POST.get("served_as")
-            if value in Participation.ServedAs.values:
+            # ⚠️ Against the identities somebody may be **asked** about, not
+            #    against the whole enum. `not_applicable` is a member of it and
+            #    means "this question does not arise here" — a POST that named
+            #    it would erase a real answer, and no control anywhere offers
+            #    it. Not drawing a control keeps nobody out; this line does.
+            if value in SERVED_AS_EXPLANATIONS:
                 set_served_as(
                     participation, value,
                     declared_by=Participation.DeclaredBy.ADMIN,
@@ -1039,8 +1082,11 @@ def event_registrations(request, pk):
         #    and an outside volunteer's row must not offer a control that would
         #    be refused — D38 section 5's "the cost falls only on the people it
         #    is genuinely ambiguous for".
-        "asked_about_serving": contacts_asked_about_serving(event),
-        "served_as_choices": Participation.ServedAs.choices,
+        "asked_about_serving": signups_asked_about_serving(event),
+        # ⚠️ Not `ServedAs.choices` — see the POST branch above. The dropdown
+        #    offers the identities a person can claim, and the enum holds one
+        #    more value than that.
+        "served_as_choices": askable_served_as(),
     })
 
 
@@ -1094,7 +1140,21 @@ def event_attendance(request, pk):
             if hours_form.is_valid():
                 # The paper-sheet path: no timestamps, just a number. Same
                 # field, because there is only one authoritative value.
-                record_hours(participation, hours_form.cleaned_data["hours"])
+                #
+                # ⚠️ Caught, for the same reason mark_absent() is caught twelve
+                #    lines up — and it was not, until 2026-08-28: record_hours()
+                #    refuses a role people *attend* (L4), and an uncaught
+                #    ValidationError out of a view is a **500**, not a message.
+                #    The template hides the box on those rows, but hiding a
+                #    control keeps nobody out: a page held open while somebody
+                #    corrects that role's `nature` posts straight into this.
+                try:
+                    record_hours(participation, hours_form.cleaned_data["hours"])
+                except NoHoursHere as error:
+                    messages.error(request, "; ".join(
+                        message for messages_ in error.message_dict.values()
+                        for message in messages_
+                    ))
         elif action == "undo":
             # ⚠️ Its own action, never folded into "absent". "I clicked the
             #    wrong row" and "they did not come" are different facts, and
@@ -1121,6 +1181,11 @@ def event_attendance(request, pk):
     rows = (
         Participation.objects.filter(event_role__event=event)
         .notifiable()
+        # ⚠️ `event_role__role` is load-bearing beyond the role's name in the
+        #    heading: every row asks `records_hours`, which reads the role's
+        #    nature to decide whether to draw an hours box at all. Without it
+        #    that is a query per row, on the page somebody has open while
+        #    checking forty people in.
         .select_related("contact", "event_role__role")
         .prefetch_related("contact__emergency_contacts")
         .order_by("event_role__role__name", "contact")

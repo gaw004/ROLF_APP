@@ -43,7 +43,13 @@
                 ⚠️ 空值不画。空表示「这一行早于这个字段」，把它画成任何一档
                    都是替没人核实过的事作证（同旁边签到那一列的处理）。
                 {% endcomment %}
-                {% if row.served_as %}
+                {% comment %}
+                ⚠️ `records_hours` 那一半是 2026-08-21 加的：来参加的位置上，
+                   这一列存的是 `not_applicable`，而那不是一档身份，是「这个问题
+                   在这一行上不成立」。照直画出来会在自己的报名页上印一句
+                   "Not applicable"，读起来像系统没认出他来。
+                {% endcomment %}
+                {% if row.served_as and row.records_hours %}
                   <span class="block text-xs text-ink-600 dark:text-ink-300">
                     {{ row.get_served_as_display }}{% if row.served_as_declared_by %} · {{ row.get_served_as_declared_by_display }}{% endif %}
                   </span>

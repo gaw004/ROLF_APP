@@ -239,11 +239,17 @@ class Command(BaseCommand):
             "superuser — which is the thing C3.5 says not to run the place from")
 
         # The dictionaries a coordinator needs before they can publish anything.
-        # ParticipationRole ships one row from a migration, so one is still empty.
+        #
+        # ⚠️ ParticipationRole's minimum is "what the migrations ship, plus one"
+        #    — the point is to catch a foundation that has entered none of its
+        #    own, and a threshold equal to what ships would pass on an empty
+        #    installation while looking like a check. It went 2 → 3 on
+        #    2026-08-26 when a second catch-all row started shipping (0018);
+        #    if a later migration seeds a third, this number moves again.
         wanted = [
             ("org", "Ministry", 1), ("org", "Position", 1),
             ("org", "EmploymentType", 1), ("events", "EventType", 1),
-            ("events", "ParticipationRole", 2),
+            ("events", "ParticipationRole", 3),
             # Not hand-entered — a data migration fills it. Zero here means the
             # migration did not run, and an emergency contact cannot be saved
             # at all, which is what stops a minor signing up.

@@ -19,6 +19,7 @@ from org.models import Ministry
 from org.permissions import ministry_ids_administered_by
 
 from .models import (
+    NARROWING_MESSAGE,
     NATURE_EXPLANATIONS,
     SERVED_AS_EXPLANATIONS,
     Audience,
@@ -30,6 +31,7 @@ from .models import (
     refuse_empty_audience,
     refuse_redundant_audience,
     refuse_wider_than_event,
+    roles_left_behind,
 )
 
 
@@ -271,8 +273,94 @@ class AudienceFormMixin:
        does.
     """
 
-    #: Which table this form edits, for the messages that differ between them.
-    AUDIENCE_ON = "event"
+    #: Which side of the pair this form edits — read off the model rather than
+    #: declared here (2026-08-27). It was a constant on each form while
+    #: refuse_bad_audience() answered the same question with isinstance(), so a
+    #: third audience-bearing table could have been classified differently by
+    #: the two. The model is the thing that knows; see Audience.AUDIENCE_ON.
+    @property
+    def AUDIENCE_ON(self):
+        return self._meta.model.AUDIENCE_ON
+
+    #: ⭐ The convenience tick, and it is **not a stored value** — ticking it
+    #: sets the two boxes below it and nothing else reaches the database.
+    #: Decision 11: "everyone" means exactly "outsiders + all staff", and giving
+    #: that state a spelling of its own would be one state with two
+    #: representations, which is what refuse_redundant_audience() exists to stop
+    #: happening a row lower down.
+    #:
+    #: ⚠️ It exists because the widest-looking box is not the widest setting.
+    #:    Somebody publishing an open day ticks "People with no current post" —
+    #:    it reads as the outside world, so it reads as everybody — and has just
+    #:    hidden the event from every member of staff. Nothing raises, and the
+    #:    only person who could notice is the one who cannot see it.
+    #:
+    #: ⚠️ Plain server-side expansion, so it works with no JavaScript at all
+    #:    (D24). The greying-out in the template is the enhancement; this is not.
+    EVERYONE_FIELD = "audience_is_everyone"
+
+    #: Where a message about the audience **as a whole** goes. The three ticks
+    #: render as one group, so the first of them puts the sentence at the top of
+    #: that group — which is where somebody hunting for "which box" starts.
+    #:
+    #: ⚠️ Only for faults that are about the set. A message about one tick goes
+    #:    on that tick, and since 2026-08-27 refuse_wider_than_event() says
+    #:    which one it means rather than leaving every refusal here. Reaching
+    #:    for this constant when the rule already named a field is how all
+    #:    three ended up on one box the first time.
+    AUDIENCE_GROUP_FIELD = Audience.AUDIENCE_FIELDS[0]
+
+    def __init__(self, *args, **kwargs):
+        """Adds the "Everyone" tick, and ticks it back on for an audience that is one.
+
+        ⚠️ Added here rather than declared on the class: this is a plain mixin,
+           not a form, so Django's metaclass never looks at it for fields —
+           declaring one would simply not appear, silently.
+
+        ⚠️ The tick is **derived** when the form is drawn, not stored. An event
+           saved as outsiders + all-staff comes back showing "Everyone", which
+           is what the person chose; showing them two separate ticks instead
+           would make the convenience a one-way trip and teach them not to use
+           it. Decision 11 puts this derivation in Python for exactly that
+           reason — a template doing it would be a second place it could be got
+           wrong.
+        """
+        super().__init__(*args, **kwargs)
+        self.fields[self.EVERYONE_FIELD] = forms.BooleanField(
+            required=False,
+            label="Everyone",
+            help_text="Outside volunteers and staff alike — the same as "
+                      "ticking both boxes below.",
+        )
+        instance = getattr(self, "instance", None)
+        if instance is not None and instance.pk is not None:
+            self.initial.setdefault(
+                self.EVERYONE_FIELD,
+                instance.visible_to_outsiders and instance.visible_to_all_staff)
+        self.order_fields(None)
+
+    def order_fields(self, field_order):
+        """Order as asked, then always re-seat the tick above the pair it fills in.
+
+        ⚠️ An override rather than a method subclasses must remember to call
+           (2026-08-27). Django's `order_fields()` sends anything it was not
+           handed to the **end**, so a form that lists its fields explicitly —
+           EventRoleForm does — threw the tick down under "notes", three fields
+           below the two it explains. That was fixed by having that form call a
+           `place_everyone_tick()` afterwards, which is a convention every
+           future audience form would have to know about and nothing would
+           enforce. Here the re-seating happens inside the very call that
+           disturbs it, so it cannot be skipped.
+
+        ⚠️ `order_fields(None)` is how __init__ asks for just the re-seating:
+           Django returns early on None, and the half below still runs.
+        """
+        super().order_fields(field_order)
+        if self.EVERYONE_FIELD not in self.fields:
+            return
+        names = [name for name in self.fields if name != self.EVERYONE_FIELD]
+        names.insert(names.index("visible_to_outsiders"), self.EVERYONE_FIELD)
+        super().order_fields(names)
 
     def audience(self):
         """The submitted audience as an Audience.Spec.
@@ -280,11 +368,17 @@ class AudienceFormMixin:
         ⚠️ Built from `cleaned_data`, never from `self.instance` — on an edit
            the instance still holds the audience already in the database, and
            validating that is the trap L2.1 records in full.
+
+        ⚠️ "Everyone" is expanded here, so every rule below and every caller
+           sees the two values that actually get stored. Expanding it later —
+           in save(), say — would let the rules validate one audience while the
+           database received another.
         """
         ministries = self.cleaned_data.get("visible_to_ministries") or []
+        everyone = bool(self.cleaned_data.get(self.EVERYONE_FIELD))
         return Audience.Spec(
-            outsiders=bool(self.cleaned_data.get("visible_to_outsiders")),
-            all_staff=bool(self.cleaned_data.get("visible_to_all_staff")),
+            outsiders=everyone or bool(self.cleaned_data.get("visible_to_outsiders")),
+            all_staff=everyone or bool(self.cleaned_data.get("visible_to_all_staff")),
             ministries=frozenset(m.pk for m in ministries),
         )
 
@@ -304,23 +398,44 @@ class AudienceFormMixin:
         ⚠️ `roles.all()` raises outright on an unsaved instance (verified), and
            a new event has no roles anyway, so the pk check is not defensive
            tidiness.
+
+        ⚠️ The walk itself — the query hints included — is models.roles_left_behind(),
+           shared with services.set_audience(). This side groups and prints;
+           that side stops at the first. Written out at both until 2026-08-27,
+           which had put one N+1 fix in two places.
         """
         if getattr(self.instance, "pk", None) is None:
             return
         roles = getattr(self.instance, "roles", None)
         if roles is None:
             return
-        blocked = []
-        for role in roles.select_related("role"):
-            try:
-                refuse_wider_than_event(event=event, role=Audience.Spec.of(role))
-            except ValidationError:
-                blocked.append(role.role.name)
-        if blocked:
-            self.add_error("visible_to_outsiders", ValidationError(
-                "Narrowing this event would leave %(roles)s open to people who "
-                "could no longer see it. Narrow those roles first.",
-                params={"roles": ", ".join(f"“{name}”" for name in blocked)},
+        # ⚠️ Keyed by the tick **and** the people, not by the tick alone. The
+        #    tick decides which box the sentence hangs under; the phrase decides
+        #    which sentence, because two roles under one box can be blocked for
+        #    different reasons — one naming Tax Help and one naming Youth Work —
+        #    and a single sentence covering both would name neither.
+        #
+        # ⚠️ Grouping on the phrase is also what keeps the ordinary case short.
+        #    Three roles blocked by the same ministry are one sentence naming it
+        #    once; per-role parentheses would print "(Tax Help)" three times,
+        #    which reads as three problems rather than one.
+        blocked = {}
+        for field, audience, name in roles_left_behind(event, roles):
+            blocked.setdefault((field, audience), []).append(name)
+        for (field, audience), names in blocked.items():
+            self.add_error(field, ValidationError(
+                # ⚠️ The stem is models.NARROWING_MESSAGE, shared with the
+                #    service door so the two read alike; only the tail differs,
+                #    because only this side can offer somewhere to go next.
+                NARROWING_MESSAGE + " Narrow %(those)s first.",
+                params={
+                    "roles": ", ".join(f"“{name}”" for name in names),
+                    "audience": audience,
+                    # One blocked role is the commonest case by a distance, and
+                    # "Narrow those roles first" for a single one reads as
+                    # though something has been missed.
+                    "those": "that role" if len(names) == 1 else "those roles",
+                },
             ))
 
     def refuse_wider_than_its_event(self, role):
@@ -342,14 +457,20 @@ class AudienceFormMixin:
         try:
             refuse_wider_than_event(event=Audience.Spec.of(event), role=role)
         except ValidationError as error:
-            self.add_error("visible_to_outsiders", error)
+            # ⚠️ `None`, so Django distributes the error by the keys the rule
+            #    put in it. Naming a field here would override what the rule
+            #    knows and put every refusal back on one box.
+            self.add_error(None, error)
 
     def clean_audience(self):
         """Run the two rules that an audience obeys on its own.
 
         ⚠️ Errors land on a **field**, never on the form as a whole. "Say who
            this is for" at the top of a long publish form leaves somebody
-           hunting for which box it means.
+           hunting for which box it means — and landing on the *wrong* field is
+           that same failure with an extra step, which is why the two rules
+           below go to different places and why refuse_wider_than_event() names
+           its own.
 
         Returns the Spec when it is usable, or None when the audience is empty
         — ⚠️ so the caller can stop rather than go on to compare an empty
@@ -358,17 +479,34 @@ class AudienceFormMixin:
         real fault would be buried under a list of consequences.
         """
         spec = self.audience()
+        # 🔴 Written back, and this line is what makes "Everyone" real. The Spec
+        #    is only what the rules see; what reaches the database is whatever
+        #    ModelForm finds in cleaned_data. Without these two the form would
+        #    validate an audience of "everyone" and then save one of "nobody" —
+        #    a published event visible to no one, past the very rule below that
+        #    exists to prevent it.
+        self.cleaned_data["visible_to_outsiders"] = spec.outsiders
+        self.cleaned_data["visible_to_all_staff"] = spec.all_staff
+
         empty = False
         try:
             refuse_empty_audience(
                 outsiders=spec.outsiders, all_staff=spec.all_staff,
                 ministries=spec.ministries, on=self.AUDIENCE_ON)
         except ValidationError as error:
-            self.add_error("visible_to_outsiders", error)
+            # Nobody ticked: every box is wrong, so there is no single guilty
+            # one — see AUDIENCE_GROUP_FIELD.
+            self.add_error(self.AUDIENCE_GROUP_FIELD, error)
             empty = True
         try:
             refuse_redundant_audience(
-                all_staff=spec.all_staff, ministries=spec.ministries)
+                all_staff=spec.all_staff, ministries=spec.ministries,
+                # ⚠️ Named after the box they ticked. Somebody who ticked
+                #    "Everyone" never saw the phrase "Everybody on the books"
+                #    and cannot act on a sentence about it.
+                covered_by=("everyone"
+                            if self.cleaned_data.get(self.EVERYONE_FIELD)
+                            else "all_staff"))
         except ValidationError as error:
             self.add_error("visible_to_ministries", error)
         return None if empty else spec
@@ -730,8 +868,6 @@ class EventRoleForm(AudienceFormMixin, forms.ModelForm):
             "notes",
         ]
         widgets = {"visible_to_ministries": forms.CheckboxSelectMultiple}
-
-    AUDIENCE_ON = "role"
 
     def __init__(self, *args, event, **kwargs):
         super().__init__(*args, **kwargs)

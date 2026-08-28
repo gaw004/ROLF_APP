@@ -63,10 +63,15 @@
     {% include "core/components/empty.html" with message="No roles opened yet. Nobody can sign up until there is at least one job to sign up for." %}
   {% endif %}
 
+  {% comment %}
+  ⚠️ `x-data="audienceTicks"`：和活动那张表单同一个组件、同一条理由（D24 纯增强）。
+     ⚠️ 而这一张是 htmx 换进来的 —— 整个面板 outerHTML 换掉之后 Alpine 会在新的
+        节点上重新初始化，因为 x-data 写在被换掉的这段 HTML 里而不是外面。
+  {% endcomment %}
   <form method="post" action="{% url 'events:event_roles' event.pk %}"
         hx-post="{% url 'events:event_roles' event.pk %}"
         hx-target="#roles-panel" hx-swap="outerHTML"
-        class="card mt-6">
+        class="card mt-6" x-data="audienceTicks">
     {% csrf_token %}
     <h2 class="mb-4 text-lg font-semibold">Add a role</h2>
     {% comment %}

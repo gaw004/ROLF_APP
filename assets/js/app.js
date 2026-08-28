@@ -142,6 +142,79 @@ Alpine.data("passwordReveal", () => ({
 }));
 
 // ---------------------------------------------------------------------------
+// 受众勾选框之间的包含关系（2026-08-27）
+//
+// 三档勾选是**包含**关系，不是并列：「所有人」= 外部 + 全体在编，而「全体在编」
+// 已经包含每一个 ministry。服务端两条规则拒绝这些冗余组合
+// （events/models.py 的 refuse_redundant_audience），这里只是**提前**告诉人
+// 哪几个已经被上面那个勾包住了 —— 否则发现这条规则的唯一方式是提交一次挨报错。
+//
+// ⚠️ 纯 UI 状态，没有任何判断落在这里（D24）：谁能看见活动仍然只由服务端决定。
+//
+// 🔴 **只禁用「没有值」的那些**（`disabled = covered && !checked`），
+//    而这一行是这个组件唯一真正微妙的地方。禁用的控件不随表单提交 —— 所以无脑
+//    禁用会让一场原本勾着「报税互助」的活动，在管理员补勾「全体在编」时把报税互助
+//    **静默丢掉**：那两个值从此进不了 POST，服务端那条「同一个状态两种存法」的拒绝
+//    根本不触发。没有 JS 的同一次提交会被拒绝并要求他自己选。
+//    有 JS 和没 JS 存进不同的结果 —— 正是 D24 说增强永远不许做的事。
+//    ⚠️ 而按值禁用之后，报错信息里那句「取消它，或者取消那几个 ministry」也真的
+//       可点了：被盖住**且勾着**的那几个仍然点得动，正是人要去取消的那几个。
+//
+// ⚠️ 「所有人」那一对不受这条影响（勾了它，那两个的值由服务端从它推出来），
+//    但判据仍然统一写成一条 —— 两种规则会在某一格上走散。
+//
+// ⚠️ 照 passwordReveal 那条规矩从 $root 里按 name 找控件，**不靠 x-ref、
+//    也不往 forms.py 的 widget attrs 里塞 x- 属性** —— 那里只放语义属性。
+//    于是任何一张带受众的表单只要在 <form> 上加一句 x-data 就有了这个行为。
+//    ⚠️ 名字只在这一份声明里出现，events/tests.py 会把它读出来跟 Django 渲染的
+//       对 —— 两边任一改名都变红。改这里就是改那份契约。
+const AUDIENCE_BOXES = {
+  everyone: "audience_is_everyone",
+  outsiders: "visible_to_outsiders",
+  allStaff: "visible_to_all_staff",
+  ministries: "visible_to_ministries",
+};
+
+Alpine.data("audienceTicks", () => ({
+  init() {
+    // ⚠️ 监听挂在整个 <form> 上（change 不冒泡到别处），所以先问一句改的是不是
+    //    受众里的控件 —— 否则改一次活动名、时间、状态、图片都要把整张表单扫五遍。
+    this.$root.addEventListener("change", (event) => {
+      if (Object.values(AUDIENCE_BOXES).includes(event.target.name)) this.sync();
+    });
+    this.sync();
+  },
+
+  boxes(name) {
+    return Array.from(this.$root.querySelectorAll(`[name="${name}"]`));
+  },
+
+  sync() {
+    const everyone = this.boxes(AUDIENCE_BOXES.everyone)[0];
+    const allStaff = this.boxes(AUDIENCE_BOXES.allStaff);
+    const wide = Boolean(everyone && everyone.checked);
+    this.cover(this.boxes(AUDIENCE_BOXES.outsiders), wide);
+    this.cover(allStaff, wide);
+    this.cover(
+      this.boxes(AUDIENCE_BOXES.ministries),
+      wide || allStaff.some((box) => box.checked),
+    );
+  },
+
+  // ⚠️ 灰的不只是那个小方块。`field.html` 和 Django 的多选 widget 各自渲染
+  //    自己的 <label>，而一个满对比度的标签配一个变淡的框，读起来是页面坏了。
+  //    所以给包着它的 <label> 或 .field 加一个 class，样式挂在 app.css 上
+  //    —— 样式落点规矩：这里不写任何一条 CSS，连 cursor 都不写（那条在 base 层）。
+  cover(boxes, covered) {
+    boxes.forEach((box) => {
+      box.disabled = covered && !box.checked;
+      const holder = box.closest("label") || box.closest(".field");
+      if (holder) holder.classList.toggle("audience-covered", covered);
+    });
+  },
+}));
+
+// ---------------------------------------------------------------------------
 // Memories 的悬浮窗（2026-08-06）
 //
 // 纯 UI 状态：开没开、开在第几张。符合 D24 对 Alpine 的口径 —— 这里没有任何

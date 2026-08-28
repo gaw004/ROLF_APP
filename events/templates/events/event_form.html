@@ -33,7 +33,13 @@
   ⚠️ enctype 不能少。没有它，浏览器把表单当 urlencoded 发，文件**只发文件名**——
      表单照样通过验证、活动照样保存，就是没有图片。整条路上没有任何报错。
   {% endcomment %}
-  <form method="post" enctype="multipart/form-data" class="card mt-6">
+  {% comment %}
+  ⚠️ `x-data="audienceTicks"` 是纯增强（D24）：勾了「所有人」或「全体在编」之后，
+     被它包住的那几个勾变灰点不动。没有 Alpine 时它们照常能点，冗余组合由服务端
+     拒绝并说清楚 —— 少的只是一次往返，不是功能。
+  {% endcomment %}
+  <form method="post" enctype="multipart/form-data" class="card mt-6"
+        x-data="audienceTicks">
     {% csrf_token %}
     {% include "core/components/form_fields.html" %}
     <div class="mt-6 flex flex-wrap gap-2">

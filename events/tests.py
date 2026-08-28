@@ -27,7 +27,8 @@ from django.db import IntegrityError, connection, transaction
 from django.db.models import ProtectedError
 from django.core.files.base import ContentFile
 from django.core.files.uploadedfile import SimpleUploadedFile
-from django.test import SimpleTestCase, TestCase, override_settings
+from django.template.loader import render_to_string
+from django.test import RequestFactory, SimpleTestCase, TestCase, override_settings
 from PIL import Image as PILImage
 from django.utils import formats, timezone
 from django.test.utils import CaptureQueriesContext
@@ -61,12 +62,14 @@ from .forms import (
 )
 from .views import EVENTS_PER_PAGE
 from .models import (
+    Audience,
     Event,
     EventNotification,
     EventRole,
     EventType,
     Participation,
     ParticipationRole,
+    refuse_wider_than_event,
 )
 from .services import (
     NoHoursHere,
@@ -79,6 +82,8 @@ from .services import (
     TurnedUp,
     cancel,
     signups_asked_about_serving,
+    inherit_audience,
+    set_audience,
     check_in,
     check_out,
     clear_hours,
@@ -185,6 +190,22 @@ def make_role(event, code, name=None, needed_count=None, nature=None, **fields):
     """⚠️ `nature` lands on the ParticipationRole, not on the EventRole — L1's
     axis belongs to the kind of job, not to one event's opening of it. Defaults
     to helping, matching the column's own default.
+
+    ⚠️ L3 (2026-08-27). The audience comes from the event, the same default
+       EventRoleForm gives a new role (decision 15). Without it every fixture
+       role here is open to **nobody** — the three columns default to
+       False/False/none — which is invisible only until L2.4 starts reading
+       them, and then red across most of this file at once. make_event() got
+       its equivalent on 2026-08-26 and this half was missed.
+
+    ⚠️ Inherited rather than hard-coded open-to-outsiders, because the classes
+       that build staff-only events (ForAudienceTests) would otherwise get roles
+       wider than their own event — a fixture manufacturing the exact state
+       refuse_wider_than_event() forbids.
+
+    ⚠️ Asked through `audience_is_empty`, so a caller that spells an audience
+       out in `fields` keeps it. Nothing does today; the check is what makes
+       that stay true rather than becoming a trap.
     """
     role, _ = ParticipationRole.objects.get_or_create(
         code=code,
@@ -193,8 +214,12 @@ def make_role(event, code, name=None, needed_count=None, nature=None, **fields):
             **({"nature": nature} if nature else {}),
         },
     )
-    return EventRole.objects.create(
+    event_role = EventRole.objects.create(
         event=event, role=role, needed_count=needed_count, **fields)
+    # ⚠️ Through services, which validates — so a fixture cannot quietly
+    #    manufacture a state the site refuses, and the door the importers will
+    #    use is exercised sixty-five times per run.
+    return inherit_audience(event_role, event)
 
 
 class EventRoleIsARoleEvenWithNobodyInItTests(TestCase):
@@ -662,6 +687,80 @@ class MinistryReportTests(TestCase):
         self.signup(self.wang)
         self.signup(self.li, role=self.a_seat())
         self.assertEqual(self.report()["figures"]["participants"], 2)
+
+    # --- the row the constraint cannot see (2026-08-27) -------------------
+
+    def a_seat_row_carrying_hours(self, contact=None):
+        """A signup on an attending role that has hours anyway.
+
+        🔴 Not a state the site can produce, and that is the point — it is the
+           state Participation.records_hours' docstring says the check
+           constraint cannot catch, because the constraint keys on
+           `served_as == not_applicable` and this row's identity was never
+           written. A bulk_create, an importer, or any row older than L1.3
+           arrives looking exactly like this.
+
+        ⚠️ `status=attended` because `participation_hours_only_when_attended`
+           is a **real** constraint and would refuse the insert. Fighting one
+           constraint to demonstrate the gap in another would be testing the
+           wrong thing.
+        """
+        return Participation.objects.create(
+            contact=contact or self.li, event_role=self.a_seat(),
+            hours=Decimal("9.00"), status=Participation.Status.ATTENDED,
+        )
+
+    def test_a_stray_attending_row_with_hours_does_not_inflate_the_total(self):
+        """Numerator and denominator over one set of rows, or the ratio is fiction.
+
+        Before 2026-08-27 the hours total came from every signup while the
+        people it was divided by came from the helping ones — so this row added
+        nine hours to the top of a fraction and nobody to the bottom.
+        """
+        self.signup(self.wang, hours=Decimal("4.00"))
+        self.a_seat_row_carrying_hours()
+        figures = self.report()["figures"]
+        self.assertEqual(figures["hours"], Decimal("4.00"))
+        self.assertEqual(figures["hours_records"], 1)
+        self.assertEqual(figures["helpers"], 1)
+        self.assertEqual(figures["hours_per_participant"], Decimal("4.00"))
+
+    def test_hours_missing_cannot_go_negative(self):
+        """⚠️ What the old subtraction did on this row, and it printed it.
+
+        `helped.count() - hours_records` mixed two sets: the stray row counted
+        as a record without counting as a signup, so a page whose whole purpose
+        is to say how much is unaccounted for announced “−1 helping signups
+        with none”.
+        """
+        self.a_seat_row_carrying_hours()
+        self.assertEqual(self.report()["figures"]["hours_missing"], 0)
+
+    def test_the_hours_charts_leave_the_stray_row_out_too(self):
+        """All three at once, because it is one narrowing and they must agree.
+
+        ⚠️ The by-month chart is the one that cannot be left behind: it is
+           printed directly under the hours total and is supposed to be that
+           total broken up. Narrowing the figure alone would put a chart
+           summing to 13 under a number reading 4.00, on one screen.
+        """
+        self.signup(self.wang, hours=Decimal("4.00"))
+        self.a_seat_row_carrying_hours()
+        charts = self.report()["charts"]
+
+        by_month = [bar.caption for bar in charts["hours_by_month"].bars]
+        self.assertIn("4.00 h", by_month)
+        self.assertNotIn("13.00 h", by_month)
+
+        # An attending role has no hours by definition, so a bar for one is not
+        # a fact about that role.
+        self.assertNotIn(
+            "ESL seat", [bar.label for bar in charts["hours_by_role"].bars])
+
+        # …and a learner does not belong on a leaderboard titled "Most hours".
+        self.assertNotIn(
+            self.li.short_label,
+            [bar.label for bar in charts["top_participants"].bars])
 
     def test_people_served_counts_the_esl_class(self):
         self.signup(self.wang, role=self.a_seat())
@@ -2069,6 +2168,37 @@ class AudienceContainmentTests(TestCase):
         self.event = make_event(ministry=self.pantry, visible_to_outsiders=False)
         self.event.visible_to_ministries.add(self.pantry)
 
+    def a_wide_event(self, name="Wide", **fields):
+        """An event open to outsiders, for the tests that then narrow it."""
+        return make_event(ministry=self.pantry, name=name,
+                          owner=self.event.owner, visible_to_outsiders=True,
+                          **fields)
+
+    def narrowing_form(self, event, **ticks):
+        """EventForm submitting `event` unchanged except for its audience.
+
+        ⚠️ One payload, because five copies of the same six keys meant a new
+           required field on EventForm turned five tests red in five places —
+           and a reader had to diff four near-identical dicts to find the key
+           that was the point of each one. The sibling class already had a
+           `payload()` helper doing this job.
+        """
+        return EventForm({
+            "name": event.name, "event_type": event.event_type_id,
+            "ministry": event.ministry_id,
+            "start_time": "2026-09-01T09:00", "end_time": "2026-09-01T12:00",
+            "status": event.status,
+            **ticks,
+        }, instance=event, user=self.an_admin())
+
+    def an_admin(self):
+        """⚠️ Memoised: register_account() uses a fixed address, so a second
+        call in one test hits the unique constraint on it.
+        """
+        if not hasattr(self, "_admin"):
+            self._admin = self.a_user()
+        return self._admin
+
     def role_form(self, event=None, **payload):
         return EventRoleForm({
             "role": ParticipationRole.seed_catch_all(
@@ -2103,12 +2233,24 @@ class AudienceContainmentTests(TestCase):
         # outsiders, who cannot see the event at all.
         form = self.role_form(visible_to_outsiders=True)
         self.assertFalse(form.is_valid())
+        # ⚠️ The one case where the old behaviour was right by accident — kept
+        #    beside the two that were not, so the trio reads as three boxes
+        #    rather than one box and two exceptions.
         self.assertIn("visible_to_outsiders", form.errors)
 
     def test_a_role_for_a_ministry_the_event_left_out_is_refused_and_names_it(self):
+        """⚠️ …and the sentence lands on the ministries box (2026-08-27).
+
+        It used to land on "People with no current post" — every one of the
+        three refusals did — so somebody refused for naming Tax Help was sent
+        to a tick that has nothing to do with Tax Help. The forms' own rule is
+        that these go on a field so nobody has to hunt for which one, and the
+        wrong field is that failure with an extra step.
+        """
         form = self.role_form(visible_to_ministries=[self.pantry.pk, self.tax.pk])
         self.assertFalse(form.is_valid())
-        self.assertIn("Tax Help", " ".join(form.errors["visible_to_outsiders"]))
+        self.assertIn("Tax Help", " ".join(form.errors["visible_to_ministries"]))
+        self.assertNotIn("visible_to_outsiders", form.errors)
 
     def test_a_role_narrower_than_its_event_is_fine(self):
         wide = make_event(ministry=self.pantry, name="Wide",
@@ -2136,27 +2278,274 @@ class AudienceContainmentTests(TestCase):
         every.visible_to_ministries.set([self.pantry, self.tax])
         form = self.role_form(event=every, visible_to_all_staff=True)
         self.assertFalse(form.is_valid())
-        self.assertIn("added later", " ".join(form.errors["visible_to_outsiders"]))
+        # …on the all-staff box, which is the tick this is about.
+        self.assertIn("added later", " ".join(form.errors["visible_to_all_staff"]))
+        self.assertNotIn("visible_to_outsiders", form.errors)
 
     # --- the same rule, asked from the event's side ------------------------
 
     def test_narrowing_an_event_below_its_roles_is_refused_and_names_them(self):
-        wide = make_event(ministry=self.pantry, name="Wide",
-                          owner=self.event.owner, visible_to_outsiders=True)
+        wide = self.a_wide_event()
         role = EventRole.objects.create(
             event=wide, role=ParticipationRole.seed_catch_all(
                 ParticipationRole.Nature.HELPING),
             visible_to_outsiders=True)
-        form = EventForm({
-            "name": wide.name, "event_type": wide.event_type_id,
-            "ministry": wide.ministry_id,
-            "start_time": "2026-09-01T09:00", "end_time": "2026-09-01T12:00",
-            "status": wide.status,
-            # Narrowing: outsiders dropped, staff only.
-            "visible_to_all_staff": True,
-        }, instance=wide, user=self.a_user())
+        # Narrowing: outsiders dropped, staff only.
+        form = self.narrowing_form(wide, visible_to_all_staff=True)
         self.assertFalse(form.is_valid())
         self.assertIn(role.role.name, " ".join(form.errors["visible_to_outsiders"]))
+
+    def test_narrowing_two_ways_at_once_reports_each_on_its_own_tick(self):
+        """⚠️ Grouped by the tick that blocked them, not gathered into one list.
+
+        Dropping "outsiders" and a ministry in the same submission breaks roles
+        for two unrelated reasons. One combined sentence on one box describes
+        neither — the reader's next move is to put a specific tick back, and
+        which one is the whole content of the message.
+        """
+        wide = self.a_wide_event()
+        wide.visible_to_ministries.set([self.pantry, self.tax])
+        outside_role = EventRole.objects.create(
+            event=wide, role=ParticipationRole.seed_catch_all(
+                ParticipationRole.Nature.HELPING),
+            visible_to_outsiders=True)
+        tax_role = EventRole.objects.create(
+            event=wide, role=ParticipationRole.seed_catch_all(
+                ParticipationRole.Nature.ATTENDING))
+        tax_role.visible_to_ministries.set([self.tax])
+
+        # Narrowing on two axes at once: outsiders dropped, Tax Help dropped.
+        form = self.narrowing_form(wide, visible_to_ministries=[self.pantry.pk])
+
+        self.assertFalse(form.is_valid())
+        outsiders = " ".join(form.errors["visible_to_outsiders"])
+        ministries = " ".join(form.errors["visible_to_ministries"])
+        self.assertIn(outside_role.role.name, outsiders)
+        self.assertNotIn(tax_role.role.name, outsiders)
+        self.assertIn(tax_role.role.name, ministries)
+        self.assertNotIn(outside_role.role.name, ministries)
+        # …and each says who, not only which role (2026-08-27). Knowing the tick
+        # narrows it to a box; knowing the ministry is what saves opening every
+        # role in turn to find which one.
+        self.assertIn("people with no current post", outsiders)
+        self.assertIn("Tax Help", ministries)
+
+    def test_checking_the_roles_costs_the_same_whether_there_are_two_or_twelve(self):
+        """⚠️ One query for every role's audience, not one per role.
+
+        Spec.of() used to read the ManyToMany with `values_list`, which builds
+        a fresh queryset and therefore ignores prefetch_related — so this loop
+        went back to the database once per role and no prefetch at the call
+        site could have helped. Measured before the fix: eight roles, eight
+        extra queries.
+
+        ⚠️ Asserted as "the same", never as an absolute number. A count pinned
+           to 9 goes red the day somebody adds a field to this form, and the
+           next person raises the number instead of asking why — which is how a
+           performance test turns into a rubber stamp. What matters is that the
+           cost does not follow the number of roles.
+        """
+        def narrowing_queries(role_count):
+            event = make_event(ministry=self.pantry, name=f"Wide {role_count}",
+                               owner=self.event.owner, visible_to_outsiders=True)
+            for index in range(role_count):
+                make_role(event, f"role-{role_count}-{index}")
+            form = EventForm({
+                "name": event.name, "event_type": event.event_type_id,
+                "ministry": event.ministry_id,
+                "start_time": "2026-09-01T09:00", "end_time": "2026-09-01T12:00",
+                "status": event.status,
+                "visible_to_all_staff": "on",
+            }, instance=event, user=self.an_admin())
+            with CaptureQueriesContext(connection) as captured:
+                self.assertFalse(form.is_valid())
+            return len(captured.captured_queries)
+
+        self.assertEqual(narrowing_queries(2), narrowing_queries(12))
+
+    def test_roles_blocked_by_the_same_ministry_name_it_once(self):
+        """⚠️ Grouped by the tick **and** the people, which is what keeps it short.
+
+        Three roles blocked by one ministry is one problem with three names on
+        it, not three problems. Annotating each role with its own reason would
+        print “Tax Help” three times, and a message that repeats itself reads
+        as a list of separate faults.
+        """
+        wide = self.a_wide_event()
+        wide.visible_to_ministries.set([self.pantry, self.tax])
+        for code in ("interpreting", "lifting", "welcome"):
+            role, _ = ParticipationRole.objects.get_or_create(
+                code=code, defaults={"name": code.title()})
+            blocked = EventRole.objects.create(event=wide, role=role)
+            blocked.visible_to_ministries.set([self.tax])
+
+        form = self.narrowing_form(wide, visible_to_ministries=[self.pantry.pk])
+
+        self.assertFalse(form.is_valid())
+        messages = form.errors["visible_to_ministries"]
+        self.assertEqual(len(messages), 1, messages)
+        self.assertEqual(messages[0].count("Tax Help"), 1, messages[0])
+        for name in ("Interpreting", "Lifting", "Welcome"):
+            self.assertIn(name, messages[0])
+
+    def test_two_ministries_are_joined_with_a_word(self):
+        """A phrase, not a comma list — it sits unquoted inside a sentence.
+
+        "open to staff in Tax Help, Youth Work" reads as though it stops
+        halfway. The role names in the same messages are each in quotes, which
+        delimits them without help; these are not.
+        """
+        youth = Ministry.objects.create(code="youth", name="Youth Work")
+        form = self.role_form(
+            visible_to_ministries=[self.pantry.pk, self.tax.pk, youth.pk])
+        self.assertFalse(form.is_valid())
+        self.assertIn("Tax Help and Youth Work",
+                      " ".join(form.errors["visible_to_ministries"]))
+
+    def test_one_blocked_role_is_not_told_to_narrow_those_roles(self):
+        # ⚠️ The commonest case by a distance. "Narrow those roles first" for a
+        #    single named role reads as though the message lost one.
+        wide = self.a_wide_event()
+        EventRole.objects.create(
+            event=wide, role=ParticipationRole.seed_catch_all(
+                ParticipationRole.Nature.HELPING),
+            visible_to_outsiders=True)
+        form = self.narrowing_form(wide, visible_to_all_staff="on")
+        self.assertFalse(form.is_valid())
+        message = " ".join(form.errors["visible_to_outsiders"])
+        self.assertIn("Narrow that role first", message)
+
+    # --- the door for everything that is not a form -----------------------
+
+    def a_role_on(self, event):
+        role, _ = ParticipationRole.objects.get_or_create(
+            code="lifting", defaults={"name": "Lifting"})
+        return EventRole.objects.create(event=event, role=role)
+
+    def test_the_service_refuses_an_audience_nobody_can_see(self):
+        event = make_event(ministry=self.pantry, visible_to_outsiders=True)
+        with self.assertRaises(ValidationError) as refused:
+            set_audience(event, Audience.Spec(False, False, frozenset()))
+        self.assertIn("Say who this is for", str(refused.exception))
+        # ⚠️ And the row is untouched — refuse first, write second.
+        event.refresh_from_db()
+        self.assertTrue(event.visible_to_outsiders)
+
+    def test_the_service_refuses_all_staff_beside_a_named_ministry(self):
+        event = make_event(ministry=self.pantry, visible_to_outsiders=True)
+        with self.assertRaises(ValidationError):
+            set_audience(
+                event, Audience.Spec(False, True, frozenset({self.pantry.pk})))
+
+    def test_the_service_refuses_a_role_wider_than_its_event(self):
+        event = make_event(ministry=self.pantry, visible_to_outsiders=False,
+                           visible_to_all_staff=True)
+        role = self.a_role_on(event)
+        with self.assertRaises(ValidationError):
+            set_audience(role, Audience.Spec(True, False, frozenset()))
+
+    def test_the_service_refuses_narrowing_an_event_below_its_roles(self):
+        """⚠️ The event side, which the form only reaches through `instance`.
+
+        A script narrowing an event has no form and no instance-bound roles to
+        stumble over — it just writes three columns. Before this, the state on
+        the other side was somebody signed up for an event they cannot see.
+        """
+        event = make_event(ministry=self.pantry, visible_to_outsiders=True)
+        role = self.a_role_on(event)
+        set_audience(role, Audience.Spec(True, False, frozenset()))
+        with self.assertRaises(ValidationError) as refused:
+            set_audience(event, Audience.Spec(False, True, frozenset()))
+        self.assertIn(role.role.name, str(refused.exception))
+
+    def test_a_legal_audience_goes_through_and_carries_the_ministries(self):
+        event = make_event(ministry=self.pantry, visible_to_outsiders=True)
+        set_audience(
+            event,
+            Audience.Spec(False, False, frozenset({self.pantry.pk, self.tax.pk})))
+        event.refresh_from_db()
+        self.assertFalse(event.visible_to_outsiders)
+        self.assertEqual(
+            set(event.visible_to_ministries.values_list("code", flat=True)),
+            {self.pantry.code, self.tax.code})
+
+    def test_a_refused_audience_leaves_the_row_exactly_as_it_was(self):
+        """Refuse first, write second — including the ministries.
+
+        ⚠️ Named for what it actually pins. It was called
+           "…leaves_no_half_narrowed_row" and its docstring claimed to be the
+           reason set_audience() is atomic — but taking `atomic` off leaves it
+           green, checked rather than assumed. It cannot reach that case: the
+           refusal happens before the first write, so nothing is ever half
+           done. `atomic` guards a failure *inside* the write, which nothing
+           here provokes, and services.set_audience() says so.
+        """
+        event = make_event(ministry=self.pantry, visible_to_outsiders=True)
+        event.visible_to_ministries.set([self.pantry])
+        role = self.a_role_on(event)
+        set_audience(role, Audience.Spec(True, False, frozenset()))
+        with self.assertRaises(ValidationError):
+            set_audience(event, Audience.Spec(False, False,
+                                              frozenset({self.tax.pk})))
+        event.refresh_from_db()
+        self.assertTrue(event.visible_to_outsiders)
+        self.assertEqual(
+            list(event.visible_to_ministries.values_list("code", flat=True)),
+            [self.pantry.code])
+
+    def test_the_service_and_the_forms_refuse_the_same_three_things(self):
+        """⭐ Two compositions of one rule set, pinned against each other.
+
+        The forms collect every fault and spread them across the boxes that
+        caused them; the service stops at the first. That difference is worth
+        keeping — but it means "which rules apply" is written twice, and the
+        failure of a drift is a script quietly writing something no person
+        could submit. So each refusal is put to both doors here, and neither is
+        allowed to be the lenient one.
+        """
+        # ⚠️ The ticks are written out per case rather than read back off the
+        #    Spec: reading its three fields anywhere but models.py or forms.py
+        #    is what AudienceContainmentGuardTests exists to stop, and a test
+        #    is not exempt from the rule it is testing.
+        cases = {
+            "nobody at all": (
+                Audience.Spec(False, False, frozenset()),
+                {},
+                False,
+            ),
+            "all staff and a ministry": (
+                Audience.Spec(False, True, frozenset({self.pantry.pk})),
+                {"visible_to_all_staff": "on",
+                 "visible_to_ministries": [self.pantry.pk]},
+                False,
+            ),
+            # ⚠️ Containment was missing until the walk was shared, and it was
+            #    the one that mattered: the other two run one rule each, while
+            #    this is the rule whose walk and sentence the two doors compose
+            #    separately. The pairing test skipped exactly the pair at risk.
+            "narrowing below a role": (
+                Audience.Spec(False, True, frozenset()),
+                {"visible_to_all_staff": "on"},
+                True,
+            ),
+        }
+        for name, (spec, ticks, needs_role) in cases.items():
+            with self.subTest(case=name):
+                event = make_event(ministry=self.pantry, name=f"E {name}",
+                                   visible_to_outsiders=True)
+                if needs_role:
+                    make_role(event, f"role-{needs_role}-{name}")
+                with self.assertRaises(ValidationError):
+                    set_audience(event, spec)
+
+                form = EventForm({
+                    "name": event.name, "event_type": event.event_type_id,
+                    "ministry": event.ministry_id,
+                    "start_time": "2026-09-01T09:00",
+                    "end_time": "2026-09-01T12:00", "status": event.status,
+                    **ticks,
+                }, instance=event, user=self.an_admin())
+                self.assertFalse(form.is_valid(), f"the form allowed {name}")
 
     def test_an_empty_event_audience_does_not_also_report_every_role(self):
         """⚠️ Order: the empty check returns, so containment never runs.
@@ -2165,18 +2554,12 @@ class AudienceContainmentTests(TestCase):
         without the early return one real fault (an empty audience) would be
         buried under a list of its own consequences.
         """
-        wide = make_event(ministry=self.pantry, name="Wide",
-                          owner=self.event.owner, visible_to_outsiders=True)
+        wide = self.a_wide_event()
         EventRole.objects.create(
             event=wide, role=ParticipationRole.seed_catch_all(
                 ParticipationRole.Nature.HELPING),
             visible_to_outsiders=True)
-        form = EventForm({
-            "name": wide.name, "event_type": wide.event_type_id,
-            "ministry": wide.ministry_id,
-            "start_time": "2026-09-01T09:00", "end_time": "2026-09-01T12:00",
-            "status": wide.status,
-        }, instance=wide, user=self.a_user())
+        form = self.narrowing_form(wide)
         self.assertFalse(form.is_valid())
         messages = " ".join(form.errors["visible_to_outsiders"])
         self.assertIn("Say who this is for", messages)
@@ -2212,6 +2595,65 @@ class AudienceContainmentTests(TestCase):
             visible_to_all_staff=True)
         form = EventRoleForm(instance=narrow, event=wide)
         self.assertFalse(form.initial.get("visible_to_outsiders"))
+
+    # --- decision 15 again, for callers that have no form -----------------
+
+    def test_a_role_can_take_its_audience_from_its_event_without_a_form(self):
+        """⚠️ The same default, for the paths that never touch EventRoleForm.
+
+        The demo seed, every fixture in this file, and batch three's session
+        generator all reach the database directly. Left to the columns' own
+        defaults they produce a role open to **nobody** — the state rule 1
+        forbids — and nothing reads a role's audience until L2.4, so it stays
+        invisible right up until it is everywhere.
+        """
+        event = make_event(ministry=self.pantry, name="Two ministries",
+                           visible_to_outsiders=False, visible_to_all_staff=False)
+        event.visible_to_ministries.set([self.pantry, self.tax])
+        role = EventRole.objects.create(
+            event=event, role=ParticipationRole.seed_catch_all(
+                ParticipationRole.Nature.HELPING))
+        self.assertTrue(role.audience_is_empty)
+
+        set_audience(role, Audience.Spec.of(event))
+
+        role.refresh_from_db()
+        self.assertFalse(role.visible_to_outsiders)
+        self.assertFalse(role.visible_to_all_staff)
+        # ⚠️ The ministries too. Copying the two booleans and forgetting the
+        #    ManyToMany leaves a role open to nobody on precisely the events
+        #    that named their audience most carefully.
+        self.assertEqual(
+            set(role.visible_to_ministries.values_list("code", flat=True)),
+            {self.pantry.code, self.tax.code},
+        )
+
+    def test_what_it_inherits_is_never_wider_than_the_event(self):
+        """⚠️ Why it inherits rather than defaulting to open-to-outsiders.
+
+        A hard-coded default is the obvious fix and it is wrong in the one
+        direction that matters: on a staff-only event it would manufacture the
+        exact state refuse_wider_than_event() exists to forbid.
+        """
+        staff_only = make_event(ministry=self.pantry, name="Staff only",
+                                visible_to_outsiders=False,
+                                visible_to_all_staff=True)
+        role = make_role(staff_only, "lifting")
+        self.assertFalse(role.visible_to_outsiders)
+        # …and it passes the invariant, which a hard-coded default would not.
+        refuse_wider_than_event(
+            event=Audience.Spec.of(staff_only), role=Audience.Spec.of(role))
+
+    def test_a_fixture_role_is_not_open_to_nobody(self):
+        """The regression this pair was written for: make_role() itself.
+
+        ⚠️ make_event() was given an audience on 2026-08-26 and make_role() was
+           not, so every role in this file was open to nobody for a day. It is
+           pinned here rather than left to the L2.4 tests that would eventually
+           notice, because by then the cheap way out is to relax L2.4.
+        """
+        role = make_role(make_event(ministry=self.pantry), "welcome")
+        self.assertFalse(role.audience_is_empty)
 
     def a_user(self):
         user = register_account(
@@ -2430,6 +2872,25 @@ class AudienceShapeTests(TestCase):
         self.assertTrue(event.visible_to_outsiders)
         self.assertFalse(event.visible_to_all_staff)
 
+    def test_describing_an_audience_never_touches_the_database(self):
+        """⚠️ Pins the property, not the absence of a method.
+
+        Audience.Spec had a `__str__` that ran a query for the ministry names,
+        documented "for error messages" and called by none. A `__str__` that
+        reaches the database fires wherever anything is printed — a log line, a
+        debugger, a template rendering the value — and every one of those is a
+        place nobody is looking for a query.
+
+        Asserting "there is no __str__" would forbid a perfectly good one. What
+        must stay true is that turning a Spec into text is free, so that is
+        what this asks.
+        """
+        event = make_event(ministry=self.pantry)
+        event.visible_to_ministries.set([self.pantry, self.tax])
+        spec = Audience.Spec.of(event)
+        with self.assertNumQueries(0):
+            self.assertIsInstance(f"{spec}", str)
+
     def test_a_role_carries_the_same_three(self):
         # L2 and L3 are the same three questions asked of two rows, so they are
         # the same three columns — declared once on the Audience mixin.
@@ -2461,6 +2922,176 @@ class AudienceShapeTests(TestCase):
         form = EventForm(
             self.payload(visible_to_ministries=[self.pantry.pk]), user=self.zhang)
         self.assertTrue(form.is_valid(), form.errors)
+
+    # --- decision 11: "everyone" is a tick, never a stored value ----------
+
+    def test_ticking_everyone_stores_outsiders_and_all_staff(self):
+        """⭐ Decision 11. "Everyone" is a convenience, not a third value.
+
+        Given a spelling of its own it would be one state written two ways, and
+        keeping the two agreeing forever is the bill this project has already
+        paid elsewhere. So the tick expands and the database holds the pair.
+        """
+        form = EventForm(self.payload(audience_is_everyone=True), user=self.zhang)
+        self.assertTrue(form.is_valid(), form.errors)
+        event = self.save(form)
+        self.assertTrue(event.visible_to_outsiders)
+        self.assertTrue(event.visible_to_all_staff)
+        # ⚠️ And nothing anywhere records that "everyone" was how they said it.
+        self.assertNotIn(
+            "everyone", [field.name for field in Event._meta.get_fields()])
+
+    def test_the_tick_reaches_the_database_and_not_only_the_rules(self):
+        """🔴 The half that would fail silently and catastrophically.
+
+        The rules read a Spec; the row is saved from cleaned_data. Expand for
+        the first and not the second and the form validates an event for
+        everyone, then saves one visible to **nobody** — straight past the rule
+        whose whole job is to prevent that, because that rule was shown the
+        other value.
+        """
+        form = EventForm(self.payload(audience_is_everyone=True), user=self.zhang)
+        self.assertTrue(form.is_valid(), form.errors)
+        self.assertIs(form.cleaned_data["visible_to_outsiders"], True)
+        self.assertIs(form.cleaned_data["visible_to_all_staff"], True)
+        self.save(form).refresh_from_db()
+
+    def test_an_event_for_everyone_comes_back_showing_everyone(self):
+        """⚠️ Or the convenience is a one-way trip and people stop using it.
+
+        Somebody who ticked one box and returns to two ticked boxes learns that
+        the system did not keep what they said. Derived in Python rather than in
+        a template, so there is one place it can be got wrong.
+        """
+        event = make_event(ministry=self.pantry, visible_to_outsiders=True,
+                           visible_to_all_staff=True)
+        form = EventForm(instance=event, user=self.zhang)
+        self.assertTrue(form.initial[EventForm.EVERYONE_FIELD])
+
+    def test_an_event_for_outsiders_alone_does_not_come_back_as_everyone(self):
+        # The other half — and the case decision 10 is about, where the widest
+        # looking box is not the widest setting.
+        event = make_event(ministry=self.pantry, visible_to_outsiders=True,
+                           visible_to_all_staff=False)
+        form = EventForm(instance=event, user=self.zhang)
+        self.assertFalse(form.initial[EventForm.EVERYONE_FIELD])
+
+    def test_the_tick_sits_directly_above_the_boxes_it_fills_in(self):
+        """⚠️ Not decoration: it fills in the two fields under it.
+
+        Django appends a field added in __init__, and order_fields() sends
+        anything it was not handed to the end — so on the role form this landed
+        under "notes", three fields below the pair it explains.
+        """
+        for form in (EventForm(user=self.zhang),
+                     EventRoleForm(event=make_event(ministry=self.pantry))):
+            with self.subTest(form=type(form).__name__):
+                names = list(form.fields)
+                self.assertEqual(
+                    names.index(form.EVERYONE_FIELD) + 1,
+                    names.index("visible_to_outsiders"))
+
+    def test_everyone_and_a_ministry_is_refused_in_the_words_they_used(self):
+        """⚠️ The message names the box they ticked, not the one it implies.
+
+        "“Everybody on the books” already includes every ministry" is a
+        sentence about a box this person never touched — they ticked
+        "Everyone". A refusal somebody cannot act on is barely better than none.
+        """
+        form = EventForm(
+            self.payload(audience_is_everyone=True,
+                         visible_to_ministries=[self.pantry.pk]),
+            user=self.zhang)
+        self.assertFalse(form.is_valid())
+        message = " ".join(form.errors["visible_to_ministries"])
+        self.assertIn("“Everyone”", message)
+        self.assertNotIn("Everybody on the books", message)
+
+    def test_the_greying_is_wired_to_every_form_that_edits_an_audience(self):
+        """The enhancement half of decision 13, which nothing else would notice.
+
+        ⚠️ D24: the greying keeps nobody out — refuse_redundant_audience() does
+           that, and it is tested separately. What this pins is that the hint
+           is actually attached. Take the attribute off and the rule is still
+           enforced, so every test stays green while the only way to discover
+           the rule goes back to being "submit and get told off".
+        """
+        for template in ("events/event_form.html",
+                         "events/_event_roles_panel.html"):
+            with self.subTest(template=template):
+                with open(settings.BASE_DIR / "events/templates" / template) as handle:
+                    self.assertIn('x-data="audienceTicks"', handle.read())
+
+    def test_the_ministry_group_gets_a_legend_not_a_label_on_its_first_option(self):
+        """⚠️ A group of tick boxes is not a tick box, and the difference shows.
+
+        The shared field component keyed its fieldset on `input_type ==
+        "radio"`, so this group fell through to the single-checkbox branch: one
+        control, one label beside it. With three ministries that put the
+        group's own title — "Only these ministries' staff" — in a row next to
+        Food Pantry, reading as a note about that one option, while the other
+        two had nothing saying what they were. Present since L2.1; found by
+        looking at the page.
+
+        The accessibility half is the same one the radio branch already writes
+        out: a `<label for>` points at exactly one control, so a screen reader
+        never hears the question again after the first option. `<legend>` is
+        the only thing read out with every one of them.
+        """
+        rendered = self.as_the_page_renders_it(EventForm(user=self.zhang))
+        title = "Only these ministries&#x27; staff"
+        self.assertIn(title, rendered)
+        at = rendered.index(title)
+        # The nearest opening tag before the title is a <legend>, not a <label>.
+        self.assertGreater(
+            rendered.rfind("<legend", 0, at), rendered.rfind("<label", 0, at),
+            "the group's title is still rendered as a label beside one option")
+
+    def test_a_single_tick_box_is_left_exactly_as_it_was(self):
+        # ⚠️ 44 single tick boxes in this project go through the same component.
+        #    Splitting the branch had to leave every one of them untouched, and
+        #    `use_fieldset` being False on CheckboxInput is what does it.
+        rendered = self.as_the_page_renders_it(EventForm(user=self.zhang))
+        at = rendered.index("Minors need a guardian")
+        self.assertGreater(
+            rendered.rfind("<label", 0, at), rendered.rfind("<legend", 0, at),
+            "a single tick box grew a fieldset it does not need")
+
+    def as_the_page_renders_it(self, form):
+        """The project's own component, never `str(form)`.
+
+        🔴 Written the obvious way this test proved nothing. `str(form)` runs
+           **Django's** default renderer, which already emits a fieldset and a
+           legend for any widget whose `use_fieldset` is True — so the
+           assertion above passed identically with the bug still in place,
+           verified by putting it back. Every page goes through
+           form_fields.html, and so must anything claiming to check what a page
+           shows.
+        """
+        return render_to_string("core/components/form_fields.html", {"form": form})
+
+    def test_the_greying_looks_for_the_names_django_actually_renders(self):
+        """🔴 The seam that would break in silence, and only in a browser.
+
+        The component finds its boxes by `name`, the way passwordReveal finds
+        its input — because the alternative is putting x- attributes into
+        forms.py's widget attrs, which the placement rules forbid. That leaves a
+        contract between a JavaScript file and a Django form with nothing
+        joining them: rename EVERYONE_FIELD and every test here still passes
+        while the greying quietly stops happening on both pages.
+
+        So the names are read out of the component's own declaration and
+        checked against the form, rather than typed here a third time.
+        """
+        source = (settings.BASE_DIR / "assets/js/app.js").read_text()
+        declaration = source.split("const AUDIENCE_BOXES = {")[1].split("};")[0]
+        looked_for = set(re.findall(r':\s*"([\w_]+)"', declaration))
+        self.assertTrue(looked_for, "audienceTicks stopped naming any box")
+
+        rendered = self.as_the_page_renders_it(EventForm(user=self.zhang))
+        for name in sorted(looked_for):
+            with self.subTest(name=name):
+                self.assertIn(f'name="{name}"', rendered)
 
     # --- rule 2: one state, one spelling ---------------------------------
 
@@ -2532,6 +3163,65 @@ class AudienceShapeTests(TestCase):
         from events.admin import EventAdmin
 
         self.assertTrue(issubclass(EventAdmin.form, AudienceFormMixin))
+
+    def test_every_admin_editing_an_audience_renders_all_three_ticks(self):
+        """⚠️ A standing requirement since errors started naming their own tick.
+
+        ModelForm._update_errors raises ValueError for a field the form does
+        not have, so a refusal keyed to `visible_to_ministries` on an admin
+        that renders only two of the three turns a tidy form error into a 500 —
+        on the validation path, where it is least excusable. It is the same
+        trap core/constraints.py records for CONSTRAINT_FIELD, arriving on a
+        second mapping.
+
+        ⚠️ Every audience form is walked, including the inline: restricting
+           `fields` on one screen is an ordinary thing to do and nothing else
+           would notice.
+        """
+        from django.contrib import admin as django_admin
+
+        request = self.a_staff_request()
+        checked = []
+        for model_admin in django_admin.site._registry.values():
+            editors = [(model_admin, None)]
+            editors += [(inline, model_admin.model)
+                        for inline in model_admin.get_inline_instances(request)]
+            for editor, parent in editors:
+                form = getattr(editor, "form", None)
+                if not (isinstance(form, type)
+                        and issubclass(form, AudienceFormMixin)):
+                    continue
+                if parent is None:
+                    built = editor.get_form(request)
+                else:
+                    built = editor.get_formset(request).form
+                checked.append(editor.__class__.__name__)
+                for name in Audience.AUDIENCE_FIELDS:
+                    with self.subTest(admin=editor.__class__.__name__, field=name):
+                        self.assertIn(
+                            name, built.base_fields,
+                            f"{editor.__class__.__name__} edits an audience "
+                            f"without rendering “{name}”, so a refusal naming "
+                            f"that tick would raise ValueError instead of "
+                            f"showing an error")
+        # ⚠️ The loop finding nothing would pass silently, which is the way a
+        #    check like this stops working.
+        self.assertTrue(checked, "no audience-editing admin was found to check")
+
+    def a_staff_request(self):
+        """A request the admin's permission hooks accept — with a **real** user.
+
+        ⚠️ A hand-rolled stub with is_staff/is_superuser and a permissive
+           has_perm() saves one INSERT and quietly diverges from the path the
+           admin actually takes: the day get_inline_instances() consults
+           something the stub lacks, it returns fewer editors and this check
+           degrades to watching nothing. Only assertTrue(checked) below would
+           notice, and only if it found none at all.
+        """
+        request = RequestFactory().get("/")
+        request.user = get_user_model().objects.create_superuser(
+            email="admin-walker@example.com", password="a-good-long-password")
+        return request
 
     # --- history ---------------------------------------------------------
 
@@ -4718,6 +5408,39 @@ class SeedDemoTests(TestCase):
             stray, [],
             f"seed_demo made a login outside {DEMO_ADDRESS_SUFFIX}, which "
             "check_deployment's C4.5 sweep cannot see")
+
+    def test_nothing_it_seeds_is_visible_to_nobody(self):
+        """L3. Every seeded event **and every role on it** has an audience.
+
+        ⭐ The first automated catch for a class of bug this project has so far
+           only ever found by opening a browser (participants.md section 10's
+           two seed bugs). An audience is three columns defaulting to
+           False/False/none, so any row the seed creates without saying who it
+           is for is open to nobody — which is what rule 1 forbids, and what
+           every seeded role was between 2026-08-26 and 2026-08-27.
+
+        ⚠️ The roles are the half that was missed, and the half nothing else
+           would have caught: no query reads a role's audience until L2.4, so
+           the demo looks perfect right up to the moment it empties.
+
+        ⚠️ Asked of both tables in one loop rather than only of EventRole. The
+           events were fixed first and are already covered by every page test
+           404ing; putting them here anyway is what keeps the *pair* honest the
+           next time a column is added to Audience.
+        """
+        with override_settings(DEBUG=True):
+            self.seed()
+        blind = [
+            f"{type(row).__name__} {row.pk}: {row}"
+            for rows in (Event.objects.all(), EventRole.objects.all())
+            for row in rows
+            if row.audience_is_empty
+        ]
+        self.assertEqual(
+            blind, [],
+            "seed_demo made rows nobody can see. Published and visible to "
+            "nobody is a draft, and a role nobody can take looks exactly like "
+            "one that is full:\n" + "\n".join(blind))
 
     def test_running_it_twice_does_not_double_anything(self):
         # get_or_create throughout. Three 张三 would set the duplicate warning

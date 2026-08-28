@@ -2668,12 +2668,26 @@ class ButtonCursorTests(TestCase):
         self.assertIn('[role="button"]', rule.group(1))
 
     def test_a_disabled_button_says_not_allowed_instead(self):
-        # 手型的意思是「点我」，而停用的按钮恰恰点不了。两种停用都要管：
-        # :disabled 是真按钮，[aria-disabled] 是画成停用的链接/div。
-        block = re.search(r"button:disabled,\s*\[aria-disabled=\"true\"\]\s*\{(.*?)\}",
-                          self.stylesheet(), re.S)
-        self.assertIsNotNone(block)
-        self.assertIn("not-allowed", block.group(1))
+        """手型的意思是「点我」，而停用的控件恰恰点不了。
+
+        ⚠️ 断言的是**这条规则盖住了哪几种停用**，不是选择器列表的字面文本
+           （2026-08-27 改）。原来的正则把 `button:disabled` 和
+           `[aria-disabled="true"]` 之间的逗号也钉死了，于是往列表里**加**一条
+           选择器 —— 也就是把这条规则变强 —— 会让守卫变红，而下一个人最省事的
+           反应是回头去加一条组件局部规则，正是本类 docstring 反对的那件事。
+
+        ⚠️ 四种都要在：真按钮、真输入框（受众那一组勾选框会被禁用）、
+           包着停用输入框的 `label`（上面那条 `label[for]` 会把它变成手），
+           以及画成停用的链接/div。
+        """
+        block = re.search(r"\n((?:\s*[^{};\n]+,\n)*[^{};\n]*)\{\s*cursor: not-allowed;",
+                          self.stylesheet())
+        self.assertIsNotNone(block, "assets/app.css 里没有那条 cursor: not-allowed 规则")
+        selectors = block.group(1)
+        for wanted in ("button:disabled", "input:disabled",
+                       "label:has(input:disabled)", '[aria-disabled="true"]'):
+            with self.subTest(selector=wanted):
+                self.assertIn(wanted, selectors)
 
     def test_it_actually_survived_the_build(self):
         """⚠️ 页面读的是 static/css/app.css，不是 assets/app.css。

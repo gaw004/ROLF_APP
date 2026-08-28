@@ -31,11 +31,18 @@ from django.db import transaction
 from accounts.services import mark_email_verified, register_account
 from contact.models import Contact, EmergencyContact, RelationshipType
 from core.timeutils import local_now, local_today
-from events.models import Event, EventRole, EventType, Participation, ParticipationRole
+from events.models import (
+    Event,
+    EventRole,
+    EventType,
+    Participation,
+    ParticipationRole,
+)
 from events.services import (
     check_in,
     check_out,
     mark_absent,
+    inherit_audience,
     record_hours,
     set_served_as,
     sign_up,
@@ -796,10 +803,37 @@ class Command(BaseCommand):
     # --- helpers ---------------------------------------------------------
 
     def role(self, event, participation_role, needed_count, **fields):
-        return EventRole.objects.get_or_create(
+        """One job opened on one event — L3's audience included.
+
+        ⚠️ The audience is taken from the event (decision 15), and it has to be
+           taken from *somewhere*: the three columns default to False/False/
+           none, so a role created straight through the ORM is open to **nobody**
+           — the state rule 1 forbids, and the state every role here was in
+           between 2026-08-26 and this line. Nothing showed it, because no query
+           reads a role's audience until L2.4; the day one does, every signup
+           page in the demo empties at once.
+
+        ⚠️ Inherited rather than hard-coded to "outsiders". The events here are
+           all open to outsiders today, but batch two's walk needs staff-only
+           and ministry-only ones, and a hard-coded value would give their roles
+           an audience wider than the event — refuse_wider_than_event()'s own
+           invariant, broken by the seed.
+
+        ⚠️ Only when the row has no audience at all, so re-seeding does not
+           overwrite one somebody set in the demo database — the same
+           `defaults=` restraint get_or_create is being used for above. "Nobody
+           at all" is never something somebody chose, so filling it in also
+           repairs a database seeded before this line existed.
+        """
+        event_role, _ = EventRole.objects.get_or_create(
             event=event, role=participation_role,
             defaults={"needed_count": needed_count, **fields},
-        )[0]
+        )
+        # ⚠️ Through services, not by assigning the columns — the same choice
+        #    joins() makes about sign_up() a few lines down, and for the same
+        #    reason: the seed should walk the doors the site walks. A demo built
+        #    by writing rows directly is one that cannot show a rule failing.
+        return inherit_audience(event_role, event)
 
     def joins(self, who, event_role):
         """Sign somebody up the way the site does — through services.sign_up().

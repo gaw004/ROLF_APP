@@ -73,6 +73,7 @@ from .tokens import (
 from .services import (
     CHECKIN_CREDENTIAL_KEY,
     ConsentRequired,
+    NoHoursHere,
     CredentialExpired,
     TurnedUp,
     apply_scan,
@@ -1139,7 +1140,21 @@ def event_attendance(request, pk):
             if hours_form.is_valid():
                 # The paper-sheet path: no timestamps, just a number. Same
                 # field, because there is only one authoritative value.
-                record_hours(participation, hours_form.cleaned_data["hours"])
+                #
+                # ⚠️ Caught, for the same reason mark_absent() is caught twelve
+                #    lines up — and it was not, until 2026-08-28: record_hours()
+                #    refuses a role people *attend* (L4), and an uncaught
+                #    ValidationError out of a view is a **500**, not a message.
+                #    The template hides the box on those rows, but hiding a
+                #    control keeps nobody out: a page held open while somebody
+                #    corrects that role's `nature` posts straight into this.
+                try:
+                    record_hours(participation, hours_form.cleaned_data["hours"])
+                except NoHoursHere as error:
+                    messages.error(request, "; ".join(
+                        message for messages_ in error.message_dict.values()
+                        for message in messages_
+                    ))
         elif action == "undo":
             # ⚠️ Its own action, never folded into "absent". "I clicked the
             #    wrong row" and "they did not come" are different facts, and

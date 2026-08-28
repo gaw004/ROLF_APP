@@ -20,6 +20,7 @@ from django.apps import apps as django_apps
 from django.conf import settings
 
 from django.contrib.auth import get_user_model
+from django.contrib.auth.models import Permission
 from django.core.management import call_command
 from django.core.management.base import CommandError
 from django.core.exceptions import ValidationError
@@ -27,6 +28,7 @@ from django.db import IntegrityError, connection, transaction
 from django.db.models import ProtectedError
 from django.core.files.base import ContentFile
 from django.core.files.uploadedfile import SimpleUploadedFile
+from django.forms.models import modelform_factory
 from django.template.loader import render_to_string
 from django.test import RequestFactory, SimpleTestCase, TestCase, override_settings
 from PIL import Image as PILImage
@@ -54,6 +56,7 @@ from .management.commands.seed_demo import demo_login
 
 from . import schedule, tokens
 from .forms import (
+    AudienceAdminForm,
     AudienceFormMixin,
     EventForm,
     EventPeriodForm,
@@ -136,13 +139,15 @@ def make_event(ministry=None, **kwargs):
         "status": Event.Status.OPEN,
         # ⚠️ L3 (2026-08-26). Without an audience an event is visible to nobody
         #    and every page 404s, so a fixture that says nothing about who it is
-        #    for gets what these events meant before the field existed: open to
-        #    outsiders. The same value migration 0019 gave every existing row,
-        #    and for the same reason.
+        #    for gets an audience here.
         #
-        # ⚠️ Note it is **not** "everyone" — outsiders only, because that is the
-        #    audience most of these tests act as. Anything about staff visibility
-        #    passes its own flags; see ForAudienceTests.
+        # ⚠️ Outsiders only, and **narrower than what migration 0019 gave the
+        #    real rows** — it wrote outsiders *and* all staff. That is a
+        #    deliberate difference, corrected on 2026-08-28 after the same
+        #    misreading ("outsiders is the wide one") had been copied into
+        #    seed_demo and hidden the entire demo from its own staff. Here it is
+        #    right because these tests act as outsiders; anything about staff
+        #    visibility passes its own flags. See ForAudienceTests.
         "visible_to_outsiders": True,
     }
     fields.update(kwargs)
@@ -2661,6 +2666,210 @@ class AudienceContainmentTests(TestCase):
             legal_last_name="Admin", legal_first_name="An")
         MinistryRole.objects.create(contact=user.contact, ministry=self.pantry)
         return user
+
+
+class AudienceThroughTheAdminTests(TestCase):
+    """The three doors the audience rules reach through the admin, and two holes.
+
+    ⚠️ Everything here is about the admin specifically, and that is not
+       thoroughness for its own sake: the site's own forms set
+       `instance.event` in __init__ and always have a saved event behind them,
+       so every one of these failures is invisible from the volunteer-facing
+       pages. Found on 2026-08-28.
+    """
+
+    def setUp(self):
+        self.pantry = Ministry.objects.create(code="food_pantry", name="Food Pantry")
+        self.tax = Ministry.objects.create(code="tax_help", name="Tax Help")
+        self.event_type, _ = EventType.objects.get_or_create(
+            code="distribution", defaults={"name": "Distribution"})
+        self.lifting = ParticipationRole.objects.create(
+            code="lifting", name="Lifting")
+        # Ministry-only: the narrowest audience there is, so anything wider is
+        # unambiguous.
+        self.owner = make_person("Owner")
+        self.event = make_event(ministry=self.pantry, visible_to_outsiders=False,
+                                owner=self.owner)
+        self.event.visible_to_ministries.set([self.pantry])
+
+    def staff(self, *codenames):
+        """A Django-admin login holding exactly the named permissions.
+
+        ⚠️ `is_staff` only. A superuser is the one account these tests must not
+           use — it is handed every permission, which is precisely the state in
+           which the readonly form below is never built.
+        """
+        user = get_user_model().objects.create_user(
+            email="admin@example.com", password="a-good-long-password",
+            is_staff=True)
+        user.user_permissions.set(
+            Permission.objects.filter(codename__in=codenames))
+        self.client.force_login(user)
+        return user
+
+    # --- ① the convenience tick, on a form that has no boxes for it to fill --
+
+    def test_a_readonly_change_page_opens(self):
+        """🔴 A 500 on an ordinary read, for a whole class of account.
+
+        Somebody holding `view_event` and nothing else gets a form with every
+        field readonly — which means, to Django, a form with **no fields at
+        all**. The mixin added its "Everyone" tick to it anyway and then went
+        looking for `visible_to_outsiders` to sit above; `list.index` raises
+        ValueError on a list that has not got it, and the page 500ed.
+        """
+        self.staff("view_event")
+        response = self.client.get(
+            reverse("admin:events_event_change", args=[self.event.pk]))
+        self.assertEqual(response.status_code, 200)
+
+    def test_the_tick_is_absent_rather_than_orphaned(self):
+        """The fix stated as a property, not as "it does not crash".
+
+        A tick over two boxes nobody can edit is a control that does nothing,
+        so the answer is not to place it somewhere safe — it is not to draw it.
+        """
+        readonly = modelform_factory(Event, form=AudienceAdminForm, fields=[])
+        self.assertNotIn(AudienceFormMixin.EVERYONE_FIELD, readonly().fields)
+
+    # --- ② a role wider than its event, added through the admin -------------
+
+    def role_payload(self, **extra):
+        return {
+            "role": self.lifting.pk, "needed_count": 2,
+            "stop_at_needed_count": "on", "notes": "",
+            "visible_to_outsiders": "on",
+            **extra,
+        }
+
+    def test_adding_a_role_wider_than_a_saved_event_is_refused(self):
+        """🔴 Silent until 2026-08-28, and the silence had a mechanism.
+
+        The rule read `self.instance.event`, and on an add form the FK is still
+        only in `cleaned_data` — ModelForm copies it across in `_post_clean`,
+        after clean(). Django raises `RelatedObjectDoesNotExist` for an unset
+        FK, and that subclasses **AttributeError**, so the `getattr(...,  None)`
+        guarding the read swallowed it and the rule returned as though there
+        were nothing to check. 302, no error, role saved.
+        """
+        self.staff("add_eventrole", "view_eventrole", "change_eventrole")
+        response = self.client.post(
+            reverse("admin:events_eventrole_add"),
+            self.role_payload(event=self.event.pk))
+        self.assertEqual(response.status_code, 200, "the admin accepted it")
+        self.assertFalse(
+            EventRole.objects.filter(event=self.event).exists(),
+            "a role open to outsiders was saved on an event no outsider can "
+            "see — nobody who can take it can find it")
+        # ⚠️ And refused for the **right** reason. A missing field refuses a
+        #    submission just as thoroughly, and a test that only counts rows
+        #    cannot tell the two apart — which is how the sibling test below
+        #    passed for a while while exercising nothing.
+        self.assertIn("visible_to_outsiders", response.context["adminform"].form.errors)
+
+    def test_adding_a_role_within_its_event_still_works(self):
+        """⚠️ The half that "refuse everything" would also pass.
+
+        Without it the test above is satisfied by a rule that has become
+        unconditional, which is the more expensive failure: it blocks the
+        ordinary case on a page with no way round it.
+        """
+        self.staff("add_eventrole", "view_eventrole", "change_eventrole")
+        self.client.post(
+            reverse("admin:events_eventrole_add"),
+            self.role_payload(event=self.event.pk, visible_to_outsiders="",
+                              visible_to_ministries=[self.pantry.pk]))
+        self.assertTrue(EventRole.objects.filter(event=self.event).exists())
+
+    # --- ③ the same rule, on an event that does not exist yet ---------------
+
+    def event_payload(self, **extra):
+        return {
+            "name": "Soup run", "event_type": self.event_type.pk,
+            "ministry": self.pantry.pk,
+            # ⚠️ Split widgets. The admin renders a DateTimeField as two boxes,
+            #    and a payload with one key per field is simply *missing* both
+            #    — which refuses the submission for a reason that has nothing to
+            #    do with what is under test. Found on 2026-08-28, when the
+            #    refusal half of this pair passed while checking nothing.
+            "start_time_0": "2026-09-01", "start_time_1": "09:00:00",
+            "end_time_0": "2026-09-01", "end_time_1": "12:00:00",
+            "location": "", "description": "",
+            "owner": self.owner.pk,
+            "status": Event.Status.OPEN,
+            "visible_to_ministries": [self.pantry.pk],
+            "roles-TOTAL_FORMS": "1", "roles-INITIAL_FORMS": "0",
+            "roles-MIN_NUM_FORMS": "0", "roles-MAX_NUM_FORMS": "1000",
+            "roles-0-role": self.lifting.pk,
+            "roles-0-needed_count": "2",
+            "roles-0-notes": "",
+            **extra,
+        }
+
+    def test_an_inline_role_wider_than_the_event_being_created_is_refused(self):
+        """🔴 The other half of the same hole, and the harder one.
+
+        On the Event *add* page there is no saved event to compare against —
+        `Spec.of()` would raise outright on the unsaved instance's ManyToMany —
+        and the event-side rule (refuse_narrowing_below_the_roles) returns early
+        on `pk is None`. So with the role side silent too, **neither half of the
+        pair ran** and the admin's own create page could build the exact state
+        the pair exists to forbid.
+
+        The event's submitted audience reaches the inline because Django
+        validates the parent form first and then builds the formsets with
+        `instance=form.instance` — the object clean_audience() writes the Spec
+        onto.
+        """
+        self.staff("add_event", "view_event", "change_event",
+                   "add_eventrole", "view_eventrole", "change_eventrole")
+        response = self.client.post(
+            reverse("admin:events_event_add"),
+            self.event_payload(**{"roles-0-visible_to_outsiders": "on"}))
+        self.assertEqual(response.status_code, 200, "the admin accepted it")
+        self.assertFalse(
+            Event.objects.filter(name="Soup run").exists(),
+            "an event was created carrying a role wider than itself")
+        # The reason, for the same reason as above — and here it has to come
+        # off the *inline*, which is the thing that was silent.
+        inline = response.context["inline_admin_formsets"][0].formset
+        self.assertIn("visible_to_outsiders", inline.errors[0])
+
+    def test_an_empty_event_audience_does_not_blame_its_roles(self):
+        """⚠️ The noise clean_audience() returns None to avoid, reached by a
+           second route.
+
+        An event ticked for nobody is wider than nothing, so publishing that
+        audience to the inlines would report **every** role on the page as too
+        wide — a screen of consequences with the one real fault somewhere in
+        it. The first draft of the submitted-audience hand-off did exactly
+        that, because it wrote the Spec before the emptiness check rather than
+        after (2026-08-28).
+        """
+        self.staff("add_event", "view_event", "change_event",
+                   "add_eventrole", "view_eventrole", "change_eventrole")
+        payload = self.event_payload(**{"roles-0-visible_to_outsiders": "on"})
+        payload["visible_to_ministries"] = []          # nobody at all
+        response = self.client.post(reverse("admin:events_event_add"), payload)
+        inline = response.context["inline_admin_formsets"][0].formset
+        self.assertEqual(
+            inline.errors, [{}],
+            "the role was blamed for an event that has not said who it is for")
+        self.assertTrue(
+            response.context["adminform"].form.errors,
+            "and the event itself must still be refused")
+
+    def test_an_inline_role_within_the_event_being_created_is_saved(self):
+        # Again the other direction, for the reason above.
+        self.staff("add_event", "view_event", "change_event",
+                   "add_eventrole", "view_eventrole", "change_eventrole")
+        self.client.post(
+            reverse("admin:events_event_add"),
+            self.event_payload(
+                **{"roles-0-visible_to_ministries": [self.pantry.pk]}))
+        event = Event.objects.filter(name="Soup run").first()
+        self.assertIsNotNone(event, "the ordinary create was blocked")
+        self.assertEqual(event.roles.count(), 1)
 
 
 class ForAudienceTests(TestCase):
@@ -5442,6 +5651,36 @@ class SeedDemoTests(TestCase):
             "nobody is a draft, and a role nobody can take looks exactly like "
             "one that is full:\n" + "\n".join(blind))
 
+    def test_every_seeded_account_can_see_something(self):
+        """🔴 The one the audience assertion above was too weak to make.
+
+        `audience_is_empty` was False on every seeded event and the demo was
+        still blank for the two people who hold a post: the seed set
+        `visible_to_outsiders` alone, and that branch of for_audience() is
+        `visible_to_outsiders & ~Exists(on_the_books)` — "people with **no**
+        current post". Measured before the fix: 27 events, and Zhang San
+        (pantry lead) and Ada (pantry helper) saw nought of them, with Ada's own
+        signups page linking to a detail view that 404ed for her.
+
+        ⚠️ Asked per account rather than per event, which is what makes it a
+           different question from the one above. "Somebody can see this event"
+           and "this person can see something" both look like the audience
+           being checked, and only the second notices a whole class of account
+           being shut out.
+        """
+        with override_settings(DEBUG=True):
+            self.seed()
+        blind = []
+        for user in get_user_model().objects.all():
+            contact = getattr(user, "contact", None)
+            if Event.objects.for_audience(contact).count() == 0:
+                blind.append(user.email)
+        self.assertEqual(
+            blind, [],
+            "these seeded accounts open the demo to an empty site, which is "
+            "indistinguishable from 'nothing is on this week': "
+            + ", ".join(sorted(blind)))
+
     def test_running_it_twice_does_not_double_anything(self):
         # get_or_create throughout. Three 张三 would set the duplicate warning
         # off on every page from then on.
@@ -6660,6 +6899,74 @@ class ClearHoursTests(TestCase):
 
     def test_clearing_twice_changes_nothing(self):
         self.assertFalse(clear_hours(self.participation))
+
+
+class HoursOnAnAttendingRowTests(PageTestCase):
+    """L4 at the surface: what the attendance page does when hours are refused.
+
+    ⚠️ The template already hides the box on a role people *attend*, and that
+       keeps nobody out — the endpoint is unchanged and takes the same POST from
+       anywhere. The ordinary way in is not forgery either: a page held open
+       while somebody corrects that role's `nature` posts straight into this.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.class_role = make_role(
+            self.event, "esl_seat", "ESL seat",
+            nature=ParticipationRole.Nature.ATTENDING)
+        self.row = Participation.objects.create(
+            contact=self.lisi.contact, event_role=self.class_role)
+
+    def post(self):
+        return self.client.post(
+            reverse("events:event_attendance", args=[self.event.pk]),
+            {"participation": self.row.pk, "action": "hours", "hours": "3.00"})
+
+    def test_it_is_a_message_rather_than_a_500(self):
+        """🔴 Uncaught until 2026-08-28.
+
+        `record_hours()` raises NoHoursHere — a ValidationError — and a
+        ValidationError escaping a view is a server error, not a refusal
+        somebody can read. mark_absent()'s TurnedUp twelve lines above it in the
+        same branch had been caught since the day it was written; this one was
+        added later and the pattern beside it was not copied.
+        """
+        self.login(self.zhang)
+        response = self.post()
+        self.assertEqual(response.status_code, 302)
+
+    def test_the_refusal_says_which_role_and_why(self):
+        # ⚠️ The role's name is the content of the message. "Not allowed" leaves
+        #    somebody looking at forty rows for the one that was refused.
+        self.login(self.zhang)
+        self.post()
+        # ⚠️ Read off the **redirect target**, not out of the request that made
+        #    it: messages are consumed when they are rendered, and the POST
+        #    above rendered nothing.
+        page = self.client.get(
+            reverse("events:event_attendance", args=[self.event.pk])).content.decode()
+        self.assertIn("ESL seat", page)
+        self.assertIn("a place people attend", page)
+
+    def test_nothing_is_written(self):
+        self.login(self.zhang)
+        self.post()
+        self.row.refresh_from_db()
+        self.assertIsNone(self.row.hours)
+        self.assertEqual(self.row.status, Participation.Status.REGISTERED)
+
+    def test_a_helping_row_still_takes_its_hours(self):
+        # The other direction: a rule that refused everything would pass all
+        # three above and break the page this one is on.
+        helping = Participation.objects.create(
+            contact=self.other_admin.contact, event_role=self.role)
+        self.login(self.zhang)
+        self.client.post(
+            reverse("events:event_attendance", args=[self.event.pk]),
+            {"participation": helping.pk, "action": "hours", "hours": "3.00"})
+        helping.refresh_from_db()
+        self.assertEqual(helping.hours, Decimal("3.00"))
 
 
 class UndoFromThePageTests(PageTestCase):

@@ -326,6 +326,22 @@ class AudienceFormMixin:
            wrong.
         """
         super().__init__(*args, **kwargs)
+        # ⚠️ Only when the two boxes it fills in are actually on this form
+        #    (2026-08-28). A ModelForm whose audience fields are all readonly
+        #    has none of them — which is exactly the form the admin builds for
+        #    somebody holding `view_event` and nothing else — and the tick then
+        #    had nothing to sit above: order_fields() below went looking for
+        #    `visible_to_outsiders` in an empty list and raised ValueError, so
+        #    **opening a change page in read-only mode was a 500**. Reproduced
+        #    on 2026-08-28, for Event and EventRole alike.
+        #
+        #    Returning early is also the right answer on its own terms, not just
+        #    a way to dodge the crash: a convenience tick over two boxes nobody
+        #    can edit is a control that does nothing, and audience() reads it
+        #    with `.get()`, so its absence changes no answer.
+        pair = ("visible_to_outsiders", "visible_to_all_staff")
+        if not all(name in self.fields for name in pair):
+            return
         self.fields[self.EVERYONE_FIELD] = forms.BooleanField(
             required=False,
             label="Everyone",
@@ -438,6 +454,27 @@ class AudienceFormMixin:
                 },
             ))
 
+    def submitted_event(self):
+        """The event this role is being attached to, wherever it is coming from.
+
+        Three doors put it in three places and only one of them is the
+        instance, which is why this is a method rather than an attribute read:
+
+        · the site's own EventRoleForm sets `instance.event` in __init__;
+        · the admin's add page has it in `cleaned_data` (ModelForm only copies
+          it onto the instance in `_post_clean`, which runs after clean());
+        · an inline under the Event add page has it in `cleaned_data` too, put
+          there by Django's InlineForeignKeyField — as the **unsaved** parent.
+
+        ⚠️ Returns None on a form editing an event rather than a role, which is
+           how EventForm inherits this pair and does nothing with it.
+        """
+        event = self.cleaned_data.get("event") if hasattr(self, "cleaned_data") else None
+        # ⚠️ getattr, because Django raises RelatedObjectDoesNotExist here on an
+        #    unset FK — and that is an AttributeError, so this reads as absent
+        #    rather than as an error. The 🔴 below is what that cost.
+        return event if event is not None else getattr(self.instance, "event", None)
+
     def refuse_wider_than_its_event(self, role):
         """L2×L3, asked from the **role's** side. The other half of the pair above.
 
@@ -446,16 +483,43 @@ class AudienceFormMixin:
            its own to compare against, so it does nothing there.
 
         ⚠️ `Spec.of(event)` reads the event's saved audience, which is correct
-           **here** — a role is always added to an event that already exists,
-           so what is in the database is what the event is. It would be wrong
-           in refuse_narrowing_below_the_roles(), where the event's own audience
-           is the thing being changed.
+           **here** whenever the event already exists: a role added to a saved
+           event is judged against what that event actually is. It would be
+           wrong in refuse_narrowing_below_the_roles(), where the event's own
+           audience is the thing being changed.
+
+        🔴 Two doors reach this with no saved event behind them, and until
+           2026-08-28 **both went through silently** — the failure this project
+           keeps convicting, a rule that reads as though it ran:
+
+           · `/admin/events/eventrole/add/`. The event arrives in
+             `cleaned_data`, not on the instance, because ModelForm copies the
+             FK across in `_post_clean` — *after* clean(). And the read was
+             `getattr(self.instance, "event", None)`, where Django raises
+             `RelatedObjectDoesNotExist`, a subclass of **AttributeError**, so
+             getattr swallowed it and returned None. Reproduced: a role saved
+             visible to outsiders on a ministry-only event, 302, no error.
+           · The Event add page with inline roles. There the event is the
+             unsaved parent, so `submitted_audience` below is the only thing
+             that knows what it is going to be — and the other half of the pair
+             (refuse_narrowing_below_the_roles) returns early on `pk is None`,
+             so with this one silent too the invariant had nobody watching it.
         """
-        event = getattr(self.instance, "event", None)
-        if event is None or getattr(event, "pk", None) is None:
+        event = self.submitted_event()
+        if event is None:
             return
+        # ⚠️ The parent's **submitted** audience when there is one, and only
+        #    then the saved row. On the admin's Event *add* page the event does
+        #    not exist yet: there is no row to read, and Spec.of() would raise
+        #    outright on the unsaved instance's ManyToMany. See
+        #    clean_audience(), which is what puts it there.
+        spec = getattr(event, "submitted_audience", None)
+        if spec is None:
+            if getattr(event, "pk", None) is None:
+                return
+            spec = Audience.Spec.of(event)
         try:
-            refuse_wider_than_event(event=Audience.Spec.of(event), role=role)
+            refuse_wider_than_event(event=spec, role=role)
         except ValidationError as error:
             # ⚠️ `None`, so Django distributes the error by the keys the rule
             #    put in it. Naming a field here would override what the rule
@@ -487,7 +551,6 @@ class AudienceFormMixin:
         #    exists to prevent it.
         self.cleaned_data["visible_to_outsiders"] = spec.outsiders
         self.cleaned_data["visible_to_all_staff"] = spec.all_staff
-
         empty = False
         try:
             refuse_empty_audience(
@@ -509,6 +572,23 @@ class AudienceFormMixin:
                             else "all_staff"))
         except ValidationError as error:
             self.add_error("visible_to_ministries", error)
+        if not empty:
+            # ⚠️ On the instance too, which is not a duplicate of the two
+            #    cleaned_data lines above: it is how an **inline role reaches
+            #    its unsaved parent's** audience. Django's admin validates the
+            #    parent form first and then builds the formsets with
+            #    `instance=form.instance` — the very object this writes to — so
+            #    on the Event add page a role can be compared against the event
+            #    it is about to belong to. Nothing reads it once the event is
+            #    saved; see refuse_wider_than_its_event().
+            #
+            # ⚠️ **Only when the audience is not empty**, for the same reason
+            #    this method returns None then. An empty audience is wider than
+            #    nothing, so publishing it to the inlines would report every
+            #    role on the page as too wide and bury the one real fault under
+            #    a list of its consequences. Left over from the first draft of
+            #    this on 2026-08-28, where it sat above the check.
+            self.instance.submitted_audience = spec
         return None if empty else spec
 
 
@@ -946,9 +1026,14 @@ class EventRoleForm(AudienceFormMixin, forms.ModelForm):
         # L2×L3. ⚠️ Runs before the vocabulary checks below rather than after,
         #    so that a submission with two faults reports the audience one too
         #    instead of hiding it behind a name clash.
-        role = self.clean_audience()
-        if role is not None:
-            self.refuse_wider_than_its_event(role)
+        # ⚠️ `audience`, not `role` — that name is taken twelve lines up by the
+        #    ParticipationRole this form selected, and rebinding it here handed
+        #    an Audience.Spec to anything below that went looking for the role.
+        #    Nothing does today; the duplicate-vocabulary branch directly below
+        #    is where the next reader would reach for it (2026-08-28).
+        audience = self.clean_audience()
+        if audience is not None:
+            self.refuse_wider_than_its_event(audience)
 
         if new_name:
             from .services import matching_participation_role

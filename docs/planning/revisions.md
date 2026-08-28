@@ -1,3 +1,101 @@
+## 五十、2026-08-28：审查报来五条，四条跑出来复现过 —— 而其中两条只在 admin 里坏
+
+> 「把 1～5 条都修了」
+
+一次 `/code-review` 对本分支七个 commit 的复审。五条，按严重程度：两个 500、
+一条静默失效的规则、一处让整个演示库对自己人空白的种子数据、一个命名坑。
+
+⚠️ **共同点是它们全都躲开了本站自己的页面。** 前三条只能从 Django admin 走到：
+站点自己的 `EventRoleForm` 在 `__init__` 里就把 `instance.event` 设好了，而
+admin 的新增页没有。一整层校验只在一半的门上生效，而那一半恰好是测试最少的。
+
+### ① 只读的改动页是一个 500（`events/forms.py`）
+
+`AudienceFormMixin.__init__` 无条件加那枚「所有人」便利勾，然后
+`order_fields()` 去 `names.index("visible_to_outsiders")` 找它该坐的位置。
+而一个**所有字段都 readonly 的 ModelForm，对 Django 来说是一个没有任何字段的
+表单** —— 只握着 `view_event` 的账号打开改动页拿到的正是它。
+`list.index` 抛 `ValueError`，页面 500。Event 和 EventRole 都是。
+
+修法不是「把勾放到一个安全的位置」，是**不画它**：两个框都不在的时候，一枚填
+它们的便利勾是一个什么都不做的控件，而 `audience()` 本来就是 `.get()` 读它。
+
+### ② 一条读起来像跑过了的规则（`events/forms.py`）
+
+`refuse_wider_than_its_event()` 读 `self.instance.event`。而**新增表单上那个
+外键还只在 `cleaned_data` 里** —— ModelForm 在 `_post_clean` 才把它抄到实例
+上，那是 `clean()` 之后。Django 对未设置的外键抛 `RelatedObjectDoesNotExist`，
+而它继承 **AttributeError**，于是护着这次读的 `getattr(..., None)` 把它吞了，
+规则当作「没有东西要查」返回。
+
+复现：`/admin/events/eventrole/add/` 给一个只对本 ministry 可见的活动加一个
+「对外部人可见」的角色 —— 302，无报错，存进去了。**正是
+`refuse_wider_than_event()` 存在的理由，由防它的那条代码亲手放行。**
+
+而同一个洞还有更难的一半：**活动新增页 + 内联角色**。那里活动还不存在，
+`Spec.of()` 会在未保存实例的多对多上直接抛错，而配对的另一半
+（`refuse_narrowing_below_the_roles`）在 `pk is None` 时提前返回 ——
+**两半同时哑掉**，admin 自己的创建页可以造出这对规则专门禁止的状态。
+
+修法两件：
+- `submitted_event()`，把「活动从哪来」这个三个门三个答案的问题收成一处；
+- `clean_audience()` 把这次提交的 Spec 也写到 `self.instance` 上。
+  这不是上面两行写回 `cleaned_data` 的复制：admin 先校验父表单、再用
+  `instance=form.instance` 建内联 formset —— 同一个对象 —— 所以内联角色能拿到
+  它**即将属于**的那个活动的受众。
+
+### ③ 演示库对自己人是空的（`seed_demo.py`）
+
+种子只写 `visible_to_outsiders=True`，读法是「这是最宽的那个框」。它不是：
+`for_audience()` 的外部人分支是 `visible_to_outsiders & ~Exists(on_the_books)`，
+意思是「**没有**在职任职的人」。
+
+量出来的：27 场活动，而持有任职的两个账号 —— 张三（食物救济负责人）和 Ada
+（帮工）—— **一场都看不见**；Ada 自己的报名页链到一个对她 404 的详情页。
+什么都不报错，只是演示站对着最该看到员工侧的那两个人一片空白。
+
+⚠️ **迁移 0019 早就把这件事写下来了，而这个文件没有跟上**：「Outsiders alone
+would hide every existing event from the foundation's own staff —— and silent.」
+同一句话，同一个错，隔了两天。
+
+守卫不是把这八个字面量钉死，是新加的
+`SeedDemoTests.test_every_seeded_account_can_see_something`：**每一个种子账号都
+必须看得见点什么**。原来那条 `audience_is_empty is False` 是全绿的 ——
+「有人看得见这场活动」和「这个人看得见东西」长得像同一个问题，只有后者能发现
+一整类账号被关在外面。反向验证：撤掉修复，它红，并且把两个账号的名字都点出来。
+
+### ④ 记工时到「来上课」的行上是一个 500（`events/views.py`）
+
+`record_hours()` 会抛 `NoHoursHere`（L4），而唯一的调用方没接 ——
+一个逃出视图的 ValidationError **是 500，不是一句能读的拒绝**。
+上面十二行 `mark_absent()` 的 `TurnedUp` 从写下那天起就是接住的，这一条是后来
+加的，旁边的写法没被抄过来。
+
+模板确实不画那个框，而**不画控件从来拦不住任何人**：端点没变，同样的 POST 从
+哪来都一样。何况正常用法就能走到 —— 页面开着不动，另一个人把那个角色的
+`nature` 改对，这一页再提交就撞上。
+
+### ⑤ 一个被覆盖的局部变量（`events/forms.py`）
+
+`role = self.clean_audience()` 盖掉了十二行上装着 `ParticipationRole` 的同名
+变量。**今天没有任何错误行为**，所以这一条没有测试可写 —— 它下面那段查重名的
+分支正是下一个人会去取 `role` 的地方，而那时拿到的是一个 `Audience.Spec`。
+改名 `audience`。
+
+---
+
+### 这一轮的方法论账
+
+> **一个「拒绝了」的断言必须同时断言**拒绝的**理由**。
+
+②的第一版测试是绿的，而它什么都没验：admin 把 `DateTimeField` 渲染成两个框，
+我的 payload 一个键都没对上，于是那次提交是因为**缺字段**被拒的，和受众规则
+毫无关系。加上「错误必须挂在 `visible_to_outsiders` 上」之后才是真的。
+这是[三十五第三节](#三次红绿得不是因为它该红绿同一天)那条的第六次发作。
+
+五处修复全部做了反向验证（撤掉修复必须变红，且脚本自己 `assert` 确认改动落地
+了），⑤除外 —— 它没有可观察的行为差异，如实记在上面。
+
 ## 四十九、2026-08-28：日志里全是健康检查；以及「内存阶跃」查下来不在这次部署里
 
 > 「1，Render 的 logs 里全是 healthz 的 log，压根让我找不到有用信息，有没有可能

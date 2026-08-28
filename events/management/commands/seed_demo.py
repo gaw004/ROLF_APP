@@ -453,14 +453,35 @@ class Command(BaseCommand):
         )
 
     def events(self):
-        """⚠️ Every event here is `visible_to_outsiders=True` — L3 (2026-08-26).
+        """⚠️ Every event here is outsiders **and** all staff — L3 (2026-08-26).
 
-        That is what all of them meant before the field existed, and without it
-        an event is visible to nobody and every demo page 404s. It is **not**
-        "everyone": staff-only and ministry-only events are what batch two's
-        acceptance walk needs, and they arrive with the rest of that batch
-        rather than being retro-fitted onto events that exist to demonstrate
-        something else.
+        That is what all of them meant before the field existed, and without an
+        audience an event is visible to nobody and every demo page 404s.
+
+        🔴 **Both flags, not just outsiders** (2026-08-28). The first version
+           set `visible_to_outsiders` alone, on the reading that it was the
+           widest box — and it is not: `for_audience()`'s outsider branch is
+           `visible_to_outsiders & ~Exists(on_the_books)`, so it means "people
+           with *no* current post", to the exclusion of the foundation's own.
+           Measured on a freshly seeded database: 27 events, and the two
+           accounts holding a post — Zhang San (pantry lead) and Ada (pantry
+           helper) — saw **nought of them**. Ada's own signups page linked to a
+           detail view that 404ed for her. Nothing raised; the demo simply
+           showed an empty site to exactly the two people it exists to
+           demonstrate the staff side to.
+
+           Migration 0019 had already written this down and this file did not
+           follow it: "Outsiders alone would hide every existing event from the
+           foundation's own staff — and silent." Same sentence, same mistake,
+           two days apart. The guard against the next variant is not these
+           eight literals but SeedDemoTests' "every seeded account can see
+           something", which is what the old assertion (audience_is_empty is
+           False) was too weak to say.
+
+        It is still **not** the "Everyone" of a staff-only or ministry-only
+        event: those are what batch two's acceptance walk needs, and they
+        arrive with the rest of that batch rather than being retro-fitted onto
+        events that exist to demonstrate something else.
         """
         now = local_now()
 
@@ -475,6 +496,7 @@ class Command(BaseCommand):
                 "location": "Church ground floor", "owner": self.pantry_admin.contact,
                 "status": Event.Status.OPEN,
                 "visible_to_outsiders": True,
+                "visible_to_all_staff": True,
             },
         )
         # 🔴 三个角色，现在**各演一种容量**（2026-08-19，`stop_at_needed_count`
@@ -503,6 +525,7 @@ class Command(BaseCommand):
                 "start_time": now + 30 * DAY, "end_time": now + 30 * DAY + 2 * HOUR,
                 "owner": self.pantry_admin.contact, "status": Event.Status.DRAFT,
                 "visible_to_outsiders": True,
+                "visible_to_all_staff": True,
             },
         )
 
@@ -516,6 +539,7 @@ class Command(BaseCommand):
                 "start_time": now + 3 * DAY, "end_time": now + 3 * DAY + 2 * HOUR,
                 "owner": self.pantry_admin.contact, "status": Event.Status.FULL,
                 "visible_to_outsiders": True,
+                "visible_to_all_staff": True,
             },
         )
         if made:
@@ -530,6 +554,7 @@ class Command(BaseCommand):
                 "start_time": now - 30 * DAY, "end_time": now - 30 * DAY + 3 * HOUR,
                 "owner": self.pantry_admin.contact, "status": Event.Status.COMPLETED,
                 "visible_to_outsiders": True,
+                "visible_to_all_staff": True,
             },
         )
         if made:
@@ -605,6 +630,7 @@ class Command(BaseCommand):
                 "start_time": now + 5 * DAY, "end_time": now + 5 * DAY + 2 * HOUR,
                 "owner": self.tax_admin.contact, "status": Event.Status.OPEN,
                 "visible_to_outsiders": True,
+                "visible_to_all_staff": True,
             },
         )
 
@@ -627,6 +653,7 @@ class Command(BaseCommand):
                 "location": "Room 1A", "owner": self.pantry_admin.contact,
                 "status": Event.Status.OPEN,
                 "visible_to_outsiders": True,
+                "visible_to_all_staff": True,
             },
         )
         if made:
@@ -727,6 +754,7 @@ class Command(BaseCommand):
                     "location": place, "owner": owner.contact,
                     "status": Event.Status.OPEN,
                     "visible_to_outsiders": True,
+                    "visible_to_all_staff": True,
                 },
             )
         past = []
@@ -742,6 +770,7 @@ class Command(BaseCommand):
                     "location": place, "owner": owner.contact,
                     "status": Event.Status.COMPLETED,
                     "visible_to_outsiders": True,
+                    "visible_to_all_staff": True,
                 },
             )
             past.append(event)

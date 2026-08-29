@@ -29,6 +29,12 @@ button.html 挑好变体之后落地的那一层。分成两个文件是为了�
       于是内容换到**这颗按钮自己**身上：按钮消失，一整块详情长在原地。
       不报错。
 
+⚠️ `clears` 也只落在**这一支**（`<a>`），理由和 `hx_get` 一样：它的全部意思是
+   「有 JS 时就地清空、没有时跳到 href 那一页」，所以它必须是一个真链接。
+   ⚠️ 这里只落一个 `data-` 钩子，一行 JS 都不写。拦截和清空写在 app.js ——
+      在这里写 `x-on:click.prevent` 会让没有 Alpine 的那一档变成死按钮
+      （`opens` 那条注释吃过这个亏），而 `data-` 钩子在任何一档都只是一个属性。
+
 ⚠️ `disabled` 只落在下面 `<button>` 那一支。上面那一支是 `<a>`，而 `<a>` 根本
    没有 disabled 属性 —— 同时给 href 和 disabled 的话，这里不会报任何错，
    渲染出来是一个**看着灰、点了照样跳**的链接。理由和用法写在 button.html。
@@ -39,21 +45,29 @@ button.html 挑好变体之后落地的那一层。分成两个文件是为了�
   <a href="{{ href }}" class="{{ cls }}{% if full %} w-full{% endif %}"
      {% if hx_get %}hx-get="{{ hx_get }}" hx-target="{{ hx_target }}"
                     hx-swap="innerHTML"{% endif %}
+     {% if clears %}data-clear-filters{% endif %}
      {% if opens %}x-on:click.prevent="{{ opens }} = true"{% endif %}
      {% if confirm %}x-on:click="if (!window.confirm('{{ confirm|escapejs }}')) $event.preventDefault()"{% endif %}>{{ label }}</a>
 {% else %}
   {% comment %}
-  ⚠️ `toggles` 强制 `type="button"`，**不接受调用方传别的**。它几乎总是长在
+  ⚠️ `shows` 强制 `type="button"`，**不接受调用方传别的**。它几乎总是长在
      表单里（第一个用它的是筛选卡上的 Schedule），而默认的 submit 会让点一下
-     开关变成提交一次筛选 —— 整页重来、状态归零，表现是「点了没反应」。
+     变成提交一次筛选 —— 整页重来、状态归零，表现是「点了没反应」。
      把它交给调用方记住，就是把一个必然会被忘的细节交出去。
+
+  ⚠️ `shows` 里写的是一个**方法调用**，所以这里直接把它放进 `x-on:click` ——
+     不在这里拼 `= true`。为什么见 button.html：「打开」有时不止一次赋值，
+     而那条规则住在 Alpine 组件里。
+
+  ⚠️ `aria-expanded` 走 `x-bind`（跟着状态变），`aria-controls` 是死的字符串。
+     两个都给才说得完整：一个说「那块展开了没」，一个说「哪一块」。
   {% endcomment %}
-  <button type="{% if toggles %}button{% else %}{{ type|default:'submit' }}{% endif %}"
+  <button type="{% if shows %}button{% else %}{{ type|default:'submit' }}{% endif %}"
           class="{{ cls }}{% if full %} w-full{% endif %}"
           {% if disabled %}disabled{% endif %}
-          {% if toggles %}x-on:click="{{ toggles }} = !{{ toggles }}"
-                          x-bind:aria-pressed="{{ toggles }}"
-                          {% if controls %}aria-controls="{{ controls }}"{% endif %}{% endif %}
+          {% if shows %}x-on:click="{{ shows }}"
+                        {% if expanded %}x-bind:aria-expanded="{{ expanded }}"{% endif %}
+                        {% if controls %}aria-controls="{{ controls }}"{% endif %}{% endif %}
           {% if name %}name="{{ name }}" value="{{ value }}"{% endif %}
           {% if prints %}x-on:click="window.print()"{% endif %}
           {% if confirm %}x-on:click="if (!window.confirm('{{ confirm|escapejs }}')) $event.preventDefault()"{% endif %}>{{ label }}</button>

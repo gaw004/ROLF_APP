@@ -12,8 +12,9 @@
 参数：
   action          表单要打的 URL
   report_button   真值 → 多一个「Generate report」按钮（只有管理列表用）
-  schedule_button 真值 → 多一个「Schedule」开关，外加一个隐藏的 `from`
-                  （日程翻到了哪一天）。只有 Events 页用。
+  schedule_button 真值 → 多一个「Schedule」按钮（**只负责打开**，关掉归日程面板
+                  右上角那颗 ×），外加一个隐藏的 `from`（日程翻到了哪一天）。
+                  只有 Events 页用。
   schedule_from   配 schedule_button 用，当前日程窗口的第一天
   scope           可选。给了就随表单一起提交（隐藏字段），并且带进「Clear」
 
@@ -168,11 +169,26 @@
     ⚠️ 「Clear」清掉的是筛选条件，**不是「我在看谁的活动」**。所以 scope 要留着 ——
        不留的话在「全基金会」那一页上点 Clear 会跳回「我管的那几个」，
        而按钮上写的是 Clear。
+
+    🔴 **`clears` 2026-08-28 加的：它清筛选，不许再关掉右边那块面板。**
+
+       在此之前它是一个普普通通的链接，点下去是**整页重新加载** —— 于是
+       Alpine 的状态全部归零：正开着的活动详情/报名表单没了，日程也退回今天。
+       用户报上来的原话是「点 clear 会直接关掉右边面板？Clear 只是取消 filter，
+       不应该关任何右边面板」。对，而整页重来这件事从来不在这颗按钮的意思里，
+       它只是当时最省事的实现。
+
+       ⚠️ 换法是「拦下来、清空字段、重发这张表单」，**不是**给这个链接挂一个
+          `hx-get`。挂 hx-get 只会换掉 `#event-results` —— 而四个输入框在
+          那一块的外面，屏幕上会变成「列表清空了，可搜索框里还写着 kitchen」，
+          再敲一个字它就自己回去了。
+       ⚠️ `href` 照旧留着，而且它仍然是那条真路：没有 JS 时点下去就是清空后的
+          那一页（D24）。
     {% endcomment %}
     {% if scope %}
-      {% include "core/components/button.html" with label="Clear" href=action|add:"?scope="|add:scope variant="ghost" %}
+      {% include "core/components/button.html" with label="Clear" href=action|add:"?scope="|add:scope variant="ghost" clears=1 %}
     {% else %}
-      {% include "core/components/button.html" with label="Clear" href=action variant="ghost" %}
+      {% include "core/components/button.html" with label="Clear" href=action variant="ghost" clears=1 %}
     {% endif %}
     {% if schedule_button %}
       {% comment %}
@@ -182,16 +198,24 @@
          这一颗是「换一种看法」。挨着 Clear 放在它前面会让两者看起来二选一。
 
       ⚠️ 它**不是这张表单的第二个提交**（`Generate report` 才是）。日程开的是一个
-         版面状态，不是一次查询 —— 走 URL 的话每开关一次都要往服务器跑一趟，
-         还会丢掉当前的滚动位置。`toggles` 因此强制 `type="button"`：
-         默认的 submit 会让「点一下开关」变成「提交一次筛选」。
+         版面状态，不是一次查询 —— 走 URL 的话每开一次都要往服务器跑一趟，
+         还会丢掉当前的滚动位置。`shows` 因此强制 `type="button"`：
+         默认的 submit 会让「点一下」变成「提交一次筛选」。
+
+      🔴 **它只负责打开**（2026-08-28，原来是一颗开关）。关掉日程那件事归日程
+         面板右上角那颗 ×，和活动详情那一块一模一样 —— 用户原话：「schedule
+         这个按钮只用来打开 schedule，schedule 面板需要在右上角同（event
+         details 一样）有叉叉可以关掉」。
+         ⚠️ 走 `showSchedule()` 而不是 `schedule = true`：开日程时还要把压在
+            它上面的详情让开，而那条规则住在 app.js 的 `eventsShell` 里。
+            少了这一半，「详情开着时按 Schedule」屏幕上一个像素都不会动。
 
       ⚠️ `schedule` 这个状态属于**外层的 `.events-shell`**（在 event_list.html 上），
          不属于这张卡。刻意如此：HTMX 筛选和翻页换掉的是 `#event-results`，
          而 shell 在它外面，于是「日程开着」这件事在筛选和翻页之后仍然成立。
          真正的版面（列多宽、面板多宽）也只有 shell 那一层看得全。
       {% endcomment %}
-      {% include "core/components/button.html" with label="Schedule" variant="secondary" toggles="schedule" controls="schedule-panel" %}
+      {% include "core/components/button.html" with label="Schedule" variant="secondary" shows="showSchedule()" expanded="schedule" controls="schedule-panel" %}
     {% endif %}
     {% comment %}
     加载态。⚠️ 筛选实时化之后它**更要紧了**（2026-08-17）：原来按下 Filter 那一下

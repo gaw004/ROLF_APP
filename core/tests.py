@@ -1656,7 +1656,32 @@ class SelfHostedFontTests(TestCase):
         self.assertIn("Noto Sans", stack)
 
 
-class HoverUnderlineTests(TestCase):
+class StylesheetReader:
+    """读 `assets/app.css`：整份（剥掉注释），以及某个选择器的那些声明。
+
+    ⚠️ 抽出来是因为**两个相邻的类要用同一份**（`ScheduleShellTests` 和
+       `PageBarTests`），而它们原来各写了一遍同样的两条正则。这个文件里这种
+       「剥注释 + 抠出规则块」的写法已经有好几处，那些不在这次的改动范围里，
+       没有一起动 —— 但新的一处不该再多一份。
+
+    ⚠️ 选择器是**整格**匹配的（逗号分开的每一格各自比对），不是子串：
+       比 `.page-bar` 会命中 `.page-bar-title`，而那是另一条规则。
+    """
+
+    def styles(self):
+        return re.sub(r"/\*.*?\*/", "",
+                      (Path(settings.BASE_DIR) / "assets" / "app.css").read_text(),
+                      flags=re.S)
+
+    def declarations(self, selector):
+        blocks = [body for sel, body in
+                  re.findall(r"([^{}]+?)\{([^{}]*?)\}", self.styles(), re.S)
+                  if selector in {one.strip() for one in sel.split(",")}]
+        self.assertTrue(blocks, f"`{selector}` is gone from app.css")
+        return "\n".join(blocks)
+
+
+class HoverUnderlineTests(StylesheetReader, TestCase):
     """The event-name underline is painted inside a **clipped** box.
 
     ⚠️ This exists because of a failure that produced no error of any kind. The
@@ -1678,10 +1703,13 @@ class HoverUnderlineTests(TestCase):
         return (Path(settings.BASE_DIR) / "assets" / "app.css").read_text()
 
     def after_block(self):
-        match = re.search(r"\.event-name::after\s*\{(.*?)\n  \}", self.stylesheet(), re.S)
-        self.assertIsNotNone(match, ".event-name::after is gone from app.css")
-        # Comments carry the words "bottom: -0.125rem" as a warning; strip them.
-        return re.sub(r"/\*.*?\*/", "", match.group(1), flags=re.S)
+        # ⚠️ 抓的是「选择器列表里**含**它的那条规则」，不是「选择器正好是它」——
+        #    2026-08-28 起页头条那条下划线和它是同一条规则（一套数值只留一份），
+        #    于是选择器列表里有两个。断言的东西一个字没变：这条规则守的是
+        #    「画在被裁的盒子里」，而那对两个调用方同样成立。
+        #    （`declarations()` 会先剥掉注释 —— 注释里正带着 `bottom: -0.125rem`
+        #     这个反面例子。）
+        return self.declarations(".event-name::after")
 
     def test_the_underline_never_hangs_outside_the_clipped_box(self):
         offsets = re.findall(r"\b(top|bottom|left|right)\s*:\s*(-[\d.]+\w*)",
@@ -1716,10 +1744,7 @@ class HoverUnderlineTests(TestCase):
         # rule, the other on the hover rule. Equal origins would make it retract
         # the way it arrived.
         resting = self.after_block()
-        hover = re.search(
-            r"\.event-row:hover \.event-name::after,\s*"
-            r"\.event-row:focus-within \.event-name::after \{(.*?)\}",
-            self.stylesheet(), re.S).group(1)
+        hover = self.declarations(".event-row:hover .event-name::after")
         self.assertIn("transform-origin: right", resting)
         self.assertIn("transform-origin: left", hover)
 
@@ -2306,21 +2331,12 @@ class EventThumbnailIsStructurallySquareTests(TestCase):
                 f"stylesheet with the rest of the geometry.")
 
 
-class ScheduleShellTests(TestCase):
+class ScheduleShellTests(StylesheetReader, TestCase):
     """The room the schedule opens into (2026-08-17).
 
     Two facts about the stylesheet, both of which are invisible on the machine
     they were written on and expensive on somebody else's.
     """
-
-    def declarations(self, selector):
-        css = re.sub(r"/\*.*?\*/", "",
-                     (Path(settings.BASE_DIR) / "assets" / "app.css").read_text(),
-                     flags=re.S)
-        blocks = [body for sel, body in re.findall(r"([^{}]+?)\{([^{}]*?)\}", css, re.S)
-                  if selector in {one.strip() for one in sel.split(",")}]
-        self.assertTrue(blocks, f"`{selector}` is gone from app.css")
-        return "\n".join(blocks)
 
     def test_the_closed_shell_is_exactly_the_page_it_replaced(self):
         """⚠️ Everybody who has not pressed the button sees this state, so it has
@@ -2375,7 +2391,7 @@ class ScheduleShellTests(TestCase):
         # on a calendar that is exactly the row naming the days.
         block = self.declarations(".schedule-panel")
         self.assertNotRegex(block, r"top:\s*0")
-        self.assertRegex(block, r"top:\s*calc\(var\(--top-bar-h\)")
+        self.assertRegex(block, r"top:\s*calc\(var\(--head-h\)")
 
     def test_the_top_bar_is_still_the_height_this_assumes(self):
         """🔴 `--top-bar-h` is a **measured** number, and the first version of it
@@ -2410,15 +2426,120 @@ class ScheduleShellTests(TestCase):
         css = re.sub(r"/\*.*?\*/", "",
                      (Path(settings.BASE_DIR) / "assets" / "app.css").read_text(),
                      flags=re.S)
-        self.assertIn("--top-bar-h: 4.25rem", css)   # 36 + 2 × 16
-        self.assertIn("--top-bar-h: 4.75rem", css)   # 36 + 2 × 20
+        self.assertIn("--site-bar-h: 4.25rem", css)   # 36 + 2 × 16
+        self.assertIn("--site-bar-h: 4.75rem", css)   # 36 + 2 × 20
 
-        # ⚠️ 2026-08-18 起有**两处**声明它：日程面板，和日程开着时钉住的筛选卡。
-        #    两块并排的东西钉在不同的高度上是一眼看得出来的错位，而各改一处
-        #    不会报错。所以这里钉的是「所有声明只有这两个值」。
-        declared = set(re.findall(r"--top-bar-h:\s*([\d.]+rem)", css))
+        # ⚠️ 2026-08-28 之前这个数叫 `--top-bar-h`，而且**同一个值在三处各声明
+        #    一份**（日程面板、钉住的筛选卡、结果区）。两块并排的东西钉在不同的
+        #    高度上是一眼看得出来的错位，而各改一处不会报错 —— 所以现在它只在
+        #    `:root` 上，这里钉的是「所有声明只有那两个值」。
+        declared = set(re.findall(r"--site-bar-h:\s*([\d.]+rem)", css))
         self.assertEqual(declared, {"4.25rem", "4.75rem"},
-                         "有人给 --top-bar-h 加了第三个值，钉在顶上的两块会错开")
+                         "有人给 --site-bar-h 加了第三个值，钉在顶上的两块会错开")
+        self.assertNotIn("--top-bar-h:", css,
+                         "旧名字回来了 —— 两个名字就是两个会各自漂移的答案")
+
+    def test_paging_lands_below_the_filter_card_in_both_states(self):
+        """🔴 翻页把结果区顶到视口最上面 —— 而视口最上面压着一条 68px 的吸顶栏。
+
+        补偿那段距离的 `scroll-margin-top` 原来只写给 `.is-open`（面板开着、
+        筛选卡钉住那一档）。量出来的后果：面板**关着**时翻一页，结果区落在
+        `top: 0`，「N events」和第一张卡的上沿被吸顶栏盖掉，筛选卡整张在视口
+        外（`filterBottom: -24`）。用户报上来的是「翻页竟然不跳到下一页的
+        top、露不出 filter 卡」。
+
+        ⚠️ 所以这里钉的是**选择器里没有 `.is-open`**，而不是某一个数值：
+           两档共用一条规则，是它们不会分家的唯一写法。
+        ⚠️ 距离里那个 `--head-h` 必须**取得到值**。它 2026-08-28 收进了 `:root`，
+           在那之前每条规则各自声明一份 —— 而漏掉一份的表现不是取默认值，是
+           **整条 calc() 被丢掉**，scroll-margin 变 0，也就是这个 bug 原样回来，
+           而 CSS 里每一条都还写着。下面那半条守的就是「取得到」。
+        """
+        css = re.sub(r"/\*.*?\*/", "",
+                     (Path(settings.BASE_DIR) / "assets" / "app.css").read_text(),
+                     flags=re.S)
+        rules = [(sel.strip(), body) for sel, body in
+                 re.findall(r"([^{}]+?)\{([^{}]*?)\}", css, re.S)
+                 if "scroll-margin-top" in body and "#event-results" in sel]
+        self.assertTrue(rules, "翻页的落点补偿没了 —— 第一张卡会藏在吸顶栏底下")
+        for selector, body in rules:
+            self.assertNotIn(
+                "is-open", selector,
+                "落点补偿又只给开着的那一档了 —— 关着时翻页会露不出筛选卡")
+            self.assertIn("--filter-h", body,
+                          "补偿必须用实测的卡高，写死的数在换行/报错时是错的")
+        # `--head-h` 只能来自 :root（或 body），也就是结果区的**祖先** ——
+        # 自定义属性只往下传，声明在兄弟节点上取不到。
+        roots = [body for sel, body in
+                 re.findall(r"([^{}]+?)\{([^{}]*?)\}", css, re.S)
+                 if sel.strip() in {":root", "body:has(.page-bar)"}
+                 and "--head-h:" in body]
+        self.assertTrue(
+            roots,
+            "--head-h 不在 :root / body 上了 —— 它一旦声明在兄弟节点上就传不过来，"
+            "整条 calc() 会被丢掉，而屏幕上只是「翻页又不对了」")
+
+    def test_the_narrow_screen_panel_is_pinned_to_the_viewport(self):
+        """🔴 窄屏那一档左边一列是 `display: none`，于是 `.events-row` 就只剩
+        面板那么高 —— 而 sticky 要有行程，元素必须比包含块矮。两者一样高时
+        sticky 一帧都不生效。
+
+        量出来的后果（宽屏点开详情 → 把窗口拖窄，浏览器留着原来的滚动位置）：
+        `scrollY: 146 / maxScroll: 154`，整块面板已经滑进吸顶栏底下，右上角那颗
+        × 落在 `top: 27px` —— 一整屏详情看得见，**唯一的出路却在栏里面**。
+        用户报上来的是「窄屏下右边面板的叉叉点不到，被挤出屏幕了」。
+
+        ⚠️ 钉的是 `position: fixed`，不是「给页面加高度让 sticky 有行程」——
+           那等于在面板下面挂一大截空白，滚下去什么也没有。
+        ⚠️ 一起钉两件事，两件都是量出来的：
+           · `top` 让开的是 `--head-total-h`（**整个头**）。这一档里页面根本不滚
+             （左列没了、面板脱离文档流，量到 `maxScroll: 0`），站头那条 bar
+             一直在屏幕上 —— 按「钉着的那条」让开的话，这张纸的上沿钻到它底下
+             53px，翻页行连同那颗 × 一起被盖住。
+           · `align-self: auto`。基线上这一层是 `flex-start`，而按 CSS Box
+             Alignment，自对齐不是 normal/stretch 的绝对定位盒子**不撑开** ——
+             `top` + `bottom` 一起失效，量到 `[top 0, height 1255]`。
+             ⚠️ 这条错在计算值上完全看不出来：五个定位计算值全对，
+                `getBoundingClientRect()` 才说实话。
+        """
+        css = re.sub(r"/\*.*?\*/", "",
+                     (Path(settings.BASE_DIR) / "assets" / "app.css").read_text(),
+                     flags=re.S)
+        block = re.search(r"@media \(width < 64rem\) \{(.*?)\n  \}\n",
+                          css, re.S)
+        self.assertIsNotNone(block, "窄屏那一档的规则整个不见了")
+        panel = re.search(
+            r"\.events-shell\.is-open \.schedule-panel \{([^}]*)\}",
+            block.group(1), re.S)
+        self.assertIsNotNone(
+            panel,
+            "窄屏那一档没有把面板钉在视口上 —— 它会跟着整页滚进吸顶栏底下")
+        self.assertRegex(panel.group(1), r"position:\s*fixed")
+        self.assertRegex(panel.group(1), r"top:\s*calc\(var\(--head-total-h\)")
+        self.assertRegex(
+            panel.group(1), r"align-self:\s*auto",
+            "align-self 没让开 —— 固定定位的盒子自对齐不是 normal/stretch 时"
+            "不撑开，top/bottom 一起失效，而计算值全是对的")
+
+    def test_the_two_panel_close_buttons_are_one_button(self):
+        """面板里现在有两颗 ×（详情一颗、日程一颗），长相必须只有一份。
+
+        ⚠️ 两份长相会在第二次改动之后分叉 —— 一颗圆一颗方、深色下一个换了底色 ——
+           而分叉出来的第二种单独看没问题，和第一种放在一起就是业余感的来源。
+        ⚠️ 所以 `.panel-close` 管长相，各自那条规则只管位置：详情那颗浮在内容
+           右上角（float + sticky），日程那颗是翻页行里的一格。
+        """
+        looks = self.declarations(".panel-close")
+        self.assertRegex(looks, r"border-radius:\s*9999px")
+        self.assertRegex(looks, r"width:\s*1\.75rem")
+        self.assertNotRegex(
+            looks, r"position:",
+            "长相那一份里混进了位置 —— 第三处要用它时就得先覆盖掉不属于自己的行")
+        placed = self.declarations(".schedule-detail-close")
+        self.assertRegex(placed, r"float:\s*right")
+        self.assertNotRegex(
+            placed, r"background-color:",
+            "位置那一份里又抄了一遍长相，两颗 × 会在下一次改动时分叉")
 
     def test_the_panel_is_hidden_rather_than_merely_narrow(self):
         # A zero-width panel is still in the accessibility tree and still in the
@@ -2444,6 +2565,277 @@ class ScheduleShellTests(TestCase):
             css, re.S)
         self.assertIsNotNone(block, "the shell has no reduced-motion rule")
         self.assertIn("transition: none", block.group(0))
+
+
+class PageBarTests(StylesheetReader, SimpleTestCase):
+    """顶栏底下那一条：这一页叫什么（2026-08-28）。
+
+    参考的是用户给的那张 LV 截图：字样一行、栏目一行，往下滚时只剩下面那一条。
+    这一批里三个坑全是**静默失效** —— 计算值对、屏幕不对，或者反过来。
+    """
+
+    def test_one_thing_is_pinned_and_it_is_the_page_bar(self):
+        """🔴 一屏顶上只钉一条。
+
+        两条一起钉是 128px，而活动列表右面板开着时还要再钉一张约 257px 的
+        筛选卡 —— 800px 高的窗口上留给活动卡片的就只剩两张。所以给了页头条的
+        页面，站头那条 bar 改成跟着内容滚走。
+
+        ⚠️ 判据是**页面上有没有那条页头条**（`:has()`），不是第二个模板开关。
+           两个开关迟早会对不上，而对不上的表现是两条一起钉、或者一条都不钉，
+           两处模板各自看都正常。
+        """
+        self.assertRegex(self.declarations(".page-bar"), r"position:\s*sticky")
+        self.assertRegex(self.declarations(".site-head"), r"position:\s*sticky")
+        self.assertRegex(self.declarations("body:has(.page-bar) .site-head"),
+                         r"position:\s*static")
+
+    def test_the_site_bar_is_not_pinned_by_utility_classes(self):
+        """🔴 **吸顶不能写成模板上的 `sticky top-0 z-30`。**
+
+        Tailwind 的 utilities 层排在 components **后面** —— 工具类会压掉上面那条
+        「有页头条时不吸顶」，表现是两条 bar 一起钉在顶上、页头条盖住站头，
+        而取消它的那条 CSS 明明写着。量出来的（`position` 计算值还是 sticky）。
+        这个文件里已经栽过一次同样的事（`.event-row-thumb` 的 `w-16`）。
+        """
+        markup = (Path(settings.BASE_DIR) / "core" / "templates" / "core"
+                  / "base.html").read_text()
+        head = re.search(r'<div class="site-head[^"]*"', markup)
+        self.assertIsNotNone(head, "站头那一层的钩子不见了")
+        for utility in ("sticky", "top-0", "z-30"):
+            self.assertNotIn(
+                utility, head.group(0),
+                f"`{utility}` 又回到模板上了 —— utilities 层会压掉「不吸顶」那条")
+
+    def test_the_page_bar_height_is_declared_where_body_can_read_it(self):
+        """🔴 `--page-bar-h` 必须在 `:root` 上，不能在 `.page-bar` 上。
+
+        `body:has(.page-bar)` 要读它，而 `.page-bar` 是 body 的**后代** ——
+        自定义属性只往下传。写在组件上的表现极其安静：`var(--page-bar-h)` 在
+        body 上取不到值 → 整个 `--head-h` 变成**保证无效值**（不是回退到默认，
+        也不是报错），于是所有读它的 `calc()` 一起失效。
+        第一版就是这么写的，浏览器里量到 `getComputedStyle(body)` 返回空串
+        才发现。
+        """
+        self.assertRegex(self.declarations(":root"), r"--page-bar-h:\s*[\d.]+rem")
+        self.assertNotRegex(
+            self.declarations(".page-bar"), r"--page-bar-h:",
+            "高度又声明回组件上了 —— body 读不到它，--head-h 会整条失效")
+
+    def test_head_h_and_head_total_h_are_two_different_questions(self):
+        """⚠️ 「钉在顶上的那条有多高」和「整个头有多高」不是一件事。
+
+        滚过之后钉着的只有页头条（52px），而窄屏上日程铺满屏幕时页面**根本不
+        滚**，站头那条一直在 —— 两处用同一个数，就会有一处钻到别人底下 53px。
+        """
+        root = self.declarations(":root")
+        self.assertRegex(root, r"--head-h:\s*var\(--site-bar-h\)")
+        self.assertRegex(root, r"--head-total-h:\s*var\(--site-bar-h\)")
+        paged = self.declarations("body:has(.page-bar)")
+        self.assertRegex(paged, r"--head-h:\s*var\(--page-bar-h\)")
+        self.assertRegex(
+            paged,
+            r"--head-total-h:\s*calc\(var\(--site-bar-h\) \+ var\(--page-bar-h\)\s*"
+            r"- var\(--page-bar-pull\)\)",
+            "页头条往上贴的那一段没从「整个头」里减掉 —— 窄屏那张纸上面会多一条缝")
+
+    def test_the_head_draws_no_line_at_all(self):
+        """🔴 **整个头一条边都不画**（2026-08-28 第四轮，用户：「整个顶栏可以
+        不要有边框吗」）—— 两行中间没有，头的下沿也没有，浅色深色都一样。
+
+        那条线原来是「白 bar 和白卡片之间的分界」。撤掉之后分界改由明度给：
+        页面底是 `ink-50`、bar 是纯白 —— 也就是说**卡片滚到 bar 底下时那条边
+        会消失在白里**。这是换来的干净所付的价，不是漏掉的一条线；真要那个
+        提示，标准做法是「钉住时才浮出一道极浅的投影」，而不是把常驻的线加回来。
+
+        ⚠️ 因此这里钉的是**没有**：四个状态（浅色 / 深色 / 深色+大图的站头，
+           以及钉住的页头条）里任何一个偷偷长回一条边，都要在这里红。
+           ⚠️ 唯一允许的横线是那条下划线，而它在 `::after` 上，不是边框。
+        """
+        for selector in (".home-bar.is-solid", ".dark .home-bar.is-solid",
+                         ".dark.has-hero .home-bar.is-solid",
+                         ".page-bar", ".page-bar.is-stuck",
+                         ".dark .page-bar.is-stuck",
+                         ".dark.has-hero .page-bar.is-stuck"):
+            self.assertNotRegex(
+                self.declarations(selector), r"border(-bottom)?(-color|-width)?:",
+                f"`{selector}` 又画上边框了 —— 这个头是一条边都不要的")
+
+    def test_the_title_is_lighter_than_the_wordmark_and_centred(self):
+        """⚠️ 一个 600、一个 400：这一条说的是「你在哪一页」，不是这个头的主角，
+           两行同样粗会互相抢。居中是为了和上面那个绝对居中的字样对同一条中轴。
+        """
+        title = self.declarations(".page-bar-title")
+        weight = re.search(r"font-weight:\s*(\d+)", title)
+        self.assertIsNotNone(weight, "标题没写字重 —— 它会跟着 h1 的默认粗体走")
+        self.assertLess(int(weight.group(1)), 600,
+                        "页头条的标题不该和顶栏那个字样一样粗")
+        self.assertRegex(self.declarations(".page-bar-inner"), r"justify-content:\s*center")
+
+    def test_the_underline_is_one_line_with_two_endpoints(self):
+        """参考图那条线：鼠标滑过时**滑**出来，当前所在那一格一直亮着。
+
+        🔴 两种状态是**同一条线**的两个终点，不是两套画法 —— 写成两套的话，
+           「常亮」那条和「滑出来」那条迟早会一粗一细、一宽一窄。
+
+        🔴 **`scaleX` 而不是 `width` / `border-bottom`。** 后两者要么动不起来
+           （只能在有和没有之间跳），要么每帧都要重排（`width` 是布局属性）；
+           `transform` 走合成器。
+           ⚠️ **从左进、向右出**（用户第三轮定的方向）：靠两个不一样的
+              `transform-origin` —— 亮起时 `left`，回到静息态时 `right`。
+              这正是活动名那条下划线的写法，见下一条守卫。
+        """
+        after = self.declarations(".page-bar-link::after")
+        self.assertRegex(after, r"transform:\s*scaleX\(0\)")
+        self.assertRegex(after, r"transform-origin:\s*right")
+        self.assertRegex(after, r"transition:\s*transform")
+        self.assertNotRegex(after, r"\bwidth:", "宽度动画会每帧重排 —— 用 scaleX")
+
+        css = self.styles()
+        on = re.search(r"([^{}]*page-bar-link[^{}]*::after)\s*\{[^}]*scaleX\(1\)",
+                       css, re.S)
+        self.assertIsNotNone(on, "线没有「亮起来」的那一档")
+        self.assertIn(':hover', on.group(1))
+        self.assertIn('[aria-current="page"]', on.group(1),
+                      "常亮那一档不是由 aria-current 选中的 —— 屏幕上说「你在这一页」"
+                      "的是这条线，而读屏软件看不见线，两件事必须绑在同一个属性上")
+
+    def test_the_underline_follows_the_house_idiom(self):
+        """🔴 全站会滑的下划线只能有**一条规则**。
+
+        活动名那条（`.event-name::after`）先有：1px、`currentColor`、`scaleX`、
+        280ms、同一条缓动，加上「静息 `right` / 亮起 `left`」这个双原点机关。
+        页头条这条**和它是同一条规则**，不是照着抄一份。
+
+        ⚠️ 这条守卫原来只比「两处的时长和缓动一样」，而那正是照抄的问题：
+           另外七条声明（颜色、几何、scaleX、双原点）谁改了一边都不会红。
+           所以现在钉的是结构 —— **两个选择器必须落在同一个选择器列表里**。
+        """
+        rules = [sel for sel, body in
+                 re.findall(r"([^{}]+?)\{([^{}]*?)\}", self.styles(), re.S)
+                 if ".page-bar-link::after" in {one.strip()
+                                                for one in sel.split(",")}
+                 and "transform: scaleX(0)" in body]
+        self.assertEqual(
+            len(rules), 1,
+            "页头条那条下划线的静息态被写在了不止一处（或一处都没有）")
+        self.assertIn(
+            ".event-name::after",
+            {one.strip() for one in rules[0].split(",")},
+            "两条下划线又各写各的了 —— 它们该是同一条规则，否则数值会漂")
+
+    def test_the_underline_sits_on_the_bottom_edge_of_the_whole_head(self):
+        """参考图里 LV 那格：线是**那个头的底边的一段**，不是字底下的一道。
+
+        所以链接要撑满这一行的高度 —— `bottom` 量的是定位祖先的盒子，链接只有
+        一行字那么高的话，线会画在字底下、离下沿还差十几像素。
+
+        🔴 撑满同时解掉另一件事：标题上有 `truncate`（长标题要截断），而它里面的
+           `overflow: hidden` **裁到内边距盒为止**。上一版那条线画在文字盒子外面
+           0.35rem 处，于是被整条裁掉 —— CSS 全对、`::after` 的 transform 确实是
+           `scaleX(1)`，**屏幕上就是没有线**（量出来的）。现在线在盒子里面。
+        """
+        after = self.declarations(".page-bar-link::after")
+        self.assertRegex(after, r"bottom:\s*0",
+                         "线又离开下沿了 —— 它该和整个头的那条边同一个高度")
+        for selector in (".page-bar-title", ".page-bar-link"):
+            self.assertRegex(
+                self.declarations(selector), r"height:\s*100%",
+                f"`{selector}` 没撑满行高 —— 线会落在字底下，还可能被 truncate 裁掉")
+
+    def test_the_head_is_one_panel_at_rest_and_the_bar_paints_its_own_when_stuck(self):
+        """🔴 **一个头，一块面板**（用户：「小标题应该和吸顶栏是一个整体」）。
+
+        站头那块面板向下延、盖住页头条那一行；页头条静息态是**透明**的。
+        深色 + 大图那一档里这是唯一做得出「一整块」的写法：那一档的底是毛玻璃，
+        而毛玻璃**各取各的背景** —— 上面那块采样天空、下面那块采样山，接缝处是
+        一道看得见的亮度台阶（截图比出来的）。
+
+        🔴 而钉住之后那块面板已经滚走，这一行底下正有活动卡片穿过去，它必须
+           自己有底 —— 否则就是字压着字。所以有 `.is-stuck` 这一档。
+
+        ⚠️ 延下去用 `padding-bottom` + 等量的负 `margin-bottom`：**盒子高度一点
+           没变**，`--site-bar-h` 那 68/76px 和它的守卫照旧成立。
+        """
+        extended = self.declarations("body:has(.page-bar) .home-bar.is-solid")
+        pad = re.search(r"padding-bottom:\s*calc\((.*?)\);", extended, re.S)
+        self.assertIsNotNone(pad, "站头那块面板没有向下延 —— 两行会是两块")
+        self.assertRegex(
+            extended, r"margin-bottom:\s*calc\(-1 \*",
+            "延下去却没有用负外边距收回来 —— 整个头会高出一行，而那个高度是量出来的")
+
+        resting = self.declarations(".page-bar")
+        self.assertRegex(resting, r"background-color:\s*transparent")
+        stuck = self.declarations(".page-bar.is-stuck")
+        self.assertRegex(stuck, r"background-color:\s*#fff")
+        self.assertRegex(self.declarations(".dark .page-bar.is-stuck"),
+                         r"background-color:\s*var\(--color-ink-900\)")
+        # 深色 + 大图：玻璃**只**给钉住的那一档。静息态再给一层的话，它会去模糊
+        # 「上面那块已经模糊过的面板」，叠出一条更暗的带子 —— 正是要修的那道缝。
+        self.assertRegex(self.declarations(".dark.has-hero .page-bar.is-stuck"),
+                         r"backdrop-filter:\s*blur")
+        self.assertNotRegex(resting, r"backdrop-filter")
+
+    def test_the_sentinel_stands_where_the_bar_actually_lands(self):
+        """🔴 哨兵和页头条必须在**同一个 y** 上，否则两块底之间有一扇空窗。
+
+        页头条往上贴 `--page-bar-pull`（12px）贴进站头那条的下内边距里。这一贴
+        原来写在页头条身上，哨兵留在贴之前的位置 —— 于是页头条 64px 就钉住了，
+        而哨兵要到 76px 才离开视口：**中间 12px 里它已经钉住、却还没拿到自己的
+        底**，站头那块延下来的面板此刻只够盖到它上面 36px，下沿连同那条下划线
+        掉在白块外面。用户报上来的是「下滑的时候偶尔会有字不在框内」，
+        而「偶尔」正是因为那扇窗只有 12px 宽。
+
+        ⚠️ 所以这一贴挂在**哨兵**身上（零高度，不占版面，后面的页头条照样落在
+           同一个 y），页头条自己不许再写第二份 —— 写了会贴两次。
+        ⚠️ 也可以在 JS 里给观察器补一个 `rootMargin` 把线上移 12px。没那么做：
+           那是把同一个数搬去第二个地方。
+        """
+        self.assertRegex(
+            self.declarations(".page-bar-sentinel"),
+            r"margin-top:\s*calc\(-1 \* var\(--page-bar-pull\)\)",
+            "哨兵没站在页头条真正的落点上 —— 交接处会露出一段没有底的下沿")
+        self.assertNotRegex(
+            self.declarations(".page-bar"), r"margin-top:",
+            "页头条又自己贴了一次 —— 两处一起贴会插进站头那条的字里")
+
+    def test_stuck_is_decided_by_a_sentinel_not_by_a_scroll_number(self):
+        """⚠️ 判据是哨兵（页头条在流里那个位置上的零高度元素）**离没离开视口顶**，
+           不是 `scrollY > 某个数` —— 那个数是「站头有多高」，两档不同、还会随
+           窄屏换行变，写死一个就会在某一档上早一点或晚一点翻。
+
+        ⚠️ IntersectionObserver 而不是 scroll 监听：这件事只需要在越线的那一帧
+           知道一次。
+        """
+        js = (Path(settings.BASE_DIR) / "assets" / "js" / "app.js").read_text()
+        fn = re.search(r"function watchPageBar\(\)(.*?)\n\}", js, re.S)
+        self.assertIsNotNone(fn, "盯着页头条钉没钉住的那段不见了")
+        body = fn.group(1)
+        self.assertIn("IntersectionObserver", body)
+        self.assertIn("page-bar-sentinel", body)
+        self.assertIn('classList.toggle("is-stuck"', body)
+        self.assertNotIn("scrollY", body, "又改回按滚动距离判断了")
+
+        markup = (Path(settings.BASE_DIR) / "core" / "templates" / "core"
+                  / "components" / "page_bar.html").read_text()
+        self.assertIn("page-bar-sentinel", markup, "哨兵不在模板里了")
+
+    def test_the_pinned_head_is_measured_in_js_not_assumed(self):
+        """⚠️ app.js 判「这一行看得见吗」时要知道顶上挡掉多少 —— 而钉着的是哪一条
+           每页不同（站头 68/76，或者页头条 52）。
+
+        🔴 两次 `querySelector`，**不是** `.page-bar, .site-head` 一次：分组选择器
+           返回的是**文档顺序**里的第一个，而站头在页头条前面 —— 于是有页头条的
+           页面上永远量到那条已经不吸顶的 bar，一路退回兜底值。屏幕上只是
+           「滚动多让开了 24px」，没有任何报错。
+        """
+        js = (Path(settings.BASE_DIR) / "assets" / "js" / "app.js").read_text()
+        fn = re.search(r"function pinnedHeadBottom\(\)(.*?)\n\}", js, re.S)
+        self.assertIsNotNone(fn, "量顶上那条的函数不见了")
+        self.assertNotIn('querySelector(".page-bar, .site-head")', fn.group(1),
+                         "分组选择器会先命中站头 —— 有页头条的页面上永远量错")
+        self.assertIn('querySelector(".page-bar")', fn.group(1))
+        self.assertIn("getBoundingClientRect().bottom", fn.group(1))
 
 
 class EventRowEntranceTests(TestCase):

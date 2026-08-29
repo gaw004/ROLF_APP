@@ -30,7 +30,12 @@
      event_list.html），所以关掉之后回到的是你翻到的那个窗口、那个滚动位置 ——
      重新取一次的话，人会发现自己被送回了今天。
   {% endcomment %}
-  <button type="button" class="schedule-detail-close"
+  {% comment %}
+  ⚠️ `panel-close` 是长相，`schedule-detail-close` 是位置（2026-08-28 拆开）。
+     日程那一块右上角现在也有一颗 × —— 两颗必须是同一颗按钮，而它们钉的地方
+     不一样：这一颗浮在内容上、跟着自己的滚动区；那一颗是翻页行里的一格。
+  {% endcomment %}
+  <button type="button" class="panel-close schedule-detail-close"
           x-on:click="closeDetail()" aria-label="Close event">&times;</button>
 
   {% include body %}

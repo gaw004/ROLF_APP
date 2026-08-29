@@ -10,7 +10,11 @@
 // ⚠️ Alpine 的越界不会报错。把权限判断写进 x-show，页面照常渲染、测试照常绿，
 //    只是那个按钮对不该看见它的人也画出来了。守卫测试为这一条存在（C2.6）。
 
-import "htmx.org";
+// ⚠️ 具名地 import 进来，不是 `import "htmx.org"`（2026-08-28 改）。
+//    这个包**不往 window 上挂自己** —— 打包之后 `window.htmx` 是 undefined，
+//    而属性和 hx- 属性照常工作，所以「htmx 在不在」这件事只有需要调它的
+//    JS API 时才会暴露出来。下面 Clear 那一段要 `htmx.trigger`。
+import htmx from "htmx.org";
 import Alpine from "alpinejs";
 
 // ---------------------------------------------------------------------------
@@ -350,10 +354,12 @@ window.onGoogleCredential = function (response) {
 //    的话，日程关着时点一张卡，面板是 `visibility: hidden` + 宽度 0 ——
 //    请求发出去了、内容也换进去了，屏幕上什么都没有。
 //
-// ⚠️ 为什么是 `$watch` 而不是 `x-effect`：两条规则各自只关心**一个**变量的变化，
-//    而 x-effect 会把它读到的所有东西都变成依赖。把两条写进一个 x-effect 里，
-//    `detail = true` 会把 effect 重新跑一遍，于是「日程开着时点一张卡」会被
-//    第一条规则当场关掉 —— 卡片点了就没反应。$watch 只在那一个值真的变了时响。
+// ⚠️ 剩下的那一条规则用 `$watch` 而不是 `x-effect`：x-effect 会把它读到的所有
+//    东西都变成依赖，于是「日程开着时点一张卡」会被同一个 effect 里的另一条
+//    规则当场关掉 —— 卡片点了就没反应。$watch 只在那一个值真的变了时响。
+//    （原来这里有**两条** $watch。「开日程 = 让开详情」那条 2026-08-28 搬进了
+//     `showSchedule()`：翻开 `schedule` 的不再是模板里一句直接赋值，而是这个
+//     方法本身，所以那条规则不必再靠监听才能听见。）
 Alpine.data("eventsShell", () => ({
   schedule: false,
   detail: false,
@@ -363,15 +369,7 @@ Alpine.data("eventsShell", () => ({
   },
 
   init() {
-    // 规则一：**开日程 = 亮出日程**。详情压在日程上面，所以开着详情时按下
-    // Schedule 而不让位的话，屏幕上一个像素都不动 —— 那是最糟的一种反馈。
-    // ⚠️ 只在**开**的那一下让位。关掉日程时详情留着（2026-08-19 定），
-    //    因为关的是底层，而人正在读的是上层。
-    this.$watch("schedule", (on) => {
-      if (on) this.closeDetail();
-    });
-
-    // 规则二：右边一空，左边那圈高亮就得跟着没。高亮的意思只有一个 ——
+    // 右边一空，左边那圈高亮就得跟着没。高亮的意思只有一个 ——
     // 「右边正开着的是这一场」—— 所以它不该活得比面板长。
     // ⚠️ 走事件而不是直接改 app.js 里那个变量：高亮归下面那一段管，
     //    而那一段不在 Alpine 的作用域里。$watch 只在真的变了时响，
@@ -383,6 +381,32 @@ Alpine.data("eventsShell", () => ({
 
   closeDetail() {
     this.detail = false;
+  },
+
+  // 「亮出日程」。⚠️ **两件事，一个方法**（2026-08-28 从一个 `$watch` 改过来）：
+  //    详情压在日程上面，所以开着详情时按下 Schedule 而不让位的话，屏幕上
+  //    一个像素都不动 —— 那是最糟的一种反馈。
+  //
+  // ⚠️ 原来这条规则写成 `$watch("schedule", on => { if (on) closeDetail() })`。
+  //    那时它必须是个 watcher，因为翻开 `schedule` 的是模板里那颗开关按钮
+  //    （`toggles="schedule"` 直接赋值），组件这边接不到那一下。现在按钮调的
+  //    就是这个方法（button.html 的 `shows`），于是「按下 Schedule 会发生
+  //    什么」整条写在一处，而不是一半在模板、一半在 watcher 里。
+  //
+  // 🔴 也因此它对**已经开着**的日程仍然有效：日程开着、又点了一张卡片时
+  //    `schedule` 一直是 true，watcher 那一版在这里不会响 —— 再按一次
+  //    Schedule 什么都不会发生，而人要的正是「把日程给我拿回来」。
+  showSchedule() {
+    this.schedule = true;
+    this.closeDetail();
+  },
+
+  // 关掉日程（2026-08-28，配面板右上角那颗 ×）。
+  // ⚠️ 关的是**底下那一层**。详情此刻不可能开着（它开着的时候日程那一块整个
+  //    被 `x-show` 藏起来了，这颗 × 也就不在屏幕上），所以这里不碰 `detail` ——
+  //    顺手把它一起关掉的话，「关掉日程」就悄悄多了一个意思。
+  closeSchedule() {
+    this.schedule = false;
   },
 }));
 
@@ -1322,6 +1346,83 @@ function watchFilterHeight() {
 watchFilterHeight();
 
 // ---------------------------------------------------------------------------
+// 页头条：钉住了没有（2026-08-28）
+//
+// 静息态那一行是**透明**的 —— 底由站头那块向下延的面板画，这样两行在屏幕上是
+// 一整块（深色 + 大图那一档里尤其重要：两块毛玻璃各取各的背景，接缝处是一道
+// 看得见的亮度台阶）。而钉住之后那块面板已经滚走，这一行底下正有活动卡片穿过
+// 去，它必须自己有底，否则就是**字压着字**。
+//
+// ⚠️ 判据来自哨兵（页头条在流里那个位置上的一个零高度元素）**离没离开视口顶**，
+//    不是 `scrollY > 某个数`：那个数是「站头有多高」，而它两档不同、还会随字体
+//    和窄屏换行变 —— 写死一个就会在某一档上早一点或晚一点翻。
+//
+// ⚠️ IntersectionObserver 而不是 scroll 监听：后者要么掉帧、要么得自己节流，
+//    而这件事只需要在**越过那一条线**的那一帧知道一次。
+//
+// ⚠️ 交接是严丝合缝的：那块面板向下延的高度**正好等于**这一行，所以它从视口里
+//    退出去的那一帧，正是哨兵离开的那一帧。两处的数来自同一个变量
+//    （`--page-bar-h` / `--page-bar-pull`，见 app.css）。
+function watchPageBar() {
+  const bar = document.querySelector(".page-bar");
+  const sentinel = document.querySelector(".page-bar-sentinel");
+  if (!bar || !sentinel || typeof IntersectionObserver === "undefined") return;
+  new IntersectionObserver(
+    ([entry]) => bar.classList.toggle("is-stuck", !entry.isIntersecting),
+  ).observe(sentinel);
+}
+
+watchPageBar();
+
+// ---------------------------------------------------------------------------
+// 「Clear」：清筛选，别的什么都不动（2026-08-28）
+//
+// 🔴 这颗按钮此前是一个普通链接，点下去**整页重新加载** —— 于是右边正开着的
+//    活动详情/报名表单一起没了，日程也退回今天。用户报上来的原话是
+//    「点 clear 会直接关掉右边面板？Clear 只是取消 filter，不应该关任何右边
+//    面板」。整页重来从来不在这颗按钮的意思里，它只是当时最省事的实现。
+//
+// 做法是「清空字段 + 触发这张表单本来就有的那一次请求」，三个后果都是要的：
+//   · 面板（详情 / 报名 / 日程）一个字都没碰 —— 这段代码里没有它们的名字；
+//   · 筛选卡里四个框当场空掉，屏幕和列表说的是同一件事；
+//   · `hx-replace-url` 照旧把地址栏改成清空后的那一份，可收藏、可转发。
+//
+// ⚠️ **只清看得见的字段。** 隐藏字段是上下文，不是筛选：`scope`（我在看谁的
+//    活动）留着，理由写在 `_period_filter.html`；`from`（日程翻到了哪一天）
+//    也留着 —— 清掉它等于「点 Clear 把日程弹回今天」，正是这次要修的那类事。
+//
+// ⚠️ 用事件委托挂在 document 上，不是在每颗按钮上挂一个：筛选卡本身不会被
+//    HTMX 换掉（它在 `#event-results` 外面），但管理列表那一页的整块结果区会，
+//    而委托对新换进来的节点天然有效。
+//
+// ⚠️ `htmx.trigger(form, "submit")` 发的是一个**自定义事件**，不是浏览器的
+//    表单提交：表单上写着 `hx-trigger="input delay:400ms, submit"`，htmx 听到
+//    它就发那次 hx-get。派发一个不可信的 submit 事件不会让浏览器自己去提交，
+//    所以这里不会变成一次整页跳转。
+//
+// ⚠️ 这个包**没有**往 window 上挂自己（见文件顶上那行 import）：写
+//    `window.htmx.trigger(...)` 的话这里会静默地什么都不做，而 `href` 已经被
+//    `preventDefault()` 拦掉了 —— 表现是「点 Clear 完全没反应」。
+//
+// ⚠️ 这段脚本整个没加载出来时**什么都不拦**：`href` 还在，浏览器照常跳到
+//    清空后的那一页（D24 的渐进增强）。这也是为什么拦截写在这里，而不是模板里
+//    一句 `x-on:click.prevent` —— 那一句在 Alpine 没起来时会变成一颗死按钮。
+document.addEventListener("click", (event) => {
+  const link = event.target.closest?.("[data-clear-filters]");
+  if (!link) return;
+  const form = link.closest("form");
+  if (!form) return;
+
+  event.preventDefault();
+  for (const field of form.querySelectorAll("input, select, textarea")) {
+    // ⚠️ 判据是 `type === "hidden"`，不是「看不看得见」：一个被 CSS 藏起来的
+    //    真筛选字段仍然该被清掉，而一个隐藏字段就算画出来了也仍然是上下文。
+    if (field.type !== "hidden") field.value = "";
+  }
+  htmx.trigger(form, "submit");
+});
+
+// ---------------------------------------------------------------------------
 // 「这块屏幕装得下右面板吗」（2026-08-19）
 //
 // 活动卡片上那个 hx-trigger 的过滤器用它决定：**就地在面板里开**，还是放手
@@ -1373,11 +1474,32 @@ function paintPicked() {
   }
 }
 
-// 吸顶导航栏挡住的那一条。⚠️ 和 app.css 的 `--top-bar-h` 是同一件事，
-//    但这里要的是**像素**而不是 rem，而那个变量声明在日程面板上（作用域不到
-//    这里）。取 76px 是两档里高的那一档：判「看得见吗」时宁可保守，
-//    多滚一次的代价远小于「明明被盖住却判成可见」。
+// 顶上钉着的那一条挡掉多少（2026-08-28 改成实测）。
+//
+// 🔴 **量它，不要猜它是哪一条。** 页面顶上钉着的可能是站头那条 bar（68/76px），
+//    也可能是页头条（52px，活动列表就是这一档，站头那条跟着内容滚走了）——
+//    而这里只需要一个数：`getBoundingClientRect().bottom`，也就是「视口顶到
+//    它下沿」。钉住的东西这个数就是它的高度，没钉住的（滚走了）这个数是负的，
+//    于是自然退回下面那个兜底。
+//
+// ⚠️ 兜底 76px 是站头那两档里**高**的一档：判「看得见吗」时宁可保守 ——
+//    多滚一次的代价，远小于「明明被盖住却判成可见」（那时人看到的是
+//    「有高亮，却找不到那一行」）。
+// ⚠️ 不去读 `--head-h`：那是 rem，换算要知道根字号，而根字号是可以被用户改的。
+//    量出来的像素没有这一层假设。
 const TOP_BAR_PX = 76;
+
+function pinnedHeadBottom() {
+  // ⚠️ 两次 querySelector，**不是** `.page-bar, .site-head` 一次：分组选择器返回
+  //    的是**文档顺序**里的第一个，而站头在页头条前面 —— 于是有页头条的页面上
+  //    永远量到那条已经不吸顶的 bar，一路退回 76px 的兜底。屏幕上只是「滚动
+  //    多让开了 24px」，没有任何报错。
+  const bar = document.querySelector(".page-bar")
+    || document.querySelector(".site-head");
+  if (!bar) return TOP_BAR_PX;
+  if (getComputedStyle(bar).position !== "sticky") return TOP_BAR_PX;
+  return Math.max(0, bar.getBoundingClientRect().bottom);
+}
 
 // 视口顶上**一共**被挡住多少 —— 顶栏，加上钉住的筛选卡（如果它此刻钉着）。
 //
@@ -1392,11 +1514,12 @@ const TOP_BAR_PX = 76;
 //    钉不钉是样式表的决定（`.events-shell.is-open .filter-card`），
 //    在这里重述一遍那个条件就是第二个会漂移的答案。
 function occludedTop() {
+  const head = pinnedHeadBottom();
   const card = document.querySelector(".filter-card");
   if (card && getComputedStyle(card).position === "sticky") {
-    return Math.max(TOP_BAR_PX, card.getBoundingClientRect().bottom);
+    return Math.max(head, card.getBoundingClientRect().bottom);
   }
-  return TOP_BAR_PX;
+  return head;
 }
 
 // 🔴 **只有那一行不完整可见时才滚。**（2026-08-19 修）

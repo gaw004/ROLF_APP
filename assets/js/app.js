@@ -1606,3 +1606,103 @@ document.body.addEventListener("htmx:afterSettle", () => {
 //    ⚠️ 从 document 起扫，不从 `event.target` 起：out-of-band 换掉的那一块
 //       **不是** target（target 是列表），从 target 起扫会正好漏掉日程。
 document.body.addEventListener("htmx:afterSettle", () => bootSchedules(document));
+
+// --- 管理列表：鼠标停在 When 那一格某一行上时，那个写着星期几的小窗 --------
+//
+// 那一格两行写的是「Aug 30, 2026, 9am」—— 月日年时刻，没有星期几。星期几对
+// 排班的人有用（「哦这场是周日」），但写进那一行会让这一列再宽出约 2.5rem，
+// 而这一整批要修的正是「每个 event 都太长了」。于是它进了这个小窗。
+//
+// ⭐ **这不是这一批之前那个同名的小窗。** 那一个显示的是完整的起止时刻 ——
+//    也就是把**主信息**藏进悬停，而它在触屏上不装，手机用户什么都拿不到。
+//    这一个显示的只是星期几：日期本身就在屏幕上。补充信息只给鼠标是知情的
+//    取舍，主信息不是。读屏用户走的是每一行里那段 `sr-only`。
+//
+// ⚠️ **这一段只搬字和算坐标，一个日期都不算。** 星期几由服务端渲染进
+//    `data-dow`（events/schedule.py 的 `_when_line`）—— 页面的时区是基金会的，
+//    而浏览器的时区是访客的。在这里从时间戳算的话，一个在纽约的 foundation
+//    admin 会看到周日被写成周六，而且不报任何错。
+//
+// ⚠️ 整段包在一个立即执行的箭头函数里，不是一个裸的块 —— 下面那句提前退出的
+//    `return` 需要一个函数体。裸块里写 `return` 是语法错误，而 esbuild 会把
+//    整个 bundle 一起报废，不只是这一段。
+(() => {
+  // 🔴 **触屏上整段不装。** 移动端浏览器点一下也会派发 mouseover，不挡的话
+  //    点一下日期会先弹出一个跟手指无关的小盒子。那一档看到的是行里那两个
+  //    完整日期本身，而星期几对他们是缺的 —— 这是知情的取舍，不是疏忽。
+  //    ⚠️ 用 `(hover: hover)` 而不是判 UA：能不能悬停是设备的能力，不是牌子。
+  if (!window.matchMedia("(hover: hover)").matches) return;
+
+  const GAP = 6;   // 小窗和那一行之间让开的距离
+  const EDGE = 8;  // 视口边缘留的余量
+
+  // ⚠️ 每次都重新 `getElementById`，不缓存。这一页整块 `#event-results` 会被
+  //    筛选 / 翻页 / 改状态换掉，而小窗在那块**外面**，所以它其实活得下来 ——
+  //    但缓存一个可能为 null 的引用意味着这段代码在别的页面上（那里根本没有
+  //    这个元素）也要各处判空。取一次便宜。
+  const boxOf = () => document.getElementById("when-dow");
+
+  function hide() {
+    const box = boxOf();
+    // ⚠️ 用 `hidden` 而不是 `style.display`：`[hidden]` 是元素自己的状态，
+    //    不和样式表抢那个属性。
+    if (box) box.hidden = true;
+  }
+
+  // ⚠️ 位置锚在**那一行自己**身上，不跟着光标走。上一版跟光标是因为它显示的是
+  //    主信息、要一直贴在手边；这一个只有一个词，跟着光标飘反而在一列日期上
+  //    不停抖。
+  //
+  // 🔴 **摆在那一行的右边，不是下边。** 下边那个位置上正好是这一格的另一行
+  //    （Starts 底下就是 Ends）—— 而这两行是一对，解释其中一个的时候盖住另一个
+  //    是最糟的落点。浏览器里实拍到过。右边是这一格自己的空白，宽度不够时
+  //    翻到左边。
+  //
+  // ⚠️ 坐标直接用 client 系，因为小窗是 `position: fixed` —— 它的包含块就是
+  //    视口，所以这里**不需要**加 scrollX / scrollY。加了的表现是：页面滚到
+  //    下半部分之后，小窗掉到屏幕外面去。
+  function show(line) {
+    const box = boxOf();
+    if (!box) return;
+    box.textContent = line.dataset.dow || "";
+    // ⚠️ 先显示再量尺寸：`[hidden]` 的元素 `getBoundingClientRect()` 全是 0，
+    //    于是下面那两处「够不够地方」的判断永远答「够」，贴着右下角时小窗
+    //    会被裁掉一条。摆位在同一帧里完成，所以看不到它在旧坐标上闪。
+    box.hidden = false;
+    const anchor = line.getBoundingClientRect();
+    const self = box.getBoundingClientRect();
+    // 右边放不下时翻到左边 —— 硬夹在视口右缘的话它会横着压在这一行上。
+    const right = anchor.right + GAP;
+    const left = right + self.width + EDGE > window.innerWidth
+      ? anchor.left - GAP - self.width
+      : right;
+    // 和这一行垂直居中。⚠️ 用 `anchor.top + anchor.height / 2` 而不是
+    //    `anchor.bottom`：这一行的高度就是一行字，居中之后小窗和它是一条基线上
+    //    的两个东西，而不是一个吊在下面的挂件。
+    const top = anchor.top + (anchor.height - self.height) / 2;
+    box.style.left = `${Math.max(EDGE, left)}px`;
+    box.style.top = `${Math.min(Math.max(EDGE, top), window.innerHeight - self.height - EDGE)}px`;
+  }
+
+  // ⚠️ 委托挂在 document 上。`#event-results` 每一次筛选 / 翻页 / 改状态都会被
+  //    整块换掉，挂在行上或者表上的监听会跟着一起没 —— 而表现是「筛一次之后
+  //    小窗就不出来了」，控制台一声不吭。
+  //
+  // ⚠️ 找的是 `[data-dow]`，也就是 When 那一格里的**某一行**，不是整格：
+  //    两行是两个不同的日期，很可能是两个不同的星期几。
+  document.addEventListener("mouseover", (event) => {
+    const line = event.target.closest?.("[data-dow]");
+    if (line) show(line);
+  });
+
+  // ⚠️ `mouseout` 也要判一次 closest：那一行里还套着 `.when-label` 和 `.sr-only`
+  //    两个 span，在它们之间移动同样会派发 mouseout，而那时光标并没有离开这一行。
+  document.addEventListener("mouseout", (event) => {
+    if (event.target.closest?.("[data-dow]")) hide();
+  });
+
+  // 🔴 **换掉那一块之前先收起来。** 改一个状态会把整块 `#event-results` 换成
+  //    新的 DOM，而光标底下那一行会被一起替换掉 —— 于是 `mouseout` 永远不会来，
+  //    小窗就那么钉在屏幕上，直到下一次悬停。
+  document.body.addEventListener("htmx:beforeSwap", hide);
+})();

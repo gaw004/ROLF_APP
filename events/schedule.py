@@ -4,6 +4,13 @@ Events 页右边那块面板画的东西。摆放全是算术 —— 落在哪�
 跟谁重叠、于是偏移几档、配哪一个颜色 —— 而算术写在模板里既测不了也读不懂，
 所以它在这里，视图只负责取数据和定窗口。
 
+⚠️ 除了面板的几何，这里还住着 `clock()` 和 `when_labels()`（2026-08-29）——
+   后者是**管理列表**那一列的两行字，和面板没关系。它在这个模块里，是因为
+   两处的时刻必须走同一个 `clock()`：同一场活动在管理列表和日程上写着不一样的
+   时间，是那种两边各自看都正常、放在一起才露馅的错。
+   真要收拾的话，该动的是把 `clock()` 提到一个更底层的模块去，而不是让
+   `when_labels()` 自己再拼一份时刻格式。
+
 🔴 **这个模块不问「现在是几点」。** 红线的位置由**浏览器**算（app.js），
    服务端只渲染一个进入页面那一刻的值 —— 因为服务端渲染出来的「现在」在页面
    开着的第二分钟就是错的，而一条画错位置的红线比没有红线更糟：它是这一页上
@@ -18,6 +25,8 @@ Events 页右边那块面板画的东西。摆放全是算术 —— 落在哪�
 import datetime
 import zlib
 from dataclasses import dataclass
+
+from django.utils import timezone
 
 from core.timeutils import day_start, local_date_of, local_now, local_today
 
@@ -151,6 +160,73 @@ def clock(moment):
     hour = moment.hour % 12 or 12
     suffix = "am" if moment.hour < 12 else "pm"
     return f"{hour}{suffix}" if moment.minute == 0 else f"{hour}:{moment.minute:02d}{suffix}"
+
+
+def when_labels(event):
+    """管理列表 When 那一格的两行字：开始一行，结束一行。
+
+        同一天  ("Aug 30, 2026, 9am",  "Aug 30, 2026, 11am")
+        跨午夜  ("Aug 30, 2026, 10pm", "Aug 31, 2026, 1am")
+
+    返回的是两枚 `WhenLine`（`.text` / `.weekday`），不是两个字符串 ——
+    星期几不写在行上，理由见 `WhenLine`。
+
+    🔴 **两行的格式完全一样，不分同一天还是跨午夜**（2026-08-29 拍板）。
+
+       上一版分两档：同一天写「日期一行 + `9am – 11am` 一行」，只有跨午夜才在
+       结束那行补上日期和一个箭头。分档省下来的那点宽度不值得 —— 它让**同一列里
+       两行的含义随行变化**：这一行的第二行是「时段」，下一行的第二行是「结束时刻」。
+       而人是竖着扫这一列的。
+
+       统一之后每一行都是「开始 / 结束」，于是跨午夜不再需要任何特殊记号：
+       结束那行自己写着 `Aug 31`。上一版那条「只写 1am 会被读成同一天凌晨」的
+       隐患也就不存在了 —— 不是靠一个箭头挡住，是靠格式本身没有那个歧义。
+
+    ⚠️ 时刻走上面那个 `clock()`，不自己拼 —— 同一场活动在管理列表和日程上写着
+       不一样的时间，是那种两边各自看都正常、放在一起才露馅的错。
+
+    ⚠️ 年份两行都写。这一列是「这场活动什么时候」的唯一出处（表格里没有别的
+       日期列了），而管理侧看得到往年已结束的活动 —— 一个不带年份的 `Aug 30`
+       在筛「去年八月」时读起来和今年的一模一样。
+    """
+    return (_when_line(event.start_time), _when_line(event.end_time))
+
+
+@dataclass(frozen=True)
+class WhenLine:
+    """When 那一格里的一行。
+
+    ⚠️ 是两个字段而不是一个字符串，因为**星期几不写在行上**：那一行已经是
+       「Aug 30, 2026, 9am」，再塞进「Sun, 」会让这一列宽出约 2.5rem，而这一整批
+       要修的正是「每个 event 都太长了」。星期几进了一个悬停才出现的小窗
+       （app.js）和一段读屏专用的文字（模板里的 `sr-only`）。
+
+    ⚠️ `text` 和 `weekday` 必须来自**同一次** `localtime()`（见下面的
+       `_when_line`）。分两次转的话，跨时区 DST 切换那一刻理论上能拿到对不上的
+       一对 —— 而它的表现是小窗写着周日、旁边的日期写着周一。
+    """
+
+    text: str      # "Aug 30, 2026, 9am"
+    weekday: str   # "Sunday"
+
+
+def _when_line(moment):
+    """一行「月 日, 年, 时刻」，外加它是星期几。
+
+    ⚠️ `timezone.localtime()` 不能省（D16）：库里存的是 UTC，直接格式化会把
+       下午 5 点之后开始的活动写成第二天 —— 不报错，只是差一天。星期几跟着一起
+       错，而那是这一对里唯一会被人当场发现的一个。
+       守卫：core.tests.TimeSourceGuardTests。
+
+    ⚠️ 手写 `{m.day}` 而不是 `%-d`：那个去零的写法是 glibc/BSD 的扩展，
+       Windows 上直接抛 ValueError。这里不需要为此赌一个部署平台。
+
+    ⚠️ 星期几写全称（`%A` → "Sunday"），不是行里那种缩写：它是小窗里唯一的
+       一个词，没有任何需要省的宽度，而 "Sun" 在只有它自己的一张小卡上
+       读起来像被截断了。
+    """
+    m = timezone.localtime(moment)
+    return WhenLine(f"{m:%b} {m.day}, {m.year}, {clock(m)}", f"{m:%A}")
 
 
 def remaining(delta):

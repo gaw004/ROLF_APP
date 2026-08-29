@@ -778,23 +778,63 @@ def event_manage_list(request):
     """
     events, administered, foundation = _scoped_events(request)
 
+    # Set by the POST branch below, and read twice at the bottom: it decides
+    # whether the fragment carries the messages back out of band.
+    wrote = False
+
     if request.method == "POST":
         # Status is editable straight from the list: publishing an event and
         # closing a finished one are frequent, and both are a single choice.
         # The times are not, and are shown read-only — moving an event obliges
         # somebody to notify the volunteers, so it goes through the edit page,
         # which routes to the notice. Two fields, two different consequences.
+        #
+        # 🔴 2026-08-29: there is no Save button any more — picking a status
+        #    *is* the submit (see the form in _event_manage_results.html). Two
+        #    things follow, and both are about not throwing away where the
+        #    person was:
+        #
+        #    · The HTMX path does not redirect at all. It falls through and
+        #      re-renders the same fragment the filter renders, so the row
+        #      updates in place and the page does not move. A redirect would
+        #      make htmx follow it and swap a whole page into #event-results.
+        #
+        #    · The no-JS path (the Save button inside <noscript>) redirects to
+        #      `get_full_path()` rather than to the bare list URL. The form's
+        #      action carries the current filter, page and scope, so this sends
+        #      them back to the page they were looking at. It used to drop all
+        #      of it and land on an unfiltered page 1 — which looks perfectly
+        #      normal, just not where you were.
         event = _managed_event(request, request.POST.get("event"))
         form = EventStatusForm(request.POST, instance=event)
         if form.is_valid():
             set_status(event, form.cleaned_data["status"])
             messages.success(request, f"“{event.name}” is now {event.get_status_display()}.")
-        return redirect("events:event_manage_list")
+        if not request.headers.get("HX-Request"):
+            return redirect(request.get_full_path())
+        wrote = True
 
     period = EventPeriodForm(
         request.GET or None, ministries=_offered_ministries(administered))
     events = period.narrow(events)
     page = _page(request, events, MANAGED_EVENTS_PER_PAGE)
+    # When 那一格的两行字：开始一行、结束一行（2026-08-29 第二轮）。
+    #
+    # 🔴 起止时间**回到了表格里**。这一批之前它们被搬进一个鼠标停在活动名上才
+    #    弹出的小窗 —— 行是短了，但那个小窗在触屏上根本不装（app.js 判
+    #    `(hover: hover)`），于是手机和平板上这一页从此看不到任何具体时刻，
+    #    而扫一整页时它也不在屏幕上。改成竖排两行同时拿到「短」和「看得见」。
+    #
+    # ⚠️ 两行字在**服务端**算好，不是把两个时间戳丢给浏览器自己格式化。
+    #    这一页的时区是基金会的（D16），而浏览器的时区是访客的 —— 一个在纽约
+    #    的 foundation admin 会看到每一场都晚三个小时，且没有任何东西会报错。
+    #    events/schedule.py 里那条「前端不做日期运算」是同一件事。
+    #
+    # ⚠️ 挂在**这一页的**活动上（`page`，不是 `events`）：整页和 HTMX 片段共用
+    #    下面这一次 render，所以两条路都覆盖到；而给整个 queryset 算就是给
+    #    翻不到的那几百场也各算一遍。
+    for event in page:
+        event.when_start, event.when_end = schedule.when_labels(event)
     return render(request, _template(
         request, "events/event_manage_list.html",
         "events/_event_manage_results.html"), {
@@ -821,6 +861,12 @@ def event_manage_list(request):
         # identical, and building one per event would be a form per row for no
         # gain.
         "status_form": EventStatusForm(),
+        # ⚠️ Only the status write lights this. Filtering and paging render the
+        #    same fragment and must NOT carry messages back: including that
+        #    partial consumes whatever is sitting unseen in the session, so the
+        #    next page someone opens is missing its own notice. The rule and its
+        #    mirror image are both written on _messages_oob.html.
+        "messages_oob": wrote,
     })
 
 

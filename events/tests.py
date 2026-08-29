@@ -6688,23 +6688,22 @@ class ManageListStatusTests(PageTestCase):
     def url(self):
         return reverse("events:event_manage_list")
 
-    def test_all_six_columns_are_there_with_no_report(self):
-        # 2026-08-05: Ministry and Ends give up their columns **only while the
-        # report is open**. Closed, this is the page it always was — which is
-        # easier to remember than "two columns gone and a third one shortened".
+    def test_the_five_columns_are_there_with_no_report(self):
+        # 2026-08-29: start and end share one column named `When` (a cell with
+        # two lines), so this is five columns, not six. Ministry is still the
+        # one that steps aside for the report, and only while it is open.
         self.login(self.zhang)
         response = self.client.get(self.url())
-        for column in ("Event", "Ministry", "Starts", "Ends", "Status"):
-            self.assertContains(response, f"<th>{column}</th>")
+        for column in ("Event", "Ministry", "When", "Status", "Go to"):
+            self.assertContains(response, f'>{column}</th>')
 
-    def test_two_columns_step_aside_for_the_report(self):
+    def test_only_ministry_steps_aside_for_the_report(self):
         self.login(self.zhang)
         response = self.client.get(self.url(), {"report": "1"})
-        self.assertNotContains(response, "<th>Ministry</th>")
-        self.assertNotContains(response, "<th>Ends</th>")
-        # Starts stays: a list filtered to August with nothing on it saying
-        # August is the one thing dropping all three would have cost (D27).
-        self.assertContains(response, "<th>Starts</th>")
+        self.assertNotContains(response, ">Ministry</th>")
+        # When stays: a list filtered to August with nothing on it saying
+        # August is the one thing dropping it would have cost (D27).
+        self.assertContains(response, ">When</th>")
 
     def test_status_can_be_changed_from_the_list(self):
         self.event.status = Event.Status.DRAFT
@@ -6748,6 +6747,304 @@ class ManageListStatusTests(PageTestCase):
         self.assertEqual(response.status_code, 403)
         theirs.refresh_from_db()
         self.assertEqual(theirs.status, Event.Status.DRAFT)
+
+    def test_picking_a_status_is_the_submit_and_there_is_no_save_button(self):
+        # 2026-08-29: one field, and that field is a dropdown — having to press
+        # a second button after choosing reads as "that didn't count".
+        self.login(self.zhang)
+        page = self.client.get(self.url()).content.decode()
+        # ⚠️ 从那个隐藏的 event 字段往回找这张表单 —— 页面上还有别的 POST 表单
+        #    （站头那颗 Log out），`index('<form method="post"')` 抓到的是它。
+        field = page.index(f'name="event" value="{self.event.pk}"')
+        form = page[page.rindex("<form", 0, field):]
+        form = form[:form.index("</form>")]
+        self.assertIn('hx-trigger="change"', form)
+        # The whole results block comes back, so the row redraws in place.
+        self.assertIn('hx-target="#event-results"', form)
+        # 🔴 Save survives for exactly one audience. Changing a status is a
+        #    write, and D24 says a write keeps a complete server-side path —
+        #    but <noscript> means it does not exist for anybody else, and in
+        #    particular is not a button keyboard users can tab to and not see.
+        self.assertIn("<noscript>", form)
+        self.assertLess(form.index("<noscript>"), form.index("Save"))
+
+    def test_the_status_write_keeps_you_on_the_page_you_were_looking_at(self):
+        # 🔴 The form's action carries the current filter/page/scope, and the
+        #    no-JS redirect goes back to it. It used to redirect to the bare
+        #    list URL, which lands on an unfiltered page 1 — a page that looks
+        #    perfectly normal and is not the one you were on. Harmless while a
+        #    Save button made it rare; not harmless now that every pick posts.
+        self.login(self.zhang)
+        response = self.client.post(
+            f"{self.url()}?report=1",
+            {"event": self.event.pk, "status": Event.Status.COMPLETED})
+        self.assertEqual(response.status_code, 302)
+        self.assertIn("report=1", response["Location"])
+
+    def test_the_htmx_write_answers_with_the_fragment_not_a_redirect(self):
+        # A redirect here would make htmx follow it and swap a whole page,
+        # <head> and all, into #event-results.
+        self.login(self.zhang)
+        response = self.client.post(
+            self.url(), {"event": self.event.pk, "status": Event.Status.COMPLETED},
+            headers={"hx-request": "true"})
+        self.assertEqual(response.status_code, 200)
+        body = response.content.decode()
+        self.assertIn('id="event-results"', body)
+        self.assertNotIn("<html", body)
+        # ⚠️ And it carries the notice back out of band. Without this the
+        #    success message sits in the session and surfaces on whatever page
+        #    the person opens next — which is worse than no message at all.
+        self.assertIn('id="messages"', body)
+        self.assertIn("hx-swap-oob", body)
+
+    def test_filtering_does_not_eat_an_unseen_message(self):
+        # The mirror image, and the reason `messages_oob` is a flag rather than
+        # an unconditional include: this fragment is rendered by filtering and
+        # paging too, and those are reads.
+        self.login(self.zhang)
+        response = self.client.get(
+            self.url(), headers={"hx-request": "true"})
+        self.assertNotIn('id="messages"', response.content.decode())
+
+
+class ManageListPage:
+    """管理列表那一页的两个共用件：它的 URL，和把 When 那一格切出来。
+
+    ⚠️ `<td class="col-when">` 这个标记只写在**一处**。两个测试类都要切这一格，
+       各抄一份的话，改了这一格的类名或结构之后，更新了一处、另一处会继续对着
+       旧的 markup 断言 —— 而它多半还是绿的。
+    """
+
+    def url(self):
+        return reverse("events:event_manage_list")
+
+    def when_cell(self, **params):
+        page = self.client.get(self.url(), params).content.decode()
+        cell = page[page.index('<td class="col-when">'):]
+        return page, cell[:cell.index("</td>")]
+
+
+class ManageListRowLengthTests(ManageListPage, PageTestCase):
+    """每一行从左到右正好是版心那么长（2026-08-29，第二轮）。
+
+    用户报的是同一件事的第二轮：「每个 event 都太长了」。第一轮的解法是把时间
+    从表格里**拿走** —— 撤掉 Ends、Starts 缩成 `8/30`，几点到几点搬进一个鼠标
+    停在活动名上才弹出的小窗。行短了，但那个小窗在触屏上根本不装，于是手机和
+    平板上这一页从此看不到任何具体时刻。
+
+    这一轮换个方向：起止时间**回到表格里**，合成一列 `When`、一格竖排两行；
+    Go to 那六个链接从「一排不折行」改成固定三列网格排成 3+3；这一页的版心
+    也从 `max-w-[92rem]` 收回全站默认的 `max-w-6xl`。
+    """
+
+    def test_start_and_end_share_one_column(self):
+        # 起止合成一列，没有单独的 Ends 列 —— 两列各写一个完整 datetime 正是
+        # 当初「每一行都比版心长」的成因。
+        self.login(self.zhang)
+        for params in ({}, {"report": "1"}):
+            with self.subTest(params=params):
+                page = self.client.get(self.url(), params)
+                self.assertNotContains(page, ">Ends</th>")
+                self.assertNotContains(page, ">Starts</th>")
+                self.assertContains(page, ">When</th>")
+
+    def test_the_when_cell_carries_both_start_and_end_on_two_lines(self):
+        # ⚠️ 同时断言「Django 的长格式不在」，不只是「两行在」。只查那两行的话，
+        #    有人把这一格改回 `{{ event.start_time }}` 时这条测试照样绿 ——
+        #    默认格式里本来就含着月和日。
+        self.login(self.zhang)
+        start, end = schedule.when_labels(self.event)
+        long = formats.date_format(
+            timezone.localtime(self.event.start_time), "DATETIME_FORMAT")
+        for params in ({}, {"report": "1"}):
+            with self.subTest(params=params):
+                page, cell = self.when_cell(**params)
+                self.assertIn('class="when-start"', cell)
+                self.assertIn('class="when-end"', cell)
+                self.assertIn(start.text, cell)
+                self.assertIn(end.text, cell)
+                self.assertNotIn(long, page)
+
+    def test_each_line_says_which_end_it_is(self):
+        # 两行的日期时刻格式一模一样，没有这两个词的话「上面那行是开始」全靠
+        # 约定 —— 而这一格旁边没有任何东西说明那个约定。
+        self.login(self.zhang)
+        _, cell = self.when_cell()
+        self.assertIn(">Starts:</span>", cell)
+        self.assertIn(">Ends:</span>", cell)
+        # 顺序：开始那一行在上。
+        self.assertLess(cell.index("Starts:"), cell.index("Ends:"))
+
+    def test_the_columns_carry_their_own_names_not_a_position(self):
+        # 🔴 列宽靠类名，不靠 nth-child：开着报表时 Ministry 整列不渲染，于是
+        #    同一个序号在两档里指的是不同的列。守的是 app.css 的 `.manage-events`
+        #    那一组还有东西可命中。
+        self.login(self.zhang)
+        page = self.client.get(self.url()).content.decode()
+        self.assertIn('<table class="manage-events">', page)
+        for hook in ("col-event", "col-ministry", "col-when", "col-status", "col-goto"):
+            with self.subTest(hook=hook):
+                self.assertIn(f'class="{hook}"', page)
+
+    def test_the_go_to_links_are_a_fixed_three_column_grid(self):
+        # 🔴 `grid-cols-3` 而不是 `flex-wrap`：自由折行的行数取决于字号、字体和
+        #    链接文案，改任何一个都可能悄悄从两排变成三排。固定三列则是
+        #    「六个就是两排」。守的是这条决定本身，不是某一次的渲染结果。
+        self.login(self.zhang)
+        page = self.client.get(self.url()).content.decode()
+        goto = page[page.index('<td class="col-goto">'):]
+        goto = goto[:goto.index("</td>")]
+        self.assertIn("goto-grid", goto)
+        self.assertNotIn("flex-wrap", goto)
+        # 🔴 **不许用 Tailwind 的 `grid-cols-3`。** 它展开是
+        #    `repeat(3, minmax(0, 1fr))`，而这一列按内容收缩 —— 报出来的最小
+        #    宽度是 0，六个链接会叠印在一起。轨道写在 app.css 上，是 max-content。
+        self.assertNotIn("grid-cols-3", goto)
+        # 不许**格内**折行 —— `Edit & roles` 断成两行很难看。
+        self.assertIn("whitespace-nowrap", goto)
+
+    def test_the_page_uses_the_sites_default_content_width(self):
+        # 行短到装得下之后，这一页不再需要自己的版心。全站每一页的正文左右缘
+        # 对齐在同一条线上，只有这一页不是 —— 那是加宽版心一直在付的代价。
+        self.login(self.zhang)
+        page = self.client.get(self.url()).content.decode()
+        self.assertNotIn("max-w-[92rem]", page)
+        self.assertIn("max-w-6xl", page)
+
+    def test_the_panel_width_and_the_page_width_are_pinned_together(self):
+        # 🔴 **这两个数是一条算式的两端，而那条算式只写在注释里。**
+        #
+        #    版心 max-w-6xl（70rem 可用）− 面板 20rem − gap-6 = 留给表格 44rem 出头，
+        #    而表格的最小宽度实测正好顶着它。任何一端一动，`.table-wrap` 就会重新
+        #    横着滚 —— 而那正是这一整批要修的东西，并且在浏览器里才看得见。
+        #
+        # ⚠️ 这条测试**不验证**那条算式（服务端量不了像素），它只保证两个数不会
+        #    被单独改掉：谁动了其中一个，这里就红，红的时候去浏览器里重新量一遍
+        #    `.table-wrap` 的 scrollWidth 和 clientWidth。
+        #    这是「把只写在散文里的耦合，变成一个会响的东西」，不是一个布局断言。
+        self.login(self.zhang)
+        page = self.client.get(self.url(), {"report": "1"}).content.decode()
+        self.assertIn("lg:w-[20rem]", page)
+        self.assertIn("max-w-6xl", page)
+
+
+class ManageListWeekdayTests(ManageListPage, PageTestCase):
+    """星期几：悬停时的小窗，加上读屏用户那一份（2026-08-29）。
+
+    When 那一格两行写的是「Aug 30, 2026, 9am」，没有星期几 —— 写进去这一列要再
+    宽出约 2.5rem，而这一批要修的正是「每个 event 都太长了」。
+
+    ⭐ 它和这一批**之前**那个同名的小窗不是一回事，而这条测试同时守着这一点：
+       那一个显示的是完整的起止时刻，也就是把主信息藏进悬停，触屏上等于没有。
+       这一个只给屏幕上已有的日期补一个词。
+    """
+
+    def test_every_line_carries_its_own_weekday(self):
+        # 🔴 挂在**每一行**上，不是挂在整格上：两行是两个不同的日期，跨午夜的
+        #    活动那两行很可能是两个不同的星期几。
+        self.login(self.zhang)
+        start, end = schedule.when_labels(self.event)
+        _, cell = self.when_cell()
+        self.assertIn(f'data-dow="{start.weekday}"', cell)
+        self.assertIn(f'data-dow="{end.weekday}"', cell)
+        # 全称，不是行里那种缩写 —— 小窗里只有这一个词，没有要省的宽度。
+        self.assertNotIn(f'data-dow="{start.weekday[:3]}"', cell)
+
+    def test_screen_readers_get_the_weekday_without_hovering(self):
+        # 🔴 `data-dow` 对读屏用户等于不存在（他们没有悬停）。所以同一个词还有
+        #    第二份，写在行里那段 `sr-only` 上 —— 读出来是
+        #    「Starts: Sunday, Aug 30, 2026, 9am」。
+        self.login(self.zhang)
+        start, _ = schedule.when_labels(self.event)
+        page = self.client.get(self.url()).content.decode()
+        self.assertIn(f'class="sr-only">{start.weekday}, </span>', page)
+
+    def test_the_box_lives_outside_the_swapped_block_and_outside_the_table(self):
+        # 🔴 两个位置约束，缺一个这个功能就是静默失效的：
+        #    · `#event-results` 每次筛选 / 翻页 / 改状态整块被换掉；
+        #    · `.table-wrap` 是 overflow-x:auto + position:relative，会裁掉
+        #      以它为包含块的绝对定位后代。
+        #    两种违反都不报错，屏幕上只是「小窗没了」或者「小窗缺一角」。
+        self.login(self.zhang)
+        page = self.client.get(self.url()).content.decode()
+        self.assertIn('id="when-dow"', page)
+        self.assertGreater(page.index('id="when-dow"'), page.index('id="event-results"'))
+        table = page.index('class="table-wrap"')
+        self.assertGreater(page.index('id="when-dow"'), page.index("</table>", table))
+
+    def test_the_fragment_does_not_draw_a_second_box(self):
+        # 整页画一个就够。片段里再画一个的话，筛一次之后页面上有两个同 id 的
+        # 元素，而 getElementById 只认第一个 —— 于是从此填的是一个看不见的盒子。
+        self.login(self.zhang)
+        fragment = self.client.get(
+            self.url(), headers={"hx-request": "true"}).content.decode()
+        self.assertNotIn('id="when-dow"', fragment)
+
+    def test_the_old_full_timestamp_box_is_gone_for_good(self):
+        # 🔴 那一版由**四处**东西拼起来：模板里的 `#event-when`、活动名上的
+        #    `data-when-*`、app.js 的一段监听、app.css 的 `.event-when*`。
+        #    少删一处都不报错 —— 留下的是一个永远填不上字的哑功能。
+        #    这条守住模板那两处（另外两处在 assets/ 里）。
+        self.login(self.zhang)
+        for headers in ({}, {"hx-request": "true"}):
+            with self.subTest(headers=headers):
+                page = self.client.get(self.url(), headers=headers).content.decode()
+                self.assertNotIn("event-when", page)
+                self.assertNotIn("data-when-", page)
+
+
+class WhenLabelsTests(TestCase):
+    """`schedule.when_labels()` —— 管理列表 When 那一格的两行字。
+
+    ⚠️ 时刻一律用 `day_start(date) + N * HOUR` 造，不用
+       `timezone.make_aware(datetime.datetime(...))`：后者按 D16 是被 ruff 的
+       DTZ 挡住的写法（见 pyproject.toml 那一段），而 `day_start()` 本来就是
+       这个项目「当地的那一天从几点开始」的唯一出处。
+       ⚠️ 只在**不跨 DST 切换**的日子上成立（这里是 8/30 和 12/31）——
+          加的是绝对时长，跨切换的那天墙上时钟会差一小时。
+    """
+
+    def make(self, start, hours):
+        return make_event(start_time=start, end_time=start + hours * HOUR)
+
+    def test_both_lines_are_month_day_year_time(self):
+        start = day_start(datetime.date(2026, 8, 30)) + 9 * HOUR
+        begin, end = schedule.when_labels(self.make(start, 2))
+        # ⚠️ 时刻走 schedule.clock()，和日程卡上写的是同一个口径 —— 整点不写 :00。
+        self.assertEqual(begin.text, "Aug 30, 2026, 9am")
+        self.assertEqual(end.text, "Aug 30, 2026, 11am")
+        # ⚠️ 星期几**不在行里**，它是小窗和 sr-only 那一份用的。
+        self.assertEqual(begin.weekday, "Sunday")
+        self.assertEqual(end.weekday, "Sunday")
+
+    def test_an_event_that_crosses_midnight_needs_no_special_mark(self):
+        # 🔴 上一版在这里分了一档：同一天写「日期一行 + 时段一行」，跨午夜才在
+        #    结束那行补日期和一个箭头。统一格式之后跨午夜不再是一个特例 ——
+        #    结束那行自己写着 Aug 31，歧义在格式层面就不存在。
+        start = day_start(datetime.date(2026, 8, 30)) + 22 * HOUR
+        begin, end = schedule.when_labels(self.make(start, 3))
+        self.assertEqual(begin.text, "Aug 30, 2026, 10pm")
+        self.assertEqual(end.text, "Aug 31, 2026, 1am")
+        # 跨午夜的两行是两个不同的星期几 —— 小窗因此挂在每一行上，不是整格上。
+        self.assertEqual((begin.weekday, end.weekday), ("Sunday", "Monday"))
+
+    def test_an_event_that_crosses_new_year_says_so(self):
+        # 年份两行都写，跨年这一档因此也是白来的。
+        start = day_start(datetime.date(2026, 12, 31)) + 22 * HOUR
+        begin, end = schedule.when_labels(self.make(start, 3))
+        self.assertEqual(begin.text, "Dec 31, 2026, 10pm")
+        self.assertEqual(end.text, "Jan 1, 2027, 1am")
+
+    def test_the_day_is_the_foundations_day_not_the_utc_one(self):
+        # D16. 洛杉矶下午 5 点之后开始的活动，UTC 那边已经是第二天了 —— 少一次
+        # `timezone.localtime()` 就会把这一场写成 8/31，不报错，只是差一天。
+        start = day_start(datetime.date(2026, 8, 30)) + 18 * HOUR
+        begin, end = schedule.when_labels(self.make(start, 2))
+        self.assertEqual(begin.text, "Aug 30, 2026, 6pm")
+        self.assertEqual(end.text, "Aug 30, 2026, 8pm")
+        # 星期几跟着一起错，而那是这一对里唯一会被人当场发现的一个。
+        self.assertEqual(begin.weekday, "Sunday")
 
 
 class NoShowPageTests(PageTestCase):

@@ -2,10 +2,20 @@
 {% block title %}Events I Manage{% endblock %}
 
 {% comment %}
-⚠️ 这一页比正文的默认宽度宽：右边多一个报表面板，按默认宽度的话表格会被挤到
-   一直横向滚动。base.html 留了 main_width 这个 block 就是为了这种情况。
+🔴 **这一页用全站默认的版心（max-w-6xl），没有 `main_width` 覆盖**（2026-08-29
+   第二轮）。它曾经是 `max-w-[92rem]`：那时 Starts / Ends 两列写的是 Django 默认的
+   datetime，两列约 320px，一行怎么都比版心长，于是这一页靠**加宽版心**去够行宽。
+
+   这一批把行本身改短了（起止合成一列、竖排两行；Go to 六个链接排成 3+3），
+   于是那条覆盖没有存在的理由了 —— 而它一直在制造一个副作用：全站每一页的
+   正文左右缘都对齐在同一条线上，只有这一页不是。
+
+⚠️ 代价如实记着：开着报表时右边那块面板占 24rem，70rem 的可用宽度里留给表格的
+   约 44.5rem，活动名那一列因此只剩十来 rem，长名字会折两三行。这一行本来就因为
+   When 那一格和 Go to 网格有两行高，所以头两行是免费的。真嫌挤的话，调节杆是
+   把 `_event_manage_results.html` 里面板外壳的 `lg:w-[24rem]` 收到 `lg:w-[20rem]`，
+   不是把版心再加宽回去。
 {% endcomment %}
-{% block main_width %}max-w-[92rem]{% endblock %}
 
 {% block content %}
   {% comment %}
@@ -57,4 +67,32 @@
   {% include "events/_period_filter.html" with action=manage_url report_button=1 scope=scope_param %}
 
   {% include "events/_event_manage_results.html" %}
+
+  {% comment %}
+  鼠标停在 When 那一格某一行上时，写着「星期几」的那个小窗（2026-08-29）。
+
+  ⭐ 它和这一批之前那个同名的小窗**不是一回事**，这一点值得说清楚：
+     那一个显示的是完整的起止时刻 —— 因为时刻当时根本不在表格里，于是它把
+     **主信息**藏进了悬停，而触屏上它不装，手机用户什么都拿不到。
+     这一个显示的只是星期几：日期本身就写在屏幕上，星期几是它的补充。
+     把补充信息只给鼠标是知情的取舍；把主信息只给鼠标不是。
+     读屏用户走的是另一条路（每一行里那段 `sr-only`，见 _event_manage_results.html）。
+
+  🔴 **两个位置约束，缺一个这个功能就是静默失效的。**
+
+     · 它必须在 `#event-results` **外面**。那一块被筛选、翻页和改状态整个换掉
+       （`hx-swap="outerHTML"`），写在里面的话每换一次小窗就被连根拔掉，
+       而 app.js 那边只是 `getElementById` 拿到 null，什么都不报。
+
+     · 它必须在 `.table-wrap` **外面**。那个容器是 `overflow-x: auto` 加
+       `position: relative`（app.css 里专门有一段讲它会裁剪绝对定位的后代），
+       小窗放进去会被裁掉半截 —— 而在没溢出的那几屏上它看起来完全正常。
+       `position: fixed` 加上放在外面，两件事一起才成立。
+     守卫：events.tests.ManageListWeekdayTests。
+
+  ⚠️ `aria-hidden` 加上一直挂着的 `hidden`：它是给鼠标的辅助显示，而同一个信息
+     已经在每一行的 `sr-only` 里给过读屏用户了。不挡的话无障碍树里会多一个
+     飘着的重复节点。
+  {% endcomment %}
+  <div id="when-dow" class="when-dow" hidden aria-hidden="true"></div>
 {% endblock %}

@@ -68,10 +68,33 @@ hx-headers 挂一次，所有 HTMX 请求都带上 CSRF —— 不要每个表�
 
   ⚠️ 吸顶。导航全收进菜单之后，bar 跟着内容滚走就意味着「在长列表底部想换页
      得先滚回顶部」—— 而列表正要变长。
+
+  🔴 **给了 `page_bar` 的页面例外：那时吸顶的是页头条，这条 bar 跟着内容滚走**
+     （2026-08-28）。规则不写在这里，也不靠第二个开关，而是 app.css 里一句
+     `body:has(.page-bar) .site-head { position: static }` —— 一个知识点、一处
+     声明。用两个 block（「有没有页头条」和「要不要吸顶」）的话，它们迟早会
+     对不上，而对不上的表现是两条 bar 同时钉在顶上、或者一条都不钉。
+     取舍如实说：滚下去之后 Menu 不在屏幕上了（要它就滚回顶部）——
+     上面那条「导航全收进菜单」的顾虑因此在这些页面上换成了「一屏只钉一条」。
+     ⚠️ 吸顶那三句**不在这里写成工具类**（原来是 `sticky top-0 z-30`），
+        整条规则搬进了 app.css 的 `.site-head`。理由不是整洁：Tailwind 的
+        utilities 层排在 components 后面，工具类会**压掉**那条「有页头条时
+        不吸顶」—— 表现是两条 bar 一起钉在顶上，而取消它的那条 CSS 明明写着。
   {% endcomment %}
-  <div class="sticky top-0 z-30">
+  <div class="site-head">
     {% include "core/components/_top_bar.html" with solid=1 themed=1 %}
   </div>
+
+  {% comment %}
+  页头条（2026-08-28）。这一页叫什么，以及以后这一页自己那排小标题。
+
+  ⚠️ 它在 `<main>` **外面**、在 bar 底下，因为它是**站的一部分**而不是内容的
+     一部分：钉住的东西必须横跨整个视口，而 main 有版心和左右内边距。
+     里面那一层再去对齐版心，见 `page_bar.html`。
+
+  ⚠️ 默认为空 —— 没有给这个 block 的页面，顶上和 2026-08-28 之前逐像素相同。
+  {% endcomment %}
+  {% block page_bar %}{% endblock %}
 
   {% include "core/components/_site_menu.html" %}
 

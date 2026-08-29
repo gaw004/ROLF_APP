@@ -1264,6 +1264,8 @@ class EndedEventTests(TestCase):
         self.assertFalse(early.is_over)
 
     def test_every_status_that_really_happened_reads_Ended_afterwards(self):
+        # ⚠️ COMPLETED 也在里面，但它从 2026-08-28 起靠的是另一条路
+        #    （`NOT_A_VOLUNTEERS_WORD`）—— 结果一样，来源不同。
         for status in (Event.Status.OPEN, Event.Status.FULL,
                        Event.Status.COMPLETED):
             with self.subTest(status=status):
@@ -1285,19 +1287,46 @@ class EndedEventTests(TestCase):
         self.assertEqual(draft.status_label, "Draft")
 
     def test_before_it_ends_the_label_is_just_the_status(self):
-        for status in Event.Status:
+        # ⚠️ 「wrapped up」除外，它任何时候都读作 Ended（下一条）。
+        for status in set(Event.Status) - Event.NOT_A_VOLUNTEERS_WORD:
             with self.subTest(status=status):
                 event = self.make(status, start=NOW + DAY, end=NOW + DAY + HOUR)
                 self.assertEqual(event.status_label, event.get_status_display())
 
-    def test_ends_with_the_clock_is_not_written_as_a_complement(self):
+    def test_wrapped_up_never_reaches_a_volunteer_even_before_it_ends(self):
+        """🔴 「Wrapped up」是管理员的记账词，不是给志愿者看的（2026-08-28）。
+
+        它的意思是「收尾做完了 —— 出勤点了、工时记了」，而那是只有办这场活动
+        的人才知道、也只有他们要回答的事。活动结束之后 `ENDS_WITH_THE_CLOCK`
+        本来就把它塌成 Ended 了（下面那条钉着），所以剩下的唯一泄漏口就是
+        **提前点了 Completed** 的这一场 —— 用户报上来的正是它：
+        「wrapped up 最好不会让一般人看到」。
+
+        ⚠️ 钉的是 `status_label`，不是某一个模板：志愿者那几页（列表、详情、
+           那句「This event is not taking signups (…)」）全都走它，
+           而管理列表故意不走（那一页显示真实 status）。
+        """
+        early = self.make(Event.Status.COMPLETED, start=NOW + DAY, end=NOW + DAY + HOUR)
+        self.assertFalse(early.is_over)
+        self.assertEqual(early.status_label, "Ended")
+        # 反过来：那一页的下拉框和管理列表里，这个词一个字没变。
+        self.assertEqual(early.get_status_display(), "Wrapped up")
+
+    def test_the_two_sets_are_listed_in_full_and_do_not_overlap(self):
         # B5 那一课：把状态列全、数一遍。五个 —— 所以 exclude(...) 是错的，
         # 哪怕它今天给出同一个答案。第六个状态必须在这里红一次。
         self.assertEqual(
             Event.ENDS_WITH_THE_CLOCK,
-            frozenset({Event.Status.OPEN, Event.Status.FULL,
-                       Event.Status.COMPLETED}),
+            frozenset({Event.Status.OPEN, Event.Status.FULL}),
         )
+        self.assertEqual(
+            Event.NOT_A_VOLUNTEERS_WORD,
+            frozenset({Event.Status.COMPLETED}),
+        )
+        # ⚠️ 两个集合不许相交：一个状态要么「过了点就换个说法」，要么「从来
+        #    不说」。同时属于两边的那一天，`status_label` 里那句 or 会让后半条
+        #    永远读不到，而两条注释都还写着自己在生效。
+        self.assertFalse(Event.ENDS_WITH_THE_CLOCK & Event.NOT_A_VOLUNTEERS_WORD)
         self.assertEqual(len(Event.Status), 5)
 
 
@@ -6401,7 +6430,8 @@ class SignupBadgeLinkTests(PageTestCase):
             self.event.status = status
             self.event.save(update_fields=["status"])
             html = self.rows()
-            self.assertIn(self.event.get_status_display(), html, status)
+            # ⚠️ 同上：这一页写的是 `status_label`，wrapped up 在这里是 Ended。
+            self.assertIn(self.event.status_label, html, status)
             self.assertNotIn(
                 f'href="/events/{self.event.pk}/signup/"', html,
                 f"{status} 的标签也变成了报名链接 —— 点下去是 404")
@@ -8167,7 +8197,10 @@ class EventRowHeadingTests(PageTestCase):
                 row = self.row()
                 self.assertNotIn("bg-success-bg", row)
                 self.assertNotIn("bg-danger-bg", row)
-                self.assertIn(self.event.get_status_display(), row)
+                # ⚠️ `status_label`，不是 `get_status_display` —— 这一格写的是
+                #    「告诉志愿者的那个词」，而 2026-08-28 起 wrapped up 在这里
+                #    读作 Ended（见 `Event.NOT_A_VOLUNTEERS_WORD`）。
+                self.assertIn(self.event.status_label, row)
 
     def test_the_name_is_wrapped_so_a_long_one_cannot_push_the_badge_out(self):
         """⚠️ `min-w-0` on the wrapper, not only on the name.
@@ -9472,6 +9505,48 @@ class SchedulePageTests(PageTestCase):
     def cards(self, html):
         return re.findall(r'<a class="schedule-card[^"]*"[^>]*>(.*?)</a>', html, re.S)
 
+    def test_the_page_title_lives_in_the_head_and_only_there(self):
+        """「Events」这四个字 2026-08-28 从版心搬到了页头条（顶栏底下那一条）。
+
+        🔴 **搬走 ≠ 复制。**一页两个 `<h1>` 会让读屏的标题大纲变成两棵并列的树，
+           而屏幕上看起来完全正常 —— 两处写着同一个词，谁也不会觉得不对。
+           （右面板里那份活动详情降成 `<h2>` 也是同一条规矩。）
+
+        ⚠️ 页头条在 `<main>` **外面**：钉住的东西要横跨整个视口，而 main 有版心
+           和左右内边距。
+        """
+        html = self.page()
+        self.assertEqual(html.count("<h1"), 1, "这一页出现了第二个 h1")
+        bar = re.search(r'<div class="page-bar">(.*?)</div>\s*</div>', html, re.S)
+        self.assertIsNotNone(bar, "页头条没渲染出来")
+        self.assertIn("Events", bar.group(1))
+        self.assertIn("<h1", bar.group(1), "标题不在页头条里了")
+
+        shell = re.search(r'<div class="events-shell".*?<div class="events-row"',
+                          html, re.S)
+        self.assertIsNotNone(shell)
+        self.assertNotIn("<h1", shell.group(0),
+                         "版心里又长回来一个标题 —— 一页两个 h1")
+
+    def test_the_title_links_to_this_page_and_says_so(self):
+        """那一格是一个指向本页的链接（LV 那格也是），常亮的下划线就画在它上面。
+
+        🔴 **`href` 不许是空的。** 那句 `url … as here_url` 必须写在
+           block **里面** —— 子模板里写在所有 block 之外的标签不会被执行，
+           于是那个变量是空的，渲染出 `href=""`：一个点了会回到站点根目录的
+           链接，而模板一个错都不报。踩过一次，浏览器里看出来的。
+
+        🔴 **`aria-current="page"` 一起钉。** 屏幕上「你在这一页」是那条下划线
+           说的，而读屏软件看不见线；少了它，这个自指链接对他们就是一个点了
+           什么都不会发生的普通链接。CSS 那条常亮规则选中的也正是这个属性
+           （守卫在 core.tests.PageBarTests），所以两件事不会各走各的。
+        """
+        html = self.page()
+        link = re.search(r'<a class="page-bar-link"[^>]*>', html)
+        self.assertIsNotNone(link, "页头条那一格不是链接了")
+        self.assertIn(f'href="{reverse("events:event_list")}"', link.group(0))
+        self.assertIn('aria-current="page"', link.group(0))
+
     def test_the_panel_holds_a_schedule_now_and_not_a_placeholder(self):
         html = self.page()
         self.assertIn('id="schedule"', html)
@@ -9570,7 +9645,10 @@ class SchedulePageTests(PageTestCase):
     def test_the_arrows_are_real_links_as_well_as_htmx(self):
         """⭐ D24 的渐进增强：关掉 JS 照样翻，只是整页重来。"""
         html = self.page()
-        arrow = re.search(r'<a class="schedule-arrow"[^>]*>', html).group(0)
+        # ⚠️ class 上带档位后缀（`schedule-arrow--4` 之类）：三档各一对，
+        #    CSS 只放出一对。这里随便取一颗都行，D24 要钉的是「它是不是真链接」。
+        arrow = re.search(r'<a class="schedule-arrow schedule-arrow--\d"[^>]*>',
+                          html, re.S).group(0)
         self.assertIn('href="/events/?', arrow)
         self.assertIn('hx-get="/events/schedule/?', arrow)
 
@@ -9648,6 +9726,57 @@ class ScheduleGeometryGuardTests(SimpleTestCase):
                          "右边缘必须是定值 —— 它一动，卡片就会走出自己那一列")
         self.assertRegex(block, r"translate:\s*0 ",
                          "水平方向不许再用 translate")
+
+    def test_the_arrows_and_the_grid_are_inset_by_the_same_variable(self):
+        """🔴 星期行和格子行必须共用同一套列，否则表头和它底下那一列对不齐。
+
+        箭头 2026-08-28 搬进了星期那一行、在 `.schedule-head` 的**外面**，
+        于是表头比整块窄了两个槽位 —— 格子行就必须照样窄两个槽位。两处写成
+        两个字面量的话，下一个人改其中一个，一天的名字会压在隔壁那一列上，
+        而两边的 CSS 各自看都正常。
+        """
+        css = re.sub(r"/\*.*?\*/", "", self.source("assets", "app.css"), flags=re.S)
+        slot = re.search(r"\.schedule-arrow-slot \{(.*?)\}", css, re.S)
+        scroll = re.search(r"\.schedule-scroll \{(.*?)\}", css, re.S)
+        self.assertIsNotNone(slot, "箭头那两个槽不见了")
+        self.assertIsNotNone(scroll, "滚动区那条规则不见了")
+        self.assertIn("width: var(--schedule-arrow-col)", slot.group(1))
+        self.assertIn("padding-inline: var(--schedule-arrow-col)", scroll.group(1))
+
+    def test_the_arrows_live_outside_the_weekday_grid(self):
+        """🔴 窄档靠**序号**藏掉看不见的那几天（`.schedule-head > :nth-child(n+4)`）。
+
+        往那张 grid 里塞一个箭头，等于把每一天的序号挪掉一位 —— 于是窄屏上
+        藏起来的是错的日子，而屏幕上只是「怎么少了周三」。所以箭头是星期行的
+        **兄弟**，不是它的孩子。
+        """
+        markup = self.source("events", "templates", "events", "_schedule.html")
+        markup = re.sub(r"\{%\s*comment\s*%\}.*?\{%\s*endcomment\s*%\}", "",
+                        markup, flags=re.S)
+        head = re.search(r'<div class="schedule-head">(.*?)</div>\s*\n\s*<span',
+                         markup, re.S)
+        self.assertIsNotNone(head, "星期那一行不见了")
+        self.assertNotIn("schedule-arrow", head.group(1),
+                         "箭头被塞进星期那张 grid 里了 —— 窄屏会藏错日子")
+        self.assertEqual(markup.count('class="schedule-arrow-slot"'), 2)
+
+    def test_the_schedule_can_be_closed_from_its_own_corner(self):
+        """日程面板右上角那颗 ×（2026-08-28）。
+
+        Schedule 那颗按钮从此只负责打开，所以**关掉的唯一出路就是这一颗** ——
+        它不见了的表现是「日程开了就再也收不起来」，而页面本身一切正常。
+
+        ⚠️ 它调 `closeSchedule()`，不是就地写 `schedule = false`：两个方向的
+           规则住在同一个 Alpine 组件里，才不会各自漂移。
+        """
+        markup = self.source("events", "templates", "events", "_schedule.html")
+        button = re.search(r"<button[^>]*schedule-close[^>]*>", markup, re.S)
+        self.assertIsNotNone(button, "日程那颗 × 不见了 —— 开了就关不掉")
+        self.assertIn('type="button"', button.group(0))
+        self.assertIn("closeSchedule()", button.group(0))
+        self.assertIn("panel-close", button.group(0),
+                      "它得和详情那颗 × 长得一模一样，长相只有 .panel-close 一份")
+        self.assertIn("aria-label", button.group(0))
 
     def test_the_day_columns_are_written_out_rather_than_repeated_from_a_variable(self):
         """⚠️ `repeat(var(--n), …)` 不报错，它**整条声明失效** —— 四列会叠成
@@ -9984,28 +10113,68 @@ class EventsShellStateTests(TestCase):
           屏幕上一个像素都不动，读起来是「这颗按钮坏了」。
         · **关**日程时详情留着（2026-08-19 定）—— 关的是底层，而人正在读的是
           上层。一起关掉的话，人只是想收起日程，结果正在读的东西也没了。
+
+        ⚠️ 2026-08-28 起这两条各住在一个方法里，不再是一个 `$watch` 加一句
+           模板里的直接赋值。换位的理由写在 `showSchedule()` 上，而这条测试
+           钉的东西一个字没变：**开的时候让位、关的时候不动详情。**
         """
         js = self.source("assets", "js", "app.js")
-        watch = re.search(
-            r'this\.\$watch\("schedule",(.*?)\}\);', js, re.S)
-        self.assertIsNotNone(watch, "开日程让位那条规则不见了")
-        body = watch.group(1)
-        self.assertIn("if (on)", body,
-                      "让位必须只在**开**的那一下发生，关的时候详情要留着")
-        self.assertIn("closeDetail()", body)
+        show = re.search(r"  showSchedule\(\) \{(.*?)\n  \},", js, re.S)
+        self.assertIsNotNone(show, "开日程让位那条规则不见了")
+        self.assertIn("this.schedule = true", show.group(1))
+        self.assertIn("closeDetail()", show.group(1))
 
-    def test_the_two_rules_use_watch_rather_than_one_effect(self):
+        close = re.search(r"  closeSchedule\(\) \{(.*?)\n  \},", js, re.S)
+        self.assertIsNotNone(close, "关日程那个方法不见了（面板右上角那颗 × 调它）")
+        self.assertIn("this.schedule = false", close.group(1))
+        self.assertNotIn(
+            "detail", close.group(1),
+            "关日程顺手把详情也关了 —— 关的是底层，而人正在读的是上层")
+
+    def test_the_schedule_button_only_ever_opens(self):
+        """🔴 那颗按钮只负责打开（2026-08-28）。
+
+        它原来是个开关（`toggles="schedule"`，点一下翻转那个布尔），而按钮上
+        没有任何东西说明此刻按下去是哪一件。用户报上来的原话是「schedule 这个
+        按钮只用来打开 schedule」—— 关掉那件事归面板右上角那颗 ×。
+
+        ⚠️ 顺带修掉的一件事：开关那一版**对已经开着的日程无效**。日程开着又点了
+           一张卡时 `schedule` 一直是 true，再按一次只会把它翻成 false ——
+           而人要的是「把日程给我拿回来」。走 `showSchedule()` 就没有这一档。
+
+        ⚠️ 钉 `aria-expanded` 而不是 `aria-pressed`：开关才有「按下 / 没按下」。
+        """
+        markup = self.source(
+            "events", "templates", "events", "_period_filter.html")
+        button = re.search(r'\{% include "core/components/button\.html"'
+                           r'[^%]*label="Schedule"[^%]*%\}', markup)
+        self.assertIsNotNone(button, "Schedule 那颗按钮不见了")
+        self.assertIn('shows="showSchedule()"', button.group(0))
+        self.assertIn('expanded="schedule"', button.group(0))
+        self.assertNotIn("toggles=", button.group(0),
+                         "又变回开关了 —— 那颗按钮同时是开和关，而屏幕上分不出来")
+
+        tag = self.source("core", "templates", "core", "components",
+                          "_button_tag.html")
+        self.assertNotIn("aria-pressed", tag)
+
+    def test_the_shell_has_exactly_one_watch_and_no_effect(self):
         """🔴 `x-effect` 会把它读到的**所有**东西变成依赖。
 
         两条规则写进一个 effect 里的话，`detail = true` 会把整个 effect 重新跑
         一遍，于是「日程开着时点一张卡」当场被第一条规则关掉 —— 表现是卡片
         点了没反应，而请求其实发出去了、也回来了。
+
+        ⚠️ 只剩一个 `$watch` 了（2026-08-28）：「开日程要让位」那条搬进了
+           `showSchedule()`，因为翻开 `schedule` 的不再是模板里一句直接赋值。
+           留下的那一个是「关面板要清高亮」——它必须是 watcher，那个记号住在
+           Alpine 作用域外面。
         """
         js = self.source("assets", "js", "app.js")
         shell = re.search(r'Alpine\.data\("eventsShell".*?\n\}\)\);', js, re.S)
         self.assertIsNotNone(shell, "eventsShell 组件不见了")
         self.assertNotIn("x-effect", shell.group(0))
-        self.assertEqual(shell.group(0).count("this.$watch("), 2)
+        self.assertEqual(shell.group(0).count("this.$watch("), 1)
 
     def test_closing_the_panel_takes_the_highlight_with_it(self):
         """🔴 高亮的意思只有一个：**右边正开着的是这一场**。
@@ -10131,6 +10300,18 @@ class ScheduleOpeningViewTests(SimpleTestCase):
         self.assertTrue(found, f"`{selector}` 从 app.css 里没了")
         return "\n".join(found)
 
+    def clear_handler(self):
+        """拦下「Clear」那段 JS 的函数体。
+
+        ⚠️ 三条测试都要它，所以抠出来的正则只写一遍 —— 那段代码在 app.js 里
+           怎么划界（现在是 `[data-clear-filters]` 到那一层 `});`）是会变的，
+           而变的时候只该改一处。
+        """
+        handler = re.search(r"\[data-clear-filters\](.*?)\n\}\);",
+                            self.source("assets", "js", "app.js"), re.S)
+        self.assertIsNotNone(handler, "拦下 Clear 的那段 JS 不见了")
+        return handler.group(1)
+
     def test_it_opens_on_the_morning_not_on_midnight(self):
         """🔴 一天里最不可能有活动的正是凌晨那几小时。从 0:00 开始的话，
            日程第一眼是一块空白，人得先自己往下拖才知道有没有东西 ——
@@ -10203,7 +10384,7 @@ class ScheduleOpeningViewTests(SimpleTestCase):
     def test_it_hangs_below_the_same_top_bar_the_panel_clears(self):
         # 两块并排的东西钉在不同的高度上，是一眼看得出来的错位。
         block = self.block(".events-shell.is-open .filter-card")
-        self.assertRegex(block, r"top:\s*calc\(var\(--top-bar-h\)")
+        self.assertRegex(block, r"top:\s*calc\(var\(--head-h\)")
 
     def test_it_stacks_above_the_rows_that_scroll_under_it(self):
         """⚠️ 活动行带 `relative`（模板上那个 class），也就是它们参与层叠。
@@ -10212,21 +10393,24 @@ class ScheduleOpeningViewTests(SimpleTestCase):
         self.assertRegex(self.block(".events-shell.is-open .filter-card"),
                          r"z-index:\s*\d+")
 
-    def test_paging_scrolls_clear_of_the_pinned_filter(self):
+    def test_paging_scrolls_clear_of_whatever_is_on_top(self):
         """🔴 钉住的东西会挡住「滚到这里」。
 
         翻页用 `show:#event-results:top`，也就是把结果区顶到**视口最上面** ——
-        而钉住的筛选卡正好压在那儿。表现：翻到下一页，第一张卡完全不见了。
-        这是钉住筛选卡那一批引入的，浏览器没做错任何事，只是那个位置底下压着
-        别的东西。
+        而那儿压着东西：日程开着时是钉住的筛选卡，关着时是那条 68px 的吸顶栏。
+        表现分别是「第一张卡完全不见了」和「翻页露不出筛选卡」。浏览器两次都
+        没做错任何事，只是那个位置底下压着别的东西。
 
+        ⚠️ **一条规则管两档**（2026-08-28）。原来这条只写给 `.is-open`，而
+           关着那一档正是用户第二次报上来的那个 bug。两档共用一条，是它们不会
+           分家的唯一写法 —— 落到的位置也几乎是同一处，理由写在 app.css 里。
         ⚠️ 让开的距离要含**实测的**卡高（`--filter-h`）—— 那张卡窄屏上换行、
            报错时多一行字，写死一个数在这两种情况下要么还挡着、要么空一截。
         """
-        block = self.block(".events-shell.is-open #event-results")
+        block = self.block(".events-shell #event-results")
         self.assertRegex(block, r"scroll-margin-top:\s*calc\(")
         self.assertIn("var(--filter-h", block)
-        self.assertIn("var(--top-bar-h)", block)
+        self.assertIn("var(--head-h)", block)
 
     def test_the_filter_height_is_measured_rather_than_written_down(self):
         js = self.source("assets", "js", "app.js")
@@ -10234,6 +10418,61 @@ class ScheduleOpeningViewTests(SimpleTestCase):
         # ⚠️ ResizeObserver 而不是 resize 事件：开关日程那 560ms 过渡里列宽变化
         #    带来的换行根本不触发 resize，于是读数会停在过渡前的值。
         self.assertRegex(js, r"new ResizeObserver\([^)]*\)[\s\S]{0,200}\.observe\(card\)")
+
+    def test_clear_empties_the_filter_without_touching_the_panel(self):
+        """🔴 Clear 清的是筛选，**不许关掉右边那块面板**（2026-08-28）。
+
+        它此前是一个普通链接，点下去整页重新加载 —— Alpine 状态全部归零，
+        于是正开着的活动详情/报名表单没了，日程也退回今天。用户报上来的原话是
+        「Clear 只是取消 filter，不应该关任何右边面板」。
+
+        钉三件事，每一件少了都不报错：
+        · `href` 还在 —— 没有 JS 的人点下去仍然得到清空后的那一页（D24）；
+        · 有 `data-clear-filters` 钩子 —— 没有它就退回整页重来；
+        · 那段 JS **不碰任何面板状态**：这条是「Clear 不该关面板」的字面形式。
+        """
+        markup = self.source("events", "templates", "events", "_period_filter.html")
+        clear = [line for line in markup.splitlines()
+                 if 'label="Clear"' in line]
+        self.assertTrue(clear, "Clear 那颗按钮不见了")
+        for line in clear:
+            self.assertIn("href=", line, "Clear 不再是一个真链接 —— 没有 JS 时它就死了")
+            self.assertIn("clears=1", line)
+
+        body = self.clear_handler()
+        for word in ("detail", "schedule", "isOpen"):
+            self.assertNotIn(
+                word, body,
+                f"清筛选那段代码里出现了 `{word}` —— 它又开始管面板了")
+
+    def test_clear_keeps_the_hidden_fields_that_are_context_not_filter(self):
+        """⚠️ 隐藏字段不是筛选条件，是上下文：
+
+        · `scope`  —— 我在看谁的活动。清掉它，「全基金会」那一页会悄悄退回
+                      「我管的那几个 ministry」，而按钮上写的是 Clear。
+        · `from`   —— 日程翻到了哪一天。清掉它就是「点 Clear 把日程弹回今天」，
+                      正是这一轮要修的那类事。
+
+        所以判据是 `type === "hidden"`，不是「看不看得见」。
+        """
+        self.assertIn('field.type !== "hidden"', self.clear_handler())
+
+    def test_clear_re_fires_the_form_through_htmx_rather_than_the_browser(self):
+        """⚠️ `htmx.trigger(form, "submit")` 发的是一个**自定义事件** ——
+        表单上写着 `hx-trigger="… , submit"`，htmx 听到它就发那次 hx-get。
+        派发一个不可信的 submit 事件不会让浏览器自己去提交，所以这里不会变成
+        一次整页跳转（那正好是这次要修掉的东西）。
+
+        🔴 而且必须是 import 进来的那个 `htmx`，不能写 `window.htmx`：
+           这个包**不往 window 上挂自己**（浏览器里量过，`window.htmx` 是
+           undefined）。写错的表现是「点 Clear 完全没反应」—— 跳转已经被
+           `preventDefault()` 拦掉，而那一行 `window.htmx.trigger` 从没跑到。
+        """
+        self.assertIn('import htmx from "htmx.org"',
+                      self.source("assets", "js", "app.js"))
+        body = self.clear_handler()
+        self.assertIn('htmx.trigger(form, "submit")', body)
+        self.assertNotIn("window.htmx", body)
 
     def test_the_hook_is_a_class_of_its_own_not_form_dot_card(self):
         """⚠️ 靠 `form.card` 去匹配会命中将来任何一张长在表单里的卡片。"""

@@ -178,6 +178,88 @@
 
 /* 键盘可达性的两条底线，写在这里而不是每个组件各写一遍。 */
 @layer base {
+  /* --- 顶上一直挡着的那一条有多高（2026-08-28）-----------------------------
+   *
+   * 🔴 **`--head-h` 只有一个意思：此刻钉在视口顶上的那条东西有多高。**
+   *    不是「顶栏有多高」—— 页面上钉着的是哪一条，是会变的：
+   *
+   *      没有页头条的页面   钉着的是站头那条 bar        4.25 / 4.75rem
+   *      有页头条的页面     bar 跟着内容滚走，钉着页头条  --page-bar-h
+   *
+   *    读它的东西全都在问同一件事：「我该让开多少」—— 日程面板钉在哪、
+   *    日程开着时筛选卡钉在哪、翻页时结果区该停在哪、以及 app.js 里
+   *    「这一行看得见吗」。这些**必须是同一个数**：两块并排的东西钉在不同的
+   *    高度上是一眼看得出来的错位，而各改一处不会报错。
+   *
+   *    ⚠️ 2026-08-28 之前这个数叫 `--top-bar-h`，而且**同一个值在三处各声明
+   *       一份**（日程面板、钉住的筛选卡、结果区）—— 三份都对，直到有人只改
+   *       其中一份。加页头条那天它们非改不可，所以顺手收成了这一份。
+   *
+   * 🔴 **4.25rem / 4.75rem 是量出来的，而第一版是「推」出来的、推错了。**
+   *    推的时候按「bar 里是 `text-sm`，行高 1.25rem」算，得到 52 / 60px。
+   *    浏览器里量到的是 **68 / 76px**：撑高那一行的根本不是文字，是右边
+   *    **主题切换那颗按钮** —— `p-2` 的内边距配一个 `h-5 w-5` 的图标，
+   *    8+20+8 = 36px，比 20px 的文字高出 16px。
+   *    加上 nav 的 `py-4`（sm 起 `py-5`）：36+32 = 68、36+40 = 76。
+   *    ⚠️ 推错的那一版不会报错，屏幕上只是日历顶上被压掉一条。
+   *    守卫 `core.tests.ScheduleShellTests.test_the_top_bar_is_still_the_height_this_assumes`
+   *    钉的是**这个高度的来源**：nav 的 `py-4 / sm:py-5`，以及那颗按钮的
+   *    `p-2` 和图标的 `h-5`。
+   */
+  :root {
+    /* 站头那条 bar 自己有多高。⚠️ 68 / 76px 是**量出来**的，来源见下面那段。 */
+    --site-bar-h: 4.25rem;
+    /* 此刻**钉在**视口顶上的那条有多高。没有页头条时就是站头那条。 */
+    --head-h: var(--site-bar-h);
+    /* 一页都还没滚时，**整个头**有多高。两者的区别是这一批栽过的那个坑：
+     * 窄屏上日程面板铺满屏幕、页面因此根本不滚，站头那条**一直在屏幕上** ——
+     * 面板按「钉着的那条」（52px）让开，就正好钻到站头底下 53px。
+     * ⚠️ 谁该用哪一个，判据是「这东西出现的时候，页面滚过了吗」：
+     *     滚过了（钉住的筛选卡、翻页落点、并排那档的日程面板）→ `--head-h`
+     *     没滚（窄屏那张铺满的纸）                            → `--head-total-h` */
+    --head-total-h: var(--site-bar-h);
+    /* 页头条有多高。⚠️ **声明在这里，不在 `.page-bar` 上** —— 下面那条
+     *    `body:has(.page-bar)` 要读它，而 `.page-bar` 是 body 的**后代**，
+     *    自定义属性只往下传。写在组件上的表现极其安静：`var(--page-bar-h)`
+     *    在 body 上取不到值 → 整个 `--head-h` 变成「保证无效值」（不是回退到
+     *    上面那行 4.25rem，也不是报错），于是所有读它的 `calc()` 一起失效，
+     *    日程面板贴着视口顶、翻页落点回到 0。第一版就是这么写的，浏览器里
+     *    量出来才发现。
+     * ⚠️ 52px = 上下各 12 的内边距 + 一行 `text-base`（行高 28px）。
+     *    守卫 core.tests.PageBarTests 钉着「这条里只有那一行字」——
+     *    哪天塞进一颗按钮，这个数就得像顶栏那 68/76px 一样重新量。 */
+    --page-bar-h: 3rem;
+    /* 页头条往上贴多少（2026-08-28 第二轮，用户：「两行中间留白太多了」）。
+     * ⚠️ 贴进去的是**站头那条 bar 自己的下内边距**，也就是一片空白 ——
+     *    它是 `py-4 / sm:py-5` 给的，而那三个字（padding）是工具类，改不动：
+     *    Tailwind 的 utilities 层排在 components 后面，写在这里会被压掉
+     *    （这一批已经栽过一次，见 `.site-head`）。所以往上贴，不去改它。
+     * ⚠️ 贴上去之后整个头矮了这么多，`--head-total-h` 必须跟着减 ——
+     *    少减的话，窄屏那张纸的上沿会离头 12px 远，多出一条缝。 */
+    --page-bar-pull: 0.75rem;
+  }
+
+  @media (width >= 40rem) {
+    :root {
+      --site-bar-h: 4.75rem;
+    }
+  }
+
+  /* 🔴 有页头条的页面：钉着的是它，所以让开的也是它。
+   *
+   * ⚠️ 用 `:has()` 而不是给 `<body>` 加一个 class（那要么是 base.html 里第二个
+   *    block、要么是每一页记得传一个开关）—— 两个开关迟早会对不上，而对不上的
+   *    表现是「让开了 76px，可屏幕上钉着的只有 52px」：日程顶上白一条，
+   *    或者反过来第一行被压住。这里只有一个事实：**页面上有没有那条页头条**。
+   * ⚠️ 兜底如实说：`:has()` 不被支持时这一句整条失效，于是让开的是 bar 的高度
+   *    （比页头条高），表现是日程和第一张卡上面多出十几像素的空白 ——
+   *    多一条缝，不是错位。 */
+  body:has(.page-bar) {
+    --head-h: var(--page-bar-h);
+    --head-total-h: calc(var(--site-bar-h) + var(--page-bar-h)
+                         - var(--page-bar-pull));
+  }
+
   /* --- 告诉浏览器这一页是浅色还是深色（2026-08-06 加）--------------------
    *
    * ⭐ 这一行解决的是「下拉菜单展开之后像是另一个网站」。**那个弹出列表不是网页
@@ -496,14 +578,13 @@
    *    面板撑高来放下 —— 撑高就等于把「一屏」这条又还回去了。
    */
   .schedule-panel {
-    --top-bar-h: 4.25rem;
     flex: 0 0 0;
     min-width: 0;
     align-self: flex-start;
     position: sticky;
-    top: calc(var(--top-bar-h) + 1rem);
-    height: calc(100vh - var(--top-bar-h) - 2rem);
-    height: calc(100svh - var(--top-bar-h) - 2rem);
+    top: calc(var(--head-h) + 1rem);
+    height: calc(100vh - var(--head-h) - 2rem);
+    height: calc(100svh - var(--head-h) - 2rem);
     overflow: hidden;
     visibility: hidden;
     opacity: 0;
@@ -512,22 +593,15 @@
       visibility 560ms;
   }
 
-  @media (width >= 40rem) {
-    .schedule-panel {
-      --top-bar-h: 4.75rem;
-    }
-  }
-
   /* 日程开着时，筛选卡钉在顶上（2026-08-18）。
    *
    * ⚠️ **只在开着的时候**（选择器带 `.is-open`）。关着那一档是全站最常打开的
    *    默认视图，而它现在没有人抱怨 —— 「关着时逐像素等于改之前」那条决定
    *    （见上面 `.events-shell`）在这里同样成立。
    *
-   * ⚠️ `top` 和日程面板用**同一个** `--top-bar-h`：两块并排的东西钉在不同的
-   *    高度上，是一眼看得出来的错位。⚠️ 但那个变量是声明在 `.schedule-panel`
-   *    上的，作用域不到这里 —— 所以这里重新声明一份，两处的值由
-   *    core.tests.ScheduleShellTests 一起钉着。
+   * ⚠️ `top` 和日程面板用**同一个** `--head-h`：两块并排的东西钉在不同的
+   *    高度上，是一眼看得出来的错位。那个变量 2026-08-28 起只声明在 `:root`
+   *    上一份（见 @layer base），所以这里不必、也不许再声明第二份。
    *
    * ⚠️ `z-index` 不能省。卡片本身没有层叠上下文，而下面滚上来的活动卡片带
    *    `position: relative`（模板上那个 `relative`）—— 少了它，滚过来的卡片
@@ -541,9 +615,8 @@
    * ⚠️ 代价如实说：这张卡连下边距约 257px，钉住之后那一列永久少掉这么多。
    *    800px 高的窗口上剩给活动卡片的约 2.9 张。这是知情的取舍，不是没量。 */
   .events-shell.is-open .filter-card {
-    --top-bar-h: 4.25rem;
     position: sticky;
-    top: calc(var(--top-bar-h) + 1rem);
+    top: calc(var(--head-h) + 1rem);
     z-index: 20;
   }
 
@@ -558,22 +631,34 @@
    *    数不行 —— 这张卡的高度会变：窄一点的屏上控件换行，表单报错时多一行字。
    *    写死的话，那两种情况下第一张卡要么还被压着，要么下面空一截。
    *
-   * ⚠️ 只在 `.is-open` 上加，和 sticky 同一个条件。关着的时候什么都没钉住，
-   *    多一段 scroll-margin 会让翻页停在一个莫名其妙的位置。 */
-  .events-shell.is-open #event-results {
-    scroll-margin-top: calc(var(--top-bar-h) + 1rem + var(--filter-h, 0px) + 0.75rem);
-  }
-
-  @media (width >= 40rem) {
-    .events-shell.is-open #event-results {
-      --top-bar-h: 4.75rem;
-    }
-  }
-
-  @media (width >= 40rem) {
-    .events-shell.is-open .filter-card {
-      --top-bar-h: 4.75rem;
-    }
+   * 🔴 **两档共用一条，`.is-open` 那个限定 2026-08-28 拿掉了。**
+   *
+   *    原来的理由写在这儿：「关着的时候什么都没钉住，多一段 scroll-margin 会让
+   *    翻页停在一个莫名其妙的位置」。量出来那句话是反的 —— 关着时翻一页，
+   *    浏览器把结果区**准确地**顶到视口最上面（`resultsTop: 0`），而视口最上面
+   *    压着的是那条 68px 的吸顶栏：「N events」和第一张卡的上沿一起被它盖掉，
+   *    筛选卡整张在视口外（量到 `filterBottom: -24`）。用户报上来的是
+   *    「翻页竟然不跳到下一页的 top、露不出 filter 卡」。
+   *
+   *    同一条公式在两档里落到的位置**几乎是同一处**，这不是巧合：
+   *      开着 —— 筛选卡钉在 `top-bar + 1rem`，结果区落在它下面 0.75rem；
+   *      关着 —— 筛选卡就在结果区正上方（`mb-6` = 24px），于是同样的距离把它
+   *              整张推回视口里，它的上沿停在吸顶栏下方 4px。
+   *    两档因此共用一条规则，而不是各写一条会分家的。
+   *
+   * ⚠️ `--filter-h` 由 JS 实测（app.js 的「筛选卡钉住之后」那一段）。写死一个
+   *    数不行 —— 这张卡的高度会变：窄一点的屏上控件换行，表单报错时多一行字。
+   *    写死的话，那两种情况下第一张卡要么还被压着，要么下面空一截。
+   *    ⚠️ 那段 JS **不看开没开**（用的是 ResizeObserver，一直在量），所以关着
+   *       这一档拿到的也是真高度。
+   *
+   * ⚠️ `--head-h` 从 `:root` 继承（2026-08-28 收拢的）。**别在这里再声明一份** ——
+   *    这条规则曾经自带一份 `--top-bar-h`，因为那时它只声明在筛选卡上，而筛选卡
+   *    是结果区的**兄弟**不是祖先，传不过来；少了那一行整条 calc() 无效
+   *    （不是取默认值，是**整条声明被丢掉**），scroll-margin 变 0。
+   *    现在它在根上，继承一定到得了。 */
+  .events-shell #event-results {
+    scroll-margin-top: calc(var(--head-h) + 1rem + var(--filter-h, 0px) + 0.75rem);
   }
 
   /* ⚠️ 1.5rem = 24px，和行内「缩略图 ↔ 卡片」那道缝**同一个值**（2026-08-17 改，
@@ -638,6 +723,64 @@
     .events-shell.is-open .events-col {
       display: none;
     }
+
+    /* 🔴 **这一档面板是钉在视口上的一张纸，不是页面里的一块。**（2026-08-28）
+     *
+     *    上一行那句 `display: none` 有个不报错的后果：左边一列没了之后，
+     *    `.events-row` 就只剩面板那么高 —— 而 `position: sticky` 要有行程，
+     *    元素必须**比包含块矮**。两者一样高时 sticky 一帧都不生效，面板于是
+     *    跟着整页一起滚，而页面上还留着标题、内外边距和页脚那约 150px 的
+     *    滚动量。
+     *
+     *    用户报上来的走法正是这个：宽屏点开详情 → 把窗口拖窄。滚动位置被浏览器
+     *    留在原处（他刚才正在往下翻卡片），于是重排之后整块面板已经滑到吸顶栏
+     *    底下 —— 量到的是 `scrollY: 146 / maxScroll: 154`，右上角那颗 × 落在
+     *    `top: 27px`，正好压在 68px 的栏里面。**看得见一整屏详情，唯一的出路
+     *    却在栏底下**，而屏幕上没有任何东西说明该往上滚。
+     *
+     * ⚠️ 修的是 `position`，不是给页面加高度。让 `.events-row` 变高才有 sticky
+     *    行程 —— 那等于在面板下面挂一大截空白，滚下去什么也没有。
+     *
+     * ⚠️ `position: fixed` 之后面板脱离 flex 流，`.events-row` 归零高度，
+     *    这一档的页面因此**几乎不滚了**：想读的东西全在这张纸上，而这张纸
+     *    自己有 `.schedule-scroll` / `.schedule-detail` 两个滚动区。
+     *
+     * ⚠️ `top` 仍然让开顶上钉着的那一条（`--head-h` 在 `:root` 上），
+     *    左右各留 1rem —— 和 main 的 `px-4` 同一个数，
+     *    于是这张纸的边和它盖住的那一页对得齐。
+     *
+     * ⚠️ 高度改由 `bottom` 定，`height: auto`。留着那条 `100svh - …` 会和
+     *    `top`/`bottom` 同时说话，多出来的部分被自己的 `overflow: hidden` 裁掉。 */
+    .events-shell.is-open .schedule-panel {
+      position: fixed;
+      /* 🔴 让开的是**整个头**，不是钉着的那一条。这一档里左边一列被藏起来、
+       *    面板又脱离了文档流，于是页面**根本不滚**（量到 `maxScroll: 0`）——
+       *    站头那条 bar 一直在屏幕上。按 `--head-h`（页头条那 52px）让开的话，
+       *    这张纸的上沿正好钻到站头底下 53px：日程的翻页行和那颗 × 一起被盖住，
+       *    而它们的计算值全都是对的。量出来的：`elementsFromPoint` 打到的是
+       *    `.page-bar`，不是那颗 ×。
+       * ⚠️ 极窄极矮的窗口上页面仍可能滚一点点，那时头会滚走一截、这张纸上面
+       *    多出一条缝。宁可多一条缝，也不要盖住出口。 */
+      top: calc(var(--head-total-h) + 1rem);
+      right: 1rem;
+      bottom: 1rem;
+      left: 1rem;
+      height: auto;
+      /* 🔴 **`align-self` 必须让开，否则上面那五行等于没写。**（量出来的）
+       *
+       *    基线上这一层是 `align-self: flex-start`（并排那一档里，sticky 要有
+       *    行程就不能被拉成整行高）。而按 CSS Box Alignment，一个绝对/固定定位的
+       *    盒子只要**自对齐不是 normal/stretch**，就**不撑开** —— 它按自己的内容
+       *    高度排，然后往起点靠。于是 `top` + `bottom` 一起被无视：
+       *    量到的是 `[top 0, height 1255]`（1255 = 一整天的格子），
+       *    改成 `auto` 之后是 `[68, 609]`。
+       *
+       *    ⚠️ 这条错**在计算值上完全看不出来**：`position/top/bottom/left/right`
+       *       五个计算值全是对的，`getBoundingClientRect()` 才说实话。第一版就是
+       *       只查了计算值就收工的，屏幕上表现为「日程从顶栏底下一直垂到屏幕外，
+       *       而且滚不动」。 */
+      align-self: auto;
+    }
   }
 
   /* ⚠️ 减少动效下**不是关掉这个功能**，是让它瞬间到位。让位本身是版面，不是装饰。 */
@@ -676,6 +819,11 @@
     --schedule-hour: 48px;
     /* 左边刻度条的宽度。⚠️ 星期行和格子行**共用**这个变量，两行的列才对得齐。 */
     --schedule-gutter: 2.75rem;
+    /* 翻页箭头那两个槽有多宽（2026-08-28）。⚠️ **星期行的箭头槽和滚动区的
+     *    左右内边距共用这一个数** —— 星期行的列比整块窄两个槽位，格子行必须
+     *    照样窄两个槽位，否则表头和它底下那一列会错开。箭头本身 1.75rem，
+     *    多出来的 0.25rem 是它和第一列之间的缝。 */
+    --schedule-arrow-col: 2rem;
     /* 重叠时每一档往右下偏多少。⚠️ 偏移是**设计**，档数才是逻辑（在 schedule.py
      *    里算，落成 `--depth`）。代价如实说：偏下去的那张卡，它的上沿不再精确
      *    对应它的开始时间 —— 一档 8px 是 10 分钟。完全重叠的两张卡里总得有一张
@@ -821,16 +969,21 @@
     overscroll-behavior: contain;
   }
 
-  /* 关闭。⚠️ 钉在右上角、盖在内容上，而不是占一行 —— 面板是一屏，
-   *    一整行只放一颗按钮等于把日历的一小时让出去。 */
-  .schedule-detail-close {
-    position: sticky;
-    top: 0;
-    z-index: 10;
-    float: right;
+  /* 右面板上那颗 ×。**长相在这里，位置在各自那条规则里**（2026-08-28 拆开）。
+   *
+   * 🔴 面板里现在有**两颗** × —— 详情/报名那一块一颗，日程那一块一颗 ——
+   *    而它们必须是同一颗按钮。两份长相会在第二次改动之后分叉（一颗圆一颗方、
+   *    一颗深色下换了底色），而分叉出来的第二种单独看没问题，和第一种放在
+   *    一起就是业余感的来源（design-system.md 开头那条判据，同 button.html）。
+   *
+   * ⚠️ 这里**不写 position**。两处的位置不是同一回事：详情那颗浮在内容右上角、
+   *    跟着自己的滚动区钉住；日程那颗是翻页行里的一格。位置混进来的话，
+   *    第三处要用它时就得先把不属于自己的那几行覆盖掉。 */
+  .panel-close {
     display: inline-flex;
     height: 1.75rem;
     width: 1.75rem;
+    flex: none;
     align-items: center;
     justify-content: center;
     border-radius: 9999px;
@@ -840,19 +993,28 @@
     line-height: 1;
   }
 
-  .schedule-detail-close:hover {
+  .panel-close:hover {
     background-color: var(--color-ink-200);
     color: var(--color-ink-900);
   }
 
-  .dark .schedule-detail-close {
+  .dark .panel-close {
     background-color: var(--color-ink-700);
     color: var(--color-ink-200);
   }
 
-  .dark .schedule-detail-close:hover {
+  .dark .panel-close:hover {
     background-color: var(--color-ink-600);
     color: var(--color-ink-50);
+  }
+
+  /* 详情那一颗的位置。⚠️ 钉在右上角、盖在内容上，而不是占一行 —— 面板是一屏，
+   *    一整行只放一颗按钮等于把日历的一小时让出去。 */
+  .schedule-detail-close {
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    float: right;
   }
 
   /* 左边列表上那一圈霓虹：右边正开着的就是这一场（2026-08-18 重做）。
@@ -908,21 +1070,66 @@
    *    会问一句。 */
 
 
-  /* 翻页行。三对箭头，一档一对 —— 默认全部不显示，下面每个断点放出一对。
+  /* 日程顶上那两行（2026-08-28 重排）。
    *
-   * 🔴 为什么是三对而不是一对加一点 JS：**一次翻几天 = 那一档看得见几列**，
-   *    而那是这里决定的。目标日期由服务端算好（schedule.navigation），
-   *    于是前端一个日期运算都不做。JS 算出来的那一天没有任何测试看得见，
-   *    而算错一天的表现是「按一下跳过了一天」，没有人会报上来。 */
-  .schedule-nav-tier {
-    display: none;
+   *   .schedule-nav        Aug 18 – Aug 21 ················· [×]
+   *   .schedule-head-row   [‹]  Mon  Tue  Wed  Thu  [›]
+   *
+   * 🔴 **箭头从第一行搬到了星期那一行**，因为第一行的右端现在归 ×。
+   *    原来 `›` 就在那个位置上：一颗关不掉的按钮和一颗翻页箭头挨在一起，
+   *    人会连着点错。（用户原话：「换日期的箭头会挡到关掉的 button」。）
+   *
+   * 🔴 **代价如实说：日历左右各少掉 `--schedule-arrow-col`（2rem）。**
+   *    中间那档面板宽 424px，于是一天从约 96px 收到约 82px。知情的取舍 ——
+   *    换来的是「关掉」和「翻页」不再抢同一个角。
+   *
+   * ⚠️ 三档屏幕各有一对箭头（一次翻几天 = 那一档看得见几列），所以两个槽位里
+   *    各躺着三颗，CSS 只放出一颗。**为什么不是一对加一点 JS**：目标日期由
+   *    服务端算好（schedule.navigation），前端一个日期运算都不做 ——
+   *    JS 算出来的那一天没有任何测试看得见，而算错一天的表现是「按一下跳过了
+   *    一天」，没有人会报上来。 */
+  .schedule-nav {
+    display: flex;
     align-items: center;
-    justify-content: space-between;
     gap: 0.5rem;
     padding-bottom: 0.5rem;
   }
 
+  /* × 推到最右。⚠️ 用 `margin-left: auto` 而不是给这一行 `space-between` ——
+   *    三档日期范围里同一时刻只有一个是显示的，而 `space-between` 会把那唯一
+   *    可见的一格顶到左边、× 顶到右边，看起来没问题；直到某一档三个都被藏起来
+   *    （将来加第四档时的手滑），那时 × 会自己跳到左边。 */
+  .schedule-close {
+    margin-left: auto;
+  }
+
+  /* 🔴 **箭头槽和滚动区的内边距取同一个变量，不是两个碰巧相等的数。**
+   *
+   *    星期行和格子行必须共用同一套列（否则表头和它底下那一列对不齐），而
+   *    箭头在星期行的**外面**——所以星期行比整块窄了两个槽位，格子行也必须
+   *    照样窄掉两个槽位。写成两个字面量的话，下一个人改其中一个，表头和格子
+   *    会错开一点点：一天的名字压在隔壁那一列上，而 CSS 里每一条都看着正常。
+   *    （槽位宽度写在 `.schedule` 的 `--schedule-arrow-col` 上，格子那一侧
+   *     取的是同一个变量，见 `.schedule-scroll`。） */
+  .schedule-head-row {
+    display: flex;
+    align-items: center;
+    gap: 0;
+    border-bottom: 1px solid var(--schedule-line);
+    padding-bottom: 0.375rem;
+  }
+
+  .schedule-arrow-slot {
+    display: flex;
+    flex: none;
+    width: var(--schedule-arrow-col);
+    align-items: center;
+    justify-content: center;
+  }
+
   .schedule-range {
+    /* ⚠️ 默认不显示：三档各一份，下面每个断点放出一份。 */
+    display: none;
     font-size: 0.8125rem;
     font-weight: 500;
     color: var(--color-ink-600);
@@ -935,7 +1142,9 @@
   }
 
   .schedule-arrow {
-    display: inline-flex;
+    /* ⚠️ 默认不显示：两个槽里各躺着三档的箭头，上面每个断点只放出一档。
+     *    （和 `.schedule-range` 同一条规矩，两者必须一起改。） */
+    display: none;
     height: 1.75rem;
     width: 1.75rem;
     flex: none;
@@ -986,10 +1195,14 @@
     column-gap: var(--schedule-column-gap);
   }
 
+  /* ⚠️ 边框和下内边距 2026-08-28 搬去了 `.schedule-head-row` —— 那条线要
+   *    横跨整块，包括两个箭头槽；留在这一层的话，线会在箭头那儿断掉两截，
+   *    读起来像表头没画完。
+   * ⚠️ `flex` 从 `none` 改成可伸缩：它现在是那一行里中间那一格，四列的固有
+   *    宽度不许把两个箭头槽挤出去。`min-width: 0` 是同一件事的另一半。 */
   .schedule-head {
-    flex: none;
-    border-bottom: 1px solid var(--schedule-line);
-    padding-bottom: 0.375rem;
+    flex: 1 1 auto;
+    min-width: 0;
   }
 
   .schedule-day {
@@ -1022,6 +1235,10 @@
 
   .schedule-scroll {
     flex: 1;
+    /* 🔴 **和星期行那两个箭头槽同一个变量**，不是一个碰巧相等的数：
+     *    表头比整块窄两个槽位，格子行必须照样窄两个槽位，否则一天的名字会压在
+     *    隔壁那一列上，而两边的 CSS 各自看都正常。 */
+    padding-inline: var(--schedule-arrow-col);
     /* ⚠️ `min-height: 0` 不能省。flex 项的默认下限是「不许缩到比内容窄/矮」，
      *    而这里的内容是 1152px 高的一天 —— 少了它，滚动区会把面板整个撑破，
      *    而面板是 `overflow: hidden`，于是下半天被裁掉、也滚不到。 */
@@ -1296,15 +1513,20 @@
    * ⚠️ 中间那档只有 424px，四列一列 96px —— 那个宽度上活动名基本只剩一两个字
    *    就截断了。手机那档日程是**满宽**的，所以反而比中间那档宽，能放三列
    *    （和参考图的手机版一样）。 */
+  /* ⚠️ 一档放出**一份日期范围 + 一对箭头**，三样东西的档数必须一致 ——
+   *    它们说的是同一件事：这一档看得见几列、于是一次翻几天、于是范围写到
+   *    哪一天。放漏一样的表现是「箭头翻了四天，上面写着两天」。 */
   @media (width >= 80rem) {
-    .schedule-nav-tier--4 {
-      display: flex;
+    .schedule-range--4,
+    .schedule-arrow--4 {
+      display: inline-flex;
     }
   }
 
   @media (64rem <= width < 80rem) {
-    .schedule-nav-tier--2 {
-      display: flex;
+    .schedule-range--2,
+    .schedule-arrow--2 {
+      display: inline-flex;
     }
 
     .schedule-head,
@@ -1320,8 +1542,9 @@
   }
 
   @media (width < 64rem) {
-    .schedule-nav-tier--3 {
-      display: flex;
+    .schedule-range--3,
+    .schedule-arrow--3 {
+      display: inline-flex;
     }
 
     .schedule-head,
@@ -1622,23 +1845,41 @@
     color: var(--color-brand-300);
   }
 
-  .event-name::after {
+  /* 🔴 **全站会滑的下划线只有这一条规则**（2026-08-28 合并）。
+   *
+   *    页头条那一格（`.page-bar-link`）用的是同一条线。原来它在文件另一头
+   *    自己写了一份一模一样的八条声明，注释里写着「照抄，不另调」——
+   *    而**照抄是会漂的**：只有 `transition` 那一条被守卫比着，其余七条
+   *    （颜色、几何、scaleX、双原点）谁改了另一边都不会红。
+   *    合成一条之后，「同一套数值」不再是一句注释里的承诺，是结构本身。
+   *
+   * ⚠️ 触发条件仍然各写各的（下面两组）：一个是「鼠标在整行上」，一个是
+   *    「鼠标在这一格上，或者你正在这一页」—— 那是两件不同的事。
+   *
+   * ⚠️ `bottom: 0`, **not** a negative offset, and this is the one line in this
+   *    block that is not obvious. Both callers clip: `.event-name` carries
+   *    `line-clamp-*` and `.page-bar-title` carries `truncate`, and both set
+   *    `overflow: hidden` — so anything positioned outside the padding box is
+   *    clipped and **never painted at all**. The first version of each used a
+   *    negative offset and the underline simply did not exist; nothing errored,
+   *    the computed style said `visibility: visible`, `height: 1px`, the right
+   *    colour — and there was nothing on screen. (Twice. Nine days apart.)
+   *
+   *    Sitting at `bottom: 0` costs nothing visually: the line box is 1.75rem
+   *    while the glyphs occupy about 1.5rem of it, so the bottom edge is
+   *    already ~2px below the descenders — the same gap the negative offset was
+   *    reaching for. On the page bar it buys something extra: the link fills the
+   *    row, so the line lands on the head's own bottom edge.
+   *
+   * ⚠️ 两个 `transform-origin` **必须不一样**，这就是「进来从左、出去向右」的
+   *    全部机关：亮起时从 left 长出来，回到静息态时缩回 right。
+   *    两边写同一个的话，出去的方向会和进来的相反。 */
+  .event-name::after,
+  .page-bar-link::after {
     content: "";
     position: absolute;
     left: 0;
     right: 0;
-    /* ⚠️ `bottom: 0`, **not** a negative offset, and this is the one line in this
-     *    block that is not obvious. `.event-name` carries `line-clamp-*`, which
-     *    sets `overflow: hidden` — so anything positioned outside its padding box
-     *    is clipped and **never painted at all**. The first version used
-     *    `bottom: -0.125rem` and the underline simply did not exist; nothing
-     *    errored, the computed style said `visibility: visible`, `height: 1px`,
-     *    the right colour — and there was nothing on screen.
-     *
-     *    Sitting at `bottom: 0` costs nothing visually: the line box is 1.75rem
-     *    while the glyphs occupy about 1.5rem of it, so the bottom edge is
-     *    already ~2px below the descenders — the same gap the negative offset was
-     *    reaching for. */
     bottom: 0;
     height: 1px;
     background-color: currentColor;
@@ -1648,14 +1889,19 @@
   }
 
   .event-row:hover .event-name::after,
-  .event-row:focus-within .event-name::after {
+  .event-row:focus-within .event-name::after,
+  .page-bar-link:hover::after,
+  .page-bar-link:focus-visible::after,
+  .page-bar-link[aria-current="page"]::after {
     transform: scaleX(1);
     transform-origin: left;
   }
 
-  /* ⚠️ 关掉动画，不是关掉下划线 —— 提示本身要留着，只是不再滑。 */
+  /* ⚠️ 关掉动画，不是关掉下划线 —— 提示本身要留着，只是不再滑。
+   *    页头条那一格尤其：那条线是「你在哪一页」的全部载体。 */
   @media (prefers-reduced-motion: reduce) {
-    .event-name::after {
+    .event-name::after,
+    .page-bar-link::after {
       transition: none;
     }
   }
@@ -2847,9 +3093,18 @@
    * `.is-solid` = 一直白着。内页底下是内容不是照片，藏起来只会让导航变难找，
    * 换不来任何东西 —— 首页那条之所以藏，是因为藏起来才看得到画面。
    */
+  /* 🔴 **不画下沿**（2026-08-28 第四轮，用户：「整个顶栏可以不要有边框吗」）。
+   *
+   *    这条线原来是「白 bar 和白卡片之间的分界」。撤掉它之后分界改由**明度**给：
+   *    页面底是 `ink-50`、bar 是纯白，滚到底下的卡片也是纯白 —— 也就是说
+   *    **卡片滚到 bar 底下时，那条边会消失在白里**。如实说清楚：这是这次换来的
+   *    干净所付的价，不是漏掉的一条线。真要那个提示，标准做法是「钉住时才浮出
+   *    一道极浅的投影」，而不是把这条常驻的线加回来。
+   *
+   * ⚠️ 顺带：bar 的盒子因此正好等于 `--site-bar-h`（68 / 76px）——
+   *    原来那 1px 边框让它比变量高一格，窄屏那张纸的上沿也就差了 1px。 */
   .home-bar.is-solid {
     background-color: #fff;
-    border-bottom: 1px solid var(--color-ink-200);
   }
 
   .home-bar.is-solid .home-bar-item {
@@ -2865,7 +3120,219 @@
    * 少了这一段的话深色模式下内页顶上会横着一条刺眼的白带。 */
   .dark .home-bar.is-solid {
     background-color: var(--color-ink-900);
-    border-bottom-color: var(--color-ink-800);
+  }
+
+  /* --- 页头条：顶栏底下那一条（2026-08-28）---------------------------------
+   *
+   *   ┌──────────────────────────────────────┐
+   *   │ ☰ Menu    RIVER OF LIFE      ☀ 名字  │  ← .site-head，跟着内容滚走
+   *   ├──────────────────────────────────────┤
+   *   │ Events                               │  ← 这一条，钉在视口顶上
+   *   └──────────────────────────────────────┘
+   *
+   * 🔴 **一屏顶上只钉一条。** 两条一起钉是 128px，而活动列表右面板开着时还要
+   *    再钉一张约 257px 的筛选卡 —— 800px 高的窗口上留给活动卡片的就只剩两张。
+   *    所以给了页头条的页面，站头那条 bar 改成跟着内容滚走（下一条规则）。
+   *    取舍如实说：滚下去之后 Menu 不在屏幕上，要它得滚回顶部。
+   *
+   * 🔴 **高度（`--page-bar-h` = 3rem = 48px）是这一条的，`--head-h` 读的就是它**
+   *    （变量在 @layer base 那一段，理由也在那儿）。48 = 一行 `text-base`
+   *    （行高 1.75rem = 28px）+ 上下各 10。
+   *    ⚠️ 它是**推出来的**，而这个文件里推错过一次（bar 那 68/76px）。区别在于
+   *       这一条里没有别的东西撑高它：一个 `<h1>`，没有按钮、没有图标。
+   *       哪天这条里放进一颗按钮，这个数就得像那次一样打开浏览器量 ——
+   *       `core.tests.PageBarTests` 那一整组钉的正是「这条里只有那一行字」
+   *       和「这个数住在 :root 上」。
+   *
+   * ⚠️ 底**不在这里**：静息态它是透明的，底由站头那块向下延的面板画；
+   *    钉住之后才自己画（`.is-stuck`）。全部理由见下一段。
+   *
+   * ⚠️ `z-index` 要压过滚上来的卡片（它们带 `position: relative`）和钉住的
+   *    筛选卡（z-20），所以取和站头同一档的 30。 */
+  /* 🔴 **一个头，一块面板。**（2026-08-28 第三轮，用户：「小标题应该和吸顶栏是
+   *    一个整体」。）
+   *
+   *    站头那条的**面板往下延**，一直盖住页头条那一行；页头条自己**在没被钉住
+   *    时是透明的**。于是屏幕上是一整块底，而不是两条上下贴着的横栏。
+   *
+   * 🔴 **在深色 + 大图那一档，这是唯一做得出「一整块」的写法。**那一档里底是
+   *    毛玻璃（`backdrop-filter`），而毛玻璃**各取各的背景**：上面那块采样的是
+   *    天空、下面那块是山，两块各自都对，接缝处却是一道看得见的亮度台阶。
+   *    截图比出来的。让一块面板盖住两行，模糊才是连续的。
+   *
+   * ⚠️ 高度靠 `padding-bottom` 延、再用等量的负 `margin-bottom` 收回来 ——
+   *    于是**盒子高度一点没变**，`--site-bar-h` 那 68/76px 和它的守卫照旧成立。
+   * ⚠️ 内边距写在 `.home-bar` 上，不是里面那个 `<nav>`：`py-4 / sm:py-5` 是
+   *    工具类，写在这里会被 utilities 层压掉（这一批栽过一次，见 `.site-head`）。
+   * ⚠️ 这个头**没有下沿那条线**（2026-08-28 第四轮撤掉的，理由写在
+   *    `.home-bar.is-solid` 上）。所以「一整块」现在是靠一块底做到的，
+   *    连一条边都不欠 —— 而下面那条下划线因此是这个头唯一的一道横线。 */
+  body:has(.page-bar) .home-bar.is-solid {
+    padding-bottom: calc(var(--page-bar-h) - var(--page-bar-pull));
+    margin-bottom: calc(-1 * (var(--page-bar-h) - var(--page-bar-pull)));
+  }
+
+  /* 哨兵：**页头条在流里的落点**。高度为 0，所以它不改变任何几何。
+   *
+   * 🔴 **往上贴那一段挂在它身上，不在页头条身上。**（2026-08-28 第五轮修的。）
+   *
+   *    这两个位置差着 `--page-bar-pull`（12px），而哨兵要是站在贴之前的
+   *    76px 处，页头条 64px 就贴到顶了 —— 中间那 **12px 的空窗里它已经钉住、
+   *    却还没拿到自己的底**：站头那块延下来的面板此刻只够盖到它上面 36px，
+   *    于是下沿连同那条下划线掉在白块外面。用户报上来的原话是「下滑的时候
+   *    偶尔会有字不在框内」，而「偶尔」正是因为那扇窗只有 12px 宽。
+   *
+   *    ⚠️ 也可以在 JS 里给观察器补一个 `rootMargin` 把线上移 12px —— 没那么做：
+   *       那是把同一个数搬去第二个地方，而这里只要让哨兵**真的**站在落点上，
+   *       它就自动是对的。零高度的元素不占版面，所以负外边距挂在它身上，
+   *       后面的页头条照样落在同一个 y。 */
+  .page-bar-sentinel {
+    height: 0;
+    margin-top: calc(-1 * var(--page-bar-pull));
+  }
+
+  .page-bar {
+    /* ⚠️ 往上贴那一段在哨兵身上（见上一条），这里不再写第二份 ——
+     *    两处都写的话会贴两次，页头条会插进站头那条的字里。 */
+    position: sticky;
+    top: 0;
+    z-index: 30;
+    height: var(--page-bar-h);
+    /* 静息态透明：这一行的底由上面那块延下来的面板画。 */
+    background-color: transparent;
+  }
+
+  /* 🔴 **钉住之后它必须自己有底。**（`is-stuck` 由 app.js 那段 IntersectionObserver
+   *    给，判据是「页头条已经贴到视口顶了没」。）
+   *
+   *    钉住时上面那块面板已经滚走，而这一行底下正有活动卡片穿过去 ——
+   *    没有底就是**字压着字**。所以静息态和钉住态是两种底，中间没有第三种。
+   *
+   * ⚠️ 交接是**严丝合缝**的，不是差不多：那块面板向下延的高度正好等于这一行，
+   *    所以它从视口里退出去的那一帧，正是这一行贴到顶的那一帧。
+   * ⚠️ 不写过渡：两种底的交接发生在同一帧，加 200ms 淡入的话，那 200ms 里
+   *    这一行是半透明的，卡片正从底下穿过去。 */
+  .page-bar.is-stuck {
+    background-color: #fff;
+  }
+
+  .dark .page-bar.is-stuck {
+    background-color: var(--color-ink-900);
+  }
+
+  /* ⚠️ 没有 JS 时 `is-stuck` 永远不会加上 —— 那一档里这一行钉住之后是透明的。
+   *    知情的取舍：它和菜单那颗按钮同性质（纯 UI 状态，没有服务端形态），
+   *    而代价只是「滚动时标题背后能看见卡片」，不是任何东西打不开。 */
+
+  /* ⚠️ **居中**，和上面那个字样对着同一条中轴（那个是 `absolute left-1/2`
+   *    居中的）。两行各自靠左的话，中轴上就有一条看得见的错位。
+   *    以后那排小标题进来时，它们作为一组一起居中 —— 参考图里 LV 那一行
+   *    就是这么排的。 */
+  .page-bar-inner {
+    height: 100%;
+    justify-content: center;
+  }
+
+  /* ⚠️ **字重 400，比顶栏那个字样（600）细。** 这一条是「你在哪一页」，
+   *    不是这个头的主角；两行同样粗会互相抢。字距比正文宽一档，
+   *    和上面那个字样是同一种排法 —— 两条 bar 上下叠着，排法不一样会读成
+   *    两个网站拼在一起。
+   * ⚠️ `<h1>` 自带浏览器默认的粗体和字号，所以这两条都得写出来，
+   *    不能只写在里面那个 `<a>` 上。 */
+  /* ⚠️ **标题和链接都撑满这一行的高度。** 下划线要落在整个头的下沿上
+   *    （`::after` 的 `bottom: 0`），而 `bottom` 量的是它定位祖先的盒子 ——
+   *    链接只有一行字那么高的话，线就画在字底下、离下沿还差十几像素。
+   * 🔴 撑满同时解掉另一件事：标题上有 `truncate`（长标题要截断），而它里面的
+   *    `overflow: hidden` **裁到内边距盒为止**。线画在盒子外面时会被整条裁掉 ——
+   *    CSS 全对、`::after` 的 transform 也确实是 scaleX(1)，**屏幕上就是没有
+   *    线**（量出来的）。现在线在盒子里面，裁不到。 */
+  .page-bar-title {
+    display: flex;
+    align-items: center;
+    height: 100%;
+    font-weight: 400;
+    letter-spacing: 0.04em;
+  }
+
+  /* --- 那条下划线（2026-08-28）---------------------------------------------
+   *
+   * 参考图（LV 的品牌页）：鼠标滑过一格时线**滑**出来，而当前所在的那一格线
+   * 一直亮着。两种状态是**同一条线**的两个终点，不是两套画法 —— 写成两套的话，
+   * 「常亮」那条和「滑出来」那条迟早会一粗一细、一宽一窄。
+   *
+   * 🔴 **用 `::after` 的 `scaleX`，不用 `border-bottom` / `text-decoration`。**
+   *    后两者只能在「有」和「没有」之间跳，动不起来；而 `width` 从 0 长到 100%
+   *    是**每帧都要重排**的动画（布局属性），一排格子一起动时会掉帧。
+   *    `transform` 走合成器，不碰布局。
+   *
+   * ⚠️ 原点在**中心**：`transform-origin: center`，于是它从中间往两边开、
+   *    离开时原路收回中间。写 `left` 的话，快速划过一排时会看到线在同一侧
+   *    反复进出，像在抖。
+   *
+   * ⚠️ 线画在**基线下面一点**（`bottom: -0.35rem`），不是紧贴文字：贴着的时候
+   *    小写字母的下伸部（p、g、y）会压在线上。
+   *
+   * ⚠️ **常亮那一档由 `[aria-current="page"]` 选中**，不是另加一个 class。
+   *    屏幕上「你在这一页」由这条线说，而读屏软件看不见线 —— 两件事因此绑在
+   *    同一个属性上：加了 class 忘了属性的那一天，线还亮着，读屏却说这不是
+   *    当前页，而两边各自看都正常。
+   *
+   * ⚠️ 减少动效下**不是去掉这条线**（它是「你在哪一页」的全部载体），
+   *    只是让它瞬间到位。 */
+  .page-bar-link {
+    position: relative;
+    display: flex;
+    align-items: center;
+    height: 100%;
+    color: var(--color-brand-900);
+    text-decoration: none;
+  }
+
+  .dark .page-bar-link {
+    color: var(--color-ink-50);
+  }
+
+  /* 🔴 **这一格的下划线不在这儿画** —— 它和活动名那条是**同一条规则**
+   *    （搜 `.event-name::after`：几何、时长、双原点全在那一份里，触发条件
+   *    也一并写在那儿）。这里一个数都不重复，因为「同一套数值」这件事一旦
+   *    靠两处抄写维持，就一定会漂。
+   *
+   * ⚠️ 落点值得记一笔：链接撑满整行（`.page-bar-link` 的 `height: 100%`），
+   *    所以那条 `bottom: 0` 在这里落在**整个头的下沿**上 —— 参考图里 LV 那格
+   *    就是这样。第四轮把头自己那条边框撤掉之后，它成了这个头**唯一**的横线：
+   *    既是「你在哪一页」，也是这个头的底在哪儿。 */
+
+  .dark .page-bar-title {
+    color: var(--color-ink-50);
+  }
+
+  /* 站头那一层：**默认吸顶**。
+   *
+   * 🔴 **吸顶写在这里，不写成模板上的 `sticky top-0 z-30` 三个工具类。**
+   *    Tailwind 的 utilities 层排在 components **后面**，于是工具类会压掉
+   *    下面那条「有页头条时不吸顶」—— 表现是两条 bar 一起钉在顶上、页头条
+   *    盖住站头，而 CSS 里那条取消规则明明写着。量出来的（`position` 计算值
+   *    还是 sticky）。这个文件里已经栽过一次同样的事，见 `.event-row-thumb`
+   *    那段注释里的 `w-16`。 */
+  .site-head {
+    position: sticky;
+    top: 0;
+    z-index: 30;
+  }
+
+  /* 🔴 **有页头条的页面，站头那条 bar 不吸顶。**
+   *
+   *    这是「一屏顶上只钉一条」的另一半，而它只有一处声明 —— 上面那条是全站
+   *    默认，这里按「页面上有没有那条页头条」把它撤掉。用第二个 block
+   *    （「这一页要不要吸顶」）的话，它和 `page_bar` 迟早对不上：两条一起钉、
+   *    或者一条都不钉，而两处模板各自看都正常。
+   *
+   * ⚠️ `position: static` 而不是 `relative`：这一层上没有任何绝对定位的孩子
+   *    要靠它定位（顶栏里那个居中字样的包含块是 `nav`，不是这一层）。
+   * ⚠️ `z-index` 跟着 position 一起失效，这正是要的：它滚走之后不该再和
+   *    页头条抢层级。 */
+  body:has(.page-bar) .site-head {
+    position: static;
   }
 
   .dark .home-bar.is-solid .home-bar-item {
@@ -3051,7 +3518,20 @@
 
   .dark.has-hero .home-bar.is-solid {
     background-color: rgb(0 0 0 / 0.62);
-    border-bottom-color: rgb(255 255 255 / 0.12);
+    backdrop-filter: blur(14px);
+  }
+
+  /* 🔴 **页头条和它上面那条 bar 必须是同一块玻璃 —— 而这在静息态是靠上面那块
+   *    面板盖住它做到的**（见 `.page-bar` 那一段）。这里只管**钉住之后**：
+   *    那时面板已经滚走，这一行得自己是玻璃，数值**照抄** bar 那一条。
+   *
+   * ⚠️ 不许另调一套数值：它们要么一模一样，要么就是两种材质，而
+   *    design-system 判过刑的正是「同一屏里出现第二种玻璃」。
+   * ⚠️ **静息态不给它 `backdrop-filter`**（上面那条规则里它是透明的）——
+   *    给了的话它会去模糊「上面那块已经模糊过的面板」，叠出一条更暗的带子，
+   *    正是这一轮要修掉的那道接缝。 */
+  .dark.has-hero .page-bar.is-stuck {
+    background-color: rgb(0 0 0 / 0.62);
     backdrop-filter: blur(14px);
   }
 

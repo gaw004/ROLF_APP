@@ -19,6 +19,28 @@
 {% endcomment %}
 {% block main_width %}max-w-4xl{% endblock %}
 
+
+
+{% comment %}
+页头条（2026-08-28）。「Events」这四个字从版心里搬到了这里 —— 顶栏底下、
+`<main>` 外面，钉在视口顶上；而站头那条 bar 跟着内容滚走（app.css 里
+`body:has(.page-bar)` 那两条）。全部理由写在 `page_bar.html` 和 app.css。
+
+🔴 **搬走之后这一页的 `<h1>` 只有这一个。** 下面那个
+   `<h1 class="mb-6 …">Events</h1>` 是同一句话的旧位置，一起删了 ——
+   留着就是一页两个 h1，读屏的标题大纲会变成两棵并列的树。
+{% endcomment %}
+{% block page_bar %}
+  {% comment %}
+  ⚠️ `{% templatetag openblock %} url … as here_url {% templatetag closeblock %}` 必须写在 **block 里面**。子模板里
+     写在所有 block 之外的标签**不会被执行**（`{% templatetag openblock %} extends {% templatetag closeblock %}` 的模板只渲染
+     block 的内容），于是那个变量是空的 —— 表现是 `href=""`，一个点了会回到
+     站点根目录的链接，而模板本身一个错都不报。踩过一次，浏览器里看出来的。
+  {% endcomment %}
+  {% url 'events:event_list' as here_url %}
+  {% include "core/components/page_bar.html" with title="Events" url=here_url %}
+{% endblock %}
+
 {% block content %}
   {% comment %}
   这一页列的是**今天零点起、所有对志愿者可见的活动**（2026-08-17 改）。
@@ -36,12 +58,9 @@
      HTMX 筛选和翻页换掉的是 `#event-results`，而它在这一层里面 ——
      状态挂在被换掉的那块上，等于每筛一次、每翻一页日程自己关一次。
 
-  ⚠️ 壳是**标题 + 一行两块**，不是「结果区里多一列」。日程要和筛选卡一样高地
+  ⚠️ 壳里是**一行两块**，不是「结果区里多一列」。日程要和筛选卡一样高地
      立在右边，而筛选卡在结果区外面。
-
-  ⚠️ 标题在这一层、在那一行**外面**：窄屏上开日程会把整列藏起来（app.css 里
-     那条 `display: none`），标题放在列里就会跟着一起消失，于是一屏日程上面
-     什么都没有。
+     （这一层原来还顶着一个「Events」标题，2026-08-28 搬进页头条了。）
 
   ⚠️ `x-cloak` 不需要：默认状态就是关着的，而关着的样子和没有 JS 时一模一样。
   {% endcomment %}
@@ -66,8 +85,11 @@
   {% endcomment %}
   <div class="events-shell" x-data="eventsShell"
        x-bind:class="isOpen ? 'is-open' : ''">
-    <h1 class="mb-6 text-2xl font-semibold">Events</h1>
-
+    {% comment %}
+    ⚠️ 标题不在这里了（2026-08-28 搬进页头条）。原来它在这一层、在下面那一行
+       **外面**，为的是窄屏开日程时整列被藏起来、标题不跟着一起消失。搬到
+       `<main>` 外面之后那个顾虑更彻底地成立了：它根本不在这棵树里。
+    {% endcomment %}
     <div class="events-row">
       <div class="events-col">
         {% url 'events:event_list' as here %}

@@ -1103,9 +1103,27 @@ class Event(Audience, ConstraintErrorFieldMixin, TimeStampedModel):
     OPEN_FOR_SIGNUP = frozenset({Status.OPEN})
     # The statuses that stop meaning what they say once `end_time` has passed —
     # see `status_label`. Listed in full rather than as a complement, for B5's
-    # reason: a sixth status must not be swept in here by default, and the two
-    # left out (draft, cancelled) are each left out for a stated reason.
-    ENDS_WITH_THE_CLOCK = frozenset({Status.OPEN, Status.FULL, Status.COMPLETED})
+    # reason: a sixth status must not be swept in here by default, and the three
+    # left out (draft, cancelled, wrapped up) are each left out for a stated
+    # reason — the last of them by the set below.
+    ENDS_WITH_THE_CLOCK = frozenset({Status.OPEN, Status.FULL})
+    # 🔴 The statuses a volunteer is **never** shown, whatever the clock says
+    #    (2026-08-28). "Wrapped up" is the admin's bookkeeping word — it means
+    #    the follow-up is done, attendance taken, hours recorded — and it is
+    #    filled in days after the event, by which time `ENDS_WITH_THE_CLOCK`
+    #    would have collapsed it to "Ended" anyway. The only case where it ever
+    #    reached a volunteer was an admin who ticked it early, and there the
+    #    word answers a question nobody outside that ministry is asking.
+    #
+    #    ⚠️ Its own set rather than a second condition inside `status_label`:
+    #       "which words are ours and which are theirs" is the fact worth
+    #       naming, and the day somebody adds `reconciled` this is the line
+    #       they have to walk past.
+    #
+    #    ⚠️ It is **not** removed from `VISIBLE_TO_PARTICIPANTS`. The event
+    #       itself stays visible — it happened, people signed up for it, and
+    #       their signups are still theirs to read. What is hidden is one word.
+    NOT_A_VOLUNTEERS_WORD = frozenset({Status.COMPLETED})
 
     name = models.CharField(max_length=200)
     event_type = models.ForeignKey(EventType, on_delete=models.PROTECT, related_name="events")
@@ -1269,10 +1287,25 @@ class Event(Audience, ConstraintErrorFieldMixin, TimeStampedModel):
            `status` is hand-filled and nothing moves it on, so a finished event
            still reads "Open for signup" — the complaint this property exists to
            answer. Every status that means "this was really going to happen"
-           (open, full, wrapped up) collapses to one word once `end_time`
-           has passed, because to somebody reading the list the difference
-           between "it filled up and then it happened" and "it happened" is not
-           a difference: it is over either way, and there is nothing to do.
+           (open, full) collapses to one word once `end_time` has passed,
+           because to somebody reading the list the difference between "it
+           filled up and then it happened" and "it happened" is not a
+           difference: it is over either way, and there is nothing to do.
+
+        🔴 **"Wrapped up" reads as "Ended" whatever the clock says**
+           (2026-08-28). It used to sit in `ENDS_WITH_THE_CLOCK`, which almost
+           always hid it — an admin ticks it days after the event, and by then
+           the clock had collapsed it anyway. What was left was the one case
+           where it leaked: ticked *early*, and then a volunteer reads a word
+           that answers a question only that ministry is asking (is the
+           attendance in? are the hours recorded?). Two words for the same
+           fact, one of which is about somebody else's paperwork.
+
+           ⚠️ Which of the two it is stays visible exactly where it is acted
+              on: the management list shows the real `status`.
+           ⚠️ It is a *label*, not a gate. Nothing about who may see the event,
+              or sign up, or read their own signup, changed with this — see
+              `NOT_A_VOLUNTEERS_WORD`.
 
         ⚠️ `Cancelled` is **not** collapsed. It says something the clock cannot:
            it did not take place. The people who signed up need that word, and
@@ -1287,7 +1320,8 @@ class Event(Audience, ConstraintErrorFieldMixin, TimeStampedModel):
            the dropdown next to it would make the edit look like it failed.
            It shows `get_status_display` plus its own "Ended" marker.
         """
-        if self.is_over and self.status in Event.ENDS_WITH_THE_CLOCK:
+        if (self.status in Event.NOT_A_VOLUNTEERS_WORD
+                or (self.is_over and self.status in Event.ENDS_WITH_THE_CLOCK)):
             return "Ended"
         # ⚠️ Derived fullness reads as the same word as the hand-set status
         #    (2026-08-19). To somebody deciding whether to come, "every place

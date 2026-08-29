@@ -788,7 +788,19 @@ class PermissionTests(TestCase):
 
     def test_a_future_grant_does_not_confer_permission_yet(self):
         # The other half of .active(), and the half most often left out.
-        MinistryRole.objects.update(start_date=TODAY + datetime.timedelta(days=1))
+        #
+        # 🔴 `local_today()` **here**, not the module-level TODAY. That constant is
+        #    frozen at import time, and "tomorrow" measured from it stops being
+        #    tomorrow the moment the suite crosses local midnight — the grant
+        #    starts today, `.active()` says yes, and this assertion fails with
+        #    `True is not false` on a change that touched nothing near it.
+        #    That is not hypothetical: CI ran 2026-08-28 23:48 PT, took 11 minutes,
+        #    and printed this failure at 00:00:40 PT.
+        #    ⚠️ The other TODAY users are safe by shape: they anchor rows that are
+        #       already active or already expired, and both stay true a day later.
+        #       Only a *future* date computed from a frozen "today" can flip.
+        MinistryRole.objects.update(
+            start_date=local_today() + datetime.timedelta(days=1))
         self.assertFalse(can_publish_event(self.user, self.pantry))
 
     def test_a_grant_on_a_retired_ministry_confers_nothing(self):

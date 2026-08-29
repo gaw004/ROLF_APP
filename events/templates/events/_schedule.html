@@ -20,21 +20,67 @@
      {% if schedule_oob %}hx-swap-oob="true"{% endif %}>
 
   {% comment %}
-  翻页那一行。三对箭头，一档一对，CSS 只显示其中一对。
+  顶上那两行（2026-08-28 重排）。
 
-  🔴 **一次翻几天 = 那一档看得见几列**，而看得见几列是 CSS 说了算的 ——
-     所以目标日期只能由服务端算好三份。让 JS 去 `+4 天` 的话，那个日期没有
-     任何测试看得见，而算错一天的表现是「按一下跳过了一天」，不会有人报上来。
-     （前端不做日期运算，phase-c.md 三。）
+      .schedule-nav       Aug 18 – Aug 21 ·············· [×]
+      .schedule-head-row  [‹]  Mon  Tue  Wed  Thu  [›]
+
+  🔴 **箭头搬到了星期那一行**，第一行的右端让给 ×。原来 `›` 就在那个位置上：
+     一颗「关掉日程」和一颗「往后翻四天」挨在一起，点错的代价还不对称 ——
+     翻错一页再翻回来，关错了就得重新开一次并且丢掉滚动位置。
+
+  🔴 **三档屏幕各一份**：日期范围三份、箭头三对，CSS 只放出一档
+     （`--4 / --2 / --3`）。三样东西说的是同一件事 —— 这一档看得见几列、
+     一次翻几天、范围写到哪一天 —— 所以放漏一样的表现是「箭头翻了四天，
+     上面写着两天」。
 
   ⭐ 箭头是**真的链接**：`href` 指向整页，`hx-get` 只换这一块。关掉 JS
      照样翻，只是整页重来（D24 的渐进增强）。
+
+  ⚠️ 前端不做日期运算（phase-c.md 三）：一次翻几天是 CSS 决定的，而目标日期
+     由服务端算好三份（schedule.navigation）。让 JS 去 `+4 天` 的话，那个日期
+     没有任何测试看得见，而算错一天的表现是「按一下跳过了一天」，不会有人
+     报上来。
   {% endcomment %}
   <div class="schedule-nav">
     {% for tier in schedule_nav %}
-      <div class="schedule-nav-tier schedule-nav-tier--{{ tier.days }}">
+      <span class="schedule-range schedule-range--{{ tier.days }}">{{ schedule_from|date:"M j" }} &ndash; {{ tier.upto|date:"M j" }}</span>
+    {% endfor %}
+    {% comment %}
+    关掉日程（2026-08-28）。⚠️ 它和详情那一块右上角那颗 × 是**同一颗按钮**
+    （`panel-close` 管长相），关的东西不同：这一颗关的是底下那一层日程，
+    那一颗关的是压在上面的详情。
+
+    ⚠️ `type="button"`：它长在筛选表单**外面**，但下一个人很容易把它搬进去 ——
+       默认的 submit 在表单里会变成一次提交。同 `_panel_frame.html` 那颗。
+
+    ⚠️ 走 `closeSchedule()` 而不是就地写 `schedule = false`：那个方法在
+       app.js 的 `eventsShell` 里，和「按下 Schedule 会发生什么」写在一起 ——
+       两个方向的规则分居两处，是它们迟早对不上的开始。
+
+    ⚠️ 这一块整个会被箭头翻页换掉（`hx-swap="outerHTML"` 打在 `#schedule` 上），
+       所以这颗按钮每翻一页都是新的一颗。没关系：`x-on:click` 由 Alpine 在
+       新节点进来时重新接上，而状态本来就住在外壳上、不在这里。
+    {% endcomment %}
+    <button type="button" class="panel-close schedule-close"
+            x-on:click="closeSchedule()" aria-label="Close schedule">&times;</button>
+  </div>
+
+  {% comment %}
+  星期那一行。⚠️ 它在滚动区**外面**：滚到晚上的时候，写着哪一天的那一行必须
+     还在 —— 一屏没有表头的格子说不出自己是哪天。
+  {% endcomment %}
+  <div class="schedule-head-row">
+    {% comment %}
+    ⚠️ 箭头在 `.schedule-head` 的**外面**，不是它的第一个格子：星期行是一张
+       grid，而 `.schedule-head > :nth-child(n+4)` 那几条靠序号藏掉看不见的
+       那几天 —— 往里塞一个箭头就等于把每一天的序号挪掉一位，于是窄屏上藏掉的
+       是错的日子。
+    {% endcomment %}
+    <span class="schedule-arrow-slot">
+      {% for tier in schedule_nav %}
         {% if tier.prev %}
-          <a class="schedule-arrow"
+          <a class="schedule-arrow schedule-arrow--{{ tier.days }}"
              href="{% url 'events:event_list' %}{% querystring from=tier.prev %}"
              hx-get="{% url 'events:event_schedule' %}{% querystring from=tier.prev %}"
              hx-target="#schedule" hx-swap="outerHTML"
@@ -45,33 +91,36 @@
           ⚠️ 到头时是一个**画出来但按不动**的 span，不是把箭头拿掉。位置一变，
              另一颗箭头就会跟着挪 —— 而那一颗此刻正在被人连着点。
           {% endcomment %}
-          <span class="schedule-arrow is-spent" aria-hidden="true">&lsaquo;</span>
+          <span class="schedule-arrow schedule-arrow--{{ tier.days }} is-spent"
+                aria-hidden="true">&lsaquo;</span>
         {% endif %}
+      {% endfor %}
+    </span>
 
-        <span class="schedule-range">{{ schedule_from|date:"M j" }} &ndash; {{ tier.upto|date:"M j" }}</span>
+    <div class="schedule-head">
+      <span class="schedule-gutter" aria-hidden="true"></span>
+      {% for column in schedule_columns %}
+        <div class="schedule-day{% if column.is_today %} is-today{% endif %}">
+          <span class="schedule-day-name">{{ column.day|date:"D" }}</span>
+          <span class="schedule-day-date">{{ column.day|date:"n/j" }}</span>
+        </div>
+      {% endfor %}
+    </div>
 
-        <a class="schedule-arrow"
+    <span class="schedule-arrow-slot">
+      {% comment %}
+      ⚠️ 往后翻**没有**「到头了」这一档：日程可以一直往后走，而往前走会被
+         今天挡住（`tier.prev` 为空）。所以这一侧不需要那个按不动的 span。
+      {% endcomment %}
+      {% for tier in schedule_nav %}
+        <a class="schedule-arrow schedule-arrow--{{ tier.days }}"
            href="{% url 'events:event_list' %}{% querystring from=tier.next %}"
            hx-get="{% url 'events:event_schedule' %}{% querystring from=tier.next %}"
            hx-target="#schedule" hx-swap="outerHTML"
            hx-replace-url="{% url 'events:event_list' %}{% querystring from=tier.next %}"
            aria-label="Later days">&rsaquo;</a>
-      </div>
-    {% endfor %}
-  </div>
-
-  {% comment %}
-  星期那一行。⚠️ 它在滚动区**外面**：滚到晚上的时候，写着哪一天的那一行必须
-     还在 —— 一屏没有表头的格子说不出自己是哪天。
-  {% endcomment %}
-  <div class="schedule-head">
-    <span class="schedule-gutter" aria-hidden="true"></span>
-    {% for column in schedule_columns %}
-      <div class="schedule-day{% if column.is_today %} is-today{% endif %}">
-        <span class="schedule-day-name">{{ column.day|date:"D" }}</span>
-        <span class="schedule-day-date">{{ column.day|date:"n/j" }}</span>
-      </div>
-    {% endfor %}
+      {% endfor %}
+    </span>
   </div>
 
   <div class="schedule-scroll" data-schedule-scroll>

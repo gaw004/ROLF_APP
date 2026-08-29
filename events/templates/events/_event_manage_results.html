@@ -29,7 +29,17 @@
     ⚠️ 窄屏（lg 以下）整段不生效 —— 那时是上下堆叠，没有「齐平」这回事，
        面板就是一张普通的卡片。
     {% endcomment %}
-    <div class="relative w-full shrink-0 lg:w-[24rem] lg:min-h-[28rem]">
+    {% comment %}
+    ⚠️ **20rem，不是 24rem**（2026-08-29 第二轮）。这一页的版心那一批从
+       `max-w-[92rem]` 收回了默认的 `max-w-6xl`（70rem 可用），于是开着报表时
+       留给左边表格的只有 44rem 出头 —— 实测 24rem 的面板会让表格的最小宽度
+       （757px）超出容器（710px），`.table-wrap` 又横着滚起来，正好是这一批
+       要修的东西。收掉这 4rem 之后表格装得下，活动名那一列也从 119px 回到
+       180px 上下。
+       ⚠️ 调节的是**面板**，不是把版心加宽回去：版心那条是全站一致性，
+          面板宽度只是这一页自己的事。
+    {% endcomment %}
+    <div class="relative w-full shrink-0 lg:w-[20rem] lg:min-h-[28rem]">
       {% include "events/_report_panel.html" %}
     </div>
   {% endif %}
@@ -42,36 +52,91 @@
 
     {% if events %}
       <div class="table-wrap">
-        <table>
+        {% comment %}
+        ⚠️ `manage-events` 只有一个用途：给下面那几列宽度规则一个作用域
+           （app.css 的 `.manage-events`）。`.table-wrap > table` 是全站好几张表
+           共用的，列宽写在那儿会跟着跑到签到页和报表页上去。
+        {% endcomment %}
+        <table class="manage-events">
           <thead>
             <tr>
               {% comment %}
-              ⚠️ 有报表的时候才让出 Ministry 和 Ends 两列，**关掉报表它们就回来**
-                 （2026-08-05 拍板）。没有报表时这一页就是原来那一页，
-                 Starts 也带回时间 —— 「少了两列、第三列还是缩过的」比
-                 「完全恢复原样」难记，而这一页大多数时候是不开报表用的。
+              🔴 **起止时间合成一列 `When`，一格两行**（2026-08-29 第二轮）。
 
-              ⚠️ Starts 在开着报表时**留着**（只留日期）。三列全舍的话，
-                 筛完「八月」之后页面上没有任何东西告诉你这些活动是八月的。
+                 第一轮的解法是把时间从表格里**拿走**：撤掉 Ends、Starts 缩成
+                 `8/30`，几点到几点搬进一个鼠标停在活动名上才弹出的小窗。行是短了，
+                 但那个小窗在触屏上根本不装 —— 手机和平板上这一页从此看不到任何
+                 具体时刻，而扫一整页时它也不在屏幕上。
+
+                 这一轮换个方向达成同一件事：时间回到表格里，靠**竖着排两行**省宽度。
+                 一行「开始」、一行「结束」，格式一模一样（见 schedule.when_labels）。
+
+              ⚠️ 表头叫 `When` 不叫 `Starts`：这一格现在同时写着起和止。
+
+              ⚠️ 仍然**只有 Ministry 一列**为报表让位。
+                 守卫：events.tests.EventManageListTests、ManageListRowLengthTests。
               {% endcomment %}
-              <th>Event</th>
-              {% if not report %}<th>Ministry</th>{% endif %}
-              <th>Starts</th>
-              {% if not report %}<th>Ends</th>{% endif %}
-              <th>Status</th><th>Go to</th>
+              <th class="col-event">Event</th>
+              {% if not report %}<th class="col-ministry">Ministry</th>{% endif %}
+              <th class="col-when">When</th>
+              <th class="col-status">Status</th><th class="col-goto">Go to</th>
             </tr>
           </thead>
           <tbody>
             {% for event in events %}
               <tr>
-                <td>
+                <td class="col-event">
+                  {% comment %}
+                  ⚠️ 这个链接上曾经挂着 `data-when-day` / `data-when-time`，供那个
+                     hover 小窗读（2026-08-29 第一轮）。小窗这一轮整个撤了 ——
+                     时间就写在右边 When 那一格里，不需要一个只有鼠标用户看得见的
+                     第二份。app.js 里对应的那一段和 app.css 的 `.event-when*`
+                     一并删掉了。
+                  {% endcomment %}
                   <a href="{% url 'events:event_detail' event.pk %}?from=manage"
                      class="prose-link">{{ event.name }}</a>
                 </td>
-                {% if not report %}<td>{{ event.ministry.name }}</td>{% endif %}
-                <td>{% if report %}{{ event.start_time|date:"Y-m-d" }}{% else %}{{ event.start_time }}{% endif %}</td>
-                {% if not report %}<td>{{ event.end_time }}</td>{% endif %}
-                <td>
+                {% if not report %}<td class="col-ministry">{{ event.ministry.name }}</td>{% endif %}
+                {% comment %}
+                ⚠️ 两行都由**视图**算好（views.event_manage_list 里那个循环），
+                   不在这里用 date 过滤器拼：页面的时区是基金会的而浏览器的是访客的
+                   （D16），而且时刻的写法要和日程卡对齐（schedule.clock）——
+                   模板里拼不出来，也测不了。
+                ⚠️ 两个 span 都是 block + nowrap（app.css 的 `.manage-events`）：
+                   这一列按内容收缩，允许格内折行的话「Aug 30, 2026, 10pm」会被
+                   折成三四行，行比改之前还高，正好和这一批要修的东西相反。
+
+                ⚠️ **`Starts:` / `Ends:` 这两个词写在这里，不在 `when_labels()`
+                   里。** 它们不含任何计算 —— 塞进那个函数会让它一半是数据一半是
+                   排版，而那边每一条断言时刻格式的测试都得跟着重复一遍这个常量。
+                   而且写成独立的 span 才能给它一个固定宽度（app.css 的
+                   `.when-label`），让两行的日期竖着对齐。
+
+                🔴 **星期几出现两次，而这两次是给不同的人的。**
+
+                   · `data-dow` —— 鼠标停在这一行上时 app.js 把它填进 `#when-dow`
+                     那个小窗。属性名两处一起改，少改一处的表现是悬停时什么都
+                     不发生、控制台一声不吭。守卫：ManageListWeekdayTests。
+
+                   · `sr-only` 那一段 —— 读屏用户拿到的是
+                     「Starts: Sunday, Aug 30, 2026, 9am」。他们**没有悬停**，
+                     只给 `data-dow` 的话这个信息对他们等于不存在。
+                     ⚠️ 那两个标签之间没有空格，靠 `sr-only` 里自带的 `, `
+                        接上 —— 视觉上读到的是「Starts: Aug 30…」，不多一个空格。
+
+                ⚠️ 这几个 span 之间的换行都用 `<span\n  attr>` 的写法断开，
+                   不是断在标签之间：`display: inline` 的元素之间那个换行是一个
+                   真空格，会在 `Starts:` 后面多出一格、把两行的日期错开。
+                {% endcomment %}
+                <td class="col-when">
+                  <span class="when-start" data-dow="{{ event.when_start.weekday }}"><span
+                    class="when-label">Starts:</span><span
+                    class="sr-only">{{ event.when_start.weekday }}, </span>{{ event.when_start.text }}</span>
+                  <span class="when-end" data-dow="{{ event.when_end.weekday }}"><span
+                    class="when-label">Ends:</span><span
+                    class="sr-only">{{ event.when_end.weekday }}, </span>{{ event.when_end.text }}</span>
+                </td>
+                <td class="col-status">
                   {% comment %}
                   状态在这里直接改：发布和收尾是最常做的两件事，各自只是一个选项。
                   ⚠️ **时间不在这里改** —— 挪时间要通知已报名的人，所以它走 Edit 页，
@@ -92,42 +157,100 @@
                   {% if not can_manage %}
                     {% include "core/components/badge.html" with label=event.get_status_display %}
                   {% else %}
-                  <form method="post" class="flex items-center gap-2">
+                  {% comment %}
+                  🔴 **换一个状态就存，没有 Save 按钮**（2026-08-29）。
+
+                     这张表单只有一个字段，而那个字段是一个下拉框 —— 选完还要再点
+                     一颗按钮，是「你刚才那一下不算数」的意思。撤掉之后一次操作
+                     就是一次操作。
+
+                  ⚠️ `hx-trigger="change"` 挂在**表单**上，不是挂在 `<select>` 上：
+                     change 从下拉框冒泡到表单，一条写在这里就够，而且这一次 POST
+                     要带上 csrf 和那个隐藏的 `event` —— htmx 从表单发就自动带全，
+                     从 select 发则要再写一份 `hx-include`。同 `_period_filter.html`
+                     那条触发器的理由。
+
+                  ⚠️ **`{% templatetag openblock %} querystring {% templatetag closeblock %}` 不能少。** 这一次 POST 回来的是整块
+                     `#event-results`，而那一块画什么取决于当前的筛选、页码、scope
+                     和要不要报表。不带的话，改一个状态就把人送回「没筛选的第一页」，
+                     而那一页看起来完全正常 —— 只是不是他刚才在看的那一页。
+
+                  ⚠️ 换法是 `outerHTML`，和筛选、翻页同一个（`#event-results` 这个
+                     id 归它们共用）。innerHTML 会把整块结果区套进它自己里面一层。
+
+                  ⚠️ 这颗表单在被换掉的那一块**里面**。没关系：请求已经在飞了，
+                     htmx 不需要发起者活到响应回来。
+                  {% endcomment %}
+                  <form method="post" class="flex items-center gap-2"
+                        action="{% url 'events:event_manage_list' %}{% querystring %}"
+                        hx-post="{% url 'events:event_manage_list' %}{% querystring %}"
+                        hx-target="#event-results" hx-swap="outerHTML"
+                        hx-trigger="change">
                     {% csrf_token %}
                     <input type="hidden" name="event" value="{{ event.pk }}">
                     <select name="status"
+                            aria-label="Status for {{ event.name }}"
                             class="rounded-md border border-ink-300 bg-white px-2 py-1 text-sm text-ink-900 dark:border-ink-600 dark:bg-ink-800 dark:text-ink-50">
                       {% for value, label in status_form.fields.status.choices %}
                         <option value="{{ value }}" {% if value == event.status %}selected{% endif %}>{{ label }}</option>
                       {% endfor %}
                     </select>
-                    {% include "core/components/button.html" with label="Save" variant="secondary" %}
+                    {% comment %}
+                    ⚠️ Save 只对**没有 JavaScript 的人**存在 —— 那条路上表单要靠提交
+                       才走，而改状态是**写操作**，D24 要求它必须有完整的服务端路径。
+                       `<noscript>` 里的内容只在 JS 关掉时渲染，所以对其余所有人
+                       它不在 DOM 里。
+                       ⚠️ 别改成 `x-show` / CSS 藏起来：那样它仍然在 Tab 顺序里，
+                          键盘用户会 Tab 到一颗看不见的按钮上。
+                       同 `_period_filter.html` 里那颗 Filter 按钮，一模一样的形状。
+                    {% endcomment %}
+                    <noscript>
+                      {% include "core/components/button.html" with label="Save" variant="secondary" %}
+                    </noscript>
                   </form>
                   {% endif %}
                 </td>
-                <td>
+                <td class="col-goto">
                   {% comment %}
                   ⚠️ 只读身份这里只画三个链接。给他画 Edit / Notify 的话，点进去是
                      403 —— 一个拒绝点它的人的链接，读起来是「站坏了」而不是
                      「这一页不归你」。
+
+                  🔴 **固定三列网格，六个链接排成 3+3 两排**（2026-08-29 第二轮）。
+
+                     ⚠️ 固定三列，不是 `flex-wrap`。自由折行的行数取决于字号、
+                        字体和链接文案，改任何一个都可能悄悄变成三排；固定三列
+                        则是「六个就是两排」，可预测。只读身份只有三个链接，
+                        自然就是一排。
+
+                  🔴 **网格写在 app.css 的 `.manage-events .goto-grid` 上，
+                     不是 Tailwind 的 `grid-cols-3`。** 那个工具类展开是
+                     `repeat(3, minmax(0, 1fr))`，而这一列是 `width: 1%`
+                     （按内容收缩）—— 表格于是把列宽定在网格报出来的最小宽度上，
+                     而 `minmax(0, …)` 报的是 **0**。屏幕上的表现是六个链接
+                     叠印在一起糊成一团，CSS 里每一条单独看都对。
+                     轨道必须是 `max-content`。
+
+                     ⚠️ `whitespace-nowrap` 仍然写在每个链接上：不许**格内**
+                        折行（`Edit & roles` 断成两行很难看），但整格必须能排成两排。
                   {% endcomment %}
-                  <div class="flex flex-wrap gap-x-2 gap-y-1 text-sm">
+                  <div class="goto-grid text-sm">
                     {% if can_manage %}
-                      <a href="{% url 'events:event_update' event.pk %}" class="prose-link">Edit &amp; roles</a>
+                      <a href="{% url 'events:event_update' event.pk %}" class="prose-link whitespace-nowrap">Edit &amp; roles</a>
                     {% endif %}
-                    <a href="{% url 'events:event_registrations' event.pk %}" class="prose-link">Signups</a>
-                    <a href="{% url 'events:event_attendance' event.pk %}" class="prose-link">Attendance</a>
+                    <a href="{% url 'events:event_registrations' event.pk %}" class="prose-link whitespace-nowrap">Signups</a>
+                    <a href="{% url 'events:event_attendance' event.pk %}" class="prose-link whitespace-nowrap">Attendance</a>
                     {% comment %}
                     ⚠️ 和 Edit / Notify 同一条规矩：只读身份不画。这一页开的是
                        打卡码，能打开它的人等于能给全场发卡 —— 它的权限和
                        「改这场活动」是同一个，不是「看这场活动」。
                     {% endcomment %}
                     {% if can_manage %}
-                      <a href="{% url 'events:checkin_display' event.pk %}" class="prose-link">Check-in QR</a>
+                      <a href="{% url 'events:checkin_display' event.pk %}" class="prose-link whitespace-nowrap">Check-in QR</a>
                     {% endif %}
-                    <a href="{% url 'events:event_report' event.pk %}" class="prose-link">Report</a>
+                    <a href="{% url 'events:event_report' event.pk %}" class="prose-link whitespace-nowrap">Report</a>
                     {% if can_manage %}
-                      <a href="{% url 'events:event_notify' event.pk %}" class="prose-link">Notify</a>
+                      <a href="{% url 'events:event_notify' event.pk %}" class="prose-link whitespace-nowrap">Notify</a>
                     {% endif %}
                   </div>
                 </td>
@@ -147,3 +270,22 @@
     {% endif %}
   </div>
 </div>
+{% if messages_oob %}
+  {% comment %}
+  🔴 **只有改状态那条路带 messages，而这个模板三条路都在用。**
+
+  筛选和翻页是**读**操作，而 `_messages_oob.html` 上写着读操作不许 include 它：
+  include 一次就会把 session 里还没显示过的消息提前消费掉，于是用户在另一个
+  页面上看到「“X” is now Open」。
+
+  但改状态那一次**是**写操作，确实有话要说 —— 而且从 2026-08-29 起它不再整页
+  重来（没有 Save 按钮了，change 就是提交），所以那句提示只能从这里回去。
+  于是不是无条件 include，而是由视图给一个标志：谁写谁点亮它。
+  和 `_schedule_detail.html` 里那一段同一个形状。
+
+  ⚠️ 它在 `#event-results` 的**外面**、和它平级：htmx 只在响应的顶层找
+     `hx-swap-oob`。写进那个 div 里面的话不报错 —— 那块提示条会被当成普通内容
+     贴进结果区里。
+  {% endcomment %}
+  {% include "core/components/_messages_oob.html" %}
+{% endif %}

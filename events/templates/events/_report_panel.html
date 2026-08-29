@@ -21,7 +21,7 @@
   ⚠️ `items-baseline`，不是 `items-center`：标题是 text-lg、两个出口是 text-sm，
      按盒子居中会让它们看起来比标题高一点点 —— 而基线对齐是文字并排时唯一
      不会「差一点」的对法。
-  ⚠️ 出口那一组 `shrink-0`：面板固定 24rem，宽度不富裕，让它们优先于标题保住
+  ⚠️ 出口那一组 `shrink-0`：面板固定 20rem（2026-08-29 从 24rem 收窄），宽度不富裕，让它们优先于标题保住
      整行（标题只有一个词，挤不坏）。
   {% endcomment %}
   <div class="mb-4 flex shrink-0 items-baseline justify-between gap-3">

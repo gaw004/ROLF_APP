@@ -621,6 +621,76 @@ class AudienceIsAskedGuardTests(TestCase):
         )
 
 
+class NoticesAreNarrowedGuardTests(TestCase):
+    """Lint-as-test: anything reaching for notices asks who is looking.
+
+    ⭐ The same shape as the two guards either side of it, and the reason it is
+       worth a third copy of that shape is that a notice is **louder** than an
+       event. An event that leaks sits in a list somebody has to open; a notice
+       that leaks is drawn straight onto the reader's page. "The staff away day
+       is on the 12th" reaching every outside volunteer is not a bug anybody
+       reports — it is one the foundation hears about from the wrong person.
+
+    ⚠️ The signal is the manager rather than a queryset method, unlike
+       AudienceIsAskedGuardTests. That table has one predicate you must not use
+       alone (`visible_to_participants`); this one has no safe way to touch the
+       manager at all — `showing()`, `past()` and `all()` are equally blind to
+       who is asking. So the rule is the blunt one: name `Notice.objects` and
+       you name `for_audience` too, or you say here why not.
+
+    🔴 **It is function-level, not call-level, and that limit is real.** A
+       function holding two queries catches nothing if *one* of them is
+       narrowed — verified by deleting a single `for_audience(contact)` from
+       notice_list() and watching this stay green (2026-08-31). It only goes red
+       when a function reaches for the table and asks nobody at all.
+
+       The limit is shared with the two guards either side of it and is not
+       worth fixing here: catching it properly means parsing the expression
+       rather than the function, and a guard that needs an AST walk is one the
+       next person cannot read or amend. What covers the gap is the tests that
+       assert on *rows* — `WhoSeesANoticeTests` in notices/tests.py — which is
+       the right division: this one catches the whole page somebody forgot,
+       those catch the row that should not be on it.
+    """
+
+    REACHES = "Notice.objects"
+    ASKS = "for_audience("
+
+    #: Named exemptions. Each is a decision with its reason written at the site.
+    ALLOWED = {
+        # The manage pages ask the *other* question — not "is it for you" but
+        # "are you answerable for it" — and they must not ask this one. An admin
+        # writing a notice for one ministry's staff is very often not in that
+        # ministry, and narrowing by audience would hide from them the thing
+        # they just wrote. Scoped by _mine_to_manage() instead.
+        "_mine_to_manage",
+        "notice_manage_list",
+        # Single-row lookups by primary key, each followed immediately by
+        # can_manage_notice(). Audience answers discovery; these three are
+        # already past it, holding an id somebody was given.
+        #
+        # ⚠️ `notice_publish` was added last and this guard caught it on the
+        #    first full run — which is the only evidence worth having that a
+        #    lint-as-test is doing anything. Adding a name here has to stay a
+        #    deliberate act with a reason beside it; the day this list grows
+        #    an entry nobody can explain, the guard is over.
+        "notice_update",
+        "notice_publish",
+        "notice_take_down",
+    }
+
+    def test_a_page_that_lists_notices_asks_who_is_looking(self):
+        offenders = functions_missing_a_call(
+            signal=self.REACHES, asks=self.ASKS, allowed=self.ALLOWED)
+        self.assertEqual(
+            offenders,
+            [],
+            "A notice is drawn straight onto somebody's page. Add "
+            "for_audience(contact), or name the function in ALLOWED with a "
+            "reason:\n" + "\n".join(offenders),
+        )
+
+
 class RolesAreNarrowedGuardTests(TestCase):
     """Lint-as-test: a page that lists roles asks who is looking. L2.
 

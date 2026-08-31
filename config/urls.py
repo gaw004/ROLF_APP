@@ -45,6 +45,10 @@ urlpatterns = [
     #    owns a whole small area including its own manage page, and "memories/"
     #    is the thing people will type.
     path('memories/', include('gallery.urls')),
+    # ⚠️ Prefixed for the same reason as the line above, and by the same test:
+    #    it owns a small area with its own manage page, rather than being one
+    #    distinct noun at the root.
+    path('notices/', include('notices.urls')),
 ]
 
 # ⚠️ Development only, and django.conf.urls.static.static() enforces that by

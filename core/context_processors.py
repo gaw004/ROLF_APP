@@ -74,6 +74,11 @@ def _menu_for(user, administered, foundation):
 
     menu = [
         _link("Events", "events:event_list"),
+        # ⚠️ Second, above My Signups, and the order is the argument. A notice is
+        #    the one thing on this menu somebody might not know they need to
+        #    read — everything else answers a question they arrived with. It is
+        #    not first because Events is what most people came for.
+        _link("Notices", "notices:notice_list"),
         _link("My Signups", "events:my_participations"),
         _link("My Profile", "accounts:profile"),
     ]
@@ -86,6 +91,10 @@ def _menu_for(user, administered, foundation):
             # second entrance means the same condition written in two places,
             # and those two eventually disagree.
             _link("Events I Manage", "events:event_manage_list"),
+            # Same call as "Events I Manage": no separate "New notice" entry,
+            # because that page already carries the button and gates it on the
+            # same permission.
+            _link("Notices I Publish", "notices:notice_manage_list"),
             # ⚠️ The **manage** page, not the wall. The wall's entrance is the
             #    feather (the drifting ones, and the still one in the top bar),
             #    and putting a second door to it in the menu would give away the

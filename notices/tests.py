@@ -329,3 +329,277 @@ class WhoMayPublishANoticeTests(TestCase):
         self.assertTrue(can_manage_notice(chief, make_notice(ministry=self.tax)))
         # ⚠️ …but writing one in a ministry's name is a different act.
         self.assertFalse(can_publish_notice(chief, self.tax))
+
+
+class NoticePagesTests(TestCase):
+    """The three pages, and who each of them lets in."""
+
+    def setUp(self):
+        from accounts.models import User
+        from org.models import MinistryRole
+        self.pantry = Ministry.objects.create(code="food_pantry", name="Food Pantry")
+        self.tax = Ministry.objects.create(code="tax_help", name="Tax Help")
+
+        admin_contact = make_person("Admin")
+        self.admin = User.objects.create_user(
+            email="admin@example.com", password="pw", contact=admin_contact)
+        MinistryRole.objects.create(
+            contact=admin_contact, ministry=self.pantry,
+            role=MinistryRole.Role.ADMIN, start_date=(NOW - DAY).date())
+
+        self.volunteer = User.objects.create_user(
+            email="vol@example.com", password="pw", contact=make_person("Volunteer"))
+
+    def test_the_board_needs_a_session(self):
+        response = self.client.get("/notices/")
+        self.assertEqual(response.status_code, 302)
+        self.assertIn("/login/", response["Location"])
+
+    def test_a_volunteer_sees_the_board_but_not_the_manage_page(self):
+        self.client.force_login(self.volunteer)
+        self.assertEqual(self.client.get("/notices/").status_code, 200)
+        self.assertEqual(self.client.get("/notices/manage/").status_code, 403)
+        self.assertEqual(self.client.get("/notices/new/").status_code, 403)
+
+    def test_a_ministry_admin_with_no_notices_gets_a_page_not_a_refusal(self):
+        """⚠️ D27: "you have not written one yet" and "this is not for you" must
+        not look the same. A new admin gets an empty page and a button.
+        """
+        self.client.force_login(self.admin)
+        response = self.client.get("/notices/manage/")
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "have not put up any notices")
+
+    def test_the_board_only_shows_notices_for_this_person(self):
+        mine = make_notice(ministry=self.pantry, visible_to_outsiders=True,
+                           visible_to_all_staff=False)
+        staff_only = make_notice(ministry=self.pantry, title="Staff away day",
+                                 visible_to_outsiders=False,
+                                 visible_to_all_staff=True)
+        self.client.force_login(self.volunteer)
+        response = self.client.get("/notices/")
+        self.assertContains(response, mine.title)
+        self.assertNotContains(response, staff_only.title)
+
+    def test_a_notice_that_came_down_moves_to_the_past_section(self):
+        gone = make_notice(title="No more cheques",
+                           starts_showing=NOW - 30 * DAY, stops_showing=NOW - DAY)
+        self.client.force_login(self.volunteer)
+        response = self.client.get("/notices/")
+        # ⚠️ Still on the page — the whole point of a required come-down date.
+        self.assertContains(response, gone.title)
+        self.assertContains(response, "Recently taken down")
+
+    def test_the_manage_page_shows_a_draft_that_the_board_does_not(self):
+        draft = make_notice(ministry=self.pantry, title="Not ready",
+                            status=Notice.Status.DRAFT)
+        self.client.force_login(self.admin)
+        self.assertContains(self.client.get("/notices/manage/"), draft.title)
+        self.assertNotContains(self.client.get("/notices/"), draft.title)
+
+    def test_a_ministry_admin_only_manages_their_own_ministrys_notices(self):
+        mine = make_notice(ministry=self.pantry, title="Mine")
+        theirs = make_notice(ministry=self.tax, title="Theirs")
+        self.client.force_login(self.admin)
+        response = self.client.get("/notices/manage/")
+        self.assertContains(response, mine.title)
+        self.assertNotContains(response, theirs.title)
+        self.assertEqual(
+            self.client.get(f"/notices/{theirs.pk}/edit/").status_code, 403)
+
+    def test_putting_up_a_notice_stamps_the_person_who_did_it(self):
+        self.client.force_login(self.admin)
+        response = self.client.post("/notices/new/", {
+            "title": "Car park closed",
+            "body": "Resurfacing.",
+            "ministry": self.pantry.pk,
+            "visible_to_outsiders": "on",
+            "visible_to_all_staff": "on",
+            "starts_showing": (NOW - DAY).strftime("%Y-%m-%dT%H:%M"),
+            "stops_showing": (NOW + 30 * DAY).strftime("%Y-%m-%dT%H:%M"),
+            "status": Notice.Status.PUBLISHED,
+        })
+        self.assertEqual(response.status_code, 302)
+        notice = Notice.objects.get(title="Car park closed")
+        self.assertEqual(notice.owner, self.admin.contact)
+        self.assertTrue(notice.is_showing)
+
+    def test_publishing_for_a_ministry_you_do_not_run_is_refused(self):
+        """⚠️ The dropdown stops a slip; this stops a POST naming any id."""
+        self.client.force_login(self.admin)
+        response = self.client.post("/notices/new/", {
+            "title": "Not mine", "body": "…",
+            "ministry": self.tax.pk,
+            "visible_to_all_staff": "on",
+            "starts_showing": (NOW - DAY).strftime("%Y-%m-%dT%H:%M"),
+            "stops_showing": (NOW + DAY).strftime("%Y-%m-%dT%H:%M"),
+            "status": Notice.Status.PUBLISHED,
+        })
+        # Refused either by the narrowed queryset (a form error) or by the
+        # second check (403) — never by creating the row.
+        self.assertFalse(Notice.objects.filter(title="Not mine").exists())
+        self.assertIn(response.status_code, (200, 403))
+
+    def test_a_notice_for_nobody_is_refused_by_the_form(self):
+        self.client.force_login(self.admin)
+        response = self.client.post("/notices/new/", {
+            "title": "Nobody", "body": "…",
+            "ministry": self.pantry.pk,
+            "starts_showing": (NOW - DAY).strftime("%Y-%m-%dT%H:%M"),
+            "stops_showing": (NOW + DAY).strftime("%Y-%m-%dT%H:%M"),
+            "status": Notice.Status.PUBLISHED,
+        })
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Say who needs to know")
+        self.assertFalse(Notice.objects.filter(title="Nobody").exists())
+
+    def test_taking_down_needs_a_post(self):
+        """⚠️ A write reachable by GET is one a crawler can perform."""
+        notice = make_notice(ministry=self.pantry)
+        self.client.force_login(self.admin)
+        self.client.get(f"/notices/{notice.pk}/take-down/")
+        notice.refresh_from_db()
+        self.assertTrue(notice.is_showing)
+        self.client.post(f"/notices/{notice.pk}/take-down/")
+        notice.refresh_from_db()
+        self.assertFalse(notice.is_showing)
+
+    def test_somebody_elses_notice_cannot_be_taken_down(self):
+        theirs = make_notice(ministry=self.tax)
+        self.client.force_login(self.admin)
+        self.assertEqual(
+            self.client.post(f"/notices/{theirs.pk}/take-down/").status_code, 403)
+        theirs.refresh_from_db()
+        self.assertTrue(theirs.is_showing)
+
+
+class TheNewNoticeFormStartsSomewhereSensibleTests(TestCase):
+    """Decision 4 and decision 14, as the boxes a person actually meets."""
+
+    def setUp(self):
+        from accounts.models import User
+        from org.models import MinistryRole
+        self.pantry = Ministry.objects.create(code="food_pantry", name="Food Pantry")
+        contact = make_person("Admin")
+        self.admin = User.objects.create_user(
+            email="admin@example.com", password="pw", contact=contact)
+        MinistryRole.objects.create(
+            contact=contact, ministry=self.pantry,
+            role=MinistryRole.Role.ADMIN, start_date=(NOW - DAY).date())
+
+    def form(self, **kwargs):
+        from notices.forms import NoticeForm
+        return NoticeForm(user=self.admin, **kwargs)
+
+    def test_a_new_notice_comes_down_in_thirty_days_by_default(self):
+        from notices.forms import DEFAULT_RUN_DAYS
+        form = self.form()
+        gap = form.initial["stops_showing"] - form.initial["starts_showing"]
+        self.assertEqual(gap.days, DEFAULT_RUN_DAYS)
+
+    def test_a_new_notice_starts_with_only_the_publishers_own_ministry_ticked(self):
+        self.assertEqual(
+            list(self.form().initial["visible_to_ministries"]), [self.pantry.pk])
+
+    def test_editing_does_not_re_tick_a_ministry_somebody_untucked(self):
+        """⚠️ Silent widening. Nothing on the page would say it had happened.
+
+        ⚠️ Asserted as "the pantry is not in there", not as "initial is None".
+           A bound ModelForm reads the saved M2M, so the value on an edit is
+           `[]` rather than absent — and a test asserting None would pass today
+           for the wrong reason and fail the day somebody saves a notice with
+           one ministry ticked.
+        """
+        notice = make_notice(ministry=self.pantry, visible_to_outsiders=True,
+                             visible_to_all_staff=False)
+        form = self.form(instance=notice)
+        self.assertNotIn(
+            self.pantry.pk, list(form.initial.get("visible_to_ministries") or []))
+
+    def test_the_ministry_dropdown_offers_only_what_they_run(self):
+        Ministry.objects.create(code="tax_help", name="Tax Help")
+        offered = list(self.form().fields["ministry"].queryset)
+        self.assertEqual(offered, [self.pantry])
+
+
+class PuttingADraftUpTests(TestCase):
+    """The one-click path from the manage list, and the words on the buttons."""
+
+    def setUp(self):
+        from accounts.models import User
+        from org.models import MinistryRole
+        self.pantry = Ministry.objects.create(code="food_pantry", name="Food Pantry")
+        contact = make_person("Admin")
+        self.admin = User.objects.create_user(
+            email="admin@example.com", password="pw", contact=contact)
+        MinistryRole.objects.create(
+            contact=contact, ministry=self.pantry,
+            role=MinistryRole.Role.ADMIN, start_date=(NOW - DAY).date())
+        self.client.force_login(self.admin)
+
+    def test_a_draft_can_go_up_from_the_list(self):
+        draft = make_notice(ministry=self.pantry, status=Notice.Status.DRAFT)
+        self.client.post(f"/notices/{draft.pk}/put-up/")
+        draft.refresh_from_db()
+        self.assertTrue(draft.is_showing)
+
+    def test_putting_up_needs_a_post(self):
+        draft = make_notice(ministry=self.pantry, status=Notice.Status.DRAFT)
+        self.client.get(f"/notices/{draft.pk}/put-up/")
+        draft.refresh_from_db()
+        self.assertTrue(draft.is_draft)
+
+    def test_the_list_offers_the_action_that_fits_each_state(self):
+        """🔴 The label says what will happen, not which function runs.
+
+        "Not up yet" and "showing" both go through take_down() and land in
+        different places — draft and past. A button reading the same word for
+        both would be describing the implementation.
+        """
+        make_notice(ministry=self.pantry, title="A draft",
+                    status=Notice.Status.DRAFT)
+        make_notice(ministry=self.pantry, title="Up now")
+        make_notice(ministry=self.pantry, title="Later",
+                    starts_showing=NOW + DAY, stops_showing=NOW + 30 * DAY)
+        page = self.client.get("/notices/manage/").content.decode()
+        for label in ("Put it up", "Take down", "Back to draft"):
+            self.assertIn(label, page)
+
+    def test_a_notice_that_came_down_offers_no_action_but_edit(self):
+        make_notice(ministry=self.pantry, title="Old news",
+                    starts_showing=NOW - 30 * DAY, stops_showing=NOW - DAY)
+        page = self.client.get("/notices/manage/").content.decode()
+        self.assertIn("Old news", page)
+        self.assertNotIn("Take down", page)
+        self.assertNotIn("Put it up", page)
+
+    def test_somebody_elses_draft_cannot_be_put_up(self):
+        tax = Ministry.objects.create(code="tax_help", name="Tax Help")
+        theirs = make_notice(ministry=tax, status=Notice.Status.DRAFT)
+        self.assertEqual(
+            self.client.post(f"/notices/{theirs.pk}/put-up/").status_code, 403)
+        theirs.refresh_from_db()
+        self.assertTrue(theirs.is_draft)
+
+
+class TheDateBoxesDoNotSuggestSecondsTests(TestCase):
+    """⚠️ Browser-found. `datetime-local` renders whatever it is handed."""
+
+    def setUp(self):
+        from accounts.models import User
+        from org.models import MinistryRole
+        self.pantry = Ministry.objects.create(code="food_pantry", name="Food Pantry")
+        contact = make_person("Admin")
+        self.admin = User.objects.create_user(
+            email="admin@example.com", password="pw", contact=contact)
+        MinistryRole.objects.create(
+            contact=contact, ministry=self.pantry,
+            role=MinistryRole.Role.ADMIN, start_date=(NOW - DAY).date())
+
+    def test_the_prefilled_dates_are_whole_minutes(self):
+        from notices.forms import NoticeForm
+        form = NoticeForm(user=self.admin)
+        for name in ("starts_showing", "stops_showing"):
+            with self.subTest(field=name):
+                value = form.initial[name]
+                self.assertEqual((value.second, value.microsecond), (0, 0))

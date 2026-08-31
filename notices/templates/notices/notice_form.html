@@ -1,0 +1,31 @@
+{% extends "core/base.html" %}
+{% block title %}{% if notice %}Edit notice{% else %}Put up a notice{% endif %}{% endblock %}
+{% block main_width %}max-w-2xl{% endblock %}
+
+{% block content %}
+  {% comment %}
+  一个模板管建和改两件事，因为它们填的是同一张表单 —— 同 event_form.html。
+
+  ministry 下拉里只有这个人管的那几个。那是防手滑；防越权的是视图里对提交值
+  再判一次 —— 两件事，都要有。
+  {% endcomment %}
+  <h1 class="text-2xl font-semibold">
+    {% if notice %}Edit “{{ notice.title }}”{% else %}Put up a notice{% endif %}
+  </h1>
+
+  {% comment %}
+  ⚠️ `x-data="audienceTicks"` 是纯增强（D24），和活动那张表单同一个组件、同一条理由：
+     勾了「Everyone」或「Everybody on the books」之后被它包住的那几个勾变灰。
+     没有 Alpine 时它们照常能点，冗余组合由服务端拒绝并说清楚 ——
+     少的只是一次往返，不是功能。
+  {% endcomment %}
+  <form method="post" class="card mt-6" x-data="audienceTicks">
+    {% csrf_token %}
+    {% include "core/components/form_fields.html" %}
+    <div class="mt-6 flex flex-wrap gap-2">
+      {% include "core/components/button.html" with label="Save" variant="primary" %}
+      {% url 'notices:notice_manage_list' as back_url %}
+      {% include "core/components/button.html" with label="Cancel" href=back_url variant="ghost" %}
+    </div>
+  </form>
+{% endblock %}

@@ -133,6 +133,17 @@ def can_manage_notice(user, notice) -> bool:
     return administers(user, notice.ministry_id) or in_foundation_tier(user)
 
 
+def can_reach_notice_manage(user) -> bool:
+    """May this account open the notice manage page at all, with nothing on it yet?
+
+    ⚠️ Its own question rather than "do they own any notices", because
+       "you have not written one yet" and "this page is not for you" must not
+       look the same (D27). A ministry admin on their first day gets an empty
+       page and a button, not a 403.
+    """
+    return bool(ministry_ids_administered_by(user)) or in_foundation_tier(user)
+
+
 def in_foundation_tier(user) -> bool:
     """Is this account in the foundation-wide group?
 

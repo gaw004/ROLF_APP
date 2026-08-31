@@ -164,6 +164,24 @@ class Notice(Audience, ConstraintErrorFieldMixin, TimeStampedModel):
     def __str__(self):
         return self.title
 
+    # --- Where this row is in its life, as three questions a page can ask ----
+    #
+    # ⚠️ Properties rather than the manage page comparing dates and status
+    #    strings itself. Two reasons, and the second is the one that bites:
+    #    `ViewsAreThinGuardTests` forbids `local_now(` in any views.py, so a
+    #    template needing "is it up yet" cannot be handed a `now`; and a
+    #    template writing `status == "draft"` is the enum's value copied
+    #    somewhere the enum cannot see, which is how the two come to disagree.
+    #
+    # ⚠️ Three of them and not a single `board_state` returning a word, because
+    #    a word would have to be compared against a literal in the template —
+    #    the very thing being avoided.
+
+    @property
+    def is_draft(self):
+        """Written, not put up. Nobody outside the manage page has ever seen it."""
+        return self.status == Notice.Status.DRAFT
+
     @property
     def is_showing(self):
         """The row's own answer to what `showing()` asks of the table.
@@ -176,4 +194,19 @@ class Notice(Audience, ConstraintErrorFieldMixin, TimeStampedModel):
         return (
             self.status == Notice.Status.PUBLISHED
             and self.starts_showing <= now < self.stops_showing
+        )
+
+    @property
+    def is_scheduled(self):
+        """Published, but its day has not come yet.
+
+        🔴 A third state, and the manage page has to draw it as one. "Not up
+           yet" and "came down" are both "not in showing()" to the database and
+           **opposites** to the person who wrote it — one has not happened, the
+           other is over. D27's line: what is missing and what is finished must
+           not look the same.
+        """
+        return (
+            self.status == Notice.Status.PUBLISHED
+            and local_now() < self.starts_showing
         )

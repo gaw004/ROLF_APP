@@ -1,0 +1,47 @@
+{% extends "core/base.html" %}
+{% block title %}Notices{% endblock %}
+{% block main_width %}max-w-4xl{% endblock %}
+
+{% block content %}
+  <div class="mb-6 flex flex-wrap items-center justify-between gap-3">
+    <h1 class="text-2xl font-semibold">Notices</h1>
+    {% if may_publish %}
+      {% url 'notices:notice_create' as create_url %}
+      {% include "core/components/button.html" with label="Put up a notice" href=create_url variant="primary" %}
+    {% endif %}
+  </div>
+
+  {% if notices %}
+    {% include "notices/_current_notices.html" %}
+  {% else %}
+    {% comment %}
+    ⚠️ 说清楚是哪一种空 —— empty.html 自己的注释写着「『暂无数据』把『你什么都不用做』
+       和『你还差一步』说成了同一句话」。这里是前一种：**没有公告不是一种缺失**，
+       所以这句话说的是「一切照常」，不给下一步动作。
+    {% endcomment %}
+    {% include "core/components/empty.html" with message="Nothing on the board right now." %}
+  {% endif %}
+
+  {% if past %}
+    {% comment %}
+    🔴 这一段是「下架时间必填」的对价（决定 4）。下架是离开板子，不是丢失 ——
+       「不再收支票」过了三十天仍然在这里，往下一节。
+       缺了这一段，那条必填就变成了「到期即消失」，而那是另一回事。
+    {% endcomment %}
+    <h2 class="mb-3 mt-10 text-lg font-semibold">Recently taken down</h2>
+    <ul class="space-y-3">
+      {% for notice in past %}
+        <li class="card opacity-75">
+          <div class="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+            <h3 class="font-semibold">{{ notice.title }}</h3>
+            <span class="text-xs text-ink-600 dark:text-ink-300">{{ notice.ministry.name }}</span>
+          </div>
+          <p class="mt-1 whitespace-pre-line text-sm text-ink-700 dark:text-ink-200">{{ notice.body }}</p>
+          <p class="mt-2 text-xs text-ink-500 dark:text-ink-400">
+            Came down {{ notice.stops_showing|date:"j M Y" }}
+          </p>
+        </li>
+      {% endfor %}
+    </ul>
+  {% endif %}
+{% endblock %}

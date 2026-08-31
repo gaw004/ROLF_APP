@@ -1,0 +1,99 @@
+{% extends "core/base.html" %}
+{% block title %}Notices I publish{% endblock %}
+{% block main_width %}max-w-5xl{% endblock %}
+
+{% block content %}
+  <div class="mb-6 flex flex-wrap items-center justify-between gap-3">
+    <h1 class="text-2xl font-semibold">Notices I publish</h1>
+    {% url 'notices:notice_create' as create_url %}
+    {% include "core/components/button.html" with label="Put up a notice" href=create_url variant="primary" %}
+  </div>
+
+  {% if notices %}
+    {% comment %}
+    ⚠️ `.table-wrap`，不是 Tailwind 的 `overflow-x-auto`。全站每一张表的外壳都是
+       它 —— 边框、圆角、表头底色、单元格内边距全在 app.css 那一段里，而它的
+       圆角特意和 `.card` 取同一个值。第一稿这里写的是 `overflow-x-auto`，
+       浏览器里就是一张没有底、没有边、表头和内容对不齐的表 ——
+       测试全绿，页面不对。
+    {% endcomment %}
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Notice</th><th>Ministry</th><th>On the board</th><th></th></tr></thead>
+        <tbody>
+          {% for notice in notices %}
+            <tr>
+              {% comment %}
+              一格两行：上面主信息、下面次信息 —— 照上一版管理列表那次改动的样式
+              （「时间回到表格里一格两行」），主信息不藏进只有鼠标看得见的地方。
+              {% endcomment %}
+              <td>
+                <div class="font-medium">{{ notice.title }}</div>
+                <div class="text-xs text-ink-600 dark:text-ink-300">{{ notice.owner }}</div>
+              </td>
+              <td>{{ notice.ministry.name }}</td>
+              <td>
+                {% comment %}
+                🔴 三种状态各说各的，不合并。「还没上板」和「已经下板」在库里都是
+                   「不在 showing() 里」，而对写它的人是两件完全相反的事 ——
+                   一件还没发生，一件已经过去。D27：没有和没算不能长得一样。
+                {% endcomment %}
+                {% if notice.is_draft %}
+                  {% include "core/components/badge.html" with label="Draft" %}
+                {% elif notice.is_showing %}
+                  <div>Until {{ notice.stops_showing|date:"j M Y" }}</div>
+                  <div class="text-xs text-ink-600 dark:text-ink-300">Showing now</div>
+                {% elif notice.is_scheduled %}
+                  <div>From {{ notice.starts_showing|date:"j M Y" }}</div>
+                  <div class="text-xs text-ink-600 dark:text-ink-300">Not up yet</div>
+                {% else %}
+                  <div>{{ notice.stops_showing|date:"j M Y" }}</div>
+                  <div class="text-xs text-ink-600 dark:text-ink-300">Came down</div>
+                {% endif %}
+              </td>
+              <td class="whitespace-nowrap">
+                {% url 'notices:notice_update' notice.pk as edit_url %}
+                {% include "core/components/button.html" with label="Edit" href=edit_url variant="ghost" %}
+                {% comment %}
+                ⭐ 每一颗都是一张完整的服务端表单，不是链接。D24：每个写操作都要有
+                   一条不依赖 JS 的完整路径 —— 而一个 GET 就能触发的写操作，
+                   是爬虫替你按的那种。
+
+                🔴 **按钮的字说的是「会发生什么」，不是「调了哪个函数」。**
+                   「还没上板」和「正在板上」按下去都走 take_down，而结果不一样：
+                   前者回草稿（没人看过，它没有过去可言），后者进往期。
+                   所以标签也不一样。写成同一个字才是在描述实现。
+                {% endcomment %}
+                {% if notice.is_draft %}
+                  <form method="post" action="{% url 'notices:notice_publish' notice.pk %}"
+                        class="inline">
+                    {% csrf_token %}
+                    {% include "core/components/button.html" with label="Put it up" variant="primary" %}
+                  </form>
+                {% elif notice.is_showing %}
+                  <form method="post" action="{% url 'notices:notice_take_down' notice.pk %}"
+                        class="inline">
+                    {% csrf_token %}
+                    {% include "core/components/button.html" with label="Take down" variant="danger" confirm="Take this notice down now? People stop seeing it straight away." %}
+                  </form>
+                {% elif notice.is_scheduled %}
+                  <form method="post" action="{% url 'notices:notice_take_down' notice.pk %}"
+                        class="inline">
+                    {% csrf_token %}
+                    {% include "core/components/button.html" with label="Back to draft" variant="ghost" confirm="Stop this from going up? Nobody has seen it yet." %}
+                  </form>
+                {% endif %}
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% else %}
+    {% comment %}
+    ⚠️ 这里是「你还差一步」那一种，所以给下一步动作 —— 和 /notices/ 那一页的空态
+       正好相反，那边是「一切照常」，不给动作。同一个组件，两种空。
+    {% endcomment %}
+    {% include "core/components/empty.html" with message="You have not put up any notices yet." action_label="Put up a notice" action_href=create_url %}
+  {% endif %}
+{% endblock %}

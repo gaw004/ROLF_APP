@@ -339,6 +339,15 @@ EMPTY_AUDIENCE_MESSAGE = {
         "Say who may sign up for this. A role nobody can take looks exactly "
         "like one that is full, or one somebody forgot to finish."
     ),
+    # ⚠️ Its own sentence rather than borrowing the event one, even though both
+    #    are about something published (2026-08-31). "There is already a status
+    #    for that" is advice a notice can act on and an event cannot act on in
+    #    the same way, and the thing at stake differs: an unseen event is a
+    #    missed occasion, an unseen notice is a person who did not find out.
+    "notice": (
+        "Say who needs to know this. A notice nobody can see is one nobody "
+        "will be told, and it will look like it went out."
+    ),
 }
 
 

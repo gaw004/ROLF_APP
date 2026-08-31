@@ -68,6 +68,11 @@ INSTALLED_APPS = [
     # gallery depends on org (GalleryPhoto -> Ministry) and accounts
     # (-> uploaded_by). Nothing depends on gallery, which is why it is last.
     'gallery',
+    # notices depends on org (Notice -> Ministry, and the whole audience axis
+    # lives in org/audience.py) and contact (-> owner). ⚠️ It does **not**
+    # depend on events, and that is the point of the table: a notice is not an
+    # event. Nothing depends on notices.
+    'notices',
 ]
 
 # Set before the first migrate, while no user table exists yet — swapping this

@@ -458,6 +458,14 @@ def refuse_bad_audience(*, row, spec):
     |-----------|-------|
     | Event     | not empty · not redundant · no role left wider than it |
     | EventRole | not empty · not redundant · not wider than its event   |
+    | anything else | not empty · not redundant                         |
+
+    ⚠️ That third row is written as an explicit branch below, not as the `else`
+       it used to be (2026-08-31). The old shape assumed anything that was not a
+       role was an event, so the first table with an audience and no children —
+       Notice — fell into the event branch and died on `row.roles` with an
+       AttributeError. A table declares its side in `AUDIENCE_ON`; this reads
+       what it declared instead of guessing from what it is not.
 
     ⚠️ Raises on the **first** failure, with the error keyed to the tick it is
        about (refuse_wider_than_event's shape). A caller reaching the database
@@ -487,6 +495,11 @@ def refuse_bad_audience(*, row, spec):
         #    that already exists, so what is in the database is what the event
         #    is. See AudienceFormMixin.refuse_wider_than_its_event.
         refuse_wider_than_event(event=Audience.Spec.of(row.event), role=spec)
+        return
+    if row.AUDIENCE_ON != "event":
+        # A table with no parent to be wider than and no children to leave
+        # behind — the two rules above are all of them. See the table in the
+        # docstring, and Notice.AUDIENCE_ON.
         return
     if row.pk is None:
         # Nothing to be wider than it yet, and `roles.all()` raises outright on

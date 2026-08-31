@@ -97,6 +97,42 @@ def can_manage_event(user, event) -> bool:
     return event is not None and administers(user, event.ministry_id)
 
 
+def can_publish_notice(user, ministry) -> bool:
+    """Put a notice on the board in this ministry's name.
+
+    ⚠️ Deliberately the same bar as publishing an event, and it was asked once
+       rather than assumed (2026-08-31). A notice is **louder** than an event —
+       it lands on the home page of everybody it is ticked for, where an event
+       waits in a list to be found — so there is a real argument for reserving
+       the wider audiences to the foundation tier.
+
+       It was not taken, for one reason: the audience axis already has one set
+       of rules, and giving the same three ticks a second, stricter meaning on
+       a second table is how two checks come to disagree about the same
+       question. What stops a ministry admin over-reaching is the same thing
+       that stops them on an event — the form pre-ticks only their own ministry
+       (decision 14) and every audience is recorded with a name against it.
+
+       If the foundation ever says otherwise, the change is this function and
+       nothing else.
+    """
+    return administers(user, ministry)
+
+
+def can_manage_notice(user, notice) -> bool:
+    """Edit it, publish it, take it down.
+
+    ⚠️ The foundation tier is included here and **not** in can_publish_notice,
+       which is not an inconsistency: taking down a wrong or harmful notice is
+       exactly the kind of thing somebody foundation-wide has to be able to do
+       without waiting for the ministry admin who wrote it to answer the phone.
+       Writing one in a ministry's name is a different act from removing one.
+    """
+    if notice is None:
+        return False
+    return administers(user, notice.ministry_id) or in_foundation_tier(user)
+
+
 def in_foundation_tier(user) -> bool:
     """Is this account in the foundation-wide group?
 

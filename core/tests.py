@@ -55,7 +55,32 @@ from contact.models import Contact
 from org.models import Assignment, Position
 
 # Apps we wrote, as opposed to Django's and the third-party ones.
-OUR_APPS = {"core", "contact", "accounts", "org", "events", "volunteer", "finance", "payroll"}
+#
+# 🔴 **Derived, not listed** (2026-08-31). The hand-written set had drifted in
+#    both directions at once: it named three apps that do not exist (volunteer,
+#    finance, payroll — planned once, never built) and was missing two that do
+#    (gallery, and notices on the day it was added).
+#
+#    ⚠️ Being missing is the dangerous half, and it is **silent**: the two
+#       guards below walk `apps.get_models()` and skip anything not in here, so
+#       an app absent from this set has no constraint checked and no text field
+#       checked — and every one of those checks passes, because it never ran.
+#       Notices found it by accident (a mapping with no constraint went red);
+#       gallery had simply never been looked at.
+#
+#    The test is the same one `project_python_files()` uses without saying so:
+#    is this app's code inside this repository, and not in the virtualenv?
+#
+#    ⚠️ Both halves are needed, and the second is easy to leave out — `.venv`
+#       sits **inside** BASE_DIR, so "is it under the project root" on its own
+#       answers yes for every third-party app too (verified: it pulled in
+#       django.contrib.*, phonenumber_field and localflavor).
+OUR_APPS = {
+    config.label for config in apps.get_app_configs()
+    if Path(config.path).is_relative_to(Path(settings.BASE_DIR))
+    and not {".venv", "venv"} & set(
+        Path(config.path).relative_to(Path(settings.BASE_DIR)).parts)
+}
 
 # ⚠️ `.claude` is here because a git worktree lives under it, and a worktree is
 #    a **complete second copy of this repository** on disk. Every guard below

@@ -70,6 +70,12 @@ CONSTRAINT_FIELD = {
     #    starts. If that ever reads wrong the fix is two constraints, not a
     #    cleverer mapping.
     "homepage_focus_out_of_range": "hero_focus_x",
+    # notices.Notice
+    #
+    # ⚠️ On "comes down" rather than "goes up": the two dates are entered in
+    #    reading order, so the second one is the one that was just typed and
+    #    the one the person is still looking at.
+    "notice_window_backwards": "stops_showing",
 }
 
 

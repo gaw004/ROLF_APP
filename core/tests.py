@@ -57,7 +57,20 @@ from org.models import Assignment, Position
 # Apps we wrote, as opposed to Django's and the third-party ones.
 OUR_APPS = {"core", "contact", "accounts", "org", "events", "volunteer", "finance", "payroll"}
 
-SKIPPED_DIRS = {".venv", "venv", "migrations", "__pycache__", "staticfiles", "node_modules"}
+# ⚠️ `.claude` is here because a git worktree lives under it, and a worktree is
+#    a **complete second copy of this repository** on disk. Every guard below
+#    that says "this may appear in exactly one place" counted that copy as the
+#    second place, so five of them failed at once — not with a useful message,
+#    but with a list of paths under .claude/worktrees. Found 2026-08-31.
+#
+#    ⚠️ The dangerous part is not the red: it is that five guards go red
+#       **together, for a reason that has nothing to do with the code**, and a
+#       suite that cries wolf is one people learn to skip. That is exactly the
+#       failure these guards exist to prevent, arriving from underneath them.
+SKIPPED_DIRS = {
+    ".venv", "venv", "migrations", "__pycache__", "staticfiles", "node_modules",
+    ".claude",
+}
 
 
 def project_python_files(skip=()):
@@ -504,13 +517,25 @@ class AudienceContainmentGuardTests(TestCase):
        object alone, so seeing one outside the two files below means somebody
        is doing the comparison by hand.
 
-    ⚠️ forms.py is allowed because it *builds* Specs and hands them over;
-       models.py is allowed because refuse_wider_than_event() lives there.
+    ⚠️ The four allowed files are two pairs, and the split between them is the
+       point (2026-08-31, when Audience moved to org/):
+
+       · `org/audience.py` defines Spec and the two rules an audience obeys on
+         its own; `org/forms.py` builds a Spec out of what was submitted. Both
+         are general — they say nothing about events;
+       · `events/models.py` is allowed because refuse_wider_than_event() lives
+         there; `events/forms.py` because it hands Specs to it. That pair is
+         the containment rule, which is **not** general: only the arithmetic
+         travels, the sentence "a role inside it cannot be either" does not.
+
        Anywhere else is a second implementation.
     """
 
     SPEC_ATTRIBUTE = r"\.(outsiders|all_staff|ministries)\b"
-    ALLOWED = ["events/models.py", "events/forms.py"]
+    ALLOWED = [
+        "org/audience.py", "org/forms.py",
+        "events/models.py", "events/forms.py",
+    ]
 
     def test_only_one_place_compares_two_audiences(self):
         hits = offending_lines(self.SPEC_ATTRIBUTE, skip=self.ALLOWED)

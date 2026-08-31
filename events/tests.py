@@ -57,15 +57,15 @@ from .management.commands.seed_demo import demo_login
 from . import schedule, tokens
 from .forms import (
     AudienceAdminForm,
-    AudienceFormMixin,
     EventForm,
     EventPeriodForm,
     EventRoleForm,
     SignUpForm,
 )
 from .views import EVENTS_PER_PAGE
+from org.audience import Audience
+from org.forms import AudienceFormMixin
 from .models import (
-    Audience,
     Event,
     EventNotification,
     EventRole,
@@ -3149,6 +3149,14 @@ class AudienceIsWiredUpTests(TestCase):
     def test_every_table_with_an_audience_says_which_day_decides(self):
         for model in self.concrete():
             with self.subTest(model=model.__name__):
+                # ⚠️ None is a real answer, not a missing one: it means the
+                #    table has no occasion behind it and the tenure is judged
+                #    today (Notice, 2026-08-31). See Audience.AUDIENCE_DAY.
+                #    Asserted as `is None` rather than falsy, so an empty
+                #    string — which would resolve to nothing and silently
+                #    behave like "today" — still fails here.
+                if model.AUDIENCE_DAY is None:
+                    continue
                 # A path this model can actually resolve, not just any string:
                 # a typo here is a FieldError at query time, on a page.
                 model._meta.get_field(model.AUDIENCE_DAY.split("__")[0])

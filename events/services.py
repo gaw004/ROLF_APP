@@ -25,19 +25,17 @@ from contact.models import Contact, ContactQuerySet
 from core.images import draft_to, stored_size, upright_size
 from core.notifications.base import EMAIL, SMS, Message, get_backend
 from core.timeutils import local_date_of, local_day, local_now
+from org.audience import Audience, on_the_books_exists, on_the_books_q
 from org.models import Assignment, Position
 
 from . import tokens
 from .models import (
-    Audience,
     refuse_bad_audience,
     Event,
     EventNotification,
     EventRole,
     Participation,
     ParticipationRole,
-    on_the_books_exists,
-    on_the_books_q,
 )
 
 

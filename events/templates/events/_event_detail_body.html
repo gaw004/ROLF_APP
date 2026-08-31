@@ -143,7 +143,23 @@
   {% comment %}
   零报名的工种照样出现在这张表里 —— 那正是 EventRole 这张表存在的理由。
   数字来自 with_signup_counts()，不是每行查一次。
+
+  ⚠️ L2（2026-08-29）：这张表**按人过滤**过了。不是给这个人的角色根本不出现，
+     而不是列出来附一句「你报不上」—— 需求 8 原文是 internal roles「只会显示给
+     internal 的人」。判据和报名下拉框是同一个（views.py 的 `to_join`）。
   {% endcomment %}
+  {% if sees_every_role %}
+    {% comment %}
+    🔴 这一句是上面那条例外的代价，不是装饰。看得了这场活动记录的人拿到的是
+       **全表**，而别人拿到的是收窄过的那一份 —— 同一个页面对两种人说两件事时，
+       页面自己要说出来是哪一件。否则一个管理员会以为外部志愿者也看得见
+       Coordinator 那一行。
+    {% endcomment %}
+    <p class="mb-3 text-sm text-ink-600 dark:text-ink-300">
+      You can read this event’s records, so every role is listed here. Other
+      people see only the roles that are open to them.
+    </p>
+  {% endif %}
   <div class="table-wrap">
     <table>
       <thead><tr><th>Role</th><th>Kind</th><th>Wanted</th><th>Signed up</th></tr></thead>
@@ -160,7 +176,20 @@
             <td>{{ role.registered_count }}</td>
           </tr>
         {% empty %}
-          <tr><td colspan="4" class="text-ink-600 dark:text-ink-300">No roles opened yet.</td></tr>
+          {% comment %}
+          🔴 两句话，不是一句（L2.4）。「一个角色都没开」和「有角色，只是没有
+             一个是给你的」是两件完全不同的事，而在此之前它们长得一模一样 ——
+             正是 D27 那条「没有和没算不能长得一样」。
+             第三句（这是一条公告，故意不收报名）是 L2.5 的，还没有。
+          {% endcomment %}
+          <tr><td colspan="4" class="text-ink-600 dark:text-ink-300">
+            {% if roles_none_for_you %}
+              This event has roles, but none of them is open to you. They are for
+              a different group of people.
+            {% else %}
+              No roles opened yet.
+            {% endif %}
+          </td></tr>
         {% endfor %}
       </tbody>
     </table>
@@ -215,6 +244,23 @@
       {% include "core/components/button.html" with label="Sign up" variant="primary" type="button" disabled=True %}
       <p class="mt-2 text-sm text-ink-600 dark:text-ink-300">
         People will see this button once you publish the event.
+      </p>
+    {% elif accepting_signups %}
+      {% comment %}
+      L2.4。这场活动**在**收报名，只是没有一个位子是给这个人的（需求 7：
+      看得见 ≠ 报得上，落点在活动这一层）。
+
+      ⚠️ 只判「活动收不收报名」就够了 —— 上面那一支已经排掉了「他有位子可报」，
+         所以到得了这里就是「有得报，但没有一个是给他的」。视图不再多送一个
+         反向的键：两个键要手工保持一致，而写歪的表现是两支都不亮，
+         人于是读到下面那句「这场活动不收报名了」。
+
+      🔴 不许掉进下面那句「这场活动不收报名了」—— 对他那是假话，而两种情况
+         在此之前长得一模一样。也不画一颗灰按钮：那颗按钮通向的下拉框是空的，
+         而「点不动的按钮」在这一页上已经有另一个含义了（上面那一支：草稿预览）。
+      {% endcomment %}
+      <p class="text-sm text-ink-600 dark:text-ink-300">
+        This event is taking signups, but none of its roles is open to you.
       </p>
     {% else %}
       <p class="text-sm text-ink-600 dark:text-ink-300">

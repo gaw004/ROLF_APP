@@ -149,7 +149,15 @@ class SignUpForm(forms.Form):
             # ⚠️ `with_signup_counts()` 是为了那个 "— full" 后缀能问出答案来
             #    （2026-08-19）。不带它的话每个选项各查一次，而这里正好是一个
             #    循环里的每一行。
-            event.roles.with_signup_counts()
+            #
+            # ⚠️ `for_audience()` 是 L2（2026-08-29）。角色**按人过滤掉**，
+            #    不是列出来附一句「你报不上」—— 需求 8 原文写的是 internal
+            #    roles「只会显示给 internal 的人」，而 participants.md 第三节
+            #    那条 🔴 写的是「在角色这一层，看得见 = 报得上」。
+            #    ⚠️ 于是它也是那道服务层资格门的**前哨**：手工构造的 POST 在
+            #       这里就得到一条普通的 "Select a valid choice"，而不是走到
+            #       `sign_up()` 里换一个 500 回来。
+            event.roles.with_signup_counts().for_audience(contact)
             .select_related("role").order_by("role__name")
         )
         # Asked through services, so the form and the two service-layer gates

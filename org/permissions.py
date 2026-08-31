@@ -146,6 +146,25 @@ def can_view_event_records(user, event) -> bool:
     return administers(user, event.ministry_id) or in_foundation_tier(user)
 
 
+def event_access(user, event) -> tuple[bool, bool]:
+    """(may manage it, may read its records) — both answers, one look at the grants.
+
+    ⚠️ Composed here rather than in the caller, and that is the whole reason it
+       exists. The two questions share a term (`administers`), and a page that
+       needs both was asking each separately — reading the grant table twice
+       per render. Spelling `administers(...) or in_foundation_tier(...)` out at
+       the call site would fix the query and break the rule this module is for:
+       the two ways into an event's records are one policy, judged in one place.
+
+    ⚠️ Order matters for the second element: managing implies reading, so the
+       foundation-tier check is only reached by somebody who does not manage
+       this ministry. That is the containment can_view_event_records() states,
+       not a shortcut on top of it.
+    """
+    manages = can_manage_event(user, event)
+    return manages, manages or (event is not None and in_foundation_tier(user))
+
+
 def can_upload_gallery_photo(user, ministry) -> bool:
     """Put a photo on the Memories wall, attributed to `ministry`.
 

@@ -1579,6 +1579,65 @@ issubset  /  <=  /  >=   出现在受众字段附近 → 只许在 events/models
 ⚠️ 于是那一页要说得出「这里有角色，只是没有一个是给你的」——
 见 [L2.5](#l25-公告)，那里现在有三种空状态要区分。
 
+> ### ⚠️ 2026-08-29 补：动手前这一节被逐条核对了一遍，四处要改
+>
+> 本节和 L2.1～L2.3 的落地对得上（`on_the_books_q()` 已经在 `models.py`、
+> 角色那头的反向名是 `eventrole_audience`、L2.3 已经让每个角色真的带着受众）。
+> 四处不对的地方写在下面，都在动手之前改掉了。
+>
+> #### 一、「共用同一条 `on_the_books_q()`」的共用不够
+>
+> 那只共用了判据的一半。真正容易写错的是外面那个三支析取，尤其是
+> `visible_to_outsiders & ~Exists(...)` ——「外部人员不是最宽的一档」这个坑
+> 在这个仓库里已经咬过一次（seed 只勾了外部人员，把整个演示库对自己人藏了起来）。
+> 照本节字面写，这个析取会有两份实现：`EventQuerySet.for_audience()` 一份、
+> `eligible()` 一份。而守卫二盯的是 `Spec` 的三个属性名，按模型字段写的第二份
+> 根本不碰那三个名字 —— 没有任何东西拦得住它。
+>
+> 落点：抽 `AudienceQuerySetMixin`，`EventQuerySet` 和 `EventRoleQuerySet` 各混入一次，
+> 差别只有两处 —— 判哪一天（`AUDIENCE_DAY`），以及那张多对多的反向名
+> （从 `model_name` 推，因为字段本来就是 `%(class)s_audience` 推出来的；
+> 写死两份的代价是批三第三张带受众的表会**静默落进 event 那一支**）。
+> `eligible()` 因此只剩一行 `.filter(pk=…).for_audience(contact).exists()`。
+>
+> #### 二、空状态不能推给 L2.5
+>
+> 本节写着「见 L2.5」，但 L2.4 正是**造出**这个状态的那一步。只做 L2.4 的话，
+> 别的 ministry 的在编成员打开活动，读到的是 "No roles opened yet." —— 一句假话，
+> 正是 D27 那条「没有和没算不能长得一样」。而批二的验收清单自己写着
+> 「看得见，报不上，页面说得出为什么」。
+>
+> 所以第二种空状态（有角色、没有一个是给你的）归 L2.4，L2.5 在它之上再加公告那一种。
+>
+> #### 三、Sign up 按钮会指向一个空下拉框
+>
+> `can_sign_up` 原来只等于 `event.accepting_signups`，和「有没有位子是给他的」无关。
+> 角色一被过滤掉，零资格的人照样看到按钮 → 点进去是一个必填却没有任何选项的下拉框
+> → 提交得到 "Select a valid choice"，而他什么都没做错。
+>
+> 落点三处：按钮按 `to_join` 画；活动详情多一句「这场活动在收报名，只是没有一个
+> 位子是给你的」（否则会掉进「本活动不收报名了」那一句，对他是假话）；
+> 报名页直接进来时 404 —— 和这个视图上面那道门、和详情页同一个答案。
+>
+> #### 四、走后门看详情的人该看到什么（定案：全表）
+>
+> `_detail()` 有一扇后门（`can_view_event_records`）。按人过滤之后，
+> 刚开完角色的 ministry admin 会看到一张缺行的表，而页面上没有任何东西说少了行。
+>
+> 定案：**这一类人看全表**，因为他们在报名页本来就看得见全部角色，
+> 而「我刚开的角色去哪了」是一个查不出原因的问题。
+> 代价照实写下来：角色表和报名下拉框对这一类人**不再是同一个集合**，
+> 而本节原文要求的是同一个 —— 所以页面自己要说出来是哪一件（一句常驻文案，不查库）。
+> 报名按钮仍然按他**自己**的资格画：全表是一种**读**的特权，不是报名的特权。
+>
+> #### 顺带：`eligible_role_ids()` 判它不建
+>
+> 详情页和 `SignUpForm` 要的是带 `with_signup_counts()` 的角色**对象**，
+> 直接 `.for_audience(contact)` 一次查询就有；再取一遍 id 是第二次查询。
+> 建一个没有调用方的函数，理由和删掉 `upcoming()`/`past()`、删掉 `Spec.__str__`
+> 是同一条：没有调用方的东西没有任何东西在查它，而下一个人读到的是一种受支持的做法。
+> 文件总表里那一行跟着改。
+
 ## L2.5 公告
 
 `takes_signups=False` 时：
@@ -2005,11 +2064,12 @@ recurring events：
 
 ---
 
-# 本轮新增的守卫（五条）
+# 本轮新增的守卫（六条）
 
 | # | 名字 | 盯什么 |
 |---|---|---|
 | 1 | `AudienceIsAskedGuardTests` | 调用 `visible_to_participants()` 的函数体里必须同时调 `for_audience(` |
+| 1b | `RolesAreNarrowedGuardTests` | 2026-08-29 加的第六条：函数体里出现 `select_related("role")`（也就是在**列角色行给人看**）的，必须同时调 `for_audience(`。点名三处管理侧例外 |
 | 2 | `AudienceContainmentGuardTests` | 「角色的范围 ⊆ 活动的范围」那三条比较只许出现在 `refuse_wider_than_event()` 里。⚠️ 改成多选之后可比的东西变多了，这条比枚举时代更必要 |
 | 3 | `HoursWriteGuardTests` | `.hours =` 只出现在 `events/services.py`（现在就成立，这一条是把现状钉住） |
 | 4 | `GeneratedEventDeleteGuardTests` | 生成场次的那三个删除条件只出现在 `_drop_generated_after()` |
@@ -2018,14 +2078,21 @@ recurring events：
 每一条都要做双向验证：故意写错一处，确认它真的红 —— 这是本项目对守卫的既有要求，
 而守卫一和守卫五都属于「不做反向验证就等于没写」的那一类。
 
+⚠️ 第六条的双向验证当场抓到了它自己：初版**没红**，因为
+`SignUpForm.__init__` 里那行调用**上面的注释**写着 `for_audience()`，
+守卫把注释读成了调用。所以它先剥掉 docstring 和 `#` 注释再找 ——
+一个注释就能满足的守卫比没有守卫更糟，它报的是一份它从没检查过的安全。
+（信号选 `select_related("role")` 而不是 `with_signup_counts(`：后者每一处容量
+判断都在调，白名单会长到比被保护的地方还多，而那正是守卫失效的方式。）
+
 # 本轮要动的文件总表
 
 清点用。批次列写「一/二/三」。
 
 | 文件 | 批 | 干什么 |
 |---|---|---|
-| `events/models.py` | 一二三 | `nature`、`NOT_APPLICABLE`、新约束、第二个兜底工种、可见性的两个布尔 + 一张多对多（`Event` / `EventRole` 各一套）、`takes_signups`、`refuse_wider_than_event()`、`for_audience()`、`Event.shape` + 两个谓词、`Session`、`SessionAttendance`、`EventSeries`、`EventSeriesRole`、`Event.series` / `Event.source` |
-| `events/services.py` | 一二三 | `on_the_books_q()` / `on_the_books_exists()`、`default_served_as()`、`record_hours()`、`check_out()`、`create_participation_role()`、`ministry_report()`、`_people_served()`、`eligible()` / `eligible_role_ids()`、`sign_up()`、系列的生成与撤销、⚠️ L5.7：工时的四个口径要 union `SessionAttendance` |
+| `events/models.py` | 一二三 | `nature`、`NOT_APPLICABLE`、新约束、第二个兜底工种、可见性的两个布尔 + 一张多对多（`Event` / `EventRole` 各一套）、`takes_signups`、`refuse_wider_than_event()`、`AudienceQuerySetMixin.for_audience()`（两张表共用一份，见 L2.4）、`Event.shape` + 两个谓词、`Session`、`SessionAttendance`、`EventSeries`、`EventSeriesRole`、`Event.series` / `Event.source` |
+| `events/services.py` | 一二三 | `on_the_books_q()` / `on_the_books_exists()`、`default_served_as()`、`record_hours()`、`check_out()`、`create_participation_role()`、`ministry_report()`、`_people_served()`、`eligible()`（⚠️ `eligible_role_ids()` 判它不建，见 L2.4 那个补框）、`sign_up()`、系列的生成与撤销、⚠️ L5.7：工时的四个口径要 union `SessionAttendance` |
 | `events/forms.py` | 一二三 | `RoleChoiceField`、`SignUpForm`、`EventRoleForm`、`EventForm`（加三档单选）、`EventPeriodForm`、新的 `EventSeriesForm` |
 | `events/views.py` | 一二三 | `_visible_events()`、`_schedule()`、`_detail()`、`event_signup`、`event_registrations`、`event_attendance`、系列的三个视图 |
 | `events/urls.py` | 三 | 系列的三条路由 |
@@ -2046,7 +2113,7 @@ recurring events：
 | `events/templates/events/my_participations.html` | 一 | 不印 Not applicable |
 | `events/templates/events/event_report.html` | 一 | 同上 |
 | `events/templates/events/_event_roles_panel.html` | 一二 | 档位列；公告的空状态 |
-| `events/templates/events/_event_detail_body.html` | 一二 | 档位列；公告的空状态；报不上的角色带原因 |
+| `events/templates/events/_event_detail_body.html` | 一二 | 档位列；三种空状态（「还没开」/「没有一个是给你的」/ 公告）；看全表的人那一句常驻文案 |
 | `events/templates/events/_period_filter.html` | 二 | 多一个 kind 下拉 |
 | `events/templates/events/event_form.html` | 二三 | `audience` / `takes_signups`；系列入口 |
 | `events/management/commands/seed_demo.py` | 一二三 | ESL 工种与活动；一场内部活动；一个系列 |
@@ -2431,3 +2498,44 @@ L2.1 实测过：验证时读实例的 M2M，读到的是库里那份旧值。
 所以 `Spec.of()` 的 docstring 写死一句：**只用于「不是正在被编辑的那一行」**。
 ⚠️ 这三格看起来很像，而第三格和前两格的区别只有一个词：
 被验证的那一行，不能从库里读。
+
+## L2.4 · 一个「特意收窄」的写法，其实是最宽的那一个（2026-08-29）
+
+给测试造一个只给某几个 ministry 看的角色，第一版写的是：
+
+```python
+role = make_role(event, code, visible_to_outsiders=False, visible_to_all_staff=False)
+role.visible_to_ministries.set(ministries)
+```
+
+读起来是「两个都关掉，只留 ministry」。实际上 `False / False / 空` 正是
+**空受众**，而 `make_role()` 看到空受众就会按决定 15 去继承活动那一份 ——
+于是这个角色拿到的是活动的「谁都看得见」，比原来还宽。
+测试因此**通过了，但通过的是另一件事**：跨 ministry 的那条断言之所以绿，
+是因为角色对所有人开放。
+
+⚠️ 值得记的是这两件事在代码上长得一模一样：
+「我要一个窄受众」和「我还没设受众」写出来是同一个字节。
+L2.3 那条 `audience_is_empty` 的注释早就写了「空受众从来不是谁选出来的状态」——
+这一节是同一句话反过来咬人的样子：**当它真的被谁选出来的时候，系统读不出区别。**
+
+处置：造窄受众一律走 `set_audience()`（它会拒绝非法的，也不会替你继承）。
+seed 里那个只给在编看的角色同样如此，注释里写了原因。
+
+## L2.4 · fixture 的缺省受众，把一步无关的改动变成一片红（2026-08-29）
+
+`make_event()` 的缺省受众 2026-08-28 特意从「外部 + 全体在编」收窄成了
+「只给外部人员」，理由写在原地：「这些测试都在扮演外部人员」。那句话当时对。
+
+L2.4 落地那一刻它不再对了：角色的受众从活动继承，而这一步是第一次真的去读它。
+于是每一个让**在编人员**走 `SignUpForm` / `sign_up()` 的测试都被拒 ——
+`ServedAsTests` 那一整类，而它们一条都不是在测受众。
+
+⚠️ 这和 L2.3 替 seed 挡下的是同一个坑低一层：那次补的是「角色要继承活动」，
+没有人回头问一句「**那活动本身的缺省装得下谁**」。
+
+处置：缺省改回「外部 + 全体在编」（迁移 0019 给真实行回填的那个值，也就是今天的行为），
+而真正关于受众的三个类各自把 flag 写全。⚠️ 其中两个类原来只写了一半 ——
+`ForAudienceTests` 的注释写着「每一个 flag 都写出来」，实际只写了一个，
+另一个一直在吃缺省。缺省一变，它们**当场变红**，而这是它们该有的样子：
+一个只写了一半的「写全」，和没写是一回事。

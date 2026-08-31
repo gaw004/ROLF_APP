@@ -40,6 +40,7 @@ from org.permissions import (
     can_manage_event,
     can_publish_event,
     can_view_event_records,
+    event_access,
     ministry_ids_administered_by,
 )
 
@@ -448,18 +449,75 @@ def _detail(request, pk):
     # ⚠️ Asked with `.filter(pk=…).exists()` rather than by re-fetching, so this
     #    stays one extra query and the row above is still the one rendered.
     for_them = Event.objects.filter(pk=pk).for_audience(contact).exists()
-    if (preview or not for_them) and not can_view_event_records(request.user, event):
+    # ⚠️ Asked once and kept: it decides the 404 below **and** how much of the
+    #    roles table this person is shown. Two calls would be two answers to one
+    #    question the day somebody edits one of them.
+    #
+    # ⚠️ Both answers in one call, because until L2.4 the read check ran only
+    #    when the 404 branch needed it and the write check ran always — asking
+    #    each separately now means the grant table is read twice on every render
+    #    of the most-hit page in the system. org.permissions composes them; the
+    #    view must not, or the two ways in stop being one policy.
+    can_manage, may_view_records = event_access(request.user, event)
+    if (preview or not for_them) and not may_view_records:
         # Deliberately indistinguishable from "no such event" — see above.
         raise Http404("No event matches the given query.")
+
+    # L2 (2026-08-29). Two sets, and they are two because they answer two
+    # questions:
+    #
+    #   · `to_join`  — the places this person may actually take. It is what the
+    #     signup form's dropdown is narrowed to, so the Sign up button below is
+    #     drawn from the same set the button leads to. Drawn from anything else,
+    #     a person with no eligible role gets a button to a required dropdown
+    #     with nothing in it.
+    #   · `roles`    — what the table shows. The same set, **except** for
+    #     somebody who may read this event's records: they see every role.
+    #
+    # 🔴 That exception breaks "the table and the dropdown are one set", which is
+    #    how L2.4 was first written, and it is a decision (2026-08-29) rather
+    #    than a slip. A ministry admin who has just opened three roles and finds
+    #    two of them missing from the event page has no way to tell that from a
+    #    bug, and they can already see all three on the signups page. The cost is
+    #    that the page now says two different things to two kinds of viewer, so
+    #    the page **says so** — see `sees_every_role` in the template.
+    #
+    # ⚠️ One spelling of "a page of role rows", narrowed or not. Written out
+    #    twice, an annotation or a prefetch added for the table would land on
+    #    one and not the other, and the records-reader's rows would quietly stop
+    #    matching everybody else's — with the template unable to tell.
+    rows = event.roles.with_signup_counts().select_related("role")
+    to_join = list(rows.for_audience(contact))
+    # ⚠️ A second query, and only for this viewer.
+    roles = list(rows) if may_view_records else to_join
+
     mine = Participation.objects.none()
     if contact is not None:
         mine = Participation.objects.filter(
             event_role__event=event, contact=contact,
         ).select_related("event_role__role")
     back_url, back_label = _back_link(request)
+    # ⚠️ Read once. It is a **property, not a column** — `Event.is_full` inside
+    #    it costs two queries on a row that carries no capacity annotation, and
+    #    this one does not (the detail page fetches a single event, not a list).
+    #    Two readings of it below would be four queries for one answer.
+    accepting_signups = event.accepting_signups
     return {
         "event": event,
-        "roles": event.roles.with_signup_counts().select_related("role"),
+        "roles": roles,
+        # 「有角色，只是没有一个是给你的」—— 第二种空状态（L2.4）。
+        #
+        # 🔴 它必须和「还没开任何角色」长得**不一样**（D27）。少了这一格，
+        #    别的 ministry 的在编成员打开活动，读到的是 "No roles opened yet."
+        #    —— 一句假话，而这一页上没有任何东西能让他看出来。
+        # ⚠️ 问的是**这张表**空不空，不是 `to_join` 空不空 —— 看全表的那个人
+        #    表不空，这一句就不该亮。
+        # ⚠️ 只在表是空的、而且这张表是收窄过的时候才多查一次。看全表的人表空，
+        #    就证明活动一个角色都没有 —— 再问一次库，问的是一个已经答过的问题。
+        "roles_none_for_you": (
+            not roles and not may_view_records and event.roles.exists()),
+        # 那句常驻文案的开关：这张表对他是全的，对别人不是。⚠️ 不查库。
+        "sees_every_role": may_view_records,
         "mine": mine,
         # ⚠️ The property, not `status in OPEN_FOR_SIGNUP` (2026-08-19). It asks
         #    the clock as well, exactly as the `open_for_signup()` queryset
@@ -467,8 +525,22 @@ def _detail(request, pk):
         #    are the same gate seen from two sides. Reading only the status here
         #    put a Sign up button on events that finished last year, and the
         #    page it led to had already stopped accepting them.
-        "can_sign_up": event.accepting_signups,
-        "can_manage": can_manage_event(request.user, event),
+        #
+        # ⚠️ `to_join`, never `roles` (L2.4): the button is drawn from what the
+        #    person may take, so an admin looking at a full table still only gets
+        #    one when a place in it is actually theirs. Otherwise the button
+        #    leads to an empty dropdown — a dead end that answers "Select a valid
+        #    choice" to somebody who did nothing wrong.
+        "can_sign_up": accepting_signups and bool(to_join),
+        # ⚠️ 「这场活动在收不收报名」，不是「他能不能报」—— 按钮那一格靠这两个
+        #    键分出三种情况，而模板里那一支落在 `can_sign_up` 之后，所以到得了
+        #    它的人已经证明了「有得报的活动，但没有一个位子是给他的」。
+        #    ⚠️ 不写成第三个键（`nothing_open_to_you = accepting and not to_join`）：
+        #       那是同一件事的第二种拼法，两个键要手工保持反向一致，
+        #       而写歪一个的表现是两支都不亮，于是人读到「这场活动不收报名了」——
+        #       正是这一步要消掉的那句假话。也不让模板去读那个属性：它查库。
+        "accepting_signups": accepting_signups,
+        "can_manage": can_manage,
         # ⚠️ False on every published event, so the banner is not something a
         #    template has to remember to switch off. It is only ever true for a
         #    viewer who already passed the check above.
@@ -569,6 +641,17 @@ def event_signup(request, pk):
     in_panel = bool(request.headers.get("HX-Request"))
 
     form = SignUpForm(request.POST or None, event=event, contact=contact)
+    # L2.4：一个位子都不是给他的时候，这一页是**没有内容**的 —— 一个必填、
+    # 却一个选项都没有的下拉框，提交回来是 "Select a valid choice"，
+    # 而那个人什么都没做错。
+    #
+    # ⚠️ 404，和这个视图上面那道门、和详情页那一条同一个答案：这一页对他不存在。
+    #    详情页那颗按钮本来就不画（`nothing_open_to_you`），所以走到这里的是
+    #    手敲 URL 或者一张放了很久的旧页面。
+    # ⚠️ 判据取自表单自己的 queryset，不另问一次 —— 两处会在某一格上走散，
+    #    而走散的表现正是「按钮说能报、页面说没有」。
+    if not form.fields["event_role"].queryset.exists():
+        raise Http404("No event matches the given query.")
     if request.method == "POST" and form.is_valid():
         try:
             # The rule lives in sign_up(), not here: an admin registering

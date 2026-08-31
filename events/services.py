@@ -58,6 +58,23 @@ class RoleFull(ValidationError):
     """
 
 
+class NotEligible(ValidationError):
+    """This place is not open to this person. L2's refusal.
+
+    ⚠️ **Its readers are the doors that are not the website.** Somebody going
+       through the signup page never reaches it: SignUpForm's dropdown is
+       narrowed to the roles that are theirs, so a role they may not have is
+       not a choice and the form refuses it first (a hand-made POST therefore
+       gets an ordinary "Select a valid choice", not a 500). What is left is
+       every other door — an admin entering somebody from a paper list, an
+       importer, batch three's generator — and those are exactly the ones with
+       nobody watching, which is why the rule is here rather than on the form.
+
+    Its own class for the same reason as RoleFull: "not for you" is an answer,
+    not a mistake, and a caller may want to tell it apart from a form error.
+    """
+
+
 class NoHoursHere(ValidationError):
     """Somebody tried to put hours on a place people attend.
 
@@ -204,6 +221,22 @@ def is_on_the_books(contact, event):
     return _on_the_books(event).filter(contact=contact).exists()
 
 
+def eligible(contact, event_role):
+    """May this person sign up for this place? L2.
+
+    One row's form of EventRoleQuerySet.for_audience(), and deliberately
+    nothing more than that: the three branches are written once, in
+    events.models.AudienceQuerySetMixin, and everything that asks this question
+    — the dropdown, the roles table, this gate — asks the same one. Spelling
+    the disjunction out again here is the second implementation that mixin's
+    docstring exists to prevent.
+
+    ⚠️ `.exists()`, so a person holding posts in two ministries at once is
+       asked "is there a qualifying tenure", never "which one is it" (D32).
+    """
+    return EventRole.objects.filter(pk=event_role.pk).for_audience(contact).exists()
+
+
 def default_served_as(contact, event_role, *, on_the_books=None):
     """(what to record, whether to put the question to them) for this signup.
 
@@ -322,6 +355,10 @@ def set_served_as(participation, value, *, declared_by):
 def sign_up(*, contact, event_role, consent=None, served_as=None):
     """Sign `contact` up for `event_role`. Returns the new Participation.
 
+    Three gates, in this order: may they have this place at all (L2), is there
+    room in it, and — for a minor — is there consent. The order is the order in
+    which the answers stop being useful; see each one.
+
     ⚠️ This is a hint layer, not enforcement, and is not dressed up as more.
        The consent rule spans two tables — the age is on Contact, the signup is
        here — so no CheckConstraint can express it and bulk_create walks
@@ -355,6 +392,34 @@ def sign_up(*, contact, event_role, consent=None, served_as=None):
        row predates D38", and nothing else may be allowed to mean it.
     """
     consent = dict(consent or {})
+
+    # 🔴 The eligibility gate (L2, 2026-08-29). Until this line existed the three
+    #    audience columns on EventRole were written by every door and read by
+    #    nothing: an outside volunteer who knew a role's id could put their name
+    #    down for a place the foundation had marked staff-only, and the failure
+    #    was silent on both sides.
+    #
+    # ⚠️ **Before the capacity gate, deliberately.** "That place is not open to
+    #    you" is the truer of the two answers, and answering "it is full" first
+    #    sends somebody off to wait for a place that would never have been
+    #    theirs however many people withdrew.
+    #
+    # ⚠️ It applies to a **re-signup after cancelling** too, further down. That
+    #    is a behaviour change to the path fixed in the browser on 2026-08-19
+    #    (changing your mind must not be permanent), and it is the right one:
+    #    coming back is a fresh act of joining, and if the role has been narrowed
+    #    since, it is no longer a place they may take. Pinned by its own test.
+    #
+    # ⚠️ Still a hint layer, not a lock — the same D14 caveat as the two gates
+    #    below. The columns are on two tables (plus a many-to-many), so no
+    #    CheckConstraint can express this and bulk_create walks past it.
+    if not eligible(contact, event_role):
+        raise NotEligible({
+            "event_role": f"“{event_role.role.name}” is not open to "
+                          f"{contact}. That place is for a different group of "
+                          "people — check who the role is open to, or pick "
+                          "another one.",
+        })
 
     # 🔴 The capacity gate (2026-08-19). Until this line existed, `needed_count`
     #    fed the "understaffed" reports and **stopped nobody**: a job wanting

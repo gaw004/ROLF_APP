@@ -87,6 +87,17 @@ def project_markdown_files():
         yield relative, path.read_text(encoding="utf-8")
 
 
+#: Docstrings and comments, for the guards that scan **code** for a call.
+#:
+#: 🔴 Both halves are load-bearing, and the second one was learned the hard way
+#:    (2026-08-29): a guard that strips docstrings alone stays green when the
+#:    call it hunts for is deleted, as long as a `#` comment above the site
+#:    mentions it by name. A guard a comment can satisfy is worse than no guard
+#:    — it reports safety it never checked.
+#: ⚠️ `\x27` keeps this file from containing the literal it hunts for, so the
+#:    guards can scan themselves.
+PROSE = re.compile(r'("""|\x27\x27\x27).*?\1|#[^\n]*', re.S)
+
 LOOP_OPENER = re.compile(r"^\s*(async\s+for|for|while)\b")
 SCOPE_OPENER = re.compile(r"^\s*(async\s+def|def|class)\s+(\w+)")
 # A loop keyword anywhere on the line, which is how a comprehension iterates.
@@ -159,6 +170,51 @@ def repeated_uses(pattern, skip=(), exempt="loop-guard-ok"):
             elif scope:
                 stack.append((indent, "scope", scope.group(2)))
     return hits
+
+
+def our_functions(skip=()):
+    """(where, name, code) for every function in our own non-test code.
+
+    `code` has docstrings and comments stripped: these callers are looking for
+    a **call**, and prose that discusses one is not one.
+
+    ⚠️ One walker, because "what counts as our code" must have one answer. Two
+       guards ask this — see functions_missing_a_call() below.
+    """
+    for relative, source in project_python_files(skip=list(skip)):
+        if relative.name == "tests.py":
+            continue
+        try:
+            tree = ast.parse(source)
+        except SyntaxError:  # pragma: no cover - caught by check, not here
+            continue
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                body = ast.get_source_segment(source, node) or ""
+                yield (f"{relative}:{node.lineno} {node.name}()", node.name,
+                       PROSE.sub("", body))
+
+
+def functions_missing_a_call(*, signal, asks, allowed, skip=()):
+    """Where `signal` appears in a function body and `asks` does not.
+
+    ⭐ The shape of both audience guards: "if you do this, you must also do
+       that". They differ in three constants and nothing else, so they share a
+       body — the alternative is what this project keeps convicting, two copies
+       of one rule where a fix reaches only the copy somebody was looking at.
+       (It happened to these two: the comment-blindness fix above landed on the
+       second guard and left the first one green on a comment.)
+
+    ⚠️ Deliberately narrow — **function bodies**, not whole files. A file-wide
+       version would go red on every docstring that discusses the pair (there
+       are several), and a guard that is red every day gets whitelisted until it
+       means nothing. Same reasoning ReportFigureNamesGuardTests writes out.
+    """
+    return [
+        where
+        for where, name, code in our_functions(skip=skip)
+        if name not in allowed and signal in code and asks not in code
+    ]
 
 
 def offending_lines(pattern, skip=(), only_filenames=None):
@@ -476,18 +532,14 @@ class AudienceIsAskedGuardTests(TestCase):
        seeing every published event, with nothing raising and every page
        looking normal.
 
-    ⚠️ Deliberately narrow — it reads **function bodies**, not whole files. A
-       file-wide version would go red on every docstring that discusses the two
-       predicates (there are several, including this one), and a guard that is
-       red every day gets whitelisted until it means nothing. Same reasoning
-       ReportFigureNamesGuardTests writes out above.
+    ⚠️ The scan itself is functions_missing_a_call() above — shared with
+       RolesAreNarrowedGuardTests, which asks the same "if this, then that" of
+       the same corpus. This class is three constants and the sentence it
+       prints.
     """
 
     NARROWS = "visible_to_participants("
     ASKS = "for_audience("
-    #: Docstrings discuss this pair at length, so they are stripped before the
-    #: search — matching prose would make the guard lie in both directions.
-    DOCSTRING = re.compile(r'("""|\x27\x27\x27).*?\1', re.S)
 
     #: Named exemptions. Each is a decision, not an oversight — see the
     #: docstring at each site, and 06-roadmap.md L2.2.
@@ -507,34 +559,86 @@ class AudienceIsAskedGuardTests(TestCase):
         "checkin_confirm",
     }
 
-    def functions(self):
-        """(where, name, source) for every function in our own non-test code."""
-        for relative, source in project_python_files(skip=["tests.py"]):
-            if relative.name == "tests.py":
-                continue
-            try:
-                tree = ast.parse(source)
-            except SyntaxError:  # pragma: no cover - caught by check, not here
-                continue
-            for node in ast.walk(tree):
-                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                    body = ast.get_source_segment(source, node) or ""
-                    yield f"{relative}:{node.lineno} {node.name}()", node.name, body
-
     def test_narrowing_by_status_always_asks_who_is_looking(self):
-        offenders = [
-            where
-            for where, name, body in self.functions()
-            if name not in self.ALLOWED
-            and self.NARROWS in self.DOCSTRING.sub("", body)
-            and self.ASKS not in self.DOCSTRING.sub("", body)
-        ]
+        offenders = functions_missing_a_call(
+            signal=self.NARROWS, asks=self.ASKS, allowed=self.ALLOWED)
         self.assertEqual(
             offenders,
             [],
             "Published is not the same question as for-them. Add "
             "for_audience(contact), or name the function in ALLOWED with a "
             "reason:\n" + "\n".join(offenders),
+        )
+
+
+class RolesAreNarrowedGuardTests(TestCase):
+    """Lint-as-test: a page that lists roles asks who is looking. L2.
+
+    ⭐ The role half of AudienceIsAskedGuardTests above. An event nobody
+       narrowed shows up on a list; a **role** nobody narrowed is worse than
+       that — requirement 8 is that internal roles are only *shown* to internal
+       people, so the failure is an internal job title (and its headcount)
+       printed on an outside volunteer's screen, with nothing raising and the
+       page looking exactly right.
+
+    ⚠️ The scan is functions_missing_a_call() above, shared with
+       AudienceIsAskedGuardTests — including the prose stripping, which this
+       guard is the reason for: written without it, it stayed **green** when
+       the call was deleted from SignUpForm.__init__, because the `#` comment
+       above that line names `for_audience()` and the guard read the comment as
+       the call. Found by the bidirectional check, which is why that check is a
+       rule here.
+
+    ⚠️ The signal is `select_related("role")`, which is what enumerating
+       EventRole **rows for a reader** looks like — not `with_signup_counts()`,
+       which every capacity question in the system also calls and would have
+       made this guard four-fifths whitelist. A whitelist longer than the thing
+       it protects is how these stop meaning anything (ReportFigureNamesGuard
+       says the same about itself).
+
+    ⚠️ events/models.py is out of scope, and that is the shape of the rule
+       rather than an exemption: `for_audience()` **is** there, and a queryset
+       method cannot ask who is looking — it is handed that. Compare
+       AudienceContainmentGuardTests, which allows only that file.
+
+    ⚠️ Its limit, stated rather than implied (D14's habit): it reads one call
+       per function body, so a function that narrows **events** already
+       satisfies it and it cannot then tell whether the roles beside them were
+       narrowed too. `views._detail()` is exactly that function, and what pins
+       it is RolesOnTheDetailPageTests, not this. What this catches is the new
+       page — batch three's sessions — that lists roles and asks nothing at all.
+    """
+
+    LISTS_ROLES = 'select_related("role")'
+    ASKS = "for_audience("
+    #: ⚠️ One entry, and it is the only one that does anything: our_functions()
+    #:    already drops every tests.py by name.
+    SKIP = ["events/models.py"]
+    #: Named exemptions, each a management-side page that answers "which roles
+    #: did we open", not "which are for me". All three are behind
+    #: can_view_event_records / _managed_event before they are reached.
+    ALLOWED = {
+        # The edit page's roles panel: the list somebody adds and deletes rows
+        # in. Narrowing it would hide from an admin the role they just made.
+        "_edit_page_context",
+        # The signups page — every name on every role, which is the point.
+        "event_registrations",
+        # R3–R7 for one event. The report page is admin-only, and a report that
+        # left out roles would answer "how many did we open" with a number that
+        # depends on who asked.
+        "event_summary",
+    }
+
+    def test_a_page_that_lists_roles_asks_who_is_looking(self):
+        offenders = functions_missing_a_call(
+            signal=self.LISTS_ROLES, asks=self.ASKS, allowed=self.ALLOWED,
+            skip=self.SKIP)
+        self.assertEqual(
+            offenders,
+            [],
+            "Roles are drawn per viewer (L2): add .for_audience(contact), or "
+            "name the function in ALLOWED with the reason it is management "
+            "side:\n" + "\n".join(offenders),
         )
 
 

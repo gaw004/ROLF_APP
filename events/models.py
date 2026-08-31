@@ -414,6 +414,15 @@ class Audience(models.Model):
     #: role branch of the other. Subclasses override it; the forms read it too.
     AUDIENCE_ON = "event"
 
+    #: Which column decides **which day** "on the books" is judged on, for the
+    #: audience filter. `start_time` here; a table hanging off an event says so
+    #: through its own path to it. ⚠️ Beside AUDIENCE_ON for the reason written
+    #: above it: the model is the thing that knows. It lived on the queryset for
+    #: a day, which split "what a table with an audience must declare" across
+    #: two class hierarchies that had to agree with nothing checking it —
+    #: see AudienceIsWiredUpTests.
+    AUDIENCE_DAY = "start_time"
+
     #: The three, named once. Every form and the admin build their field list
     #: from this, so no screen can quietly offer two of the three.
     AUDIENCE_FIELDS = (
@@ -832,7 +841,99 @@ def refuse_bad_audience(*, row, spec):
         )})
 
 
-class EventQuerySet(models.QuerySet):
+class AudienceQuerySetMixin:
+    """`for_audience()`, for every table that carries an audience.
+
+    ⭐ **One implementation of the three branches, not one per table.** L3 asks
+       it of an Event ("may they see this") and L2 of an EventRole ("may they
+       sign up for this"), and those are the same three ticks read the same
+       way — participants.md's whole point in making them the same three
+       columns. Written out twice, the copy that drifts is the outsider branch:
+       "open to outsiders" is not the widest setting, it **excludes** staff, and
+       this repository has already been bitten by that reading once — seed_demo
+       ticked outsiders alone and hid the entire demo from the foundation's own
+       people (events/tests.py, make_event).
+
+       ⚠️ And nothing would catch the second copy. AudienceContainmentGuardTests
+          watches Audience.Spec's attribute names; a hand-written second version
+          reads the model fields and never touches them.
+
+    Two things differ between the tables, and only two, and **neither is
+    declared here**:
+
+    · `Audience.AUDIENCE_DAY` — the column holding the moment "on the books" is
+      judged at. The event's own start, or its event's start. It sits on the
+      model beside AUDIENCE_ON, so a table declares everything about its
+      audience in one place;
+    · the reverse name of the ministries M2M, derived from the model name
+      because the field derives it the same way (`related_name=
+      "%(class)s_audience"`). One string, one derivation, no constant to keep
+      in step.
+    """
+
+    def for_audience(self, contact):
+        """Narrow to what this person may see. L3 on events, L2 on roles.
+
+        ⚠️ A **second** predicate, always written beside visible_to_participants()
+           and never folded into it. That one answers "is it published", this one
+           answers "is it for them", and until 2026-08-26 the second question had
+           no answer anywhere: every signed-in account saw every published event
+           (participants.md section 1).
+
+        The three branches are the three kinds of tick, and each is judged on
+        **the day of the event** — the same clock on both tables. Two different
+        clocks would produce "visible but not signable on the day" and "signable
+        on the day but invisible today", and neither has an explanation a person
+        would accept.
+
+        ⚠️ All three ask whether *a* qualifying tenure **exists**, never which
+           one it is: somebody may hold posts in two ministries at once (D32's
+           invariant is about there being one structure, not one row), and an
+           event ticked for either is one they can see — and a role ticked for
+           either is one they can sign up for.
+
+        🔴 The ministry branch is an Exists, never a join. Written as
+           `filter(visible_to_ministries__in=…)` an event ticked for two
+           ministries comes back **twice** for somebody on the books in both —
+           verified, and it corrupts paging and every count downstream while
+           looking on the page like a row that got listed twice.
+
+        ⚠️ `contact is None` is not an error and not a special case: an account
+           with no Contact cannot hold a post, so it *is* an outsider. That
+           includes every superuser (D12 keeps User.contact nullable because a
+           superuser matches no real person) — so a superuser does not see
+           staff-only events, which is correct and reads like a bug the first
+           time somebody meets it. Do not "fix" it by exempting them; that would
+           open a hole straight through this whole layer, exactly as
+           org/permissions.py says about its own checks.
+        """
+        outsiders = Q(visible_to_outsiders=True)
+        if contact is None:
+            return self.filter(outsiders)
+
+        on_the_books = Assignment.objects.filter(
+            on_the_books_q(models.OuterRef("event_day")), contact_id=contact.pk)
+        # ⚠️ The reverse name on the M2M is what lets this be one Exists rather
+        #    than a subquery over the through table with two nested OuterRefs.
+        #    See the field's own comment.
+        in_a_ticked_ministry = on_the_books.filter(**{
+            f"position__ministry__{self.model._meta.model_name}_audience":
+                models.OuterRef("pk"),
+        })
+
+        dated = self.annotate(event_day=local_day(self.model.AUDIENCE_DAY))
+        return dated.filter(
+            # ⚠️ `~Exists`, checked against `exclude(Exists(...))` on both a
+            #    staff member and a genuine outsider — the two agree. Testing it
+            #    with a staff member alone returns nothing either way and proves
+            #    nothing, which is how the first attempt at this went.
+            (outsiders & ~models.Exists(on_the_books))
+            | (Q(visible_to_all_staff=True) & models.Exists(on_the_books))
+            | models.Exists(in_a_ticked_ministry)
+        )
+
+
+class EventQuerySet(AudienceQuerySetMixin, models.QuerySet):
     """Two status predicates, because status is answering two different questions.
 
     Event.status carries the lifecycle (draft → open → full → wrapped up /
@@ -860,64 +961,6 @@ class EventQuerySet(models.QuerySet):
            so the name stops implying an audience it never had.
         """
         return self.filter(status__in=Event.VISIBLE_TO_PARTICIPANTS)
-
-    def for_audience(self, contact):
-        """Narrow to what this person may see. L3.
-
-        ⚠️ A **second** predicate, always written beside visible_to_participants()
-           and never folded into it. That one answers "is it published", this one
-           answers "is it for them", and until 2026-08-26 the second question had
-           no answer anywhere: every signed-in account saw every published event
-           (participants.md section 1).
-
-        The three branches are the three kinds of tick, and each is judged on
-        **the day of the event** — the same clock L2's eligibility uses. Two
-        different clocks would produce "visible but not signable on the day" and
-        "signable on the day but invisible today", and neither has an
-        explanation a person would accept.
-
-        ⚠️ All three ask whether *a* qualifying tenure **exists**, never which
-           one it is: somebody may hold posts in two ministries at once (D32's
-           invariant is about there being one structure, not one row), and an
-           event ticked for either is one they can see.
-
-        🔴 The ministry branch is an Exists, never a join. Written as
-           `filter(visible_to_ministries__in=…)` an event ticked for two
-           ministries comes back **twice** for somebody on the books in both —
-           verified, and it corrupts paging and every count downstream while
-           looking on the page like a row that got listed twice.
-
-        ⚠️ `contact is None` is not an error and not a special case: an account
-           with no Contact cannot hold a post, so it *is* an outsider. That
-           includes every superuser (D12 keeps User.contact nullable because a
-           superuser matches no real person) — so a superuser does not see
-           staff-only events, which is correct and reads like a bug the first
-           time somebody meets it. Do not "fix" it by exempting them; that would
-           open a hole straight through this whole layer, exactly as
-           org/permissions.py says about its own checks.
-        """
-        outsiders = Q(visible_to_outsiders=True)
-        if contact is None:
-            return self.filter(outsiders)
-
-        on_the_books = Assignment.objects.filter(
-            on_the_books_q(models.OuterRef("event_day")), contact_id=contact.pk)
-        # ⚠️ The reverse name on the M2M is what lets this be one Exists rather
-        #    than a subquery over the through table with two nested OuterRefs.
-        #    See the field's own comment.
-        in_a_ticked_ministry = on_the_books.filter(
-            position__ministry__event_audience=models.OuterRef("pk"))
-
-        dated = self.annotate(event_day=local_day("start_time"))
-        return dated.filter(
-            # ⚠️ `~Exists`, checked against `exclude(Exists(...))` on both a
-            #    staff member and a genuine outsider — the two agree. Testing it
-            #    with a staff member alone returns nothing either way and proves
-            #    nothing, which is how the first attempt at this went.
-            (outsiders & ~models.Exists(on_the_books))
-            | (Q(visible_to_all_staff=True) & models.Exists(on_the_books))
-            | models.Exists(in_a_ticked_ministry)
-        )
 
     def open_for_signup(self, now=None):
         """Everything a volunteer may still sign up for.
@@ -1339,7 +1382,19 @@ class Event(Audience, ConstraintErrorFieldMixin, TimeStampedModel):
         return f"{self.name}（{self.ministry.name} · {self.start_time:%Y-%m-%d}）"
 
 
-class EventRoleQuerySet(models.QuerySet):
+class EventRoleQuerySet(AudienceQuerySetMixin, models.QuerySet):
+    """L2 lives here: `for_audience()` on this table answers "may they sign up".
+
+    ⚠️ The same method as on Event, from the same mixin, and that is the point.
+       On an event the answer decides what somebody may **find**; on a role it
+       decides what somebody may **join** — and requirement 6 is that on a role
+       those are one answer: "in the role layer, seen means signable"
+       (participants.md section 3). So a role that is not theirs is filtered
+       **out** of the page and out of the form's dropdown, never listed with a
+       note saying they cannot have it — requirement 8's own words are that
+       internal roles "are only shown to" internal people.
+    """
+
     def with_signup_counts(self):
         """Adds registered_count / attended_count as real SQL columns.
 
@@ -1423,6 +1478,11 @@ class EventRole(Audience, ConstraintErrorFieldMixin, TimeStampedModel):
     """
 
     AUDIENCE_ON = "role"
+    # ⚠️ Its event's day, which is the same clock the event's own visibility is
+    #    judged on — deliberately. Two clocks would mean "visible today but not
+    #    signable on the day", and nobody could explain that to the person it
+    #    happened to.
+    AUDIENCE_DAY = "event__start_time"
 
     event = models.ForeignKey(Event, on_delete=models.CASCADE, related_name="roles")
     role = models.ForeignKey(ParticipationRole, on_delete=models.PROTECT, related_name="+")

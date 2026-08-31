@@ -32,6 +32,7 @@ from accounts.services import mark_email_verified, register_account
 from contact.models import Contact, EmergencyContact, RelationshipType
 from core.timeutils import local_now, local_today
 from events.models import (
+    Audience,
     Event,
     EventRole,
     EventType,
@@ -44,6 +45,7 @@ from events.services import (
     mark_absent,
     inherit_audience,
     record_hours,
+    set_audience,
     set_served_as,
     sign_up,
 )
@@ -169,6 +171,13 @@ class Command(BaseCommand):
             code="welcome", defaults={"name": "Welcome desk"})
         self.interpreting, _ = ParticipationRole.objects.get_or_create(
             code="interpreting", defaults={"name": "Interpreting"})
+        # ⚠️ L2's whole point on one row (2026-08-29): a job only the
+        #    foundation's own people may take. Without one in the demo, "one
+        #    publish recruits inside and outside" (requirement 8) has nothing to
+        #    show and the audience columns on EventRole are invisible on every
+        #    screen — the same argument as the ESL seat below it.
+        self.coordinating, _ = ParticipationRole.objects.get_or_create(
+            code="coordinating", defaults={"name": "Floor coordinator"})
         # ⚠️ L1's whole point on one row: the first role in this system where
         #    the person is receiving rather than giving. Without one in the
         #    demo, every screen the axis touches — the Kind column, the report's
@@ -509,6 +518,17 @@ class Command(BaseCommand):
         welcome = self.role(self.open_event, self.welcome, 4)
         self.role(self.open_event, self.interpreting, 1,   # nobody signs up
                   stop_at_needed_count=False)
+        # ⭐ 第四个角色，L2（2026-08-29）：**同一场活动，一次发布，招内外两批人**。
+        #    上面三个跟着活动走（谁都看得见、谁都报得上），这一个只给在编的人。
+        #    于是演示库里第一次有了这一屏：外部志愿者打开这场活动，看到三个位子；
+        #    在编的人打开同一场，看到四个 —— 而这正是需求 8 的原话。
+        # ⚠️ 走 set_audience()，不是给 role() 传两个 False：那是**空受众**，
+        #    inherit_audience() 会把活动那份（谁都看得见）填回去，于是这一行
+        #    看起来收窄了、实际上比原来还宽。events/tests.py 那边踩过同一脚。
+        set_audience(
+            self.role(self.open_event, self.coordinating, 1),
+            Audience.Spec(outsiders=False, all_staff=True, ministries=frozenset()),
+        )
 
         if created:
             self.signup(self.adult, lifting)

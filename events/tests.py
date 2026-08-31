@@ -76,6 +76,7 @@ from .models import (
 )
 from .services import (
     NoHoursHere,
+    NotEligible,
     RoleFull,
     CHECKIN_CREDENTIAL_KEY,
     CREDENTIAL_MAX_AGE,
@@ -95,6 +96,7 @@ from .services import (
     default_message,
     event_summary,
     events_in_period,
+    eligible,
     mark_absent,
     ministry_report,
     ministry_staff_participation,
@@ -141,14 +143,23 @@ def make_event(ministry=None, **kwargs):
         #    and every page 404s, so a fixture that says nothing about who it is
         #    for gets an audience here.
         #
-        # ⚠️ Outsiders only, and **narrower than what migration 0019 gave the
-        #    real rows** — it wrote outsiders *and* all staff. That is a
-        #    deliberate difference, corrected on 2026-08-28 after the same
-        #    misreading ("outsiders is the wide one") had been copied into
-        #    seed_demo and hidden the entire demo from its own staff. Here it is
-        #    right because these tests act as outsiders; anything about staff
-        #    visibility passes its own flags. See ForAudienceTests.
+        # ⚠️ **Both**, which is what migration 0019 gave the real rows: today's
+        #    behaviour, everybody. It was outsiders alone between 2026-08-28 and
+        #    L2.4, on the reading that "these tests act as outsiders" — and that
+        #    reading stopped being harmless the moment roles started reading
+        #    their audience (L2.4), because make_role() inherits this one. Every
+        #    fixture role was then open to outsiders only, so every test that
+        #    puts somebody **on the books** through SignUpForm or sign_up()
+        #    (ServedAsTests and its neighbours) failed for a reason that had
+        #    nothing to do with what it was testing.
+        #
+        # ⚠️ "Open to outsiders" is still not the widest setting — it excludes
+        #    staff, which is decision 10 and the trap that hid the whole demo
+        #    once. The widest is these two together, and that is what this is.
+        #    Anything actually *about* the audience spells its own flags out and
+        #    is unaffected (ForAudienceTests, EventRoleAudienceTests).
         "visible_to_outsiders": True,
+        "visible_to_all_staff": True,
     }
     fields.update(kwargs)
     return Event.objects.create(**fields)
@@ -2199,11 +2210,19 @@ class AudienceContainmentTests(TestCase):
     def setUp(self):
         self.pantry = Ministry.objects.create(code="food_pantry", name="Food Pantry")
         self.tax = Ministry.objects.create(code="tax_help", name="Tax Help")
-        self.event = make_event(ministry=self.pantry, visible_to_outsiders=False)
+        # ⚠️ Both flags spelled out, never inherited from make_event()'s
+        #    default (which is the widest audience, outsiders **and** all
+        #    staff). This class is *about* containment, and an event that
+        #    quietly carried "everybody on the books" would contain every role
+        #    a test could write — three of these would then pass for the wrong
+        #    reason, which is how they went red when that default widened.
+        self.event = make_event(ministry=self.pantry, visible_to_outsiders=False,
+                                visible_to_all_staff=False)
         self.event.visible_to_ministries.add(self.pantry)
 
     def a_wide_event(self, name="Wide", **fields):
         """An event open to outsiders, for the tests that then narrow it."""
+        fields.setdefault("visible_to_all_staff", False)
         return make_event(ministry=self.pantry, name=name,
                           owner=self.event.owner, visible_to_outsiders=True,
                           **fields)
@@ -2308,7 +2327,12 @@ class AudienceContainmentTests(TestCase):
         trigger by hand. It stops being redundant the moment a third ministry
         exists, and by then nobody would remember to add it.
         """
-        every = make_event(ministry=self.pantry, name="Every ministry")
+        # ⚠️ Both ticks off explicitly, like setUp's event: "every ministry" is
+        #    the whole point here, and an event that also carried "everybody on
+        #    the books" from the fixture default would contain the role for the
+        #    wrong reason and this refusal would never fire.
+        every = make_event(ministry=self.pantry, name="Every ministry",
+                           visible_to_outsiders=False, visible_to_all_staff=False)
         every.visible_to_ministries.set([self.pantry, self.tax])
         form = self.role_form(event=every, visible_to_all_staff=True)
         self.assertFalse(form.is_valid())
@@ -2927,6 +2951,12 @@ class ForAudienceTests(TestCase):
         #    This class is *about* the audience, so a fixture quietly carrying
         #    "open to outsiders" would make half of it pass for the wrong reason.
         flags.setdefault("visible_to_outsiders", False)
+        # ⚠️ Both of them, and the second one was added the day make_event()'s
+        #    default widened to the pair (L2.4). The comment above already said
+        #    "every flag spelled out"; only one of the two actually was, and the
+        #    half that was missing let two of these tests pass for the wrong
+        #    reason the moment the default changed underneath them.
+        flags.setdefault("visible_to_all_staff", False)
         event = make_event(ministry=self.pantry, name=name, owner=self.owner, **flags)
         for ministry in ministries:
             event.visible_to_ministries.add(ministry)
@@ -3038,6 +3068,256 @@ class ForAudienceTests(TestCase):
         }
         self.assertNotIn(draft.name, seen)
         self.assertIn("Open day", seen)
+
+
+class AudienceIsWiredUpTests(TestCase):
+    """Every table that carries an audience can also be narrowed by one.
+
+    ⭐ The one thing about audiences that is not checked by any of the tests
+       below it, because it is about a table that does not exist yet. Inheriting
+       `Audience` hands a new table the three columns, `AUDIENCE_ON`, the
+       refusal rules and the admin — all of it silent if nobody also mixes
+       `AudienceQuerySetMixin` into its queryset. And silence is the whole
+       failure: nothing raises, the rows simply go out to everybody, which is
+       the hole participants.md section 1 found in the first place.
+
+    ⚠️ Written against `Audience.__subclasses__()` rather than a list of two, so
+       batch three's `Session` is covered on the day somebody adds it rather
+       than on the day somebody remembers this file.
+    """
+
+    def concrete(self):
+        rows = [model for model in Audience.__subclasses__()
+                if not model._meta.abstract]
+        # A loop that finds nothing passes every assertion inside it — the way
+        # this kind of check quietly stops checking.
+        self.assertGreaterEqual(len(rows), 2, "Event and EventRole at least")
+        return rows
+
+    def test_every_table_with_an_audience_can_be_narrowed_by_one(self):
+        for model in self.concrete():
+            with self.subTest(model=model.__name__):
+                self.assertTrue(
+                    hasattr(model.objects, "for_audience"),
+                    f"{model.__name__} inherits Audience but its manager cannot "
+                    "narrow by one — mix AudienceQuerySetMixin into its queryset.",
+                )
+
+    def test_every_table_with_an_audience_says_which_day_decides(self):
+        for model in self.concrete():
+            with self.subTest(model=model.__name__):
+                # A path this model can actually resolve, not just any string:
+                # a typo here is a FieldError at query time, on a page.
+                model._meta.get_field(model.AUDIENCE_DAY.split("__")[0])
+
+
+class EventRoleAudienceTests(TestCase):
+    """L2: which places a given person may actually take. Requirements 6, 7, 8.
+
+    The other half of ForAudienceTests above, and the same three branches from
+    the same mixin — deliberately, because "visible on the day but not signable
+    on the day" is a state nobody could explain. What differs is the
+    consequence: on an event the answer decides what somebody may **find**; on
+    a role it decides what they may **join**, and a role that is not theirs is
+    filtered out of the page rather than listed with a note (requirement 8:
+    internal roles "are only shown to" internal people).
+
+    ⚠️ Every failure here is silent in both directions. Too wide, and an
+       outside volunteer takes a place the foundation marked staff-only; too
+       narrow, and somebody is quietly refused a place that is theirs. Neither
+       raises anything.
+    """
+
+    def setUp(self):
+        self.pantry = Ministry.objects.create(code="food_pantry", name="Food Pantry")
+        self.tax = Ministry.objects.create(code="tax_help", name="Tax Help")
+        # Open to everybody, so that what narrows below is the **role** and
+        # never the event — this class is about the role's own ticks.
+        self.event = make_event(ministry=self.pantry, visible_to_outsiders=True,
+                                visible_to_all_staff=True)
+        self.outsider = make_person("Outsider", birth_date=datetime.date(1985, 1, 1))
+
+    def a_post(self, ministry):
+        # ⚠️ A fresh post each time, and a unique code with it: two people in
+        #    one ministry is the ordinary case here, and `position_code_ci_unique`
+        #    refuses the second one.
+        code = f"{ministry.code}_officer_{Position.objects.count()}"
+        return Position.objects.create(
+            code=code, name="Officer",
+            kind=Position.Kind.STAFF, compensation=Position.Compensation.PAID,
+            ministry=ministry)
+
+    def employ(self, person, ministry, **dates):
+        dates.setdefault("start_date",
+                         local_date_of(self.event.start_time) - datetime.timedelta(days=30))
+        return Assignment.objects.create(
+            contact=person, position=self.a_post(ministry), **dates)
+
+    def a_staffer(self, last_name="Staffer", ministry=None):
+        person = make_person(last_name, birth_date=datetime.date(1985, 1, 1))
+        self.employ(person, ministry or self.pantry)
+        return person
+
+    def staff_only(self, code="coord", **fields):
+        """A role only the foundation's own people may take.
+
+        ⚠️ The flag pair **is** what most of this class is testing, so it is
+           typed once. Six hand-written copies were six chances to type the pair
+           that looks narrow and is empty — see for_ministries() below, which
+           records that mistake costing this class a test that passed for the
+           wrong reason.
+        """
+        return make_role(self.event, code, visible_to_outsiders=False,
+                         visible_to_all_staff=True, **fields)
+
+    def for_ministries(self, code, *ministries):
+        """A role open to named ministries' staff and nobody else.
+
+        🔴 Through set_audience(), **not** by passing the two flags to
+           make_role() and then adding the ministries. False/False/none is not
+           a narrow audience, it is the empty one — so make_role() would read it
+           as a role with no audience and inherit the event's, and the two ticks
+           that look like they pin this down would be overwritten by the widest
+           setting there is. Cost the first draft of this class a test that
+           passed for the wrong reason.
+        """
+        role = make_role(self.event, code)
+        return set_audience(role, Audience.Spec(
+            outsiders=False, all_staff=False,
+            ministries=frozenset(ministry.pk for ministry in ministries)))
+
+    def open_to(self, contact):
+        return sorted(role.role.code
+                      for role in self.event.roles.for_audience(contact))
+
+    # --- the three branches, from the role's side -------------------------
+
+    def test_a_staff_only_role_does_not_appear_to_an_outsider(self):
+        self.staff_only()
+        self.assertEqual(self.open_to(self.outsider), [])
+
+    def test_one_event_can_open_a_public_role_and_a_staff_role_at_once(self):
+        """⭐ Requirement 8, entire: publish once, recruit both.
+
+        The outsider sees the event and the lifting job; the coordinator's seat
+        is not on their page at all. Nobody publishes the same day twice.
+        """
+        make_role(self.event, "lifting")           # inherits: everybody
+        self.staff_only()
+        self.assertEqual(self.open_to(self.outsider), ["lifting"])
+        self.assertEqual(self.open_to(self.a_staffer()), ["coord", "lifting"])
+
+    def test_a_staff_member_of_another_ministry_sees_the_event_and_none_of_its_roles(self):
+        """Requirement 7, and the shape it actually lands in.
+
+        "Seen is not signable" is true of the **event**, not of the role: they
+        can open the page, and there is simply nothing on it for them.
+        """
+        self.for_ministries("pantry_only", self.pantry)
+        outside_ministry = self.a_staffer("Taxman", ministry=self.tax)
+        self.assertTrue(
+            Event.objects.filter(pk=self.event.pk)
+            .for_audience(outside_ministry).exists())
+        self.assertEqual(self.open_to(outside_ministry), [])
+
+    def test_somebody_with_posts_in_two_ministries_can_sign_up_on_either(self):
+        # D32: a qualifying tenure **exists**, never which one it is. Written
+        # as a join this person would also see one of the roles twice.
+        both = make_person("Both", birth_date=datetime.date(1985, 1, 1))
+        self.employ(both, self.pantry)
+        self.employ(both, self.tax)
+        self.for_ministries("pantry_only", self.pantry)
+        self.for_ministries("tax_only", self.tax)
+        self.assertEqual(self.open_to(both), ["pantry_only", "tax_only"])
+
+    def test_eligibility_is_judged_on_the_day_of_the_event(self):
+        """The same clock as the event's own visibility, for the same reason.
+
+        Somebody who left last month is an outsider on the day, whatever the
+        calendar says today.
+        """
+        former = make_person("Former", birth_date=datetime.date(1985, 1, 1))
+        self.employ(
+            former, self.pantry,
+            start_date=local_date_of(self.event.start_time) - datetime.timedelta(days=60),
+            end_date=local_date_of(self.event.start_time) - datetime.timedelta(days=1),
+        )
+        staff_only = self.staff_only()
+        self.assertFalse(eligible(former, staff_only))
+        self.assertTrue(eligible(self.a_staffer(), staff_only))
+
+    # --- the gate in sign_up() --------------------------------------------
+
+    def test_signing_up_for_a_role_that_is_not_yours_is_refused(self):
+        """⚠️ Asked of the **service**, not through a page.
+
+        The website cannot reach this: the form's dropdown holds only the roles
+        that are theirs. Its readers are the other doors — an admin working
+        from a paper list, an importer, batch three's generator — which is
+        exactly why the rule is not on the form.
+        """
+        staff_only = self.staff_only()
+        with self.assertRaises(NotEligible) as refused:
+            sign_up(contact=self.outsider, event_role=staff_only)
+        self.assertIn("Coord", " ".join(refused.exception.messages))
+        self.assertFalse(Participation.objects.exists())
+
+    def test_not_being_eligible_is_answered_before_the_role_being_full(self):
+        """🔴 The order of the gates, and it is not cosmetic.
+
+        "It is full" sends somebody away to wait for a place that would never
+        have been theirs however many people withdrew.
+        """
+        staff_only = self.staff_only(needed_count=1)
+        sign_up(contact=self.a_staffer(), event_role=staff_only)
+        with self.assertRaises(NotEligible):
+            sign_up(contact=self.outsider, event_role=staff_only)
+
+    def test_signing_up_again_after_cancelling_meets_the_gate(self):
+        """⚠️ A behaviour change, recorded rather than discovered later.
+
+        Changing your mind must not be permanent (fixed in the browser on
+        2026-08-19) — but coming back is a fresh act of joining, and a role
+        narrowed in the meantime is no longer a place this person may take.
+        """
+        role = make_role(self.event, "lifting")
+        participation = sign_up(contact=self.outsider, event_role=role)
+        cancel(participation)
+
+        set_audience(role, Audience.Spec(outsiders=False, all_staff=True,
+                                         ministries=frozenset()))
+        with self.assertRaises(NotEligible):
+            sign_up(contact=self.outsider, event_role=role)
+        participation.refresh_from_db()
+        self.assertEqual(participation.status, Participation.Status.CANCELLED)
+
+    # --- the form draws from the same set ---------------------------------
+
+    def test_the_signup_form_offers_only_the_roles_that_are_theirs(self):
+        make_role(self.event, "lifting")
+        self.staff_only()
+        offered = SignUpForm(event=self.event, contact=self.outsider)
+        self.assertEqual(
+            [role.role.code for role in offered.fields["event_role"].queryset],
+            ["lifting"])
+        staffer = SignUpForm(event=self.event, contact=self.a_staffer())
+        self.assertEqual(
+            sorted(role.role.code
+                   for role in staffer.fields["event_role"].queryset),
+            ["coord", "lifting"])
+
+    def test_a_page_of_roles_is_one_query(self):
+        """The detail page and the dropdown both ask for a page at a time.
+
+        ⚠️ Pinned as a shape, not a number: what must stay true is that asking
+           costs the same for one role as for a dozen. A count nailed down here
+           becomes a rubber stamp the first time somebody adds a column.
+        """
+        for index in range(12):
+            make_role(self.event, f"job{index}")
+        staffer = self.a_staffer()
+        with self.assertNumQueries(1):
+            list(self.event.roles.for_audience(staffer).with_signup_counts())
 
 
 class AudienceShapeTests(TestCase):
@@ -4288,6 +4568,148 @@ class DetailPageBackLinkTests(PageTestCase):
         self.assertContains(response, "&larr; Events")
 
 
+class RolesOnTheDetailPageTests(PageTestCase):
+    """L2.4 on the page: which roles are drawn, and what the page says when none is.
+
+    ⭐ Three sentences that used to be one. "No roles opened yet", "these roles
+       are not for you" and (from L2.5) "this is an announcement" are three
+       different facts, and D27's standing rule is that nothing and not-counted
+       may not look alike. Until this step the second one was printed as the
+       first — a plain lie to every staff member of another ministry.
+
+    ⚠️ Every assertion here is about the **page**. The querysets underneath are
+       covered by EventRoleAudienceTests; what this class is for is the part
+       only a reader sees, which is where this round's holes have all been
+       (participants.md section 10, the two seed bugs).
+    """
+
+    def setUp(self):
+        super().setUp()
+        # self.event is open to everybody and self.role inherits that, so the
+        # narrowing below is always the role's own doing.
+        self.staff_only = make_role(
+            self.event, "coord", name="Coordinator",
+            visible_to_outsiders=False, visible_to_all_staff=True)
+
+    def url(self, event=None):
+        return reverse("events:event_detail", args=[(event or self.event).pk])
+
+    def open_as(self, user, event=None):
+        self.login(user)
+        return self.client.get(self.url(event))
+
+    def hide_every_role(self):
+        """Leave the event visible to everybody, and none of its roles."""
+        set_audience(self.role, Audience.Spec(
+            outsiders=False, all_staff=True, ministries=frozenset()))
+
+    # --- who sees which rows ----------------------------------------------
+
+    def test_an_outsider_is_not_shown_a_staff_only_role(self):
+        response = self.open_as(self.lisi)
+        self.assertContains(response, self.role.role.name)
+        self.assertNotContains(response, "Coordinator")
+
+    def test_the_page_distinguishes_no_roles_from_none_for_you(self):
+        """🔴 The two empty states, side by side — the point of this step.
+
+        Same viewer, same kind of blank table, two different facts.
+        """
+        self.hide_every_role()
+        self.staff_only.delete()
+        none_for_you = self.open_as(self.lisi)
+        self.assertContains(none_for_you, "none of them is open to you")
+        self.assertNotContains(none_for_you, "No roles opened yet")
+
+        empty = make_event(ministry=self.pantry, name="Nothing opened yet",
+                           owner=self.zhang.contact)
+        nothing_yet = self.client.get(self.url(empty))
+        self.assertContains(nothing_yet, "No roles opened yet")
+        self.assertNotContains(nothing_yet, "none of them is open to you")
+
+    def test_no_sign_up_button_when_nothing_is_open_to_them(self):
+        """⚠️ …and it does not fall back to "this event is not taking signups".
+
+        It is taking them. It is taking them from other people.
+        """
+        self.hide_every_role()
+        response = self.open_as(self.lisi)
+        self.assertNotContains(response, "Sign up")
+        self.assertContains(response, "none of its roles is open to you")
+        self.assertNotContains(response, "not taking signups")
+
+    def test_the_signup_page_is_a_404_when_no_role_is_theirs(self):
+        """The page behind the button that is no longer drawn.
+
+        ⚠️ 404 rather than an empty dropdown: a required field with no options
+           answers "Select a valid choice" to somebody who did nothing wrong,
+           and this view already answers 404 for every other "nothing here for
+           you" (draft, finished, not your audience).
+        """
+        self.hide_every_role()
+        self.login(self.lisi)
+        response = self.client.get(
+            reverse("events:event_signup", args=[self.event.pk]))
+        self.assertEqual(response.status_code, 404)
+
+    def test_a_hand_made_post_for_a_hidden_role_is_a_form_error_not_a_500(self):
+        # The dropdown holds one role; this posts the id of the other one.
+        self.login(self.lisi)
+        response = self.client.post(
+            reverse("events:event_signup", args=[self.event.pk]),
+            {"event_role": self.staff_only.pk})
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("event_role", response.context["form"].errors)
+        self.assertFalse(
+            Participation.objects.filter(event_role=self.staff_only).exists())
+
+    def test_a_signup_you_already_hold_survives_the_role_being_narrowed(self):
+        """⭐ Narrowing takes away **discovery**, never a row somebody holds.
+
+        The same rule that keeps my_participations and the check-in scanner out
+        of the audience filter (06-roadmap.md L2.2).
+        """
+        sign_up(contact=self.lisi.contact, event_role=self.role)
+        self.hide_every_role()
+        response = self.open_as(self.lisi)
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "What you signed up for")
+        self.assertContains(response, self.role.role.name)
+
+    # --- the exception: somebody who may read this event's records ---------
+
+    def test_somebody_who_may_read_the_records_sees_every_role(self):
+        """⚠️ A deliberate break in "the table and the dropdown are one set".
+
+        A ministry admin who has just opened a role and cannot find it on the
+        event page has no way to tell that from a bug — and they can already
+        see it on the signups page. So they get the full table **and** a
+        sentence saying that is what they are looking at.
+        """
+        response = self.open_as(self.zhang)
+        self.assertContains(response, "Coordinator")
+        self.assertContains(response, "every role is listed here")
+
+    def test_nobody_else_is_told_they_are_seeing_every_role(self):
+        # The sentence is the price of the exception, so it must not appear for
+        # the people the exception is not about — to them it would be false.
+        response = self.open_as(self.lisi)
+        self.assertNotContains(response, "every role is listed here")
+
+    def test_the_manager_still_only_gets_a_sign_up_button_for_their_own_roles(self):
+        """The full table is a **reading** privilege, never a signing-up one.
+
+        ⚠️ zhang runs the pantry but holds no post, so by audience they are an
+           outsider — which is the ordinary case for a ministry admin here and
+           exactly why the button is drawn from what they may take rather than
+           from what the table shows.
+        """
+        self.hide_every_role()
+        response = self.open_as(self.zhang)
+        self.assertContains(response, "Coordinator")
+        self.assertNotContains(response, "Sign up")
+
+
 class DraftPreviewTests(PageTestCase):
     """2026-08-06: an unpublished event opens for the people who may publish it.
 
@@ -5054,7 +5476,14 @@ class EventUpdatePageTests(PageTestCase):
         #    every well-formed POST carries one. Public, because that is
         #    what these events were before the field existed and none of
         #    these tests is about the audience.
+        #
+        # ⚠️ **Both** ticks (L2.4), matching what make_event() gives the
+        #    fixture. Posting only the first is a *narrowing* — and since the
+        #    roles on this event inherit its audience, every edit here was then
+        #    refused for leaving a role behind: five tests failing on a rule
+        #    none of them is about.
         "visible_to_outsiders": True,
+        "visible_to_all_staff": True,
         }
         fields.update(overrides)
         return fields
@@ -5879,12 +6308,32 @@ class AcceptanceWalkTests(TestCase):
     # --- ② the food pantry's admin ----------------------------------------
 
     def test_the_pantry_admin_sees_a_role_nobody_signed_up_for(self):
-        # ⭐ D19's acceptance point, walked: the event opened three roles and
-        # Interpreting has nobody in it, so it has three — not two.
+        # ⭐ D19's acceptance point, walked: the event opened four roles and
+        # Interpreting has nobody in it, so it has four — not three.
+        #
+        # ⚠️ Four since 2026-08-29, when the seed grew a staff-only role
+        #    (L2.4). The signups page is management side and is **not** narrowed
+        #    by audience — it answers "which roles did we open", and the walk
+        #    below checks the other half: what a volunteer sees on the event
+        #    page is three of them.
         self.as_role("pantry_admin")
         response = self.client.get(
             reverse("events:event_registrations", args=[self.open_event().pk]))
         self.assertContains(response, "Interpreting")
+        self.assertEqual(len(response.context["roles"]), 4)
+
+    def test_an_outside_volunteer_is_not_offered_the_staff_only_role(self):
+        """L2, walked on the demo data: one publish, two audiences.
+
+        The pantry's Saturday distribution opens three jobs anybody may take
+        and one only the foundation's own people may — requirement 8, on one
+        event, without publishing it twice.
+        """
+        self.as_role("participant_adult")
+        response = self.client.get(
+            reverse("events:event_detail", args=[self.open_event().pk]))
+        self.assertContains(response, "Interpreting")
+        self.assertNotContains(response, "Floor coordinator")
         self.assertEqual(len(response.context["roles"]), 3)
 
     def test_the_pantry_admin_is_refused_the_other_ministrys_event(self):

@@ -945,13 +945,42 @@ class MinistryReportTests(TestCase):
         # Skipping them is what a GROUP BY does, and in a chart it is a lie:
         # January beside March says the ministry ran events in consecutive
         # months. A quiet ministry has to look quiet.
-        make_event(ministry=self.pantry, start_time=NOW - 90 * DAY,
-                   end_time=NOW - 90 * DAY + HOUR)
-        bars = self.report()["charts"]["events_by_month"].bars
-        # Two events three months apart, so at least one month between them has
-        # nothing in it — and it has to appear, at zero.
-        self.assertGreaterEqual(len(bars), 3)
-        self.assertIn("0 events", [bar.caption for bar in bars])
+        #
+        # 🔴 **Fixed dates, and the report narrowed to just these two.** Both
+        #    halves are the fix for a test that spent months being green and
+        #    then went red on 2026-08-30 without anybody touching it (see
+        #    06-roadmap.md's note). It used to place its events at NOW - 30 and
+        #    NOW - 90 days and assert "at least three bars" — but whether 60
+        #    days spans three calendar months depends on what today is. On the
+        #    last day or two of most months, "30 days ago" steps back over a
+        #    whole month: on 2026-08-30 the two events landed in June and July,
+        #    which are adjacent, so there was no empty month to draw and the
+        #    premise in the comment ("three months apart") was simply not what
+        #    the fixture built. Twelve days a year, roughly one per month.
+        #
+        # ⚠️ The moments come from `day_start(date)`, not
+        #    `timezone.make_aware(datetime.datetime(...))` — D16's rule, and
+        #    ruff's DTZ blocks the second spelling anyway. Neither date is near
+        #    a daylight-saving switch, so adding an absolute hour is safe.
+        january = make_event(
+            ministry=self.pantry, name="January",
+            start_time=day_start(datetime.date(2026, 1, 10)) + 10 * HOUR,
+            end_time=day_start(datetime.date(2026, 1, 10)) + 11 * HOUR)
+        march = make_event(
+            ministry=self.pantry, name="March",
+            start_time=day_start(datetime.date(2026, 3, 10)) + 10 * HOUR,
+            end_time=day_start(datetime.date(2026, 3, 10)) + 11 * HOUR)
+        # ⚠️ Only these two. The report otherwise also covers setUp's event,
+        #    which is still placed relative to today — and that would put the
+        #    calendar back into the answer by the back door.
+        bars = self.report(Event.objects.filter(pk__in=[january.pk, march.pk])
+                           )["charts"]["events_by_month"].bars
+        # February is the whole test: it has nothing in it and it still gets a
+        # bar, at zero.
+        self.assertEqual([bar.label for bar in bars],
+                         ["Jan 2026", "Feb 2026", "Mar 2026"])
+        self.assertEqual([bar.caption for bar in bars],
+                         ["1 event", "0 events", "1 event"])
 
     def test_most_hours_does_not_put_the_unrecorded_people_first(self):
         # ⚠️ Postgres sorts NULL first on a descending order, so the obvious
@@ -1039,15 +1068,29 @@ class MinistryReportTests(TestCase):
         somebody wrote, and every other test here builds its own unordered
         queryset — which is precisely why they all passed.
         """
-        for day in (2, 3, 4):
+        # ⚠️ Fixed dates, and the report narrowed to just these three — the
+        #    same fix, and the same reason, as the empty-month test below. Built
+        #    at NOW - 2/3/4 days and reported over the whole ministry, this
+        #    asserted "3 events" while setUp's own event floated in and out of
+        #    the same calendar month: on 2026-08-31 it landed in August beside
+        #    these three and the bar read "4 events". Nothing to do with
+        #    grouping, which is what this test is actually about.
+        same_month = [
             make_event(ministry=self.pantry, name=f"Same month {day}",
-                       start_time=NOW - day * DAY,
-                       end_time=NOW - day * DAY + HOUR)
-        ordered = Event.objects.filter(ministry=self.pantry).order_by("-start_time")
+                       start_time=day_start(datetime.date(2026, 5, day)) + 10 * HOUR,
+                       end_time=day_start(datetime.date(2026, 5, day)) + 11 * HOUR)
+            for day in (2, 3, 4)
+        ]
+        # The ordering is the point of this test and must survive the narrowing.
+        ordered = (Event.objects.filter(pk__in=[event.pk for event in same_month])
+                   .order_by("-start_time"))
         bars = ministry_report(ordered)["charts"]["events_by_month"].bars
-        self.assertIn("3 events", [bar.caption for bar in bars])
-        # The other four groupings ride on the same queryset.
-        report = ministry_report(ordered)
+        self.assertEqual([bar.caption for bar in bars], ["3 events"])
+        # The other four groupings ride on the same queryset. ⚠️ setUp's event
+        # is the one carrying the role that wants five, so this half asks over
+        # the whole ministry — ordered, which is what it is here to check.
+        report = ministry_report(
+            Event.objects.filter(ministry=self.pantry).order_by("-start_time"))
         self.assertEqual(report["charts"]["role_gap"].bars[0].needed, 5)
 
     def test_bars_are_scaled_against_the_largest_not_the_total(self):

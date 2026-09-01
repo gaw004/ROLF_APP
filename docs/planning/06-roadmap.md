@@ -53,8 +53,8 @@
 | # | 问题 | 定案 |
 |---|---|---|
 | 1 | 全机构岗位（`Position.ministry` 为空，如执行主任）在「本 ministry 在编」这一档算不算 | 不算。它只满足「全体在编」 |
-| 2 | 公告怎么和「还没建完」区分 | 加 `Event.takes_signups` 显式开关 |
-| 3 | 想参加公告的人怎么「记住」它 | 不做新东西。需要被记住的一律开一个 `attending` 角色（`needed_count` 留空） |
+| 2 | ~~公告怎么和「还没建完」区分~~ | ❌ **2026-08-31 推翻**，见 [D41](decisions/D41-notices-are-not-events.md)。这个开关一行代码都没写过，而它两头都不成立：有固定时间的那一半归下面第 3 条，没固定时间的那一半**根本进不了 `Event`**（起止两列都是 NOT NULL）。公告改成独立的 `Notice` 表 |
+| 3 | 想参加公告的人怎么「记住」它 | 不做新东西。需要被记住的一律开一个 `attending` 角色（`needed_count` 留空）。**2026-08-31 起这一条承重**：删掉第 2 条那个开关之后，它是「有固定时间、想来就来」唯一的落点 |
 | 4 | L5 的载体 | 独立 `EventSeries` 表，规则必须带结束条件，一次生成完，不加 cron。⚠️ 2026-08-26 收窄：它**只服务 recurring events 那一档**，Programs 是另一个形状（[L5.0](#l50-六个决定以及为什么是三档不是四格)） |
 | 5 | 生成场次的角色从哪来 | `EventSeriesRole` 模板表，生成时逐场复制成真的 `EventRole`。⚠️ 同上，只对 recurring events |
 | 6 | 可见性判「哪一天在编」 | 活动当天，和 L2 资格同一把尺 |
@@ -1040,8 +1040,13 @@ M2M 在 `save()` **之后**才写，`full_clean()` 在**之前**跑。所以：
 所以角色要**按看的人过滤掉**，不是列出来带一句「你报不上」。
 
 ⚠️ 于是多出一种空状态：**别的 ministry 的在编成员打开活动，看到零个角色** ——
-和「还没建完」「这是一条公告」长得一模一样。[L2.5](#l25-公告) 因此要从两句话变三句，
-而这正是 [D27](decisions/D27-ministry-report.md) 那条「没有和没算不能长得一样」。
+和「还没建完」长得一模一样，而这正是 [D27](decisions/D27-ministry-report.md) 那条
+「没有和没算不能长得一样」。所以这两种要分成两句话。
+
+> 本句原文还有第三种（「这是一条公告」），并因此写着「L2.5 要从两句话变三句」。
+> 2026-08-31 [D41](decisions/D41-notices-are-not-events.md) 把公告移出了 `Event`，
+> 第三种**自己消失了** —— 一个角色都没有的活动只剩「还没建完」一种含义。
+> 两句话就够，[L2.5](#l25-公告) 整节作废。
 
 ⚠️ [`participants.md` 第六节](participants.md)那个示意框写的是「外部人看得见活动，
 这个位置报不上」，和它自己第三节的 🔴 打架。需求原文 + 第三节的不变量，二比一，
@@ -1640,26 +1645,34 @@ issubset  /  <=  /  >=   出现在受众字段附近 → 只许在 events/models
 
 ## L2.5 公告
 
-`takes_signups=False` 时：
+❌ **本节整个作废（2026-08-31）。**
 
-- `Event.accepting_signups` 属性把它 AND 进去（那是 `can_sign_up` 的唯一来源）；
-- 不许有角色。同 L2.3 一样是跨表的，落在 `EventRole.clean()` 和 `EventForm.clean()`；
-- 两处空状态分成两句话，这一格是[验收](#验收)里点名的一条：
+> 🔴 **原计划的 `Event.takes_signups` 是个伪需求，一行代码都没写过。**
+> 完整论证在 [D41](decisions/D41-notices-are-not-events.md)，短版是它两头都不成立：
+>
+> - **有**固定时间的公告不需要它 —— 上面[决定 3](#七个已定的决定2026-08-21) 已经写死了
+>   「需要被记住的一律开一个 `attending` 角色，`needed_count` 留空」；
+> - **没有**固定时间的公告装不进 `Event` —— `start_time` / `end_time` 都是 NOT NULL，
+>   编造时间之后它会进 R1 的活动条数、进日历、进 `.ics`。
+>
+> 落点改成 `notices` app 的 `Notice` 表（批四 N2 / N3，已落地）。
+>
+> **原来那三句空状态因此变回两句。** 本节曾要求把「这是一条公告」和
+> 「还没建完」区分开；公告不在 `Event` 那张表里之后，「一个角色都没有」只剩
+> 「还没建完」一种含义，那个歧义**自己消失了**，不需要任何文案去消解它。
+> `_event_roles_panel.html` 那句 empty 一个字不动。
+>
+> ⚠️ 本节引的 ChurchSuite 依据**过不来**：它的原文场景是
+> *"an internal reminder in the Calendar module of the weekly staff meeting"*，
+> 一条**日历条目** —— 而本仓库已经把例会判给了 `Shift`（[`phase-d.md`](phase-d.md)）。
+> 三家真有这个需求的产品（Viva、Planning Center、Chatter）全都建了独立对象。
 
-| 情况 | 文案 |
-|---|---|
-| `takes_signups=False` | This is an announcement — there is nothing to sign up for. |
-| `takes_signups=True` 且零角色 | 保持现在那句 No roles opened yet. |
+本节剩下**唯一**要做的一件事，排在批四 N4（仪表盘）之后：
 
-⚠️ 现在这两种情况长得一模一样，正是 [D27](decisions/D27-ministry-report.md) 那条
-「没有和没算不能长得一样」。要改的文件是
-`_event_roles_panel.html`（第 55 行那句 empty）和 `_event_detail_body.html`（第 158 行那格）。
-
-行业依据写进 [D27](decisions/D27-ministry-report.md) 或 `participants.md`：
-ChurchSuite 从零设计就把报名做成每场活动的显式开关（开关关着时，
-Sign-Ups / Tickets 这些页签根本不出现），可见性是另一组设置；
-Planning Center 是被「有人以为在 Groups 里 RSVP 了就等于报名了」这个 bug
-逼着补上同一个开关的。两家最终落在同一个形状上。
+- `_event_detail_body.html` 角色空状态那一格，在 `No roles opened yet.` 之后补一句
+  指向 `/me/` 的英文引导。
+  ⚠️ 它是承重的：横幅那条被判不做（[D41 第六节](decisions/D41-notices-are-not-events.md)），
+  所以这是活动侧通向公告的**唯一**线索。
 
 ## L2.6 `EventType` 上页面
 
@@ -1682,8 +1695,6 @@ Planning Center 是被「有人以为在 Groups 里 RSVP 了就等于报名了�
 - `test_the_schedule_narrows_by_audience_too`
 - `test_signing_up_for_an_event_you_cannot_see_is_a_404`
 - `test_cancelling_visibility_does_not_hide_an_event_you_already_signed_up_for`
-- `test_an_announcement_says_it_takes_no_signups`
-- `test_an_announcement_cannot_have_roles`
 - `test_the_event_list_filters_by_kind`
 
 多选带来的那几条（2026-08-26 加）：
@@ -1919,7 +1930,7 @@ class EventSeries(TimeStampedModel):
     rule = models.TextField()          # RFC 5545 的 RRULE，不含 DTSTART
     starts_on / start_time / duration
     location / description / image
-    可见性三件套 / takes_signups / requires_guardian_consent   # 模板
+    可见性三件套 / requires_guardian_consent                  # 模板
     ended_on                            # 「即日停止」
     undone_at / undone_by               # 整批撤销
     history = HistoricalRecords(m2m_fields=["visible_to_ministries"])
@@ -2091,7 +2102,7 @@ recurring events：
 
 | 文件 | 批 | 干什么 |
 |---|---|---|
-| `events/models.py` | 一二三 | `nature`、`NOT_APPLICABLE`、新约束、第二个兜底工种、可见性的两个布尔 + 一张多对多（`Event` / `EventRole` 各一套）、`takes_signups`、`refuse_wider_than_event()`、`AudienceQuerySetMixin.for_audience()`（两张表共用一份，见 L2.4）、`Event.shape` + 两个谓词、`Session`、`SessionAttendance`、`EventSeries`、`EventSeriesRole`、`Event.series` / `Event.source` |
+| `events/models.py` | 一二三 | `nature`、`NOT_APPLICABLE`、新约束、第二个兜底工种、可见性的两个布尔 + 一张多对多（`Event` / `EventRole` 各一套）、`refuse_wider_than_event()`（⚠️ `Audience` 和 `AudienceQuerySetMixin` **2026-08-31 搬去了 `org/audience.py`**，留在这里的只有事件×角色那条含容规则，见 [D41 第四节](decisions/D41-notices-are-not-events.md)）、`Event.shape` + 两个谓词、`Session`、`SessionAttendance`、`EventSeries`、`EventSeriesRole`、`Event.series` / `Event.source` |
 | `events/services.py` | 一二三 | `on_the_books_q()` / `on_the_books_exists()`、`default_served_as()`、`record_hours()`、`check_out()`、`create_participation_role()`、`ministry_report()`、`_people_served()`、`eligible()`（⚠️ `eligible_role_ids()` 判它不建，见 L2.4 那个补框）、`sign_up()`、系列的生成与撤销、⚠️ L5.7：工时的四个口径要 union `SessionAttendance` |
 | `events/forms.py` | 一二三 | `RoleChoiceField`、`SignUpForm`、`EventRoleForm`、`EventForm`（加三档单选）、`EventPeriodForm`、新的 `EventSeriesForm` |
 | `events/views.py` | 一二三 | `_visible_events()`、`_schedule()`、`_detail()`、`event_signup`、`event_registrations`、`event_attendance`、系列的三个视图 |
@@ -2115,7 +2126,7 @@ recurring events：
 | `events/templates/events/_event_roles_panel.html` | 一二 | 档位列；公告的空状态 |
 | `events/templates/events/_event_detail_body.html` | 一二 | 档位列；三种空状态（「还没开」/「没有一个是给你的」/ 公告）；看全表的人那一句常驻文案 |
 | `events/templates/events/_period_filter.html` | 二 | 多一个 kind 下拉 |
-| `events/templates/events/event_form.html` | 二三 | `audience` / `takes_signups`；系列入口 |
+| `events/templates/events/event_form.html` | 二三 | `audience`；系列入口 |
 | `events/management/commands/seed_demo.py` | 一二三 | ESL 工种与活动；一场内部活动；一个系列 |
 | `docs/planning/diagrams/src/page.html` | 三 | ERD 加三个字段和两张表，DFD 加一条生成的路，表册加两行。⚠️ 改完要按 `docs/planning/diagrams/README.md` 重新生成 `data-and-flow.html`，那一步要 `npm i mermaid puppeteer-core` |
 

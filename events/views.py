@@ -701,25 +701,23 @@ def event_signup(request, pk):
 
 @login_required
 def my_participations(request):
-    """Mine means mine — narrowed in the query, not in the template.
+    """Everything this person has signed up for, newest first.
 
-    visible_to_participants() as well, which is not belt and braces: every row
-    here links to the detail page, and that page uses the same predicate. A
-    signup an admin entered against an unpublished event would otherwise appear
-    with a link that 404s — the failure this pair of predicates was written to
-    prevent, arriving from the other end.
+    ⚠️ The predicate moved to `ParticipationQuerySet.mine()` on 2026-09-02,
+       when the dashboard needed the same one. Its reasoning went with it —
+       including why it also asks `visible_to_participants()` — because a rule
+       explained where it is not implemented is one that gets changed in one
+       place and read in the other.
+
+    What stays here is this page's own half: **all of it, newest first**. The
+    dashboard asks the same question of the same method and then adds
+    `.upcoming()`, which is exactly the difference between the two pages.
     """
-    contact = _my_contact(request)
-    rows = Participation.objects.none()
-    if contact is not None:
-        rows = (
-            Participation.objects.filter(
-                contact=contact,
-                event_role__event__in=Event.objects.visible_to_participants(),
-            )
-            .select_related("event_role__event__ministry", "event_role__role")
-            .order_by("-event_role__event__start_time")
-        )
+    rows = (
+        Participation.objects.mine(_my_contact(request))
+        .select_related("event_role__event__ministry", "event_role__role")
+        .order_by("-event_role__event__start_time")
+    )
     return render(request, "events/my_participations.html", {"participations": rows})
 
 

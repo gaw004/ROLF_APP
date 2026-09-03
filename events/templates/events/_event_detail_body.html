@@ -180,7 +180,12 @@
           🔴 两句话，不是一句（L2.4）。「一个角色都没开」和「有角色，只是没有
              一个是给你的」是两件完全不同的事，而在此之前它们长得一模一样 ——
              正是 D27 那条「没有和没算不能长得一样」。
-             第三句（这是一条公告，故意不收报名）是 L2.5 的，还没有。
+
+          ⚠️ 这里**永远不会有第三句**。原 L2.5 计划过一句「这是一条公告，
+             故意不收报名」，那一整节 2026-08-31 作废了：公告不再是活动
+             （D41），它有自己的表和自己的页面。于是「一个角色都没有」
+             重新只剩一种含义 —— 还没建完 —— 那个歧义自己消失了，
+             不需要任何文案去消解它。
           {% endcomment %}
           <tr><td colspan="4" class="text-ink-600 dark:text-ink-300">
             {% if roles_none_for_you %}
@@ -189,6 +194,13 @@
             {% else %}
               No roles opened yet.
             {% endif %}
+            {% comment %}
+            ⚠️ 这一条引导是**承重的**，不是顺手加的：活动列表顶部那条公告横幅
+               判了不做（D41 第六节），所以它是活动这一侧通向公告的唯一线索。
+            {% endcomment %}
+            <a href="{% url 'dashboard:me' %}" class="text-brand-700 hover:underline dark:text-brand-300">
+              Notices and what you have signed up for live on your home page.
+            </a>
           </td></tr>
         {% endfor %}
       </tbody>

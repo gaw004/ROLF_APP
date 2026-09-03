@@ -900,7 +900,7 @@ class MinistryReportTests(TestCase):
         # consent_required_for() needs both halves: a minor AND an event that
         # asked for consent. Asking it differently here would reassure somebody
         # about a rule the report is not actually checking.
-        child = make_person("Chen", birth_date=local_now().date())
+        child = make_person("Chen", birth_date=local_today())
         unknown = make_person("Zhou")
         self.signup(child)
         self.signup(unknown)
@@ -921,7 +921,7 @@ class MinistryReportTests(TestCase):
     def test_a_consented_minor_is_not_flagged(self):
         self.event.requires_guardian_consent = True
         self.event.save()
-        child = make_person("Chen", birth_date=local_now().date())
+        child = make_person("Chen", birth_date=local_today())
         self.signup(child, consent_at=local_now(), consent_given_by="A parent")
         self.assertEqual(self.report()["figures"]["minors_without_consent"], 0)
 
@@ -7948,7 +7948,7 @@ class ManageListReportPageTests(PageTestCase):
                    name="Long ago", start_time=NOW - 400 * DAY,
                    end_time=NOW - 400 * DAY + HOUR)
         self.login(self.zhang)
-        window = (local_now() - datetime.timedelta(days=7)).date()
+        window = local_today() - datetime.timedelta(days=7)
         response = self.client.get(
             self.url(), {"report": "1", "start": window.isoformat()})
         self.assertEqual(response.context["report"]["figures"]["events"], 1)

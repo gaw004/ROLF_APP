@@ -73,6 +73,9 @@ def _menu_for(user, administered, foundation):
         ]
 
     menu = [
+        # ⚠️ 第一条，因为它是登录之后的落脚点 —— 别的每一条都答一个他带着来的
+        #    问题，只有这一条告诉他「有什么在等你」。
+        _link("Home", "dashboard:me"),
         _link("Events", "events:event_list"),
         # ⚠️ Second, above My Signups, and the order is the argument. A notice is
         #    the one thing on this menu somebody might not know they need to

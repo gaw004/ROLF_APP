@@ -1,0 +1,32 @@
+{% comment %}
+「接下来」卡的内容。一行两级：上面时间、下面活动名 · 角色 —— 照管理列表
+那次改动的样式（「时间回到表格里一格两行」）。
+{% endcomment %}
+{% if coming %}
+  <ul class="space-y-2">
+    {% for row in coming %}
+      <li>
+        <a href="{% url 'events:event_detail' row.event_role.event.pk %}"
+           class="-mx-2 flex items-center gap-2 rounded-lg px-2 py-1.5 hover:bg-ink-50 dark:hover:bg-ink-800">
+          <span class="min-w-0 flex-1">
+            <span class="block text-sm">{{ row.event_role.event.start_time|date:"D j M, H:i" }}</span>
+            <span class="block truncate text-xs text-ink-600 dark:text-ink-300">
+              {{ row.event_role.event.name }} · {{ row.event_role.role.name }}
+            </span>
+          </span>
+          <span class="text-ink-400" aria-hidden="true">›</span>
+        </a>
+      </li>
+    {% endfor %}
+  </ul>
+{% else %}
+  {% comment %}
+  ⚠️ 这是「你还差一步」那一种空态，所以给下一步动作 —— 和公告那张卡正好相反，
+     那边没有公告是「一切照常」。同一页两种空，说的不是同一件事。
+  {% endcomment %}
+  <p class="text-sm text-ink-600 dark:text-ink-300">Nothing on your calendar yet.</p>
+  <a href="{% url 'events:event_list' %}"
+     class="mt-2 inline-block text-sm font-medium text-brand-700 hover:underline dark:text-brand-300">
+    Find something to join →
+  </a>
+{% endif %}

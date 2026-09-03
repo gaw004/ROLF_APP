@@ -12,6 +12,8 @@ people in it. The analogy is exact, and this is the second time in this project
 that one had to be split out of the other.
 """
 
+from decimal import Decimal
+
 from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.db import models
@@ -1191,6 +1193,78 @@ class ParticipationQuerySet(models.QuerySet):
         coming, and mailing them about a new time is noise.
         """
         return self.exclude(status=Participation.Status.CANCELLED)
+
+    def volunteering(self):
+        """The rows on the **volunteering** ledger. D38's own half of D36.
+
+        ⭐ This is the definition of the one hours figure this project is
+           allowed to print. D36 concluded there was no printable total —
+           `Participation.hours` and `Shift` overlap and may never be added —
+           and [D38 section 7] overturned exactly that much of it: once
+           `served_as` exists, "hours volunteered" has a definition, and this
+           is it.
+
+        🔴 **One ledger, never two.** The whole safety of the figure is that
+           this filter cannot accidentally include work time: a caller that
+           wants both is asking for the sum D36 forbids, and there is
+           deliberately no method here that would give it to them.
+
+        ⚠️ Beside recording_hours() and attending() because they are neighbours
+           on the same axis, and the three have to be read together: those two
+           split on the *role's* nature (giving vs receiving), this one on the
+           *person's* declaration (my own time vs my job). An event can pair any
+           of them, which is why neither axis can be derived from the other.
+        """
+        return self.filter(served_as=Participation.ServedAs.VOLUNTEER)
+
+    def hours_given(self):
+        """Sum the hours on these rows. `Decimal("0")` when there are none.
+
+        ⚠️ Only meaningful after `volunteering()` — on its own it would add the
+           two ledgers together, which is the one thing D36 forbids. It is a
+           separate method rather than folded into the filter because the
+           dashboard needs the number while `/me/participations/` needs the
+           rows.
+
+        ⚠️ `or Decimal("0")`: `Sum` over no rows is None, and a page that prints
+           "None hours volunteered" is the failure this line exists to stop.
+           Zero is a true answer for somebody who has not started yet; None is
+           not an answer at all.
+        """
+        return self.aggregate(total=models.Sum("hours"))["total"] or Decimal("0")
+
+    def mine(self, contact):
+        """This person's signups, narrowed in the query rather than the template.
+
+        ⚠️ `visible_to_participants()` as well, and it is not belt and braces:
+           every row here links to the detail page, and that page uses the same
+           predicate. A signup an admin entered against an unpublished event
+           would otherwise appear with a link that 404s — the failure this pair
+           was written to prevent, arriving from the other end.
+
+        ⚠️ Extracted from `views.my_participations` on 2026-09-02 so that the
+           dashboard and that page cannot come to different answers about what
+           counts as "mine". Two copies of this predicate is one page showing a
+           signup the other does not.
+        """
+        if contact is None:
+            return self.none()
+        return self.filter(
+            contact=contact,
+            event_role__event__in=Event.objects.visible_to_participants(),
+        )
+
+    def upcoming(self, now=None):
+        """Not over yet, soonest first — what "coming up" means.
+
+        ⚠️ The cut is `end_time`, not `start_time`, matching
+           `EventQuerySet.open_for_signup()`: something that started an hour ago
+           and runs till five is still very much coming up for the person who
+           has to be there.
+        """
+        return self.filter(
+            event_role__event__end_time__gt=now or local_now(),
+        ).order_by("event_role__event__start_time")
 
 
 class Participation(ConstraintErrorFieldMixin, TimeStampedModel):

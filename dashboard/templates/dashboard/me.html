@@ -1,0 +1,106 @@
+{% extends "core/base.html" %}
+{% block title %}Home{% endblock %}
+{% block main_width %}max-w-6xl{% endblock %}
+
+{% block content %}
+  {% comment %}
+  排版：一条问候通栏 + 主区卡片网格 + 一条窄侧栏。
+
+  ⚠️ 侧栏在手机上排到**最下面**（`order-last lg:order-none`），不是最上面。
+     月历和订阅按钮不该占掉第一屏 —— 第一屏是公告和「你接下来要去哪」。
+
+  ⚠️ 卡片顺序固定，按紧急程度：你必须知道的 → 你承诺了什么 → 别人在等你
+     → 好消息 → 回顾。不按人配置（要一张 per-user 布局表，而卡片总共五张、
+     且身份已经决定了谁看得见哪几张）。
+  {% endcomment %}
+
+  <header class="mb-6">
+    <h1 class="text-2xl font-semibold">{{ greeting }}, {{ user.display_name }}</h1>
+    {% comment %}
+    🔴 在编的人列出**每一条**任职，不是第一条 —— D32 的不变量是一人可多岗。
+    ⚠️ 外部志愿者这一行**整行不出现**，不画一句「你没有职位」：
+       D27「没有和没算不能长得一样」，而「不是在编」本来就不是一种缺失。
+    {% endcomment %}
+    {% if posts %}
+      {% comment %}
+      ⚠️ 每条任职**各占一行**，不是用一个分隔符串起来。两个理由：一人多岗时
+         「哪个职位属于哪个 ministry」一眼看得出来；而第一版用的全角「／」
+         是一个 CJK 字符，被 InterfaceLanguageGuardTests 当场拦下 —— D23：
+         浏览器渲染出来的每一个字都必须是英文。
+      {% endcomment %}
+      <div class="mt-1 space-y-0.5 text-sm text-ink-600 dark:text-ink-300">
+        {% for post in posts %}
+          <p>{{ post.position.name }} · {{ post.position.ministry.name }}</p>
+        {% endfor %}
+      </div>
+    {% endif %}
+  </header>
+
+  <div class="grid gap-6 lg:grid-cols-3">
+    <div class="grid content-start gap-6 sm:grid-cols-2 lg:col-span-2">
+      {% if notices %}
+        {% comment %}
+        ⚠️ 没有公告时**整张卡不出现**，不画一句「暂无公告」——
+           没有公告不是一种缺失，是「一切照常」。
+        {% endcomment %}
+        {% url 'notices:notice_list' as notices_url %}
+        {% include "dashboard/_card.html" with icon="📣" title="Notices" tone="rose" body="notices/_current_notices.html" href=notices_url href_label="View all notices" %}
+      {% endif %}
+
+      {% url 'events:my_participations' as signups_url %}
+      {% include "dashboard/_card.html" with icon="📅" title="Coming up" tone="sky" body="dashboard/_body_coming.html" href=signups_url href_label="See all your signups" %}
+
+      {% if is_ministry_admin %}
+        {% url 'events:event_manage_list' as manage_url %}
+        {% include "dashboard/_card.html" with icon="⚠️" title="Needs you" tone="amber" body="dashboard/_body_needs_you.html" href=manage_url href_label="Events I manage" %}
+        {% include "dashboard/_card.html" with icon="👥" title="Recent signups" tone="violet" body="dashboard/_body_recent_signups.html" href=manage_url href_label="Events I manage" %}
+      {% endif %}
+
+      {% include "dashboard/_card.html" with icon="⏱" title="Volunteer hours" tone="emerald" body="dashboard/_body_hours.html" href=signups_url href_label="See your signups" %}
+    </div>
+
+    {% comment %}
+    侧栏。⚠️ 这个月历是一个**跳转控件**，不是第三个日历页面 ——
+       它不翻月、不显示活动名。翻月是 /events/schedule/ 的活。
+    {% endcomment %}
+    <aside class="order-last space-y-4 lg:order-none">
+      <section class="card">
+        <h2 class="mb-3 text-center text-sm font-semibold">{{ month_name }}</h2>
+        <table class="w-full table-fixed text-center text-xs">
+          <thead>
+            <tr class="text-ink-500 dark:text-ink-400">
+              {% for initial in weekday_initials %}
+                <th class="pb-1 font-normal">{{ initial }}</th>
+              {% endfor %}
+            </tr>
+          </thead>
+          <tbody>
+            {% for week in weeks %}
+              <tr>
+                {% for cell in week %}
+                  <td class="py-1">
+                    {% if cell.day %}
+                      <span class="mx-auto flex h-6 w-6 items-center justify-center rounded-full
+                                   {% if cell.is_today %}bg-brand-600 font-semibold text-white dark:bg-brand-500 dark:text-ink-950{% endif %}">
+                        {{ cell.day }}
+                      </span>
+                      {% comment %}
+                      ⚠️ 点在数字**下面**而不是替换数字：一个人要同时知道
+                         「几号」和「那天有事」，二选一等于没说。
+                      {% endcomment %}
+                      <span class="mx-auto mt-0.5 block h-1 w-1 rounded-full {% if cell.marked %}bg-brand-600 dark:bg-brand-400{% endif %}"></span>
+                    {% endif %}
+                  </td>
+                {% endfor %}
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+        <div class="mt-3">
+          {% url 'events:event_schedule' as schedule_url %}
+          {% include "core/components/button.html" with label="Open the calendar" href=schedule_url variant="secondary" full=True %}
+        </div>
+      </section>
+    </aside>
+  </div>
+{% endblock %}

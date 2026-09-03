@@ -2353,6 +2353,40 @@
    * ⚠️ 那些「卡片 + 彩色边」的警示框（生日提示、只读提示等）现在在模板里各自
    *    显式写了 `border` —— Tailwind 的 `border-<色>` 只给颜色，宽度原来是这里给的。
    *    它们的轮廓不是装饰：那条线在说「这一行和周围的页面不一样」。 */
+  /* --- 仪表盘卡片上那个彩色小图标（2026-09-02）---------------------------
+   *
+   * ⚠️ 颜色是**认卡用的**，不是装饰。一屏五张卡，人靠颜色定位而不是读标题 ——
+   *    所以同一张卡的色档全站固定，换页面也不许变（tone 写在 me.html 里）。
+   *
+   * ⚠️ 一个 emoji 装在一个圆角方块里，不引图标库：这一页要五个图标，
+   *    为五个图标引一个字体文件是每一个访客都在付的账。
+   *
+   * ⚠️ 深色下底色降到 /15 而不是换一组色值 —— 五档各写一份深色色值，
+   *    就是五个将来会各自漂移的地方。 */
+  .dash-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 1.5rem;
+    height: 1.5rem;
+    border-radius: 0.5rem;
+    font-size: 0.8rem;
+    line-height: 1;
+    flex: none;
+  }
+
+  .dash-icon-sky     { background-color: color-mix(in srgb, #0ea5e9 18%, transparent); }
+  .dash-icon-violet  { background-color: color-mix(in srgb, #8b5cf6 18%, transparent); }
+  .dash-icon-amber   { background-color: color-mix(in srgb, #f59e0b 22%, transparent); }
+  .dash-icon-rose    { background-color: color-mix(in srgb, #f43f5e 18%, transparent); }
+  .dash-icon-emerald { background-color: color-mix(in srgb, #10b981 18%, transparent); }
+
+  .dark .dash-icon-sky     { background-color: color-mix(in srgb, #0ea5e9 15%, transparent); }
+  .dark .dash-icon-violet  { background-color: color-mix(in srgb, #8b5cf6 15%, transparent); }
+  .dark .dash-icon-amber   { background-color: color-mix(in srgb, #f59e0b 15%, transparent); }
+  .dark .dash-icon-rose    { background-color: color-mix(in srgb, #f43f5e 15%, transparent); }
+  .dark .dash-icon-emerald { background-color: color-mix(in srgb, #10b981 15%, transparent); }
+
   .card {
     /* 圆角 0.75rem（2026-08-06 从 0.5rem 加大）。 */
     border-radius: 0.75rem;

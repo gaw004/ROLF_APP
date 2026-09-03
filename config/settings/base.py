@@ -73,6 +73,17 @@ INSTALLED_APPS = [
     # depend on events, and that is the point of the table: a notice is not an
     # event. Nothing depends on notices.
     'notices',
+    # dashboard reads events, notices and org, and is read by nobody — so it is
+    # last, and it has to be. D17's rule is "谁也不许反向 import", and /me/ is an
+    # aggregator: the one page whose whole job is to show several apps at once.
+    # Putting it in `core` would have made the root of the dependency chain
+    # import three of its own downstreams.
+    #
+    # ⭐ It has **no models.py**, and that is load-bearing rather than an
+    #    omission: an app with no models cannot quietly grow a table, so
+    #    "the dashboard owns no data, it is a view onto other apps' data"
+    #    is a structural fact instead of a promise. See D42.
+    'dashboard',
 ]
 
 # Set before the first migrate, while no user table exists yet — swapping this

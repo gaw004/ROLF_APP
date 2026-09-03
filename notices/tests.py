@@ -7,7 +7,7 @@ from django.db.utils import IntegrityError
 from django.test import TestCase
 
 from contact.models import Contact
-from core.timeutils import local_now
+from core.timeutils import local_now, local_today
 from org.audience import Audience
 from org.models import Assignment, Ministry, Position
 from org.permissions import can_manage_notice, can_publish_notice
@@ -16,6 +16,16 @@ from notices.services import publish, take_down
 
 NOW = local_now()
 DAY = datetime.timedelta(days=1)
+
+#: 🔴 **日期一律从这里出发。** 不要去问那个 aware 的 `NOW` 常量要它的日子 ——
+#: D16 那条「"今天"只有一种写法」在测试里同样成立，而 `local_now()` 是 aware 的，
+#: 问它日期给的是它自己那个时区（UTC）的那一天。
+#:
+#: ⚠️ 这个错**一天里只有一部分时间是错的**：UTC 下午先翻页，于是「昨天」算出来
+#:    正好等于本地的今天，`active()` 照收不误。所以它带着绿色上线，几天后在一次
+#:    什么都没改的运行里变红 —— 读起来像是代码坏了。
+#: 守卫见 core.tests.TimeSourceGuardTests.test_nobody_takes_the_day_off_an_aware_now。
+TODAY = local_today()
 
 
 def make_person(last_name, **kwargs):
@@ -190,7 +200,7 @@ class WhoSeesANoticeTests(TestCase):
             ministry=ministry or self.pantry)
 
     def employ(self, person, post, **dates):
-        dates.setdefault("start_date", (NOW - 30 * DAY).date())
+        dates.setdefault("start_date", TODAY - 30 * DAY)
         return Assignment.objects.create(contact=person, position=post, **dates)
 
     def seen_by(self, contact):
@@ -242,7 +252,7 @@ class WhoSeesANoticeTests(TestCase):
         newcomer = make_person("Newcomer")
         self.employ(
             newcomer, self.a_staff_post(code="new", ministry=self.pantry),
-            start_date=(NOW - DAY).date())
+            start_date=TODAY - DAY)
         self.assertEqual(self.seen_by(newcomer), [notice])
 
     def test_somebody_who_has_left_stops_seeing_it(self):
@@ -253,7 +263,7 @@ class WhoSeesANoticeTests(TestCase):
         leaver = make_person("Leaver")
         self.employ(
             leaver, self.a_staff_post(code="gone", ministry=self.pantry),
-            start_date=(NOW - 30 * DAY).date(), end_date=(NOW - DAY).date())
+            start_date=TODAY - 30 * DAY, end_date=TODAY - DAY)
         self.assertEqual(self.seen_by(leaver), [])
         self.assertEqual(self.seen_by(self.staff), [notice])
 
@@ -303,7 +313,7 @@ class WhoMayPublishANoticeTests(TestCase):
             email="admin@example.com", password="x", contact=person)
         MinistryRole.objects.create(
             contact=person, ministry=self.pantry,
-            role=MinistryRole.Role.ADMIN, start_date=(NOW - DAY).date())
+            role=MinistryRole.Role.ADMIN, start_date=TODAY - DAY)
 
     def test_a_ministry_admin_may_publish_for_their_own_ministry(self):
         self.assertTrue(can_publish_notice(self.admin, self.pantry))
@@ -345,7 +355,7 @@ class NoticePagesTests(TestCase):
             email="admin@example.com", password="pw", contact=admin_contact)
         MinistryRole.objects.create(
             contact=admin_contact, ministry=self.pantry,
-            role=MinistryRole.Role.ADMIN, start_date=(NOW - DAY).date())
+            role=MinistryRole.Role.ADMIN, start_date=TODAY - DAY)
 
         self.volunteer = User.objects.create_user(
             email="vol@example.com", password="pw", contact=make_person("Volunteer"))
@@ -485,7 +495,7 @@ class TheNewNoticeFormStartsSomewhereSensibleTests(TestCase):
             email="admin@example.com", password="pw", contact=contact)
         MinistryRole.objects.create(
             contact=contact, ministry=self.pantry,
-            role=MinistryRole.Role.ADMIN, start_date=(NOW - DAY).date())
+            role=MinistryRole.Role.ADMIN, start_date=TODAY - DAY)
 
     def form(self, **kwargs):
         from notices.forms import NoticeForm
@@ -534,7 +544,7 @@ class PuttingADraftUpTests(TestCase):
             email="admin@example.com", password="pw", contact=contact)
         MinistryRole.objects.create(
             contact=contact, ministry=self.pantry,
-            role=MinistryRole.Role.ADMIN, start_date=(NOW - DAY).date())
+            role=MinistryRole.Role.ADMIN, start_date=TODAY - DAY)
         self.client.force_login(self.admin)
 
     def test_a_draft_can_go_up_from_the_list(self):
@@ -594,7 +604,7 @@ class TheDateBoxesDoNotSuggestSecondsTests(TestCase):
             email="admin@example.com", password="pw", contact=contact)
         MinistryRole.objects.create(
             contact=contact, ministry=self.pantry,
-            role=MinistryRole.Role.ADMIN, start_date=(NOW - DAY).date())
+            role=MinistryRole.Role.ADMIN, start_date=TODAY - DAY)
 
     def test_the_prefilled_dates_are_whole_minutes(self):
         from notices.forms import NoticeForm

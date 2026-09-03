@@ -1,0 +1,42 @@
+{% comment %}
+一张卡的外壳 —— 图标 + 名词标题 + 内容 + 卡底那条出口。
+
+⭐ 抽成一份而不是每张卡各写一遍，是因为**出口那条链接必须在每张卡的同一个高度上**。
+   靠每张卡自己去对齐，第二张就会差半行，而那正是「单独看都没问题、放在一起
+   就是业余感」的来源（design-system.md 开头那条判据）。
+   `flex-col` + 内容 `flex-1` 把出口推到底，几张卡不管内容多少都齐平。
+
+⚠️ 内容靠 `body` 传一个**模板名**再 include，不是 `{% templatetag openblock %} block {% templatetag closeblock %}`。
+   block 只在 `{% templatetag openblock %} extends {% templatetag closeblock %}` 时有意义，
+   写在 include 进来的模板里**一声不响地什么都不做** —— 第一版这么写的，
+   卡片会全部渲染成空壳。
+
+参数：
+  icon         一个 emoji。⚠️ 不引图标库 —— 这一页要五个图标，为五个图标引一个
+               字体文件是每个访客都在付的账。
+  title        名词短语（Notices / Coming up），不是句子，不带数字。
+               ⚠️ 带了数字（"3 notices"）就等于把内容抄进了标题，两处会分叉。
+  body         内容模板的路径
+  href         出口链接，通向一个**已经存在**的页面。不给就不画出口
+  href_label   出口的字，形如 `View all notices`（模板自己补 ` →`）
+  tone         图标底色的一档：sky / violet / amber / rose / emerald
+{% endcomment %}
+<section class="card flex flex-col">
+  <h2 class="mb-3 flex items-center gap-2 text-sm font-semibold">
+    {% comment %}
+    ⚠️ 图标底色是**认卡用的**，不是装饰：人在一屏五张卡里靠颜色定位，不靠读标题。
+       所以同一张卡的颜色全站固定，换页面也不许变。
+    {% endcomment %}
+    <span class="dash-icon dash-icon-{{ tone|default:'sky' }}" aria-hidden="true">{{ icon }}</span>
+    {{ title }}
+  </h2>
+
+  <div class="flex-1">{% include body %}</div>
+
+  {% if href %}
+    <a href="{{ href }}"
+       class="mt-4 block border-t border-ink-200 pt-3 text-sm font-medium text-brand-700 hover:underline dark:border-ink-700 dark:text-brand-300">
+      {{ href_label }} →
+    </a>
+  {% endif %}
+</section>

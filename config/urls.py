@@ -49,6 +49,15 @@ urlpatterns = [
     #    it owns a small area with its own manage page, rather than being one
     #    distinct noun at the root.
     path('notices/', include('notices.urls')),
+    # ⚠️ **After accounts**, which owns `me/profile/`. The two do not actually
+    #    collide — this one matches `me/` exactly — but the order is what saves
+    #    the next reader from having to prove that to themselves.
+    #
+    # It is the signed-in landing page, and it is deliberately *not* `/`:
+    # D25 kept `/` public and gave the test for it ("would you send this link to
+    # somebody with no account?"). This one needs a session, so it is not that
+    # page — and `/` still does not redirect anybody anywhere.
+    path('me/', include('dashboard.urls')),
 ]
 
 # ⚠️ Development only, and django.conf.urls.static.static() enforces that by

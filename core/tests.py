@@ -370,6 +370,29 @@ class TimeSourceGuardTests(TestCase):
     # day off a stored DateTimeField. Every datetime column in this project is
     # named *_time or *_at, so that is what it looks for.
     STORED_INSTANT_DATE = r"\b\w+_(time|at)\.date\(\)"
+    # The fourth spelling, and the one the three above all miss: an aware
+    # datetime that is **not** a model field — `local_now()` itself, or the
+    # `NOW = local_now()` constant every test module in this project declares.
+    # `.date()` on either is still the UTC day.
+    #
+    # 🔴 It is the nastiest of the four, because it is only wrong for part of
+    #    the day. A test written at noon Pacific is green; the same test at 6pm
+    #    is red, because UTC has turned the page and "yesterday" now computes to
+    #    today's date. So it ships green, and goes red days later on a run that
+    #    changed nothing — which reads as "the code broke", not "the test was
+    #    always wrong". Found 2026-09-02, twice within an hour: once while
+    #    writing dashboard/tests.py, and then in notices/tests.py where it had
+    #    been sitting green since the day before.
+    #
+    # ⚠️ `[^\n]*` between the two halves so it catches the arithmetic form too
+    #    — subtracting a timedelta first and asking the result for its day.
+    #    Three of the four cases found in shipped code were written that way.
+    #
+    # ⚠️ And that example is described rather than written out, for the reason
+    #    the note at the top of this class gives: the file has to be able to
+    #    scan itself. Spelling it out here is what made the first run of this
+    #    very guard go red on its own comment.
+    AWARE_NOW_DATE = r"(local_now\(\)|\bNOW\b)[^\n]*\.date\(\)"
 
     def test_nobody_computes_today_outside_core_timeutils(self):
         # ruff's DTZ catches the first pattern but not the others: those are
@@ -392,6 +415,16 @@ class TimeSourceGuardTests(TestCase):
             hits,
             [],
             "That is the UTC day. Use core.timeutils.local_date_of():\n" + "\n".join(hits),
+        )
+
+    def test_nobody_takes_the_day_off_an_aware_now(self):
+        hits = offending_lines(self.AWARE_NOW_DATE, skip=["core/timeutils.py"])
+        self.assertEqual(
+            hits,
+            [],
+            "That is the UTC day, and it is only wrong for part of each day — "
+            "use core.timeutils.local_today(), or do the arithmetic on a date "
+            "rather than on an instant:\n" + "\n".join(hits),
         )
 
 
@@ -596,7 +629,14 @@ class AudienceIsAskedGuardTests(TestCase):
     ALLOWED = {
         # The rows somebody already holds. Narrowing an audience afterwards must
         # not take away a signup they made while it was still open to them.
-        "my_participations",
+        #
+        # ⚠️ The name moved on 2026-09-02: the predicate itself is now
+        #    `ParticipationQuerySet.mine()`, extracted so the dashboard and
+        #    /me/participations/ cannot disagree about what counts as mine.
+        #    The exemption travelled with the code, which is the point —
+        #    leaving it on the old name would have exempted a function that no
+        #    longer asks the question, and red-flagged the one that does.
+        "mine",
         # The two predicates defining themselves.
         "visible_to_participants",
         "for_audience",

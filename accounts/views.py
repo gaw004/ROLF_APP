@@ -69,7 +69,7 @@ def register(request):
        reloading the page.
     """
     if request.user.is_authenticated:
-        return redirect("events:event_list")
+        return redirect("dashboard:me")
 
     if getattr(request, "limited", False):
         # ⚠️ Before the form is even built, so a refused attempt writes nothing
@@ -94,7 +94,7 @@ def register(request):
                 # proved it, and the person did not change the box afterwards.
                 mark_email_verified(user)
                 login(request, user)
-                return redirect("events:event_list")
+                return redirect("dashboard:me")
             send_verification_code(user)
             request.session[PENDING_SESSION_KEY] = user.pk
             return redirect("accounts:verify_email")
@@ -136,7 +136,7 @@ def register_with_google(request):
        them exactly where they would have been without the button.
     """
     if request.user.is_authenticated:
-        return redirect("events:event_list")
+        return redirect("dashboard:me")
     if request.method != "POST":
         return redirect("accounts:register")
 
@@ -227,7 +227,7 @@ def verify_email(request):
        tab, and both of those want the same thing next.
     """
     if request.user.is_authenticated:
-        return redirect("events:event_list")
+        return redirect("dashboard:me")
 
     user = _pending_user(request)
     if user is None:
@@ -252,7 +252,7 @@ def verify_email(request):
                 login(request, user)
                 messages.success(
                     request, "Your email address is confirmed. Welcome.")
-                return redirect("events:event_list")
+                return redirect("dashboard:me")
 
     return render(request, "accounts/verify_email.html",
                   _verify_context(request, user, form))
@@ -313,10 +313,25 @@ class SiteLoginView(LoginView):
     redirect_authenticated_user = True
 
     def get_success_url(self):
-        return self.get_redirect_url() or reverse_lazy("events:event_list")
+        """登录之后落在 `/me/`，除非 `?next=` 另有指定。
+
+        ⭐ **这里是唯一回答「登录之后去哪」的地方**，而
+           `config/settings/base.py` 已经写下了为什么不去设
+           `LOGIN_REDIRECT_URL`：那会是同一句话的第二份拷贝，
+           而第二份拷贝在它们分歧的那天之前没有任何东西会读它。
+
+        ⚠️ 落点从活动列表改成仪表盘（2026-09-02），而这**不推翻 D25**：
+           D25 管的是「**访问 `/` 时**看到什么」——那一页仍然公开、仍然对
+           所有人一样、仍然不跳转。这里管的是「**登录表单提交成功之后**去
+           哪」，D25 一个字都没管过。两件事，两个问题。
+        """
+        return self.get_redirect_url() or reverse_lazy("dashboard:me")
 
 
 class SiteLogoutView(LogoutView):
+    # ⚠️ **不跟着改到 `/me/`**（2026-09-02，登录落点改动的同一天）。刚登出的人
+    #    没有会话，而 `/me/` 是 `@login_required` —— 送他去那里就是让他被弹回
+    #    登录页，读起来像是登出失败了。登出之后该落在一个不需要登录的地方。
     next_page = reverse_lazy("events:event_list")
 
 

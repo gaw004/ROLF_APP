@@ -33,10 +33,22 @@
 
   <div class="flex-1">{% include body %}</div>
 
+  {% comment %}
+  出口。⚠️ **没有分割线**，而这一版是有过的。理由不是口味 ——
+     `events/templates/events/_report_panel.html` 里那两个出口
+     （View full report / Save as PDF）自己的注释就写着同一句话：
+     「挪到顶上之后……**少了一条分隔线**」。同一个判断，第二次做。
+     一张卡本来就有边框，里面再画一条横线是在同一件事上说两遍。
+
+  ⚠️ 样式和那两个出口**取同一套**：`text-sm` + `prose-link`
+     （brand 色、常驻下划线、正常字重）。原来这里是 `font-medium` + 只有
+     hover 才有下划线 —— 同一个站上两种「次要链接」，单独看都行，
+     放在一起就是不齐。
+
+  ⚠️ `mt-auto` 保留：几张卡的出口仍然必须落在同一个高度上，那是
+     `flex-col` + 内容 `flex-1` 那一套的目的。
+  {% endcomment %}
   {% if href %}
-    <a href="{{ href }}"
-       class="mt-4 block border-t border-ink-200 pt-3 text-sm font-medium text-brand-700 hover:underline dark:border-ink-700 dark:text-brand-300">
-      {{ href_label }} →
-    </a>
+    <a href="{{ href }}" class="prose-link mt-4 block text-sm">{{ href_label }} →</a>
   {% endif %}
 </section>

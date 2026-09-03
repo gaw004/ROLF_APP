@@ -71,18 +71,3 @@ def month_name(today=None):
     """`September 2026`，给格子上方那一行。"""
     today = today or local_today()
     return f"{calendar.month_name[today.month]} {today.year}"
-
-
-def greeting(now):
-    """Good morning / afternoon / evening.
-
-    ⚠️ 收一个**时刻**而不是自己去问时钟：这一页所有的「现在」必须是同一个
-       （见 `views.me`），否则问候语和月历有可能落在午夜两侧的不同天上 ——
-       一年发生一次，且没有任何东西会报错。
-    """
-    hour = now.hour
-    if hour < 12:
-        return "Good morning"
-    if hour < 18:
-        return "Good afternoon"
-    return "Good evening"

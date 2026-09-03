@@ -661,6 +661,46 @@ class AudienceIsAskedGuardTests(TestCase):
         )
 
 
+class TailwindSourcesGuardTests(TestCase):
+    """Lint-as-test: every app with templates is listed in `assets/app.css`.
+
+    ⭐ The stylesheet lists its scan roots **explicitly**, one line per app, and
+       that file explains at length why (automatic scanning treats the design
+       docs as a source of class names, which quietly hides typos). What it
+       could not do is notice when somebody adds an app and forgets the line.
+
+    🔴 And the failure is silent in the worst way: a new app's pages look
+       **fine**. Everything it reuses — `.card`, `.table-wrap`, `.prose-link` —
+       is hand-written CSS that no scanner is involved in, and the common
+       utilities (`text-sm`, `flex`, `space-y-3`) were already generated for
+       some other template. Only the classes that appear **for the first time**
+       in the new app go missing. On 2026-09-03 that was `lg:col-span-4` and
+       `lg:order-first`, and the symptom was one page's whole layout collapsing
+       while every other page in the same two new apps looked correct.
+
+    ⚠️ It checks presence, not order — the list is alphabetical today and that
+       is worth keeping, but a guard that enforced it would fail for a reason
+       nobody would call a bug.
+    """
+
+    STYLESHEET = Path(settings.BASE_DIR) / "assets" / "app.css"
+
+    def test_every_app_with_templates_is_scanned(self):
+        css = self.STYLESHEET.read_text(encoding="utf-8")
+        missing = sorted(
+            label for label in OUR_APPS
+            if (Path(settings.BASE_DIR) / label / "templates").is_dir()
+            and f'@source "../{label}/templates"' not in css
+        )
+        self.assertEqual(
+            missing,
+            [],
+            "These apps have templates that Tailwind never scans, so any class "
+            "used there for the first time is silently absent from the build. "
+            "Add an @source line to assets/app.css for:\n" + "\n".join(missing),
+        )
+
+
 class NoticesAreNarrowedGuardTests(TestCase):
     """Lint-as-test: anything reaching for notices asks who is looking.
 

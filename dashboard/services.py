@@ -34,12 +34,26 @@ def _posts(contact):
     """
     if contact is None:
         return []
-    return list(
+    rows = (
         Assignment.objects.active()
         .filter(contact=contact)
         .select_related("position__ministry")
-        .order_by("position__name")
+        .order_by("position__name", "start_date")
     )
+    # ⚠️ 按**岗位**去重，而这是防御不是修复：数据干净时 active() 本来就不会
+    #    返回同一个岗位的两条。它挡的是重叠任职（同一人同一岗位两段同时生效），
+    #    而那个数据库现在还拦不住 —— 走查那天页面上真的出现了四行一模一样的
+    #    `Food Pantry lead · Food Pantry`。
+    #
+    # ⚠️ 去重本身也是这一行该有的语义，不只是补丁：它答的是「**你现在是什么
+    #    身份**」，不是「你有几段任职记录」。同一个岗位说一次就够了。
+    seen, posts = set(), []
+    for row in rows:
+        if row.position_id in seen:
+            continue
+        seen.add(row.position_id)
+        posts.append(row)
+    return posts
 
 
 def _needs_you(ministry_ids, now):
@@ -58,7 +72,7 @@ def _needs_you(ministry_ids, now):
     """
     if not ministry_ids:
         return {"short": [], "unfinished": []}
-    short = (
+    short = list(
         EventRole.objects.understaffed()
         .filter(event__ministry_id__in=ministry_ids,
                 event__status=Event.Status.OPEN,
@@ -66,13 +80,23 @@ def _needs_you(ministry_ids, now):
         .select_related("event", "role")
         .order_by("event__start_time")[:ROWS_PER_CARD]
     )
-    unfinished = (
+    # 🔴 **两组加起来** 不超过 ROWS_PER_CARD，不是各自不超过。
+    #
+    #    第一版是各取四条，于是这张卡最多能画八行 —— 而卡片的四条门槛
+    #    （D42）第二条写的是「内容**天然**不超过四行；常常要截断的，
+    #    那是一个页面不是一张卡」。走查那天它画了五行，是我自己定的规矩
+    #    被自己破的第一处。
+    #
+    # ⚠️ 名额优先给「还缺人」那一组：它讲的是**还来得及**做点什么的事，
+    #    而「结束了没收尾」是已经发生的。一张卡只放得下四行时，
+    #    先说还救得回来的那几件。
+    unfinished = list(
         Event.objects.filter(ministry_id__in=ministry_ids, end_time__lte=now)
         .exclude(status__in=[Event.Status.COMPLETED, Event.Status.CANCELLED,
                              Event.Status.DRAFT])
-        .order_by("-end_time")[:ROWS_PER_CARD]
+        .order_by("-end_time")[:max(0, ROWS_PER_CARD - len(short))]
     )
-    return {"short": list(short), "unfinished": list(unfinished)}
+    return {"short": short, "unfinished": unfinished}
 
 
 def _this_month(mine, now):
@@ -107,7 +131,6 @@ def dashboard_for(user, now=None):
     )
 
     return {
-        "greeting": month.greeting(now),
         "posts": _posts(contact),
         # ⚠️ N3 那个 partial 收的就是一个列表，两个挂载点同一份渲染。
         "notices": list(
@@ -115,14 +138,18 @@ def dashboard_for(user, now=None):
             .select_related("ministry")[:NOTICES_SHOWN]
         ),
         "coming": coming,
+        # ⚠️ 排除我已经报过的 —— 否则它和上面那张说的是同一件事。
+        #    传的是**已经取出来的** coming 之外的全部报名，所以这里要自己查一次
+        #    「我报过哪些活动」，一个 values_list，不是又一次完整取行。
+        "happening_soon": list(
+            Event.objects.open_for_signup(now)
+            .for_audience(contact)
+            .exclude(pk__in=mine.values("event_role__event_id"))
+            .with_shortfall()
+            .select_related("ministry")[:ROWS_PER_CARD]
+        ),
         "hours_given": mine.volunteering().hours_given(),
         "needs_you": _needs_you(ministry_ids, now),
-        "recent_signups": list(
-            Participation.objects.filter(
-                event_role__event__ministry_id__in=ministry_ids)
-            .select_related("contact", "event_role__event", "event_role__role")
-            .order_by("-created_at")[:ROWS_PER_CARD]
-        ) if ministry_ids else [],
         "is_ministry_admin": bool(ministry_ids),
         "is_foundation": in_foundation_tier(user),
         # 侧栏。

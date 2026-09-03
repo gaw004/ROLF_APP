@@ -46,7 +46,12 @@ def make_person(last_name, **kwargs):
 
 
 def make_account(email, contact):
-    return User.objects.create_user(email=email, password="pw", contact=contact)
+    # ⚠️ `email_verified=True`：一个没验证过地址的账号**登不进来**
+    #    （SiteAuthenticationForm 在密码之后拦一道），而这一份里有一条测试真的
+    #    去走登录表单。不设它的话那条测试收到的是 200 + 一条表单错误，
+    #    而不是它在等的 302。
+    return User.objects.create_user(
+        email=email, password="pw", contact=contact, email_verified=True)
 
 
 class DashboardTestCase(TestCase):
@@ -240,12 +245,17 @@ class TheMinistryAdminCardsTests(DashboardTestCase):
 
     def test_a_ministry_admin_does(self):
         self.make_admin(self.me)
-        page = self.page().content.decode()
-        self.assertIn("Needs you", page)
-        self.assertIn("Recent signups", page)
+        self.assertIn("Needs you", self.page().content.decode())
 
     def test_a_ministry_admin_only_sees_their_own_ministrys_shortfalls(self):
-        """⚠️ 这张卡是这一页唯一会泄露别的 ministry 的地方。"""
+        """⚠️ 这张卡是这一页唯一会泄露别的 ministry 的地方。
+
+        ⚠️ 断言收在**这张卡里面**，不是「整页里找不到这个名字」。
+           第一版是后者，而 `Happening soon` 一上线它就红了 —— 别的 ministry
+           的活动**本来就该**出现在那张卡上（那张卡问的是「我能报名什么」，
+           而一个 Food Pantry 的 admin 当然报得了 Tax Help 的活动）。
+           整页找字符串会把两张卡的语义混成一个断言。
+        """
         self.make_admin(self.me, ministry=self.pantry)
         mine = self.an_event(ministry=self.pantry)
         mine.name = "Mine and short"
@@ -255,9 +265,22 @@ class TheMinistryAdminCardsTests(DashboardTestCase):
         theirs.name = "Theirs and short"
         theirs.save()
         self.a_role(theirs, needed_count=5)
-        page = self.page().content.decode()
-        self.assertIn("Mine and short", page)
-        self.assertNotIn("Theirs and short", page)
+        card = self.needs_you_card(self.page().content.decode())
+        self.assertIn("Mine and short", card)
+        self.assertNotIn("Theirs and short", card)
+
+    @staticmethod
+    def needs_you_card(page):
+        """`Needs you` 那张卡的 HTML，从它的标题切到下一张卡的开头。
+
+        ⚠️ 粗糙但够用，而且**故意粗糙**：一个真的 HTML 解析器会把这条测试
+           变成一件需要维护的东西，而它要问的只是「这个名字有没有出现在这张卡
+           里」。切错了会红，而红了就是有人动了卡片结构 —— 那正是该看一眼的时候。
+        """
+        start = page.index("Needs you")
+        rest = page[start:]
+        end = rest.find("<section", 1)
+        return rest if end == -1 else rest[:end]
 
     def test_an_event_that_ended_without_being_wrapped_up_is_flagged(self):
         """借 `Status.COMPLETED` 的既有语义，不造第三个口径。"""
@@ -312,15 +335,6 @@ class TheMonthGridTests(DashboardTestCase):
         self.assertEqual(month.WEEKDAY_INITIALS[1], "M")
 
 
-class TheGreetingTests(TestCase):
-    def test_it_follows_the_clock(self):
-        def at(hour):
-            return local_now().replace(hour=hour, minute=0)
-        self.assertEqual(month.greeting(at(9)), "Good morning")
-        self.assertEqual(month.greeting(at(14)), "Good afternoon")
-        self.assertEqual(month.greeting(at(20)), "Good evening")
-
-
 class TheQueryBudgetTests(DashboardTestCase):
     """这一页是全站查询最多的一个，所以它的上限写下来。
 
@@ -349,3 +363,137 @@ class TheQueryBudgetTests(DashboardTestCase):
             len(queries), self.BUDGET,
             f"/me/ 用了 {len(queries)} 次查询，上限是 {self.BUDGET}。"
             "先问这张新卡值不值这次查询，再考虑抬这个数。")
+
+class HappeningSoonTests(DashboardTestCase):
+    """「我还能报什么」，缺人的排前面。"""
+
+    def test_it_leaves_out_what_i_have_already_signed_up_for(self):
+        """⚠️ 否则它和 Coming up 说的是同一件事，一屏两张卡讲一个故事。"""
+        joined = self.an_event(start=NOW + DAY)
+        joined.name = "Already mine"
+        joined.save()
+        self.sign_up(event=joined)
+        free = self.an_event(start=NOW + 2 * DAY)
+        free.name = "Still open"
+        free.save()
+        self.a_role(free)
+        page = self.page().content.decode()
+        card = page[page.index("Happening soon"):]
+        self.assertIn("Still open", card)
+        self.assertNotIn("Already mine", card)
+
+    def test_an_event_that_still_needs_people_comes_first(self):
+        """⭐ 「还缺人的赢过更早的」—— 这是一条判断，所以它在 queryset 上。"""
+        sooner = self.an_event(start=NOW + DAY)
+        sooner.name = "Sooner but full"
+        sooner.save()
+        self.a_role(sooner, needed_count=1)
+        Participation.objects.create(
+            contact=make_person("Somebody"), event_role=sooner.roles.first())
+
+        later = self.an_event(start=NOW + 5 * DAY)
+        later.name = "Later but short"
+        later.save()
+        self.a_role(later, needed_count=5)
+
+        names = [e.name for e in
+                 Event.objects.open_for_signup(NOW).with_shortfall()]
+        self.assertEqual(names[0], "Later but short")
+
+    def test_a_role_with_no_limit_is_never_short(self):
+        """⚠️ needed_count 为空是「不限人数」，不是「差无穷个」——
+        口径不在这里重写，`is_short` 那个注解本来就带着这个陷阱。
+        """
+        event = self.an_event(start=NOW + DAY)
+        self.a_role(event)          # needed_count 留空
+        row = Event.objects.open_for_signup(NOW).with_shortfall().get(pk=event.pk)
+        self.assertFalse(row.needs_people)
+
+    def test_it_only_offers_events_this_person_can_see(self):
+        hidden = self.an_event(start=NOW + DAY, visible_to_outsiders=False,
+                               visible_to_all_staff=True)
+        hidden.name = "Staff only"
+        hidden.save()
+        self.a_role(hidden)
+        page = self.page().content.decode()
+        self.assertNotIn("Staff only", page)
+
+    def test_the_empty_state_says_so(self):
+        self.assertIn("Nothing coming up that you can join.",
+                      self.page().content.decode())
+
+
+class ThePostsLineIsDefensiveTests(DashboardTestCase):
+    """⚠️ 数据干净时 active() 本来就不会返回同岗位两条 —— 这是防御，不是修复。
+
+    走查那天页面上出现了四行一模一样的 `Food Pantry lead · Food Pantry`，
+    起因是 seed 的 get_or_create 键里含一个每天都在变的日期。那个 bug 修了，
+    但**数据库仍然拦不住重叠任职**，所以这一行自己也要站得住。
+    """
+
+    def test_two_overlapping_tenures_in_one_post_show_as_one_line(self):
+        post = Position.objects.create(
+            code="lead", name="Food Pantry lead", kind=Position.Kind.STAFF,
+            compensation=Position.Compensation.PAID, ministry=self.pantry)
+        Assignment.objects.create(
+            contact=self.me, position=post, start_date=TODAY - 30 * DAY)
+        Assignment.objects.create(
+            contact=self.me, position=post, start_date=TODAY - 20 * DAY)
+        page = self.page().content.decode()
+        self.assertEqual(page.count("Food Pantry lead"), 1)
+
+    def test_two_different_posts_still_show_as_two_lines(self):
+        """⚠️ 去重按**岗位**，不是「只显示一条」—— D32：一人可以多岗。"""
+        self.employ(self.me, code="pantry_lead", ministry=self.pantry)
+        self.employ(self.me, code="tax_lead", ministry=self.tax)
+        page = self.page().content.decode()
+        self.assertIn("Pantry Lead", page)
+        self.assertIn("Tax Lead", page)
+
+
+class TheLandingPageAfterLoginTests(DashboardTestCase):
+    def test_logging_in_lands_on_the_dashboard(self):
+        from django.urls import reverse
+        response = self.client.post(reverse("accounts:login"), {
+            "username": self.account.email, "password": "pw"})
+        self.assertRedirects(response, "/me/")
+
+    def test_the_public_front_page_still_does_not_redirect(self):
+        """🔴 D25。登录之后 `/` 仍然是那张给所有人看的门面页。"""
+        self.client.force_login(self.account)
+        self.assertEqual(self.client.get("/").status_code, 200)
+
+
+class TheCardsRespectTheirOwnRowCapTests(DashboardTestCase):
+    """⭐ D42 的门槛第二条：内容天然不超过四行。
+
+    ⚠️ `Needs you` 是唯一一张由**两组**拼起来的卡，所以也是唯一一张能悄悄
+       画到八行的。走查那天它画了五行 —— 我自己定的规矩被自己破的第一处。
+    """
+
+    def test_needs_you_never_draws_more_than_the_cap(self):
+        from dashboard.services import ROWS_PER_CARD, _needs_you
+        self.make_admin(self.me)
+        for n in range(6):
+            short = self.an_event(start=NOW + (n + 1) * DAY)
+            self.a_role(short, needed_count=5)
+            over = self.an_event(start=NOW - (n + 1) * DAY)
+            over.status = Event.Status.OPEN
+            over.save()
+        rows = _needs_you({self.pantry.pk}, NOW)
+        self.assertLessEqual(
+            len(rows["short"]) + len(rows["unfinished"]), ROWS_PER_CARD)
+
+    def test_the_places_that_still_need_people_get_the_slots_first(self):
+        """⚠️ 还来得及做点什么的排在已经发生的前面。"""
+        from dashboard.services import _needs_you
+        self.make_admin(self.me)
+        for n in range(4):
+            short = self.an_event(start=NOW + (n + 1) * DAY)
+            self.a_role(short, needed_count=5)
+        over = self.an_event(start=NOW - DAY)
+        over.status = Event.Status.OPEN
+        over.save()
+        rows = _needs_you({self.pantry.pk}, NOW)
+        self.assertEqual(len(rows["short"]), 4)
+        self.assertEqual(rows["unfinished"], [])

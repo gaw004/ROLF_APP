@@ -52,6 +52,7 @@ from core.timeutils import (
 from org.models import Assignment, Ministry, MinistryRole, Position
 from org.permissions import foundation_admin_group
 
+from .management.commands import seed_demo
 from .management.commands.seed_demo import demo_login
 
 from . import schedule, tokens
@@ -6091,6 +6092,47 @@ class SeedDemoTests(TestCase):
 
     def seed(self):
         call_command("seed_demo", verbosity=0)
+
+    def test_running_it_twice_does_not_duplicate_anything(self):
+        """🔴 It is idempotent, and that has to be tested rather than assumed.
+
+        Every `get_or_create` in it matched on a value derived from
+        `local_today()` until 2026-09-02 — so "does this already exist" was
+        being asked about *today's* row, and a second run on a second day
+        answered no. The dashboard showed one person four identical posts,
+        one per day the command had been run.
+
+        ⚠️ Nothing raised and no constraint was violated: the unique constraint
+           on Assignment covers (contact, position, start_date), and those four
+           rows had four different start dates. The general rule the fix is
+           written under: **a get_or_create lookup key may not contain a value
+           that moves with the clock** — that is not "make it if missing", it is
+           "make one a day".
+
+        ⚠️ Asserted over every table the command touches, not just Assignment.
+           The bug was one call site's shape, and the same shape is available to
+           all of them.
+        """
+        with override_settings(DEBUG=True):
+            self.seed()
+            counts = {
+                model: model.objects.count()
+                for model in (Contact, Assignment, Position, Event, EventRole,
+                              Participation, Ministry)
+            }
+            # 🔴 **第二次必须发生在「第二天」，否则这条测试是假的。**
+            #    bug 的形状是「今天跑和昨天跑找的不是同一行」——
+            #    同一天连跑两次，`local_today()` 返回同一个值，
+            #    `get_or_create` 照样匹配得上，于是**有 bug 的代码也会绿**。
+            #    第一版就是那么写的，绿得毫无意义。
+            from unittest import mock
+
+            tomorrow = local_today() + datetime.timedelta(days=1)
+            with mock.patch.object(seed_demo, "local_today", return_value=tomorrow):
+                self.seed()
+        for model, before in counts.items():
+            with self.subTest(model=model.__name__):
+                self.assertEqual(model.objects.count(), before)
 
     def test_it_refuses_to_run_with_debug_off(self):
         # One mistaken run against production fills the contact table with

@@ -581,6 +581,31 @@ class EventQuerySet(AudienceQuerySetMixin, models.QuerySet):
             end_time__gt=now or local_now(),
         )
 
+    def with_shortfall(self):
+        """Short-of-people first, then soonest. For "where am I needed".
+
+        ⭐ One ordering, defined once, because it is a **judgement** and not a
+           sort key: "the event that still needs people beats the event that is
+           sooner". Written at a call site it would be an `order_by` somebody
+           tweaks; written here it has a name and a reason.
+
+        ⚠️ `is_short` is not restated — it is `EventRole`'s own annotation, the
+           same one `understaffed()` filters on and the same one the signups
+           page draws its badge from. That rule has a trap in it (`needed_count`
+           NULL means "no limit", so such a role is never short), and a second
+           copy of a rule with a trap in it does not stay in step.
+
+        ⚠️ `Exists`, never a join to the roles. An event with three short roles
+           would otherwise come back three times — the same mistake
+           `for_audience()` records about the ministry branch, and it corrupts
+           slicing while looking on the page like a row that got listed twice.
+        """
+        short_role = EventRole.objects.with_signup_counts().filter(
+            event=models.OuterRef("pk"), is_short=True)
+        return self.annotate(
+            needs_people=models.Exists(short_role)
+        ).order_by("-needs_people", "start_time")
+
     # ⚠️ `upcoming()` (start_time >= now) and `past()` (end_time < now) lived
     #    here until 2026-08-17. They went with their last callers — the Past
     #    Events page, and event_list's old window — and are **not** kept "in

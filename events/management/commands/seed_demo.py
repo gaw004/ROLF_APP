@@ -424,16 +424,29 @@ class Command(BaseCommand):
             defaults={"contact_type": Contact.ContactType.INDIVIDUAL,
                       "birth_date": datetime.date(1985, 1, 1)},
         )[0]
+        # 🔴 `start_date` 在 `defaults` 里，**不在匹配键里** —— 而它一开始在。
+        #
+        # 匹配键里含一个 `local_today() - N 天` 的值，意思是「今天跑和昨天跑
+        # 找的不是同一行」：get_or_create 每天都匹配不上上一次那条，于是
+        # 再建一条。走查那天页面上出现了同一个人同一个岗位的**四行**任职，
+        # 对应这个命令被跑过的四天。
+        #
+        # ⚠️ 它不报错、也不违反约束：`UniqueConstraint(contact, position,
+        #    start_date)` 挡的是「同一天开始的两条」，而这四条的开始日期
+        #    恰恰各不相同。
+        #
+        # ⚠️ 通则：**get_or_create 的匹配键里不许出现一个随时间变的值。**
+        #    那样写出来的不是「有就用、没有就建」，是「每天建一条」。
         Assignment.objects.get_or_create(
             contact=self.pantry_admin.contact, position=self.pantry_lead,
-            start_date=local_today() - datetime.timedelta(days=400),
-            defaults={"employment_type": self.full_time},
+            defaults={"employment_type": self.full_time,
+                      "start_date": local_today() - datetime.timedelta(days=400)},
         )
         Assignment.objects.get_or_create(
             contact=self.leaver, position=self.pantry_staff,
-            start_date=local_today() - datetime.timedelta(days=400),
             defaults={
                 "employment_type": self.full_time,
+                "start_date": local_today() - datetime.timedelta(days=400),
                 "end_date": local_today() - datetime.timedelta(days=10),
             },
         )
@@ -447,8 +460,8 @@ class Command(BaseCommand):
         ).contact
         Assignment.objects.get_or_create(
             contact=self.unpaid_staff, position=self.pantry_helper,
-            start_date=local_today() - datetime.timedelta(days=300),
-            defaults={"employment_type": self.part_time},
+            defaults={"employment_type": self.part_time,
+                      "start_date": local_today() - datetime.timedelta(days=300)},
         )
         self.intern = Contact.objects.get_or_create(
             legal_last_name="Silva", legal_first_name="Rafa",
@@ -457,8 +470,8 @@ class Command(BaseCommand):
         )[0]
         Assignment.objects.get_or_create(
             contact=self.intern, position=self.pantry_intern,
-            start_date=local_today() - datetime.timedelta(days=120),
-            defaults={"employment_type": self.part_time},
+            defaults={"employment_type": self.part_time,
+                      "start_date": local_today() - datetime.timedelta(days=120)},
         )
 
     def events(self):

@@ -40,12 +40,26 @@
  *    而你唯一能指望的信号（「这个 class 没被生成」）已经被喂饱了。
  *
  * 所以显式列到 app 名一级。⚠️ 不写 ../**\/templates —— 那个会把 .venv 里
- * Django admin 的模板也扫进来，而显式 @source 是不看 .gitignore 的。 */
+ * Django admin 的模板也扫进来，而显式 @source 是不看 .gitignore 的。
+ *
+ * 🔴 **这份名单漏一行的代价，2026-09-03 真的付了一次。** notices 和 dashboard
+ *    两个新 app 建好之后没加进来，于是它们模板里的 class 一个都没生成。
+ *    而它**看起来是好的**：两个 app 复用的 card / table-wrap / prose-link 是
+ *    这个文件里手写的规则（不经扫描），text-sm / flex / space-y-3 又早被别的
+ *    模板生成过 —— 所以只有真正“第一次出现”的那几个类是缺的。
+ *    仪表盘的 lg:col-span-4 和 lg:order-first 就在其中，表现是一整个版面塌掉，
+ *    而在此之前那两个 app 的每一页看着都正常。
+ *
+ * ⚠️ 守卫：core.tests.TailwindSourcesGuardTests.test_every_app_with_templates_is_scanned。
+ *    这份名单和「磁盘上哪些 app 有 templates 目录」必须一致，
+ *    而人是记不住这件事的 —— 上面那段话已经证明了。 */
 @source "../accounts/templates";
 @source "../contact/templates";
 @source "../core/templates";
+@source "../dashboard/templates";
 @source "../events/templates";
 @source "../gallery/templates";
+@source "../notices/templates";
 @source "../org/templates";
 
 

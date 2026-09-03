@@ -12,6 +12,7 @@ import json
 import os
 import re
 import tempfile
+from unittest import mock
 from decimal import Decimal
 from importlib import import_module
 from pathlib import Path
@@ -8264,6 +8265,37 @@ class EventImageUploadTests(PageTestCase):
         form = self.upload(a_photo(size=(600, 400)))
         self.assertFalse(form.is_valid())
         self.assertIn("larger than", " ".join(form.errors["image"]))
+
+    @override_settings(IMAGE_MAX_PIXELS=100_000)
+    def test_an_upload_over_the_pixel_limit_is_refused(self):
+        """🔴 The limit the byte comparison above cannot make (2026-09-01).
+
+        A decode costs width × height × channels and is only loosely tied to
+        the file size — measured, a 9000×9000 PNG of flat colour is 0.25 MB on
+        the wire and 243 MB decoded, so it passes the byte check with 9.75 MB
+        to spare. The complaint has to say *pixels*, because somebody looking
+        at a small file told it is "too big" will not know what to change.
+        """
+        form = self.upload(a_photo(size=(600, 400)))
+
+        self.assertFalse(form.is_valid())
+        complaint = " ".join(form.errors["image"])
+        self.assertIn("megapixels", complaint)
+        self.assertIn("file size is fine", complaint)
+
+    @override_settings(IMAGE_MAX_PIXELS=100_000)
+    def test_an_oversized_upload_is_never_re_encoded(self):
+        """⭐ Refusing after decoding would spend the memory anyway.
+
+        `normalise_event_image` is the expensive call; the check has to sit in
+        front of it, and asserting the form is invalid would pass either way.
+        """
+        called = []
+        with mock.patch("events.services.normalise_event_image",
+                        side_effect=lambda f: called.append(f) or f):
+            self.upload(a_photo(size=(600, 400))).is_valid()
+
+        self.assertEqual(called, [])
 
     def test_an_event_without_a_picture_is_perfectly_valid(self):
         from events.forms import EventForm

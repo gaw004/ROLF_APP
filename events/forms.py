@@ -13,6 +13,7 @@ from django.conf import settings
 from django.db.models import Q
 
 from contact.models import EmergencyContact, RelationshipType
+from core.images import is_new_upload, too_many_pixels
 from core.limits import LONG_TEXT, PHONE, SEARCH
 from core.timeutils import day_start
 from org.models import Ministry
@@ -671,13 +672,29 @@ class EventForm(AudienceFormMixin, forms.ModelForm):
         uploaded = self.cleaned_data.get("image")
         # An unchanged field hands back the stored FieldFile, which has already
         # been through this and must not be re-encoded on every save.
-        if not uploaded or not hasattr(uploaded, "content_type"):
+        if not is_new_upload(uploaded):
             return uploaded
         if uploaded.size > settings.EVENT_IMAGE_MAX_UPLOAD_BYTES:
             raise forms.ValidationError(
                 f"That image is larger than "
                 f"{settings.EVENT_IMAGE_MAX_UPLOAD_BYTES // (1024 * 1024)} MB. "
                 f"Most phone photos are well under it.")
+        # 🔴 **The check the one above cannot make**, and it has to come before
+        #    `normalise_event_image` for the same reason that one does: what a
+        #    decode costs is the pixel count, not the file size. Measured: a
+        #    0.25 MB PNG holding 81 megapixels is 243 MB once decoded, and it
+        #    passes the byte limit with 9.75 MB to spare. Header read only —
+        #    see `core.images.too_many_pixels`.
+        #
+        # ⚠️ Worded by megapixels rather than by width × height. There is no
+        #    single pair of dimensions to name — 8000×6000 and 12000×4000 are
+        #    both refused and neither is "too wide".
+        if too_many_pixels(uploaded):
+            raise forms.ValidationError(
+                f"That image is larger than "
+                f"{settings.IMAGE_MAX_PIXELS // 1_000_000} megapixels. Its "
+                f"file size is fine — it is the number of pixels in it. "
+                f"Scaling it down before uploading will fix it.")
         from .services import normalise_event_image
 
         return normalise_event_image(uploaded)

@@ -92,7 +92,12 @@ design-system.md「十五、Memories」。
                ⚠️ 这一行在屏幕上一个像素都不占：2026-08-08 拍板「每个图不要带标签了」，
                去掉的是**画出来的**那行图注（`.wall-caption`），不是这个名字。
             {% endcomment %}
-            <img src="{{ item.photo.thumb.url }}" alt=""
+            {# 🔴 `item.thumb_url`，**不是** `item.photo.thumb.url`（2026-09-01）。
+               签名是每次调用 `.url` 现算的，所以后者会让每一次渲染都生成一个新网址 ——
+               浏览器按网址认图，网址变了就等于换了一张图，缓存命中率是**零**。
+               实测:墙上六十张缩略图每次进都全量重下。
+               这个字符串是 `services.wall_urls` 整批签好、缓存过的。别改回去。 #}
+            <img src="{{ item.thumb_url }}" alt=""
                  {% if not forloop.parentloop.first %}loading="lazy"{% endif %}>
             <span class="sr-only">{{ item.photo.caption }}</span>
           </button>

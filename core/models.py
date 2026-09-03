@@ -1,9 +1,14 @@
+import io
+import logging
 from collections import namedtuple
+from pathlib import Path
 
+from django.core.files.base import ContentFile
 from django.core.validators import FileExtensionValidator
 from django.db import IntegrityError, models, transaction
 
 from core.limits import LONG_TEXT
+from core.renditions import HERO_RENDITION_WIDTHS, rendition_field
 from core.storages import public_storage
 
 #: What `HomePage.hero` answers with: the file to fill the screen, and which of
@@ -15,6 +20,8 @@ from core.storages import public_storage
 #:    nobody can check by reading, and this is the one rule the front page and
 #:    the rest of the site have to keep agreeing about.
 Hero = namedtuple("Hero", "file kind")
+
+logger = logging.getLogger(__name__)
 
 
 class TimeStampedModel(models.Model):
@@ -103,14 +110,22 @@ class HomePage(models.Model):
 
     MEDIA_DIR = "home"
 
-    #: The two fields that put an object in the public bucket.
+    #: Every field that puts an object in the public bucket — the two uploads
+    #: and the derived rungs of the picture's `srcset` ladder.
     #:
-    #: ⚠️ A tuple rather than two mentions in `save()`, because everything that
-    #:    knows about the bucket has to agree on it: the replacement below, and
-    #:    `core.services.orphaned_home_media`, which decides what is *not*
+    #: ⚠️ A tuple rather than a mention per field in `save()`, because everything
+    #:    that knows about the bucket has to agree on it: the replacement below,
+    #:    and `core.services.orphaned_home_media`, which decides what is *not*
     #:    pointed at. Those two disagreeing means the sweep deletes a live
     #:    picture — the one failure mode here that a user would actually see.
-    MEDIA_FIELDS = ("hero_image", "hero_video")
+    #:
+    #: ⚠️ **The renditions belong in here and it is not a formality.** They are
+    #:    files in the same bucket under the same prefix, so a rung left out is
+    #:    a rung `orphaned_home_media()` reports as rubbish and offers to
+    #:    delete — while a page is serving it. Left out of the other half, every
+    #:    change of picture leaks three more files that nothing points at.
+    MEDIA_FIELDS = ("hero_image", "hero_video",
+                    *(rendition_field(width) for width in HERO_RENDITION_WIDTHS))
 
     # ⚠️ The **public** bucket, named explicitly, unlike every other upload in
     #    the project. This page is the one thing here that needs no login, so
@@ -121,6 +136,50 @@ class HomePage(models.Model):
         upload_to=MEDIA_DIR, blank=True, storage=public_storage,
         help_text="Full-screen background. Landscape, at least 2000px wide.",
     )
+    # --- The srcset ladder, derived from hero_image (2026-08-31) -------------
+    #
+    # ⚠️ **Three declared fields rather than one JSON column of widths**, and
+    #    the reason is the two sweeps: `_superseded_media()` and
+    #    `core.services.orphaned_home_media()` both walk `MEDIA_FIELDS` and ask
+    #    each one for `.name`. A JSON blob of paths would be invisible to both,
+    #    so replacing the picture would leak its rungs and the orphan sweep
+    #    would offer to delete the live ones. Adding a rung costs a migration;
+    #    that is the price of the files being swept like every other file here.
+    #
+    # ⚠️ `editable=False`, so they stay out of the admin form. They are derived,
+    #    and a derived value somebody can also set by hand is two answers to one
+    #    question — the same rule `brand_palette` is under. `core/admin.py`
+    #    lists its fields explicitly, so nothing there needs to change.
+    #
+    # ⚠️ Empty is a supported state, not a broken one: the srcset properties
+    #    below return "" and the templates fall back to `src` alone, which is
+    #    exactly how the page behaved before this existed. That is what makes
+    #    the deploy safe in the window before `rebuild_hero_renditions` runs.
+    hero_image_1280 = models.ImageField(
+        upload_to=MEDIA_DIR, blank=True, editable=False, storage=public_storage)
+    hero_image_1920 = models.ImageField(
+        upload_to=MEDIA_DIR, blank=True, editable=False, storage=public_storage)
+    hero_image_2560 = models.ImageField(
+        upload_to=MEDIA_DIR, blank=True, editable=False, storage=public_storage)
+    #: The uploaded picture's own width, for the `w` it is offered under.
+    #:
+    #: ⚠️ **Stored, because reading it costs a download.** `ImageField.width`
+    #:    opens the file whenever there is no `width_field` to answer from, so a
+    #:    `srcset` built by asking the field would put an R2 round trip on the
+    #:    front page once per render. Filled by `refresh_renditions`, which has
+    #:    the picture open anyway.
+    #:
+    #: ⚠️ Not Django's `width_field=`, deliberately. That fills itself from a
+    #:    `post_init` signal, which reads the file on **every instance load**
+    #:    for as long as the column is empty — so the rows that predate this
+    #:    field would pay exactly the download it exists to prevent, on every
+    #:    page view, until somebody happened to save them.
+    hero_image_width = models.PositiveIntegerField(default=0, editable=False)
+    #: Its height, for the aspect ratio `hero_sizes` is built on. Same reasons
+    #: as the width above: stored because reading it costs a download, and not
+    #: Django's `height_field=` because that one reads on every instance load
+    #: until the column is filled.
+    hero_image_height = models.PositiveIntegerField(default=0, editable=False)
     # ⚠️ FileField rather than a video-specific field: Django has no VideoField,
     #    and nothing here transcodes. What arrives is what is served, so the size
     #    of the file somebody uploads is the size every visitor downloads.
@@ -202,21 +261,242 @@ class HomePage(models.Model):
     def hero_focus(self):
         """The focal point as CSS writes it: "50% 50%".
 
-        ⚠️ One property, two callers — the front page's `object-position` and
-           every other page's `background-position`, which show **the same
-           photograph**. Formatting it at each call site is how those two end
-           up disagreeing, and the symptom would be a picture framed one way on
-           the front page and another way behind the rest of the site, with
+        ⚠️ One property, two callers — the front page and the shared dark
+           backdrop, which show **the same photograph** and both crop it with
+           `object-position`. Formatting it at each call site is how those two
+           end up disagreeing, and the symptom would be a picture framed one way
+           on the front page and another way behind the rest of the site, with
            both looking deliberate. `_hero_backdrop.html` carries a comment
            about exactly that kind of divergence; it was written after it
            happened once.
         """
         return f"{self.hero_focus_x}% {self.hero_focus_y}%"
 
+    @property
+    def hero_rungs(self):
+        """`[(width, url)]` for the shared dark backdrop. Capped at 2560.
+
+        ⚠️ **Pairs rather than a `srcset` string, because that layer is not an
+           `<img>` and cannot be one.** It is `display: none` in light mode, and
+           a `display:none` `<img>` is still downloaded while a `background-image`
+           is not — so building it as an `<img srcset>` silently charged every
+           light-mode reader for a picture they never see. Measured rather than
+           reasoned; `loading="lazy"` does not fix it either. The whole finding
+           is written out in `_hero_backdrop.html`.
+
+           So these go out as CSS custom properties and `app.css` picks one with
+           a media query. The rung that is picked is the only one fetched, and
+           `display:none` fetches none of them.
+
+        ⚠️ **The original is deliberately not among them**, unlike
+           `hero_srcset`. This layer is the one nobody ever sees sharply — it
+           sits under two gradients and 62% black glass — so a 5K display gets
+           2560 upscaled behind all of that. That is a stated cost: the
+           alternative is every laptop re-downloading the full photograph on
+           every navigation, which is the fault this began as.
+        """
+        rungs = []
+        for width in HERO_RENDITION_WIDTHS:
+            rendition = getattr(self, rendition_field(width))
+            if rendition:
+                rungs.append((width, rendition.url))
+        return rungs
+
+    @property
+    def hero_srcset(self):
+        """The candidates for the front page, **including the original**.
+
+        ⚠️ This is the half of the feature that keeps the promise: nothing is
+           compressed away. The front page is where the photograph is the point,
+           so the file that was uploaded stays on the ladder as its widest rung
+           and a display big enough to use it still gets every pixel.
+
+        ⚠️ Sized by `width`, never by the longest edge — `w` is what the browser
+           compares against "viewport width × DPR". See `core.images.width_size`
+           for why the two differ on a portrait upload.
+        """
+        rungs = self.hero_rungs
+        if not rungs or not self.hero_image:
+            return ""
+        candidates = [f"{url} {width}w" for width, url in rungs]
+        # ⚠️ The width has to be known and has to be wider than the top rung.
+        #    Zero is what the column holds for a row that predates this feature,
+        #    and offering the original at `0w` would tell the browser it is the
+        #    narrowest candidate there is — every screen would then choose it,
+        #    which is the download this whole feature removes, arriving through
+        #    the field meant to prevent it. Leaving it off is the safe half of
+        #    that trade; after `rebuild_hero_renditions` it never happens.
+        if self.hero_image_width > rungs[-1][0]:
+            candidates.append(f"{self.hero_image.url} {self.hero_image_width}w")
+        return ", ".join(candidates)
+
+    @property
+    def hero_sizes(self):
+        """What to put in `sizes=` for a picture drawn with `object-fit: cover`.
+
+        🔴 **`100vw` is wrong here, and it is wrong in the direction that makes
+           the front page blurry on a phone.** `sizes` states the width of the
+           `<img>` *box*, and the browser picks a rung from that — but this box
+           is the whole viewport and the picture is drawn with `cover`, so the
+           width actually painted is
+
+               max(viewport width, viewport height × the picture's aspect)
+
+           A 390×844 phone showing a 1.884-aspect photograph paints it 1590 CSS
+           px wide — 4770 device pixels at 3x — while `100vw` claims 390 and
+           gets a 1280 rung stretched nearly four times. Before the ladder
+           existed the same phone was handed the full-size original and looked
+           right, so shipping `100vw` would have been a regression dressed as an
+           optimisation, on the one page where the photograph *is* the content.
+
+        ⚠️ Falls back to `100vw` when the dimensions are unknown (a row that
+           predates these columns). That is the pre-ladder behaviour and it is
+           only ever reached alongside an empty `srcset`, which ignores `sizes`
+           entirely.
+
+        ⚠️ The ratio is rounded to three places rather than printed in full:
+           `sizes` is re-evaluated on every resize, and the extra digits buy
+           nothing at any real viewport height.
+        """
+        if not self.hero_image_width or not self.hero_image_height:
+            return "100vw"
+        aspect = round(self.hero_image_width / self.hero_image_height, 3)
+        return f"max(100vw, calc(100vh * {aspect}))"
+
+    def strip_hero_metadata(self):
+        """Take the camera's metadata off the picture. Pixels are untouched.
+
+        Returns the bytes the picture ends up as — stripped, or the original
+        where there was nothing to strip — so the caller can build the ladder
+        from them.
+
+        ⚠️ **Returning them is not a convenience.** `FieldFile.save()` below
+           rebinds `self.hero_image` to a fresh `FieldFile` with no open handle,
+           so the very next read of it is a round trip to R2 for bytes that are
+           still in this function's local variable. Measured: one avoidable GET
+           of the whole photograph on every change of the front page picture.
+
+        🔴 **This bucket is public and unsigned**, so everything the camera
+           wrote travels with the photograph — including where it was taken.
+           Measured on 2026-09-01: the hero kept all 4 GPS tags while Memories,
+           which is *private*, kept none. The asymmetry was backwards.
+
+        ⚠️ Lossless, and orientation survives — the whole working is over
+           `core.images.without_metadata`. Nothing here re-encodes, so "do not
+           compress unless it is free" is kept to the letter.
+
+        ⚠️ **Rewrites the field only when the bytes actually change.** A
+           photograph with no metadata, or one that is not a JPEG, must not be
+           handed a new uuid filename for nothing: that is a new URL, and a new
+           URL is every cache in the world missing.
+
+        ⚠️ `save=False`. The caller is `save()` itself, one line above the write
+           that stores this name.
+        """
+        from .images import without_metadata
+
+        if not self.hero_image:
+            return None
+        try:
+            self.hero_image.open("rb")
+            original = self.hero_image.read()
+        except Exception:
+            # ⚠️ Logged and carried, like the ladder below. An object store that
+            #    will not hand the file back is not a reason to refuse the save
+            #    — the picture is already stored, and the alternative is a 500
+            #    on the page somebody just used successfully.
+            logger.exception("Could not read the hero picture to strip metadata")
+            return None
+        stripped = without_metadata(original)
+        if stripped is original or stripped == original:
+            return original
+        name = Path(self.hero_image.name).name
+        self.hero_image.save(name, ContentFile(stripped), save=False)
+        return stripped
+
+    def refresh_renditions(self, data=None):
+        """Re-derive the srcset ladder from the current picture. Never raises.
+
+        ⚠️ Failure clears the rungs rather than stopping the save, exactly like
+           `refresh_palette` above and for the same reason: the picture is the
+           content, the ladder is an optimisation. With the rungs empty both
+           templates fall back to `src` alone — the page is heavier than it
+           should be and completely correct, which is the right way round.
+
+        ⚠️ **The uploads are inside the guard too, not only the encoding.** They
+           are three network writes to R2, and a timeout on the second one used
+           to propagate out of `save()` — so a transient object-store hiccup
+           turned "change the front page picture" into a 500, with the picture
+           itself unsaved because `super().save()` had not run yet. That is the
+           precise opposite of the paragraph above. Anything that fails now
+           leaves the ladder empty and the page correct.
+
+        ⚠️ **The old rungs are not deleted here.** They are in `MEDIA_FIELDS`,
+           so `_superseded_media()` reads them off the stored row and
+           `discard_media` removes them after the commit — the same path the
+           picture itself takes. Deleting them here would run before the write
+           and orphan them if it rolled back.
+
+        ⚠️ `data` is the picture's bytes when the caller already has them —
+           `strip_hero_metadata` has just read and rewritten the file, and
+           reaching for `self.hero_image` again would fetch from R2 what is
+           sitting in memory a stack frame away. Omitted, the file is read.
+        """
+        from .renditions import render_ladder
+
+        if not self.hero_image:
+            self._clear_renditions()
+            return
+        try:
+            source = io.BytesIO(data) if data is not None else self.hero_image
+            size, ladder = render_ladder(source)
+            for width in HERO_RENDITION_WIDTHS:
+                content = ladder.get(width)
+                if content is None:
+                    # ⚠️ Cleared, not left alone. A rung kept from the previous
+                    #    photograph would be served under this one's `srcset` —
+                    #    the wrong picture, at one screen width only, with
+                    #    nothing raised. This is also how a narrower upload
+                    #    drops the rungs it does not fill.
+                    setattr(self, rendition_field(width), "")
+                    continue
+                getattr(self, rendition_field(width)).save(
+                    content.name, content, save=False)
+        except Exception:
+            # ⚠️ Logged rather than swallowed in silence. A front page that
+            #    quietly stops being responsive looks exactly like one that
+            #    never was, and the only symptom is a bandwidth bill.
+            logger.exception("Could not build the hero ladder")
+            self._clear_renditions()
+            return
+        self.hero_image_width, self.hero_image_height = size
+
+    def _clear_renditions(self):
+        """Forget every derived rung. The page falls back to `src` alone."""
+        for width in HERO_RENDITION_WIDTHS:
+            setattr(self, rendition_field(width), "")
+        self.hero_image_width = 0
+        self.hero_image_height = 0
+
     def __str__(self):
         return "Home page"
 
-    def save(self, *args, **kwargs):
+    def save(self, *args, rebuild_hero=False, **kwargs):
+        """Store the row, re-deriving whatever the picture changed.
+
+        ⚠️ `rebuild_hero` forces the derived work on a picture whose **name has
+           not changed** — the backfill case, where the file has been in the
+           bucket since before there was a ladder to cut or metadata to strip.
+           `rebuild_hero_renditions` is the only caller.
+
+           It is a flag rather than the command doing the work itself and then
+           saving, and that was measured rather than guessed: stripping renames
+           the file, so a command that stripped, cut the ladder and *then*
+           called `save()` had its rename detected here and did the whole thing
+           a second time — building three more rungs and orphaning the first
+           three, which no sweep could find because the row had never pointed at
+           them. One path in, once.
+        """
         # ⚠️ Forced, not merely defaulted. Without this a second row can be
         #    created through the shell or a fixture, and then load() below picks
         #    one of them by chance.
@@ -225,7 +505,34 @@ class HomePage(models.Model):
         # ⚠️ Read **before** the write, obviously — but also *outside* the
         #    on_commit callback below, which runs when the old row is already
         #    gone from the database and could no longer be asked.
-        superseded = self._superseded_media()
+        #
+        # ⚠️ Read **once**, and before `refresh_renditions` below: that call
+        #    reassigns the rung fields, so a second read afterwards would
+        #    compare the new names against themselves and find nothing
+        #    superseded — the old rungs would stay in the bucket for good.
+        stored = self._stored_media()
+        # ⚠️ **Only when the picture actually changed**, unlike the palette
+        #    above — and the asymmetry is deliberate. Re-deriving a ramp is tens
+        #    of milliseconds against the same bytes; re-deriving the ladder
+        #    decodes the photograph, re-encodes three WebPs, and stores them
+        #    under three *new* uuid names. Doing that on every save would mean
+        #    fixing a typo in the verse silently invalidates every browser and
+        #    CDN copy of the background — and leaves three files behind each
+        #    time. Nothing would raise; the bill arrives as bandwidth.
+        #
+        # ⚠️ Compared against **the stored name**, not against Django's
+        #    `FieldFile._committed`. That flag was the first attempt and it is
+        #    wrong in a way that is silent: `FieldFile.save()` sets it True
+        #    *before* it calls `instance.save()`, so on the upload path — the
+        #    only path that matters — the branch never ran and no ladder was
+        #    ever cut. Everything else stayed green.
+        if rebuild_hero or self.hero_image.name != stored.get("hero_image"):
+            # ⚠️ **Stripping before the ladder, not after.** The rungs are cut
+            #    from whatever it leaves behind, and its bytes are handed
+            #    straight over — see `strip_hero_metadata` for why fetching
+            #    them again would be a needless round trip.
+            self.refresh_renditions(self.strip_hero_metadata())
+        superseded = self._superseded_media(stored)
         super().save(*args, **kwargs)
         if superseded:
             from .services import discard_media
@@ -238,7 +545,23 @@ class HomePage(models.Model):
             #    unaffected.
             transaction.on_commit(lambda: discard_media(superseded))
 
-    def _superseded_media(self):
+    def _stored_media(self):
+        """`{field: name}` as the database currently has it. `{}` before insert.
+
+        ⚠️ One read, handed to both callers in `save()`. They ask it different
+           questions — "did the picture change?" and "what is no longer pointed
+           at?" — but a second read taken *after* `refresh_renditions()` would
+           be answering about names this save has already replaced.
+        """
+        if not self.pk:
+            return {}
+        stored = (
+            type(self)._base_manager.filter(pk=self.pk)
+            .values(*self.MEDIA_FIELDS).first()
+        )
+        return stored or {}
+
+    def _superseded_media(self, stored):
         """`[(storage, name)]` — the objects this save stops pointing at.
 
         ⚠️ **The whole reason this exists**: replacing the front page's picture
@@ -263,18 +586,10 @@ class HomePage(models.Model):
            picture with it. `hero` prefers the video when both are set, and
            somebody setting one has not said anything about the other.
         """
-        if not self.pk:
-            return []
-        stored = (
-            type(self)._base_manager.filter(pk=self.pk)
-            .values(*self.MEDIA_FIELDS).first()
-        )
-        if stored is None:
-            return []
         return [
             (self._meta.get_field(field).storage, stored[field])
             for field in self.MEDIA_FIELDS
-            if stored[field] and stored[field] != getattr(self, field).name
+            if stored.get(field) and stored[field] != getattr(self, field).name
         ]
 
     def refresh_palette(self):

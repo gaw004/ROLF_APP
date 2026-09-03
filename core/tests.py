@@ -7,6 +7,7 @@ keeps reaching for when a rule has to hold everywhere and no linter enforces it
 
 import colorsys
 import datetime
+import hashlib
 import io
 import os
 import ast
@@ -21,6 +22,8 @@ import threading
 from unittest import mock
 
 import boto3
+from PIL import ExifTags
+from PIL import Image as PILImage
 
 from django.apps import apps
 from django.core.mail.backends.base import BaseEmailBackend
@@ -30,6 +33,7 @@ from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.contrib.staticfiles import finders
 from django.core.files.base import ContentFile
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.core.management import call_command
 from django.db import IntegrityError, connection, models
 from django.test import RequestFactory, SimpleTestCase, TestCase, override_settings
@@ -41,9 +45,14 @@ from core.health import HEALTH_PATH
 from core.management.commands.check_deployment import DEMO_ADDRESS_SUFFIX
 from core import memory
 from core.limits import LONG_TEXT
+from core.admin import HomePageForm
 from core.models import HomePage
-from core.services import orphaned_home_media
+from core.services import orphaned_home_media, restamp_home_media
 from core.palette import dominant_colour, ramp_from, relative_luminance
+from core.images import (a_flat_png, draft_to, too_many_pixels,
+                         upright_size, width_size, without_metadata)
+from core.renditions import (HERO_RENDITION_WIDTHS, render_ladder,
+                             rendition_field)
 from core.querysets import DateRangeQuerySet
 from core.timeutils import local_today
 
@@ -4102,6 +4111,906 @@ class OrphanedHomeMediaTests(EmptyBucketTestCase):
         self.assertIn("1 could not be deleted", output)
 
 
+class RestampHomeMediaTests(EmptyBucketTestCase):
+    """The backfill for the header that only new uploads get.
+
+    ⚠️ The bucket is faked here rather than reached. Development storage is the
+       local disk, which has no `connection` and no `get_object_parameters` —
+       so these patch both on and then assert about **the call that was made**,
+       which is the whole surface this function has. What R2 does with a
+       CopyObject is R2's contract, not this project's.
+    """
+
+    def storage(self):
+        return HomePage._meta.get_field("hero_image").storage
+
+    HEADERS = {"CacheControl": "public, max-age=2592000"}
+
+    def a_page_with_a_picture(self):
+        page = HomePage.load()
+        page.hero_image.save("live.jpg", ContentFile(b"live"), save=True)
+        return HomePage.load()
+
+    def restamp(self, *, client=None, headers=None):
+        """Run the service against a stand-in S3 client. Returns (client, result)."""
+        client = client or mock.MagicMock()
+        client.head_object.return_value = {"ContentType": "image/jpeg"}
+        storage = type(self.storage())
+        with (
+            mock.patch.object(storage, "connection", create=True) as conn,
+            mock.patch.object(storage, "bucket_name", "a-bucket", create=True),
+            mock.patch.object(storage, "get_object_parameters", create=True,
+                              return_value=dict(headers or self.HEADERS)),
+        ):
+            conn.meta.client = client
+            return client, restamp_home_media()
+
+    def test_the_object_is_copied_onto_itself_and_keeps_its_url(self):
+        """⭐ The one that says this is a cache fix and not a database write.
+
+        A re-upload would take a collision suffix, so the front page would come
+        back pointing at a new key — every cache in the world would miss, the
+        row would have changed, and the thing that was supposed to be a header
+        edit would have moved the picture.
+        """
+        page = self.a_page_with_a_picture()
+        client, stamped = self.restamp()
+
+        call = client.copy_object.call_args.kwargs
+        self.assertEqual(call["Key"], page.hero_image.name)
+        self.assertEqual(call["CopySource"],
+                         {"Bucket": "a-bucket", "Key": page.hero_image.name})
+        self.assertEqual(call["MetadataDirective"], "REPLACE")
+        self.assertEqual(stamped, [page.hero_image.name])
+        self.assertEqual(HomePage.load().hero_image.name, page.hero_image.name)
+
+    def test_the_header_is_whatever_the_storage_is_configured_with(self):
+        """⚠️ Not "is it this string". The value lives in prod.py and is
+        asserted there; what this holds is that the backfill reads it rather
+        than carrying its own copy — because the failure of a second copy is
+        silent, and it is new uploads and backfilled ones disagreeing for ever.
+        """
+        self.a_page_with_a_picture()
+        client, _ = self.restamp(headers={"CacheControl": "public, max-age=99"})
+
+        self.assertEqual(client.copy_object.call_args.kwargs["CacheControl"],
+                         "public, max-age=99")
+
+    def test_the_content_type_survives_the_replace(self):
+        """⚠️ REPLACE means replace. A header not named in the call is dropped,
+        and a JPEG that comes back as `application/octet-stream` stops being a
+        picture the browser draws and becomes a file it offers to download —
+        which on the front page is a blank screen with no error.
+        """
+        self.a_page_with_a_picture()
+        client, _ = self.restamp()
+
+        self.assertEqual(client.copy_object.call_args.kwargs["ContentType"],
+                         "image/jpeg")
+
+    def test_one_object_refusing_does_not_leave_the_other_unstamped(self):
+        """⚠️ hero_image is the one this was written for — 3.65 MB behind every
+        page in dark mode. A video that will not copy is no reason to skip it.
+        """
+        page = HomePage.load()
+        page.hero_image.save("live.jpg", ContentFile(b"live"), save=True)
+        page.hero_video.save("live.mp4", ContentFile(b"live"), save=True)
+        picture = HomePage.load().hero_image.name
+
+        client = mock.MagicMock()
+        client.head_object.return_value = {"ContentType": "image/jpeg"}
+        client.copy_object.side_effect = [None, OSError("R2 said no")]
+
+        with self.assertLogs("core.services", level="ERROR") as logged:
+            _, stamped = self.restamp(client=client)
+
+        self.assertEqual(stamped, [picture])
+        self.assertIn("Could not restamp", "\n".join(logged.output))
+
+    def test_a_front_page_with_no_picture_is_not_an_error(self):
+        """A fresh install has neither field set, and the backdrop falls back to
+        plain dark on purpose. Nothing to stamp is a state, not a fault."""
+        client, stamped = self.restamp()
+
+        self.assertEqual(stamped, [])
+        client.copy_object.assert_not_called()
+
+    def run_command(self, stamped):
+        out = io.StringIO()
+        with mock.patch(
+                "core.management.commands.restamp_home_media.restamp_home_media",
+                return_value=stamped):
+            call_command("restamp_home_media", stdout=out)
+        return out.getvalue()
+
+    def test_the_command_names_what_it_touched(self):
+        output = self.run_command(["home/live.jpg"])
+
+        self.assertIn("restamped: home/live.jpg", output)
+        self.assertIn("1 object(s) restamped", output)
+
+    def test_stamping_nothing_says_so_instead_of_claiming_success(self):
+        """⚠️ Two different states arrive here as the same empty list — an
+        empty front page, and a storage that refused every copy. The service
+        logs rather than raises (see its note), so the command must not report
+        the second as a job well done: somebody who reads "0 objects restamped,
+        success" goes and looks for the bug somewhere else.
+        """
+        output = self.run_command([])
+
+        self.assertIn("Nothing was restamped", output)
+        self.assertIn("check the log", output)
+
+
+def a_hero(size=(5312, 2819), fmt="JPEG", colour=(80, 110, 150),
+           orientation=None, gps=False):
+    """One real photograph as an upload, the shape the front page receives.
+
+    The default is the live picture's own dimensions, so that the arithmetic
+    these tests assert is the arithmetic that ran against the file the fault
+    was found on.
+
+    `orientation` and `gps` build the two things a phone writes and a stock
+    photograph does not — the tag that decides which way up it is drawn, and
+    the one that says where it was taken.
+    """
+    exif = PILImage.Exif()
+    if orientation:
+        exif[274] = orientation
+    if gps:
+        exif[271] = "ACME Phone"
+        exif[ExifTags.IFD.GPSInfo] = {
+            1: "N", 2: (37.0, 26.0, 12.0), 3: "W", 4: (122.0, 10.0, 30.0)}
+
+    image = PILImage.new("RGB", size, colour)
+    buffer = io.BytesIO()
+    image.save(buffer, fmt, quality=88, exif=exif)
+    image.close()
+    return ContentFile(buffer.getvalue(), name=f"hero.{fmt.lower()}")
+
+
+class HeroLadderTests(EmptyBucketTestCase):
+    """The responsive sizes cut from the front page's picture (2026-08-31).
+
+    ⭐ **The promise being kept here is "nothing is compressed away".** The
+       feature exists because a 5312×2819 photograph was being sent to every
+       screen in dark mode, on every page, and a 2x laptop can only show 5.9 MP
+       of it — but the answer was explicitly *not* to shrink the file. So the
+       first test below is the one that matters, and the rest are about the
+       ladder being honest: right widths, right aspect, never wider than the
+       original, and labelled with the number a browser actually compares
+       against.
+    """
+
+    def test_the_originals_pixels_are_never_touched(self):
+        """⭐ The user's red line, as an assertion.
+
+        Every rung is a new file and the original is never re-encoded. A
+        pipeline that "optimised" it would be a different feature from the one
+        that was asked for, and it would be invisible — the page would look
+        right and the photograph would quietly no longer be the photograph.
+
+        ⚠️ **Pixels, not bytes**, since 2026-09-01. The bytes do change now: the
+           camera's metadata is taken off on the way in, because this bucket is
+           public and that metadata included GPS coordinates
+           (`core.images.without_metadata`). Not one pixel moves, which is what
+           the promise was actually about — an assertion on the file's SHA-256
+           would have been asserting the implementation instead.
+        """
+        upload = a_hero()
+        with PILImage.open(upload) as source:
+            before = hashlib.sha256(source.tobytes()).hexdigest()
+        upload.seek(0)
+
+        page = HomePage.load()
+        page.hero_image.save("hero.jpg", upload, save=True)
+
+        page = HomePage.load()
+        with page.hero_image.open("rb") as handle:
+            with PILImage.open(handle) as stored:
+                self.assertEqual(hashlib.sha256(stored.tobytes()).hexdigest(),
+                                 before)
+
+    def test_the_cameras_location_does_not_reach_the_public_bucket(self):
+        """🔴 The one that was a live privacy hole, not a hypothetical.
+
+        Measured through the real upload path on 2026-09-01: the hero kept all
+        four of its GPS tags, on a URL that needs no login, while Memories —
+        which is *private* — kept none. The front page now offers this original
+        as the top rung of its `srcset`, so it is handed to every large display
+        rather than merely sitting in a bucket.
+        """
+        page = HomePage.load()
+        page.hero_image.save("hero.jpg", a_hero(gps=True), save=True)
+
+        page = HomePage.load()
+        with page.hero_image.open("rb") as handle:
+            with PILImage.open(handle) as stored:
+                exif = stored.getexif()
+                gps = exif.get_ifd(ExifTags.IFD.GPSInfo) if exif else {}
+
+        self.assertEqual(dict(gps), {})
+        self.assertNotIn(271, exif, "the camera's make is still on a public URL")
+
+    def test_a_portrait_hero_and_its_rungs_face_the_same_way(self):
+        """🔴 The trap in stripping metadata, and it is why Orientation stays.
+
+        A phone shooting in portrait writes a **landscape** raster plus
+        `Orientation=6`, and the browser turns it. Drop that tag and the browser
+        draws the original on its side — while the rungs, whose pixels were
+        already turned by `exif_transpose`, come out upright. The result is one
+        photograph facing two ways: sideways on a big screen, correct on a
+        small one, with nothing raised.
+        """
+        page = HomePage.load()
+        page.hero_image.save(
+            "hero.jpg", a_hero(size=(4000, 3000), orientation=6), save=True)
+
+        page = HomePage.load()
+        with page.hero_image.open("rb") as handle:
+            with PILImage.open(handle) as stored:
+                self.assertEqual(stored.getexif().get(274), 6,
+                                 "the orientation tag was stripped along with "
+                                 "the GPS — the original now faces the wrong way")
+                upright = upright_size(stored)
+
+        with PILImage.open(page.hero_image_1280) as rung:
+            self.assertEqual(upright[0] > upright[1], rung.width > rung.height)
+
+    def test_a_picture_with_nothing_to_strip_keeps_its_url(self):
+        """⚠️ Rewriting it for nothing would hand it a new uuid filename — a new
+        URL, and every cache in the world missing, to remove metadata that was
+        not there.
+        """
+        page = HomePage.load()
+        page.hero_image.save("hero.jpg", a_hero(gps=False), save=True)
+        name = HomePage.load().hero_image.name
+
+        HomePage.load().save()
+
+        self.assertEqual(HomePage.load().hero_image.name, name)
+
+    def test_every_rung_is_cut_and_keeps_the_aspect_ratio(self):
+        ladder = render_ladder(a_hero(size=(5312, 2819)))
+
+        self.assertEqual(sorted(ladder.files), list(HERO_RENDITION_WIDTHS))
+        self.assertEqual(ladder.size, (5312, 2819))
+        for width, content in ladder.files.items():
+            with self.subTest(rung=width):
+                with PILImage.open(content) as rung:
+                    self.assertEqual(rung.width, width)
+                    self.assertEqual(rung.height,
+                                     round(2819 * width / 5312))
+                    self.assertEqual(rung.format, "WEBP")
+
+    def test_a_rung_wider_than_the_picture_is_not_cut(self):
+        """⚠️ Never upscale. A 1500px picture blown up to 2560 is bytes with no
+        detail in them — and the `w` would then be a claim about resolution
+        that is not there, so a browser would pick it believing it was getting
+        something.
+        """
+        ladder = render_ladder(a_hero(size=(1500, 800)))
+
+        self.assertEqual(sorted(ladder.files), [1280])
+        self.assertEqual(ladder.size, (1500, 800))
+
+    def test_a_picture_narrower_than_every_rung_gets_no_ladder(self):
+        ladder = render_ladder(a_hero(size=(900, 600)))
+
+        self.assertEqual(ladder.files, {})
+        # ⚠️ Still reports the width. Nothing downstream should have to open
+        #    the file to find out how wide it is — that read is the cost this
+        #    whole design is avoiding.
+        self.assertEqual(ladder.size, (900, 600))
+
+    def test_a_portrait_picture_is_rungged_by_width_not_by_longest_edge(self):
+        """⭐ The bug `core.images.width_size` exists to prevent.
+
+        `srcset`'s `w` is compared against "viewport width × DPR", so a ladder
+        built on the longest edge would label a portrait photograph by its
+        **height** — and a phone asking for 1170px of width would be handed a
+        picture 1280 tall and about 600 wide. It would look like a blurry
+        picture, not like a units mistake. There is a 5120×5120 in the
+        development bucket, so this is not hypothetical.
+        """
+        ladder = render_ladder(a_hero(size=(3000, 6000)))
+
+        for width, content in ladder.files.items():
+            with self.subTest(rung=width):
+                with PILImage.open(content) as rung:
+                    self.assertEqual(rung.width, width)
+                    self.assertEqual(rung.height, width * 2)
+
+    def test_the_small_rungs_are_cut_from_the_largest_one(self):
+        """⚠️ Same rule as the Memories thumbnail, same reason.
+
+        Only the widest rung is sized from the photograph's own dimensions;
+        everything under it is resampled from that. Cut each rung from the
+        decode instead and their sizes depend on which scale libjpeg happened
+        to pick for that particular file — valid images, right format, and
+        dimensions that move when the photograph does.
+        """
+        resized_from = []
+        real_resize = PILImage.Image.resize
+
+        def spy(self, size, *args, **kwargs):
+            resized_from.append((self.size, size))
+            return real_resize(self, size, *args, **kwargs)
+
+        with mock.patch.object(PILImage.Image, "resize", spy):
+            render_ladder(a_hero(size=(5312, 2819)))
+
+        widest = max(HERO_RENDITION_WIDTHS)
+        for source_size, target in resized_from:
+            if target[0] == widest:
+                continue
+            with self.subTest(rung=target[0]):
+                self.assertEqual(
+                    source_size[0], widest,
+                    f"the {target[0]}w rung was cut from a "
+                    f"{source_size[0]}px picture rather than from the "
+                    f"{widest}w one")
+
+    def test_the_photograph_is_decoded_at_reduced_scale(self):
+        """⭐ The memory guard, and the reason the ladder stops at 2560.
+
+        This runs on a 512 MB instance that already holds two workers, and the
+        repository has been taken down twice by decoding a whole photograph to
+        throw most of it away. `draft_to` asks libjpeg for a reduced-scale
+        decode; the assertion is on the size the picture had when it was
+        resized, because that is the actual rule.
+
+        ⚠️ A ratio rather than a pixel count: JPEG only offers 1/2, 1/4 and
+           1/8, so a fixed number would be encoding that arithmetic instead of
+           stating the rule.
+        """
+        decoded_at = []
+        real_resize = PILImage.Image.resize
+
+        def spy(self, size, *args, **kwargs):
+            decoded_at.append(self.size)
+            return real_resize(self, size, *args, **kwargs)
+
+        with mock.patch.object(PILImage.Image, "resize", spy):
+            render_ladder(a_hero(size=(5312, 2819)))
+
+        self.assertNotEqual(decoded_at, [], "nothing was resized at all")
+        self.assertLessEqual(
+            decoded_at[0][0], 5312 / 2,
+            "the photograph was still at full size when the ladder was cut — "
+            "draft_to has stopped taking effect, and a large upload will cost "
+            "the instance its memory")
+
+    def test_a_portrait_phone_photo_is_still_decoded_at_reduced_scale(self):
+        """🔴 The one that made the memory fix a no-op for the commonest upload.
+
+        Every caller computes its target from `upright_size` — the size *after*
+        the EXIF turn — while the decoder has not turned anything yet. So for a
+        photograph shot in portrait on a phone (a landscape raster carrying
+        orientation 6) the target arrived with its axes swapped relative to the
+        raster, Pillow's `min(w // tw, h // th)` floored one term to zero, and
+        its scale loop fell through to 1: **the whole picture decoded**, on the
+        instance this was written to protect.
+
+        ⚠️ The pipeline output is identical either way, which is why nothing
+           caught it. The assertion has to be on the size at the moment of the
+           resize.
+
+        ⚠️ Exercised on `draft_to` directly rather than through
+           `render_ladder`, and the numbers are small on purpose. libjpeg only
+           offers 1/2, 1/4 and 1/8, so a reduced decode is only *available* when
+           the raster is at least twice the target — and `render_ladder` drafts
+           to its widest rung, so reproducing this through the ladder would need
+           a 30 MP fixture to show a difference the arithmetic shows at 600px.
+        """
+        exif = PILImage.Exif()
+        exif[274] = 6  # Orientation: turn a quarter — i.e. shot in portrait.
+        raster = PILImage.new("RGB", (600, 520), (70, 90, 120))
+        buffer = io.BytesIO()
+        raster.save(buffer, "JPEG", quality=88, exif=exif)
+        raster.close()
+        buffer.seek(0)
+
+        with PILImage.open(buffer) as source:
+            self.assertEqual(source.size, (600, 520), "the raster is landscape")
+            native = upright_size(source)
+            self.assertEqual(native, (520, 600), "upright, it is a portrait")
+
+            draft_to(source, width_size(native, 256))
+
+            # min(600 // 295, 520 // 256) == 2 once the target is expressed in
+            # the raster's axes. Left in the upright axes it is
+            # min(600 // 256, 520 // 295) == 1, and nothing is reduced at all.
+            self.assertEqual(
+                source.size, (300, 260),
+                "the decoder was handed a target in the upright axes, so it "
+                "declined to reduce — the memory fix is a no-op for every "
+                "photograph shot in portrait on a phone")
+
+    def test_stripping_metadata_moves_no_pixels(self):
+        """⭐ What makes this a metadata edit rather than a re-encode.
+
+        The scan data is copied verbatim from the `SOS` marker onward, so the
+        picture that comes out is the picture that went in — bit for bit. That
+        is the whole licence for doing this to a file the user asked not to be
+        compressed.
+        """
+        raw = a_hero(size=(1200, 800), gps=True).read()
+        out = without_metadata(raw)
+
+        self.assertNotEqual(out, raw, "nothing was stripped at all")
+        with PILImage.open(io.BytesIO(raw)) as a:
+            with PILImage.open(io.BytesIO(out)) as b:
+                self.assertEqual(a.tobytes(), b.tobytes())
+                self.assertEqual(a.size, b.size)
+
+    def test_an_upright_orientation_tag_is_not_worth_keeping(self):
+        """⚠️ `Orientation=1` and no tag at all mean the same thing — draw it as
+        it is. Writing the tag back would be bytes saying nothing.
+        """
+        out = without_metadata(a_hero(size=(64, 48), orientation=1, gps=True).read())
+
+        with PILImage.open(io.BytesIO(out)) as stored:
+            self.assertIsNone(stored.getexif().get(274))
+
+    def test_a_file_that_is_not_a_jpeg_comes_back_untouched(self):
+        """⚠️ The stated gap, asserted so it stays stated. PNG and WebP keep
+        metadata in a different structure and would each need their own
+        surgery; GPS comes from cameras and cameras write JPEG. A PNG exported
+        by software that embedded a location would still carry it.
+        """
+        raw = a_hero(size=(64, 48), fmt="PNG").read()
+
+        self.assertIs(without_metadata(raw), raw)
+
+    def test_a_malformed_jpeg_is_handed_back_rather_than_guessed_at(self):
+        """⚠️ This runs on somebody's upload. A truncated or unusual file is a
+        reason to do nothing, never a reason to raise on the save path — and
+        never a reason to emit bytes assembled from a guess.
+        """
+        for label, data in [("truncated", b"\xff\xd8\xff\xe1\x00\x10Exif\x00\x00rest"),
+                            ("not an image", b"\xff\xd8 plainly not a jpeg"),
+                            ("empty", b"")]:
+            with self.subTest(case=label):
+                self.assertEqual(without_metadata(data), data)
+
+    def test_width_size_and_stored_size_disagree_on_a_portrait(self):
+        """⚠️ The two are not interchangeable, which is the whole reason there
+        are two. On a landscape picture they agree, and that is what makes
+        substituting one for the other survive review.
+        """
+        self.assertEqual(width_size((3000, 6000), 1500), (1500, 3000))
+        self.assertIsNone(width_size((900, 600), 1280))
+
+
+#: A PNG that is enormous in pixels and tiny on the wire, built once.
+#:
+#: ⚠️ Flat colour on purpose — that is what makes it compress to a quarter of a
+#:    megabyte while decoding to hundreds. The real-world shapes of this are
+#:    posters, diagrams and screenshots, not photographs: a photographic PNG
+#:    this size is a 50–150 MB file and never reaches the pixel check, because
+#:    the byte limit stops it first.
+#:
+#: ⚠️ Module scope rather than a call per test. Encoding 81 megapixels at
+#:    `compress_level=9` measures ~0.43s, and three tests want the identical
+#:    bytes — there is nothing for them to vary.
+HUGE_PNG = a_flat_png((9000, 9000))
+
+
+class PixelLimitTests(SimpleTestCase):
+    """The gate that the byte limit cannot be (2026-09-01).
+
+    🔴 What a decode costs is width × height × channels, and that is only
+       loosely related to the file size. Measured: a 9000×9000 PNG of flat
+       colour is **0.25 MB on the wire and 243 MB decoded**, which cleared both
+       existing defences at once — well under the 10 MB byte limit, and at 81 MP
+       just under Pillow's own MAX_IMAGE_PIXELS of 89 MP — on a 512 MB instance
+       running two workers.
+    """
+
+    def test_the_gap_this_closes_is_real(self):
+        """⭐ The measurement, as a test, so the premise cannot quietly stop
+        being true. If a future Pillow lowers MAX_IMAGE_PIXELS below this, or
+        the byte limit rises to cover it, this check has become redundant and
+        somebody should be told rather than left guessing.
+        """
+        data = HUGE_PNG
+
+        self.assertLess(len(data), settings.EVENT_IMAGE_MAX_UPLOAD_BYTES,
+                        "the fixture is refused by the byte limit, so it no "
+                        "longer demonstrates the gap")
+        self.assertLess(9000 * 9000, PILImage.MAX_IMAGE_PIXELS,
+                        "Pillow's own bomb guard now catches this on its own")
+        self.assertGreater(9000 * 9000, settings.IMAGE_MAX_PIXELS)
+
+    def test_an_enormous_picture_is_refused(self):
+        self.assertTrue(too_many_pixels(ContentFile(HUGE_PNG)))
+
+    def test_a_48_megapixel_phone_photograph_is_not(self):
+        """⚠️ The reason the limit is 50 million and not 40. A phone in its
+        high-resolution mode produces 8000×6000, and refusing those would be
+        refusing ordinary photographs from ordinary phones.
+        """
+        upload = a_hero(size=(8000, 6000))
+
+        self.assertFalse(too_many_pixels(upload))
+
+    def test_the_check_never_decodes_the_picture(self):
+        """⭐ The whole point. Decoding something to find out whether decoding
+        it was affordable is the mistake this exists to avoid — and it is a
+        mistake that would pass every other test in this class.
+        """
+        # ⚠️ Built **before** the spy goes on. Making the fixture decodes it,
+        #    and counting that would convict the test's own setup — which is
+        #    what the first version of this did.
+        upload = ContentFile(HUGE_PNG)
+
+        decoded = []
+        real_load = PILImage.Image.load
+
+        def spy(self, *args, **kwargs):
+            decoded.append(self.size)
+            return real_load(self, *args, **kwargs)
+
+        with mock.patch.object(PILImage.Image, "load", spy):
+            too_many_pixels(upload)
+
+        self.assertEqual(decoded, [],
+                         "the file was decoded in order to measure it, which "
+                         "spends exactly the memory this check is protecting")
+
+    def test_the_file_is_left_where_the_pipeline_expects_it(self):
+        """⚠️ Django's uploads are read from wherever they were left, so a check
+        that consumes the header and does not rewind hands the next stage a
+        truncated file. That failure looks like a corrupt image, not like a
+        misplaced cursor.
+        """
+        upload = a_hero(size=(64, 48))
+        too_many_pixels(upload)
+
+        self.assertEqual(upload.tell(), 0)
+        with PILImage.open(upload) as still_readable:
+            self.assertEqual(still_readable.size, (64, 48))
+
+    def test_something_unreadable_is_not_reported_as_too_large(self):
+        """⚠️ "Not an image" is a different complaint with a different fix, and
+        it belongs to whoever raises it a moment later. Answering it here would
+        tell somebody to shrink a file that is not a picture at all.
+        """
+        self.assertFalse(too_many_pixels(ContentFile(b"not an image")))
+
+
+class HeroPixelLimitTests(TestCase):
+    """The same gate on the front page's own upload.
+
+    ⚠️ A `TestCase` rather than joining `PixelLimitTests` above: `HomePageForm`
+       is a ModelForm and validating one touches the database, while the checks
+       up there are on a plain function and are faster without it.
+    """
+
+    def a_form(self, size):
+        upload = SimpleUploadedFile(
+            "hero.jpg", a_hero(size=size).read(), content_type="image/jpeg")
+        return HomePageForm({"hero_focus_x": 50, "hero_focus_y": 50},
+                            {"hero_image": upload})
+
+    @override_settings(IMAGE_MAX_PIXELS=100_000)
+    def test_a_picture_over_the_limit_is_refused(self):
+        """🔴 The front page is the **one upload with no re-encoding step**, so
+        until this existed nothing between the file picker and the public
+        bucket ever looked at the pixel count. It would not have raised — it
+        would have taken the site down while somebody changed the front page.
+        """
+        form = self.a_form((600, 400))
+
+        self.assertFalse(form.is_valid())
+        complaint = " ".join(form.errors["hero_image"])
+        self.assertIn("megapixels", complaint)
+        self.assertIn("file size is fine", complaint,
+                      "the complaint reads as a file-size one, so somebody "
+                      "looking at a small file is told to fix the wrong thing")
+
+    def test_an_ordinary_picture_still_goes_through(self):
+        """⚠️ The other half. A guard nothing can get past is not a guard."""
+        self.assertNotIn("hero_image", self.a_form((600, 400)).errors)
+
+
+class HeroSrcsetTests(EmptyBucketTestCase):
+    """What each of the two pages is offered, and why they differ.
+
+    ⚠️ `EmptyBucketTestCase`, like its neighbours — these tests store real
+       photographs, and a plain `TestCase` writes them into the developer's own
+       `media/` and leaves them there. Caught the honest way: a `ls media/home`
+       after one run had ninety WebP files in it.
+    """
+
+    def a_page(self, size=(5312, 2819)):
+        page = HomePage.load()
+        page.hero_image.save("hero.jpg", a_hero(size=size), save=True)
+        return HomePage.load()
+
+    def test_the_front_page_still_offers_the_original(self):
+        """⭐ "Except where it costs sharpness, do not compress."
+
+        The front page is where the photograph *is* the content, so the file
+        that was uploaded stays on the ladder as its widest candidate and a
+        display big enough to use it still receives every pixel.
+        """
+        page = self.a_page()
+
+        self.assertIn(f"{page.hero_image.url} 5312w", page.hero_srcset)
+        for width in HERO_RENDITION_WIDTHS:
+            self.assertIn(f" {width}w", page.hero_srcset)
+
+    def test_the_shared_backdrop_stops_at_the_widest_rung(self):
+        """⚠️ The deliberate difference, and the cost is stated rather than
+        hidden: a 5K display gets 2560 upscaled behind two gradients and 62%
+        black glass. What it buys is every laptop no longer re-fetching the
+        whole photograph on every navigation — the fault this began as.
+        """
+        page = self.a_page()
+
+        self.assertEqual([w for w, _ in page.hero_rungs],
+                         list(HERO_RENDITION_WIDTHS))
+        self.assertNotIn(page.hero_image.url,
+                         [url for _, url in page.hero_rungs])
+
+    def test_the_backdrop_is_never_built_as_an_img(self):
+        """🔴 The regression guard, and it is about a download nobody can see.
+
+        This layer is `display: none` in light mode. A `background-image` on a
+        hidden element is not fetched; an `<img>` inside one **is** — so
+        building it as `<img srcset>` charges every light-mode reader for a
+        picture they never see, with the page looking identical either way.
+        Measured in Chrome 141 while this was being written, because the first
+        version of this feature did exactly that:
+
+            background-image     -> not requested
+            <img>                -> requested
+            <img loading="lazy"> -> still requested
+
+        The third line is the patch that looked obvious and does not work.
+        """
+        markup = (Path(settings.BASE_DIR) / "core" / "templates" / "core"
+                  / "components" / "_hero_backdrop.html").read_text()
+        body = re.sub(r"\{%\s*comment\s*%\}.*?\{%\s*endcomment\s*%\}", "",
+                      markup, flags=re.S)
+
+        self.assertNotIn("<img", body,
+                         "the dark backdrop has become an <img> — light-mode "
+                         "readers now download a picture they never see")
+        self.assertIn("background-image", (
+            Path(settings.BASE_DIR) / "assets" / "app.css").read_text())
+
+    def test_the_backdrop_offers_every_rung_to_the_stylesheet(self):
+        """⚠️ The template ships URLs, `app.css` picks one with a media query.
+        A rung the template does not emit is a rung no breakpoint can reach.
+        """
+        self.a_page()
+        markup = self.client.get(reverse("accounts:login")).content.decode()
+
+        self.assertIn("--hero-original: url(", markup)
+        for width in HERO_RENDITION_WIDTHS:
+            with self.subTest(rung=width):
+                self.assertIn(f"--hero-{width}: url(", markup)
+
+    def test_every_breakpoint_falls_back_through_every_rung(self):
+        """⚠️ A chain that skips rungs lands on the original, which is the
+        download this whole change removes.
+
+        The admin asks for "at least 2000px wide", so a 2200px upload is
+        ordinary — and it yields 1280 and 1920 but no 2560. A desktop rule
+        written `var(--hero-2560, var(--hero-original))` would then serve the
+        raw multi-megabyte JPEG to every dark-mode page, while the two rungs it
+        did cut sat unused in the bucket.
+        """
+        css = (Path(settings.BASE_DIR) / "assets" / "app.css").read_text()
+        rules = re.findall(r"\.hero-backdrop\s*\{([^}]*)\}", css)
+
+        self.assertEqual(len(rules), len(HERO_RENDITION_WIDTHS),
+                         "one rule per rung is the arrangement these "
+                         "assertions are about")
+        for rule in rules:
+            with self.subTest(rule=rule.strip()[:40]):
+                for width in HERO_RENDITION_WIDTHS:
+                    self.assertIn(f"--hero-{width}", rule)
+                self.assertIn("--hero-original", rule)
+
+    def test_every_rung_the_template_emits_has_a_breakpoint(self):
+        """⚠️ The two halves are in different files and neither imports the
+        other. A width added to `HERO_RENDITION_WIDTHS` is generated, stored,
+        swept and emitted — and then never chosen, because nothing in the
+        stylesheet mentions it. Nothing raises; the rung is simply dead weight
+        in the bucket.
+        """
+        css = (Path(settings.BASE_DIR) / "assets" / "app.css").read_text()
+        for width in HERO_RENDITION_WIDTHS:
+            with self.subTest(rung=width):
+                self.assertIn(f"--hero-{width}", css,
+                              f"nothing in app.css ever selects the {width}px "
+                              f"rung, so it is generated and never served")
+
+    def test_a_row_that_predates_the_width_column_is_not_offered_at_zero(self):
+        """⚠️ `0w` would read as "the smallest candidate there is", so every
+        screen would choose the original — the exact download this feature
+        removes, arriving through the field meant to prevent it. The safe half
+        of the trade is to fall back to the capped ladder.
+        """
+        page = self.a_page()
+        HomePage.objects.filter(pk=page.pk).update(hero_image_width=0)
+        page = HomePage.load()
+
+        # ⚠️ A leading space, because "0w" is a substring of "1280w" — the
+        #    first version of this assertion passed on the descriptor it was
+        #    meant to rule out and failed on the ladder it was meant to allow.
+        self.assertNotIn(" 0w", page.hero_srcset)
+        self.assertNotIn(page.hero_image.url, page.hero_srcset)
+
+    def test_no_ladder_means_no_srcset_at_all(self):
+        """⚠️ The state between the deploy and `rebuild_hero_renditions`, and it
+        has to be the old behaviour exactly: `src` alone, page correct, merely
+        heavier than it will be in a minute.
+        """
+        page = HomePage.load()
+        page.hero_image.save("hero.jpg", ContentFile(b"not an image"),
+                             save=True)
+        page = HomePage.load()
+
+        self.assertEqual(page.hero_srcset, "")
+        self.assertEqual(page.hero_rungs, [])
+
+    def test_the_front_page_sizes_for_the_cover_fit_and_not_for_the_viewport(self):
+        """🔴 `sizes="100vw"` is wrong here, and wrong towards blurry.
+
+        The hero fills the viewport with `object-fit: cover`, so on a portrait
+        screen the painted width is `viewport height × aspect`, not the
+        viewport width. A 390×844 phone showing this 1.884-aspect photograph
+        paints it 1590 CSS px wide — 4770 device pixels at 3x — while `100vw`
+        claims 390 and earns a 1280 rung stretched nearly four times. The same
+        phone was sharp before the ladder existed, because it got the original.
+        """
+        page = self.a_page()
+        markup = self.client.get(reverse("home")).content.decode()
+
+        aspect = round(5312 / 2819, 3)
+        self.assertEqual(page.hero_sizes, f"max(100vw, calc(100vh * {aspect}))")
+        self.assertIn(f"sizes=\"max(100vw, calc(100vh * {aspect}))\"", markup)
+        self.assertIn("srcset=", markup)
+
+    def test_sizes_falls_back_when_the_dimensions_are_unknown(self):
+        """⚠️ A row from before these columns existed. `100vw` is the
+        pre-ladder behaviour, and it is only ever reached next to an empty
+        `srcset` — which makes `sizes` inert anyway.
+        """
+        page = self.a_page()
+        HomePage.objects.filter(pk=page.pk).update(hero_image_height=0)
+
+        self.assertEqual(HomePage.load().hero_sizes, "100vw")
+
+    def test_a_storage_failure_mid_ladder_does_not_break_the_save(self):
+        """🔴 "Never raises" has to include the three uploads, not just the
+        encoding.
+
+        Each rung is a network write to R2. A timeout on the second one used to
+        propagate out of `save()`, so an object-store hiccup turned "change the
+        front page picture" into a 500 — with the picture itself unsaved,
+        because `super().save()` had not run yet. The ladder is an optimisation;
+        the picture is the content.
+
+        ⚠️ The picture is stored first and only the **rung** writes are made to
+           fail. Patching the storage for the whole save would break the upload
+           of the photograph itself, which is a different failure and not the
+           one this is about.
+        """
+        page = self.a_page()
+        storage = type(HomePage._meta.get_field("hero_image_1280").storage)
+
+        with mock.patch.object(storage, "save",
+                               side_effect=OSError("R2 said no")):
+            with self.assertLogs("core.models", level="ERROR") as logged:
+                page.refresh_renditions()
+        page.save()
+
+        page = HomePage.load()
+        self.assertEqual(page.hero_rungs, [])
+        self.assertEqual(page.hero_srcset, "")
+        self.assertEqual(page.hero_sizes, "100vw")
+        self.assertIn("Could not build the hero ladder", "\n".join(logged.output))
+
+    def test_saving_the_verse_does_not_rebuild_the_ladder(self):
+        """⭐ The one that stops a typo costing everybody their cache.
+
+        Re-deriving the ladder writes three new uuid filenames, so doing it on
+        every save would mean editing the verse silently invalidates every
+        browser and CDN copy of the background — and leaves three files behind
+        each time. Nothing would raise; the bill arrives as bandwidth.
+
+        ⚠️ This is also the guard on `_committed`, which is Django's private
+           flag. The day it changes shape, this goes red — rather than the
+           bucket quietly churning.
+        """
+        page = self.a_page()
+        before = [getattr(page, f"hero_image_{w}").name
+                  for w in HERO_RENDITION_WIDTHS]
+
+        page.verse_text = "For we are his workmanship."
+        page.save()
+
+        page = HomePage.load()
+        self.assertEqual(
+            [getattr(page, f"hero_image_{w}").name
+             for w in HERO_RENDITION_WIDTHS],
+            before)
+
+    def test_the_backfill_cuts_the_ladder_once_and_orphans_nothing(self):
+        """🔴 It cut it twice, and the second cut leaked three files.
+
+        Stripping metadata renames the picture. So a command that stripped, cut
+        the ladder and *then* called `save()` had its own rename detected as "a
+        new picture has arrived" and did the whole thing again — three more
+        rungs, and the first three orphaned where no sweep could find them,
+        because the row had never pointed at those names.
+
+        ⚠️ The fixture carries GPS **and** goes into the row without passing
+           through `save()`, which is what a photograph uploaded before any of
+           this existed actually looks like. Without the metadata there is
+           nothing to strip, no rename, and the bug does not reproduce.
+        """
+        page = HomePage.load()
+        storage = HomePage._meta.get_field("hero_image").storage
+        HomePage.objects.filter(pk=page.pk).update(hero_image="home/old.jpg")
+        storage.save("home/old.jpg", a_hero(size=(900, 600), gps=True))
+
+        before = set(storage.listdir(HomePage.MEDIA_DIR)[1])
+        with mock.patch.object(
+                HomePage, "refresh_renditions",
+                autospec=True, side_effect=HomePage.refresh_renditions) as cut:
+            with self.captureOnCommitCallbacks(execute=True):
+                call_command("rebuild_hero_renditions", stdout=io.StringIO())
+        after = set(storage.listdir(HomePage.MEDIA_DIR)[1])
+
+        self.assertEqual(cut.call_count, 1, "the ladder was cut more than once")
+
+        page = HomePage.load()
+        live = {Path(page.hero_image.name).name}
+        live |= {Path(getattr(page, rendition_field(w)).name).name
+                 for w in HERO_RENDITION_WIDTHS if getattr(page, rendition_field(w))}
+        self.assertEqual((after - before) - live, set(),
+                         "the backfill left files behind that nothing points at")
+
+    def test_replacing_the_picture_takes_its_rungs_with_it(self):
+        """⚠️ The rungs are in `MEDIA_FIELDS`, so they travel the same path the
+        picture does. Left out, every change of picture would leak three files
+        that nothing points at — in the one bucket the pg_dump does not cover.
+        """
+        page = self.a_page()
+        storage = HomePage._meta.get_field("hero_image").storage
+        old = [getattr(page, f"hero_image_{w}").name
+               for w in HERO_RENDITION_WIDTHS]
+
+        with self.captureOnCommitCallbacks(execute=True):
+            page.hero_image.save("second.jpg", a_hero(colour=(10, 90, 40)),
+                                 save=True)
+
+        for name in old:
+            with self.subTest(rung=name):
+                self.assertFalse(storage.exists(name))
+
+    def test_the_live_rungs_are_never_called_orphans(self):
+        """⭐ The failure that costs something irreversible, for the new fields.
+
+        `orphaned_home_media()` offers to delete everything under the prefix
+        that no field points at. A rung missing from `MEDIA_FIELDS` is a rung
+        it reports as rubbish **while a page is serving it**.
+        """
+        page = self.a_page()
+        live = {getattr(page, f"hero_image_{w}").name
+                for w in HERO_RENDITION_WIDTHS}
+
+        self.assertTrue(live)
+        self.assertEqual(live & set(orphaned_home_media()), set())
+
+
 class DerivedPaletteTests(TestCase):
     """The brand ramp is built from the front page's photograph (D26).
 
@@ -4214,8 +5123,6 @@ class DerivedPaletteTests(TestCase):
         """
         import io
 
-        from PIL import Image as PILImage
-
         source = PILImage.new("RGB", (6000, 4000), (178, 34, 34))
         buffer = io.BytesIO()
         source.save(buffer, "JPEG", quality=88)
@@ -4295,6 +5202,11 @@ class HeroFramingTests(TestCase):
         out as a picture framed one way on the front page and another way
         behind the rest of the site, both looking deliberate — which is the
         divergence `_hero_backdrop.html` was already carrying a warning about.
+
+        ⚠️ They stayed two different properties through the 2026-08-31 work.
+           Unifying them on `object-position` was tried — it falls out of using
+           an `<img>` — and reverted, because a hidden `<img>` is downloaded and
+           a hidden `background-image` is not. Two properties, one number.
         """
         page = HomePage.load()
         page.hero_image = "home/example.webp"
@@ -5409,6 +6321,21 @@ class ProductionHardeningGuardTests(TestCase):
         return (Path(settings.BASE_DIR) / "config" / "settings" / "prod.py"
                 ).read_text(encoding="utf-8")
 
+    @property
+    def public_cache_control(self):
+        """The header value itself, never the branch it is written in.
+
+        ⚠️ Searching the surrounding source instead is the same trap
+           `test_error_mail_is_not_wired_to_the_admins` sidesteps by quoting,
+           and this one walked into it: the `immutable` guard below failed on
+           the comment **explaining why `immutable` is not used**. A guard that
+           convicts its own reason teaches the next person to delete the reason.
+        """
+        found = re.search(r'"CacheControl":\s*"([^"]*)"', self.source)
+        self.assertIsNotNone(
+            found, "the public bucket no longer sets a CacheControl at all")
+        return found.group(1)
+
     def test_ssl_redirect_never_ships_without_the_proxy_header(self):
         """⚠️ The pair, not either one. Render terminates TLS at its proxy, so
         Django sees http and redirects to https, which arrives as http again —
@@ -5472,6 +6399,46 @@ class ProductionHardeningGuardTests(TestCase):
         # This database holds minors' names, dates of birth and addresses.
         self.assertIn("send_default_pii=False", self.source)
         self.assertNotIn("send_default_pii=True", self.source)
+
+    def test_the_public_bucket_states_how_long_its_files_stay_fresh(self):
+        """🔴 The one whose failure arrives as "the background image is broken".
+
+        R2 sends no `Cache-Control`, and with the header absent a browser makes
+        one up: fresh for 10% of the object's age. A hero picture replaced an
+        hour ago is fresh for six minutes, and the seventh minute is not a slow
+        page — the dark-mode backdrop is `position: fixed`, so it has nothing
+        to paint while it revalidates and the whole page goes black, then comes
+        back on reload. That is what it looked like from the outside on
+        2026-08-31, and the word nobody used about it was "cache".
+
+        ⚠️ Asserts a `max-age` is stated, not which number it is. Thirty days
+           is a judgement about how long a wrong file could hide behind a reused
+           name (see the note in prod.py); "the header is sent at all" is the
+           property that keeps the page from going black.
+        """
+        self.assertRegex(
+            self.public_cache_control, r"^public,\s*max-age=\d+",
+            "the public bucket no longer sends a Cache-Control: without one the "
+            "dark-mode backdrop blanks on every navigation past the browser's "
+            "made-up freshness window",
+        )
+
+    def test_the_public_bucket_does_not_promise_a_file_is_immutable(self):
+        """⚠️ The other half, and it is not belt-and-braces.
+
+        `immutable` tells the browser not to revalidate **even on a reload**.
+        That is only safe when a URL can never come back with different bytes
+        behind it, and `HomePage.hero_image` is the one upload here that keeps
+        its own filename rather than taking a uuid — so a retired name can be
+        uploaded again, over a picture that is no longer there to collide with.
+        With `immutable` the wrong photograph would be unfixable from the
+        browser; without it a hard reload is still the way out.
+        """
+        self.assertNotIn(
+            "immutable", self.public_cache_control,
+            "the public bucket promises immutability it cannot keep — "
+            "hero_image filenames are the uploader's, not uuids",
+        )
 
 
 class CheckDeploymentCommandTests(TestCase):

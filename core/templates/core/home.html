@@ -75,10 +75,35 @@
                autoplay muted loop playsinline preload="metadata"
                aria-hidden="true"></video>
       {% else %}
+        {% comment %}
+        ⚠️ **`hero_srcset` 带原图，和内页那一层有意不同**（2026-08-31）。
+           首页这一屏照片就是内容本身，所以上传的那个文件留在梯子最顶一档 ——
+           屏幕够大就照样拿到每一个像素，一点清晰度都没让。
+           内页背景封顶 2560，理由和代价写在 `HomePage.hero_rungs` 上。
+
+        ⚠️ **这里能用 `<img srcset>`，是因为首页这一屏永远可见。** 内页那一层
+           浅色模式下是 `display: none`，而 `display:none` 里的 `<img>` 照样会被
+           下载 —— 所以那边只能是 `background-image` 加媒体查询。
+           两处机制不同不是没统一，是那条量出来的差别，见 `_hero_backdrop.html`。
+
+        🔴 **`sizes` 不是 `100vw`，理由写在 `HomePage.hero_sizes` 上。**
+           这张图是 `object-cover` 铺满整个视口的，竖屏时真正画出来的宽度
+           远大于视口宽 —— 写 `100vw` 会让手机挑到一档然后拉伸近四倍。
+           别"简化"回 `100vw`。
+
+        ⚠️ 兜底那张 logo 不带 `srcset`：它是打包进 static 的固定资源，
+           只有一个尺寸，给它加 `sizes` 只会让浏览器对着一个候选做选择题。
+        {% endcomment %}
+        {# ⚠️ `with`, because `hero_srcset` is a property that walks the rungs
+           and joins a string — written inline it runs twice, once for the `if`
+           and once for the value, on the busiest public URL in the site. #}
+        {% with srcset=page.hero_srcset %}
         <img class="absolute inset-0 h-full w-full object-cover"
              style="object-position: {{ page.hero_focus }}"
              src="{% if hero %}{{ hero.file.url }}{% else %}{% static 'core/img/event-default.webp' %}{% endif %}"
+             {% if srcset %}srcset="{{ srcset }}" sizes="{{ page.hero_sizes }}"{% endif %}
              alt="" fetchpriority="high">
+        {% endwith %}
       {% endif %}
     {% endwith %}
 

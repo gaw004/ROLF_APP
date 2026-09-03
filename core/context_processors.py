@@ -196,22 +196,6 @@ def site_appearance(request):
     hero_image = page.hero_image if page.hero_image else None
     return {
         "site_hero_image": hero_image,
-        # ⚠️ **`hero_rungs`, not `hero_srcset`** — pairs rather than a `srcset`
-        #    string, because the shared backdrop is a `background-image` and
-        #    cannot be an `<img srcset>`: it is `display: none` in light mode,
-        #    where an `<img>` is still fetched and a background is not. The
-        #    front page, which is always visible, does use `srcset`.
-        #
-        #    ⚠️ Both surfaces draw the **same picture at the same size**, and
-        #       since 2026-09-02 both reach for the original first. These rungs
-        #       are the stylesheet's fallback chain, not a smaller ladder meant
-        #       for the backdrop — that idea lasted two days and is written up
-        #       on `HomePage.hero_rungs`.
-        #
-        # ⚠️ Costs no query and no file read: the rungs' URLs come off columns
-        #    already loaded on this row. `HomePage.hero_image_width` is stored
-        #    for the same reason — see the note on that field.
-        "site_hero_rungs": page.hero_rungs,
         "site_brand_palette": page.brand_palette or None,
         # ⚠️ The same string the front page uses, out of the same property.
         #    Every page crops this one photograph to a different shape, and the

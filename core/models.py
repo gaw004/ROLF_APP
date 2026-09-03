@@ -274,33 +274,27 @@ class HomePage(models.Model):
 
     @property
     def hero_rungs(self):
-        """`[(width, url)]` the shared dark backdrop may choose between.
+        """`[(width, url)]` for every rendition that exists, narrowest first.
 
-        ⚠️ **Pairs rather than a `srcset` string, because that layer is not an
-           `<img>` and cannot be one.** It is `display: none` in light mode, and
-           a `display:none` `<img>` is still downloaded while a `background-image`
-           is not — so building it as an `<img srcset>` silently charged every
-           light-mode reader for a picture they never see. Measured rather than
-           reasoned; `loading="lazy"` does not fix it either. The whole finding
-           is written out in `_hero_backdrop.html`.
+        Read by `hero_srcset`, which turns them into the front page's candidate
+        list, and by `rebuild_hero_renditions` to report what it cut.
 
-           So these go out as CSS custom properties and `app.css` chooses. Only
-           the chosen one is fetched, and `display:none` fetches none of them.
-
-        🔴 **As of 2026-09-02 the stylesheet chooses the original, and these are
-           only its fallbacks.** They were the whole point for two days: the
-           backdrop was capped at 2560 so a laptop would not re-download the
-           full photograph on every navigation. That re-download was the missing
+        🔴 **It briefly had a third reader and no longer does.** For two days
+           the shared dark backdrop chose between these with CSS breakpoints,
+           capped at 2560, so that a laptop would not re-download the whole
+           photograph on every navigation. That re-download was the missing
            `Cache-Control` on the public bucket, fixed in the same batch — and
-           with the reason gone, all the cap did was make the same photograph
-           visibly softer on inner pages than on the front page. Reported by the
-           person looking at it, then measured: 1.15x upscale on a 1470x750
-           screen, and 0.127 bytes/px against the original's 0.244.
+           with the reason gone, the cap only made the same photograph visibly
+           softer on inner pages than on the front page. Reported by the person
+           looking at it, then measured: 1.15x upscale on a 1470x750 screen, on
+           top of 0.127 bytes/px against the original's 0.244.
 
-           They are kept rather than deleted because they cost nothing to emit
-           and the stylesheet's fallback chain still ends in them — and because
-           the day this wants per-orientation rungs, the template will not have
-           to change. `hero_srcset` uses them for real.
+           The backdrop now takes the original, and the rungs it used to be
+           handed were deleted rather than left as a `var()` fallback: the
+           original is written inside the same `{% if %}` as the element, so
+           nothing past it could ever be reached. Three URLs of dead data in
+           the `style` attribute of every inner page, and a chain a reader had
+           to trace before finding out it was inert.
         """
         rungs = []
         for width in HERO_RENDITION_WIDTHS:

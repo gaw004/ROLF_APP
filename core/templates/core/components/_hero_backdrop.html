@@ -75,18 +75,19 @@
       `cover` 真正按的那个数。所以正确的做法不是把断点算准，是不去猜。
       完整的账在 app.css 的 `.hero-backdrop` 那一节。
 
-⚠️ 写在这里的是 **URL（数据）**，不是样式。三个档位变量仍然输出：它们是
-   app.css 那条兜底链的下游，原图万一缺失时接得住。
+⚠️ 写在这里的是 **URL（数据）**，不是样式。只有原图一个变量 ——
+   三个档位变量曾经也写在这里，给 app.css 的兜底链用；而那条链**永远走不到**
+   （原图和这一层是同一个 `{% templatetag openblock %} if {% templatetag closeblock %}` 写出来的），
+   所以它们是每个响应里三百多字节的死数据。一并删了。
+   衍生档没有白存：首页的 `<img srcset>` 真的在用它们。
 
-⚠️ 没有衍生物时（部署完还没跑 `rebuild_hero_renditions` 的那一小段）
-   三个变量都不输出，而 `--hero-original` 一定在 —— 这一层只要有照片就输出，
-   所以那一小段里它照常工作。
+⚠️ 所以这一层不依赖衍生档存不存在：部署完还没跑 `rebuild_hero_renditions`
+   的那一小段里，它照常工作。
 {% endcomment %}
 {% if site_hero_image %}
   <div aria-hidden="true"
        class="hero-backdrop pointer-events-none fixed inset-0 -z-10 hidden bg-cover dark:block"
        style="--hero-original: url('{{ site_hero_image.url }}');
-              {% for width, url in site_hero_rungs %}--hero-{{ width }}: url('{{ url }}');{% endfor %}
               background-position: {{ site_hero_focus }}">
     {% include "core/components/_hero_scrim.html" %}
   </div>

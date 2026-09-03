@@ -4729,6 +4729,18 @@ class HeroSrcsetTests(EmptyBucketTestCase):
         page.hero_image.save("hero.jpg", a_hero(size=size), save=True)
         return HomePage.load()
 
+    def stylesheet(self):
+        return (Path(settings.BASE_DIR) / "assets" / "app.css").read_text()
+
+    def backdrop_rules(self):
+        """Every `.hero-backdrop` rule body in the stylesheet.
+
+        ⚠️ A list rather than the one rule, because **how many there are** is
+           itself the assertion: more than one means breakpoints have come
+           back, and a breakpoint here is a guess at what `cover` will do.
+        """
+        return re.findall(r"\.hero-backdrop\s*\{([^}]*)\}", self.stylesheet())
+
     def test_the_front_page_still_offers_the_original(self):
         """⭐ "Except where it costs sharpness, do not compress."
 
@@ -4784,10 +4796,15 @@ class HeroSrcsetTests(EmptyBucketTestCase):
         self.assertIn("background-image", (
             Path(settings.BASE_DIR) / "assets" / "app.css").read_text())
 
-    def test_the_backdrop_offers_every_rung_to_the_stylesheet(self):
-        """⚠️ The template ships the URLs; `app.css` decides which to use.
-        A rung the template does not emit is a rung the fallback chain cannot
-        reach — and `--hero-original` is the one it asks for first.
+    def test_the_backdrop_ships_one_url_and_only_one(self):
+        """⚠️ The stylesheet reads `--hero-original` and nothing else, so
+        nothing else belongs in the attribute.
+
+        The rungs were emitted here too until 2026-09-02, feeding a `var()`
+        fallback that could not fire: the original is written inside the same
+        `{% if site_hero_image %}`, so it is present whenever the element is.
+        Three URLs of dead data on every inner page, and a chain a reader had
+        to trace to find out it was inert.
         """
         self.a_page()
         markup = self.client.get(reverse("accounts:login")).content.decode()
@@ -4795,7 +4812,7 @@ class HeroSrcsetTests(EmptyBucketTestCase):
         self.assertIn("--hero-original: url(", markup)
         for width in HERO_RENDITION_WIDTHS:
             with self.subTest(rung=width):
-                self.assertIn(f"--hero-{width}: url(", markup)
+                self.assertNotIn(f"--hero-{width}:", markup)
 
     def test_the_backdrop_asks_for_the_original_first(self):
         """🔴 The regression this replaces was visible to the eye.
@@ -4811,43 +4828,15 @@ class HeroSrcsetTests(EmptyBucketTestCase):
            viewport with `cover`. Anything that gives the backdrop less is
            serving a worse image for the same job.
         """
-        css = (Path(settings.BASE_DIR) / "assets" / "app.css").read_text()
-        rules = re.findall(r"\.hero-backdrop\s*\{([^}]*)\}", css)
+        rules = self.backdrop_rules()
 
         self.assertEqual(len(rules), 1,
                          "the backdrop has grown breakpoints again — CSS "
                          "cannot know the picture's aspect ratio, so any "
                          "breakpoint here is a guess at what `cover` will do")
-        self.assertRegex(rules[0], r"background-image:\s*var\(--hero-original")
+        self.assertRegex(rules[0],
+                         r"background-image:\s*var\(--hero-original\s*\)")
 
-    def test_the_backdrops_fallback_walks_every_rung(self):
-        """⚠️ The chain has to reach every value it might need.
-
-        The original is always there — the element is only emitted when there
-        is a picture — so the rungs are reached only if it somehow is not. A
-        chain that stops early would leave the layer with no background at all
-        rather than a smaller one.
-        """
-        css = (Path(settings.BASE_DIR) / "assets" / "app.css").read_text()
-        rule = re.findall(r"\.hero-backdrop\s*\{([^}]*)\}", css)[0]
-
-        for width in HERO_RENDITION_WIDTHS:
-            with self.subTest(rung=width):
-                self.assertIn(f"--hero-{width}", rule)
-
-    def test_every_rung_the_template_emits_has_a_breakpoint(self):
-        """⚠️ The two halves are in different files and neither imports the
-        other. A width added to `HERO_RENDITION_WIDTHS` is generated, stored,
-        swept and emitted — and then never chosen, because nothing in the
-        stylesheet mentions it. Nothing raises; the rung is simply dead weight
-        in the bucket.
-        """
-        css = (Path(settings.BASE_DIR) / "assets" / "app.css").read_text()
-        for width in HERO_RENDITION_WIDTHS:
-            with self.subTest(rung=width):
-                self.assertIn(f"--hero-{width}", css,
-                              f"nothing in app.css ever selects the {width}px "
-                              f"rung, so it is generated and never served")
 
     def test_a_row_that_predates_the_width_column_is_not_offered_at_zero(self):
         """⚠️ `0w` would read as "the narrowest candidate there is", so every

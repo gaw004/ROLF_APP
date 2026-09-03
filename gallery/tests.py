@@ -12,16 +12,24 @@
 import datetime
 import io
 import itertools
+import re
 import tempfile
+import time
+from pathlib import Path
 from unittest import mock
 
+from django.conf import settings
+from django.core.cache import cache
 from django.core.files.base import ContentFile
 from django.core.files.uploadedfile import SimpleUploadedFile
+from django.db import connection
 from django.test import TestCase, override_settings
+from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
 from PIL import Image as PILImage
 
 from accounts.services import register_account
+from core.images import a_flat_png
 from core.models import HomePage
 from core.timeutils import local_today
 from events.tests import PageTestCase
@@ -36,6 +44,8 @@ from gallery.services import (
     normalise_gallery_image,
     repeats_for,
     strips_for,
+    wall_urls,
+    WALL_URL_WINDOW,
 )
 from org.models import Ministry, MinistryRole
 from org.permissions import (
@@ -91,6 +101,25 @@ def a_file_too_big(name=TOO_BIG_NAME):
     """
     return SimpleUploadedFile(name, b"\xff\xd8\xff" + b"0" * SMALL_LIMIT,
                               content_type="image/jpeg")
+
+
+#: The name the over-dimensioned fixture carries.
+TOO_MANY_PIXELS_NAME = "poster-export.png"
+
+
+def a_too_many_pixels(name=TOO_MANY_PIXELS_NAME, size=(1400, 1400)):
+    """A picture that is small on the wire and large in pixels.
+
+    ⚠️ **A real image, unlike `a_file_too_big`**, because this check has to read
+       the header to answer at all — a blob of zeroes would be turned away as
+       unreadable and would prove nothing about the pixel count.
+
+    ⚠️ Flat colour and modest dimensions, run against an overridden 1 MP limit.
+       The shape being reproduced is 9000×9000 at 0.25 MB (measured), and
+       building that in every test run would cost seconds and hundreds of
+       megabytes to demonstrate arithmetic that holds at any scale.
+    """
+    return SimpleUploadedFile(name, a_flat_png(size), content_type="image/png")
 
 
 def a_photo(size=(1200, 800), fmt="JPEG", exif=None, colour=(90, 120, 160),
@@ -726,6 +755,123 @@ class StripDrawTests(TestCase):
 
 
 @override_settings(MEDIA_ROOT=tempfile.mkdtemp(), STORAGES=LOCAL_STORAGE)
+class WallUrlCacheTests(PageTestCase):
+    """One batch of signed URLs per window, so a browser can cache a photograph.
+
+    🔴 **A presigned URL is different every time it is generated**, because the
+       moment of signing goes into the signature. django-storages signs on every
+       `.url`, so the same photograph arrived under a new URL on every render —
+       a new cache key every time. Measured 2026-09-01: the wall re-fetched all
+       sixty thumbnails on every visit, a browser-cache hit rate of exactly
+       zero. Upstream says so itself, in the docstring of its own
+       `S3StaticStorage`.
+
+    ⚠️ Development storage does not sign at all, so a plain "are these two
+       renders equal?" would pass here whatever the code did. Every test below
+       therefore either asserts something structural (how many cache reads, how
+       the two constants relate) or fakes a signature explicitly.
+    """
+
+    def setUp(self):
+        super().setUp()
+        cache.clear()
+        self.photos = [store(self.pantry, taken_year=2019) for _ in range(3)]
+
+    def signing_storage(self):
+        """Patch `url()` so it changes on every call, the way a real one does."""
+        counter = itertools.count()
+        return mock.patch.object(
+            type(self.photos[0].thumb.storage), "url",
+            lambda self, name: f"/media/{name}?sig={next(counter)}")
+
+    def test_two_renders_in_one_window_serve_the_identical_url(self):
+        """⭐ This assertion *is* the definition of a cache hit.
+
+        A browser files an image under its exact URL. Two renders that disagree
+        about the URL mean two downloads of one photograph, and no amount of
+        `Cache-Control` can help — which is what was happening.
+        """
+        with self.signing_storage():
+            first = wall_urls(self.photos)
+            second = wall_urls(self.photos)
+
+        self.assertEqual(first, second)
+        self.assertEqual(len(first), 3)
+
+    def test_the_whole_page_costs_one_cache_read_and_not_one_per_photo(self):
+        """⚠️ `CACHES` is the **database** backend. Caching per photograph would
+        be 120 SELECTs on a full wall — more expensive than the signing it
+        replaced, and this project keeps query-count tests for that reason.
+        """
+        with self.signing_storage():
+            wall_urls(self.photos)                       # fills the entry
+            with CaptureQueriesContext(connection) as queries:
+                wall_urls(self.photos)
+
+        self.assertEqual(len(queries), 1, "\n".join(q["sql"] for q in queries))
+
+    def test_a_new_window_signs_afresh(self):
+        """⚠️ The URLs have to age out well before the signature behind them
+        does, or the page would start serving links that 403 on arrival."""
+        with self.signing_storage():
+            before = wall_urls(self.photos)
+            with mock.patch("gallery.services.time.time",
+                            return_value=time.time() + WALL_URL_WINDOW + 1):
+                after = wall_urls(self.photos)
+
+        self.assertNotEqual(before, after)
+
+    def test_taking_a_photo_down_does_not_serve_its_url_from_the_batch(self):
+        """⚠️ Keyed by the photo ids, not by the day. The draw is seeded by the
+        date so the page holds still — but a photograph that has been removed
+        leaves it, and a date-only key would go on handing out a link to a file
+        that is gone.
+        """
+        with self.signing_storage():
+            wall_urls(self.photos)
+            fewer = wall_urls(self.photos[:2])
+
+        self.assertEqual(set(fewer), {p.pk for p in self.photos[:2]})
+
+    def test_the_window_is_shorter_than_the_signature_it_hands_out(self):
+        """🔴 The relationship is the design; the two numbers are just today's
+        values. Somebody served a URL in the final second of a window still has
+        the rest of that signature's life to fetch it — an hour, as these stand.
+        A window at or past the expiry would hand out links that are already
+        dead.
+        """
+        source = (Path(settings.BASE_DIR) / "config" / "settings" / "prod.py"
+                  ).read_text(encoding="utf-8")
+        found = re.search(
+            r"querystring_expire\"\]\s*=\s*expire\s+or\s+(\d+)(?:\s*\*\s*(\d+))?",
+            source)
+        self.assertIsNotNone(found, "the memories bucket's expiry has moved")
+
+        # ⚠️ Read as numbers rather than `eval`'d. A test that executes a slice
+        #    of a settings file is one typo away from doing something else.
+        expire = int(found.group(1)) * int(found.group(2) or 1)
+
+        self.assertLess(WALL_URL_WINDOW, expire,
+                        "the batch is handed out for longer than the signature "
+                        "in it lasts — the wall will serve links that 403")
+
+    def test_the_markup_never_asks_the_file_for_its_own_url(self):
+        """⭐ The guard on the regression, and it has to read the template.
+
+        `{{ item.photo.thumb.url }}` re-signs on every render. It looks
+        identical to the working version on any page you open, and it silently
+        restores the bug — nothing errors, the pictures appear, and the cache
+        stops working again.
+        """
+        markup = (Path(settings.BASE_DIR) / "gallery" / "templates" / "gallery"
+                  / "_wall_strip.html").read_text()
+        body = re.sub(r"\{#.*?#\}", "", markup, flags=re.S)
+
+        self.assertNotIn(".thumb.url", body)
+        self.assertIn("item.thumb_url", body)
+
+
+@override_settings(MEDIA_ROOT=tempfile.mkdtemp(), STORAGES=LOCAL_STORAGE)
 class WallPageTests(PageTestCase):
     """The page itself: who gets in, and what the markup has to carry."""
 
@@ -1153,7 +1299,12 @@ class WallPageTests(PageTestCase):
             a_photo(size=(400, 300)).read()), save=True)
         self.login(self.lisi)
         page = self.client.get(reverse("gallery:wall")).content.decode()
-        self.assertIn("background-image: url(", page)
+        # ⚠️ Still a `background-image` after 2026-08-31, and deliberately so —
+        #    the responsive rungs arrive as custom properties picked by a media
+        #    query rather than as `<img srcset>`, because this layer is
+        #    `display: none` in light mode and a hidden `<img>` is still
+        #    downloaded. See `_hero_backdrop.html`.
+        self.assertIn("--hero-original: url(", page)
         # Dark only — light mode is unchanged by any of this.
         #
         # ⚠️ `bg-center` left the class list on 2026-08-13: the crop is now
@@ -1497,6 +1648,52 @@ class ManagePageTests(PageTestCase):
         self.assertNotIn(TOO_BIG_NAME, opened,
                          "the oversized file was decoded before being skipped — "
                          "the size check has moved behind normalise_gallery_image")
+        self.assertEqual(len(opened), 1)
+
+    def test_a_photo_over_the_pixel_limit_is_skipped_and_named(self):
+        """🔴 The gate the byte limit cannot be (2026-09-01).
+
+        A decode costs width × height × channels, which is only loosely tied to
+        the file size: measured, a 9000×9000 PNG of flat colour is 0.25 MB on
+        the wire and 243 MB decoded, so it passed the byte check with room to
+        spare. It is skipped the same way an oversized file is — named, with
+        the rest of the batch still going up.
+        """
+        self.login(self.zhang)
+        with override_settings(IMAGE_MAX_PIXELS=1_000_000):
+            response = self.post_photos(
+                self.pantry,
+                files=[a_photo(), a_too_many_pixels(), a_photo()],
+                follow=True)
+
+        self.assertEqual(GalleryPhoto.objects.count(), 2)
+        self.assertContains(response, "Added 2 to Memories")
+        self.assertContains(response, f"megapixels: {TOO_MANY_PIXELS_NAME}")
+
+    def test_a_photo_over_the_pixel_limit_is_never_decoded(self):
+        """⭐ The assertion that matters, and the row count would pass without it.
+
+        Skipping must not mean "decode it and throw the pixels away" — decoding
+        is the entire expense being avoided. Same shape as the oversized-file
+        guard above, and for the same reason.
+        """
+        self.login(self.zhang)
+        real = normalise_gallery_image
+        opened = []
+
+        def spy(upload):
+            opened.append(upload.name)
+            return real(upload)
+
+        with override_settings(IMAGE_MAX_PIXELS=1_000_000):
+            with mock.patch("gallery.services.normalise_gallery_image", spy):
+                self.post_photos(
+                    self.pantry, files=[a_too_many_pixels(), a_photo()])
+
+        self.assertNotIn(TOO_MANY_PIXELS_NAME, opened,
+                         "the oversized picture was decoded before being "
+                         "skipped, which spends the memory the check exists "
+                         "to save")
         self.assertEqual(len(opened), 1)
 
     def test_a_batch_that_is_entirely_unusable_is_still_an_error(self):

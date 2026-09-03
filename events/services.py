@@ -11,6 +11,7 @@ import uuid
 from dataclasses import dataclass
 from decimal import Decimal
 
+from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.db import transaction
 from django.db import models
@@ -22,7 +23,7 @@ from PIL import Image as PILImage
 from PIL import ImageOps as PILImageOps
 
 from contact.models import Contact, ContactQuerySet
-from core.images import draft_to, stored_size, upright_size
+from core.images import draft_to, over_pixel_budget, stored_size, upright_size
 from core.notifications.base import EMAIL, SMS, Message, get_backend
 from core.timeutils import local_date_of, local_day, local_now
 from org.models import Assignment, Position
@@ -1751,7 +1752,18 @@ def normalise_event_image(uploaded):
             #    the day, with a behaviour guard in each app staying green
             #    throughout: both were asked "was this decoded smaller?", and
             #    on both the answer was yes.
-            target = stored_size(upright_size(source), EVENT_IMAGE_MAX_EDGE)
+            native = upright_size(source)
+            # 🔴 **The floor.** `EventForm.clean_image` refuses an oversized
+            #    upload before it ever gets here, but the form is not the only
+            #    caller — a management command or a shell session reaches this
+            #    directly, and `draft_to` below does nothing at all for PNG and
+            #    WebP. One comparison, against numbers `upright_size` has
+            #    already read out of the header.
+            if over_pixel_budget(native):
+                raise ValidationError(
+                    f"That image is {native[0]} × {native[1]} pixels, past the "
+                    f"{settings.IMAGE_MAX_PIXELS // 1_000_000} megapixel limit.")
+            target = stored_size(native, EVENT_IMAGE_MAX_EDGE)
             draft_to(source, target)
             # ⚠️ **`in_place=True`, and the reasoning is gallery's** (2026-08-13)
             #    — the full note lives over the same call in

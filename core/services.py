@@ -81,3 +81,82 @@ def orphaned_home_media():
     return sorted(
         name for name in (f"{prefix}/{f}" for f in files) if name not in live
     )
+
+
+def restamp_home_media():
+    """Rewrite the headers on the front page's live objects. Returns the keys.
+
+    ⚠️ **This exists because `object_parameters` is an upload-time setting.**
+       django-storages sends it as ExtraArgs from `_save`, so giving the public
+       bucket a `Cache-Control` (config/settings/prod.py) changes every object
+       written *after* the deploy and none of the ones already there. The
+       picture on the front page today is one of the ones already there, and it
+       is also the only one anybody downloads — so without this the fix ships,
+       the setting is right, and the symptom does not move.
+
+    ⚠️ A server-side copy onto itself with `MetadataDirective="REPLACE"`, not a
+       re-upload. The bytes never leave R2, so this costs no bandwidth and —
+       more to the point — **the key does not change**. A re-upload would take a
+       collision suffix and hand the front page a new URL, which is a database
+       write dressed up as a cache fix.
+
+    ⚠️ `ContentType` is restated because REPLACE means *replace*: every header
+       not named in the call is dropped, and an image served as
+       `application/octet-stream` downloads instead of displaying. It is read
+       back off the object rather than guessed from the extension.
+
+    ⚠️ The value comes from `get_object_parameters`, never from a constant
+       here. A second copy of the header is a second thing to change, and the
+       two disagreeing fails silently: new uploads cached one way, the
+       backfilled ones another, and nothing anywhere saying so.
+
+    ⚠️ Only what the row points at. Orphans under the same prefix are
+       `purge_orphaned_home_media`'s business, and stamping a file nobody serves
+       so that it caches for a month is work in the wrong direction.
+
+    ⚠️ **`MEDIA_FIELDS`, so it covers whatever that tuple grows to** — as of
+       2026-08-31 that is the picture, the video and the three responsive rungs.
+       The rungs already carry the header (they are written after the setting
+       landed, by `FieldFile.save()`), so for them this is a no-op that costs
+       two API calls each. Walking the tuple rather than naming two fields is
+       what keeps a sixth object from being the one nobody remembers.
+
+    ⚠️ The `connection` lookup is **outside** the try, so running this against
+       development storage raises rather than reporting nothing to do. That is
+       the honest answer: the local disk serves no headers, and a run that
+       quietly said "0 objects" would look exactly like a run against a bucket
+       that is already correct.
+    """
+    from .models import HomePage
+
+    page = HomePage.current()
+    storage = HomePage._meta.get_field("hero_image").storage
+    client = storage.connection.meta.client
+    bucket = storage.bucket_name
+
+    stamped = []
+    for field in HomePage.MEDIA_FIELDS:
+        name = getattr(page, field).name
+        if not name:
+            continue
+        try:
+            head = client.head_object(Bucket=bucket, Key=name)
+            # ⚠️ Merged rather than passed alongside as keywords, so that the
+            #    configured parameters win and a second `ContentType` appearing
+            #    in them one day is an override instead of a TypeError.
+            params = {"ContentType": head.get("ContentType",
+                                              "application/octet-stream")}
+            params.update(storage.get_object_parameters(name))
+            client.copy_object(
+                Bucket=bucket, Key=name,
+                CopySource={"Bucket": bucket, "Key": name},
+                MetadataDirective="REPLACE", **params,
+            )
+        except Exception:
+            # ⚠️ Logged and carried, like discard_media: hero_video failing is
+            #    no reason to leave hero_image — the big one, and the one this
+            #    was written for — unstamped.
+            logger.exception("Could not restamp %r", name)
+            continue
+        stamped.append(name)
+    return stamped

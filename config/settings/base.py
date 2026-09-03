@@ -315,6 +315,30 @@ MEDIA_ROOT = BASE_DIR / 'media'
 # refused by the form rather than streamed to disk first.
 EVENT_IMAGE_MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 
+# 🔴 **The second half of that limit, and the half that was missing.** What a
+#    decode costs is the **pixel count, not the file size** — the two are only
+#    loosely related, and for synthetic content they are barely related at all.
+#    Measured 2026-09-01: a 9000×9000 PNG of flat colour is **0.25 MB on the
+#    wire** and 243 MB decoded. It sailed through both existing defences — well
+#    under the 10 MB above, and at 81 MP just under Pillow's own
+#    MAX_IMAGE_PIXELS (89 MP) — on a 512 MB instance running two workers.
+#
+# ⚠️ 50 million, chosen so that a 48 MP phone (8000×6000) lands inside it. 8K
+#    (33 MP), an everyday phone photograph (12 MP) and the current front page
+#    picture (15 MP) all pass with room to spare.
+#
+# ⚠️ **What this does and does not protect, stated rather than implied:**
+#      · JPEG at any size is already safe — `core.images.draft_to` decodes it
+#        at 1/2, 1/4 or 1/8, so 50 MP arrives as about 3 MP of working set.
+#      · PNG and WebP cannot be drafted, so 50 MP of those is still ~150 MB.
+#        What keeps that rare is the byte limit above: a *photographic* PNG at
+#        50 MP is a 50–150 MB file and never gets this far. Only synthetic,
+#        highly compressible content (a poster, a screenshot, an export) can
+#        pass both gates, and that is a knowing trade rather than an oversight.
+#
+# ⚠️ Checked from the file's header, never by decoding it — see the callers.
+IMAGE_MAX_PIXELS = 50_000_000
+
 
 # --- Where each kind of upload is stored -------------------------------------
 # ⚠️ **Four aliases, and the split is a requirement rather than tidiness.**

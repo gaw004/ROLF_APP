@@ -4742,18 +4742,20 @@ class HeroSrcsetTests(EmptyBucketTestCase):
         for width in HERO_RENDITION_WIDTHS:
             self.assertIn(f" {width}w", page.hero_srcset)
 
-    def test_the_shared_backdrop_stops_at_the_widest_rung(self):
-        """⚠️ The deliberate difference, and the cost is stated rather than
-        hidden: a 5K display gets 2560 upscaled behind two gradients and 62%
-        black glass. What it buys is every laptop no longer re-fetching the
-        whole photograph on every navigation — the fault this began as.
+    def test_the_backdrop_is_offered_every_rung_that_exists(self):
+        """⚠️ `hero_rungs` is the stylesheet's fallback chain, so it has to
+        carry every rung that was cut — the CSS names them all and reaches the
+        rungs only if the original is somehow missing.
+
+        ⚠️ The original is not in this list because it is emitted separately, as
+           `--hero-original`; the template writes both. That is a difference in
+           **how they travel**, not a difference in what the backdrop may use —
+           since 2026-09-02 the stylesheet asks for the original first.
         """
         page = self.a_page()
 
         self.assertEqual([w for w, _ in page.hero_rungs],
                          list(HERO_RENDITION_WIDTHS))
-        self.assertNotIn(page.hero_image.url,
-                         [url for _, url in page.hero_rungs])
 
     def test_the_backdrop_is_never_built_as_an_img(self):
         """🔴 The regression guard, and it is about a download nobody can see.
@@ -4783,8 +4785,9 @@ class HeroSrcsetTests(EmptyBucketTestCase):
             Path(settings.BASE_DIR) / "assets" / "app.css").read_text())
 
     def test_the_backdrop_offers_every_rung_to_the_stylesheet(self):
-        """⚠️ The template ships URLs, `app.css` picks one with a media query.
-        A rung the template does not emit is a rung no breakpoint can reach.
+        """⚠️ The template ships the URLs; `app.css` decides which to use.
+        A rung the template does not emit is a rung the fallback chain cannot
+        reach — and `--hero-original` is the one it asks for first.
         """
         self.a_page()
         markup = self.client.get(reverse("accounts:login")).content.decode()
@@ -4794,27 +4797,43 @@ class HeroSrcsetTests(EmptyBucketTestCase):
             with self.subTest(rung=width):
                 self.assertIn(f"--hero-{width}: url(", markup)
 
-    def test_every_breakpoint_falls_back_through_every_rung(self):
-        """⚠️ A chain that skips rungs lands on the original, which is the
-        download this whole change removes.
+    def test_the_backdrop_asks_for_the_original_first(self):
+        """🔴 The regression this replaces was visible to the eye.
 
-        The admin asks for "at least 2000px wide", so a 2200px upload is
-        ordinary — and it yields 1280 and 1920 but no 2560. A desktop rule
-        written `var(--hero-2560, var(--hero-original))` would then serve the
-        raw multi-megabyte JPEG to every dark-mode page, while the two rungs it
-        did cut sat unused in the bucket.
+        For two days the backdrop was capped at 2560 so a laptop would not
+        re-download the whole photograph on every navigation — and that
+        re-download was the missing `Cache-Control`, fixed in the same batch.
+        With the reason gone the cap only made the same picture softer on inner
+        pages than on the front page: measured at 1.15x upscale on a 1470x750
+        screen, on top of 0.127 bytes/px against the original's 0.244.
+
+        ⚠️ The two surfaces draw **one photograph at one size** — both fill the
+           viewport with `cover`. Anything that gives the backdrop less is
+           serving a worse image for the same job.
         """
         css = (Path(settings.BASE_DIR) / "assets" / "app.css").read_text()
         rules = re.findall(r"\.hero-backdrop\s*\{([^}]*)\}", css)
 
-        self.assertEqual(len(rules), len(HERO_RENDITION_WIDTHS),
-                         "one rule per rung is the arrangement these "
-                         "assertions are about")
-        for rule in rules:
-            with self.subTest(rule=rule.strip()[:40]):
-                for width in HERO_RENDITION_WIDTHS:
-                    self.assertIn(f"--hero-{width}", rule)
-                self.assertIn("--hero-original", rule)
+        self.assertEqual(len(rules), 1,
+                         "the backdrop has grown breakpoints again — CSS "
+                         "cannot know the picture's aspect ratio, so any "
+                         "breakpoint here is a guess at what `cover` will do")
+        self.assertRegex(rules[0], r"background-image:\s*var\(--hero-original")
+
+    def test_the_backdrops_fallback_walks_every_rung(self):
+        """⚠️ The chain has to reach every value it might need.
+
+        The original is always there — the element is only emitted when there
+        is a picture — so the rungs are reached only if it somehow is not. A
+        chain that stops early would leave the layer with no background at all
+        rather than a smaller one.
+        """
+        css = (Path(settings.BASE_DIR) / "assets" / "app.css").read_text()
+        rule = re.findall(r"\.hero-backdrop\s*\{([^}]*)\}", css)[0]
+
+        for width in HERO_RENDITION_WIDTHS:
+            with self.subTest(rung=width):
+                self.assertIn(f"--hero-{width}", rule)
 
     def test_every_rung_the_template_emits_has_a_breakpoint(self):
         """⚠️ The two halves are in different files and neither imports the
@@ -4831,10 +4850,11 @@ class HeroSrcsetTests(EmptyBucketTestCase):
                               f"rung, so it is generated and never served")
 
     def test_a_row_that_predates_the_width_column_is_not_offered_at_zero(self):
-        """⚠️ `0w` would read as "the smallest candidate there is", so every
-        screen would choose the original — the exact download this feature
-        removes, arriving through the field meant to prevent it. The safe half
-        of the trade is to fall back to the capped ladder.
+        """⚠️ `0w` would read as "the narrowest candidate there is", so every
+        screen would choose the original — and choose it for the wrong reason,
+        on a row whose real width nobody knows. Leaving it off the `srcset`
+        until the width is filled in is the honest answer; after
+        `rebuild_hero_renditions` it never happens.
         """
         page = self.a_page()
         HomePage.objects.filter(pk=page.pk).update(hero_image_width=0)

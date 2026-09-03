@@ -17,13 +17,21 @@ and throwing away nine before anything reached the glass.
    the same pixels; there are simply no longer six times too many of them in
    flight.
 
-⚠️ **The two consumers pick a rung by different mechanisms, and that is not an
+⚠️ **The two consumers reach these by different mechanisms, and that is not an
    inconsistency.** The front page's picture is always visible, so it is an
-   `<img srcset sizes="100vw">` and the browser chooses. The shared dark
-   backdrop is `display: none` in light mode, where an `<img>` is fetched and a
-   `background-image` is not — so it stays a background and `app.css` chooses
-   with a media query. Measured, not assumed; the whole finding is in
+   `<img srcset sizes=...>` and the browser chooses from the ladder. The shared
+   dark backdrop is `display: none` in light mode, where an `<img>` is fetched
+   and a `background-image` is not — so it stays a background, and a background
+   cannot be given a `srcset`. Measured, not assumed; the whole finding is in
    `core/templates/core/components/_hero_backdrop.html`.
+
+   ⚠️ **So the backdrop takes the original and does not choose at all**
+      (2026-09-02). It draws the same photograph at the same size as the front
+      page, so it needs the same resolution; and CSS cannot be told the
+      picture's aspect ratio, which is what `cover` actually scales by. Every
+      breakpoint written here was a guess at that, and the guess was wrong by
+      3.7x on a portrait phone. The rungs remain the front page's ladder and
+      the stylesheet's fallback chain.
 
 ⚠️ Its shape is deliberately `core.palette`'s: derived from `hero_image`,
    refreshed from `HomePage.save()`, and importing PIL inside the function so

@@ -274,7 +274,7 @@ class HomePage(models.Model):
 
     @property
     def hero_rungs(self):
-        """`[(width, url)]` for the shared dark backdrop. Capped at 2560.
+        """`[(width, url)]` the shared dark backdrop may choose between.
 
         ⚠️ **Pairs rather than a `srcset` string, because that layer is not an
            `<img>` and cannot be one.** It is `display: none` in light mode, and
@@ -284,16 +284,23 @@ class HomePage(models.Model):
            reasoned; `loading="lazy"` does not fix it either. The whole finding
            is written out in `_hero_backdrop.html`.
 
-           So these go out as CSS custom properties and `app.css` picks one with
-           a media query. The rung that is picked is the only one fetched, and
-           `display:none` fetches none of them.
+           So these go out as CSS custom properties and `app.css` chooses. Only
+           the chosen one is fetched, and `display:none` fetches none of them.
 
-        ⚠️ **The original is deliberately not among them**, unlike
-           `hero_srcset`. This layer is the one nobody ever sees sharply — it
-           sits under two gradients and 62% black glass — so a 5K display gets
-           2560 upscaled behind all of that. That is a stated cost: the
-           alternative is every laptop re-downloading the full photograph on
-           every navigation, which is the fault this began as.
+        🔴 **As of 2026-09-02 the stylesheet chooses the original, and these are
+           only its fallbacks.** They were the whole point for two days: the
+           backdrop was capped at 2560 so a laptop would not re-download the
+           full photograph on every navigation. That re-download was the missing
+           `Cache-Control` on the public bucket, fixed in the same batch — and
+           with the reason gone, all the cap did was make the same photograph
+           visibly softer on inner pages than on the front page. Reported by the
+           person looking at it, then measured: 1.15x upscale on a 1470x750
+           screen, and 0.127 bytes/px against the original's 0.244.
+
+           They are kept rather than deleted because they cost nothing to emit
+           and the stylesheet's fallback chain still ends in them — and because
+           the day this wants per-orientation rungs, the template will not have
+           to change. `hero_srcset` uses them for real.
         """
         rungs = []
         for width in HERO_RENDITION_WIDTHS:

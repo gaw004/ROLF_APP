@@ -62,6 +62,13 @@ CONSTRAINT_FIELD = {
     "participation_hours_when_not_applicable": "hours",
     "participation_checkout_before_checkin": "checked_out_at",
     "participation_absent_after_checkin": "status",
+    # events.Session
+    #
+    # ⚠️ The duplicate lands on "start_time" rather than on "event": the event
+    #    is the page somebody is already on when they add a meeting, so it is
+    #    never the box they got wrong — the time is.
+    "session_duplicate_start": "start_time",
+    "session_end_before_start": "end_time",
     # core.HomePage
     #
     # ⚠️ One constraint covers both halves of the framing, so the message has to

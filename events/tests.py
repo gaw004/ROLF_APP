@@ -72,10 +72,13 @@ from .models import (
     EventRole,
     Participation,
     ParticipationRole,
+    Session,
+    Source,
     refuse_wider_than_event,
 )
 from .services import (
     NoHoursHere,
+    add_session,
     NotEligible,
     RoleFull,
     CHECKIN_CREDENTIAL_KEY,
@@ -2131,6 +2134,170 @@ class ServedAsTests(TestCase):
         self.run_backfill()
         row.refresh_from_db()
         self.assertEqual(row.served_as, Participation.ServedAs.VOLUNTEER)
+
+
+class SessionTests(TestCase):
+    """L5.1: the meetings inside a run.
+
+    One Event (1 March to 20 June) with twelve Session rows under it is what
+    participants.md section 9 said Event could not hold. These tests hold the
+    two layers apart on purpose: the constraints are asserted through bare
+    creates, because a constraint that only fails through full_clean() is a
+    clean() rule wearing a constraint's name; the containment rule is asserted
+    through full_clean() and through the service, because that is all it can
+    ever be (D14 — it reads another table, so no CheckConstraint can see it).
+    """
+
+    def setUp(self):
+        # A run with real width, so "inside" and "outside" are both reachable.
+        self.spring = make_event(
+            name="ESL spring term",
+            start_time=NOW + DAY,
+            end_time=NOW + 100 * DAY,
+        )
+        self.first_week = NOW + 2 * DAY
+
+    def make_session(self, **fields):
+        return Session.objects.create(**{
+            "event": self.spring,
+            "start_time": self.first_week,
+            "end_time": self.first_week + 2 * HOUR,
+            **fields,
+        })
+
+    def test_a_session_belongs_to_one_event(self):
+        session = self.make_session()
+        self.assertEqual(list(self.spring.sessions.all()), [session])
+
+    def test_two_sessions_in_one_event_cannot_start_at_the_same_moment(self):
+        # One run cannot meet twice at once. Asserted through the database:
+        # this is the constraint, not the hint layer above it.
+        self.make_session()
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            self.make_session(end_time=self.first_week + 3 * HOUR)
+
+    def test_two_events_may_hold_meetings_at_the_same_moment(self):
+        # The other half of the uniqueness, and the reason it is a pair of
+        # columns rather than one: two courses running the same evening is
+        # ordinary, and a constraint on start_time alone would forbid it.
+        other = make_event(ministry=self.spring.ministry, name="Tuesday ESL",
+                           start_time=NOW + DAY, end_time=NOW + 100 * DAY)
+        self.make_session()
+        Session.objects.create(
+            event=other, start_time=self.first_week,
+            end_time=self.first_week + 2 * HOUR)
+        self.assertEqual(Session.objects.count(), 2)
+
+    def test_a_session_cannot_end_before_it_starts(self):
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            self.make_session(end_time=self.first_week - HOUR)
+
+    def test_a_session_outside_its_events_own_dates_is_refused(self):
+        """The rule the two ends of an Event were already making.
+
+        A spring term running to 20 June cannot meet on 1 August — the columns
+        on the parent row say so, and this is what makes them true of the table
+        rather than only of the description.
+        """
+        late = Session(
+            event=self.spring,
+            start_time=self.spring.end_time + DAY,
+            end_time=self.spring.end_time + DAY + 2 * HOUR,
+        )
+        with self.assertRaises(ValidationError) as caught:
+            late.full_clean()
+        # Named to the end that is actually outside, not to the form as a whole.
+        self.assertIn("end_time", caught.exception.message_dict)
+
+    def test_a_session_before_its_event_starts_is_refused(self):
+        early = Session(
+            event=self.spring,
+            start_time=self.spring.start_time - DAY,
+            end_time=self.spring.start_time - DAY + 2 * HOUR,
+        )
+        with self.assertRaises(ValidationError) as caught:
+            early.full_clean()
+        self.assertIn("start_time", caught.exception.message_dict)
+
+    def test_a_session_inside_its_events_dates_is_kept(self):
+        session = Session(
+            event=self.spring,
+            start_time=self.first_week,
+            end_time=self.first_week + 2 * HOUR,
+        )
+        session.full_clean()
+        session.save()
+        self.assertEqual(self.spring.sessions.count(), 1)
+
+    def test_the_service_refuses_a_session_outside_the_events_dates(self):
+        # D18: the programmatic path goes through services, and it is what
+        # makes clean() reach code that is not a ModelForm.
+        with self.assertRaises(ValidationError):
+            add_session(
+                self.spring,
+                start_time=self.spring.end_time + DAY,
+                end_time=self.spring.end_time + DAY + 2 * HOUR,
+            )
+        self.assertEqual(self.spring.sessions.count(), 0)
+
+    def test_the_service_keeps_a_session_inside_the_events_dates(self):
+        session = add_session(
+            self.spring,
+            start_time=self.first_week,
+            end_time=self.first_week + 2 * HOUR,
+        )
+        self.assertEqual(session.source, Source.MANUAL)
+        self.assertEqual(list(self.spring.sessions.all()), [session])
+
+    def test_a_bare_create_walks_past_the_containment_rule(self):
+        """D14 asks for the gap to be stated rather than implied.
+
+        The rule reads another table, so it cannot be a CheckConstraint, and
+        this pins what that costs: a create() that skips full_clean() stores a
+        meeting outside its run. Written down so the next person reads the
+        docstring as true rather than as a promise.
+        """
+        stray = Session.objects.create(
+            event=self.spring,
+            start_time=self.spring.end_time + DAY,
+            end_time=self.spring.end_time + DAY + 2 * HOUR,
+        )
+        self.assertEqual(self.spring.sessions.count(), 1)
+        self.assertGreater(stray.start_time, self.spring.end_time)
+
+    def test_deleting_an_event_takes_its_sessions_with_it(self):
+        self.make_session()
+        self.spring.delete()
+        self.assertEqual(Session.objects.count(), 0)
+
+    def test_a_session_starts_out_marked_as_added_by_hand(self):
+        # The default is the fact about every row that exists before the
+        # generator does: somebody typed it. L5.6 is what writes the other one.
+        self.assertEqual(self.make_session().source, Source.MANUAL)
+
+    def test_moving_a_session_is_kept_in_its_history(self):
+        # "Who moved week 7 from Tuesday to Thursday" is a question about
+        # people's attendance, so it gets the same audit trail Event and
+        # Participation have.
+        session = self.make_session()
+        # ⚠️ Both ends move. Nudging only the start is what the check constraint
+        #    above exists to refuse, and it refused this test's first draft.
+        session.start_time = self.first_week + DAY
+        session.end_time = self.first_week + DAY + 2 * HOUR
+        session.save()
+        self.assertEqual(session.history.count(), 2)
+        self.assertEqual(
+            session.history.earliest().start_time, self.first_week)
+
+    def test_sessions_come_back_in_the_order_they_are_taught(self):
+        # Forward, unlike Event's newest-first: a course is read from week one.
+        third = self.make_session(start_time=self.first_week + 14 * DAY,
+                                  end_time=self.first_week + 14 * DAY + 2 * HOUR)
+        first = self.make_session()
+        second = self.make_session(start_time=self.first_week + 7 * DAY,
+                                   end_time=self.first_week + 7 * DAY + 2 * HOUR)
+        self.assertEqual(
+            list(self.spring.sessions.all()), [first, second, third])
 
 
 class DictionaryTableTests(TestCase):

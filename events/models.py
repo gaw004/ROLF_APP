@@ -27,7 +27,7 @@ from contact.models import Contact, RelationshipType
 from core.constraints import ConstraintErrorFieldMixin
 from core.limits import LONG_TEXT, SHORT_TEXT
 from core.models import ImmutableCodeMixin, TimeStampedModel
-from core.timeutils import day_start, local_now, local_today
+from core.timeutils import day_start, local_date_of, local_now, local_today
 # ⚠️ The audience machinery moved to org/audience.py on 2026-08-31 — the three
 #    ticks, Spec, for_audience(), and "who counts as on the books". It is
 #    written entirely in org vocabulary (Ministry, Position, Assignment) and
@@ -1610,6 +1610,133 @@ def askable_served_as():
         (value, Participation.ServedAs(value).label)
         for value in SERVED_AS_EXPLANATIONS
     ]
+
+
+class Source(models.TextChoices):
+    """Where a row came from: a person typed it, or a rule produced it.
+
+    ⚠️ **One definition, two tables.** `Session.source` uses it now; `Event.source`
+       joins it at L5.4, when the recurring-events generator lands. Written here
+       rather than inside either model because the two columns are not "alike",
+       they are the same question — and this project has deleted a second copy
+       of one truth three times already.
+
+    Its only reader is L5.6's `_drop_generated_after()`, and the distinction it
+    has to make is this: rows a rule produced may be dropped and produced again
+    when the rule changes, and rows a person added by hand may not. Without the
+    column, re-scheduling a course either dares not delete anything, or deletes
+    the make-up class somebody added on purpose.
+    """
+
+    MANUAL = "manual", "Added by hand"
+    GENERATED = "generated", "Produced by a rule"
+
+
+class Session(ConstraintErrorFieldMixin, TimeStampedModel):
+    """One meeting inside a run of something. ⚠️ It is not an `Event`.
+
+    The spring ESL class is **one** `Event` (1 March to 20 June); its twelve
+    meetings are twelve `Session` rows underneath it. This is the sentence
+    participants.md section 9 says `Event` could not hold — "he is in this
+    programme from March to June" — and `Event` has in fact always had the two
+    ends of it. What was missing is the moments in between.
+
+    ⚠️ The division of labour with `Event` is hard, and all three have to hold:
+       · a `Session` **cannot be signed up for on its own** (the signup hangs on
+         the `Event`'s role, once for the whole run — decision 19)
+       · a `Session` **has no audience of its own** (L2/L3 live on `Event` and
+         `EventRole`, and a run is seen or not seen as one thing)
+       · a `Session` **is not in the site's event list or schedule** (`/events/`,
+         `/events/schedule/`) — it is not an occasion you browse to, it is one
+         meeting of an occasion, and it appears inside that run's own page.
+       Break any one of them and the thing being described is an `Event`, and it
+       should go through recurring events instead — which produces N independent
+       events, each of them `single`.
+
+    ⚠️ The line against `Shift` has not moved either (participants.md section 6):
+       a standing post + repeating weekly + the foundation owing him time for it
+       is a `Shift`. Somebody taking a course is not at work.
+    """
+
+    event = models.ForeignKey(Event, on_delete=models.CASCADE, related_name="sessions")
+    start_time = models.DateTimeField()
+    end_time = models.DateTimeField()
+    # ⚠️ Named to match `Event`, which is the window this one subdivides —
+    #    `session.start_time` and `event.start_time` are compared against each
+    #    other in clean() below. The `_at` suffix means something else in this
+    #    codebase (registered_at, checked_in_at, sent_at: the moment an action
+    #    happened), and a scheduled window has never used it.
+    source = models.CharField(
+        max_length=20, choices=Source.choices, default=Source.MANUAL)
+
+    history = HistoricalRecords()
+
+    class Meta:
+        # Forward, unlike Event's `-start_time`. The two orders answer two
+        # questions: a list of events is read newest-first, and a course is read
+        # in the order it is taught. The run's own schedule page draws them in
+        # this order.
+        ordering = ["start_time", "id"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["event", "start_time"],
+                name="session_no_two_meetings_at_once",
+                violation_error_message=(
+                    "This run already has a meeting starting then."),
+                violation_error_code="session_duplicate_start",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(end_time__gte=models.F("start_time")),
+                name="session_end_time_not_before_start_time",
+                violation_error_message="The end time cannot be before the start time.",
+                violation_error_code="session_end_before_start",
+            ),
+        ]
+        # ⚠️ No `indexes`, and that is a decision rather than an omission. The
+        #    unique constraint above already builds a composite index on
+        #    (event, start_time), which is exactly what both queries want: every
+        #    meeting of one run in teaching order, and "when is the next one"
+        #    for the my-programs page. A second index on start_time alone would
+        #    serve nothing that asks about sessions without saying which run.
+
+    def __str__(self):
+        return f"{self.event.name} · {self.start_time:%Y-%m-%d %H:%M}"
+
+    def clean(self):
+        """A meeting falls inside the run it belongs to.
+
+        The two ends of an `Event` say when the run starts and stops, so a
+        meeting outside them contradicts the row it hangs on: a spring class
+        running to 20 June cannot have a meeting on 1 August. Without this, the
+        docstring above — "what was missing is the moments in between" — stops
+        being true of the table.
+
+        ⚠️ A hint layer, not a rule, and D14 asks for that to be said plainly:
+           `Session.objects.create(...)` and `bulk_create` walk straight past
+           it. It cannot become a CheckConstraint either, for the same reason
+           the L2×L3 invariant and ParticipationRole's frozen `nature` cannot —
+           the test is in another table (the event's two columns), and a check
+           constraint cannot see one. The programmatic path that is meant to
+           obey it is `services.add_session()`, which calls `full_clean()`.
+        """
+        super().clean()
+        if self.event_id is None or self.start_time is None or self.end_time is None:
+            return
+        # Errors land on a field rather than the form as a whole, and on the end
+        # that is actually outside — telling somebody "this is out of range"
+        # without saying which end is a second lookup they have to do by hand.
+        if self.start_time < self.event.start_time:
+            raise ValidationError({"start_time": (
+                "This run starts on "
+                f"{local_date_of(self.event.start_time):%-d %B %Y}, so a meeting "
+                "cannot be before that."
+            )})
+        if self.end_time > self.event.end_time:
+            raise ValidationError({"end_time": (
+                "This run ends on "
+                f"{local_date_of(self.event.end_time):%-d %B %Y}, so a meeting "
+                "cannot run past it."
+            )})
 
 
 class EventNotification(ConstraintErrorFieldMixin, TimeStampedModel):

@@ -1813,10 +1813,69 @@ issubset  /  <=  /  >=   出现在受众字段附近 → 只许在 events/models
 决定了要不要动一条已有的数据库约束。下一次遇到「这个数该怎么算」的问题时，
 值得先问一句：它会不会反过来决定形状。
 
+## 又七条（2026-09-05，页面安排）
+
+[L5.3](#l53-三档单选落在哪) 写的是「现有 `/events/` 列表页排不排除 Program 这一格留白 ——
+在设计出来之前替它决定，就是在猜」，[L5.8](#l58-页面与路由) 写的是「Programs 的页面本轮不设计」。
+设计现在有了，两格一起填。
+
+| # | 问题 | 定案 |
+|---|---|---|
+| 22 | Programs 出现在哪 | 自己的列表页 `/programs/`，**不进** `/events/` |
+| 23 | 日程 | Programs 有自己的 schedule，画**每一讲**，不画那条 111 天的横条；站点日程 `/events/schedule/` 不含 Programs |
+| 24 | recurring events | 不需要任何额外代码 —— 它生成的是 N 个各自独立的 `single` 活动，天然就在 `/events/` 里 |
+| 25 | 「挑哪几场」 | 不是第四种东西，是 Programs 下的副开关（决定 17），和「报一次管全部」同在 `/programs/` |
+| 26 | 我报名的 programs | 单开 `/me/programs/`，且**从 `/me/participations/` 里拿走** —— 各管各的，`/me/` 上两个入口 |
+| 27 | Program 的详情页 | **复用 `/events/<pk>/`**，按 `shape` 换一块（讲次表走独立 partial）。列表页各开各的，详情页只有一个 |
+| 28 | 拼写 | `program`（美式）。原文的 `PROGRAMME = "programme"` 作废 |
+
+### 决定 27 是这次走查买来的，理由要写下来
+
+列表页和详情页的答案不一样，而分界线是**持不持有不变量**：
+
+- **列表页放心新开**。它只是一个筛过的查询集，多一个列表页 = 多一行 `filter(shape=program)`，
+  没有第二处规则；
+- **详情页只许有一个**。一个 Program 的详情页要重新持有受众（`for_audience`）、报名门
+  （`eligible`）、草稿预览、监护人同意书、改期通知、L2×L3 含容不变量 —— 六样全是
+  「漏一处就静默泄露」的类型。
+
+而这不是推理，是本仓库正在为同一形状付的两笔账（2026-09-05 走查实测）：
+`event_signup`（`events/views.py`）漏了受众门，且 `AudienceIsAskedGuardTests` 的信号
+触发不到它；`event_create` / `event_update` 漏了 `form.save_m2m()`，而晚一个月写的
+`notices/views.py` 有 —— 同一形状的两处代码，新写的那处对、老的那处错。**两扇门，一扇忘了上锁。**
+
+还有一条本仓库自己的判据，在 `notices/models.py` 的 `Notice` docstring 上：
+「它没有场合，所以它没有场合带来的一切：没有角色、没有报名、没有出勤、没有工时。
+**这一行上要是哪天开始想要其中任何一样，那被描述的东西就是一个 Event，它就该是一个 Event。**」
+Program **四样全要**。按这张表它就是 Event，就走 Event 那条路。
+
+⚠️ 决定 23 让 [L5.1](#l51-session一期课的第几讲) 三条否定式里的第三条改了措辞：
+原文「不进活动列表页」会读错 —— 讲次确实要出现在 Program 自己那页的 schedule 里。
+准确说法是**不进站点级的活动列表和日程**。判据不变。
+
+⚠️ 决定 28 现在改是免费的，值写进库再改就是一次数据迁移。三处不一致（库里 `programme`、
+页面写 Programs、口头说 programs）的代价是以后 grep 不到彼此。
+
 ## L5.1 `Session`：一期课的第几讲
 
+> ### 2026-09-05 落地。本节初稿有六处照字面敲会出问题，逐条改在下面
+>
+> 开工前的走查把这一节和仓库现状对了一遍。形状是对的 —— 那三条否定式是本节最值钱的
+> 东西，它们把「什么时候该用 `Session`、什么时候该用 `Event`」写成了**可判定的判据**，
+> 不是描述。问题全在「照着敲」这一层：初稿的列名和全仓冲突、漏了一条别的表都有的约束、
+> 一条它自己的 docstring 隐含要求的规则没人挡，以及三处会让守卫当场变红的遗漏。
+
+落库的形状（已实现，`events/models.py`）：
+
 ```python
-class Session(TimeStampedModel):
+class Source(models.TextChoices):
+    """一份定义两处用：`Session.source`（本步）和 `Event.source`（L5.4）。"""
+
+    MANUAL = "manual", "Added by hand"
+    GENERATED = "generated", "Produced by a rule"
+
+
+class Session(ConstraintErrorFieldMixin, TimeStampedModel):
     """一期活动里的一次聚会。⚠️ 它不是 `Event`。
 
     ESL 春季班是**一个** `Event`（3/1 起、6/20 止），十二次聚会是它下面的
@@ -1827,7 +1886,7 @@ class Session(TimeStampedModel):
     ⚠️ 和 `Event` 的分工是硬的，三条都要成立：
        · `Session` **不能单独报名**（报名挂在 `Event` 的角色上，整期一次）
        · `Session` **没有自己的受众**（L2/L3 在 `Event` 和 `EventRole` 上）
-       · `Session` **不进活动列表页**（它不是一场活动，是一场活动的一次聚会）
+       · `Session` **不进站点级的活动列表和日程**（`/events/`、`/events/schedule/`）
        任何一条要破，说明那个东西其实是 `Event`，该走 recurring events 那一档。
 
     ⚠️ 和 `Shift` 的分界线也没有变（participants.md 第六节）：有固定岗位 +
@@ -1835,17 +1894,74 @@ class Session(TimeStampedModel):
     """
 
     event = models.ForeignKey(Event, on_delete=models.CASCADE, related_name="sessions")
-    starts_at / ends_at
-    # 由生成器造的还是人手加的 —— 同 Event.source 的用途，见 L5.4 那句删除
-    source = ...
+    start_time / end_time
+    source = ...                      # 默认 MANUAL
+    history = HistoricalRecords()
+
+    class Meta:
+        ordering = ["start_time", "id"]          # 正序，和 Event 相反
+        constraints = [唯一(event, start_time)、check(end_time >= start_time)]
+
+    def clean(self): ...              # 一讲必须落在这一期之内
 ```
 
-⚠️ 唯一约束 `(event, starts_at)`：同一期课不可能有两次同时开始的聚会。
+### 六处改动，逐条写明原文是什么、为什么改
+
+| # | 初稿写的 | 改成 | 为什么 |
+|---|---|---|---|
+| 1 | `starts_at / ends_at` | `start_time / end_time` | 仓库里 `_at` 一律是**动作发生的时刻**（`registered_at`、`checked_in_at`、`sent_at`、`consent_at`、`created_at`），排定的时间窗从来不用它（`Event.start_time`、`Notice.starts_showing`、`Assignment.start_date`）。用 `_at` 会被读成「这一讲实际开始的时刻」。而同 `Event` 命名还有第二个好处：`clean()` 里两者要直接比较 |
+| 2 | 只有唯一约束 | 加 `end_time >= start_time` 的 `CheckConstraint` | `Event` / `Assignment` / `MinistryRole` / `Notice` 各有一条。⚠️ 这一条是 L5.2 自己那句话的反面教材：「逐条抄，**不是**『大概同款』—— 抄漏一条的表现是那张表比它复制的那张松」，而初稿在 L5.1 上就先松了一条 |
+| 3 | 没有任何窗口检查 | `clean()` + `services.add_session()` | 春季班 3/1–6/20 可以存一个 8/1 的聚会，而**本节 docstring 自己说**「`Event` 一直有起止两列，缺的只是中间那些时刻」—— 中间的时刻能跑到两列外面，那句话就不成立。跨表条件（判据在 `event` 的两列上），`CheckConstraint` 看不见，同 L2×L3 那条和 `nature` 冻结那条 |
+| 4 | `source` 各写各的 | 枚举提到模块级 `Source`，L5.4 的 `Event.source` 复用同一份 | 初稿是「L5.1 给 Session 写一份、L5.4 给 Event 再写一份」，同一个概念两处定义 —— 这个项目判过三次的「第二份真相」 |
+| 5 | 没提 `ConstraintErrorFieldMixin` / `core/constraints.py` | 两者都补 | `core/tests.py` 那条守卫双向查：约束缺 `violation_error_code`、code 缺 `CONSTRAINT_FIELD` 映射、或留下没有约束的映射，三种都当场红。⚠️ 而「本轮要动的文件总表」里 `core/constraints.py` 只标了「批一」，批三这一格是漏的 |
+| 6 | 没有 `history` | `history = HistoricalRecords()` | 相邻的 `SessionAttendance` 初稿明写了它。「谁在什么时候把第 7 讲从周二挪到周四」会影响一批人的出勤记录，而 `Event` / `Participation` / `Notice` 全都有。两张相邻的表一张有一张没有，需要理由而不是默认 |
+
+⚠️ 第 3 条按 [D14](decisions/D14-constraint-is-the-only-rule.md) 的规矩**把缺口写出来而不是暗示**：
+`Session.objects.create()` 和 `bulk_create` 从它旁边走过去。这一条本身配了一条测试
+（`test_a_bare_create_walks_past_the_containment_rule`），钉的就是这个代价 ——
+免得下一个人把 docstring 读成承诺。
+
+⚠️ **不加 `indexes`，而这是决定不是遗漏。** 唯一约束 `(event, start_time)` 自带的复合索引
+正好服务那两个查询：「这一期的全部讲，按时间正序」和「下一讲是哪天」（`/me/programs/` 要用）。
+`Event` 那三条索引各自标了 R1/R2 的理由，「不加」同样要写。
 
 ⚠️ `Event.duration`（R3）对 Program 会变成「111 天」。**不改它** ——
 那两列说的就是这个，而报表上那一格对 Program 本来就没有意义。
 真要显示「每次两小时」，那是 `Session` 的时长，属于**新页面**的事。
 记在这里是因为它看起来像个 bug。
+
+### ⚠️ 这一步**不兑现** participants.md 第九节那条缺口
+
+第九节排第一位那条（「他报一次之后，后面每一场都不用再报」）的出栏要等
+[L5.2](#l52-sessionattendance他哪几场来没来干了多久) + [L5.3](#l53-三档单选落在哪)。
+L5.1 只提供承载 —— 记在这里是因为初稿没写这句，容易让人以为做完这一步就结清了。
+
+### 测试（`events/tests.py` · `SessionTests`）
+
+- `test_a_session_belongs_to_one_event`
+- `test_two_sessions_in_one_event_cannot_start_at_the_same_moment`
+- `test_two_events_may_hold_meetings_at_the_same_moment`
+  —— 唯一约束是**两列**而不是一列：两门课同一个晚上开是常事
+- `test_a_session_cannot_end_before_it_starts`
+- `test_a_session_outside_its_events_own_dates_is_refused`
+- `test_a_session_before_its_event_starts_is_refused`
+- `test_a_session_inside_its_events_dates_is_kept`
+- `test_the_service_refuses_a_session_outside_the_events_dates`
+- `test_the_service_keeps_a_session_inside_the_events_dates`
+- `test_a_bare_create_walks_past_the_containment_rule` —— D14 那个缺口
+- `test_deleting_an_event_takes_its_sessions_with_it`
+- `test_a_session_starts_out_marked_as_added_by_hand`
+- `test_moving_a_session_is_kept_in_its_history`
+- `test_sessions_come_back_in_the_order_they_are_taught`
+
+⚠️ 两条约束走**数据库**（裸 `create()` + `IntegrityError`），窗口那条走 `full_clean()`
+和服务层 —— 两层分开验。一条只在 `full_clean()` 下失败的「约束」，是穿着约束外衣的 `clean()`。
+
+### 迁移
+
+`events/migrations/0022_session.py` —— 纯 `CreateModel`（`Session` + `HistoricalSession`），
+无回填。docstring 写明：今天库里每一场活动都是没有聚会的单场，而「没有这些行」正是这个意思，
+所以这一步不改任何一行现有数据的含义。
 
 ## L5.2 `SessionAttendance`：他哪几场、来没来、干了多久
 
@@ -1865,7 +1981,9 @@ class SessionAttendance(TimeStampedModel):
     """
 
     participation = models.ForeignKey(
-        Participation, on_delete=models.CASCADE, related_name="sessions")
+        Participation, on_delete=models.CASCADE, related_name="attendances")
+    # ⚠️ `attendances`，不是初稿的 `sessions`：L5.1 已经把 `event.sessions` 用掉了
+    #    （→ `Session`），同一个词在两个方向上指两张表是下一个人必踩的一脚。
     session = models.ForeignKey(Session, on_delete=models.CASCADE, related_name="+")
     status = ...          # 同 Participation.Status，但只在这一场上成立
     hours = ...           # 决定 20
@@ -1874,6 +1992,8 @@ class SessionAttendance(TimeStampedModel):
 ```
 
 ⚠️ 唯一约束 `(participation, session)`。
+
+⚠️ L5.1 的列名改了（`starts_at` → `start_time`，见那一节第 1 条），本节和 L5.6 引用它的地方跟着改。
 
 ### 三条从 `Participation` 搬过来的规则，一条都不能漏
 
@@ -1900,7 +2020,7 @@ D38 第五节那张表问的是「他这次参加算什么」，而对一期课�
 class Event(...):
     class Shape(models.TextChoices):
         SINGLE = "single", "One occasion"
-        PROGRAMME = "programme", "A course or programme — sign up once"
+        PROGRAM = "program", "A course or program — sign up once"
 ```
 
 ⚠️ **枚举只有两档，而界面上是三档。** 第二档（recurring events：每周一场、
@@ -1917,13 +2037,20 @@ class Event(...):
 ### 两个谓词，页面怎么用**本轮不定**
 
 ```python
-    def programmes(self): ...      # Shape.PROGRAMME
+    def programs(self): ...        # Shape.PROGRAM
     def single_occasions(self): ...  # Shape.SINGLE
 ```
 
-⚠️ 基金会说 Programs 会有**自己的页面**，而页面设计要等后端定完。
-所以后端把两者分得开，而**现有 `/events/` 列表页排不排除 Program 这一格留白** ——
-在设计出来之前替它决定，就是在猜。
+> ### 2026-09-05：这一格不再留白了，见[又七条](#又七条2026-09-05页面安排)
+>
+> 原文是「基金会说 Programs 会有**自己的页面**，而页面设计要等后端定完。所以后端把两者
+> 分得开，而**现有 `/events/` 列表页排不排除 Program 这一格留白** —— 在设计出来之前
+> 替它决定，就是在猜」。
+>
+> 设计给出来了（决定 22–27），所以答案是**排除**：Programs 走 `/programs/`，
+> `/events/` 和 `/events/schedule/` 都只剩单场（含 recurring 生成的那些）。
+> 而它反过来证明了这一列该存在 —— 上面那两条理由（列表页要按它筛、一个还没排期的
+> Program 也是 Program）现在**各自都有了真实调用方**。
 
 ⚠️ 留白的是「用哪个」，不是「有没有」：两个谓词都要写、都要有测试。
 
@@ -2040,8 +2167,23 @@ def _drop_generated_after(series, after):
 
 ## L5.8 页面与路由
 
-⚠️ Programs 的页面**本轮不设计**（基金会明说要等后端定完）。本轮只做到：
-两个谓词、`Session` 和 `SessionAttendance` 两张表、以及 admin 能建能看。
+> ### 2026-09-05：页面定了，见[又七条](#又七条2026-09-05页面安排)
+>
+> 原文是「Programs 的页面**本轮不设计**（基金会明说要等后端定完）。本轮只做到：
+> 两个谓词、`Session` 和 `SessionAttendance` 两张表、以及 admin 能建能看」。
+
+按决定 22–27，本轮要出三张列表页和**零张**新详情页：
+
+| 路由 | 装什么 |
+|---|---|
+| `/programs/` | Programs 的列表（`shape=program`），两档共用一页 |
+| `/programs/schedule/` | Programs 的日程，画**每一讲**，不画那条 111 天的横条 |
+| `/me/programs/` | 我在上的课。⚠️ 同时要把 program 的报名**从 `/me/participations/` 里拿走**，并在 `/me/` 上挂第二个入口 |
+| ~~`/programs/<pk>/`~~ | ❌ 不新建视图。详情复用 `/events/<pk>/`，按 `shape` 换一块（讲次表走独立 partial，同 `_event_roles_panel.html` 那一级）。理由见决定 27 |
+
+⚠️ 三张列表页各自都要过 `for_audience()` —— `AudienceIsAskedGuardTests` 和
+`RolesAreNarrowedGuardTests` 会盯着，但**别指望守卫兜底**：本轮走查刚证实
+`event_signup` 那条路守卫的信号根本触发不到（它用的是 `open_for_signup()`）。
 
 recurring events 那一档的路由照初版：`events/series/new/`、
 `events/series/<int:pk>/`、`events/series/<int:pk>/undo/`。
@@ -2069,15 +2211,15 @@ recurring events 那一档的路由照初版：`events/series/new/`、
 
 Program（决定 16–20）：
 
-- `test_a_programme_is_one_event_with_many_sessions`
-- `test_signing_up_for_a_programme_creates_one_participation`
+- `test_a_program_is_one_event_with_many_sessions`
+- `test_signing_up_for_a_program_creates_one_participation`
   —— ⚠️ 决定 19。它同时钉住 `signups` 不会因为一期课暴涨
-- `test_signing_up_for_a_programme_covers_every_session`
+- `test_signing_up_for_a_program_covers_every_session`
 - `test_picking_some_sessions_leaves_the_others_alone`（决定 17）
 - `test_joining_in_week_five_is_not_four_absences`（决定 18）
   —— ⚠️ 出勤率的分母是 8 不是 12
 - `test_hours_on_a_session_are_counted_by_the_report`（决定 20 的 union）
-- `test_a_seat_in_a_programme_still_records_no_hours`
+- `test_a_seat_in_a_program_still_records_no_hours`
   —— L1/L4 那条规则在新表上同样成立
 - `test_a_session_somebody_attended_is_never_deleted_by_the_generator`
 
@@ -2124,7 +2266,7 @@ recurring events：
 | 文件 | 批 | 干什么 |
 |---|---|---|
 | `events/models.py` | 一二三 | `nature`、`NOT_APPLICABLE`、新约束、第二个兜底工种、可见性的两个布尔 + 一张多对多（`Event` / `EventRole` 各一套）、`refuse_wider_than_event()`（⚠️ `Audience` 和 `AudienceQuerySetMixin` **2026-08-31 搬去了 `org/audience.py`**，留在这里的只有事件×角色那条含容规则，见 [D41 第四节](decisions/D41-notices-are-not-events.md)）、`Event.shape` + 两个谓词、`Session`、`SessionAttendance`、`EventSeries`、`EventSeriesRole`、`Event.series` / `Event.source` |
-| `events/services.py` | 一二三 | `on_the_books_q()` / `on_the_books_exists()`、`default_served_as()`、`record_hours()`、`check_out()`、`create_participation_role()`、`ministry_report()`、`_people_served()`、`eligible()`（⚠️ `eligible_role_ids()` 判它不建，见 L2.4 那个补框）、`sign_up()`、系列的生成与撤销、⚠️ L5.7：工时的四个口径要 union `SessionAttendance` |
+| `events/services.py` | 一二三 | `add_session()`（L5.1）；`on_the_books_q()` / `on_the_books_exists()`、`default_served_as()`、`record_hours()`、`check_out()`、`create_participation_role()`、`ministry_report()`、`_people_served()`、`eligible()`（⚠️ `eligible_role_ids()` 判它不建，见 L2.4 那个补框）、`sign_up()`、系列的生成与撤销、⚠️ L5.7：工时的四个口径要 union `SessionAttendance` |
 | `events/forms.py` | 一二三 | `RoleChoiceField`、`SignUpForm`、`EventRoleForm`、`EventForm`（加三档单选）、`EventPeriodForm`、新的 `EventSeriesForm` |
 | `events/views.py` | 一二三 | `_visible_events()`、`_schedule()`、`_detail()`、`event_signup`、`event_registrations`、`event_attendance`、系列的三个视图 |
 | `events/urls.py` | 三 | 系列的三条路由 |
@@ -2132,9 +2274,10 @@ recurring events：
 | `events/recurrence.py` | 三 | 新文件，纯函数 |
 | `events/migrations/0016_participationrole_nature.py` | 一 | 新 |
 | `events/migrations/0017_served_as_not_applicable.py` | 一 | 新 |
-| `events/migrations/0018_audience_and_signups.py` | 二 | 新 |
-| `events/migrations/0019_event_series.py` | 三 | 新 |
-| `core/constraints.py` | 一 | `CONSTRAINT_FIELD` 加一行 |
+| ~~`events/migrations/0018_audience_and_signups.py`~~ | 二 | ❌ **没有这个文件**，2026-09-05 划掉。批二实际拆成了四条：`0018_second_catch_all_role`（L1.6，下面单独列着）、`0019_event_audience`（含回填）、`0020_audience_reverse_name`、`0021_drop_event_type`。后三条各自在正文里有说明，唯独这一行从没跟着改 —— 于是总表里一度同时存在两个 0018 |
+| `events/migrations/0022_session.py` | 三 | 新（L5.1）。⚠️ 编号：批二实际拆成了 0018–0021，所以批三从 0022 起 |
+| `events/migrations/00NN_event_series.py` | 三 | 新（L5.4）。⚠️ 编号等落地时定，不预写 |
+| `core/constraints.py` | 一三 | `CONSTRAINT_FIELD` 加一行；⚠️ 批三 L5.1 又加两行（`Session` 的两条约束）—— 这一格 2026-09-05 之前写的是「一」，而批三加约束不改它，`core/tests.py` 那条守卫会当场红 |
 | `core/timeutils.py` | 一 | `local_day()` —— `local_date_of()` 的 ORM 双胞胎，`tzinfo` 包在里面 |
 | `core/querysets.py` | 一 | `in_effect_on()` 的 docstring：`on` 现在也可以是数据库表达式 |
 | `core/tests.py` | 一二三 | 五条新守卫 |

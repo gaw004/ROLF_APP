@@ -36,6 +36,8 @@ from .models import (
     EventRole,
     Participation,
     ParticipationRole,
+    Session,
+    Source,
 )
 
 
@@ -1964,6 +1966,27 @@ def create_participation_role(name, *, nature):
     role.full_clean()
     role.save()
     return role
+
+
+def add_session(event, *, start_time, end_time, source=Source.MANUAL):
+    """Put one meeting on a run. Returns the new Session.
+
+    The single programmatic way in, so the rule that a meeting falls inside its
+    run's own dates holds for code as well as for forms. `Session.clean()` is
+    where that rule is written; this function is what makes `full_clean()`
+    actually get called on a path that is not a ModelForm — D14's point being
+    that a rule nothing calls is a rule nothing enforces.
+
+    ⚠️ Until L5.6 its only callers are tests. Said plainly rather than left to
+       be discovered: the generator that will schedule a whole course is the
+       reader this exists for, and it is three steps away. The admin does not
+       need it — a ModelForm calls `full_clean()` on its own.
+    """
+    session = Session(
+        event=event, start_time=start_time, end_time=end_time, source=source)
+    session.full_clean()
+    session.save()
+    return session
 
 
 # --- P6: telling people the event changed --------------------------------

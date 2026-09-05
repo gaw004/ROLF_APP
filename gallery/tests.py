@@ -865,7 +865,16 @@ class WallUrlCacheTests(PageTestCase):
         """
         markup = (Path(settings.BASE_DIR) / "gallery" / "templates" / "gallery"
                   / "_wall_strip.html").read_text()
-        body = re.sub(r"\{#.*?#\}", "", markup, flags=re.S)
+        # ⚠️ Strip what Django strips, and nothing more. This line used to be
+        #    `re.sub(r"\{#.*?#\}", "", markup, flags=re.S)` — and that re.S was
+        #    wrong twice over: Django's own lexer has no DOTALL, so a `{#` that
+        #    runs past its line is not a comment but printed text. The note this
+        #    guard reads around was exactly that shape, so the guard erased a
+        #    block the browser was showing to users. Both forms, both correct:
+        #    {% comment %} spans lines, {# #} does not.
+        body = re.sub(r"\{%\s*comment\s*%\}.*?\{%\s*endcomment\s*%\}", "",
+                      markup, flags=re.S)
+        body = re.sub(r"\{#[^\n]*?#\}", "", body)
 
         self.assertNotIn(".thumb.url", body)
         self.assertIn("item.thumb_url", body)
@@ -989,6 +998,36 @@ class WallPageTests(PageTestCase):
         block = css[start:start + 400]
         self.assertIn("var(--wall-sets", block)
         self.assertNotIn("-50%", block)
+
+    def test_the_shift_pays_for_the_seam_gap(self):
+        """🔴 The track is a flex row, so N copies carry N−1 gaps between them.
+
+            track = N × copy + (N−1) × gap
+
+        `-100% / N` therefore advances `copy + gap×(N−1)/N` — one whole copy
+        minus `gap/N`. The seam wants `copy + gap` exactly, and
+
+            (track + gap) / N = (N×copy + N×gap) / N = copy + gap    ✓
+
+        so the numerator has to carry a `- var(--photo-gap)` alongside the
+        `-100%`. Measured on production 2026-09-05 without it: every strip was
+        4.67px short (gap 14, N 3), which is not a white line at the seam but
+        the whole strip hopping left once per loop — and the photo that had a
+        few pixels left at the edge vanishing instead of sliding out.
+
+        ⚠️ Reads `--photo-gap`, not a number. That variable is deliberately the
+           same one used within a copy and between copies (`.wall-track,
+           .wall-set` is one rule for exactly that reason); a literal here
+           would re-break the seam the next time the gap changes, silently.
+        """
+        from pathlib import Path
+
+        css = Path("assets/app.css").read_text()
+        start = css.index("@keyframes wall-drift-left")
+        block = css[start:start + 400]
+        self.assertIn("var(--photo-gap)", block,
+                      "the shift ignores the gaps between copies — the seam "
+                      "will jump by gap/N every loop")
 
     def test_every_photo_carries_its_aspect_and_nothing_else(self):
         """⚠️ `--h` is gone (2026-08-07). Every photo is drawn at the strip's

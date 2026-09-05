@@ -1452,6 +1452,30 @@ function positionRowMenus() {
       if (panel) place(panel);
     }
   }, true);
+
+  // 🔴 **开着的时候还要跟着滚**（2026-09-04 修）。
+  //
+  //    `.row-menu` 是 `position: fixed`，坐标是开的那一刻按触发器算出来的一对
+  //    视口坐标 —— 而 popover 不会因为滚动而关闭。于是开着菜单再滚一下，
+  //    面板钉在原地、它那一行走掉了，屏幕上它**贴在了另一行旁边**。
+  //    ⚠️ 这不只是难看：这张表里的动作是 Take down / Back to draft，
+  //       一个看起来指着隔壁行的菜单，是会让人对着错的那一行点下去的。
+  //       （点下去仍然作用在正确的那一行 —— 表单里是它自己的 pk ——
+  //       所以这个毛病不会有任何报错，只会让人以为自己点错了。）
+  //
+  // ⚠️ `capture: true`：滚动事件在元素上**不冒泡**，而这张表自己就是一个滚动
+  //    容器（`.table-wrap` 是 `overflow-x: auto`）。少了它，只有整页滚动会被
+  //    接住，表格内部横向滚动时面板照样掉队。
+  //
+  // ⚠️ `passive: true`：这两个监听器一行都不碰事件，声明出来浏览器才不用等
+  //    它们决定要不要 preventDefault —— 滚动手感的差别就在这里。
+  const followOpenMenus = () => {
+    document.querySelectorAll(".row-menu").forEach((panel) => {
+      if (panel.matches(":popover-open")) place(panel);
+    });
+  };
+  window.addEventListener("scroll", followOpenMenus, {passive: true, capture: true});
+  window.addEventListener("resize", followOpenMenus, {passive: true});
 }
 
 positionRowMenus();

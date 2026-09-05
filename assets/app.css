@@ -3663,7 +3663,16 @@
     background-color: var(--color-ink-800);
   }
 
-  /* 🔴 **"Manage" 这两个字只在 hover / focus 时出现。**
+  /* 🔴 **"Manage" 这两个字只在能悬停的设备上收起来**（2026-09-04 修）。
+   *
+   *    初版无条件收起，于是触屏上这个入口是三个**没有任何文字**的点 ——
+   *    而它同时是两个管理页仅有的可见入口（站点菜单那三格同日撤掉了）。
+   *    当时把它记成「已知代价」，判据是「有人问起再说」；这一次不等了。
+   *
+   * ⚠️ 判据是 `(hover: hover)` 而不是屏幕宽度，也不是判 UA：
+   *    能不能悬停是**设备的能力**，不是牌子，也不是窗口有多宽 ——
+   *    同一条判据 app.js 里那个悬停小窗已经在用。
+   *    带鼠标的窄窗口照旧收起，触屏的大平板照旧常显。
    *
    * ⚠️ `:focus-visible` 必须和 `:hover` 一起写 —— 键盘用户拿不到 hover，
    *    而这是免费的：少了它，Tab 到这里的人看到的是一个焦点环套着三个点，
@@ -3672,22 +3681,25 @@
    * ⚠️ 用 `opacity` + 固定 `width: 0`→`auto` 会让整行在 hover 时横着弹一下。
    *    这里改成**始终占位**（`visibility` 不动、只动 opacity）不行 —— 那样
    *    静息态就有一块空白。所以用 `max-width` 过渡：静息 0、hover 展开，
-   *    右端那颗点因此原地不动，字从它左边推出来。
-   *
-   * ⚠️ 触屏上这两条永远不会命中 —— 那是已知代价，写在模板注释里。 */
+   *    右端那颗点因此原地不动，字从它左边推出来。 */
   .manage-link-label {
-    overflow: hidden;
-    max-width: 0;
     font-size: 0.875rem;
     white-space: nowrap;
-    opacity: 0;
-    transition: max-width 200ms ease, opacity 200ms ease;
   }
 
-  .manage-link:hover .manage-link-label,
-  .manage-link:focus-visible .manage-link-label {
-    max-width: 6rem;
-    opacity: 1;
+  @media (hover: hover) {
+    .manage-link-label {
+      overflow: hidden;
+      max-width: 0;
+      opacity: 0;
+      transition: max-width 200ms ease, opacity 200ms ease;
+    }
+
+    .manage-link:hover .manage-link-label,
+    .manage-link:focus-visible .manage-link-label {
+      max-width: 6rem;
+      opacity: 1;
+    }
   }
 
   /* 三个点竖着排。⚠️ 点本身复用 `.row-menu-dot`（画出来的，不是字符「⋮」）——

@@ -6669,6 +6669,55 @@ class RowMenuTests(StylesheetReader, SimpleTestCase):
         return re.sub(r"\{%\s*comment\s*%\}.*?\{%\s*endcomment\s*%\}", "",
                       markup, flags=re.S)
 
+    def test_the_manage_entry_says_what_it_is_on_a_touch_screen(self):
+        """🔴 站点菜单那三格撤掉之后，标题行那颗 ⋮ 是那两页仅有的可见入口。
+
+        初版无条件把 "Manage" 收成 `max-width: 0`，只在 hover / focus 时展开
+        —— 而触屏两样都没有，于是手机上这个入口是三个不说明自己是什么的点。
+        修法是把**收起**那一段关进 `(hover: hover)`：能悬停的设备才收。
+
+        ⚠️ 钉的是「收起规则落在 hover 查询里」，不是「有没有 `max-width: 0`」——
+           后者两种写法下都在，断言它等于什么都没测。
+        ⚠️ 读的是剥掉注释的 `styles()`：这条规矩在源文件里被注释讲了两遍，
+           拿原文找字符串会命中注释而不是规则。
+        """
+        css = self.styles()
+        collapsed = css.index("max-width: 0")
+        # ⚠️ 先断言再 rindex：少了这一句，规则被搬出去时这条测试是抛
+        #    `ValueError` 而不是说人话 —— 一条读不懂的守卫会被当成守卫坏了。
+        self.assertTrue(
+            "(hover: hover)" in css[:collapsed],
+            "`.manage-link-label` 收起前没有任何 `(hover: hover)` 查询 —— "
+            "触屏上这个入口又变回三个没有说明的点了")
+        query = css.rindex("(hover: hover)", 0, collapsed)
+        # 收起规则必须在那个 media block 之内 —— 之间不能有闭合它的括号。
+        self.assertNotIn(
+            "\n  }\n", css[query:collapsed],
+            "`.manage-link-label` 的收起规则不在 `(hover: hover)` 里 —— "
+            "触屏上这个入口又变回三个没有说明的点了")
+
+    def test_an_open_menu_follows_its_row_when_the_page_scrolls(self):
+        """🔴 面板是 `position: fixed`，而 popover 不会因为滚动而关闭。
+
+        坐标是开的那一刻算出来的一对视口坐标，所以开着菜单再滚一下，
+        它就贴到别的行旁边去了 —— 而这张表里的动作是 Take down。
+        点下去仍然作用在正确的那一行（表单里是它自己的 pk），所以这个毛病
+        不报任何错，只让人以为自己点错了行。
+
+        ⚠️ `capture` 不能少：滚动事件在元素上不冒泡，而这张表自己就是一个
+           滚动容器（`.table-wrap` 是 `overflow-x: auto`）。
+        """
+        js = (Path(settings.BASE_DIR) / "assets" / "js" / "app.js").read_text()
+        body = js[js.index("function positionRowMenus"):js.index("positionRowMenus();")]
+        for needle, why in [
+            ('"scroll"', "开着的菜单不会跟着滚动走"),
+            ('"resize"', "改窗口大小之后菜单留在旧位置"),
+            ("capture: true", "表格内部滚动接不住 —— scroll 在元素上不冒泡"),
+            (":popover-open", "没有分辨哪个面板开着，会去摆所有的"),
+        ]:
+            with self.subTest(needle=needle):
+                self.assertIn(needle, body, why)
+
     def test_it_is_a_popover_and_not_a_positioned_div(self):
         """🔴 三条约束，缺一不可：
 

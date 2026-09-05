@@ -5954,10 +5954,13 @@ class CheckDeploymentCommandTests(TestCase):
 
     def test_an_empty_dictionary_table_is_called_out(self):
         # ⚠️ The failure this catches is not an error: a coordinator opens
-        #    "publish an event", the event-type dropdown is empty, and the page
+        #    "publish an event", the ministry dropdown is empty, and the page
         #    simply cannot be completed. Nothing is logged anywhere.
+        # ⚠️ This asked about EventType until 2026-09-04, when that table was
+        #    deleted (06-roadmap.md L2.6). Ministry is the same failure on the
+        #    same form — required FK, empty dropdown, page cannot be saved.
         text = self.report()
-        self.assertIn("EventType", text)
+        self.assertIn("Ministry", text)
         self.assertIn("empty, so the form that needs it", text)
 
     def test_the_role_check_still_asks_for_one_of_the_foundations_own(self):

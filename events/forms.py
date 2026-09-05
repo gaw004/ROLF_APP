@@ -457,7 +457,7 @@ class EventForm(EventAudienceFormMixin, forms.ModelForm):
     class Meta:
         model = Event
         fields = [
-            "name", "event_type", "ministry", "start_time", "end_time",
+            "name", "ministry", "start_time", "end_time",
             "location", "status", "requires_guardian_consent",
             # L3. Right after the lifecycle fields and before the prose, because
             # "who is this for" is a publishing decision rather than a detail.

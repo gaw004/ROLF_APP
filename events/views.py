@@ -259,7 +259,7 @@ def _visible_events(period, contact):
         #    不加这个注解的话那是**每行一次查询** —— 一页二十行，在全站被打得
         #    最多的一页上。判据本身没有在这里重写，见 `with_capacity()`。
         .with_capacity()
-        .select_related("ministry", "event_type")
+        .select_related("ministry")
         .order_by("start_time")
     )
 
@@ -398,7 +398,7 @@ def _detail(request, pk):
        取数路径。分叉在这里的名字叫「草稿从侧边栏漏出去了」。
     """
     event = get_object_or_404(
-        Event.objects.select_related("ministry", "event_type"), pk=pk)
+        Event.objects.select_related("ministry"), pk=pk)
     contact = _my_contact(request)
     preview = event.status not in Event.VISIBLE_TO_PARTICIPANTS
     # L3 (2026-08-26): not for them is the same kind of answer as not published.
@@ -772,7 +772,7 @@ def _scoped_events(request):
     events = Event.objects.all() if foundation else Event.objects.filter(
         ministry_id__in=administered)
     return (
-        events.select_related("ministry", "event_type").order_by("-start_time"),
+        events.select_related("ministry").order_by("-start_time"),
         administered,
         foundation,
     )

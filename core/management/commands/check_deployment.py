@@ -201,7 +201,7 @@ class Command(BaseCommand):
     def readiness(self):
         """C3.5's checklist, answered from the database instead of from memory.
 
-        ⚠️ Every row here fails silently. An empty EventType table is not an
+        ⚠️ Every row here fails silently. An empty Ministry table is not an
            error, it is a "publish an event" form with an empty dropdown; a
            deployment whose only account is the superuser works perfectly and
            quietly breaks the rule that nobody runs the foundation from one.
@@ -248,7 +248,7 @@ class Command(BaseCommand):
         #    if a later migration seeds a third, this number moves again.
         wanted = [
             ("org", "Ministry", 1), ("org", "Position", 1),
-            ("org", "EmploymentType", 1), ("events", "EventType", 1),
+            ("org", "EmploymentType", 1),
             ("events", "ParticipationRole", 3),
             # Not hand-entered — a data migration fills it. Zero here means the
             # migration did not run, and an emergency contact cannot be saved

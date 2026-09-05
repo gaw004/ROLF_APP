@@ -96,7 +96,7 @@ ChurchSuite 的 event sequence 每一场都是真行，「更新整个序列」�
 | 批 | 装什么 | 为什么是这个顺序 |
 |---|---|---|
 | 批一 · L1 + L4 | 性质轴 + 记账口径 | 结构最小（字典表加一列），却当场修掉一个正在涨的静默 bug，并让报表第一次答得出「我们服务了多少人」。不依赖 L2 / L3 |
-| 批二 · L3 + L2 | 可见性 + 资格 + 公告 + `EventType` 上页面 | 一个整体：不变量横跨两层，拆开交付会留一个「角色比活动宽」的窗口期。本轮权限面最大的一批，必须配浏览器验收 |
+| 批二 · L3 + L2 | 可见性 + 资格 + 公告（`EventType` 上页面那一条作废，见 L2.6） | 一个整体：不变量横跨两层，拆开交付会留一个「角色比活动宽」的窗口期。本轮权限面最大的一批，必须配浏览器验收 |
 | 批三 · L5 | 一期 / 各报各的 / 单场 | 三张新表（`Session`、`SessionAttendance`、`EventSeries`）。⚠️ 2026-08-26 重写：初版只装了需求 4 的一半，另一半（Programs：报一次管全部）是 [`participants.md` 第九节](participants.md)第一条缺口的出栏 |
 
 ---
@@ -1667,23 +1667,45 @@ issubset  /  <=  /  >=   出现在受众字段附近 → 只许在 events/models
 > 一条**日历条目** —— 而本仓库已经把例会判给了 `Shift`（[`phase-d.md`](phase-d.md)）。
 > 三家真有这个需求的产品（Viva、Planning Center、Chatter）全都建了独立对象。
 
-本节剩下**唯一**要做的一件事，排在批四 N4（仪表盘）之后：
+本节剩下的**唯一**一件事已经做完（2026-09-02，`8a8352a`），至此本节全部结清。
 
-- `_event_detail_body.html` 角色空状态那一格，在 `No roles opened yet.` 之后补一句
+它原本排在批四 N4（仪表盘）之后，实际是在 N4 里一并收掉的 —— 那句引导指向
+`/me/`，而 `/me/` 正是 N4 建出来的那一页，两件事分不开。
+
+- ✅ `_event_detail_body.html` 角色空状态那一格，在 `No roles opened yet.` 之后补一句
   指向 `/me/` 的英文引导。
   ⚠️ 它是承重的：横幅那条被判不做（[D41 第六节](decisions/D41-notices-are-not-events.md)），
   所以这是活动侧通向公告的**唯一**线索。
 
 ## L2.6 `EventType` 上页面
 
-`EventPeriodForm` 加一个 `event_type` 的 `ModelChoiceField`
-（`is_active=True`，`empty_label="All kinds"`），`narrow()` 里多一个 filter，
-`order_fields` 里排在 ministry 后面，`description()` 跟着补一句。
-详情页和管理列表显示类型。
+❌ **本节整个作废（2026-09-04）。这张表没有上页面 —— 它被整张删掉了。**
 
-目的只有一个：让这张字典表有真读者 ——
-[D5](decisions/D05-lookup-tables-not-enums.md) 那一行从「没有一处代码 branch 它、
-前台模板命中 0 次」变成「有页面」。
+> 原计划是给 `EventPeriodForm` 加一个 `event_type` 的下拉、`narrow()` 多一个
+> filter、详情页和管理列表显示类型，目的写着「让这张字典表有真读者」。
+>
+> 🔴 **而它是一个必填、却没有任何人读的字段，这两半同时成立。**
+> 单独一条都不足以推翻它，合起来足够：
+>
+> - **成本每天在付**：`Event.event_type` 是非空 FK，而且在 `EventForm.Meta.fields`
+>   里 —— 每一个 ministry admin 发布活动都必须选一个类型，不选就发不出去；
+> - **收益一次没有**：全仓 `*.html` 命中 **0** 次，唯一的读者是 admin 的 changelist；
+> - **没有人要过**：[`participants.md` 第六节](participants.md) 自己查证过
+>   「R1–R8 / P1–P6 里一条都没提到活动分类」。
+>
+> 于是只有三条路，而**继续保持现状是三条里最差的那一条**：给它上页面（本节原计划）、
+> 把表删掉、或者让每个人接着填一个没人看的框。选了第二条 ——
+> 迁移 `events/migrations/0021_drop_event_type.py`，代码 / 迁移 / 文档 / 图一处不留，
+> 照 `3b5c059` 删通用关系表那次的规矩办。
+>
+> ⚠️ 本节原文把「没有一处代码 branch 它、前台模板命中 0 次」记在 **D5** 名下，
+> 而那句话**不在 D5 里** —— 它在 [D41](decisions/D41-notices-are-not-events.md)
+> 和 `participants.md` 第六节。而且「没有一处代码 branch 它」恰恰是 D5 判定它
+> **该做成字典表的理由**，本来就该保持成立；只有「命中 0 次」那一半是缺陷。
+>
+> ⚠️ `participants.md` 那张「三件容易被塞进同一个字段的事」的表**仍然成立**，
+> 只是第一行没有了：L3「这场给谁看」和 L1「这个角色是来给还是来受」还在，
+> 而且正因为少了一个容易混进来的第三者，那条边界比原来更清楚。
 
 ## L2.7 批二的测试与验收
 
@@ -1695,7 +1717,6 @@ issubset  /  <=  /  >=   出现在受众字段附近 → 只许在 events/models
 - `test_the_schedule_narrows_by_audience_too`
 - `test_signing_up_for_an_event_you_cannot_see_is_a_404`
 - `test_cancelling_visibility_does_not_hide_an_event_you_already_signed_up_for`
-- `test_the_event_list_filters_by_kind`
 
 多选带来的那几条（2026-08-26 加）：
 
@@ -1926,7 +1947,7 @@ class EventSeries(TimeStampedModel):
        明写「条件破了就必须升级成表」。
     """
 
-    name / ministry / event_type / owner
+    name / ministry / owner
     rule = models.TextField()          # RFC 5545 的 RRULE，不含 DTSTART
     starts_on / start_time / duration
     location / description / image
@@ -2167,7 +2188,7 @@ grep 了一遍，它里面搜不到 `served_as`、`stop_at_needed_count`、`comp
 | [D38](decisions/D38-served-as-volunteer-or-work.md) | 加 `not_applicable` 一档，写明它不是身份、永远不出现在表单上、且它换来了一条真正的约束 |
 | [D27](decisions/D27-ministry-report.md) | 指标拆成两组并排不相加；`hours_per_participant` 的分母改口；新增 People served |
 | [D19](decisions/D19-event-role.md) | `EventRole` 长出「谁报得上」那一组勾选（两个布尔 + 一张多对多）；并写明 L1 为什么落在 `ParticipationRole` 而不是这里 |
-| [D5](decisions/D05-lookup-tables-not-enums.md) | `EventType` 从「没有 branch」变成「有页面」；`nature` 作为「字典表上的枚举列」的第二个例子 |
+| [D5](decisions/D05-lookup-tables-not-enums.md) | `EventType` 从字典表清单里**删掉**（说不出谁读它，L2.6）；`nature` 作为「字典表上的枚举列」的第二个例子 |
 | [`deferred.md`](deferred.md) | `Event.parent` 出栏，并注明载体判定作废的理由 |
 | [`phase-b.md`](phase-b.md) | 可见性那一节补 L3 这一维 |
 | [D32](decisions/D32-worker-axes-schedule-and-assignment.md) | ✅ 2026-08-21 已改：那条不变量的标题原来写的是「一个人在基金会里只有一条在编路径」，会被读成「一个人只能有一行任职」。改成「在编只有一套结构」，并补一小节写明一人多岗是常态、判据一律写成存在性判断 |
@@ -2363,7 +2384,7 @@ self.assertNotIn("empty, so the form that needs it", text)          # 加了一�
 ```
 
 第二行当场红。原因不是门槛错了，是**那句话是所有字典表共用的** ——
-`Ministry` / `Position` / `EmploymentType` / `EventType` 在测试库里全是 0 行，
+`Ministry` / `Position` / `EmploymentType` / `EventType`（当时还在）在测试库里全是 0 行，
 每一个都在输出里印同一句。于是第一行的「通过」是靠别的表在报警混过去的，
 和 `ParticipationRole` 一点关系都没有。
 

@@ -964,7 +964,7 @@ indexes = [models.Index(fields=["ministry", "kind", "is_active"])]
 
 ⚠️ `code` 用 `UniqueConstraint(Lower("code"))`，字段上不写 `unique=True`。
 `save()` 转小写只保证"存进去的值好看"，`bulk_create` 能插 `Food_Pantry` + `food_pantry` 两行。
-**`Ministry` / `EmploymentType` 以及 B6 的 `EventType` / `ParticipationRole` 一律照此办理** ——
+**`Ministry` / `EmploymentType` 以及 B6 的 `EventType`（后已删）/ `ParticipationRole` 一律照此办理** ——
 见 `goal.md` D9「归一化通则」。
 
 `name` **不加**唯一约束 ——
@@ -1252,7 +1252,7 @@ P1–P6  流程：注册建 Contact / ministry admin 发活动 / 普通用户报
 ## 为什么按这个顺序
 
 ```
-B6  events 的表：EventType / Event / EventRole / ParticipationRole / Participation
+B6  events 的表：EventType（2026-09-04 删）/ Event / EventRole / ParticipationRole / Participation
  └→ B7  org：MinistryRole + permissions.py          ← 必须在任何页面之前
      └→ B8  accounts：注册流程（P1）
          └→ B9  自助页面①：看活动 + 报名（P3）
@@ -1283,7 +1283,7 @@ python manage.py startapp events
 
 | 模型 | 要点 |
 |---|---|
-| `EventType` | 字典表：`code`（唯一·不可改）/ `name` / `is_active`。照 `Ministry` 抄，`ImmutableCodeMixin` + `UniqueConstraint(Lower("code"))` |
+| ~~`EventType`~~ | ~~字典表：`code`（唯一·不可改）/ `name` / `is_active`。照 `Ministry` 抄，`ImmutableCodeMixin` + `UniqueConstraint(Lower("code"))`~~<br>**2026-09-04 删除** —— 说不出谁读它（[06-roadmap L2.6](06-roadmap.md#l26-eventtype-上页面)） |
 | `ParticipationRole` | 字典表，同上。**必须 seed 一行 `code=general`**（"通用志愿者"）—— `Participation.event_role` 非空之后，"没有具体分工"要有地方落。<br>落点是**数据迁移**（`events/migrations/0003_seed_general_participation_role.py`），不是 `seed_demo`：它是 schema 的一条不变量，而 `seed_demo` 拒绝在 `DEBUG` 关掉时运行，只靠它的话生产库起来就没有这一行（2026-07-31 补，见「计划外（三方核对）」） |
 | `Event` | 见下 |
 | `EventRole` | **本步的核心新表** —— 见下 |
@@ -1301,7 +1301,6 @@ class Event(ConstraintErrorFieldMixin, TimeStampedModel):
         CANCELLED = "cancelled", "Cancelled"
 
     name        = CharField(max_length=200)
-    event_type  = FK(EventType, PROTECT)
     ministry    = FK(Ministry, PROTECT)          # ⚠️ 非空
     start_time  = DateTimeField()
     end_time    = DateTimeField()
@@ -1485,7 +1484,7 @@ def check_out(participation, *, at=None):
 
 | 外键 | 选什么 | 为什么 |
 |---|---|---|
-| `Event.event_type` / `.ministry` / `.owner` | `PROTECT` | `CASCADE` 会让删一个人带走整场活动 |
+| ~~`Event.event_type`~~ / `.ministry` / `.owner` | `PROTECT` | `CASCADE` 会让删一个人带走整场活动。<br>⚠️ `event_type` 那一格 **2026-09-04 删除** —— 说不出谁读它（[06-roadmap L2.6](06-roadmap.md#l26-eventtype-上页面)） |
 | `EventRole.event` | `CASCADE` | 活动没了，它开的工种没有意义 |
 | `EventRole.role` | `PROTECT` | 字典表 |
 | `Participation.event_role` | `CASCADE` | ⚠️ **两级级联**：删 `Event` → 删 `EventRole` → 删 `Participation`。风险和原来"删 Event 直接带走 Participation"等价，但**更不显眼** —— 所以 `delete_event` 权限不给普通 Group（B13 验收要查） |

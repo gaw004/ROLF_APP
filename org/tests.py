@@ -16,7 +16,7 @@ from django.urls import reverse
 
 from contact.models import Contact
 from core.timeutils import local_now, local_today
-from events.models import Event, EventType
+from events.models import Event
 
 from .admin import StaffingFilter
 from .models import Assignment, EmploymentType, Ministry, MinistryRole, Position
@@ -762,10 +762,8 @@ class PermissionTests(TestCase):
         MinistryRole.objects.create(contact=self.zhang, ministry=self.pantry)
 
     def make_event(self, ministry):
-        event_type, _ = EventType.objects.get_or_create(
-            code="distribution", defaults={"name": "Distribution"})
         return Event.objects.create(
-            name="Distribution", event_type=event_type, ministry=ministry,
+            name="Distribution", ministry=ministry,
             start_time=local_now(), end_time=local_now() + datetime.timedelta(hours=2),
             owner=self.zhang,
         )

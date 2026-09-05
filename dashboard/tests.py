@@ -18,7 +18,6 @@ from dashboard import calendar as month
 from events.models import (
     Event,
     EventRole,
-    EventType,
     Participation,
     ParticipationRole,
 )
@@ -63,8 +62,6 @@ class DashboardTestCase(TestCase):
     def setUp(self):
         self.pantry = Ministry.objects.create(code="food_pantry", name="Food Pantry")
         self.tax = Ministry.objects.create(code="tax_help", name="Tax Help")
-        self.kind, _ = EventType.objects.get_or_create(
-            code="distribution", defaults={"name": "Distribution"})
         self.role, _ = ParticipationRole.objects.get_or_create(
             code="lifting",
             defaults={"name": "Lifting",
@@ -79,7 +76,6 @@ class DashboardTestCase(TestCase):
         start = start or NOW + DAY
         fields = {
             "name": "Autumn food drive",
-            "event_type": self.kind,
             "ministry": ministry or self.pantry,
             "start_time": start,
             "end_time": start + 3 * HOUR,

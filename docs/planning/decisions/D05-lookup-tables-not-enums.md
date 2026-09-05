@@ -6,8 +6,12 @@
 
 `RelationshipType` 是数据库表。基金会以后想加"推荐人"、"校友"这类关系，
 在 admin 里加一行就行 —— 不用改代码、不用写迁移、不用重新部署。
-**这是"需求变了还能用"最直接的体现**，后续 Ministry、Skill、活动类型、捐款类型、
+**这是"需求变了还能用"最直接的体现**，后续 Ministry、Skill、捐款类型、
 付款方式一律照此办理。
+
+> ⚠️ 「活动类型」原来也在这一行里，2026-09-04 删掉了 —— 不是判错了类，是那张表
+> 从头到尾没有读者，最后整张删了（[06-roadmap L2.6](../06-roadmap.md#l26-eventtype-上页面)）。
+> 判据留在这里：字典表答的是「以后想加一行不用改代码」，它答不了「谁会来读这一行」。
 
 > 注意"理事会成员"**不是**关系类型 —— 理事走 `kind=board` 的 `Position` + 一行 `Assignment`（见 D11）。
 > 判断方法：这个人在基金会担任的职务 → `Position` / `Assignment`；出事时该打谁的电话 → `EmergencyContact`。
@@ -28,7 +32,7 @@
 
 | `TextChoices`（代码按它分支） | 字典表 + `code`（纯标签） |
 |---|---|
-| `Contact.contact_type`、`Position.kind`、`Assignment.status`、`Event.status`、`Participation.status`、`Participation.consent_method`、`MinistryRole.role`、`EventNotification.reason`、`BackgroundCheck.status`（已推迟） | `RelationshipType`、`Ministry`、`EmploymentType`、`EventType`、`ParticipationRole`、`Skill`（已推迟）、Phase D 的 `financial_type` / `payment_method` |
+| `Contact.contact_type`、`Position.kind`、`Assignment.status`、`Event.status`、`Participation.status`、`Participation.consent_method`、`MinistryRole.role`、`EventNotification.reason`、`BackgroundCheck.status`（已推迟） | `RelationshipType`、`Ministry`、`EmploymentType`、`ParticipationRole`、`Skill`（已推迟）、Phase D 的 `financial_type` / `payment_method`<br>⚠️ `EventType` 2026-09-04 从这一列删掉，表也删了：见上面那条 |
 
 > **2026-07-29 晚补进三个**：`Participation.consent_method`、`MinistryRole.role`、
 > `EventNotification.reason`。本表自称"当前分配"，而这三个新的 `TextChoices`

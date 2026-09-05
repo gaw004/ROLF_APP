@@ -1110,7 +1110,7 @@ def events_in_period(start, end, ministry=None):
 
     events = (
         Event.objects.in_period(start, end)
-        .select_related("ministry", "event_type")
+        .select_related("ministry")
         .annotate(role_count=Count("roles", distinct=True))
     )
     return events.filter(ministry=ministry) if ministry is not None else events

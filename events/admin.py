@@ -14,22 +14,9 @@ from .models import (
     Audience,
     Event,
     EventRole,
-    EventType,
     Participation,
     ParticipationRole,
 )
-
-
-@admin.register(EventType)
-class EventTypeAdmin(admin.ModelAdmin):
-    list_display = ["name", "code", "is_active"]
-    list_filter = ["is_active"]
-    search_fields = ["name", "code"]
-
-    def get_readonly_fields(self, request, obj=None):
-        # Same split as Ministry: editable while adding, frozen afterwards.
-        # clean() covers everything that is not the admin.
-        return ["code"] if obj else []
 
 
 @admin.register(ParticipationRole)
@@ -77,13 +64,13 @@ class EventAdmin(SimpleHistoryAdmin):
     # them from this changelist.
     form = AudienceAdminForm
     list_display = [
-        "name", "ministry", "event_type", "status", "start_time", "end_time", "duration",
+        "name", "ministry", "status", "start_time", "end_time", "duration",
     ]
-    list_filter = ["status", "ministry", "event_type", "visible_to_outsiders"]
+    list_filter = ["status", "ministry", "visible_to_outsiders"]
     search_fields = ["name", "location"]
     date_hierarchy = "start_time"
-    autocomplete_fields = ["event_type", "ministry", "owner"]
-    list_select_related = ["ministry", "event_type"]
+    autocomplete_fields = ["ministry", "owner"]
+    list_select_related = ["ministry"]
     inlines = [EventRoleInline]
 
     def get_list_display(self, request):

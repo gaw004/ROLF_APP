@@ -246,7 +246,7 @@
 
   <div class="hero">
     <div class="eyebrow">数据与流程全景</div>
-    <h1 class="serif">十六张表，五个 app，十四条需求</h1>
+    <h1 class="serif">十五张表，五个 app，十四条需求</h1>
     <p class="lede">
       这三张图把 <code>docs/planning/</code> 里已经拍板的东西——D1–D24 二十四条决策、
       <code>phase-b.md</code> 的模型表与约束清单、<code>02-roadmap.md</code> 的 B0–B13——
@@ -273,7 +273,7 @@
 
     <div class="prose">
       <p>
-        一张图放全部 16 张业务表和它们的每一个字段。关系线上标的是 <code>on_delete</code>——
+        一张图放全部 15 张业务表和它们的每一个字段。关系线上标的是 <code>on_delete</code>——
         那不是实现细节，<code>phase-b.md</code> 用了整整一节论证「一次加十几个外键，其中一个选错是灾难级的」。
         <strong>四条 <code>CASCADE</code> 之外全是 <code>PROTECT</code> 或 <code>SET_NULL</code></strong>，
         凡是要留痕的东西（任职、授权、工时、通知）一律不许被静默带走。
@@ -400,12 +400,6 @@ erDiagram
   }
 
   %% ========== events app ==========
-  EventType {
-    bigint id PK
-    slug code UK "Lower 唯一·不可改"
-    str name
-    bool is_active
-  }
   ParticipationRole {
     bigint id PK
     slug code UK "必 seed general 走数据迁移"
@@ -415,7 +409,6 @@ erDiagram
   Event {
     bigint id PK
     str name
-    ref event_type FK "→ EventType · PROTECT"
     ref ministry FK "→ Ministry · PROTECT · 非空 R2 R8 P2 的轴"
     datetime start_time "Index R1"
     datetime end_time "end 大于等于 start · R3 派生不存"
@@ -485,7 +478,6 @@ erDiagram
   User               ||--o{ MinistryRole       : "granted_by SET_NULL"
 
   Ministry           ||--o{ Event              : "ministry PROTECT 非空"
-  EventType          ||--o{ Event              : "event_type PROTECT"
   Contact            ||--o{ Event              : "owner PROTECT"
   Event              ||--o{ EventRole          : "event CASCADE"
   ParticipationRole  ||--o{ EventRole          : "role PROTECT"
@@ -583,7 +575,7 @@ flowchart LR
   MA["Ministry Admin<br/>某个 ministry 的 admin"]
   FA["Foundation Admin<br/>全局 Group"]
   ST["内部录入员<br/>staff · /admin/"]
-  SYS(("ROLF_APP<br/>5 个 app · 16 张表"))
+  SYS(("ROLF_APP<br/>5 个 app · 15 张表"))
   PROV["通知服务商<br/>Console · Email · SMS · Novu"]
   GD["家长 / 紧急联系人<br/>不是系统用户"]
 
@@ -649,7 +641,7 @@ flowchart TB
   D2[("D2 · User")]:::store
   D3[("D3 · Ministry · Position<br/>Assignment · EmploymentType")]:::store
   D4[("D4 · MinistryRole")]:::store
-  D5[("D5 · Event · EventRole<br/>EventType · ParticipationRole")]:::store
+  D5[("D5 · Event · EventRole<br/>ParticipationRole")]:::store
   D6[("D6 · Participation")]:::store
   D7[("D7 · EventNotification<br/>+ recipients / unreachable")]:::store
   D8[("D8 · simple-history × 7")]:::store
@@ -733,7 +725,7 @@ flowchart TB
     <div class="prose">
       <p>
         为什么还要第三张：<b>ERD 的实体框里没有 app 这个维度</b>——mermaid 的
-        <code>erDiagram</code> 不支持分组，16 张表在里面是平的。而 D17 恰恰规定了
+        <code>erDiagram</code> 不支持分组，15 张表在里面是平的。而 D17 恰恰规定了
         「一个 app 一个业务领域」和一条<b>单向</b>依赖链，谁也不许反向 import。
         这张图把表按 app 收拢，只画跨 app 的外键。
       </p>
@@ -769,9 +761,8 @@ flowchart TB
     T11["MinistryRole"]:::org
   end
 
-  subgraph EVENTS ["events · 6 张表"]
+  subgraph EVENTS ["events · 5 张表"]
     direction LR
-    T12["EventType"]:::events
     T13["ParticipationRole"]:::events
     T14["Event"]:::events
     T15["EventRole"]:::events
@@ -854,7 +845,7 @@ flowchart LR
   <section id="inventory">
     <div class="sec-head">
       <span class="idx serif">四</span>
-      <h2 class="serif">十六张表分别记什么</h2>
+      <h2 class="serif">十五张表分别记什么</h2>
       <span class="tag mono">逐表对照 R1–R8 · P1–P6</span>
     </div>
 
@@ -925,11 +916,6 @@ flowchart LR
             <td class="yes">✓</td><td>P2 P4 P5 P6 ——每个受保护视图每次请求都查它</td>
           </tr>
           <tr>
-            <td class="mono tname">EventType</td><td><span class="pill a-events">events</span></td>
-            <td>活动类型字典</td><td>被 Event 指</td>
-            <td class="no">—</td><td>（支撑 Event）</td>
-          </tr>
-          <tr>
             <td class="mono tname">ParticipationRole</td><td><span class="pill a-events">events</span></td>
             <td><b>一次活动之内</b>的工种字典：签到台、搬运、翻译。<b>≠ Position</b>。必须 seed 一行 <code>general</code>，走数据迁移不走 seed_demo</td>
             <td>被 EventRole 指</td>
@@ -938,7 +924,7 @@ flowchart LR
           <tr>
             <td class="mono tname">Event</td><td><span class="pill a-events">events</span></td>
             <td>一场活动：属哪个 ministry（<b>非空</b>）、起止时间、地点、负责人、五档 status</td>
-            <td>→ EventType · Ministry · Contact(owner)；被 EventRole / EventNotification 指</td>
+            <td>→ Ministry · Contact(owner)；被 EventRole / EventNotification 指</td>
             <td class="yes">✓</td><td>R1 R2 R3 P2 P3</td>
           </tr>
           <tr>

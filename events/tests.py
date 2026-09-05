@@ -70,7 +70,6 @@ from .models import (
     Event,
     EventNotification,
     EventRole,
-    EventType,
     Participation,
     ParticipationRole,
     refuse_wider_than_event,
@@ -130,11 +129,8 @@ def make_person(last_name, **kwargs):
 
 def make_event(ministry=None, **kwargs):
     ministry = ministry or Ministry.objects.create(code="food_pantry", name="Food Pantry")
-    event_type, _ = EventType.objects.get_or_create(
-        code="distribution", defaults={"name": "Distribution"})
     fields = {
         "name": "Saturday distribution",
-        "event_type": event_type,
         "ministry": ministry,
         "start_time": NOW + DAY,
         "end_time": NOW + DAY + 3 * HOUR,
@@ -2138,16 +2134,27 @@ class ServedAsTests(TestCase):
 
 
 class DictionaryTableTests(TestCase):
-    def test_bulk_create_cannot_insert_an_event_type_code_differing_only_in_case(self):
-        EventType.objects.create(code="distribution", name="Distribution")
-        with self.assertRaises(IntegrityError), transaction.atomic():
-            EventType.objects.bulk_create([EventType(code="Distribution", name="Dup")])
+    """D9's two rules, on whichever dictionary table is handy.
 
-    def test_event_type_code_cannot_be_changed_once_created(self):
-        event_type = EventType.objects.create(code="distribution", name="Distribution")
-        event_type.code = "dist"
+    ⚠️ These moved off `EventType` on 2026-09-04, when that table was deleted
+       for having no reader (06-roadmap.md L2.6). They were never about event
+       types — `ParticipationRole` carries the same `ImmutableCodeMixin` +
+       `UniqueConstraint(Lower("code"))` shape, and the rules are the mixin's.
+       Deleting them along with the table would have taken D9's whole coverage
+       with it, silently.
+    """
+
+    def test_bulk_create_cannot_insert_a_code_differing_only_in_case(self):
+        ParticipationRole.objects.create(code="lifting", name="Lifting")
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            ParticipationRole.objects.bulk_create(
+                [ParticipationRole(code="Lifting", name="Dup")])
+
+    def test_a_code_cannot_be_changed_once_created(self):
+        role = ParticipationRole.objects.create(code="lifting", name="Lifting")
+        role.code = "lift"
         with self.assertRaises(ValidationError) as caught:
-            event_type.full_clean()
+            role.full_clean()
         self.assertIn("code", caught.exception.message_dict)
 
     def test_the_catch_all_role_can_always_be_had(self):
@@ -2281,7 +2288,7 @@ class AudienceContainmentTests(TestCase):
            `payload()` helper doing this job.
         """
         return EventForm({
-            "name": event.name, "event_type": event.event_type_id,
+            "name": event.name,
             "ministry": event.ministry_id,
             "start_time": "2026-09-01T09:00", "end_time": "2026-09-01T12:00",
             "status": event.status,
@@ -2453,7 +2460,7 @@ class AudienceContainmentTests(TestCase):
             for index in range(role_count):
                 make_role(event, f"role-{role_count}-{index}")
             form = EventForm({
-                "name": event.name, "event_type": event.event_type_id,
+                "name": event.name,
                 "ministry": event.ministry_id,
                 "start_time": "2026-09-01T09:00", "end_time": "2026-09-01T12:00",
                 "status": event.status,
@@ -2641,7 +2648,7 @@ class AudienceContainmentTests(TestCase):
                     set_audience(event, spec)
 
                 form = EventForm({
-                    "name": event.name, "event_type": event.event_type_id,
+                    "name": event.name,
                     "ministry": event.ministry_id,
                     "start_time": "2026-09-01T09:00",
                     "end_time": "2026-09-01T12:00", "status": event.status,
@@ -2671,7 +2678,7 @@ class AudienceContainmentTests(TestCase):
         # ⚠️ roles.all() raises outright on an unsaved instance (verified), so
         #    the pk check is not defensive tidiness.
         form = EventForm({
-            "name": "Brand new", "event_type": self.event.event_type_id,
+            "name": "Brand new",
             "ministry": self.pantry.pk,
             "start_time": "2026-09-01T09:00", "end_time": "2026-09-01T12:00",
             "status": Event.Status.OPEN, "visible_to_outsiders": True,
@@ -2778,8 +2785,6 @@ class AudienceThroughTheAdminTests(TestCase):
     def setUp(self):
         self.pantry = Ministry.objects.create(code="food_pantry", name="Food Pantry")
         self.tax = Ministry.objects.create(code="tax_help", name="Tax Help")
-        self.event_type, _ = EventType.objects.get_or_create(
-            code="distribution", defaults={"name": "Distribution"})
         self.lifting = ParticipationRole.objects.create(
             code="lifting", name="Lifting")
         # Ministry-only: the narrowest audience there is, so anything wider is
@@ -2882,7 +2887,7 @@ class AudienceThroughTheAdminTests(TestCase):
 
     def event_payload(self, **extra):
         return {
-            "name": "Soup run", "event_type": self.event_type.pk,
+            "name": "Soup run",
             "ministry": self.pantry.pk,
             # ⚠️ Split widgets. The admin renders a DateTimeField as two boxes,
             #    and a payload with one key per field is simply *missing* both
@@ -3387,13 +3392,11 @@ class AudienceShapeTests(TestCase):
         self.zhang = register_account(
             password="a-good-long-password", email="zhang@example.com",
             legal_last_name="Zhang", legal_first_name="San")
-        self.event_type, _ = EventType.objects.get_or_create(
-            code="distribution", defaults={"name": "Distribution"})
         MinistryRole.objects.create(contact=self.zhang.contact, ministry=self.pantry)
 
     def payload(self, **extra):
         return {
-            "name": "Soup run", "event_type": self.event_type.pk,
+            "name": "Soup run",
             "ministry": self.pantry.pk,
             "start_time": "2026-09-01T09:00", "end_time": "2026-09-01T12:00",
             "status": Event.Status.OPEN,
@@ -4000,9 +4003,8 @@ class MinistryAdminPageTests(PageTestCase):
         # The POST side. The narrowed dropdown stops a slip; this stops a
         # forged id, and only one of the two is a security check.
         self.login(self.zhang)
-        event_type = EventType.objects.first()
         response = self.client.post(reverse("events:event_create"), {
-            "name": "Sneaky", "event_type": event_type.pk, "ministry": self.tax.pk,
+            "name": "Sneaky", "ministry": self.tax.pk,
             "start_time": "2026-09-01T09:00", "end_time": "2026-09-01T12:00",
             "status": Event.Status.DRAFT, "visible_to_outsiders": True,
         })
@@ -4016,11 +4018,9 @@ class MinistryAdminPageTests(PageTestCase):
         self.assertEqual(choices, [self.pantry])
 
     def test_publishing_for_their_own_ministry_works(self):
-        event_type = EventType.objects.first()
         self.login(self.zhang)
         response = self.client.post(reverse("events:event_create"), {
-            "name": "Saturday pantry", "event_type": event_type.pk,
-            "ministry": self.pantry.pk,
+            "name": "Saturday pantry", "ministry": self.pantry.pk,
             "start_time": "2026-09-01T09:00", "end_time": "2026-09-01T12:00",
             "status": Event.Status.OPEN,
         # ⚠️ L2.1 rule 1: the form refuses an audience nobody is in, so
@@ -5154,7 +5154,7 @@ class MergedEditAndRolesPageTests(PageTestCase):
     def test_creating_an_event_lands_on_the_merged_page(self):
         self.login(self.zhang)
         response = self.client.post(reverse("events:event_create"), {
-            "name": "Soup run", "event_type": EventType.objects.first().pk,
+            "name": "Soup run",
             "ministry": self.pantry.pk,
             "start_time": "2026-09-01T09:00", "end_time": "2026-09-01T12:00",
             "status": Event.Status.OPEN, "visible_to_outsiders": True,
@@ -5516,7 +5516,6 @@ class EventUpdatePageTests(PageTestCase):
 
     def payload(self, **overrides):
         fields = {
-            "event_type": self.event.event_type_id,
             "name": self.event.name,
             "ministry": self.event.ministry_id,
             "start_time": self.widget_value(self.event.start_time),
@@ -8865,7 +8864,7 @@ class EventImageUploadTests(PageTestCase):
         from events.forms import EventForm
         return EventForm(
             {
-                "name": "With a picture", "event_type": EventType.objects.first().pk,
+                "name": "With a picture",
                 "ministry": self.pantry.pk,
                 "start_time": "2026-09-01T09:00", "end_time": "2026-09-01T12:00",
                 "status": Event.Status.OPEN,
@@ -9057,7 +9056,7 @@ class EventImageUploadTests(PageTestCase):
     def test_an_event_without_a_picture_is_perfectly_valid(self):
         from events.forms import EventForm
         form = EventForm({
-            "name": "No picture", "event_type": EventType.objects.first().pk,
+            "name": "No picture",
             "ministry": self.pantry.pk,
             "start_time": "2026-09-01T09:00", "end_time": "2026-09-01T12:00",
             "status": Event.Status.OPEN,

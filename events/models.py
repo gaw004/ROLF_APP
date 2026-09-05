@@ -49,45 +49,6 @@ from org.audience import (
 from org.models import Ministry
 
 
-class EventType(ImmutableCodeMixin, ConstraintErrorFieldMixin, models.Model):
-    """Food distribution, tax clinic, ESL class — a dictionary table.
-
-    Same shape as Ministry and EmploymentType, and for D5's reason: no code
-    branches on the values, so they belong in a table where the admin can add a
-    row, not in an enum where adding one is a migration.
-    """
-
-    code = models.SlugField(
-        max_length=50,
-        help_text="Stable identifier used by code. Lowercase, cannot be changed later.",
-    )
-    name = models.CharField(max_length=100)
-    is_active = models.BooleanField(default=True)
-
-    class Meta:
-        ordering = ["name"]
-        constraints = [
-            # Lower("code"), never unique=True on the field: bulk_create is a
-            # normal write path here and never calls save(), so lowercasing in
-            # save() guarantees nothing about what is in the table. goal.md D9.
-            models.UniqueConstraint(
-                Lower("code"),
-                name="eventtype_code_ci_unique",
-                violation_error_message="An event type with this code already exists.",
-                violation_error_code="eventtype_code_taken",
-            ),
-        ]
-
-    def clean(self):
-        super().clean()
-        error = self.code_change_error()
-        if error:
-            raise ValidationError({"code": error})
-
-    def __str__(self):
-        return self.name
-
-
 class ParticipationRole(ImmutableCodeMixin, ConstraintErrorFieldMixin, models.Model):
     """A job done *inside* one event: welcome desk, lifting, interpreting.
 
@@ -782,7 +743,6 @@ class Event(Audience, ConstraintErrorFieldMixin, TimeStampedModel):
     NOT_A_VOLUNTEERS_WORD = frozenset({Status.COMPLETED})
 
     name = models.CharField(max_length=200)
-    event_type = models.ForeignKey(EventType, on_delete=models.PROTECT, related_name="events")
     # Not nullable. R2, R8 and P2 all turn on this column, and an event with no
     # ministry is one nobody owns and nobody has the right to manage.
     ministry = models.ForeignKey(Ministry, on_delete=models.PROTECT, related_name="events")

@@ -35,7 +35,6 @@ from events.models import (
     Audience,
     Event,
     EventRole,
-    EventType,
     Participation,
     ParticipationRole,
 )
@@ -151,12 +150,6 @@ class Command(BaseCommand):
             code="full_time", defaults={"name": "Full time"})
         self.part_time, _ = EmploymentType.objects.get_or_create(
             code="part_time", defaults={"name": "Part time"})
-        self.distribution, _ = EventType.objects.get_or_create(
-            code="distribution", defaults={"name": "Distribution"})
-        # Stored on self from 2026-08-21: event 6 below is a class, and the
-        # demo had no event of any type but "distribution".
-        self.klass, _ = EventType.objects.get_or_create(
-            code="class", defaults={"name": "Class"})
         # The catch-all role has to exist: event_role is not nullable, so "no
         # particular job" needs somewhere to land.
         # One catch-all per half of the axis — "no particular job" and "no
@@ -513,7 +506,7 @@ class Command(BaseCommand):
         self.open_event, created = Event.objects.get_or_create(
             name="Saturday distribution",
             defaults={
-                "event_type": self.distribution, "ministry": self.pantry,
+                "ministry": self.pantry,
                 "start_time": now + 7 * DAY, "end_time": now + 7 * DAY + 3 * HOUR,
                 "location": "Church ground floor", "owner": self.pantry_admin.contact,
                 "status": Event.Status.OPEN,
@@ -554,7 +547,7 @@ class Command(BaseCommand):
         Event.objects.get_or_create(
             name="Christmas distribution (not published yet)",
             defaults={
-                "event_type": self.distribution, "ministry": self.pantry,
+                "ministry": self.pantry,
                 "start_time": now + 30 * DAY, "end_time": now + 30 * DAY + 2 * HOUR,
                 "owner": self.pantry_admin.contact, "status": Event.Status.DRAFT,
                 "visible_to_outsiders": True,
@@ -568,7 +561,7 @@ class Command(BaseCommand):
         confirmed, made = Event.objects.get_or_create(
             name="English corner (full)",
             defaults={
-                "event_type": self.distribution, "ministry": self.pantry,
+                "ministry": self.pantry,
                 "start_time": now + 3 * DAY, "end_time": now + 3 * DAY + 2 * HOUR,
                 "owner": self.pantry_admin.contact, "status": Event.Status.FULL,
                 "visible_to_outsiders": True,
@@ -583,7 +576,7 @@ class Command(BaseCommand):
         past, made = Event.objects.get_or_create(
             name="Last month's distribution",
             defaults={
-                "event_type": self.distribution, "ministry": self.pantry,
+                "ministry": self.pantry,
                 "start_time": now - 30 * DAY, "end_time": now - 30 * DAY + 3 * HOUR,
                 "owner": self.pantry_admin.contact, "status": Event.Status.COMPLETED,
                 "visible_to_outsiders": True,
@@ -659,7 +652,7 @@ class Command(BaseCommand):
         Event.objects.get_or_create(
             name="Tax clinic",
             defaults={
-                "event_type": self.distribution, "ministry": self.tax,
+                "ministry": self.tax,
                 "start_time": now + 5 * DAY, "end_time": now + 5 * DAY + 2 * HOUR,
                 "owner": self.tax_admin.contact, "status": Event.Status.OPEN,
                 "visible_to_outsiders": True,
@@ -681,7 +674,7 @@ class Command(BaseCommand):
         esl, made = Event.objects.get_or_create(
             name="ESL class",
             defaults={
-                "event_type": self.klass, "ministry": self.pantry,
+                "ministry": self.pantry,
                 "start_time": now + 4 * DAY, "end_time": now + 4 * DAY + 2 * HOUR,
                 "location": "Room 1A", "owner": self.pantry_admin.contact,
                 "status": Event.Status.OPEN,
@@ -780,7 +773,6 @@ class Command(BaseCommand):
             Event.objects.get_or_create(
                 name=name,
                 defaults={
-                    "event_type": self.distribution,
                     "ministry": self.pantry if ministry == "pantry" else self.tax,
                     "start_time": now + days * DAY,
                     "end_time": now + days * DAY + 3 * HOUR,
@@ -796,7 +788,6 @@ class Command(BaseCommand):
             event, _ = Event.objects.get_or_create(
                 name=name,
                 defaults={
-                    "event_type": self.distribution,
                     "ministry": self.pantry if ministry == "pantry" else self.tax,
                     "start_time": now - days * DAY,
                     "end_time": now - days * DAY + 3 * HOUR,

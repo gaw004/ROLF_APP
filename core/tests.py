@@ -1425,7 +1425,15 @@ class ContrastGuardTests(TestCase):
 
 
 TEMPLATE_COMMENT = re.compile(r"\{%\s*comment\s*%\}.*?\{%\s*endcomment\s*%\}", re.S)
-INLINE_TEMPLATE_COMMENT = re.compile(r"\{#.*?#\}", re.S)
+# 🔴 **No re.S here, deliberately — Django's lexer has none either.**
+#    django.template.base.tag_re is ({%.*?%}|{{.*?}}|{#.*?#}) compiled without
+#    DOTALL, so `{#` that does not find its `#}` on the same line is not a
+#    comment at all: the whole block is a text token and gets rendered.
+#    This regex was written with re.S on 2026-09-01 and that one flag made
+#    every guard built on _blank_out_comments() blind to precisely the text
+#    that ships. Two blocks reached production that way; the wall repeated one
+#    of them 60 times, 20% of the page. Keep this in step with Django.
+INLINE_TEMPLATE_COMMENT = re.compile(r"\{#[^\n]*?#\}")
 # Han, hiragana/katakana, Hangul. Built from ranges rather than written out, so
 # this module contains no character it is looking for — the guards scan the
 # project, and four earlier ones in this repo matched their own source.
@@ -1466,6 +1474,50 @@ def _blank_out_comments(text):
     def blanks(match):
         return "\n" * match.group(0).count("\n")
     return INLINE_TEMPLATE_COMMENT.sub(blanks, TEMPLATE_COMMENT.sub(blanks, text))
+
+
+class TemplateCommentsAreClosedGuardTests(TestCase):
+    """`{# ... #}` on one line, or it is not a comment at all.
+
+    🔴 **This is the guard the other guards needed.** Django's lexer builds
+       comment tokens with ({%.*?%}|{{.*?}}|{#.*?#}) and no DOTALL, so a `{#`
+       whose `#}` sits on a later line matches nothing: the block becomes a
+       text token and Django prints it, braces and all, into the page.
+
+    Found in production 2026-09-05: two blocks were shipping as visible text.
+    `_wall_strip.html` held one inside the per-photo loop, so the Memories wall
+    drew it 60 times — 16.2KB, 20% of the response, smeared across every
+    thumbnail. Nothing failed. Nothing logged. The page just had prose on it.
+
+    ⚠️ Why no existing guard caught it: INLINE_TEMPLATE_COMMENT was written
+       with re.S, so _blank_out_comments() erased these blocks before any
+       scanner saw them. The comment regex was more forgiving than Django, and
+       everything downstream inherited the blind spot. That flag is gone; this
+       test now pins the property directly, so the two can never drift apart
+       again without something going red.
+
+    ⚠️ Deliberately not "does this render" — a template that is never rendered
+       by a test would slip through. This reads the source, so a template added
+       tomorrow is covered whether or not anything renders it.
+    """
+
+    def test_every_inline_comment_closes_on_its_own_line(self):
+        offenders = []
+        for relative, source in project_template_files():
+            # {% comment %} blocks swallow their contents at the parser level,
+            # so a stray `{#` inside one is genuinely harmless. Blank them
+            # first — TEMPLATE_COMMENT is the multi-line one and keeps its re.S.
+            masked = TEMPLATE_COMMENT.sub(
+                lambda match: re.sub(r"[^\n]", " ", match.group(0)), source)
+            for number, line in enumerate(masked.splitlines(), 1):
+                for start in (m.start() for m in re.finditer(r"\{#", line)):
+                    if "#}" not in line[start:]:
+                        offenders.append(f"{relative}:{number}: {line.strip()}")
+        self.assertEqual(
+            offenders, [],
+            "`{#` must close on the same line — Django's lexer is not DOTALL, "
+            "so these blocks render as visible text. Use {% comment %} for "
+            "anything longer than one line:\n" + "\n".join(offenders))
 
 
 class InterfaceLanguageGuardTests(TestCase):

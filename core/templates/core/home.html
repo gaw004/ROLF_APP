@@ -97,9 +97,11 @@
         ⚠️ 兜底那张 logo 不带 `srcset`：它是打包进 static 的固定资源，
            只有一个尺寸，给它加 `sizes` 只会让浏览器对着一个候选做选择题。
         {% endcomment %}
-        {# ⚠️ `with`, because `hero_srcset` is a property that walks the rungs
+        {% comment %}
+        ⚠️ `with`, because `hero_srcset` is a property that walks the rungs
            and joins a string — written inline it runs twice, once for the `if`
-           and once for the value, on the busiest public URL in the site. #}
+           and once for the value, on the busiest public URL in the site.
+        {% endcomment %}
         {% with srcset=page.hero_srcset %}
         <img class="absolute inset-0 h-full w-full object-cover"
              style="object-position: {{ page.hero_focus }}"

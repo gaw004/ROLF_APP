@@ -1,0 +1,69 @@
+{% comment %}
+表格一行里的「⋯」菜单（2026-09-03 设计评审第 3 条）。
+
+它解决的是公告管理页上那个毛病：`Edit`（最高频、最安全）是个不起眼的文字链接，
+旁边 `Take down`（低频、有后果）是一颗**红色实心药丸** —— 权重正好反了。
+而且每一行都有一颗，于是一整列红色，红色从此不再是警示色。
+
+⚠️ 活动管理页那六个 Go to 链接**曾经也收进过这里**，当天撤回（用户 2026-09-03：
+   「我只想要六个 Go to 链接回到表格里」）。撤回的是那一处的**应用**，不是这个
+   组件 —— 公告这边的理由（权重反了、一整列红色）和活动那边的理由（300 个链接
+   太吵）本来就是两件事，一处不合用不等于另一处也不合用。
+
+🔴 **用原生 `popover`，不用 Alpine 的 `x-show`，也不用绝对定位的下拉。**
+   三个理由，每一个单独都足以否掉另外两种写法：
+
+   ① **`.table-wrap` 是 `overflow-x: auto`**，而 `overflow-x: auto` 之下
+      `overflow-y` **不可能**是 `visible`（CSS 规范如此）—— 一个绝对定位的面板
+      会被这个容器裁掉。这不是调 CSS 能绕开的。
+      ⚠️ 而且它只在窗口**窄到出现横向滚动条**时才裁，宽屏上看起来完全正常。
+      （实测过：窄窗口下容器确实在横向滚动，而 popover 完整可见。）
+
+   ② **`position: fixed` 会被任何带 `backdrop-filter` 的祖先抓住**，而 `.table-wrap`
+      在深色 + 有大图时**正是**这样一个祖先（实测量到的）。这个仓库为这件事
+      栽过两次（改密码弹窗被困在卡片里、lightbox 靠巧合才对），完整论证在
+      design-system.md 第二节和 core/tests.py 那条 overlay 守卫上。
+      `popover` 渲染在 **top layer** —— 这是平台上唯一一个祖先够不着的地方，
+      也正是 `modal.html` 用 `showModal()` 换来的那个性质。
+
+   ③ **D24：写操作必须有不依赖 JS 的完整路径。** `popovertarget` 的开合
+      **一行 JS 都不需要**，点外面关、Esc 关全是浏览器给的。写成 `x-show` 的话，
+      关掉 JS 之后菜单永远打不开 —— 而里面装的是这一行仅有的几个写操作。
+
+⚠️ 没有 JS 时 popover 落在**视口居中**（规范的默认锚定）。app.js 里那段
+   `positionRowMenus` 把它挪到触发器旁边，那是纯增强：少了它菜单仍然能开、
+   仍然能提交，只是位置在屏幕中间。
+
+⚠️ 里面每个写操作**仍然是完整的服务端 `<form method="post">`** —— 这个组件
+   只负责把它们收起来，一个字都没改它们的提交路径。
+
+参数：
+  id     这一行的唯一标识（用 pk 拼，如 `12`）
+  label  给读屏的完整句子，如 "Actions for Car park closed" ——
+         ⚠️ 不能只写 "Actions"：一页有 50 个同名按钮，读屏用户听到的是
+            五十遍「Actions 按钮」，分不出哪个是哪一行的。
+  items  菜单内容的模板路径
+{% endcomment %}
+<button type="button" class="row-menu-trigger btn-hit"
+        popovertarget="row-menu-{{ id }}"
+        aria-label="{{ label }}">
+  {% comment %}
+  ⚠️ 三个点是**画出来的**（三个 span），不是字符「…」或「⋯」：
+     那两个字符在不同字体里的字重、间距、垂直位置都不一样，而这个仓库的
+     正文字体（Jost）里它的点比周围的字轻一档，缩到 14px 之后几乎看不见。
+  {% endcomment %}
+  <span class="row-menu-dot" aria-hidden="true"></span>
+  <span class="row-menu-dot" aria-hidden="true"></span>
+  <span class="row-menu-dot" aria-hidden="true"></span>
+</button>
+
+{% comment %}
+⚠️ `popover` 这个属性单独出现就是 `popover="auto"` —— 自动关（点外面、Esc），
+   而且同一时刻只开一个。`popover="manual"` 要自己写关闭逻辑，那正是这里不要的。
+
+⚠️ id 要和上面那个 `popovertarget` 逐字一致。对不上的表现是**点了没反应**，
+   控制台一句话都没有 —— 所以两处都从同一个 `{% templatetag openvariable %} id {% templatetag closevariable %}` 拼出来。
+{% endcomment %}
+<div id="row-menu-{{ id }}" popover class="row-menu">
+  {% include items %}
+</div>

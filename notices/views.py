@@ -17,6 +17,7 @@ from django.contrib.auth.decorators import login_required
 from django.core.exceptions import PermissionDenied
 from django.shortcuts import get_object_or_404, redirect, render
 
+from core.pagination import page_of
 from org.permissions import (
     SCOPED_DENIAL,
     can_manage_notice,
@@ -30,10 +31,38 @@ from .forms import NoticeForm
 from .models import Notice
 from .services import publish, take_down
 
-#: How many past notices the reading page offers. ⚠️ A cap rather than paging:
-#: "what did that say about the cheques again" is answered by the most recent
-#: handful, and a board with a paginator is a filing cabinet.
+#: How many past notices the reading page offers. ⚠️ A cap rather than paging,
+#: and it stayed one on 2026-09-03 when everything else on these two pages got a
+#: paginator (用户拍板): "what did that say about the cheques again" is answered
+#: by the most recent handful, and an archive with a paginator under a board is a
+#: filing cabinet bolted to a noticeboard. What is on the board **now** is a
+#: different question, and that list is the one that got paged — see below.
 PAST_SHOWN = 20
+
+#: How many notices are on one page of the board (2026-09-03).
+#:
+#: ⚠️ 20, matching `events.views.EVENTS_PER_PAGE` rather than a number of its
+#:    own: both are the same page for the same person — "what is there for me
+#:    right now" — and two reading lists that scroll to different lengths is a
+#:    difference somebody has to explain.
+#:
+#: ⚠️ It is a **safety net, not an expectation**. 用户说得很清楚：同时挂在板上的
+#:    公告不该有很多。所以在正常规模下这个翻页器一次都不会画出来
+#:    （`pagination.html` 只在装不下时才画），而它存在是因为「不该很多」不是
+#:    「不可能很多」—— 没有它的那一版是**完全无上限**的。
+BOARD_PER_PAGE = 20
+
+#: How many rows on one page of the manage list (2026-09-03).
+#:
+#: ⚠️ 50, matching `events.views.MANAGED_EVENTS_PER_PAGE` for the same reason the
+#:    two above match: it is the same kind of page, and this one has the same
+#:    reason to be longer than the reading list — it carries drafts, scheduled
+#:    ones and everything that has already come down.
+#:
+#: 🔴 The account this was missing for is the foundation tier: `_mine_to_manage()`
+#:    hands it `Notice.objects.all()` — every ministry, since the first day, past
+#:    ones included — on one unbounded page.
+MANAGED_NOTICES_PER_PAGE = 50
 
 #: The sentence both admin pages refuse with. ⚠️ Written once — two doors onto
 #: the same room that disagree about why it is locked is how a refusal starts
@@ -72,8 +101,15 @@ def notice_list(request):
     current = Notice.objects.showing().for_audience(contact).select_related("ministry")
     past = (Notice.objects.past().for_audience(contact)
             .select_related("ministry")[:PAST_SHOWN])
+    # ⚠️ 翻的是**上面那一列**，下面 `past` 那一列照旧是截断（见 PAST_SHOWN）。
+    #    一页上两个翻页器的话，`?page=` 到底指哪一列就得看参数名才知道 ——
+    #    而这一页上「板上的」和「已经下架的」是两个不同的问题，不是一列的两截。
+    page = page_of(request, current, BOARD_PER_PAGE)
     return render(request, "notices/notice_list.html", {
-        "notices": list(current),
+        # ⚠️ `page` 本身就是可迭代的（Django 的 Page 对象），所以模板那边一个字
+        #    都不用改；`page` 另外传一份，是给翻页器用的。
+        "notices": page,
+        "page": page,
         "past": list(past),
         "may_publish": can_reach_notice_manage(request.user),
     })
@@ -93,7 +129,15 @@ def notice_manage_list(request):
     if not can_reach_notice_manage(request.user):
         raise PermissionDenied(NOT_A_NOTICE_ADMIN)
     rows = _mine_to_manage(request).select_related("ministry", "owner")
-    return render(request, "notices/notice_manage_list.html", {"notices": rows})
+    # ⚠️ `page_of()` 补的那个 `-pk` 结尾是这里的**必需品**，不是保险：没有一个
+    #    唯一列收尾，同一分钟上板的两条公告在第 1 页和第 2 页之间的先后是未定义
+    #    的，表现是一行出现两次、或者一行凭空消失，而没有任何东西会报错。
+    #    ⚠️ `Notice.Meta.ordering` 已经是 `["-starts_showing", "-id"]`，
+    #       而 `page_of()` 读得到它 —— 读不到的那一版会把整个排序换成 `-pk`，
+    #       理由写在 core/pagination.py 的 `ordering_for()` 上。
+    page = page_of(request, rows, MANAGED_NOTICES_PER_PAGE)
+    return render(request, "notices/notice_manage_list.html",
+                  {"notices": page, "page": page})
 
 
 @login_required

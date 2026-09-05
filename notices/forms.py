@@ -17,7 +17,7 @@ from core.timeutils import local_now
 from org.audience import Audience
 from org.forms import AudienceFormMixin
 from org.models import Ministry
-from org.permissions import ministry_ids_administered_by
+from org.permissions import in_foundation_tier, ministry_ids_administered_by
 
 from .models import Notice
 
@@ -58,7 +58,23 @@ class NoticeForm(AudienceFormMixin, forms.ModelForm):
         # follows.
         super().__init__(*args, **kwargs)
         administered = ministry_ids_administered_by(user)
-        self.fields["ministry"].queryset = Ministry.objects.filter(id__in=administered)
+        # 🔴 **The dropdown is the other half of `can_publish_notice`**
+        #    (2026-09-03). That function now lets the foundation tier publish in
+        #    any ministry's name, and D41 promised the change would be "一个函数"
+        #    — it was not, and this is the half that was missed. A foundation
+        #    admin holding no MinistryRole has an empty `administered`, so the
+        #    old line handed them a dropdown with nothing in it: permission
+        #    granted, and no ministry to exercise it on. The form does not fail,
+        #    it simply refuses every submission with "this field is required" —
+        #    which reads as a broken page, not as a missing permission.
+        #
+        # ⚠️ `is_active=True` rather than everything, matching what
+        #    ministry_ids_administered_by() already filters for the other branch:
+        #    a retired ministry is not somewhere new notices go up.
+        self.fields["ministry"].queryset = (
+            Ministry.objects.filter(is_active=True).order_by("name")
+            if in_foundation_tier(user)
+            else Ministry.objects.filter(id__in=administered))
         # ⚠️ The same set the dropdown above is built from, not a second lookup.
         #    Two answers to "which ministries are theirs" drift apart on exactly
         #    the account where it matters.
@@ -71,6 +87,12 @@ class NoticeForm(AudienceFormMixin, forms.ModelForm):
         # useful start. ⚠️ Only when adding — re-ticking their own ministry on
         # an edit would quietly widen a notice somebody had deliberately
         # narrowed, and nothing about that is visible.
+        #
+        # ⚠️ A foundation admin who runs no ministry gets **nothing** pre-ticked,
+        #    and that is right rather than a gap left by the line above: the
+        #    prefill's whole claim is "your own ministry is the narrowest useful
+        #    start", and they have no own ministry for it to name. Ticking one
+        #    for them would be the form picking an audience nobody asked for.
         self.initial.setdefault("visible_to_ministries", list(administered))
         # Decision 4's landing point. ⚠️ `setdefault`, so a bound form redisplayed
         # after an error keeps what the person typed rather than snapping back.

@@ -1,8 +1,11 @@
 """`/me/` —— 每张卡只画属于这个人的东西，而卡片的取舍本身也钉在这里。"""
 
 import datetime
+import re
 from decimal import Decimal
+from pathlib import Path
 
+from django.conf import settings
 from django.contrib.auth.models import Group
 from django.db import connection
 from django.test import TestCase
@@ -246,6 +249,27 @@ class TheMinistryAdminCardsTests(DashboardTestCase):
     def test_a_ministry_admin_does(self):
         self.make_admin(self.me)
         self.assertIn("Needs you", self.page().content.decode())
+
+    def test_the_needs_you_card_does_not_wear_a_warning_sign(self):
+        """🔴 ⚠️ 的意思是「出错了 / 有危险」，而这张卡说的是**有事在等你**
+           （还缺人的工种，和结束了没收尾的出勤；空态就写着
+           "Nothing waiting on you."）。
+
+        一个管理员打开首页看到一个警告三角，第一反应是「哪里坏了」——
+        而实际上只是有个工种还差两个人。2026-09-03 设计评审第 9 条，
+        用户判定只改这一个符号：其余四个是长相问题，这一个是意思错了。
+
+        ⚠️ 钉的是**不许是警告三角**，不是「必须是铃铛」：换个更好的符号
+           是设计决定，而用一个说错话的符号是缺陷。
+        """
+        markup = (Path(settings.BASE_DIR) / "dashboard" / "templates"
+                  / "dashboard" / "me.html").read_text()
+        body = re.sub(r"\{%\s*comment\s*%\}.*?\{%\s*endcomment\s*%\}", "",
+                      markup, flags=re.S)
+        card = next(line for line in body.splitlines() if 'title="Needs you"' in line)
+        self.assertNotIn("\u26a0", card,
+                         "这张卡又戴上警告三角了 —— 它说的是「有事在等你」，"
+                         "不是「出错了」")
 
     def test_a_ministry_admin_only_sees_their_own_ministrys_shortfalls(self):
         """⚠️ 这张卡是这一页唯一会泄露别的 ministry 的地方。

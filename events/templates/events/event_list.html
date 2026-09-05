@@ -26,12 +26,16 @@
 `<main>` 外面，钉在视口顶上；而站头那条 bar 跟着内容滚走（app.css 里
 `body:has(.page-bar)` 那两条）。全部理由写在 `page_bar.html` 和 app.css。
 
-🔴 **搬走之后这一页的 `<h1>` 只有这一个。** 下面那个
-   `<h1 class="mb-6 …">Events</h1>` 是同一句话的旧位置，一起删了 ——
-   留着就是一页两个 h1，读屏的标题大纲会变成两棵并列的树。
+🔴 **2026-09-03 第二轮改回来了一半**：版心里那个 `<h1>Events</h1>` 回来了，
+   而这一条 bar 里的两格降成了 `<nav>` 里的普通链接。整页仍然只有一个 h1，
+   只是这一次它在版心里 —— 用户的分工：「顶栏的 title 是为了网页下滑可以看到
+   这是哪一个页面，但是页面本身也要有 title」。
 {% endcomment %}
 {% block page_bar %}
   {% comment %}
+  ⚠️ 一格（2026-09-03 第三轮从两格收回来）。这一条写的就是这一页的名字；
+     通往管理页的那个入口挪到了下面标题行右端那颗 ⋮。
+
   ⚠️ `{% templatetag openblock %} url … as here_url {% templatetag closeblock %}` 必须写在 **block 里面**。子模板里
      写在所有 block 之外的标签**不会被执行**（`{% templatetag openblock %} extends {% templatetag closeblock %}` 的模板只渲染
      block 的内容），于是那个变量是空的 —— 表现是 `href=""`，一个点了会回到
@@ -60,7 +64,8 @@
 
   ⚠️ 壳里是**一行两块**，不是「结果区里多一列」。日程要和筛选卡一样高地
      立在右边，而筛选卡在结果区外面。
-     （这一层原来还顶着一个「Events」标题，2026-08-28 搬进页头条了。）
+     （这一层顶着的那个「Events」标题：2026-08-28 搬进页头条，2026-09-03 第二轮
+     搬了回来 —— 两处都要有字，而只有版心里这个是 `<h1>`。）
 
   ⚠️ `x-cloak` 不需要：默认状态就是关着的，而关着的样子和没有 JS 时一模一样。
   {% endcomment %}
@@ -86,10 +91,31 @@
   <div class="events-shell" x-data="eventsShell"
        x-bind:class="isOpen ? 'is-open' : ''">
     {% comment %}
-    ⚠️ 标题不在这里了（2026-08-28 搬进页头条）。原来它在这一层、在下面那一行
-       **外面**，为的是窄屏开日程时整列被藏起来、标题不跟着一起消失。搬到
-       `<main>` 外面之后那个顾虑更彻底地成立了：它根本不在这棵树里。
+    ⚠️ 标题 2026-09-03 第二轮回到了这一层，而且仍然在下面那一行 `.events-row`
+       **外面** —— 这是它当初就该在的位置：窄屏开日程时整个左列被藏起来，
+       标题在行里的话会跟着一起消失。
+
+    ⚠️ 整页唯一的 `<h1>`。页头条上那两格是 `<nav>` 里的链接，一个 h1 都没有 ——
+       两处都写着「Events」，而只有这一个声称自己是这一页的标题。
     {% endcomment %}
+    {% comment %}
+    ⚠️ 标题和那颗 ⋮ 同一行（2026-09-03）。⋮ 是通往 /events/manage/ 的入口 ——
+       站点菜单里那一格同日撤掉了，这里是它现在唯一的可见入口（外加仪表盘
+       那张卡）。
+
+    ⚠️ 门槛是 `can_see_all_events`（context processor 算的）：ministry admin 和
+       foundation tier 都为真，而这两种身份正是 `_scoped_events()` 放进那一页的
+       两种。画给别人就是一个点了必定 403 的链接 —— 读起来是「站坏了」，
+       而不是「这一页不归你」。
+    {% endcomment %}
+    <div class="mb-6 flex items-center justify-between gap-3">
+      <h1 class="text-2xl font-semibold">Events</h1>
+      {% if can_see_all_events %}
+        {% url 'events:event_manage_list' as manage_url %}
+        {% include "core/components/manage_link.html" with href=manage_url label="Manage events" %}
+      {% endif %}
+    </div>
+
     <div class="events-row">
       <div class="events-col">
         {% url 'events:event_list' as here %}

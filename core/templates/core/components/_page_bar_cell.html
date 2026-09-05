@@ -1,0 +1,27 @@
+{% comment %}
+页头条上的**一格**（2026-09-03）。
+
+🔴 **这一条 bar 是导航，不是标题**（2026-09-03 第二轮，用户：「顶栏的 title 是为了
+   网页下滑可以看到这是哪一个页面，但是页面本身也要有 title」）。所以这里没有
+   `<h1>` —— 一页只许一个 h1，而它属于版心里那个真正的页面标题。
+   ⚠️ 第一版这里是 `<h1>`，版心里那个被删掉了；那一版把「下滑时的路标」当成了
+      「这一页的标题」。两处都要有字，而标题只能有一个。
+
+🔴 **`aria-current="page"` 只给当前那一格。** 屏幕上「你在哪一格」由那条常亮的
+   下划线说，而 CSS 选中它的正是这个属性（`.page-bar-link[aria-current="page"]`，
+   守卫在 core.tests.PageBarTests）—— 两件事绑在同一处，就不会出现「线还亮着、
+   读屏却说这不是当前页」。这是这一格和另一格**唯一**的区别。
+
+⚠️ `truncate` 在外层盒子上，链接在里面撑满行高：那条 `::after` 的下划线因此画在
+   链接的盒子**里面**，裁不掉。反过来（线画在盒子外）是踩过的坑 —— CSS 全对、
+   `scaleX` 也确实是 1，屏幕上就是没有线。理由写在 app.css 的 `.page-bar-link`。
+
+⚠️ 字号 `text-sm`，比版心里那个标题小得多，也比顶栏那个字样小一号（2026-09-03
+   第二轮定的）：这一条是路标，不是主角。
+
+参数：label、href、is_here（真值时这一格是当前页）。
+{% endcomment %}
+<span class="page-bar-cell truncate text-sm">
+  <a class="page-bar-link" href="{{ href }}"
+     {% if is_here %}aria-current="page"{% endif %}>{{ label }}</a>
+</span>

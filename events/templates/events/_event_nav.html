@@ -10,12 +10,18 @@
 {% endcomment %}
 <nav class="mb-6 flex flex-wrap items-center gap-1 text-sm" aria-label="This event">
   {% comment %}
-  ⚠️ 面包屑上的字要和导航栏上那一格一致 —— 只读身份在导航里看到的是
-     「All events」，面包屑却写「Events I manage」的话，读起来像两个不同的页面。
+  ⚠️ 面包屑上的字要和那一页自己的标题一致 —— 一个页面不该有两个名字。
+
+  🔴 **读的是 `manage_list_name`，不是 `can_manage`**（2026-09-03）。
+     此前这里判的是**逐场活动**的 `can_manage`（`event_access` 算的），
+     而那一页的标题判的是页面级的那个。管理页改成「一张列表、权限逐行」之后，
+     这两个不再同步：两顶帽子的人在**自己**的活动上 `can_manage` 为真，
+     于是面包屑写「← Events I Manage」，而点回去那一页的标题是「All Events」。
+     现在两处读同一个值，由 core/context_processors.py 一处算出。
   {% endcomment %}
   <a href="{% url 'events:event_manage_list' %}"
      class="rounded-md px-2 py-1 text-ink-600 hover:bg-ink-100 dark:text-ink-300 dark:hover:bg-ink-800">&larr;
-    {% if can_manage %}Events I Manage{% else %}All Events{% endif %}</a>
+    {{ manage_list_name }}</a>
   <span class="px-1 text-ink-300 dark:text-ink-600">|</span>
   {% comment %}
   ⚠️ 「Roles」那一格 2026-08-04 去掉了 —— 工种已经并进 Edit 页。

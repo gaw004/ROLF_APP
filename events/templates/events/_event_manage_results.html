@@ -79,7 +79,8 @@
               <th class="col-event">Event</th>
               {% if not report %}<th class="col-ministry">Ministry</th>{% endif %}
               <th class="col-when">When</th>
-              <th class="col-status">Status</th><th class="col-goto">Go to</th>
+              <th class="col-status">Status</th>
+              <th class="col-goto">Go to</th>
             </tr>
           </thead>
           <tbody>
@@ -154,7 +155,16 @@
                       {% include "core/components/badge.html" with label="Ended" %}
                     </span>
                   {% endif %}
-                  {% if not can_manage %}
+                  {% comment %}
+                  🔴 **`event.can_manage` 是**逐行**的**（2026-09-03）。这一页现在
+                     一张列表列全部 ministry，所以「能不能改」不再是整页的属性 ——
+                     两顶帽子的人在自己那几个 ministry 的行上看到下拉，
+                     在别人的行上看到一枚标签。视图在那个循环里算好（views.py）。
+
+                  ⚠️ 藏起一个下拉挡不住任何人 —— 真正的拒绝在 POST 那一支的
+                     `_managed_event()` 里。这里只决定画什么。
+                  {% endcomment %}
+                  {% if not event.can_manage %}
                     {% include "core/components/badge.html" with label=event.get_status_display %}
                   {% else %}
                   {% comment %}
@@ -171,7 +181,7 @@
                      那条触发器的理由。
 
                   ⚠️ **`{% templatetag openblock %} querystring {% templatetag closeblock %}` 不能少。** 这一次 POST 回来的是整块
-                     `#event-results`，而那一块画什么取决于当前的筛选、页码、scope
+                     `#event-results`，而那一块画什么取决于当前的筛选、页码
                      和要不要报表。不带的话，改一个状态就把人送回「没筛选的第一页」，
                      而那一页看起来完全正常 —— 只是不是他刚才在看的那一页。
 
@@ -212,8 +222,9 @@
                 </td>
                 <td class="col-goto">
                   {% comment %}
-                  ⚠️ 只读身份这里只画三个链接。给他画 Edit / Notify 的话，点进去是
-                     403 —— 一个拒绝点它的人的链接，读起来是「站坏了」而不是
+                  ⚠️ **这一行改不了的时候只画三个链接**（2026-09-03 起是逐行判断，
+                     此前是整页）。给他画 Edit / Notify 的话，点进去是 403 ——
+                     一个拒绝点它的人的链接，读起来是「站坏了」而不是
                      「这一页不归你」。
 
                   🔴 **固定三列网格，六个链接排成 3+3 两排**（2026-08-29 第二轮）。
@@ -233,9 +244,14 @@
 
                      ⚠️ `whitespace-nowrap` 仍然写在每个链接上：不许**格内**
                         折行（`Edit & roles` 断成两行很难看），但整格必须能排成两排。
+
+                  ⚠️ 2026-09-03 试过把这六个收进一个「⋯」菜单（设计评审第 6 条，
+                     理由是 50 行 × 6 = 300 个链接、一屏里眼睛没有落点），当天撤回
+                     —— 用户要它们留在表格里。那个组件仍然在用（公告管理页），
+                     撤的是这一处的应用。
                   {% endcomment %}
                   <div class="goto-grid text-sm">
-                    {% if can_manage %}
+                    {% if event.can_manage %}
                       <a href="{% url 'events:event_update' event.pk %}" class="prose-link whitespace-nowrap">Edit &amp; roles</a>
                     {% endif %}
                     <a href="{% url 'events:event_registrations' event.pk %}" class="prose-link whitespace-nowrap">Signups</a>
@@ -245,11 +261,11 @@
                        打卡码，能打开它的人等于能给全场发卡 —— 它的权限和
                        「改这场活动」是同一个，不是「看这场活动」。
                     {% endcomment %}
-                    {% if can_manage %}
+                    {% if event.can_manage %}
                       <a href="{% url 'events:checkin_display' event.pk %}" class="prose-link whitespace-nowrap">Check-in QR</a>
                     {% endif %}
                     <a href="{% url 'events:event_report' event.pk %}" class="prose-link whitespace-nowrap">Report</a>
-                    {% if can_manage %}
+                    {% if event.can_manage %}
                       <a href="{% url 'events:event_notify' event.pk %}" class="prose-link whitespace-nowrap">Notify</a>
                     {% endif %}
                   </div>
@@ -259,9 +275,13 @@
           </tbody>
         </table>
       </div>
-      {% include "core/components/pagination.html" %}
+      {% include "core/components/pagination.html" with target="#event-results" %}
     {% else %}
-      {% if can_manage %}
+      {% comment %}
+      ⚠️ 这一处仍然是**页面级**：它问的是「你能不能发活动」，不是「你能不能改
+         某一行」—— 而这一屏一行都没有，本来就无行可问。
+      {% endcomment %}
+      {% if can_publish %}
         {% url 'events:event_create' as create_url %}
         {% include "core/components/empty.html" with message="No events match this filter. If you expected some, your ministry admin grant may have expired — it has to be active today." action_label="Publish a new event" action_href=create_url %}
       {% else %}

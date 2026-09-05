@@ -11,19 +11,29 @@
    真到了需要跳到第 17 页的规模，那时该加的是搜索，不是更多页码。
 
 ⭐ HTMX 是快路，链接本身是**完整可用的 GET** —— 关掉 JS 照样翻页（D24）。
-   `show:#event-results:top` 让换完片段之后视口回到列表顶部，
+   `show:<目标>:top` 让换完片段之后视口回到列表顶部，
    否则你点了 Next，人还停在上一页的半空中，看到的是新一页的中间。
 
-参数：page（Django 的 Page 对象）。
+🔴 **`target` 不给就一个 hx-* 属性都不画**（2026-09-03，公告那两页也要翻页时）。
+   原来这里写死着 `hx-target="#event-results"`，而公告那两页整页渲染、根本没有
+   这个 id：照抄过去的话，HTMX 找不到目标 —— 换不进任何东西，屏幕上就是
+   「点了 Next 什么都没发生」，控制台一句话，页面一个错都不报。
+   ⚠️ 不画 hx-* 并不会少一条路：这两个 `<a>` 本来就是完整的 GET（上面那条
+      ⭐ 说的就是这件事），少的只是一次「不整页重载」的快路。
+
+参数：
+  page    必填，Django 的 Page 对象
+  target  选填，HTMX 要换掉的那一块的选择器（如 `#event-results`）。
+          不给就是普通链接、整页加载。
 {% endcomment %}
 {% if page.paginator.num_pages > 1 %}
   <nav class="mt-6 flex flex-wrap items-center justify-between gap-3 text-sm"
        aria-label="Pagination">
     {% if page.has_previous %}
       <a href="{% querystring page=page.previous_page_number %}"
-         hx-get="{% querystring page=page.previous_page_number %}"
-         hx-target="#event-results" hx-swap="outerHTML show:#event-results:top"
-         hx-push-url="true"
+         {% if target %}hx-get="{% querystring page=page.previous_page_number %}"
+         hx-target="{{ target }}" hx-swap="outerHTML show:{{ target }}:top"
+         hx-push-url="true"{% endif %}
          class="prose-link">&larr; Previous</a>
     {% else %}
       <span class="text-ink-400 dark:text-ink-500">&larr; Previous</span>
@@ -35,9 +45,9 @@
 
     {% if page.has_next %}
       <a href="{% querystring page=page.next_page_number %}"
-         hx-get="{% querystring page=page.next_page_number %}"
-         hx-target="#event-results" hx-swap="outerHTML show:#event-results:top"
-         hx-push-url="true"
+         {% if target %}hx-get="{% querystring page=page.next_page_number %}"
+         hx-target="{{ target }}" hx-swap="outerHTML show:{{ target }}:top"
+         hx-push-url="true"{% endif %}
          class="prose-link">Next &rarr;</a>
     {% else %}
       <span class="text-ink-400 dark:text-ink-500">Next &rarr;</span>

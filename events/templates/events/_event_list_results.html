@@ -248,7 +248,7 @@ event_list 的结果区。整页和 HTMX 片段渲染的是同一份 —— 视�
       </li>
     {% endfor %}
   </ul>
-  {% include "core/components/pagination.html" %}
+  {% include "core/components/pagination.html" with target="#event-results" %}
 </div>
 {% if schedule_oob %}
   {% comment %}

@@ -197,6 +197,24 @@ class Notice(Audience, ConstraintErrorFieldMixin, TimeStampedModel):
         )
 
     @property
+    def has_actions(self):
+        """还有没有事可做 —— 「⋯」菜单画不画，问的就是这一句（2026-09-03）。
+
+        🔴 四档里只有**已经下架**那一档什么都做不了：它已经走完了，
+           `take_down()` 对它无意义，重新上板是新写一条而不是改这一条。
+
+        ⚠️ 它存在是因为浏览器里看出来的一个缺陷：菜单落地那一版，下架了的行
+           也画了一颗「⋯」，点开是一个**空面板**。测试全绿 —— 每一条断言的都是
+           「该有的项在不在」，没有一条问过「会不会一项都没有」。
+
+        ⚠️ 写成属性而不是在模板里拼 `is_draft or is_showing or is_scheduled`：
+           那就是同一句话的第二份拷贝，而菜单内容（`_notice_menu_items.html`）
+           里已经有一份。两份迟早会分家，而分家的表现正是这次这个 ——
+           一个打开是空的入口，或者反过来：有操作却没有入口。
+        """
+        return self.is_draft or self.is_showing or self.is_scheduled
+
+    @property
     def is_scheduled(self):
         """Published, but its day has not come yet.
 

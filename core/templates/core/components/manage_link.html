@@ -1,0 +1,49 @@
+{% comment %}
+标题行右端那颗「⋮」—— 通往这一块的管理页（2026-09-03）。
+
+🔴 **它是这两个管理页现在唯一的可见入口**（外加仪表盘「Needs you」那张卡）。
+   站点菜单里那三格（Events I Manage / Notices I Publish / All Events）同日撤掉了。
+
+   ⚠️ `core/context_processors.py` 开头记着：这个项目每一个管理页都曾经**只能
+      靠手敲 URL 进** —— 权限对、页面在、没有任何东西指向它，而那一批缺口
+      修过五次、本次会话又补过第八次。**这一次不是遗漏，是用户看着代价拍的板**，
+      两处注释互相指着，免得下一个人把它当成第九次。
+
+⚠️ 为什么是「⋮」而不是一颗写着 Manage 的按钮（用户 2026-09-03 定的）：
+   那一页是**读**公告 / 读活动的地方，一颗写操作的按钮摆在标题旁边，
+   会把这一页说成半个管理页。三个点安静，而它在标题行最右端 ——
+   那本来就是这一行放操作的位置。
+
+🔴 **触屏上它没有任何文字说明，这是已知代价。** "Manage" 两个字只在
+   hover / focus 时出现，而触屏两样都没有 —— 手机上它就是三个孤零零的点。
+   用户知情并选择了这一版。
+   ⚠️ 重启条件：有人问「右上角那三个点是干什么的」。那时该做的是让它常显
+      （`.manage-link-label` 去掉那两条 opacity 规则），不是加回菜单入口。
+
+⚠️ **`aria-label` 给的是完整句子**，读屏因此不依赖那个 hover 的字 ——
+   它拿到的是 "Manage notices"，而不是三个装饰用的点。
+
+⚠️ 三个点是**画出来的**（三个 span），不是字符「⋮」：那个字符在不同字体里的
+   字重、间距、垂直位置都不一样，而这个仓库的正文字体（Jost）里它比周围的字
+   轻一档，缩小之后几乎看不见。同 `row_menu.html` 那一段的理由，
+   点的样式也复用它的 `.row-menu-dot`。
+
+参数：
+  href   管理页地址
+  label  给读屏的完整句子，如 "Manage notices"
+
+⚠️ **调用方必须自己判权限。** 这个组件不判 —— 画给没权限的人就是一个点了
+   必定 403 的链接，读起来是「站坏了」而不是「这一页不归你」。
+{% endcomment %}
+<a href="{{ href }}" class="manage-link" aria-label="{{ label }}">
+  {% comment %}
+  ⚠️ `aria-hidden` 给这两块：读屏读的是上面那个 aria-label，
+     而这里的「Manage」和三个点对它是重复的装饰。
+  {% endcomment %}
+  <span class="manage-link-label" aria-hidden="true">Manage</span>
+  <span class="manage-link-dots" aria-hidden="true">
+    <span class="row-menu-dot"></span>
+    <span class="row-menu-dot"></span>
+    <span class="row-menu-dot"></span>
+  </span>
+</a>

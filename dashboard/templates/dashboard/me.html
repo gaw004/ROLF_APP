@@ -61,7 +61,26 @@
 
       {% if is_ministry_admin %}
         {% url 'events:event_manage_list' as manage_url %}
-        {% include "dashboard/_card.html" with icon="⚠️" title="Needs you" tone="amber" body="dashboard/_body_needs_you.html" href=manage_url href_label="Events I manage" %}
+        {% comment %}
+        🔴 **铃铛，不是警告三角**（2026-09-03 设计评审第 9 条）。
+
+           这张卡装的是「还缺人的工种」和「结束了但出勤没收尾的活动」，
+           空态写的是 "Nothing waiting on you." —— 语义是**有事在等你**。
+           而 ⚠️ 的意思是「出错了 / 有危险」，那是另一回事：一个管理员打开
+           首页看到一个警告三角，第一反应是「哪里坏了」，而实际上只是
+           有个工种还差两个人。
+
+        ⚠️ 用铃铛而不是「举手」那类人物 emoji：人物 emoji 带肤色变体，
+           各平台差异极大，而这一格只有 1.5rem。同一条理由下，其余四个
+           （📣 📅 ✨ ⏱）都是物件，本轮不动。
+
+        ⚠️ 更彻底的做法是五个都换成自己画的矢量图标 —— emoji 是各家操作系统
+           自己画的，你看到的和多数志愿者（安卓）看到的不是同一套，而且无法验证
+           （这正是本项目拒绝把 Futura 写进字体栈时用过的同一条理由）。
+           **用户 2026-09-03 判定只改这一个**：其余四个是长相问题，这一个是
+           意思错了。重启条件：真的有人问「首页那个警告是什么坏了」。
+        {% endcomment %}
+        {% include "dashboard/_card.html" with icon="🔔" title="Needs you" tone="amber" body="dashboard/_body_needs_you.html" href=manage_url href_label="Events I manage" %}
       {% endif %}
 
       {% include "dashboard/_card.html" with icon="⏱" title="Volunteer hours" tone="emerald" body="dashboard/_body_hours.html" href=signups_url href_label="See your signups" %}

@@ -3387,9 +3387,9 @@ class AudienceShapeTests(TestCase):
         self.zhang = register_account(
             password="a-good-long-password", email="zhang@example.com",
             legal_last_name="Zhang", legal_first_name="San")
-        MinistryRole.objects.create(contact=self.zhang.contact, ministry=self.pantry)
         self.event_type, _ = EventType.objects.get_or_create(
             code="distribution", defaults={"name": "Distribution"})
+        MinistryRole.objects.create(contact=self.zhang.contact, ministry=self.pantry)
 
     def payload(self, **extra):
         return {
@@ -4016,8 +4016,8 @@ class MinistryAdminPageTests(PageTestCase):
         self.assertEqual(choices, [self.pantry])
 
     def test_publishing_for_their_own_ministry_works(self):
-        self.login(self.zhang)
         event_type = EventType.objects.first()
+        self.login(self.zhang)
         response = self.client.post(reverse("events:event_create"), {
             "name": "Saturday pantry", "event_type": event_type.pk,
             "ministry": self.pantry.pk,
@@ -5516,8 +5516,8 @@ class EventUpdatePageTests(PageTestCase):
 
     def payload(self, **overrides):
         fields = {
-            "name": self.event.name,
             "event_type": self.event.event_type_id,
+            "name": self.event.name,
             "ministry": self.event.ministry_id,
             "start_time": self.widget_value(self.event.start_time),
             "end_time": self.widget_value(self.event.end_time),
@@ -7367,6 +7367,215 @@ class ManageListPage:
         return page, cell[:cell.index("</td>")]
 
 
+class ManageListUndoTests(ManageListPage, PageTestCase):
+    """状态下拉的撤销（2026-09-03 设计评审第 1 条）。
+
+    🔴 那个下拉是「换一个就存」，而发布一场活动是**对外**的：志愿者从那一刻起
+       看得见它、能报名。整套界面里只有这一个控件按一下就有这种后果，
+       而它长得和一个普通筛选下拉一模一样，摆在几十行数据中间。
+       auto-save 的前提是**可逆**，不是「有提示」。
+    """
+
+    def change_to(self, status, **headers):
+        self.event.status = Event.Status.DRAFT
+        self.event.save(update_fields=["status"])
+        self.login(self.zhang)
+        return self.client.post(
+            self.url(), {"event": self.event.pk, "status": status}, **headers)
+
+    def test_changing_a_status_offers_a_way_back(self):
+        response = self.change_to(Event.Status.OPEN, headers={"hx-request": "true"})
+        html = response.content.decode()
+        self.assertIn("Undo", html, "改完状态没有给撤销的路")
+        self.assertRegex(html, r'name="status" value="draft"',
+                         "撤销表单带的不是改之前那个状态")
+
+    def test_the_undo_button_says_where_it_goes_back_to(self):
+        """⚠️ 光写「Undo」答不出「撤销到哪一档」—— 人在这一列上一秒钟点两次
+           的时候，那两个字本身没有信息。
+        """
+        html = self.change_to(Event.Status.OPEN,
+                              headers={"hx-request": "true"}).content.decode()
+        self.assertIn("back to Draft", html)
+
+    def test_the_label_describes_the_previous_status_not_the_new_one(self):
+        """🔴 第一版这里写的是 `event.get_status_display()` —— 而那是 `set_status`
+           **之后**的显示名，也就是刚设定的**新**状态。
+
+        按钮于是写着「Undo — back to Open for signup」，按下去回到 Draft：
+        一句读起来完全通顺、每次都渲染正常的假话。
+        """
+        html = self.change_to(Event.Status.OPEN,
+                              headers={"hx-request": "true"}).content.decode()
+        self.assertNotIn("back to Open for signup", html,
+                         "撤销按钮写的是新状态 —— 它说的和它做的不是一回事")
+
+    def test_pressing_it_puts_the_status_back(self):
+        self.change_to(Event.Status.OPEN, headers={"hx-request": "true"})
+        self.event.refresh_from_db()
+        self.assertEqual(self.event.status, Event.Status.OPEN)
+
+        self.client.post(self.url(),
+                         {"event": self.event.pk, "status": Event.Status.DRAFT},
+                         headers={"hx-request": "true"})
+        self.event.refresh_from_db()
+        self.assertEqual(self.event.status, Event.Status.DRAFT)
+
+    def test_it_survives_the_redirect_that_the_no_js_path_takes(self):
+        """🔴 这一条是这组里最要紧的。
+
+        没有 JS 的那条路是 POST → redirect → GET，而重定向之后 `wrote` 是假 ——
+        凭据只放在渲染上下文里的话，**撤销就成了一个只有 JS 的人才有的功能**，
+        而这正是 D24 一直拒绝的那种东西。放 session 才跨得过这一次重定向。
+        """
+        response = self.change_to(Event.Status.OPEN)          # 不带 hx-request
+        self.assertEqual(response.status_code, 302)
+        html = self.client.get(response["Location"]).content.decode()
+        self.assertIn("Undo", html, "没有 JS 的那条路上撤销消失了")
+        self.assertRegex(html, r'name="status" value="draft"')
+
+    def test_it_is_shown_once_and_then_gone(self):
+        """⚠️ 它是一次性的。留着的话，下一次打开这一页还会看到一颗撤销
+           **上上次**的按钮，而那时人已经不记得上上次是什么了。
+        """
+        self.change_to(Event.Status.OPEN, headers={"hx-request": "true"})
+        self.assertNotIn("Undo", self.client.get(self.url()).content.decode())
+
+    def test_reading_the_page_never_offers_one(self):
+        """⚠️ 筛选和翻页都是读操作 —— 它们不改任何东西，所以那里没有可撤销的事。"""
+        self.login(self.zhang)
+        for params in ({}, {"q": "garden"}, {"page": "1"}, {"report": "1"}):
+            with self.subTest(params=params):
+                self.assertNotIn(
+                    "Undo", self.client.get(self.url(), params).content.decode())
+
+    def test_undoing_somebody_elses_event_is_refused(self):
+        """⚠️ 撤销不是一条新路径，是同一条路反着走一次 —— 包括那一次
+           `_managed_event()` 权限检查。这条守卫钉的就是「没有绕过它」。
+        """
+        theirs = make_event(ministry=self.tax, owner=self.other_admin.contact)
+        self.login(self.zhang)
+        response = self.client.post(
+            self.url(), {"event": theirs.pk, "status": Event.Status.DRAFT})
+        self.assertIn(response.status_code, (403, 404))
+
+
+class ManageListPagingTests(ManageListPage, PageTestCase):
+    """这一页的翻页器（每页 50）—— 以及它那个 HTMX 目标。
+
+    ⚠️ 2026-09-03 翻页组件从写死 `#event-results` 改成了收一个 `target` 参数
+       （公告那两页也要翻页，而它们没有这个 id）。**活动这边必须把它传回来**：
+       忘了传的表现是翻页从 HTMX 快路退回整页加载 —— 点了 Next 页面确实翻了，
+       只是整页闪一下、右边那块报表面板跟着重来，没有任何东西报错。
+    """
+
+    def test_the_paginator_carries_the_htmx_target_back(self):
+        from events.models import Event
+        from events.views import MANAGED_EVENTS_PER_PAGE
+
+        for number in range(MANAGED_EVENTS_PER_PAGE + 1 - Event.objects.count()):
+            make_event(ministry=self.pantry, owner=self.zhang.contact,
+                       name=f"Filler {number}")
+        self.login(self.zhang)
+        html = self.client.get(self.url()).content.decode()
+
+        nav = re.search(r'<nav[^>]*aria-label="Pagination".*?</nav>', html, re.S)
+        self.assertIsNotNone(nav, "撑破一页了，翻页器却没画出来")
+        self.assertIn("Page 1 of 2", nav.group(0))
+        self.assertIn('hx-target="#event-results"', nav.group(0),
+                      "翻页器没拿到 HTMX 目标 —— 翻页会退回整页加载")
+
+
+class ManageListHeadTests(ManageListPage, PageTestCase):
+    """这一页 2026-09-03 也用上了页头条，两格：Events / Events I Manage。
+
+    ⚠️ 公告那两页先做的，这一页跟上 —— 全站四页一条 bar、一个顺序：**读的那一页
+       在左，管理的那一页在右**。这里钉的是「四页一致」这件事本身，因为不一致
+       的表现是从一页点到另一页时整个头横着挪一段，而每一页单独看都正常。
+    """
+
+    def head(self, html):
+        found = re.search(r'<div class="page-bar">(.*?)</nav>', html, re.S)
+        self.assertIsNotNone(found, "页头条没渲染出来")
+        return found.group(1)
+
+    def test_the_word_is_in_both_places_and_the_h1_is_the_one_in_the_page(self):
+        """两处都写着「Events I Manage」：页头条上一格，版心里一个标题
+        （2026-09-03 第二轮）。而 `<h1>` 只有版心里那一个 —— 页头条是下滑时的
+        路标，不是这一页的标题。
+
+        ⚠️ 两处的字**必须一样**，而它们各自读一次同一个 `can_manage`。这条守卫
+           因此同时断言两处都在、且写的是同一个词：只对上一处的话，只读身份
+           那一档会出现「页头条写 All Events、标题写 Events I Manage」。
+        """
+        self.login(self.zhang)
+        html = self.client.get(self.url()).content.decode()
+        self.assertEqual(html.count("<h1"), 1, "这一页出现了第二个 h1")
+        head = self.head(html)
+        self.assertIn("Events I Manage", head)
+        self.assertNotIn("<h1", head,
+                         "页头条又成了标题 —— 它是路标，不是这一页的标题")
+        self.assertRegex(html, r"<h1[^>]*>\s*Events I Manage\s*</h1>",
+                         "版心里那个标题不见了，或者写的不是同一个词")
+
+    def test_the_read_only_tier_gets_its_own_word_in_both_places(self):
+        """⚠️ 这一层看到的这一页叫「All Events」，而**页头条和版心标题必须写
+           同一句** —— 两处各判一次身份的话，迟早会出现「bar 上一个词、
+           标题另一个词」。现在两处都读 `manage_list_name`，一处算。
+        """
+        from django.contrib.auth.models import Group
+        from org.permissions import FOUNDATION_ADMIN_GROUP
+        chief = self.account("chief", "周", birth_date=datetime.date(1980, 1, 1))
+        chief.groups.add(Group.objects.get_or_create(name=FOUNDATION_ADMIN_GROUP)[0])
+        self.login(chief)
+
+        html = self.client.get(self.url()).content.decode()
+        head = self.head(html)
+        self.assertIn("All Events", head)
+        self.assertNotIn("Events I Manage", head)
+        self.assertRegex(html, r"<h1[^>]*>\s*All Events\s*</h1>")
+        # ⚠️ 而回去那一格仍然在（2026-09-03 第四轮）——
+        #    没有它这一页就回不到 /events/。
+        self.assertIn(">Events<", head, "回去那一格不见了")
+
+        # 🔴 **/events/ 那一页上不写这一页的名字**（用户 2026-09-03 定的）：
+        #    这两格是「你在哪儿 + 从哪儿来」，不是切换器。去管理页走那颗 ⋮。
+        #    ⚠️ 这条断言此前是反的（钉「两页的第二格写同一句话」），
+        #       那是两格互为切换器那一版的规矩。
+        board = self.head(
+            self.client.get(reverse("events:event_list")).content.decode())
+        self.assertNotIn("All Events", board,
+                         "读的那一页写上了管理页的名字 —— 那两格不是切换器")
+
+    def test_the_current_cell_points_at_this_page_and_keeps_its_query_string(self):
+        """🔴 `aria-current="page"` 说的是「你在这一页」，而这一页的**状态写在
+           查询串上**（筛选、页码、`?report=1`）。写成裸 URL 的话，那是一个
+           自称是本页、点了却把筛选和页码全丢掉的链接 —— 正是这条属性在防的
+           那种谎。
+
+        ⚠️ 这条守卫此前用的例子是 `?scope=all`（那时它决定这一页是「我管的」
+           还是「全基金会」）。参数 2026-09-03 随「一张列表」一起删了，
+           而这条规矩本身不变，所以换一个仍然存在的查询串来钉。
+        """
+        self.login(self.zhang)
+        head = self.head(
+            self.client.get(self.url(), {"q": "garden"}).content.decode())
+        current = re.search(r'<a class="page-bar-link" href="([^"]*)"[^>]*'
+                            r'aria-current="page"', head)
+        self.assertIsNotNone(current, "没有一格声称自己是当前页")
+        self.assertIn("q=garden", current.group(1),
+                      "当前那一格丢掉了这一页的查询串")
+
+    def test_the_board_offers_the_manage_page_only_to_the_two_tiers(self):
+        """⚠️ 画给别人就是一个点了必定 403 的链接 —— 读起来是「站坏了」。"""
+        self.login(self.lisi)
+        head = self.head(
+            self.client.get(reverse("events:event_list")).content.decode())
+        self.assertNotIn("Events I Manage", head)
+        self.assertNotIn("All Events", head)
+        self.assertIn("Events", head, "第一格也跟着没了")
+
+
 class ManageListRowLengthTests(ManageListPage, PageTestCase):
     """每一行从左到右正好是版心那么长（2026-08-29，第二轮）。
 
@@ -7430,9 +7639,13 @@ class ManageListRowLengthTests(ManageListPage, PageTestCase):
                 self.assertIn(f'class="{hook}"', page)
 
     def test_the_go_to_links_are_a_fixed_three_column_grid(self):
-        # 🔴 `grid-cols-3` 而不是 `flex-wrap`：自由折行的行数取决于字号、字体和
-        #    链接文案，改任何一个都可能悄悄从两排变成三排。固定三列则是
-        #    「六个就是两排」。守的是这条决定本身，不是某一次的渲染结果。
+        """🔴 `grid-cols-3` 而不是 `flex-wrap`：自由折行的行数取决于字号、字体和
+           链接文案，改任何一个都可能悄悄从两排变成三排。固定三列则是
+           「六个就是两排」。守的是这条决定本身，不是某一次的渲染结果。
+
+        ⚠️ 2026-09-03 这一格被收进过一个「⋯」菜单（设计评审第 6 条），当天撤回
+           —— 用户要六个链接留在表格里。这条守卫连同 app.css 那一段一起恢复了。
+        """
         self.login(self.zhang)
         page = self.client.get(self.url()).content.decode()
         goto = page[page.index('<td class="col-goto">'):]
@@ -8414,7 +8627,11 @@ class FoundationTierReadOnlyTests(PageTestCase):
         self.assertContains(response, "Tax one")
         self.assertContains(response, self.event.name)
         self.assertContains(response, "All Events")
-        self.assertFalse(response.context["can_manage"])
+        # ⚠️ 2026-09-03：页面级那个 `can_manage` 拆成了两个，因为它一直在同时
+        #    回答两个问题。这一层列的是全部（`showing_all`），而它自己没有
+        #    任何 ministry 的发布权（`can_publish`）。
+        self.assertTrue(response.context["showing_all"])
+        self.assertFalse(response.context["can_publish"])
 
     # --- may not write, anywhere -------------------------------------------
 
@@ -8477,15 +8694,22 @@ class FoundationTierReadOnlyTests(PageTestCase):
     def test_a_ministry_admin_who_is_also_foundation_keeps_managing(self):
         """⚠️ Being promoted must not take the publish button away.
 
-        zhang administers the pantry. Adding the foundation group as well has to
-        leave the managing view of their own ministries intact, not replace it
-        with the read-only view of everything.
+        🔴 **2026-09-03 重写**。这条断言原来是「他默认拿到的仍然是自己那几个
+           ministry 的**可管理视图**」—— 那是当时的实现，而它要保护的东西是
+           「不因为升职而失去发布权」。
+
+           现在一张列表列全部、权限逐行判：他既没失去任何写，还多看到了别人的。
+           所以这里钉的换成那件**真正要保护的事**：发布权还在，自己的行还能改。
         """
         self.zhang.groups.add(foundation_admin_group())
         self.login(type(self.zhang).objects.get(pk=self.zhang.pk))
         response = self.client.get(reverse("events:event_manage_list"))
-        self.assertTrue(response.context["can_manage"])
-        self.assertContains(response, "Events I Manage")
+
+        self.assertTrue(response.context["can_publish"], "发布权没了")
+        self.assertContains(response, "Publish a new event")
+        # 自己那几个 ministry 的行照样可改 —— 逐行标记为真。
+        mine = next(e for e in response.context["events"] if e.pk == self.event.pk)
+        self.assertTrue(mine.can_manage)
 
     def test_the_navigation_actually_offers_the_page(self):
         """⚠️ The seventh time this project has built a page nothing linked to.
@@ -8496,13 +8720,29 @@ class FoundationTierReadOnlyTests(PageTestCase):
         this class of gap invisible.
 
         Caught by looking at a screenshot, not by a test. This is the test.
+
+        ⚠️ 2026-09-03：入口从页头条那一格换成了标题行右端那颗 ⋮（站点菜单里
+           那几格同日撤走了）。这条守卫因此改钉 ⋮ —— 它钉的从来是
+           「**有东西指向那一页**」，不是某一版入口长什么样。
+           ⚠️ 「All Events」这几个字不再出现在这一页上，那是要的：那是
+              **另一页**的名字，而这条 bar 上的两格是「你在哪儿 + 从哪儿来」。
         """
         self.login(self.boss)
         page = self.client.get(reverse("events:event_list")).content.decode()
         self.assertIn(reverse("events:event_manage_list"), page)
-        self.assertIn("All Events", page)
+        self.assertIn("manage-link", page, "这一层看不到通往管理页的 ⋮")
 
-    # --- ?scope=all: the other view, for somebody who holds both hats --------
+    # --- 两顶帽子：一张列表，权限逐行（2026-09-03 起）-------------------------
+    #
+    # 🔴 这一组此前钉的是 `?scope=all`：管理页有两种模式，而两顶帽子的人默认
+    #    落在窄的那一种，靠站点菜单里一格带参数的链接切到宽的那一种。
+    #
+    #    用户推翻了那个设计，理由是它把「有没有权限看」和「页面列不列出来」
+    #    搞成了两件事：「既然老张有权看，那就给他啊。他的页面就该显示所有的
+    #    ministries，然后在所有的 events 里，只有 Food Pantry 他可以改。」
+    #
+    #    于是模式没有了，参数也没有了 —— 下面钉的是同样那几件事在新设计下的
+    #    说法：**看得见的更多了，能改的一个没多。**
 
     def both_hats(self):
         """zhang administers the pantry **and** is in the foundation group."""
@@ -8516,67 +8756,74 @@ class FoundationTierReadOnlyTests(PageTestCase):
         return make_event(ministry=self.tax, owner=self.other_admin.contact,
                           name="Tax clinic nobody here runs")
 
-    def test_scope_all_shows_another_ministrys_events_to_somebody_with_both_hats(self):
-        """⭐ The gap this closed: the foundation-wide **read** authority they
-        already held had no entrance for them at all, because the default view
-        (rightly) keeps their own ministries editable.
+    def test_both_hats_see_every_ministry_without_asking_for_it(self):
+        """⭐ 这一条替换掉的那一条钉的是「带上 `?scope=all` 才看得到」。
+
+        现在**默认**就看得到 —— 那个读权限他一直有，缺的只是一个把这些行
+        列出来的页面。
         """
         theirs = self.someone_elses_event()
         self.both_hats()
-        response = self.client.get(reverse("events:event_manage_list"), {"scope": "all"})
+        response = self.client.get(reverse("events:event_manage_list"))
         self.assertContains(response, theirs.name)
-        self.assertFalse(response.context["can_manage"])
+        self.assertContains(response, self.event.name, msg_prefix="自己的行不见了")
+        self.assertTrue(response.context["showing_all"])
 
-    def test_scope_all_does_not_hand_over_a_single_write(self):
-        """⚠️ The whole safety of this parameter. Read widens; write does not.
+    def test_the_rows_he_does_not_run_are_read_only(self):
+        """🔴 逐行 —— 这一批的核心。同一张表上两种行。"""
+        theirs = self.someone_elses_event()
+        self.both_hats()
+        rows = {e.pk: e for e in
+                self.client.get(reverse("events:event_manage_list")).context["events"]}
+        self.assertTrue(rows[self.event.pk].can_manage, "自己的行该能改")
+        self.assertFalse(rows[theirs.pk].can_manage, "别人的行不该能改")
 
-        The POST is on another ministry's event, from the page that is now
-        allowed to *show* it.
+    def test_seeing_more_hands_over_no_write_at_all(self):
+        """🔴 **这一组里最要紧的一条。** 看得见的多了，能改的一个没多。
+
+        ⚠️ 它走的是 POST，不是读 HTML：藏起一个下拉挡不住任何人 ——
+           一张从任何地方提交过来的表单，到视图那里长得一模一样。
         """
         theirs = self.someone_elses_event()
         self.both_hats()
         response = self.client.post(
-            f"{reverse('events:event_manage_list')}?scope=all",
+            reverse("events:event_manage_list"),
             {"event": theirs.pk, "status": Event.Status.CANCELLED})
         self.assertEqual(response.status_code, 403)
         theirs.refresh_from_db()
         self.assertNotEqual(theirs.status, Event.Status.CANCELLED)
 
-    def test_scope_all_is_ignored_for_somebody_not_in_the_tier(self):
-        # A plain ministry admin typing the parameter gets their own ministries,
-        # editable, exactly as before — not everybody's.
+    def test_a_plain_ministry_admin_still_sees_only_their_own(self):
+        """⚠️ 放宽的只有 foundation tier 那一层。少了这一条，
+           上面几条用一句「谁都看得到全部」也能满足。
+        """
         theirs = self.someone_elses_event()
         self.login(self.zhang)
-        response = self.client.get(reverse("events:event_manage_list"), {"scope": "all"})
-        self.assertTrue(response.context["can_manage"])
+        response = self.client.get(reverse("events:event_manage_list"))
         self.assertNotContains(response, theirs.name)
+        self.assertFalse(response.context["showing_all"])
+        self.assertTrue(response.context["can_publish"])
 
-    def test_the_filter_carries_the_scope_so_it_survives_a_click(self):
-        """⚠️ A method="get" form throws away the action's query string and sends
-        its own fields instead. Without a hidden field the page silently narrows
-        back to their own ministries on the first Filter — and the list looks
-        completely normal, only shorter.
+    def test_the_filter_offers_every_ministry_it_is_showing(self):
+        """⚠️ 这一条替换掉的那一条钉的是「`scope` 要有隐藏字段，否则一按筛选就
+           退回窄视图」。参数没了，但那件事的**新形态**要钉：列的是全部时，
+           下拉必须能选到全部 —— 否则筛选够不着眼前这些行，而页面看起来正常。
         """
+        self.someone_elses_event()
         self.both_hats()
-        page = self.client.get(
-            reverse("events:event_manage_list"), {"scope": "all"}).content.decode()
-        self.assertIn('name="scope" value="all"', page)
+        response = self.client.get(reverse("events:event_manage_list"))
+        offered = response.context["period"].fields["ministry"].queryset
+        self.assertIn(self.tax, offered, "筛选选不到眼前这些行的 ministry")
 
-    def test_the_full_report_stays_foundation_wide(self):
-        # It shares _scoped_events(), and the panel links to it with the whole
-        # query string — so a report that quietly covered a different set of
-        # events than the list it was opened from would be the one figure nobody
-        # could check.
-        theirs = self.someone_elses_event()
-        self.both_hats()
-        response = self.client.get(reverse("events:ministry_report"), {"scope": "all"})
-        self.assertContains(response, theirs.name)
-
-    def test_a_ministry_admin_still_sees_the_managing_label(self):
+    def test_a_ministry_admin_is_offered_the_manage_page_from_the_board(self):
+        """⚠️ 2026-09-03：/events/ 上那个入口从页头条第二格换成了标题行右端
+           那颗 ⋮ —— 而「读的那一页不写管理页的名字」是**要的**：
+           那两格是「你在哪儿 + 从哪儿来」，不是切换器。
+        """
         self.login(self.zhang)
         page = self.client.get(reverse("events:event_list")).content.decode()
-        self.assertIn("Events I Manage", page)
-        self.assertNotIn("All Events", page)
+        self.assertIn("manage-link", page, "看不到通往管理页的 ⋮")
+        self.assertIn(reverse("events:event_manage_list"), page)
 
     def test_a_plain_volunteer_is_offered_neither(self):
         self.login(self.lisi)
@@ -10344,28 +10591,38 @@ class SchedulePageTests(PageTestCase):
     def cards(self, html):
         return re.findall(r'<a class="schedule-card[^"]*"[^>]*>(.*?)</a>', html, re.S)
 
-    def test_the_page_title_lives_in_the_head_and_only_there(self):
-        """「Events」这四个字 2026-08-28 从版心搬到了页头条（顶栏底下那一条）。
+    def test_the_word_is_in_both_places_and_only_one_of_them_is_the_h1(self):
+        """「Events」这个词在两处：页头条上一格，版心里一个标题（2026-09-03 第二轮）。
 
-        🔴 **搬走 ≠ 复制。**一页两个 `<h1>` 会让读屏的标题大纲变成两棵并列的树，
+        分工是用户定的：「顶栏的 title 是为了网页下滑可以看到这是哪一个页面，
+        但是页面本身也要有 title」。所以页头条那一格是 `<nav>` 里的链接，
+        版心里那个才是 `<h1>`。
+
+        🔴 **仍然只有一个 h1。**一页两个会让读屏的标题大纲变成两棵并列的树，
            而屏幕上看起来完全正常 —— 两处写着同一个词，谁也不会觉得不对。
-           （右面板里那份活动详情降成 `<h2>` 也是同一条规矩。）
+           （右面板里那份活动详情是 `<h2>` 也是同一条规矩。）
+           ⚠️ 2026-08-28 到 09-03 之间是**反过来**的：h1 在页头条上，版心里那个
+              被删了 —— 于是页面本身没有标题。这条守卫因此两头都钉。
 
         ⚠️ 页头条在 `<main>` **外面**：钉住的东西要横跨整个视口，而 main 有版心
            和左右内边距。
         """
         html = self.page()
         self.assertEqual(html.count("<h1"), 1, "这一页出现了第二个 h1")
-        bar = re.search(r'<div class="page-bar">(.*?)</div>\s*</div>', html, re.S)
+
+        bar = re.search(r'<div class="page-bar">(.*?)</nav>', html, re.S)
         self.assertIsNotNone(bar, "页头条没渲染出来")
         self.assertIn("Events", bar.group(1))
-        self.assertIn("<h1", bar.group(1), "标题不在页头条里了")
+        self.assertNotIn("<h1", bar.group(1),
+                         "页头条又成了标题 —— 它是下滑时的路标，不是这一页的标题")
 
         shell = re.search(r'<div class="events-shell".*?<div class="events-row"',
                           html, re.S)
         self.assertIsNotNone(shell)
-        self.assertNotIn("<h1", shell.group(0),
-                         "版心里又长回来一个标题 —— 一页两个 h1")
+        self.assertIn("<h1", shell.group(0),
+                      "版心里那个标题不见了 —— 这一页本身没有标题了")
+        self.assertRegex(shell.group(0), r"<h1[^>]*>\s*Events\s*</h1>",
+                         "版心里那个标题写的不是 Events")
 
     def test_the_title_links_to_this_page_and_says_so(self):
         """那一格是一个指向本页的链接（LV 那格也是），常亮的下划线就画在它上面。

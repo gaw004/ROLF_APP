@@ -5,6 +5,26 @@ messages 框架的四档。位置固定在主内容区顶部 —— 每一页都
 ⚠️ role="status" 而不是 role="alert"：读屏软件对后者会打断当前朗读，
    而这里大多数是「保存成功了」。真正需要打断的是表单错误，那些在 field.html 里。
 {% endcomment %}
+{% comment %}
+🔴 **撤销（2026-09-03 设计评审第 1 条）。**
+
+   活动管理列表上那个状态下拉是「换一个就存」，而发布一场活动是**对外**的
+   ——志愿者从那一刻起看得见它、能报名。整套界面里只有这一个控件按一下就有
+   这种后果，而它长得和一个普通筛选下拉一模一样，就摆在几十行数据中间。
+
+   auto-save 的前提是**可逆**，不是「有提示」。Gmail 删邮件、Notion 删页面、
+   Linear 改状态，都是「立刻执行 + 一条带撤销的提示」。
+
+⚠️ 它画在这里而不是那一行里，是因为**没有 JS 的那条路会重定向**：
+   POST → redirect → GET，那一行早就重新渲染过了，而提示条是唯一一个
+   跨得过这次重定向的地方（凭据存在 session 里，见 events/views.py）。
+
+⚠️ 这个组件是全站共用的，别的页面上 `undo_action` 未定义 → 假 → 什么都不画。
+
+⚠️ 它是一张**普通的 POST 表单**，打的是这一页自己 —— 也就是说它走的是
+   改状态本来那条路，包括那一次 `_managed_event()` 权限检查。撤销不是一条
+   新路径，是同一条路反着走一次。
+{% endcomment %}
 {% if messages %}
   <div class="mb-6 space-y-2" role="status" aria-live="polite">
     {% for message in messages %}
@@ -13,7 +33,31 @@ messages 框架的四档。位置固定在主内容区顶部 —— 每一页都
         {% elif message.level_tag == 'warning' %}border-warning-fg/30 bg-warning-bg text-warning-fg dark:border-warning-fg-dark/30 dark:bg-warning-bg-dark dark:text-warning-fg-dark
         {% elif message.level_tag == 'error' %}border-danger-fg/30 bg-danger-bg text-danger-fg dark:border-danger-fg-dark/30 dark:bg-danger-bg-dark dark:text-danger-fg-dark
         {% else %}border-info-fg/30 bg-info-bg text-info-fg dark:border-info-fg-dark/30 dark:bg-info-bg-dark dark:text-info-fg-dark{% endif %}">
-        {{ message }}
+        {% comment %}
+        ⚠️ 撤销只挂在**第一条**提示上（`forloop.first`）。一次请求里可能有好几条
+           提示，而撤销说的是「刚才那一次操作」—— 画在每一条旁边就是同一颗按钮
+           出现三次，而它们全都做同一件事。
+        {% endcomment %}
+        {% if undo_action and forloop.first %}
+          <div class="flex flex-wrap items-center justify-between gap-3">
+            <span>{{ message }}</span>
+            <form method="post" action="{{ request.get_full_path }}" class="shrink-0">
+              {% csrf_token %}
+              <input type="hidden" name="event" value="{{ undo_action.event }}">
+              <input type="hidden" name="status" value="{{ undo_action.status }}">
+              {% comment %}
+              ⚠️ 按钮上写着**要回到哪里**（"Undo — back to Draft"），不是光一个
+                 "Undo"。人在这一列上一秒钟点了两次的时候，「撤销」这两个字
+                 本身答不出「撤销到哪一档」。
+              {% endcomment %}
+              <button type="submit" class="underline underline-offset-2">
+                Undo — back to {{ undo_action.label }}
+              </button>
+            </form>
+          </div>
+        {% else %}
+          {{ message }}
+        {% endif %}
       </div>
     {% endfor %}
   </div>

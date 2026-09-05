@@ -100,33 +100,46 @@ def can_manage_event(user, event) -> bool:
 def can_publish_notice(user, ministry) -> bool:
     """Put a notice on the board in this ministry's name.
 
-    ⚠️ Deliberately the same bar as publishing an event, and it was asked once
-       rather than assumed (2026-08-31). A notice is **louder** than an event —
-       it lands on the home page of everybody it is ticked for, where an event
-       waits in a list to be found — so there is a real argument for reserving
-       the wider audiences to the foundation tier.
+    Two ways in, and unlike an event's records they are **not** two different
+    authorities — both may write:
 
-       It was not taken, for one reason: the audience axis already has one set
-       of rules, and giving the same three ticks a second, stricter meaning on
-       a second table is how two checks come to disagree about the same
-       question. What stops a ministry admin over-reaching is the same thing
-       that stops them on an event — the form pre-ticks only their own ministry
-       (decision 14) and every audience is recorded with a name against it.
+      · the ministry's own admin, in their own ministry's name;
+      · the foundation tier, in any ministry's name.
 
-       If the foundation ever says otherwise, the change is this function and
-       nothing else.
+    ⚠️ The foundation half arrived 2026-09-03, on the foundation's word, and it
+       is the restart condition D41's last table wrote down verbatim — "给
+       ministry admin 之外的人发布权 / 基金会说了算". That entry also promised
+       "改动只在 org.permissions.can_publish_notice 一个函数里", and that turned
+       out to be **half true**: the check is one line here, but a check is not a
+       door. `NoticeForm` builds its ministry dropdown from
+       ministry_ids_administered_by(), so a foundation admin holding no
+       MinistryRole would have passed this function and still had an empty
+       dropdown — permitted to publish, with nothing to publish for. The other
+       half of the change is there, and it is written on that form.
+
+    ⚠️ What did **not** change is the audience axis. A notice is louder than an
+       event — it lands on the home page of everybody it is ticked for — and
+       there was a real argument (2026-08-31) for reserving the wider ticks to
+       this tier. It was not taken then and is not taken now: the same three
+       ticks meaning something stricter on a second table is how two checks come
+       to disagree about one question. Every audience is still recorded with a
+       name against it.
     """
-    return administers(user, ministry)
+    return administers(user, ministry) or in_foundation_tier(user)
 
 
 def can_manage_notice(user, notice) -> bool:
     """Edit it, publish it, take it down.
 
-    ⚠️ The foundation tier is included here and **not** in can_publish_notice,
-       which is not an inconsistency: taking down a wrong or harmful notice is
-       exactly the kind of thing somebody foundation-wide has to be able to do
-       without waiting for the ministry admin who wrote it to answer the phone.
-       Writing one in a ministry's name is a different act from removing one.
+    ⚠️ **Deliberately still its own function, even though it and
+       can_publish_notice now admit exactly the same two tiers** (2026-09-03).
+       They coincide today for two unrelated reasons: this one has always
+       included the foundation tier because taking down a wrong or harmful
+       notice cannot wait for the admin who wrote it to answer the phone, and
+       that one includes it as of today because the foundation asked to be able
+       to write one. Folding either into the other would tie the two together,
+       and the next move is likelier to separate them again — if publishing is
+       ever narrowed back, removing must stay wide.
     """
     if notice is None:
         return False

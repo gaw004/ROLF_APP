@@ -2,17 +2,71 @@
 {% block title %}Notices{% endblock %}
 {% block main_width %}max-w-4xl{% endblock %}
 
+{% comment %}
+页头条（2026-09-03）。「Notices」这四个字从版心里搬到了顶栏底下那一条，
+和活动列表 2026-08-28 那次是同一个搬法、同一个组件。
+
+🔴 **两处都有字，而 `<h1>` 只有版心里那一个**（2026-09-03 第二轮改）。第一版把
+   版心里那个删掉了，那是把「下滑时的路标」当成了「这一页的标题」——
+   用户的原话分得很清楚：「顶栏的 title 是为了网页下滑可以看到这是哪一个页面，
+   但是页面本身也要有 title」。页头条那两格因此降成了普通导航链接。
+
+🔴 **「Put up a notice」那颗按钮在这一页没了**（用户 2026-09-03）。它现在只在
+   /notices/manage/ 上 —— 这一页是**读**公告的地方，对着一屋子人里的两三个
+   admin 画一颗写操作的按钮，等于把这一页说成半个管理页。
+   ⚠️ 有权限的人并没有因此少一条路：右边那一格就是入口，而且它是常驻的，
+      比一颗只在这一页出现的按钮更好找。
+{% endcomment %}
+{% block page_bar %}
+  {% comment %}
+  ⚠️ 一格（2026-09-03 第三轮从两格收回来）。这一条写的就是这一页的名字；
+     通往管理页的入口挪到了下面标题行右端那颗 ⋮。
+
+  ⚠️ 那句 `url … as` 必须写在 **block 里面** —— 子模板里写在所有 block 之外的
+     标签不会被执行，于是变量是空的，渲染出 `href=""`：一个点了会回到站点根
+     目录的链接，而模板一个错都不报。活动列表那边踩过一次。
+  {% endcomment %}
+  {% url 'notices:notice_list' as here_url %}
+  {% include "core/components/page_bar.html" with title="Notices" url=here_url %}
+{% endblock %}
+
 {% block content %}
-  <div class="mb-6 flex flex-wrap items-center justify-between gap-3">
+  {% comment %}
+  ⚠️ 这一页的**真**标题（2026-09-03 第二轮加回来）。它是整页唯一的 `<h1>` ——
+     页头条那两格是 `<nav>` 里的链接，一个 h1 都没有。
+
+  ⚠️ 这一行**没有按钮**：「Put up a notice」只在 /notices/manage/ 上（同日第一轮
+     用户定的），所以这里不写那个 `flex justify-between` 的外壳，标题独占一行。
+  {% endcomment %}
+  {% comment %}
+  ⚠️ 标题和那颗 ⋮ 同一行（2026-09-03）。⋮ 是通往 /notices/manage/ 的入口 ——
+     站点菜单里那一格同日撤掉了，这里是它现在唯一的可见入口。
+
+  ⚠️ 门槛是 `may_publish`（视图算的 `can_reach_notice_manage`）。画给别人就是
+     一个点了必定 403 的链接 —— 读起来是「站坏了」，而不是「这一页不归你」。
+
+  ⚠️ 这一行仍然**没有**「Put up a notice」那颗按钮（用户同日第一轮定的）：
+     这一页是读公告的地方。⋮ 通向的是管理页，那颗按钮在那儿。
+  {% endcomment %}
+  <div class="mb-6 flex items-center justify-between gap-3">
     <h1 class="text-2xl font-semibold">Notices</h1>
     {% if may_publish %}
-      {% url 'notices:notice_create' as create_url %}
-      {% include "core/components/button.html" with label="Put up a notice" href=create_url variant="primary" %}
+      {% url 'notices:notice_manage_list' as manage_url %}
+      {% include "core/components/manage_link.html" with href=manage_url label="Manage notices" %}
     {% endif %}
   </div>
 
   {% if notices %}
     {% include "notices/_current_notices.html" %}
+    {% comment %}
+    ⚠️ 翻页器只在装不下时才画（组件自己判），所以正常规模下这一页看不到它 ——
+       用户说得对，同时挂在板上的公告不该有很多。它在这里是因为「不该很多」
+       不是「不可能很多」，而在此之前这一列是**完全无上限**的。
+
+    ⚠️ 不传 `target`：这一页是整页渲染的，没有 HTMX 片段。传一个不存在的 id
+       过去的话，点了 Next 屏幕上什么都不会发生，而页面一个错都不报。
+    {% endcomment %}
+    {% include "core/components/pagination.html" %}
   {% else %}
     {% comment %}
     ⚠️ 说清楚是哪一种空 —— empty.html 自己的注释写着「『暂无数据』把『你什么都不用做』

@@ -86,7 +86,26 @@
    **稳定的选择器**上 —— 靠 `.bg-brand-600` 去匹配会命中任何借用这个颜色的东西，
    而且工具类的名字是会随设计调整而变的。
 {% endcomment %}
-{% with base="btn inline-flex items-center justify-center gap-2 rounded-full px-5 py-2 text-sm font-medium transition-colors disabled:opacity-50 disabled:pointer-events-none" %}
+{% comment %}
+🔴 **`hit`：命中区，不是尺寸**（2026-09-03 设计评审第 2 条）。
+
+   这颗按钮是 `py-2` + `text-sm` = **36px 高**，而 HIG 要 44pt、Material 要 48dp。
+   表格行里的每一颗都是这个尺寸，而 ministry admin 有相当一部分时间在手机上。
+
+   ⚠️ 解法不是把 `py-2` 加到 `py-3`：那会让管理列表每一行都高 8px，
+      为了手指去改所有人的版面。Apple 和 Material 对密集表格给的是同一个答案 ——
+      **视觉尺寸不变，命中区用伪元素撑开**。几何写在 app.css 的 `.btn-hit`。
+
+   ⚠️ 只有**行内**的按钮需要它。页面上那些独立的按钮周围本来就有留白，
+      手指点不空；到处加反而会让相邻控件的命中区互相重叠。
+{% endcomment %}
+{% comment %}
+⚠️ 两层 `with`，不是一句 `|add:hit|yesno:…`：过滤器是从左往右串的，
+   `add` 之后那个字符串**永远是真**，`yesno` 会对每一颗按钮都答「是」。
+   先把 `hit` 转成一段后缀（真 → " btn-hit"，假 → ""），再拼上去。
+{% endcomment %}
+{% with hit_class=hit|yesno:" btn-hit," %}
+{% with base="btn inline-flex items-center justify-center gap-2 rounded-full px-5 py-2 text-sm font-medium transition-colors disabled:opacity-50 disabled:pointer-events-none"|add:hit_class %}
 {% if variant == "primary" %}
   {% comment %}白字配 brand-600 = 5.21:1。⚠️ 别改成 brand-500，那是 3.65:1，过不了线。{% endcomment %}
   {% with cls=base|add:" btn-primary bg-brand-600 text-white hover:bg-brand-700 dark:bg-brand-500 dark:hover:bg-brand-400 dark:text-ink-950" %}{% include "core/components/_button_tag.html" %}{% endwith %}
@@ -97,5 +116,6 @@
 {% else %}
   {% with cls=base|add:" btn-secondary bg-white text-ink-800 ring-1 ring-inset ring-ink-300 hover:bg-ink-50 dark:bg-ink-800 dark:text-ink-100 dark:ring-ink-600 dark:hover:bg-ink-700" %}{% include "core/components/_button_tag.html" %}{% endwith %}
 {% endif %}
+{% endwith %}
 {% endwith %}
 {% endspaceless %}

@@ -1969,7 +1969,7 @@ class StylesheetReader:
        没有一起动 —— 但新的一处不该再多一份。
 
     ⚠️ 选择器是**整格**匹配的（逗号分开的每一格各自比对），不是子串：
-       比 `.page-bar` 会命中 `.page-bar-title`，而那是另一条规则。
+       比 `.page-bar` 会命中 `.page-bar-cell`，而那是另一条规则。
     """
 
     def styles(self):
@@ -2965,16 +2965,88 @@ class PageBarTests(StylesheetReader, SimpleTestCase):
                 self.declarations(selector), r"border(-bottom)?(-color|-width)?:",
                 f"`{selector}` 又画上边框了 —— 这个头是一条边都不要的")
 
-    def test_the_title_is_lighter_than_the_wordmark_and_centred(self):
+    def test_the_cells_are_lighter_than_the_wordmark_and_centred(self):
         """⚠️ 一个 600、一个 400：这一条说的是「你在哪一页」，不是这个头的主角，
            两行同样粗会互相抢。居中是为了和上面那个绝对居中的字样对同一条中轴。
         """
-        title = self.declarations(".page-bar-title")
+        title = self.declarations(".page-bar-cell")
         weight = re.search(r"font-weight:\s*(\d+)", title)
         self.assertIsNotNone(weight, "标题没写字重 —— 它会跟着 h1 的默认粗体走")
         self.assertLess(int(weight.group(1)), 600,
                         "页头条的标题不该和顶栏那个字样一样粗")
         self.assertRegex(self.declarations(".page-bar-inner"), r"justify-content:\s*center")
+
+    def test_both_cells_are_one_rule_not_two(self):
+        """🔴 第二格 2026-09-03 到位（Notices / Notices I publish，Events / Events
+           I Manage）。它和当前那一格只有一处不同：一个是 `<h1>`、带
+           `aria-current`，另一个不是。
+
+        排版**必须是同一条规则**：撑满行高（下划线要落在头的下沿上，且不能被
+        `truncate` 裁掉）、同样的字重和字距。抄一份的表现是两格基线差半个像素、
+        或者两条下划线一高一低 —— 截图上要盯很久才看得出来。
+        """
+        rules = [sel for sel, body in
+                 re.findall(r"([^{}]+?)\{([^{}]*?)\}", self.styles(), re.S)
+                 if ".page-bar-cell" in {one.strip() for one in sel.split(",")}
+                 and "height: 100%" in body]
+        self.assertEqual(len(rules), 1,
+                         "格子那个盒子被写在了不止一处（或一处都没有）")
+        self.assertNotIn(
+            ".page-bar-title", self.styles(),
+            "`.page-bar-title` 又回来了 —— 这一条 bar 不是标题（h1 在版心里），"
+            "一个叫 title 的类画着不是标题的东西，下一个人会照着名字推断 DOM")
+
+    def test_the_two_cells_are_spaced_by_the_stylesheet_not_the_template(self):
+        """⚠️ 间距和 `justify-content: center` 是**一对**：这一排是作为一组居中的，
+           而「一组」有多宽正是这个数说了算。写成模板上的 `gap-7` 的话，改一处就
+           会看到这一排慢慢偏离上面那个字样的中轴，而两边各自看都正常。
+        """
+        inner = self.declarations(".page-bar-inner")
+        self.assertRegex(inner, r"gap:\s*[\d.]+rem")
+        markup = (Path(settings.BASE_DIR) / "core" / "templates" / "core"
+                  / "components" / "page_bar.html").read_text()
+        nav = re.search(r'<nav class="page-bar-inner[^"]*"', markup)
+        self.assertIsNotNone(nav, "页头条那一层的钩子不见了")
+        self.assertNotRegex(nav.group(0), r"\bgap-\d",
+                            "间距又写回模板上了 —— 它和居中是一对，要在同一处")
+
+    def test_the_bar_is_navigation_and_carries_no_heading(self):
+        """🔴 **这一条 bar 里一个 `<h1>` 都没有**（2026-09-03 第二轮，用户：
+           「顶栏的 title 是为了网页下滑可以看到这是哪一个页面，但是页面本身
+           也要有 title」）。
+
+        分工写死在这里：这一条只回答「下滑之后我在哪一页」，而这一页的标题在
+        版心里。第一版反过来 —— 这里是 h1，版心里那个被删了 —— 于是页面本身
+        没有标题。两个版本都只有一个 h1，只有这一版两处都有字。
+
+        ⚠️ 钉的是那个 partial 自己，因为四个页面都从它长出来：它长回一个 h1 的
+           那一天，四页同时变成一页两棵标题树，而屏幕上一点都看不出来。
+        """
+        markup = (Path(settings.BASE_DIR) / "core" / "templates" / "core"
+                  / "components" / "_page_bar_cell.html").read_text()
+        body = re.sub(r"\{%\s*comment\s*%\}.*?\{%\s*endcomment\s*%\}", "",
+                      markup, flags=re.S)
+        self.assertNotIn("<h1", body, "页头条那一格又成了标题")
+        self.assertNotIn("<h2", body, "同上 —— 这一排是导航，不是标题层级")
+
+    def test_only_the_current_cell_says_it_is_the_current_page(self):
+        """🔴 `aria-current="page"` 是两格之间**唯一**的区别，而它不是装饰：
+           屏幕上「你在这一格」由那条常亮的下划线说，读屏软件看不见线。
+
+        ⚠️ 常亮那一档的 CSS 选中的也正是这个属性（上面那条守卫钉着），所以
+           两件事绑在同一处 —— 分家的表现是「线还亮着，读屏却说这不是当前页」。
+        """
+        markup = (Path(settings.BASE_DIR) / "core" / "templates" / "core"
+                  / "components" / "_page_bar_cell.html").read_text()
+        # ⚠️ 注释先剥掉：那段注释里就写着这个属性名两次，数原文会数到三。
+        markup = re.sub(r"\{%\s*comment\s*%\}.*?\{%\s*endcomment\s*%\}", "",
+                        markup, flags=re.S)
+        self.assertEqual(markup.count('aria-current="page"'), 1,
+                         "aria-current 不再是恰好一处 —— 要么两格都说自己是"
+                         "当前页，要么一格都不说")
+        self.assertRegex(
+            markup, r'\{%\s*if is_here\s*%\}\s*aria-current="page"',
+            "aria-current 没有挂在 `is_here` 上了")
 
     def test_the_underline_is_one_line_with_two_endpoints(self):
         """参考图那条线：鼠标滑过时**滑**出来，当前所在那一格一直亮着。
@@ -3042,7 +3114,7 @@ class PageBarTests(StylesheetReader, SimpleTestCase):
         after = self.declarations(".page-bar-link::after")
         self.assertRegex(after, r"bottom:\s*0",
                          "线又离开下沿了 —— 它该和整个头的那条边同一个高度")
-        for selector in (".page-bar-title", ".page-bar-link"):
+        for selector in (".page-bar-cell", ".page-bar-link"):
             self.assertRegex(
                 self.declarations(selector), r"height:\s*100%",
                 f"`{selector}` 没撑满行高 —— 线会落在字底下，还可能被 truncate 裁掉")
@@ -3865,7 +3937,9 @@ class SiteMenuTests(TestCase):
         MinistryRole.objects.create(contact=user.contact, ministry=pantry)
         menu = self.menu(user)
         self.assertEqual(self.headings(menu), ["Ministry Admin"])
-        self.assertIn("Events I Manage", self.labels(menu))
+        # ⚠️ 那一组现在只剩 Memories Photos：两个管理页 2026-09-03 从菜单里
+        #    撤走了，入口是各自页面标题行右端那颗 ⋮（见下面那条守卫）。
+        self.assertIn("Memories Photos", self.labels(menu))
 
     def test_a_foundation_admin_gets_the_foundation_heading_only(self):
         from org.permissions import foundation_admin_group
@@ -3874,7 +3948,6 @@ class SiteMenuTests(TestCase):
         user.groups.add(foundation_admin_group())
         menu = self.menu(get_user_model().objects.get(pk=user.pk))
         self.assertEqual(self.headings(menu), ["Foundation Admin"])
-        self.assertIn("All Events", self.labels(menu))
         self.assertIn("Ministry Admins", self.labels(menu))
 
     def test_somebody_with_both_hats_gets_both_headings_in_order(self):
@@ -3889,17 +3962,47 @@ class SiteMenuTests(TestCase):
         user.groups.add(foundation_admin_group())
         menu = self.menu(get_user_model().objects.get(pk=user.pk))
         self.assertEqual(self.headings(menu), ["Ministry Admin", "Foundation Admin"])
+        # ⚠️ 同一个 URL 在两顶帽子下只出现一次，不是两次 —— 那一页自己会为
+        #    foundation tier 变宽，第二份只会读成 bug。
+        self.assertEqual(self.labels(menu).count("Memories Photos"), 1)
 
-    def test_the_foundation_entry_asks_for_the_foundation_wide_view(self):
-        # ⚠️ Without ?scope=all, somebody who also runs a ministry would follow a
-        #    link labelled "All Events" onto a page showing only their own.
+    def test_the_two_management_pages_left_this_menu(self):
+        """🔴 **2026-09-03：三格撤走了** —— `Events I Manage`、`Notices I Publish`、
+           `All Events`。入口改成各自页面标题行右端那颗 ⋮，加上仪表盘那张卡。
+
+        ⚠️ 这条守卫钉的是**知情的收敛**，不是「这个项目又漏了一个入口」。
+           两者长得一模一样（菜单里没有那一格），区别只在有没有别的东西指向
+           那一页 —— 所以下面那半条一起钉：⋮ 那个组件必须存在且被两页调用。
+           光钉「菜单里没有」的话，哪天 ⋮ 被删了，这条守卫照样绿。
+
+        ⚠️ `?scope=all` 也一并消失：管理页从「两种模式」改成了「一张列表、
+           权限逐行」，没有模式可切了。
+        """
         from org.permissions import foundation_admin_group
+        from org.models import Ministry, MinistryRole
 
         user = self.volunteer()
+        pantry = Ministry.objects.create(code="food_pantry", name="Food Pantry")
+        MinistryRole.objects.create(contact=user.contact, ministry=pantry)
         user.groups.add(foundation_admin_group())
         menu = self.menu(get_user_model().objects.get(pk=user.pk))
-        entry = next(i for i in menu if i.get("label") == "All Events")
-        self.assertIn("scope=all", entry["url"])
+
+        labels = self.labels(menu)
+        for gone in ("Events I Manage", "All Events", "Notices I Publish"):
+            with self.subTest(label=gone):
+                self.assertNotIn(gone, labels, "这一格该在 ⋮ 那边，不在菜单里")
+        self.assertFalse([i for i in menu if "scope=all" in (i.get("url") or "")])
+
+        # …而那两页**有**入口：组件在，且两个读页面都调用了它。
+        component = (Path(settings.BASE_DIR) / "core" / "templates" / "core"
+                     / "components" / "manage_link.html")
+        self.assertTrue(component.exists(), "⋮ 那个组件不见了 —— 管理页没有入口了")
+        for path in [Path("notices") / "templates" / "notices" / "notice_list.html",
+                     Path("events") / "templates" / "events" / "event_list.html"]:
+            with self.subTest(path=str(path)):
+                markup = (Path(settings.BASE_DIR) / path).read_text()
+                self.assertIn("manage_link.html", markup,
+                              "这一页没有通往管理页的 ⋮ —— 那一页又只能手敲 URL 了")
 
     def test_the_admin_site_is_its_own_section_not_a_tier(self):
         # is_staff is a different axis from the two ministry tiers, so filing it
@@ -6386,3 +6489,264 @@ class HealthCheckGuardTests(TestCase):
             logged, ["/", "/events/"],
             "the access log either still carries the health check, or has "
             "stopped carrying the requests somebody will need to read")
+
+
+class PaginationHelperTests(TestCase):
+    """`core/pagination.py` —— 翻页那两个函数（2026-09-03 从 events 搬来）。
+
+    搬家的理由和 `Audience` 去 `org` 那次一样：`notices` 的两页也要翻页，而让它
+    为一件和活动无关的事去 import `events` 是画错的依赖（D41 第四节）。
+    """
+
+    def test_a_models_own_ordering_survives_being_paginated(self):
+        """🔴 **`Meta.ordering` 必须被读到**，而这正是搬家时翻出来的那个坑。
+
+        `qs.query.order_by` 对一个没有自己调过 `.order_by()` 的 queryset 是**空的**
+        —— 模型的 `Meta.ordering` 要等编译 SQL 时才补上。所以旧版那句
+        「往 `query.order_by` 后面加一个 `-pk`」对这种 queryset 是**替换**掉排序，
+        不是补齐它。
+
+        活动那边一次都没碰上：`_scoped_events()` 显式排了序。`Notice` 没有 ——
+        它的排序写在 `Meta` 上 —— 于是公告管理页会从「最近上板的在最前」
+        变成「最后建的在最前」，而两者在测试数据里常常长得一模一样。
+        """
+        from core.pagination import ordering_for
+        from notices.models import Notice
+
+        self.assertEqual(Notice.objects.all().query.order_by, (),
+                         "前提变了：这个 queryset 现在自己带排序了")
+        self.assertEqual(ordering_for(Notice.objects.all()),
+                         ["-starts_showing", "-id", "-pk"])
+
+    def test_an_explicit_order_by_wins_over_the_models_default(self):
+        from core.pagination import ordering_for
+        from notices.models import Notice
+
+        self.assertEqual(ordering_for(Notice.objects.order_by("title")),
+                         ["title", "-pk"])
+
+    def test_the_ordering_always_ends_in_a_unique_column(self):
+        """🔴 少了它，翻页会说谎：两条排序键相同的行之间没有定义先后，
+           于是第 1 页和第 2 页可以各自把它排在前面 —— 一行出现两次，
+           或者一行凭空消失，而没有任何东西会报错。
+        """
+        from core.pagination import ordering_for
+        from notices.models import Notice
+        from events.models import Event
+
+        for rows in (Notice.objects.all(), Event.objects.order_by("-start_time"),
+                     Event.objects.all()):
+            with self.subTest(model=rows.model.__name__):
+                self.assertEqual(ordering_for(rows)[-1], "-pk")
+
+    def test_the_two_functions_sort_identically(self):
+        """🔴 `page_holding()` 和 `page_of()` 必须用**一模一样**的排序。
+
+        差一截的话，「跳到那一场所在的那一页」偶尔会跳到相邻的一页 ——
+        看起来像随机失灵。所以两个函数在同一个文件里，而且都问同一个
+        `ordering_for()`；这条守卫钉的是「都问它」，不是两串字面量相等。
+        """
+        source = (Path(settings.BASE_DIR) / "core" / "pagination.py").read_text()
+        for name in ("def page_of", "def page_holding"):
+            body = source[source.index(name):]
+            body = body[:body.index("\n\n\n")] if "\n\n\n" in body else body
+            self.assertIn("ordering_for(rows)", body,
+                          f"`{name}` 自己排序了 —— 两处排序迟早会差一截")
+
+
+class PaginationComponentTests(SimpleTestCase):
+    """翻页那个组件（`core/components/pagination.html`）。"""
+
+    def markup(self):
+        """模板本身，**注释剥掉**。
+
+        ⚠️ 剥注释不是可选的：那段注释里逐字写着它防的那个反面教材
+           （`hx-target="#event-results"`），数原文的守卫会当场把正确的代码
+           报成坏的。这个文件里同一件事已经栽过两次（`x-dialog="open"` 那条、
+           页头条那条），所以这里从第一版就剥。
+        """
+        markup = (Path(settings.BASE_DIR) / "core" / "templates" / "core"
+                  / "components" / "pagination.html").read_text()
+        return re.sub(r"\{%\s*comment\s*%\}.*?\{%\s*endcomment\s*%\}", "",
+                      markup, flags=re.S)
+
+    def test_the_htmx_target_is_a_parameter_and_not_a_hardcoded_id(self):
+        """🔴 原来这里写死着 `hx-target="#event-results"`（2026-09-03 改）。
+
+        公告那两页整页渲染，根本没有这个 id —— 照抄过去的话 HTMX 找不到目标，
+        屏幕上就是「点了 Next 什么都没发生」，控制台一句话，页面一个错都不报。
+        """
+        markup = self.markup()
+        self.assertNotIn('hx-target="#event-results"', markup,
+                         "翻页器又把活动列表那个 id 写死了")
+        self.assertIn('hx-target="{{ target }}"', markup)
+
+    def test_no_htmx_attribute_is_drawn_without_a_target(self):
+        """⚠️ 不给 `target` 就一个 hx-* 都不画 —— 而不是画一个指向空处的。
+           少的只是「不整页重载」那条快路：这两个 `<a>` 本来就是完整的 GET（D24）。
+        """
+        markup = self.markup()
+        for attribute in re.findall(r"hx-[a-z-]+=", markup):
+            with self.subTest(attribute=attribute):
+                before = markup[:markup.index(attribute)]
+                self.assertGreater(
+                    before.count("{% if target %}"), before.count("{% endif %}"),
+                    f"`{attribute}` 画在了 `target` 的判断外面")
+
+    def test_the_links_keep_the_rest_of_the_query_string(self):
+        """⚠️ `{% querystring %}` 保留当前所有查询参数、只换 page。手写 `?page=2`
+           会把筛选条件和管理列表上的 `report=1` 一起丢掉 —— 表现是
+           「翻一页，筛选没了」。
+        """
+        markup = self.markup()
+        self.assertNotRegex(markup, r'href="\?page=',
+                            "翻页链接又是手写的了 —— 它会丢掉筛选条件")
+        self.assertEqual(markup.count("{% querystring page="), 4)
+
+
+class TouchTargetTests(StylesheetReader, SimpleTestCase):
+    """行内按钮的命中区（2026-09-03 设计评审第 2 条）。
+
+    按钮视觉高度 36px（`py-2` + `text-sm`），HIG 要 44pt、Material 要 48dp。
+    表格行里每一颗都是这个尺寸，而 ministry admin 有相当一部分时间在手机上。
+    """
+
+    def test_the_hit_area_reaches_forty_four_pixels(self):
+        """🔴 36 + 4 + 4 = 44。这条守卫钉的是**那个数**，不是「有这条规则」——
+           伪元素还在、`inset` 被人调小了的表现是「还是不好点」，而看不出来。
+        """
+        after = self.declarations(".btn-hit::after")
+        found = re.search(r"inset:\s*(-?[\d.]+)rem\s+0", after)
+        self.assertIsNotNone(found, "命中区的几何不见了，或者不再只撑竖直方向")
+        grown = abs(float(found.group(1))) * 16 * 2
+        self.assertGreaterEqual(36 + grown, 44,
+                                "命中区撑得不够，行内按钮仍然低于 44pt")
+
+    def test_it_grows_only_vertically(self):
+        """⚠️ 左右也撑的话，同一行里相邻两颗按钮的命中区会重叠 —— 点在缝里的
+           那一下打给谁取决于 DOM 顺序，而屏幕上那里明明是有空隙的。
+        """
+        self.assertRegex(self.declarations(".btn-hit::after"),
+                         r"inset:\s*-?[\d.]+rem\s+0\b")
+
+    def test_the_host_is_positioned_or_the_pseudo_element_escapes(self):
+        """⚠️ 少了 `position: relative`，那个绝对定位的伪元素会去找**更外面**的
+           定位祖先 —— 命中区跑到表格外面某处，而按钮看起来一切正常。
+        """
+        self.assertRegex(self.declarations(".btn-hit"), r"position:\s*relative")
+
+    def test_the_row_buttons_ask_for_it(self):
+        """⚠️ 规则存在不等于用上了。这条钉的是公告管理页那一行里的每一颗按钮 ——
+           它是全站行内按钮最密的地方。
+        """
+        markup = (Path(settings.BASE_DIR) / "notices" / "templates" / "notices"
+                  / "notice_manage_list.html").read_text()
+        body = re.sub(r"\{%\s*comment\s*%\}.*?\{%\s*endcomment\s*%\}", "",
+                      markup, flags=re.S)
+        # ⚠️ 只看 `<tbody>` 里面。页面顶上那颗「Put up a notice」和空状态里那颗
+        #    是**独立**按钮，周围本来就有留白 —— 给它们也加，只会让命中区去和
+        #    别的东西重叠。这条守卫说的是「行内的那些」，所以它就该只看行内。
+        rows = re.search(r"<tbody>.*?</tbody>", body, re.S)
+        self.assertIsNotNone(rows, "这一页不画表格了？")
+        includes = re.findall(r'include "core/components/button\.html"[^%]*',
+                              rows.group(0))
+        self.assertTrue(includes, "行里不画按钮了？")
+        for one in includes:
+            with self.subTest(button=one[:70]):
+                self.assertIn("hit=1", one, "这颗行内按钮没有加大命中区")
+
+
+class RowMenuTests(StylesheetReader, SimpleTestCase):
+    """行内「⋯」菜单（2026-09-03 设计评审第 3 + 6 条）。
+
+    🔴 这个组件存在的全部理由是**三个都会静默失效的约束**，而它们各自都能让
+       另外两种写法看起来是对的。这些守卫钉的就是那三条。
+    """
+
+    def component(self):
+        markup = (Path(settings.BASE_DIR) / "core" / "templates" / "core"
+                  / "components" / "row_menu.html").read_text()
+        return re.sub(r"\{%\s*comment\s*%\}.*?\{%\s*endcomment\s*%\}", "",
+                      markup, flags=re.S)
+
+    def test_it_is_a_popover_and_not_a_positioned_div(self):
+        """🔴 三条约束，缺一不可：
+
+        ① `.table-wrap` 是 `overflow-x: auto`，而 `overflow-x: auto` 之下
+           `overflow-y` **不可能**是 `visible` —— 绝对定位的面板会被裁掉。
+           ⚠️ 而且只在窗口窄到出现横向滚动条时才裁，宽屏上一切正常。
+        ② `position: fixed` 会被带 `backdrop-filter` 的祖先抓住，而 `.card`
+           在深色 + 有大图时正是这样一个祖先（这个仓库为此栽过两次）。
+        ③ D24：菜单里装着这一行仅有的几个写操作，开合不能只有 JS 一条路。
+
+        `popover` 一次答完三条：top layer（祖先够不着）+ `popovertarget`
+        （零 JS 开合）。
+        """
+        markup = self.component()
+        self.assertRegex(markup, r"<div[^>]*\spopover\b",
+                         "面板不再是 popover —— 它会被表格的横向滚动裁掉")
+        self.assertIn("popovertarget=", markup,
+                      "开合不再是原生的 —— 关掉 JS 就打不开了")
+        self.assertNotIn("x-show", markup,
+                         "改回 Alpine 了：那会同时踩中裁剪、backdrop-filter 和 D24")
+
+    def test_the_trigger_and_the_panel_agree_on_one_id(self):
+        """⚠️ 对不上的表现是**点了没反应**，控制台一句话都没有。
+           所以两处都从同一个 `id` 拼出来。
+        """
+        markup = self.component()
+        self.assertEqual(markup.count('popovertarget="row-menu-{{ id }}"'), 1)
+        self.assertEqual(markup.count('id="row-menu-{{ id }}"'), 1)
+
+    def test_the_panel_clears_the_user_agent_centring(self):
+        """🔴 `[popover]` 的 UA 样式是 `inset: 0` + `margin: auto` —— 也就是
+           **视口居中**。不清掉的话，app.js 写上去的 top/left 会被这两条按住：
+           坐标算对了，菜单还在屏幕正中间。
+        """
+        panel = self.declarations(".row-menu")
+        self.assertRegex(panel, r"inset:\s*auto")
+        self.assertRegex(panel, r"margin:\s*0")
+
+    def test_the_trigger_has_a_name_that_says_which_row(self):
+        """⚠️ 只写 "Actions" 的话，读屏用户在一页 50 行上听到的是五十遍一模一样的
+           「Actions 按钮」，分不出哪个是哪一行。所以 `aria-label` 收的是整句。
+        """
+        self.assertIn('aria-label="{{ label }}"', self.component())
+        # ⚠️ 只有公告管理页在用这个组件。活动那六个 Go to 链接 2026-09-03 收进来过，
+        #    当天撤回（用户要它们留在表格里）—— 撤的是那一处的应用，不是组件。
+        markup = (Path(settings.BASE_DIR) / "notices" / "templates" / "notices"
+                  / "notice_manage_list.html").read_text()
+        self.assertIn('label="Actions for "|add:', markup,
+                      "这一页给菜单的名字里没有带上这一行是谁")
+
+    def test_the_writes_inside_are_still_whole_server_forms(self):
+        """🔴 D24：收进菜单**一个字都没改**这些操作的提交路径。
+           菜单只是把它们藏起来；一个 GET 就能触发的写操作，是爬虫替你按的那种。
+        """
+        markup = (Path(settings.BASE_DIR) / "notices" / "templates" / "notices"
+                  / "_notice_menu_items.html").read_text()
+        body = re.sub(r"\{%\s*comment\s*%\}.*?\{%\s*endcomment\s*%\}", "",
+                      markup, flags=re.S)
+        forms = re.findall(r'<form method="post"', body)
+        self.assertEqual(len(forms), 3, "三档各一张表单（上板 / 下架 / 回草稿）")
+        self.assertEqual(body.count("{% csrf_token %}"), 3)
+        self.assertNotIn("<a ", body, "写操作变成链接了 —— GET 触发的写操作")
+
+    def test_the_confirm_uses_the_house_idiom_and_not_a_dead_attribute(self):
+        """🔴 第一版这里写的是 `data-confirm="…"` —— 而这个仓库里**没有任何东西
+           接这个属性**。表现是一个静默失效的确认框：模板上明明写着一句确认，
+           点下去直接就下架了。
+
+        确认必须和 `_button_tag.html` 用同一句 Alpine。
+        """
+        markup = (Path(settings.BASE_DIR) / "notices" / "templates" / "notices"
+                  / "_notice_menu_items.html").read_text()
+        # ⚠️ 先剥注释：那段注释里逐字写着它防的那个反面教材（`data-confirm`），
+        #    数原文的守卫会把正确的代码报成坏的。这个文件里同一件事已经栽过三次
+        #    （`x-dialog="open"`、页头条、翻页组件），所以这里也剥。
+        markup = re.sub(r"\{%\s*comment\s*%\}.*?\{%\s*endcomment\s*%\}", "",
+                        markup, flags=re.S)
+        self.assertNotIn("data-confirm", markup,
+                         "又用上了那个没人接的属性 —— 确认会静默失效")
+        self.assertEqual(markup.count("window.confirm("), 2,
+                         "两个破坏性动作各要一句确认（下架 / 回草稿）")

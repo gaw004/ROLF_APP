@@ -24,16 +24,19 @@ Two halves that share nothing but this file:
 import hashlib
 import io
 import math
+import time
 import uuid
 from dataclasses import dataclass
 from random import Random
 
+from django.core.cache import cache
+from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.core.files.base import ContentFile
 from PIL import Image as PILImage
 from PIL import ImageOps as PILImageOps
 
-from core.images import draft_to, stored_size, upright_size
+from core.images import draft_to, over_pixel_budget, stored_size, upright_size
 from core.timeutils import local_today
 
 from .models import GalleryPhoto
@@ -231,6 +234,19 @@ def normalise_gallery_image(uploaded):
             #    stored is sized from this, never from the decoded size — see
             #    `core.images.stored_size`.
             native = upright_size(source)
+            # 🔴 **The floor.** `GalleryPhotoForm.clean_images` checks this
+            #    before calling — and it has to, because it skips one photo of
+            #    ten and keeps the batch going, which is a decision only the
+            #    form can make. But the form is not the only way in: a
+            #    management command, a bulk import or a shell session reaches
+            #    this function directly, and `draft_to` below is a no-op for
+            #    PNG and WebP, so nothing else would stand between an enormous
+            #    upload and a full decode. One comparison, on numbers already
+            #    read from the header.
+            if over_pixel_budget(native):
+                raise ValidationError(
+                    f"That photo is {native[0]} × {native[1]} pixels, past the "
+                    f"{settings.IMAGE_MAX_PIXELS // 1_000_000} megapixel limit.")
             # The memory fix. Full note over `core.images.draft_to`; the short
             # version is that a 49 MP photograph is 146 MB of pixels thrown away
             # in the next breath, and this asks libjpeg not to produce them.
@@ -385,6 +401,18 @@ class WallPhoto:
     #:    ratios, a maximum acceptable loss — was deleted on 2026-08-07 and this
     #:    is now always `photo.aspect`.
     aspect: float
+    #: The thumbnail's signed URL, or "" when nobody has filled it in.
+    #:
+    #: ⚠️ **Carried here rather than reached through `photo.thumb.url` in the
+    #:    template**, and it is not tidiness: signing happens on every `.url`
+    #:    call, so markup that asks the FieldFile would re-sign on every render
+    #:    and put back the cache miss `services.wall_urls` exists to remove.
+    #:    Holding the string is what makes that impossible to undo by accident.
+    #:
+    #: ⚠️ Defaulted, so `strips_for()` — which knows nothing about signing —
+    #:    still constructs these, and so the layout tests that build them
+    #:    directly do not each have to invent a URL.
+    thumb_url: str = ""
 
     @property
     def relative_height(self):
@@ -618,3 +646,66 @@ def remove_photo(photo):
     photo.thumb.delete(save=False)
     photo.delete()
     return caption
+
+
+#: How long one batch of signed URLs is handed out for.
+#:
+#: 🔴 **This is what lets a browser cache work at all**, and it has to stay
+#:    strictly under `querystring_expire` on the memories bucket
+#:    (config/settings/prod.py, four hours). Somebody served a URL in the last
+#:    second of a window still has the remainder of the signature's life to
+#:    fetch it with — an hour, at these two numbers.
+#:
+#: ⚠️ Three hours rather than "as long as possible": the gap between the two is
+#:    the whole safety margin, and a window equal to the expiry would hand out
+#:    URLs that die on arrival.
+WALL_URL_WINDOW = 3 * 3600
+
+
+def wall_urls(photos):
+    """`{photo_id: {"thumb": url, "image": url}}` for one wall, signed once.
+
+    🔴 **A presigned URL is different every time it is generated**, and that is
+       the whole problem. django-storages signs on every `url()` call and
+       botocore stamps the current moment into the signature, so the same
+       photograph arrives under a new URL on every render — a new cache key,
+       every time. Measured 2026-09-01: the wall re-fetched all sixty
+       thumbnails on every visit, a browser-cache hit rate of exactly zero.
+       Upstream says as much in the docstring of its own `S3StaticStorage`.
+
+    ⚠️ **One cache entry for the whole page, never one per photograph.**
+       `CACHES` is the database backend, so a per-photo cache would be 120
+       SELECTs on a page that today runs a handful — more expensive than the
+       signing it replaces, and this project has query-count tests for exactly
+       that class of regression.
+
+    ⚠️ 120 and not 60: the strips carry thumbnails, the lightbox sequence
+       carries the full-size images, and both are signed.
+
+    ⚠️ Keyed by the **photo ids**, not by the day. The draw is seeded by the
+       date so the page holds still, but a photograph taken down disappears
+       from it — so two renders minutes apart can legitimately differ, and a
+       date-only key would go on serving a URL for a picture that has gone.
+
+    ⚠️ Returns plain strings. Handing the template a `FieldFile` would let a
+       `.url` slip back in and re-sign, quietly restoring the bug — which is why
+       the two templates are given these instead.
+    """
+    if not photos:
+        return {}
+
+    now = int(time.time())
+    ids = sorted(photo.pk for photo in photos)
+    digest = hashlib.sha256(repr(ids).encode()).hexdigest()[:16]
+    key = f"gallery:wall-urls:{now // WALL_URL_WINDOW}:{digest}"
+
+    urls = cache.get(key)
+    if urls is None:
+        urls = {photo.pk: {"thumb": photo.thumb.url, "image": photo.image.url}
+                for photo in photos}
+        # ⚠️ Expires **with** the window, not a full window from now. The key
+        #    already changes at the boundary, so a longer life would only leave
+        #    an unreachable row behind in the cache table for every window that
+        #    passes — the database backend has no eviction of its own.
+        cache.set(key, urls, WALL_URL_WINDOW - (now % WALL_URL_WINDOW))
+    return urls

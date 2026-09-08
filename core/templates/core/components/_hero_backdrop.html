@@ -43,10 +43,51 @@
    照片**、裁成两种形状，所以必须由同一个数定位；共用一个上下文值就是为了这个。
    在这里再写死一次 `bg-center`，就是把这个文件自己警告过的那种分叉请回来。
 {% endcomment %}
+{% comment %}
+⚠️ 2026-08-31：这一层开始按屏幕给图 —— 但**仍然是 `background-image`，
+   不是 `<img>`**，而那不是偷懒，是量出来的。
+
+   🔴 `<img>` 是第一版，为的是 `srcset`（首页那边正是这么做的，见 home.html）。
+      它坏在一处、坏得完全看不出来：这一层在浅色模式下是 `display: none`
+      （外面那个 `hidden dark:block`），而 **`display:none` 里的
+      `background-image` 浏览器不会去取，`<img>` 会**。也就是说换成 `<img>`
+      之后，所有用浅色模式的人从此白下一张他们永远看不到的背景图。
+
+      当场量的（Chrome 141，同一个 `display:none` 容器里三个元素）：
+          background-image     → 不请求
+          <img>                → 请求
+          <img loading="lazy"> → **照样请求**
+      第三行是本来打算用的补丁，它没用 —— 页面上那个 img 确实带着
+      `loading="lazy"`、父元素确实是 `display:none`，`currentSrc` 照样有值。
+      别再试一次。
+
+   所以这一层只能是背景，而背景给不了 `srcset`。
+
+🔴 **于是它就用原图，和首页同一张**（2026-09-02）。中间有两天它按视口挑一个更小的
+   档，那是错的，两重错：
+
+     ① 挑小档的理由是「笔记本不用每翻一页重下整张原图」，而那个「每翻一页」是
+        公开桶缺 `Cache-Control` 造成的，同一批就修掉了。理由没了，代价还在。
+     ② 断点按视口**宽**写，而 `bg-cover` 是按**高**铺的。这和首页
+        `sizes="100vw"` 是同一个错，只是首页修了、这里没修。竖屏手机上差 3.7 倍。
+
+   ⚠️ 第二条在 CSS 里**修不好** —— 媒体查询拿不到这张图的宽高比，而那正是
+      `cover` 真正按的那个数。所以正确的做法不是把断点算准，是不去猜。
+      完整的账在 app.css 的 `.hero-backdrop` 那一节。
+
+⚠️ 写在这里的是 **URL（数据）**，不是样式。只有原图一个变量 ——
+   三个档位变量曾经也写在这里，给 app.css 的兜底链用；而那条链**永远走不到**
+   （原图和这一层是同一个 `{% templatetag openblock %} if {% templatetag closeblock %}` 写出来的），
+   所以它们是每个响应里三百多字节的死数据。一并删了。
+   衍生档没有白存：首页的 `<img srcset>` 真的在用它们。
+
+⚠️ 所以这一层不依赖衍生档存不存在：部署完还没跑 `rebuild_hero_renditions`
+   的那一小段里，它照常工作。
+{% endcomment %}
 {% if site_hero_image %}
   <div aria-hidden="true"
-       class="pointer-events-none fixed inset-0 -z-10 hidden bg-cover dark:block"
-       style="background-image: url('{{ site_hero_image.url }}');
+       class="hero-backdrop pointer-events-none fixed inset-0 -z-10 hidden bg-cover dark:block"
+       style="--hero-original: url('{{ site_hero_image.url }}');
               background-position: {{ site_hero_focus }}">
     {% include "core/components/_hero_scrim.html" %}
   </div>

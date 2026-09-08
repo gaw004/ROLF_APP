@@ -37,6 +37,13 @@ MAX_PHOTOS_PER_UPLOAD = 10
 #:    so the "why" in a success message and the "why" in an error cannot drift.
 SKIP_REASONS = {
     "too_big": "over {limit_mb} MB",
+    # ⚠️ Its own reason rather than folding into `too_big`, because the two are
+    #    fixed in different ways and the person reading this has to know which:
+    #    a file over the byte limit needs saving at a lower quality, one over
+    #    the pixel limit needs its dimensions reduced. A photograph can be
+    #    0.25 MB and still be refused here, and "over 10 MB" would be a lie
+    #    about a file they can see is not.
+    "too_many_pixels": "larger than {limit_mp} megapixels",
     "unreadable": "not usable images",
     "repeats": "already on the wall",
     "past_cap": f"past the {MAX_PHOTOS_PER_UPLOAD}-at-once limit",
@@ -54,8 +61,10 @@ def describe_skipped(skipped):
        along: "skipped 2" does not tell you *which* two to go and fix.
     """
     limit_mb = settings.EVENT_IMAGE_MAX_UPLOAD_BYTES // (1024 * 1024)
+    limit_mp = settings.IMAGE_MAX_PIXELS // 1_000_000
     parts = [
-        f"{phrase.format(limit_mb=limit_mb)}: {', '.join(skipped[key])}"
+        f"{phrase.format(limit_mb=limit_mb, limit_mp=limit_mp)}: "
+        f"{', '.join(skipped[key])}"
         for key, phrase in SKIP_REASONS.items()
         if skipped.get(key)
     ]
@@ -142,8 +151,10 @@ class GalleryPhotoForm(forms.Form):
         #    will be left behind; otherwise the first they hear of it is a
         #    number in a green bar they have already clicked past.
         limit_mb = settings.EVENT_IMAGE_MAX_UPLOAD_BYTES // (1024 * 1024)
+        limit_mp = settings.IMAGE_MAX_PIXELS // 1_000_000
         self.fields["images"].help_text = (
-            f"Up to {MAX_PHOTOS_PER_UPLOAD} at once, each under {limit_mb} MB. "
+            f"Up to {MAX_PHOTOS_PER_UPLOAD} at once, each under {limit_mb} MB "
+            f"and {limit_mp} megapixels. "
             f"JPEG, PNG and WebP; SVG and PDF do not work. Anything too big, "
             f"unreadable or already on the wall is skipped and named — the rest "
             f"still go up."
@@ -197,6 +208,8 @@ class GalleryPhotoForm(forms.Form):
            Pillow's own MAX_IMAGE_PIXELS. That correction was paid for once
            already over in events/forms.py; the full note is there.
         """
+        from core.images import too_many_pixels
+
         from .services import digest_of, normalise_gallery_image, source_digest_of
 
         uploads = [f for f in self.cleaned_data.get("images") or [] if f]
@@ -218,6 +231,15 @@ class GalleryPhotoForm(forms.Form):
         for upload in uploads:
             if upload.size > limit:
                 skipped["too_big"].append(upload.name)
+                continue
+            # 🔴 **The other half of "never decode something enormous", and the
+            #    byte check above cannot make it.** A 0.25 MB PNG can hold 81
+            #    megapixels — 243 MB once decoded, measured — so a file that is
+            #    comfortably inside the limit above can still be the one that
+            #    takes the instance down. This reads the header only; the note
+            #    is over `core.images.too_many_pixels`.
+            if too_many_pixels(upload):
+                skipped["too_many_pixels"].append(upload.name)
                 continue
             # ⭐ **The same file again is caught here, before it is decoded**
             #    (2026-08-13). This is the cheap check and the common case —

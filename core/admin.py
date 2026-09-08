@@ -5,11 +5,14 @@ than in one of the apps only because two apps now want the same filter, and a
 copy of it in each would be a copy of a business rule.
 """
 
+from django import forms
+from django.conf import settings
 from django.contrib import admin
 from django.shortcuts import redirect
 from django.template.loader import render_to_string
 from django.urls import reverse
 
+from .images import is_new_upload, too_many_pixels
 from .models import HomePage
 
 
@@ -39,6 +42,50 @@ class InEffectFilter(admin.SimpleListFilter):
         return queryset
 
 
+class HomePageForm(forms.ModelForm):
+    """Refuses a picture with more pixels in it than the instance can decode.
+
+    🔴 **The front page is the one upload with no re-encoding step**, so until
+       2026-09-01 nothing between the file picker and the bucket ever looked at
+       how large the picture was in pixels. The byte limit the other two uploads
+       carry does not answer that question: a 0.25 MB PNG can hold 81
+       megapixels, which is 243 MB decoded on a 512 MB instance. It would not
+       have raised — it would have taken the site down while somebody changed
+       the front page.
+
+    ⚠️ **The outer of two guards, not the only one.** `core.renditions.
+       render_ladder` refuses the same picture on its own, which is what covers
+       the shell and `rebuild_hero_renditions`. This one exists because a
+       complaint belongs next to the field somebody just used — `save()` has no
+       field to put one next to, and an admin who gets a traceback instead of a
+       sentence has learned nothing about what to do differently.
+
+    ⚠️ Nothing else is validated here and nothing is re-encoded. Stripping the
+       camera's metadata happens in `HomePage.save()` instead, because it has to
+       apply to the shell and to `rebuild_hero_renditions` as well as to this
+       screen.
+    """
+
+    class Meta:
+        model = HomePage
+        fields = "__all__"
+
+    def clean_hero_image(self):
+        uploaded = self.cleaned_data.get("hero_image")
+        # An unchanged field hands back the stored FieldFile, which is already
+        # in the bucket and has already been through this.
+        if not is_new_upload(uploaded):
+            return uploaded
+        if too_many_pixels(uploaded):
+            raise forms.ValidationError(
+                f"That picture is larger than "
+                f"{settings.IMAGE_MAX_PIXELS // 1_000_000} megapixels. Its file "
+                f"size is fine — it is the number of pixels in it, and decoding "
+                f"one that large is what the server cannot afford. Scaling it "
+                f"down before uploading will fix it.")
+        return uploaded
+
+
 @admin.register(HomePage)
 class HomePageAdmin(admin.ModelAdmin):
     """The one row, edited in place. No list to choose from, no add, no delete.
@@ -48,6 +95,8 @@ class HomePageAdmin(admin.ModelAdmin):
        list-add-delete furniture otherwise, and every piece of it is a way to
        end up with zero rows or two.
     """
+
+    form = HomePageForm
 
     fieldsets = [
         ("Background", {

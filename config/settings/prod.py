@@ -255,21 +255,84 @@ def _r2(bucket, *, public=False, expire=None):
         ),
     }
     if public:
-        # Served straight off the bucket's own domain, unsigned and cacheable.
+        # Served straight off the bucket's own domain, unsigned — and cacheable
+        # only once it is told to be, which is the 🔴 note below.
         options["querystring_auth"] = False
         options["custom_domain"] = env("R2_PUBLIC_BASE_HOST", required=True)
+        # 🔴 **"Cacheable" was true of the URL and never of the response**
+        #    (2026-08-31). R2 sends no `Cache-Control` of its own, and with the
+        #    header absent Chrome falls back to a heuristic: fresh for 10% of
+        #    the object's age. A picture replaced an hour ago is fresh for six
+        #    minutes — and what happens after that is not a slow page, it is a
+        #    black one. The dark-mode backdrop is a `position: fixed` layer
+        #    (`_hero_backdrop.html`) with nothing to paint until the
+        #    revalidation lands, so the whole background drops to `ink-900` for
+        #    the length of a round trip and returns on reload. Measured on the
+        #    live hero the day this landed: 3.65 MB, no `Cache-Control`,
+        #    `Last-Modified` 44 minutes old — a four-minute freshness window on
+        #    the largest file the site serves, on every page in dark mode.
+        #
+        # ⚠️ Thirty days rather than a year, and **no `immutable`**. Both would
+        #    be right if these names were uuids, which is what the note on
+        #    `file_overwrite` above assumes of every upload — but it is only
+        #    true of the ones that go through `normalise_*`, and
+        #    `HomePage.hero_image` is the one field in the project that does
+        #    not: it keeps the filename it was uploaded with. Django suffixes
+        #    only on a *collision*, and `HomePage.save` has `discard_media`
+        #    delete the file it stopped pointing at — so a later upload of a
+        #    **different** picture under a retired filename reproduces the URL
+        #    with new bytes behind it. A year of `immutable` would make that
+        #    unfixable even by a hard reload; thirty days self-heals, and it is
+        #    still four orders of magnitude more than the four minutes the
+        #    browser was making up. The real fix is a uuid name on that field,
+        #    and it is not this change.
+        #
+        # ⚠️ Deliberately **not** set on the signed buckets below, where it
+        #    would buy nothing: every render signs a fresh `X-Amz-Date`, so the
+        #    URL — and with it the browser's cache key — is a different one
+        #    every time the page is drawn. That is its own bug and its own fix.
+        #
+        # ⚠️ django-storages sends this as ExtraArgs **at upload time**
+        #    (`storages/backends/s3.py`, `_save`). Objects already in the bucket
+        #    keep the headers they were written with, so this setting alone
+        #    changes nothing for the picture that is live right now — the one
+        #    everybody is actually downloading. `manage.py restamp_home_media`
+        #    is the other half and has to be run once after the deploy. Stated
+        #    here because a deploy that visibly fixes nothing reads as a setting
+        #    that does not work.
+        options["object_parameters"] = {"CacheControl": "public, max-age=2592000"}
     else:
         # ⚠️ This is what makes @login_required mean anything for a photo. With
         #    an unsigned URL the login gate protects the *page* and not the
         #    file: one copied link and the picture is public for good, which is
         #    not a decision the person who uploaded it ever made.
         #
-        # ⚠️ An hour, not a day and not a minute. Long enough that a photo
-        #    opened from a page left sitting overnight has already expired
-        #    (rather than the link outliving the session by a day), short enough
-        #    that nobody watches a lightbox 404 mid-browse.
+        # ⚠️ **Four hours as of 2026-09-01, and the number is now half of a
+        #    pair** — it used to be one hour, chosen only as "long enough that a
+        #    page left open overnight has expired, short enough that nobody
+        #    watches a lightbox 404 mid-browse". Both of those still hold at
+        #    four. What changed is that the figure now also decides how long a
+        #    photograph can stay in a browser's cache.
+        #
+        #    A presigned URL carries the moment it was signed, and django-
+        #    storages signs afresh on **every** `url()` call (botocore's
+        #    `SigV4Auth.add_auth` overwrites the timestamp unconditionally, so
+        #    there is nothing to inject). A different URL each render is a
+        #    different cache key each render: measured, the Memories wall was
+        #    re-downloading all sixty thumbnails on every visit, for a hit rate
+        #    of exactly zero. django-storages says as much itself, in the
+        #    docstring of its own `S3StaticStorage`.
+        #
+        #    `gallery.services.wall_urls` fixes that by signing the whole wall
+        #    once per window and caching the batch. **This number has to exceed
+        #    that window** — the relationship, not either figure, is what
+        #    matters, and `gallery.tests` asserts it rather than the constants.
+        #
+        # ⚠️ The cost is stated rather than buried: a link copied out of the
+        #    page now works for four hours instead of one. It still expires, and
+        #    the page it came from still needs a login.
         options["querystring_auth"] = True
-        options["querystring_expire"] = expire or 3600
+        options["querystring_expire"] = expire or 4 * 3600
     # ⚠️ **The subclass, not S3Storage itself** (2026-08-28). Upstream builds a
     #    brand new boto3 Session for every (bucket × thread) pair and keeps it
     #    for the life of the thread — measured at 200.3 MB per fully warmed

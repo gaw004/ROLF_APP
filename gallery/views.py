@@ -5,6 +5,8 @@ permission check first and delegated to org.permissions, no arithmetic here.
 The layout arithmetic for the wall is all in services.strips_for.
 """
 
+from dataclasses import replace
+
 from django.contrib import messages
 from django.contrib.auth.decorators import login_required
 from django.core.exceptions import PermissionDenied
@@ -26,6 +28,7 @@ from .services import (
     repeats_for,
     resolve_removal,
     strips_for,
+    wall_urls,
 )
 
 #: The one sentence both photo-admin pages refuse with. ⚠️ Written once: two
@@ -64,6 +67,17 @@ def _strip(photos, position):
     }
 
 
+def _signed(item, urls):
+    """The same `WallPhoto` carrying its thumbnail's already-signed URL.
+
+    ⚠️ `replace()` rather than mutating: `WallPhoto` is frozen, and it is frozen
+       because it is the layout's input. Rebuilding one field keeps every
+       property — `relative_height`, `width_ratio`, which the strip's span and
+       the marquee's speed are computed from — exactly as it was.
+    """
+    return replace(item, thumb_url=urls[item.photo.pk]["thumb"])
+
+
 @login_required
 def wall(request):
     """The Memories page: one strip of equal-height photos, drifting left.
@@ -76,8 +90,14 @@ def wall(request):
        some of them minors.
     """
     strips = strips_for()
+    # ⚠️ **Signed once for the whole page**, thumbnails and full-size together —
+    #    120 URLs on a full wall. Signing per `.url` call gave every render a
+    #    different URL for the same photograph, so the browser cache never hit
+    #    once; the working is over `services.wall_urls`.
+    urls = wall_urls([item.photo for photos in strips for item in photos])
     return render(request, "gallery/wall.html", {
-        "strips": [_strip(photos, n) for n, photos in enumerate(strips)],
+        "strips": [_strip([_signed(item, urls) for item in photos], n)
+                   for n, photos in enumerate(strips)],
         # The sequence the lightbox arrows walk — the whole page, top strip
         # first and left to right within each.
         #
@@ -87,7 +107,7 @@ def wall(request):
         #    place the full-size links live, and it is why the lightbox opens
         #    without a round trip.
         "sequence": [
-            {"src": item.photo.image.url, "caption": item.photo.caption}
+            {"src": urls[item.photo.pk]["image"], "caption": item.photo.caption}
             for photos in strips for item in photos
         ],
     })

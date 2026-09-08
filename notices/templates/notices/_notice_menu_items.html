@@ -1,0 +1,49 @@
+{% comment %}
+「⋯」菜单里的内容 —— 一条公告在它当前那一档下能做的事。
+
+⭐ 每一项都是一张**完整的服务端表单**，不是链接。D24：每个写操作都要有一条
+   不依赖 JS 的完整路径 —— 而一个 GET 就能触发的写操作，是爬虫替你按的那种。
+   收进菜单一个字都没改这件事：菜单只是把它们藏起来，提交路径原样。
+
+🔴 **按钮的字说的是「会发生什么」，不是「调了哪个函数」。**
+   「还没上板」和「正在板上」按下去都走 take_down，而结果不一样：前者回草稿
+   （没人看过，它没有过去可言），后者进往期。所以标签也不一样 ——
+   写成同一个字才是在描述实现。
+
+⚠️ Take down 在这里是**红色的字**，不是一颗红色实心药丸（2026-09-03 评审第 3 条）。
+   原来每一行「正在展示」的公告都顶着一颗红药丸，于是一整列红色 ——
+   而警示色只有稀缺时才是警示色。收进菜单之后一次只看得到一个，它才重新有分量。
+
+⚠️ 需要外层提供 `notice`。
+{% endcomment %}
+{% if notice.is_draft %}
+  <form method="post" action="{% url 'notices:notice_publish' notice.pk %}">
+    {% csrf_token %}
+    <button type="submit" class="row-menu-item">Put it up</button>
+  </form>
+{% elif notice.is_showing %}
+  <form method="post" action="{% url 'notices:notice_take_down' notice.pk %}">
+    {% csrf_token %}
+    {% comment %}
+    🔴 确认用的是 `_button_tag.html` 里**一模一样**的那句 Alpine，不是一个
+       `data-confirm` 属性 —— 这个仓库里没有任何东西接 `data-confirm`，
+       写成那样是一个**静默失效**的确认框：点下去直接就下架了，而模板上明明
+       写着一句确认。第一版就是这么写的。
+
+    ⚠️ 没有 JS 时它直接提交。确认框是防手滑的，不是权限 —— 真正的拒绝在视图里
+       （`can_manage_notice`），而这一条不依赖 JS。
+    {% endcomment %}
+    <button type="submit" class="row-menu-item row-menu-item-danger"
+            x-on:click="if (!window.confirm('Take this notice down now? People stop seeing it straight away.')) $event.preventDefault()">
+      Take down
+    </button>
+  </form>
+{% elif notice.is_scheduled %}
+  <form method="post" action="{% url 'notices:notice_take_down' notice.pk %}">
+    {% csrf_token %}
+    <button type="submit" class="row-menu-item"
+            x-on:click="if (!window.confirm('Stop this from going up? Nobody has seen it yet.')) $event.preventDefault()">
+      Back to draft
+    </button>
+  </form>
+{% endif %}

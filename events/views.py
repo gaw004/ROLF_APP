@@ -26,20 +26,21 @@ Thin shells, every one of them. Three rules hold across the whole file:
 from django.contrib import messages
 from django.contrib.auth.decorators import login_required
 from django.core.exceptions import PermissionDenied, ValidationError
-from django.core.paginator import Paginator
 from django.db.models import Prefetch
 from django.http import Http404, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 from django_ratelimit.decorators import ratelimit
 
+from core.pagination import page_holding, page_of
 from org.models import Ministry
 from org.permissions import (
     SCOPED_DENIAL,
     in_foundation_tier,
+    administers_one_of,
     can_manage_event,
     can_publish_event,
-    can_view_event_records,
+    event_access,
     ministry_ids_administered_by,
 )
 
@@ -98,6 +99,8 @@ from .services import (
     scheduled_hours,
     resolve_recipients,
     signups_asked_about_serving,
+    hours_recorded_against,
+    signups_left_outside,
     set_served_as,
     set_status,
     sign_up,
@@ -174,47 +177,11 @@ EVENTS_PER_PAGE = 20
 MANAGED_EVENTS_PER_PAGE = 50
 
 
-def _page(request, events, per_page, number=None):
-    """One page of a filtered list, ordered so that paging cannot lie.
-
-    ⚠️ The ordering **must** end in a unique column. `-start_time` alone is not
-       unique — two events starting at the same minute have no defined order
-       between them, so Postgres may return them in a different order for
-       page 1 and page 2. The visible result is a row appearing twice, or one
-       vanishing entirely, and nothing anywhere reports it.
-
-    ⚠️ The caller keeps the unpaginated queryset. The report is computed from
-       **that**, not from this page: a figure that changed when you turned the
-       page would mean nothing at all (D27).
-
-    ⚠️ `number` 覆盖 URL 上的 `?page=`（2026-08-18）。它只有一个调用方：日程上
-       点开一场活动时，左边要翻到**那一场所在的**那一页，而那一页是算出来的，
-       不是人点出来的。
-    """
-    ordered = events.order_by(*events.query.order_by, "-pk")
-    return Paginator(ordered, per_page).get_page(number or request.GET.get("page"))
-
-
-def _page_holding(events, pk, per_page):
-    """Which page of that list the given event is on. None if it is not on any.
-
-    ⚠️ 这里**必须**用和 `_page` 一模一样的排序，包括结尾那个 `-pk` ——
-       少一截，一分钟内开始的两场活动在这里和在列表里的先后可以不同，
-       于是「跳到那一页」偶尔会跳到相邻的一页。看起来像随机失灵。
-
-    ⚠️ 全量取一次 pk 再 `.index()`，而不是用窗口函数数「有多少行排在它前面」。
-       理由和 forms.py 那条搜索一样：试点期只有几十场活动，这里没有东西要优化；
-       而窗口函数那一版要在两个地方各写一遍同样的排序，也就是上面那条注释
-       防的东西再多一份。
-
-    ⚠️ 返回 None 是一个**正常**结果，不是错误：日程画的是「那几天里全部的活动」，
-       而列表还带着筛选和「今天起」那一刀。两边天然可以不重合。
-    """
-    ordered = events.order_by(*events.query.order_by, "-pk")
-    keys = list(ordered.values_list("pk", flat=True))
-    if pk not in keys:
-        return None
-    return keys.index(pk) // per_page + 1
+# ⚠️ 翻页那两个函数 2026-09-03 搬去了 `core/pagination.py`（`page_of` /
+#    `page_holding`）。搬家的理由和 `Audience` 去 `org` 那次一样：`notices`
+#    的两页也要翻页，而让它为一件和活动无关的事去 import `events` 是画错的
+#    依赖（D41 第四节）。排序那条规矩（结尾必须是唯一列）跟着一起走了，
+#    两个函数仍然在同一个文件里 —— 它们必须用一模一样的排序。
 
 
 def _my_contact(request):
@@ -294,7 +261,7 @@ def _visible_events(period, contact):
         #    不加这个注解的话那是**每行一次查询** —— 一页二十行，在全站被打得
         #    最多的一页上。判据本身没有在这里重写，见 `with_capacity()`。
         .with_capacity()
-        .select_related("ministry", "event_type")
+        .select_related("ministry")
         .order_by("start_time")
     )
 
@@ -303,10 +270,10 @@ def _listing(request, period, contact, page_number=None):
     """左边那一列的上下文。event_list 和日程点开的那一次共用。
 
     ⚠️ 只返回**模板真的要用的**东西。未分页的那个查询集不在里面 —— 需要它的
-       是 `_page_holding`，而那是视图的事；塞进上下文就是把一个没人渲染的
+       是 `page_holding`，而那是视图的事；塞进上下文就是把一个没人渲染的
        完整集合递给模板，正是本文件第一条规矩防的那件事。
     """
-    page = _page(request, _visible_events(period, contact), EVENTS_PER_PAGE,
+    page = page_of(request, _visible_events(period, contact), EVENTS_PER_PAGE,
                  number=page_number)
     return {
         "events": page,
@@ -433,7 +400,7 @@ def _detail(request, pk):
        取数路径。分叉在这里的名字叫「草稿从侧边栏漏出去了」。
     """
     event = get_object_or_404(
-        Event.objects.select_related("ministry", "event_type"), pk=pk)
+        Event.objects.select_related("ministry"), pk=pk)
     contact = _my_contact(request)
     preview = event.status not in Event.VISIBLE_TO_PARTICIPANTS
     # L3 (2026-08-26): not for them is the same kind of answer as not published.
@@ -448,18 +415,105 @@ def _detail(request, pk):
     # ⚠️ Asked with `.filter(pk=…).exists()` rather than by re-fetching, so this
     #    stays one extra query and the row above is still the one rendered.
     for_them = Event.objects.filter(pk=pk).for_audience(contact).exists()
-    if (preview or not for_them) and not can_view_event_records(request.user, event):
+    # ⚠️ Asked once and kept: it decides the 404 below **and** how much of the
+    #    roles table this person is shown. Two calls would be two answers to one
+    #    question the day somebody edits one of them.
+    #
+    # ⚠️ Both answers in one call, because until L2.4 the read check ran only
+    #    when the 404 branch needed it and the write check ran always — asking
+    #    each separately now means the grant table is read twice on every render
+    #    of the most-hit page in the system. org.permissions composes them; the
+    #    view must not, or the two ways in stop being one policy.
+    can_manage, may_view_records = event_access(request.user, event)
+    # 🔴 The third way in, and it is not a loophole in the rule above — it is
+    #    the rule 06-roadmap L2.2 states in as many words: **narrowing takes
+    #    away discovery, never a row you already hold.** An audience edited
+    #    after the fact, or a post that ended between signing up and the day
+    #    itself, must not make somebody's own event page disappear.
+    #
+    #    Participation.mine() has always had this half right — it deliberately
+    #    does not ask for_audience(), and the guard whitelist in core/tests.py
+    #    names it with this exact reason. This page did not, so the row stayed
+    #    listed on /me/participations/ and in the dashboard's "coming up" and
+    #    linked to a 404. Both halves say the same thing from 2026-09-08.
+    #
+    # ⚠️ Only asked when the audience says no, so the most-hit page in the
+    #    system does not pay for a query whose answer it already has.
+    #
+    # ⚠️ Deliberately **not** extended to `preview`. A draft is not a row
+    #    anybody holds yet, and mine() already excludes drafts — so there the
+    #    listing and the page agree without this, and adding it would make a
+    #    withdrawn draft readable to whoever had signed up before it went back.
+    holds_a_signup = (
+        contact is not None
+        and not for_them
+        and Participation.objects.filter(
+            event_role__event_id=pk, contact=contact).exists()
+    )
+    if (preview or not (for_them or holds_a_signup)) and not may_view_records:
         # Deliberately indistinguishable from "no such event" — see above.
         raise Http404("No event matches the given query.")
+
+    # L2 (2026-08-29). Two sets, and they are two because they answer two
+    # questions:
+    #
+    #   · `to_join`  — the places this person may actually take. It is what the
+    #     signup form's dropdown is narrowed to, so the Sign up button below is
+    #     drawn from the same set the button leads to. Drawn from anything else,
+    #     a person with no eligible role gets a button to a required dropdown
+    #     with nothing in it.
+    #   · `roles`    — what the table shows. The same set, **except** for
+    #     somebody who may read this event's records: they see every role.
+    #
+    # 🔴 That exception breaks "the table and the dropdown are one set", which is
+    #    how L2.4 was first written, and it is a decision (2026-08-29) rather
+    #    than a slip. A ministry admin who has just opened three roles and finds
+    #    two of them missing from the event page has no way to tell that from a
+    #    bug, and they can already see all three on the signups page. The cost is
+    #    that the page now says two different things to two kinds of viewer, so
+    #    the page **says so** — see `sees_every_role` in the template.
+    #
+    # ⚠️ One spelling of "a page of role rows", narrowed or not. Written out
+    #    twice, an annotation or a prefetch added for the table would land on
+    #    one and not the other, and the records-reader's rows would quietly stop
+    #    matching everybody else's — with the template unable to tell.
+    # ⚠️ The prefetch is for the "Open to" column, drawn only for whoever sees
+    #    every role — one query for the lot instead of one per row. `.all()` in
+    #    audience_in_words is what lets it land; see audience_is_empty for why
+    #    that spelling matters.
+    rows = (event.roles.with_signup_counts().select_related("role")
+            .prefetch_related("visible_to_ministries"))
+    to_join = list(rows.for_audience(contact))
+    # ⚠️ A second query, and only for this viewer.
+    roles = list(rows) if may_view_records else to_join
+
     mine = Participation.objects.none()
     if contact is not None:
         mine = Participation.objects.filter(
             event_role__event=event, contact=contact,
         ).select_related("event_role__role")
     back_url, back_label = _back_link(request)
+    # ⚠️ Read once. It is a **property, not a column** — `Event.is_full` inside
+    #    it costs two queries on a row that carries no capacity annotation, and
+    #    this one does not (the detail page fetches a single event, not a list).
+    #    Two readings of it below would be four queries for one answer.
+    accepting_signups = event.accepting_signups
     return {
         "event": event,
-        "roles": event.roles.with_signup_counts().select_related("role"),
+        "roles": roles,
+        # 「有角色，只是没有一个是给你的」—— 第二种空状态（L2.4）。
+        #
+        # 🔴 它必须和「还没开任何角色」长得**不一样**（D27）。少了这一格，
+        #    别的 ministry 的在编成员打开活动，读到的是 "No roles opened yet."
+        #    —— 一句假话，而这一页上没有任何东西能让他看出来。
+        # ⚠️ 问的是**这张表**空不空，不是 `to_join` 空不空 —— 看全表的那个人
+        #    表不空，这一句就不该亮。
+        # ⚠️ 只在表是空的、而且这张表是收窄过的时候才多查一次。看全表的人表空，
+        #    就证明活动一个角色都没有 —— 再问一次库，问的是一个已经答过的问题。
+        "roles_none_for_you": (
+            not roles and not may_view_records and event.roles.exists()),
+        # 那句常驻文案的开关：这张表对他是全的，对别人不是。⚠️ 不查库。
+        "sees_every_role": may_view_records,
         "mine": mine,
         # ⚠️ The property, not `status in OPEN_FOR_SIGNUP` (2026-08-19). It asks
         #    the clock as well, exactly as the `open_for_signup()` queryset
@@ -467,8 +521,22 @@ def _detail(request, pk):
         #    are the same gate seen from two sides. Reading only the status here
         #    put a Sign up button on events that finished last year, and the
         #    page it led to had already stopped accepting them.
-        "can_sign_up": event.accepting_signups,
-        "can_manage": can_manage_event(request.user, event),
+        #
+        # ⚠️ `to_join`, never `roles` (L2.4): the button is drawn from what the
+        #    person may take, so an admin looking at a full table still only gets
+        #    one when a place in it is actually theirs. Otherwise the button
+        #    leads to an empty dropdown — a dead end that answers "Select a valid
+        #    choice" to somebody who did nothing wrong.
+        "can_sign_up": accepting_signups and bool(to_join),
+        # ⚠️ 「这场活动在收不收报名」，不是「他能不能报」—— 按钮那一格靠这两个
+        #    键分出三种情况，而模板里那一支落在 `can_sign_up` 之后，所以到得了
+        #    它的人已经证明了「有得报的活动，但没有一个位子是给他的」。
+        #    ⚠️ 不写成第三个键（`nothing_open_to_you = accepting and not to_join`）：
+        #       那是同一件事的第二种拼法，两个键要手工保持反向一致，
+        #       而写歪一个的表现是两支都不亮，于是人读到「这场活动不收报名了」——
+        #       正是这一步要消掉的那句假话。也不让模板去读那个属性：它查库。
+        "accepting_signups": accepting_signups,
+        "can_manage": can_manage,
         # ⚠️ False on every published event, so the banner is not something a
         #    template has to remember to switch off. It is only ever true for a
         #    viewer who already passed the check above.
@@ -517,7 +585,7 @@ def event_detail_panel(request, pk):
     if request.GET.get("from_list"):
         return render(request, "events/_schedule_detail.html", context)
 
-    number = _page_holding(_visible_events(period, contact), pk, EVENTS_PER_PAGE)
+    number = page_holding(_visible_events(period, contact), pk, EVENTS_PER_PAGE)
     context.update(_listing(request, period, contact, page_number=number))
     context.update({
         # 左边那一列作为 out-of-band 的第二块跟着回去。
@@ -549,7 +617,7 @@ def event_signup(request, pk):
 
     ⚠️ 面板成功那一次**不重画左边那一列**。报名会让一场活动满员、于是列表上
        那个绿标签该变成 Full —— 这里没有跟着换。知情的取舍：换它要连着
-       算一次分页（`_page_holding`）并回送 40KB，而那个标签在下一次筛选、翻页
+       算一次分页（`page_holding`）并回送 40KB，而那个标签在下一次筛选、翻页
        或刷新时自然就对了。写下来是因为「点了报名，左边标签没变」看起来像 bug，
        而它是这一行。
     """
@@ -569,6 +637,17 @@ def event_signup(request, pk):
     in_panel = bool(request.headers.get("HX-Request"))
 
     form = SignUpForm(request.POST or None, event=event, contact=contact)
+    # L2.4：一个位子都不是给他的时候，这一页是**没有内容**的 —— 一个必填、
+    # 却一个选项都没有的下拉框，提交回来是 "Select a valid choice"，
+    # 而那个人什么都没做错。
+    #
+    # ⚠️ 404，和这个视图上面那道门、和详情页那一条同一个答案：这一页对他不存在。
+    #    详情页那颗按钮本来就不画（`nothing_open_to_you`），所以走到这里的是
+    #    手敲 URL 或者一张放了很久的旧页面。
+    # ⚠️ 判据取自表单自己的 queryset，不另问一次 —— 两处会在某一格上走散，
+    #    而走散的表现正是「按钮说能报、页面说没有」。
+    if not form.fields["event_role"].queryset.exists():
+        raise Http404("No event matches the given query.")
     if request.method == "POST" and form.is_valid():
         try:
             # The rule lives in sign_up(), not here: an admin registering
@@ -618,25 +697,23 @@ def event_signup(request, pk):
 
 @login_required
 def my_participations(request):
-    """Mine means mine — narrowed in the query, not in the template.
+    """Everything this person has signed up for, newest first.
 
-    visible_to_participants() as well, which is not belt and braces: every row
-    here links to the detail page, and that page uses the same predicate. A
-    signup an admin entered against an unpublished event would otherwise appear
-    with a link that 404s — the failure this pair of predicates was written to
-    prevent, arriving from the other end.
+    ⚠️ The predicate moved to `ParticipationQuerySet.mine()` on 2026-09-02,
+       when the dashboard needed the same one. Its reasoning went with it —
+       including why it also asks `visible_to_participants()` — because a rule
+       explained where it is not implemented is one that gets changed in one
+       place and read in the other.
+
+    What stays here is this page's own half: **all of it, newest first**. The
+    dashboard asks the same question of the same method and then adds
+    `.upcoming()`, which is exactly the difference between the two pages.
     """
-    contact = _my_contact(request)
-    rows = Participation.objects.none()
-    if contact is not None:
-        rows = (
-            Participation.objects.filter(
-                contact=contact,
-                event_role__event__in=Event.objects.visible_to_participants(),
-            )
-            .select_related("event_role__event__ministry", "event_role__role")
-            .order_by("-event_role__event__start_time")
-        )
+    rows = (
+        Participation.objects.mine(_my_contact(request))
+        .select_related("event_role__event__ministry", "event_role__role")
+        .order_by("-event_role__event__start_time")
+    )
     return render(request, "events/my_participations.html", {"participations": rows})
 
 
@@ -684,71 +761,71 @@ def _scoped_events(request):
        a report that could go wrong quietly — it is read once and believed, and
        nobody checks a total against a list they are not allowed to see.
 
-    ⚠️ Somebody who is both — a foundation admin who also runs a ministry —
-       keeps the managing view of their own ministries rather than the read-only
-       view of everything. Losing the ability to publish an event because you
-       were also promoted would be a strange way to be rewarded.
+    🔴 **One list, and the permission lands on each row** (2026-09-03).
 
-    ⚠️ `?scope=all` (2026-08-06) is how that person reaches the other view, and it
-       **does not widen anybody's authority**. It is available only to the
-       foundation tier, and it answers by handing back an empty `administered` —
-       so `can_manage` is False, the page draws itself read-only, and every write
-       on it still goes through `_managed_event()`, which asks
-       permissions.py about the actual account and not about this parameter.
-       A ministry admin who adds it to the URL gets nothing: they are not in the
-       tier, so the branch is not taken.
+       Until today this page had **two modes**, switched by `?scope=all`:
+       without it, the ministries you administer (editable); with it, every
+       ministry (read only). Somebody holding both hats saw only their own by
+       default, and the other ministries' events were **not on the page at
+       all** — not greyed out, not unclickable: absent. He had the right to
+       read them and no page listed them for him.
 
-       The 2026-08-05 decision above is not reversed by it. That decision was
-       about which view somebody gets **by default**, and the default is
-       unchanged; what was missing was any way at all to ask for the other one,
-       which left the read-only authority the foundation tier already holds with
-       no entrance for half the people who hold it (revisions.md).
+       The user's argument, and it is the better design:
+
+         「既然老张有权看，那就给他啊。他的页面就该显示所有的 ministries，
+           因为他是 foundation admin，然后在所有的 events 里，
+           只有 Food Pantry 他可以改。」
+
+       So the foundation tier now always sees everything, and what he may
+       *change* is decided per row (see `event_manage_list`). The mode switch
+       had nothing left to do and went with it.
+
+       ⭐ Notices has worked this way since it was written — `_mine_to_manage()`
+          hands the foundation tier `Notice.objects.all()`. Events was the last
+          place in the project with two modes.
+
+       ⚠️ This reverses the 2026-08-05 decision that somebody holding both hats
+          keeps the managing view of their own ministries by default. It
+          reverses it **in the direction that decision was protecting**: he does
+          not lose a single write — he gains the rows he was already allowed to
+          read. Losing publishing rights by being promoted was the thing to
+          avoid, and it still is.
+
+    ⚠️ The foundation tier gets the same page over every ministry. Without this
+       it had no entrance at all: it holds no MinistryRole, so nothing anywhere
+       listed events for it to open. That is the same gap C0.2 closed five times
+       over — the pages existed and nothing pointed at them.
     """
-    if request.GET.get("scope") == "all" and in_foundation_tier(request.user):
-        return (
-            Event.objects.all()
-            .select_related("ministry", "event_type").order_by("-start_time"),
-            set(),
-            True,
-        )
-
     administered = ministry_ids_administered_by(request.user)
-    # The foundation tier gets the same page over every ministry — read only.
-    # ⚠️ Without this it had no entrance at all: it holds no MinistryRole, so
-    #    nothing anywhere listed events for it to open. That is the same gap
-    #    C0.2 closed five times over — the pages existed and nothing pointed at
-    #    them.
     foundation = in_foundation_tier(request.user)
     if not administered and not foundation:
         raise PermissionDenied(SCOPED_DENIAL)
 
-    events = Event.objects.all() if not administered else Event.objects.filter(
+    events = Event.objects.all() if foundation else Event.objects.filter(
         ministry_id__in=administered)
     return (
-        events.select_related("ministry", "event_type").order_by("-start_time"),
+        events.select_related("ministry").order_by("-start_time"),
         administered,
         foundation,
     )
 
 
-def _looking_foundation_wide(request, administered):
-    """Did `_scoped_events()` hand back the whole foundation, read only?
-
-    Asked of the **outcome** (`administered` came back empty) rather than of the
-    query string alone, so a ministry admin who types `?scope=all` does not get a
-    page that behaves as if the parameter had been honoured. It was not.
-    """
-    return request.GET.get("scope") == "all" and not administered
-
-
-def _offered_ministries(administered):
+def _offered_ministries(administered, showing_all=False):
     """What the filter's dropdown may offer this account.
 
     ⚠️ Interface, not a permission — the queryset is already narrowed. What this
        prevents is a ministry admin being offered every ministry in the
        foundation, picking one, and getting an empty list with nothing saying why.
+
+    🔴 **`showing_all` comes first** (2026-09-03). The foundation tier now sees
+       every ministry's events on one page, so narrowing its dropdown to the
+       ministries it *administers* would offer it a filter that cannot reach
+       most of the rows in front of it — and for somebody holding both hats that
+       set is not empty, so the old `if not administered` guard would not have
+       caught it. The symptom would be a filter that silently omits ministries
+       whose events are right there on the page.
     """
-    if not administered:
+    if showing_all or not administered:
         return None
     return Ministry.objects.filter(
         pk__in=administered, is_active=True).order_by("name")
@@ -801,23 +878,55 @@ def event_manage_list(request):
         #
         #    · The no-JS path (the Save button inside <noscript>) redirects to
         #      `get_full_path()` rather than to the bare list URL. The form's
-        #      action carries the current filter, page and scope, so this sends
-        #      them back to the page they were looking at. It used to drop all
-        #      of it and land on an unfiltered page 1 — which looks perfectly
-        #      normal, just not where you were.
+        #      action carries the current filter and page, so this sends them
+        #      back to the page they were looking at. It used to drop all of it
+        #      and land on an unfiltered page 1 — which looks perfectly normal,
+        #      just not where you were.
         event = _managed_event(request, request.POST.get("event"))
+        # 🔴 **改之前的状态要在 `is_valid()` 之前读**（2026-09-03 设计评审第 1 条）。
+        #
+        #    `EventStatusForm(request.POST, instance=event)` 是一个 ModelForm，
+        #    而 `is_valid()` 会走到 `_post_clean()` —— 那一步就把提交上来的值
+        #    **写进了 `event.status`**。在它之后读到的是新值，于是那颗 Undo
+        #    会「撤销」到刚刚设定的那个状态：一颗按下去什么都不会发生的按钮，
+        #    而且它每一次都渲染得完全正常。
+        previous = event.status
         form = EventStatusForm(request.POST, instance=event)
         if form.is_valid():
             set_status(event, form.cleaned_data["status"])
             messages.success(request, f"“{event.name}” is now {event.get_status_display()}.")
+            # 🔴 **撤销的凭据放 session，不是放上下文**（设计评审第 1 条）。
+            #
+            #    没有 JS 的那条路是 POST → redirect → GET（下面那句 PRG），
+            #    而重定向之后 `wrote` 是假 —— 凭据只放在上下文里的话，
+            #    **撤销就成了一个只有 JS 的人才有的功能**，而这正是这个项目
+            #    一直拒绝的那种东西（D24）。放 session 就跨得过那次重定向，
+            #    这也正是 messages 框架自己的做法。
+            #
+            # ⚠️ HTMX 那条路不重定向，于是同一次请求里写进去、又在下面读出来 ——
+            #    一套机制两条路，不是两套。
+            #
+            # ⚠️ 只存 pk 和状态值，不存对象：session 是要序列化的，而且真正的
+            #    权限判断在撤销那一次 POST 上重做一遍（走同一个
+            #    `_managed_event()`），这里存的东西不构成任何授权。
+            request.session["undo_status"] = {
+                "event": event.pk,
+                "status": previous,
+                # 🔴 **`previous` 的显示名，不是 `event.get_status_display()`。**
+                #    后者读的是刚刚设定的**新**状态 —— 按钮会写着
+                #    「Undo — back to Open for signup」，而按下去回到的是 Draft。
+                #    一句读起来完全通顺、而且每次都渲染正常的假话。
+                "label": Event.Status(previous).label,
+            }
         if not request.headers.get("HX-Request"):
             return redirect(request.get_full_path())
         wrote = True
 
     period = EventPeriodForm(
-        request.GET or None, ministries=_offered_ministries(administered))
+        request.GET or None,
+        ministries=_offered_ministries(administered, showing_all=foundation))
     events = period.narrow(events)
-    page = _page(request, events, MANAGED_EVENTS_PER_PAGE)
+    page = page_of(request, events, MANAGED_EVENTS_PER_PAGE)
     # When 那一格的两行字：开始一行、结束一行（2026-08-29 第二轮）。
     #
     # 🔴 起止时间**回到了表格里**。这一批之前它们被搬进一个鼠标停在活动名上才
@@ -835,6 +944,21 @@ def event_manage_list(request):
     #    翻不到的那几百场也各算一遍。
     for event in page:
         event.when_start, event.when_end = schedule.when_labels(event)
+        # 🔴 **逐行的「你能不能改这一行」**（2026-09-03）。
+        #
+        #    这一页现在一张列表列全部（见 `_scoped_events`），所以「可不可改」
+        #    不再是整页的属性。它决定这一行画状态下拉还是一枚标签，
+        #    以及 Go to 那一格画三个链接还是六个。
+        #
+        # ⚠️ **一次集合判断，不是每行一次 `administers()` 查询** ——
+        #    `administered` 是上面那一次查询的结果（一个 id 集合）。
+        #    每行各问一次的话，50 行就是 50 次查询，而答案完全相同。
+        #
+        # 🔴 **这只决定「画什么」，不决定「准不准」。** 每一个写操作仍然走
+        #    `_managed_event()` → `can_manage_event()`，问的是真实账号和真实
+        #    活动。藏起一颗按钮挡不住任何人，真正的拒绝在视图里 ——
+        #    `button.html` 的 `disabled` 那段注释写的是同一条。
+        event.can_manage = administers_one_of(event.ministry_id, administered)
     return render(request, _template(
         request, "events/event_manage_list.html",
         "events/_event_manage_results.html"), {
@@ -842,13 +966,22 @@ def event_manage_list(request):
         "page": page,
         "total": page.paginator.count,
         "period": period,
-        "can_manage": bool(administered),
-        # ⚠️ Passed to the filter so it survives a Filter or a Clear. A
-        #    method="get" form replaces the whole query string with its own
-        #    fields, so without it the foundation-wide page silently narrows back
-        #    to the person's own ministries on the first click — and the list
-        #    still looks perfectly normal, just shorter.
-        "scope_param": "all" if _looking_foundation_wide(request, administered) else None,
+        # 🔴 页面级那个 `can_manage` 2026-09-03 一分为二 —— 它一直在同时回答
+        #    两个不同的问题，而一张列表之后这两个问题的答案会不一样：
+        #
+        #      · `showing_all`  这一页列的是不是全部 ministry（标题、横幅、筛选）
+        #      · `can_publish`  这个账号有没有任何 ministry 的发布权（那颗按钮）
+        #
+        #    而「这一行能不能改」是第三个问题，答案挂在每一行上（见上面循环）。
+        "showing_all": foundation,
+        "can_publish": bool(administered),
+        # 撤销刚才那次状态修改。⚠️ `pop` 而不是 `get`：它是一次性的 ——
+        #    留着的话，下一次打开这一页还会看到一颗撤销上上次的按钮，
+        #    而那时人已经不记得上上次是什么了。
+        #
+        # ⚠️ 取出来就渲染，不判「是不是刚刚那一次」：跨重定向的那条路上
+        #    「刚刚」本来就横跨两次请求。
+        "undo_action": request.session.pop("undo_status", None),
         # ⚠️ Present only when asked for, and the template keys the whole panel
         #    off "is it there". `report=1` without it would draw an empty panel
         #    full of zeros, which is a different claim from "not run yet".
@@ -894,15 +1027,22 @@ def ministry_report_page(request):
     rasterises this HTML.
     """
     events, administered, foundation = _scoped_events(request)
+    # ⚠️ 和列表页同一个判断（2026-09-03）：列全部时下拉必须能选全部，
+    #    否则筛选选不到自己看得见的行。
     period = EventPeriodForm(
-        request.GET or None, ministries=_offered_ministries(administered))
+        request.GET or None,
+        ministries=_offered_ministries(administered, showing_all=foundation))
     events = period.narrow(events)
     return render(request, "events/ministry_report.html", {
         "events": events.order_by("start_time", "pk"),
         "total": events.count(),
         "period": period,
-        "can_manage": bool(administered),
-        "scope": "Every ministry" if not administered else None,
+        # ⚠️ `can_manage` 和 `scope` 两个 2026-09-03 删了 —— `ministry_report.html`
+        #    **一次都没有读过它们**（grep 过），而 `scope` 那句
+        #    `"Every ministry" if not administered else None` 改成一张列表之后
+        #    还会说谎：两顶帽子的人拿到的正是全基金会的报表，而它答「不是」。
+        #    一个没人读、又不再正确的值，留着只会被下一个人当真。
+        "showing_all": foundation,
         # Arrived from the panel's "Save as PDF": open the print dialog on load,
         # so that path is one click rather than two.
         "autoprint": bool(request.GET.get("print")),
@@ -927,6 +1067,15 @@ def event_create(request):
         event = form.save(commit=False)
         event.owner = _my_contact(request)
         event.save()
+        # ⚠️ **Not optional**, for the same reason request.FILES above is not:
+        #    without it the tick is silently dropped. `commit=False` defers the
+        #    many-to-many, and `visible_to_ministries` is the only part of an
+        #    audience that lives in one — so an event ticked for a ministry and
+        #    nothing else stored an audience of nobody, and 404'd for everyone
+        #    including the person who had just published it. Missing here and in
+        #    event_update until 2026-09-08; notices.views.notice_create had it
+        #    from the day it was written.
+        form.save_m2m()
         messages.success(request, "Event created. Next, open the roles it needs.")
         return redirect("events:event_update", pk=event.pk)
 
@@ -961,6 +1110,14 @@ def event_update(request, pk):
         # can express. See EventForm.time_changed for the seconds trap.
         moved = form.time_changed()
         event = form.save(commit=False)
+        # ⚠️ Above the branch, not inside it, because **this view has two
+        #    exits** — the reschedule path redirects to the notice page and
+        #    never reaches the save below. Safe here: the row already has a pk,
+        #    so the through-table writes have something to point at, and they
+        #    are independent of the columns saved a few lines down.
+        #
+        #    See event_create for what its absence cost.
+        form.save_m2m()
         if moved:
             reschedule(
                 event,
@@ -976,7 +1133,22 @@ def event_update(request, pk):
                 f"?reason={EventNotification.Reason.TIME_CHANGED}"
             )
         event.save()
-        messages.success(request, "Event updated.")
+        # Narrowing an audience may leave people who already signed up outside
+        # it. That is allowed — their signups stand and their event page still
+        # opens — but it is silent, and this is the one moment somebody can act
+        # on knowing. ⚠️ It states the fact and stops: nothing in this system
+        # can withdraw somebody else's signup, so naming an action here would
+        # send the reader looking for a control that is not there.
+        stranded = signups_left_outside(event)
+        if stranded:
+            who = ("1 person who signed up is" if stranded == 1
+                   else f"{stranded} people who signed up are")
+            messages.success(request, (
+                f"Event updated. {who} outside the audience you just set — "
+                "their signups stand, and they can still open this event."
+            ))
+        else:
+            messages.success(request, "Event updated.")
         return redirect("events:event_detail", pk=event.pk)
 
     return render(request, "events/event_form.html",
@@ -1051,6 +1223,26 @@ def role_delete(request, pk):
     if not can_manage_event(request.user, role.event):
         raise PermissionDenied(SCOPED_DENIAL)
     if request.method == "POST":
+        # 🔴 Hours are records, and deleting this row deletes them. Participation
+        #    cascades from event_role, so one POST took an attended signup and
+        #    the hours somebody had recorded against it — while the confirmation
+        #    said only "anyone signed up for it goes with it", which reads as
+        #    losing a place in a list, not losing a number that has already been
+        #    reported. Refused since 2026-09-08: an ending is a date, not a
+        #    deletion, and there is no way back from this one through the site.
+        #
+        # ⚠️ Only when hours exist. A role opened by mistake, or one people
+        #    signed up for and nobody has worked yet, is still deletable — that
+        #    is what this page is for, and the confirmation now says how many
+        #    signups go with it.
+        recorded = hours_recorded_against(role)
+        if recorded:
+            messages.error(request, (
+                f"“{role.role.name}” has {recorded} recorded against it, and "
+                "deleting the role would delete those hours too. Close signups "
+                "on it instead, or correct the hours first."
+            ))
+            return redirect("events:event_update", pk=role.event_id)
         role.delete()
         messages.success(request, "Role removed.")
         if request.headers.get("HX-Request"):
@@ -1079,9 +1271,12 @@ def event_registrations(request, pk):
        "who said so" beside it.
     """
     event = get_object_or_404(Event.objects.select_related("ministry"), pk=pk)
-    if not can_view_event_records(request.user, event):
+    # ⚠️ One read of the grant table, not two. org.permissions.event_access()
+    #    exists for exactly this and says so in its own docstring; three pages
+    #    were still asking each question separately until 2026-09-08.
+    can_manage, may_view_records = event_access(request.user, event)
+    if not may_view_records:
         raise PermissionDenied(SCOPED_DENIAL)
-    can_manage = can_manage_event(request.user, event)
 
     if request.method == "POST":
         if not can_manage:
@@ -1110,9 +1305,24 @@ def event_registrations(request, pk):
                     f"Recorded. {participation.contact} will see on their signups "
                     "page that an admin set this.",
                 )
+            else:
+                # ⚠️ Both refusals say so out loud (2026-09-08). They were
+                #    silent redirects: somebody pressed the control, the page
+                #    came back identical, and nothing distinguished a refused
+                #    write from a successful one — D27's rule that having
+                #    nothing and counting nothing must not look alike, applied
+                #    to an action instead of a figure.
+                messages.error(
+                    request, "That is not an identity somebody can be asked "
+                             "about, so nothing was recorded.")
+        else:
+            messages.error(
+                request, "This signup is on a place people attend, so it does "
+                         "not record an identity — nothing was changed.")
         return redirect("events:event_registrations", pk=event.pk)
 
     roles = event.roles.with_signup_counts().select_related("role").prefetch_related(
+        "visible_to_ministries",
         Prefetch(
             "participations",
             queryset=Participation.objects.select_related("contact").order_by("contact"),
@@ -1153,9 +1363,9 @@ def event_attendance(request, pk):
     #    and interface keeps nobody out — a form posted from anywhere at all
     #    arrives at this view with the same shape.
     event = get_object_or_404(Event.objects.select_related("ministry"), pk=pk)
-    if not can_view_event_records(request.user, event):
+    can_manage, may_view_records = event_access(request.user, event)
+    if not may_view_records:
         raise PermissionDenied(SCOPED_DENIAL)
-    can_manage = can_manage_event(request.user, event)
 
     if request.method == "POST":
         if not can_manage:
@@ -1257,11 +1467,12 @@ def event_report(request, pk):
        any event's report without being able to touch the event.
     """
     event = get_object_or_404(Event.objects.select_related("ministry"), pk=pk)
-    if not can_view_event_records(request.user, event):
+    can_manage, may_view_records = event_access(request.user, event)
+    if not may_view_records:
         raise PermissionDenied(SCOPED_DENIAL)
     return render(request, "events/event_report.html", {
         "event": event,
-        "can_manage": can_manage_event(request.user, event),
+        "can_manage": can_manage,
         "summary": event_summary(event),
         "staff": ministry_staff_participation(event),
     })
@@ -1394,7 +1605,15 @@ def checkin_confirm(request):
 
     if targets is None or not targets.any_signup:
         return render(request, "events/checkin_refused.html", {
-            "event": event,
+            # ⚠️ **No `event` here**, and it is the only one of this page's four
+            #    refusals that withholds the name. The scan path does not ask
+            #    the audience — right, because somebody standing in the hall
+            #    with a signup should not be stopped by it (06-roadmap L2.2) —
+            #    but that reasoning is about people who **have** a signup, and
+            #    this is the branch for people who do not. A forwarded QR code
+            #    therefore named a staff-only event to somebody the event page
+            #    would 404 for. The template already draws the name only when
+            #    it is given one.
             "reason": "You are not signed up for this event.",
             # ⚠️ A link, never a signup. Creating the row here would walk past
             #    sign_up()'s two gates, and the state on the other side of them

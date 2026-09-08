@@ -16,7 +16,7 @@ from django.urls import reverse
 
 from contact.models import Contact
 from core.timeutils import local_now, local_today
-from events.models import Event, EventType
+from events.models import Event
 
 from .admin import StaffingFilter
 from .models import Assignment, EmploymentType, Ministry, MinistryRole, Position
@@ -29,6 +29,7 @@ from .permissions import (
     can_view_event_records,
     foundation_admin_group,
     ministry_ids_administered_by,
+    unresolved_permissions,
 )
 from .services import build_org_tree
 
@@ -762,10 +763,8 @@ class PermissionTests(TestCase):
         MinistryRole.objects.create(contact=self.zhang, ministry=self.pantry)
 
     def make_event(self, ministry):
-        event_type, _ = EventType.objects.get_or_create(
-            code="distribution", defaults={"name": "Distribution"})
         return Event.objects.create(
-            name="Distribution", event_type=event_type, ministry=ministry,
+            name="Distribution", ministry=ministry,
             start_time=local_now(), end_time=local_now() + datetime.timedelta(hours=2),
             owner=self.zhang,
         )
@@ -864,16 +863,65 @@ class FoundationAdminGroupTests(TestCase):
         }
         # Subset rather than equality: a permission named in the list but absent
         # from this database (an app not installed yet) is skipped by design.
+        #
+        # ⚠️ Which is why this assertion can never catch a name that resolves to
+        #    nothing — it passes more easily the more of the list is broken.
+        #    That is what test_every_named_permission_resolves below is for; the
+        #    two are a pair and neither is sufficient alone.
         self.assertTrue(granted <= set(FOUNDATION_ADMIN_PERMISSIONS))
         self.assertIn("org.add_ministry", granted,
                       "A production database starts with no ministries and nothing "
                       "else can create one.")
 
+    def test_every_named_permission_resolves(self):
+        """🔴 A label that names nothing grants nothing, silently.
+
+        `events.view_eventtype` sat in the list for three days after its model
+        was deleted, and nothing went red: the builder skips what it cannot
+        resolve, and the subset assertion above gets *easier* to satisfy as the
+        list rots. A mistyped codename fails exactly the same way and looks
+        correct in every listing.
+        """
+        self.assertEqual(unresolved_permissions(), [])
+
     def test_it_never_grants_delete_ministry(self):
-        # Deleting a ministry cascades into its events. "We stopped running it"
-        # is is_active=False — an ending is a date, not a deletion.
+        # "We stopped running it" is is_active=False — an ending is a date, not
+        # a deletion. ⚠️ The comment here used to say deleting cascades into
+        # the ministry's events; it does not (Event.ministry is PROTECT). What
+        # cascades is the audience many-to-many — see the test below, and
+        # org/permissions.py for the corrected reason.
         granted = {p.codename for p in foundation_admin_group().permissions.all()}
         self.assertNotIn("delete_ministry", granted)
+
+    def test_deleting_a_ministry_empties_the_audiences_that_named_it(self):
+        """🔴 What actually cascades, pinned because the comments named the wrong thing.
+
+        A ministry that owns events cannot be deleted at all — Event.ministry is
+        PROTECT. A ministry that owns nothing but is *ticked into* somebody
+        else's event is a different row: the audience many-to-many has no
+        on_delete of its own, so the tick goes, and an event left with an empty
+        audience is invisible to everybody. That is exactly the state
+        refuse_empty_audience() exists to prevent, reached by a path it cannot
+        see.
+
+        ⚠️ Not a defence — this documents the consequence. Deleting needs a
+           superuser and the foundation tier is not granted it, which is the
+           protection; this test is here so the next person reads a true reason.
+        """
+        owner = make_person("Owner")
+        pantry = make_ministry()
+        spare = make_ministry(code="spare", name="Spare")
+        event = Event.objects.create(
+            name="Joint briefing", ministry=pantry, owner=owner,
+            start_time=local_now(), end_time=local_now(),
+            visible_to_outsiders=False, visible_to_all_staff=False)
+        event.visible_to_ministries.set([spare])
+        self.assertFalse(event.audience_is_empty)
+
+        spare.delete()
+
+        event.refresh_from_db()
+        self.assertTrue(event.audience_is_empty)
 
     def test_a_migrate_is_what_keeps_the_group_true_in_production(self):
         """⚠️ The second half of the same bug, and the half that mattered more.

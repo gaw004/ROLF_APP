@@ -82,6 +82,29 @@ def administers(user, ministry, on=None) -> bool:
     return ministry_id in ministry_ids_administered_by(user, on=on)
 
 
+def administers_one_of(ministry, administered) -> bool:
+    """`administers()` for a page of rows: the same rule, asked with no query.
+
+    ⚠️ **The second implementation of one rule, and it lives here beside the
+       first for that reason** — the same arrangement core/querysets.py uses for
+       active()/is_currently_active and events/models.py for
+       recording_hours()/records_hours. Change one, change the other.
+
+    It was inlined in events/views.py until 2026-09-08 (`event.ministry_id in
+    administered`), which is this function's body written somewhere the grep
+    guard cannot see it: PermissionGuardTests looks for MinistryRole.objects,
+    and a set membership test names nothing it recognises. The rule that views
+    make exactly one call into this module was being broken by the only spelling
+    that could not be caught.
+
+    ⚠️ `administered` is the caller's already-fetched set of ids — one query for
+       a page rather than one per row, which is why the pair exists at all. It
+       decides **what to draw**; every write still goes through the real check.
+    """
+    ministry_id = getattr(ministry, "pk", ministry)
+    return ministry_id in administered
+
+
 def can_publish_event(user, ministry) -> bool:
     """P2: publish an event for this ministry, and say how many each role needs."""
     return administers(user, ministry)
@@ -95,6 +118,66 @@ def can_manage_event(user, event) -> bool:
     not something "may look at the list" should carry.
     """
     return event is not None and administers(user, event.ministry_id)
+
+
+def can_publish_notice(user, ministry) -> bool:
+    """Put a notice on the board in this ministry's name.
+
+    Two ways in, and unlike an event's records they are **not** two different
+    authorities — both may write:
+
+      · the ministry's own admin, in their own ministry's name;
+      · the foundation tier, in any ministry's name.
+
+    ⚠️ The foundation half arrived 2026-09-03, on the foundation's word, and it
+       is the restart condition D41's last table wrote down verbatim — "给
+       ministry admin 之外的人发布权 / 基金会说了算". That entry also promised
+       "改动只在 org.permissions.can_publish_notice 一个函数里", and that turned
+       out to be **half true**: the check is one line here, but a check is not a
+       door. `NoticeForm` builds its ministry dropdown from
+       ministry_ids_administered_by(), so a foundation admin holding no
+       MinistryRole would have passed this function and still had an empty
+       dropdown — permitted to publish, with nothing to publish for. The other
+       half of the change is there, and it is written on that form.
+
+    ⚠️ What did **not** change is the audience axis. A notice is louder than an
+       event — it lands on the home page of everybody it is ticked for — and
+       there was a real argument (2026-08-31) for reserving the wider ticks to
+       this tier. It was not taken then and is not taken now: the same three
+       ticks meaning something stricter on a second table is how two checks come
+       to disagree about one question. Every audience is still recorded with a
+       name against it.
+    """
+    return administers(user, ministry) or in_foundation_tier(user)
+
+
+def can_manage_notice(user, notice) -> bool:
+    """Edit it, publish it, take it down.
+
+    ⚠️ **Deliberately still its own function, even though it and
+       can_publish_notice now admit exactly the same two tiers** (2026-09-03).
+       They coincide today for two unrelated reasons: this one has always
+       included the foundation tier because taking down a wrong or harmful
+       notice cannot wait for the admin who wrote it to answer the phone, and
+       that one includes it as of today because the foundation asked to be able
+       to write one. Folding either into the other would tie the two together,
+       and the next move is likelier to separate them again — if publishing is
+       ever narrowed back, removing must stay wide.
+    """
+    if notice is None:
+        return False
+    return administers(user, notice.ministry_id) or in_foundation_tier(user)
+
+
+def can_reach_notice_manage(user) -> bool:
+    """May this account open the notice manage page at all, with nothing on it yet?
+
+    ⚠️ Its own question rather than "do they own any notices", because
+       "you have not written one yet" and "this page is not for you" must not
+       look the same (D27). A ministry admin on their first day gets an empty
+       page and a button, not a 403.
+    """
+    return bool(ministry_ids_administered_by(user)) or in_foundation_tier(user)
 
 
 def in_foundation_tier(user) -> bool:
@@ -144,6 +227,25 @@ def can_view_event_records(user, event) -> bool:
     if event is None:
         return False
     return administers(user, event.ministry_id) or in_foundation_tier(user)
+
+
+def event_access(user, event) -> tuple[bool, bool]:
+    """(may manage it, may read its records) — both answers, one look at the grants.
+
+    ⚠️ Composed here rather than in the caller, and that is the whole reason it
+       exists. The two questions share a term (`administers`), and a page that
+       needs both was asking each separately — reading the grant table twice
+       per render. Spelling `administers(...) or in_foundation_tier(...)` out at
+       the call site would fix the query and break the rule this module is for:
+       the two ways into an event's records are one policy, judged in one place.
+
+    ⚠️ Order matters for the second element: managing implies reading, so the
+       foundation-tier check is only reached by somebody who does not manage
+       this ministry. That is the containment can_view_event_records() states,
+       not a shortcut on top of it.
+    """
+    manages = can_manage_event(user, event)
+    return manages, manages or (event is not None and in_foundation_tier(user))
 
 
 def can_upload_gallery_photo(user, ministry) -> bool:
@@ -221,10 +323,21 @@ FOUNDATION_ADMIN_PERMISSIONS = [
     # index entirely when you hold no permission on it, which is why this looked
     # like a missing page rather than a missing permission.
     #
-    # ⚠️ No delete_ministry, deliberately. Deleting a ministry cascades into its
-    #    events, and "we are not running this any more" is is_active=False —
-    #    the same "an ending is a date, not a deletion" rule the rest of this
-    #    project follows.
+    # ⚠️ No delete_ministry, deliberately, and "we are not running this any
+    #    more" is is_active=False — the same "an ending is a date, not a
+    #    deletion" rule the rest of this project follows.
+    #
+    # 🔴 The reason written here until 2026-09-08 was **wrong**: it said
+    #    deleting a ministry cascades into its events. It does not —
+    #    `Event.ministry` is PROTECT, so a ministry that owns events cannot be
+    #    deleted at all. What does cascade is the one nobody had written down:
+    #    the audience many-to-many. A ministry that owns nothing but is *ticked
+    #    into* other ministries' events takes those ticks with it, and an event
+    #    left with an empty audience disappears for everybody — the state
+    #    refuse_empty_audience() exists to prevent, arriving by a path it does
+    #    not watch. Deleting still needs a superuser, so the withholding above
+    #    is the protection; what changed here is that it now gives the reason
+    #    that is true.
     "org.add_ministry",
     "org.change_ministry",
     "org.view_ministry",
@@ -239,11 +352,48 @@ FOUNDATION_ADMIN_PERMISSIONS = [
     # have to be filled in before the pilot, and that is done by a staff account
     # in the admin — this tier can see what is there without being able to
     # rename a category out from under existing rows.
-    "events.view_eventtype",
+    # ⚠️ `events.view_eventtype` sat here until 2026-09-08, three days after
+    #    that table was deleted (commit d600bc9, "一处不留"). Nothing reported
+    #    it: the loop below skipped the label it could not resolve, and the test
+    #    on this list asserts a **subset**, so a name that resolves to nothing
+    #    can never fail. That is the third time this file has met "the list is
+    #    right, reality is not, and nothing says so" — see the note under
+    #    unresolved() for what now says so.
     "events.view_participationrole",
     "org.view_position",
     "org.view_employmenttype",
 ]
+
+
+def _named_permissions():
+    """Every label in FOUNDATION_ADMIN_PERMISSIONS, resolved — None where it is not.
+
+    One resolution, two readers: the group builder below takes what resolved,
+    and unresolved() reports what did not. Written as one function because the
+    two used to be one loop with the failures thrown away.
+    """
+    for label in FOUNDATION_ADMIN_PERMISSIONS:
+        app_label, codename = label.split(".")
+        yield Permission.objects.filter(
+            content_type__app_label=app_label, codename=codename).first()
+
+
+def unresolved_permissions():
+    """The labels naming a permission this database does not have.
+
+    ⚠️ Skipping them is still right — an app that is not installed yet should
+       not stop the group being built. What was wrong was skipping them
+       **silently**: `events.view_eventtype` outlived its model by three days
+       and the only thing that would ever have noticed was somebody reading this
+       file. A typo in a codename fails exactly the same way, and grants nothing
+       while looking correct in every listing.
+
+    Read by core.management.commands.check_deployment, so a stale name is
+    reported where the rest of "is this database ready" is reported.
+    """
+    return [label for label, found
+            in zip(FOUNDATION_ADMIN_PERMISSIONS, _named_permissions())
+            if found is None]
 
 
 def foundation_admin_group() -> Group:
@@ -258,13 +408,7 @@ def foundation_admin_group() -> Group:
        gets 403 from them. That is deliberate, not an oversight.
     """
     group, _ = Group.objects.get_or_create(name=FOUNDATION_ADMIN_GROUP)
-    wanted = []
-    for label in FOUNDATION_ADMIN_PERMISSIONS:
-        app_label, codename = label.split(".")
-        found = Permission.objects.filter(
-            content_type__app_label=app_label, codename=codename).first()
-        if found:
-            wanted.append(found)
+    wanted = [p for p in _named_permissions() if p is not None]
     # ⚠️ Reconciled every time, not only when the group is new or empty.
     #
     #    The earlier version was `if created or not group.permissions.exists()`,

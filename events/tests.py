@@ -53,30 +53,34 @@ from core.timeutils import (
 from org.models import Assignment, Ministry, MinistryRole, Position
 from org.permissions import foundation_admin_group
 
+from .management.commands import seed_demo
 from .management.commands.seed_demo import demo_login
 
 from . import schedule, tokens
 from .forms import (
     AudienceAdminForm,
-    AudienceFormMixin,
     EventForm,
     EventPeriodForm,
     EventRoleForm,
     SignUpForm,
 )
 from .views import EVENTS_PER_PAGE
+from org.audience import Audience
+from org.forms import AudienceFormMixin
 from .models import (
-    Audience,
     Event,
     EventNotification,
     EventRole,
-    EventType,
     Participation,
     ParticipationRole,
+    Session,
+    Source,
     refuse_wider_than_event,
 )
 from .services import (
     NoHoursHere,
+    add_session,
+    NotEligible,
     RoleFull,
     CHECKIN_CREDENTIAL_KEY,
     CREDENTIAL_MAX_AGE,
@@ -85,6 +89,7 @@ from .services import (
     apply_scan,
     TurnedUp,
     cancel,
+    hours_recorded_against,
     signups_asked_about_serving,
     inherit_audience,
     set_audience,
@@ -96,6 +101,7 @@ from .services import (
     default_message,
     event_summary,
     events_in_period,
+    eligible,
     mark_absent,
     ministry_report,
     ministry_staff_participation,
@@ -128,11 +134,8 @@ def make_person(last_name, **kwargs):
 
 def make_event(ministry=None, **kwargs):
     ministry = ministry or Ministry.objects.create(code="food_pantry", name="Food Pantry")
-    event_type, _ = EventType.objects.get_or_create(
-        code="distribution", defaults={"name": "Distribution"})
     fields = {
         "name": "Saturday distribution",
-        "event_type": event_type,
         "ministry": ministry,
         "start_time": NOW + DAY,
         "end_time": NOW + DAY + 3 * HOUR,
@@ -142,14 +145,23 @@ def make_event(ministry=None, **kwargs):
         #    and every page 404s, so a fixture that says nothing about who it is
         #    for gets an audience here.
         #
-        # ⚠️ Outsiders only, and **narrower than what migration 0019 gave the
-        #    real rows** — it wrote outsiders *and* all staff. That is a
-        #    deliberate difference, corrected on 2026-08-28 after the same
-        #    misreading ("outsiders is the wide one") had been copied into
-        #    seed_demo and hidden the entire demo from its own staff. Here it is
-        #    right because these tests act as outsiders; anything about staff
-        #    visibility passes its own flags. See ForAudienceTests.
+        # ⚠️ **Both**, which is what migration 0019 gave the real rows: today's
+        #    behaviour, everybody. It was outsiders alone between 2026-08-28 and
+        #    L2.4, on the reading that "these tests act as outsiders" — and that
+        #    reading stopped being harmless the moment roles started reading
+        #    their audience (L2.4), because make_role() inherits this one. Every
+        #    fixture role was then open to outsiders only, so every test that
+        #    puts somebody **on the books** through SignUpForm or sign_up()
+        #    (ServedAsTests and its neighbours) failed for a reason that had
+        #    nothing to do with what it was testing.
+        #
+        # ⚠️ "Open to outsiders" is still not the widest setting — it excludes
+        #    staff, which is decision 10 and the trap that hid the whole demo
+        #    once. The widest is these two together, and that is what this is.
+        #    Anything actually *about* the audience spells its own flags out and
+        #    is unaffected (ForAudienceTests, EventRoleAudienceTests).
         "visible_to_outsiders": True,
+        "visible_to_all_staff": True,
     }
     fields.update(kwargs)
     return Event.objects.create(**fields)
@@ -890,7 +902,7 @@ class MinistryReportTests(TestCase):
         # consent_required_for() needs both halves: a minor AND an event that
         # asked for consent. Asking it differently here would reassure somebody
         # about a rule the report is not actually checking.
-        child = make_person("Chen", birth_date=local_now().date())
+        child = make_person("Chen", birth_date=local_today())
         unknown = make_person("Zhou")
         self.signup(child)
         self.signup(unknown)
@@ -911,7 +923,7 @@ class MinistryReportTests(TestCase):
     def test_a_consented_minor_is_not_flagged(self):
         self.event.requires_guardian_consent = True
         self.event.save()
-        child = make_person("Chen", birth_date=local_now().date())
+        child = make_person("Chen", birth_date=local_today())
         self.signup(child, consent_at=local_now(), consent_given_by="A parent")
         self.assertEqual(self.report()["figures"]["minors_without_consent"], 0)
 
@@ -2126,17 +2138,239 @@ class ServedAsTests(TestCase):
         self.assertEqual(row.served_as, Participation.ServedAs.VOLUNTEER)
 
 
-class DictionaryTableTests(TestCase):
-    def test_bulk_create_cannot_insert_an_event_type_code_differing_only_in_case(self):
-        EventType.objects.create(code="distribution", name="Distribution")
-        with self.assertRaises(IntegrityError), transaction.atomic():
-            EventType.objects.bulk_create([EventType(code="Distribution", name="Dup")])
+class SessionTests(TestCase):
+    """L5.1: the meetings inside a run.
 
-    def test_event_type_code_cannot_be_changed_once_created(self):
-        event_type = EventType.objects.create(code="distribution", name="Distribution")
-        event_type.code = "dist"
+    One Event (1 March to 20 June) with twelve Session rows under it is what
+    participants.md section 9 said Event could not hold. These tests hold the
+    two layers apart on purpose: the constraints are asserted through bare
+    creates, because a constraint that only fails through full_clean() is a
+    clean() rule wearing a constraint's name; the containment rule is asserted
+    through full_clean() and through the service, because that is all it can
+    ever be (D14 — it reads another table, so no CheckConstraint can see it).
+    """
+
+    def setUp(self):
+        # A run with real width, so "inside" and "outside" are both reachable.
+        self.spring = make_event(
+            name="ESL spring term",
+            start_time=NOW + DAY,
+            end_time=NOW + 100 * DAY,
+        )
+        self.first_week = NOW + 2 * DAY
+
+    def make_session(self, **fields):
+        return Session.objects.create(**{
+            "event": self.spring,
+            "start_time": self.first_week,
+            "end_time": self.first_week + 2 * HOUR,
+            **fields,
+        })
+
+    def test_a_session_belongs_to_one_event(self):
+        session = self.make_session()
+        self.assertEqual(list(self.spring.sessions.all()), [session])
+
+    def test_two_sessions_in_one_event_cannot_start_at_the_same_moment(self):
+        # One run cannot meet twice at once. Asserted through the database:
+        # this is the constraint, not the hint layer above it.
+        self.make_session()
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            self.make_session(end_time=self.first_week + 3 * HOUR)
+
+    def test_two_events_may_hold_meetings_at_the_same_moment(self):
+        # The other half of the uniqueness, and the reason it is a pair of
+        # columns rather than one: two courses running the same evening is
+        # ordinary, and a constraint on start_time alone would forbid it.
+        other = make_event(ministry=self.spring.ministry, name="Tuesday ESL",
+                           start_time=NOW + DAY, end_time=NOW + 100 * DAY)
+        self.make_session()
+        Session.objects.create(
+            event=other, start_time=self.first_week,
+            end_time=self.first_week + 2 * HOUR)
+        self.assertEqual(Session.objects.count(), 2)
+
+    def test_a_session_cannot_end_before_it_starts(self):
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            self.make_session(end_time=self.first_week - HOUR)
+
+    def test_a_session_outside_its_events_own_dates_is_refused(self):
+        """The rule the two ends of an Event were already making.
+
+        A spring term running to 20 June cannot meet on 1 August — the columns
+        on the parent row say so, and this is what makes them true of the table
+        rather than only of the description.
+        """
+        late = Session(
+            event=self.spring,
+            start_time=self.spring.end_time + DAY,
+            end_time=self.spring.end_time + DAY + 2 * HOUR,
+        )
         with self.assertRaises(ValidationError) as caught:
-            event_type.full_clean()
+            late.full_clean()
+        # Named to the end that is actually outside, not to the form as a whole.
+        self.assertIn("end_time", caught.exception.message_dict)
+
+    def test_a_session_before_its_event_starts_is_refused(self):
+        early = Session(
+            event=self.spring,
+            start_time=self.spring.start_time - DAY,
+            end_time=self.spring.start_time - DAY + 2 * HOUR,
+        )
+        with self.assertRaises(ValidationError) as caught:
+            early.full_clean()
+        self.assertIn("start_time", caught.exception.message_dict)
+
+    def test_a_session_inside_its_events_dates_is_kept(self):
+        session = Session(
+            event=self.spring,
+            start_time=self.first_week,
+            end_time=self.first_week + 2 * HOUR,
+        )
+        session.full_clean()
+        session.save()
+        self.assertEqual(self.spring.sessions.count(), 1)
+
+    def test_the_service_refuses_a_session_outside_the_events_dates(self):
+        # D18: the programmatic path goes through services, and it is what
+        # makes clean() reach code that is not a ModelForm.
+        with self.assertRaises(ValidationError):
+            add_session(
+                self.spring,
+                start_time=self.spring.end_time + DAY,
+                end_time=self.spring.end_time + DAY + 2 * HOUR,
+            )
+        self.assertEqual(self.spring.sessions.count(), 0)
+
+    def test_the_service_keeps_a_session_inside_the_events_dates(self):
+        session = add_session(
+            self.spring,
+            start_time=self.first_week,
+            end_time=self.first_week + 2 * HOUR,
+        )
+        self.assertEqual(session.source, Source.MANUAL)
+        self.assertEqual(list(self.spring.sessions.all()), [session])
+
+    def test_a_bare_create_walks_past_the_containment_rule(self):
+        """D14 asks for the gap to be stated rather than implied.
+
+        The rule reads another table, so it cannot be a CheckConstraint, and
+        this pins what that costs: a create() that skips full_clean() stores a
+        meeting outside its run. Written down so the next person reads the
+        docstring as true rather than as a promise.
+        """
+        stray = Session.objects.create(
+            event=self.spring,
+            start_time=self.spring.end_time + DAY,
+            end_time=self.spring.end_time + DAY + 2 * HOUR,
+        )
+        self.assertEqual(self.spring.sessions.count(), 1)
+        self.assertGreater(stray.start_time, self.spring.end_time)
+
+    def test_deleting_an_event_takes_its_sessions_with_it(self):
+        self.make_session()
+        self.spring.delete()
+        self.assertEqual(Session.objects.count(), 0)
+
+    def test_a_session_starts_out_marked_as_added_by_hand(self):
+        # The default is the fact about every row that exists before the
+        # generator does: somebody typed it. L5.6 is what writes the other one.
+        self.assertEqual(self.make_session().source, Source.MANUAL)
+
+    def test_moving_a_session_is_kept_in_its_history(self):
+        # "Who moved week 7 from Tuesday to Thursday" is a question about
+        # people's attendance, so it gets the same audit trail Event and
+        # Participation have.
+        session = self.make_session()
+        # ⚠️ Both ends move. Nudging only the start is what the check constraint
+        #    above exists to refuse, and it refused this test's first draft.
+        session.start_time = self.first_week + DAY
+        session.end_time = self.first_week + DAY + 2 * HOUR
+        session.save()
+        self.assertEqual(session.history.count(), 2)
+        self.assertEqual(
+            session.history.earliest().start_time, self.first_week)
+
+    def test_sessions_come_back_in_the_order_they_are_taught(self):
+        # Forward, unlike Event's newest-first: a course is read from week one.
+        third = self.make_session(start_time=self.first_week + 14 * DAY,
+                                  end_time=self.first_week + 14 * DAY + 2 * HOUR)
+        first = self.make_session()
+        second = self.make_session(start_time=self.first_week + 7 * DAY,
+                                   end_time=self.first_week + 7 * DAY + 2 * HOUR)
+        self.assertEqual(
+            list(self.spring.sessions.all()), [first, second, third])
+
+
+class AudienceBackfillTests(TestCase):
+    """Migration 0019's backfill, which decides what happens on launch day.
+
+    🔴 Every event and role that existed before the audience columns meant
+       "anybody signed in", and the backfill has to say that in **both** flags.
+       Setting `visible_to_outsiders` alone would hide every existing event from
+       the foundation's own staff — the opposite of what those rows meant — and
+       hide it silently, because an event nobody can see looks exactly like an
+       event that is not there.
+
+    ⚠️ The function is called directly rather than by replaying the migration.
+       Replaying needs a migration-testing dependency this project does not
+       have, and the backfill only shows itself on rows that existed *before*
+       it — which an empty test database has none of. Calling it gives the one
+       thing worth pinning: what it writes.
+
+    ⚠️ `apps` here is the live registry, not the historical one. Fine for this
+       function, which touches only columns that still exist — and the
+       difference is worth stating rather than leaving for somebody to discover
+       when a later migration changes the shape underneath it.
+    """
+
+    def test_existing_events_stay_visible_after_the_migration(self):
+        from importlib import import_module
+
+        from django.apps import apps as live_apps
+
+        # ⚠️ import_module, because the module name starts with a digit and
+        #    cannot be written as an import statement.
+        migration = import_module("events.migrations.0019_event_audience")
+
+        event = make_event(name="Before the columns existed")
+        role = make_role(event, "lifting")
+        Event.objects.update(visible_to_outsiders=False, visible_to_all_staff=False)
+        EventRole.objects.update(
+            visible_to_outsiders=False, visible_to_all_staff=False)
+
+        migration.open_to_everyone(live_apps, None)
+
+        event.refresh_from_db()
+        role.refresh_from_db()
+        for row in (event, role):
+            self.assertTrue(row.visible_to_outsiders)
+            # ⚠️ The half whose absence is the launch-day failure.
+            self.assertTrue(row.visible_to_all_staff)
+
+
+class DictionaryTableTests(TestCase):
+    """D9's two rules, on whichever dictionary table is handy.
+
+    ⚠️ These moved off `EventType` on 2026-09-04, when that table was deleted
+       for having no reader (06-roadmap.md L2.6). They were never about event
+       types — `ParticipationRole` carries the same `ImmutableCodeMixin` +
+       `UniqueConstraint(Lower("code"))` shape, and the rules are the mixin's.
+       Deleting them along with the table would have taken D9's whole coverage
+       with it, silently.
+    """
+
+    def test_bulk_create_cannot_insert_a_code_differing_only_in_case(self):
+        ParticipationRole.objects.create(code="lifting", name="Lifting")
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            ParticipationRole.objects.bulk_create(
+                [ParticipationRole(code="Lifting", name="Dup")])
+
+    def test_a_code_cannot_be_changed_once_created(self):
+        role = ParticipationRole.objects.create(code="lifting", name="Lifting")
+        role.code = "lift"
+        with self.assertRaises(ValidationError) as caught:
+            role.full_clean()
         self.assertIn("code", caught.exception.message_dict)
 
     def test_the_catch_all_role_can_always_be_had(self):
@@ -2243,11 +2477,19 @@ class AudienceContainmentTests(TestCase):
     def setUp(self):
         self.pantry = Ministry.objects.create(code="food_pantry", name="Food Pantry")
         self.tax = Ministry.objects.create(code="tax_help", name="Tax Help")
-        self.event = make_event(ministry=self.pantry, visible_to_outsiders=False)
+        # ⚠️ Both flags spelled out, never inherited from make_event()'s
+        #    default (which is the widest audience, outsiders **and** all
+        #    staff). This class is *about* containment, and an event that
+        #    quietly carried "everybody on the books" would contain every role
+        #    a test could write — three of these would then pass for the wrong
+        #    reason, which is how they went red when that default widened.
+        self.event = make_event(ministry=self.pantry, visible_to_outsiders=False,
+                                visible_to_all_staff=False)
         self.event.visible_to_ministries.add(self.pantry)
 
     def a_wide_event(self, name="Wide", **fields):
         """An event open to outsiders, for the tests that then narrow it."""
+        fields.setdefault("visible_to_all_staff", False)
         return make_event(ministry=self.pantry, name=name,
                           owner=self.event.owner, visible_to_outsiders=True,
                           **fields)
@@ -2262,7 +2504,7 @@ class AudienceContainmentTests(TestCase):
            `payload()` helper doing this job.
         """
         return EventForm({
-            "name": event.name, "event_type": event.event_type_id,
+            "name": event.name,
             "ministry": event.ministry_id,
             "start_time": "2026-09-01T09:00", "end_time": "2026-09-01T12:00",
             "status": event.status,
@@ -2352,7 +2594,12 @@ class AudienceContainmentTests(TestCase):
         trigger by hand. It stops being redundant the moment a third ministry
         exists, and by then nobody would remember to add it.
         """
-        every = make_event(ministry=self.pantry, name="Every ministry")
+        # ⚠️ Both ticks off explicitly, like setUp's event: "every ministry" is
+        #    the whole point here, and an event that also carried "everybody on
+        #    the books" from the fixture default would contain the role for the
+        #    wrong reason and this refusal would never fire.
+        every = make_event(ministry=self.pantry, name="Every ministry",
+                           visible_to_outsiders=False, visible_to_all_staff=False)
         every.visible_to_ministries.set([self.pantry, self.tax])
         form = self.role_form(event=every, visible_to_all_staff=True)
         self.assertFalse(form.is_valid())
@@ -2429,7 +2676,7 @@ class AudienceContainmentTests(TestCase):
             for index in range(role_count):
                 make_role(event, f"role-{role_count}-{index}")
             form = EventForm({
-                "name": event.name, "event_type": event.event_type_id,
+                "name": event.name,
                 "ministry": event.ministry_id,
                 "start_time": "2026-09-01T09:00", "end_time": "2026-09-01T12:00",
                 "status": event.status,
@@ -2617,7 +2864,7 @@ class AudienceContainmentTests(TestCase):
                     set_audience(event, spec)
 
                 form = EventForm({
-                    "name": event.name, "event_type": event.event_type_id,
+                    "name": event.name,
                     "ministry": event.ministry_id,
                     "start_time": "2026-09-01T09:00",
                     "end_time": "2026-09-01T12:00", "status": event.status,
@@ -2647,7 +2894,7 @@ class AudienceContainmentTests(TestCase):
         # ⚠️ roles.all() raises outright on an unsaved instance (verified), so
         #    the pk check is not defensive tidiness.
         form = EventForm({
-            "name": "Brand new", "event_type": self.event.event_type_id,
+            "name": "Brand new",
             "ministry": self.pantry.pk,
             "start_time": "2026-09-01T09:00", "end_time": "2026-09-01T12:00",
             "status": Event.Status.OPEN, "visible_to_outsiders": True,
@@ -2657,11 +2904,102 @@ class AudienceContainmentTests(TestCase):
     # --- decision 15: a new role inherits ---------------------------------
 
     def test_a_new_role_inherits_what_the_event_can_see(self):
+        """Decision 15, and all **three** parts of an audience.
+
+        ⚠️ It asserted the two booleans and stopped until 2026-09-08, so
+           deleting the many-to-many half of the implementation left the whole
+           suite green. Its own sibling below writes the failure out in as many
+           words — "copying the two booleans and forgetting the ManyToMany
+           leaves a role open to nobody on precisely the events that named their
+           audience most carefully" — and the no-form path was pinned while the
+           path a person actually walks was not.
+        """
         wide = make_event(ministry=self.pantry, name="Wide",
                           visible_to_outsiders=True, visible_to_all_staff=True)
+        wide.visible_to_ministries.set([self.pantry])
         form = EventRoleForm(event=wide)
         self.assertTrue(form.initial["visible_to_outsiders"])
         self.assertTrue(form.initial["visible_to_all_staff"])
+        # ⚠️ Primary keys, not instances — that is what a ModelMultipleChoice
+        #    initial holds, and asserting instances passes only by accident of
+        #    __eq__ on some paths.
+        self.assertEqual(
+            list(form.initial["visible_to_ministries"]), [self.pantry.pk])
+
+    def test_the_admin_cannot_move_a_signup_to_another_role(self):
+        """Moving a row between roles changes which fact it states.
+
+        A signup with hours, re-pointed at an attending role, passes every
+        check — the no-hours constraint keys on served_as and this row does not
+        claim not_applicable — and afterwards the report counts nothing for it
+        while /me/ counts the hours. One row, two ledgers, no error.
+        """
+        from events.admin import ParticipationAdmin
+        self.assertIn("event_role", ParticipationAdmin.readonly_fields)
+        self.assertNotIn("event_role", ParticipationAdmin.autocomplete_fields)
+
+    def test_deleting_a_role_with_recorded_hours_is_refused(self):
+        """🔴 One POST used to take an attended signup and its hours with it.
+
+        EventRole cascades into Participation, and role_delete asked nothing —
+        so a row marked attended with 3.5 hours against it disappeared, the
+        ministry report's total dropped, and the only trace was in the shadow
+        table. The confirmation said "anyone signed up for it goes with it",
+        which reads as losing a place in a list.
+
+        ⚠️ Hours are the number that has already left this system. An ending is
+           a date, not a deletion — and there is no way back through the site.
+        """
+        role = EventRole.objects.create(
+            event=self.event, role=ParticipationRole.seed_catch_all(
+                ParticipationRole.Nature.HELPING))
+        Participation.objects.create(
+            contact=make_person("Worker"), event_role=role,
+            status=Participation.Status.ATTENDED, hours=Decimal("3.5"))
+        self.assertEqual(hours_recorded_against(role), "3.5 hours")
+
+    def test_a_role_nobody_has_worked_can_still_be_deleted(self):
+        # The other half, and the reason this is not a blanket refusal: a role
+        # opened by mistake is exactly what that button is for.
+        role = EventRole.objects.create(
+            event=self.event, role=ParticipationRole.seed_catch_all(
+                ParticipationRole.Nature.HELPING))
+        Participation.objects.create(
+            contact=make_person("Signed"), event_role=role)
+        self.assertEqual(hours_recorded_against(role), "")
+
+    def test_a_retired_ministry_stays_tickable_on_a_row_that_already_has_it(self):
+        """🔴 Otherwise retiring a ministry locks its events out of the site.
+
+        The tick stops being rendered, so the browser cannot submit it, so the
+        audience comes back narrower than it is stored, so the save is refused
+        with "narrow that role first" — and there is no page for narrowing a
+        role. The event then cannot be edited from the site again for any
+        reason, including a typo. Retiring is the act org/permissions.py
+        recommends in place of deleting, so this is not a corner.
+        """
+        retired = Ministry.objects.create(
+            code="retired_help", name="Retired Help", is_active=False)
+        role = EventRole.objects.create(
+            event=self.event, role=ParticipationRole.seed_catch_all(
+                ParticipationRole.Nature.HELPING))
+        role.visible_to_ministries.set([self.pantry, retired])
+        offered = list(EventRoleForm(instance=role, event=self.event)
+                       .fields["visible_to_ministries"].queryset)
+        self.assertIn(retired, offered)
+        # ⚠️ Offered, not re-ticked — the form only makes the stored value
+        #    expressible. Somebody may take it off; they may not be trapped by
+        #    a box they are not allowed to see.
+        self.assertIn(self.pantry, offered)
+
+    def test_a_retired_ministry_is_not_offered_on_a_row_without_it(self):
+        # The other half: retiring still takes it out of circulation for
+        # everything that was not already ticked into it.
+        Ministry.objects.create(
+            code="retired_help", name="Retired Help", is_active=False)
+        offered = {m.code for m in EventRoleForm(event=self.event)
+                   .fields["visible_to_ministries"].queryset}
+        self.assertNotIn("retired_help", offered)
 
     def test_editing_a_role_does_not_re_inherit(self):
         # ⚠️ Re-inheriting would silently widen a role somebody had narrowed.
@@ -2754,8 +3092,6 @@ class AudienceThroughTheAdminTests(TestCase):
     def setUp(self):
         self.pantry = Ministry.objects.create(code="food_pantry", name="Food Pantry")
         self.tax = Ministry.objects.create(code="tax_help", name="Tax Help")
-        self.event_type, _ = EventType.objects.get_or_create(
-            code="distribution", defaults={"name": "Distribution"})
         self.lifting = ParticipationRole.objects.create(
             code="lifting", name="Lifting")
         # Ministry-only: the narrowest audience there is, so anything wider is
@@ -2858,7 +3194,7 @@ class AudienceThroughTheAdminTests(TestCase):
 
     def event_payload(self, **extra):
         return {
-            "name": "Soup run", "event_type": self.event_type.pk,
+            "name": "Soup run",
             "ministry": self.pantry.pk,
             # ⚠️ Split widgets. The admin renders a DateTimeField as two boxes,
             #    and a payload with one key per field is simply *missing* both
@@ -2971,12 +3307,23 @@ class ForAudienceTests(TestCase):
         #    This class is *about* the audience, so a fixture quietly carrying
         #    "open to outsiders" would make half of it pass for the wrong reason.
         flags.setdefault("visible_to_outsiders", False)
+        # ⚠️ Both of them, and the second one was added the day make_event()'s
+        #    default widened to the pair (L2.4). The comment above already said
+        #    "every flag spelled out"; only one of the two actually was, and the
+        #    half that was missing let two of these tests pass for the wrong
+        #    reason the moment the default changed underneath them.
+        flags.setdefault("visible_to_all_staff", False)
         event = make_event(ministry=self.pantry, name=name, owner=self.owner, **flags)
         for ministry in ministries:
             event.visible_to_ministries.add(ministry)
         return event
 
     def a_post(self, code, ministry):
+        # ⚠️ `ministry` may be None, and until 2026-09-08 nothing in this class
+        #    ever passed that — every fixture handed it one, so the whole
+        #    foundation-wide branch (an executive director, a finance officer:
+        #    on the books, in no single ministry) went untested. Decision 1 of
+        #    this round is *about* those posts.
         return Position.objects.create(
             code=code, name=code, kind=Position.Kind.STAFF,
             compensation=Position.Compensation.PAID, ministry=ministry)
@@ -2994,6 +3341,39 @@ class ForAudienceTests(TestCase):
 
     def test_an_outsider_sees_only_what_is_open_to_outsiders(self):
         self.assertEqual(self.seen_by(self.outsider), {"Open day"})
+
+    def test_the_executive_director_sees_all_staff_events_but_not_ministry_ones(self):
+        """Decision 1 of this round, and the branch no fixture here ever took.
+
+        A post with no ministry — the executive director, the finance officer —
+        is on the books, so "everybody on the books" includes them. It falls
+        into no single ministry's tick, so a pantry huddle does not. Both halves
+        matter: the first is what makes them staff at all, and the second is
+        what stops "no ministry" being read as "every ministry".
+        """
+        director = make_person("Director", birth_date=datetime.date(1970, 1, 1))
+        Assignment.objects.create(
+            contact=director,
+            position=self.a_post("executive_director", None),
+            start_date=local_date_of(self.public.start_time) - DAY)
+        self.assertEqual(self.seen_by(director), {"All-hands"})
+
+    def test_an_outsiders_only_event_is_hidden_from_the_admin_who_published_it(self):
+        """Decision 10's jarring half, pinned so it is not "fixed" later.
+
+        "Only people with no current post" is not the widest setting — it is a
+        setting staff are *outside*. So an event ticked that way disappears for
+        the person who published it, which reads as a bug the first time
+        somebody meets it and is the whole point of the tick: a food parcel
+        collection that employees should not be taking places in.
+        """
+        publisher = make_person("Publisher", birth_date=datetime.date(1975, 1, 1))
+        self.employ(publisher, self.pantry, code="pantry_lead")
+        parcels = self.an_event("Parcel collection", visible_to_outsiders=True)
+        parcels.owner = publisher
+        parcels.save()
+        self.assertNotIn("Parcel collection", self.seen_by(publisher))
+        self.assertIn("Parcel collection", self.seen_by(self.outsider))
 
     def test_staff_see_the_all_hands_and_not_the_public_one(self):
         """⚠️ "Open to outsiders" is not the widest setting — it **excludes**
@@ -3084,6 +3464,264 @@ class ForAudienceTests(TestCase):
         self.assertIn("Open day", seen)
 
 
+class AudienceIsWiredUpTests(TestCase):
+    """Every table that carries an audience can also be narrowed by one.
+
+    ⭐ The one thing about audiences that is not checked by any of the tests
+       below it, because it is about a table that does not exist yet. Inheriting
+       `Audience` hands a new table the three columns, `AUDIENCE_ON`, the
+       refusal rules and the admin — all of it silent if nobody also mixes
+       `AudienceQuerySetMixin` into its queryset. And silence is the whole
+       failure: nothing raises, the rows simply go out to everybody, which is
+       the hole participants.md section 1 found in the first place.
+
+    ⚠️ Written against `Audience.__subclasses__()` rather than a list of two, so
+       batch three's `Session` is covered on the day somebody adds it rather
+       than on the day somebody remembers this file.
+    """
+
+    def concrete(self):
+        rows = [model for model in Audience.__subclasses__()
+                if not model._meta.abstract]
+        # A loop that finds nothing passes every assertion inside it — the way
+        # this kind of check quietly stops checking.
+        self.assertGreaterEqual(len(rows), 2, "Event and EventRole at least")
+        return rows
+
+    def test_every_table_with_an_audience_can_be_narrowed_by_one(self):
+        for model in self.concrete():
+            with self.subTest(model=model.__name__):
+                self.assertTrue(
+                    hasattr(model.objects, "for_audience"),
+                    f"{model.__name__} inherits Audience but its manager cannot "
+                    "narrow by one — mix AudienceQuerySetMixin into its queryset.",
+                )
+
+    def test_every_table_with_an_audience_says_which_day_decides(self):
+        for model in self.concrete():
+            with self.subTest(model=model.__name__):
+                # ⚠️ None is a real answer, not a missing one: it means the
+                #    table has no occasion behind it and the tenure is judged
+                #    today (Notice, 2026-08-31). See Audience.AUDIENCE_DAY.
+                #    Asserted as `is None` rather than falsy, so an empty
+                #    string — which would resolve to nothing and silently
+                #    behave like "today" — still fails here.
+                if model.AUDIENCE_DAY is None:
+                    continue
+                # A path this model can actually resolve, not just any string:
+                # a typo here is a FieldError at query time, on a page.
+                model._meta.get_field(model.AUDIENCE_DAY.split("__")[0])
+
+
+class EventRoleAudienceTests(TestCase):
+    """L2: which places a given person may actually take. Requirements 6, 7, 8.
+
+    The other half of ForAudienceTests above, and the same three branches from
+    the same mixin — deliberately, because "visible on the day but not signable
+    on the day" is a state nobody could explain. What differs is the
+    consequence: on an event the answer decides what somebody may **find**; on
+    a role it decides what they may **join**, and a role that is not theirs is
+    filtered out of the page rather than listed with a note (requirement 8:
+    internal roles "are only shown to" internal people).
+
+    ⚠️ Every failure here is silent in both directions. Too wide, and an
+       outside volunteer takes a place the foundation marked staff-only; too
+       narrow, and somebody is quietly refused a place that is theirs. Neither
+       raises anything.
+    """
+
+    def setUp(self):
+        self.pantry = Ministry.objects.create(code="food_pantry", name="Food Pantry")
+        self.tax = Ministry.objects.create(code="tax_help", name="Tax Help")
+        # Open to everybody, so that what narrows below is the **role** and
+        # never the event — this class is about the role's own ticks.
+        self.event = make_event(ministry=self.pantry, visible_to_outsiders=True,
+                                visible_to_all_staff=True)
+        self.outsider = make_person("Outsider", birth_date=datetime.date(1985, 1, 1))
+
+    def a_post(self, ministry):
+        # ⚠️ A fresh post each time, and a unique code with it: two people in
+        #    one ministry is the ordinary case here, and `position_code_ci_unique`
+        #    refuses the second one.
+        code = f"{ministry.code}_officer_{Position.objects.count()}"
+        return Position.objects.create(
+            code=code, name="Officer",
+            kind=Position.Kind.STAFF, compensation=Position.Compensation.PAID,
+            ministry=ministry)
+
+    def employ(self, person, ministry, **dates):
+        dates.setdefault("start_date",
+                         local_date_of(self.event.start_time) - datetime.timedelta(days=30))
+        return Assignment.objects.create(
+            contact=person, position=self.a_post(ministry), **dates)
+
+    def a_staffer(self, last_name="Staffer", ministry=None):
+        person = make_person(last_name, birth_date=datetime.date(1985, 1, 1))
+        self.employ(person, ministry or self.pantry)
+        return person
+
+    def staff_only(self, code="coord", **fields):
+        """A role only the foundation's own people may take.
+
+        ⚠️ The flag pair **is** what most of this class is testing, so it is
+           typed once. Six hand-written copies were six chances to type the pair
+           that looks narrow and is empty — see for_ministries() below, which
+           records that mistake costing this class a test that passed for the
+           wrong reason.
+        """
+        return make_role(self.event, code, visible_to_outsiders=False,
+                         visible_to_all_staff=True, **fields)
+
+    def for_ministries(self, code, *ministries):
+        """A role open to named ministries' staff and nobody else.
+
+        🔴 Through set_audience(), **not** by passing the two flags to
+           make_role() and then adding the ministries. False/False/none is not
+           a narrow audience, it is the empty one — so make_role() would read it
+           as a role with no audience and inherit the event's, and the two ticks
+           that look like they pin this down would be overwritten by the widest
+           setting there is. Cost the first draft of this class a test that
+           passed for the wrong reason.
+        """
+        role = make_role(self.event, code)
+        return set_audience(role, Audience.Spec(
+            outsiders=False, all_staff=False,
+            ministries=frozenset(ministry.pk for ministry in ministries)))
+
+    def open_to(self, contact):
+        return sorted(role.role.code
+                      for role in self.event.roles.for_audience(contact))
+
+    # --- the three branches, from the role's side -------------------------
+
+    def test_a_staff_only_role_does_not_appear_to_an_outsider(self):
+        self.staff_only()
+        self.assertEqual(self.open_to(self.outsider), [])
+
+    def test_one_event_can_open_a_public_role_and_a_staff_role_at_once(self):
+        """⭐ Requirement 8, entire: publish once, recruit both.
+
+        The outsider sees the event and the lifting job; the coordinator's seat
+        is not on their page at all. Nobody publishes the same day twice.
+        """
+        make_role(self.event, "lifting")           # inherits: everybody
+        self.staff_only()
+        self.assertEqual(self.open_to(self.outsider), ["lifting"])
+        self.assertEqual(self.open_to(self.a_staffer()), ["coord", "lifting"])
+
+    def test_a_staff_member_of_another_ministry_sees_the_event_and_none_of_its_roles(self):
+        """Requirement 7, and the shape it actually lands in.
+
+        "Seen is not signable" is true of the **event**, not of the role: they
+        can open the page, and there is simply nothing on it for them.
+        """
+        self.for_ministries("pantry_only", self.pantry)
+        outside_ministry = self.a_staffer("Taxman", ministry=self.tax)
+        self.assertTrue(
+            Event.objects.filter(pk=self.event.pk)
+            .for_audience(outside_ministry).exists())
+        self.assertEqual(self.open_to(outside_ministry), [])
+
+    def test_somebody_with_posts_in_two_ministries_can_sign_up_on_either(self):
+        # D32: a qualifying tenure **exists**, never which one it is. Written
+        # as a join this person would also see one of the roles twice.
+        both = make_person("Both", birth_date=datetime.date(1985, 1, 1))
+        self.employ(both, self.pantry)
+        self.employ(both, self.tax)
+        self.for_ministries("pantry_only", self.pantry)
+        self.for_ministries("tax_only", self.tax)
+        self.assertEqual(self.open_to(both), ["pantry_only", "tax_only"])
+
+    def test_eligibility_is_judged_on_the_day_of_the_event(self):
+        """The same clock as the event's own visibility, for the same reason.
+
+        Somebody who left last month is an outsider on the day, whatever the
+        calendar says today.
+        """
+        former = make_person("Former", birth_date=datetime.date(1985, 1, 1))
+        self.employ(
+            former, self.pantry,
+            start_date=local_date_of(self.event.start_time) - datetime.timedelta(days=60),
+            end_date=local_date_of(self.event.start_time) - datetime.timedelta(days=1),
+        )
+        staff_only = self.staff_only()
+        self.assertFalse(eligible(former, staff_only))
+        self.assertTrue(eligible(self.a_staffer(), staff_only))
+
+    # --- the gate in sign_up() --------------------------------------------
+
+    def test_signing_up_for_a_role_that_is_not_yours_is_refused(self):
+        """⚠️ Asked of the **service**, not through a page.
+
+        The website cannot reach this: the form's dropdown holds only the roles
+        that are theirs. Its readers are the other doors — an admin working
+        from a paper list, an importer, batch three's generator — which is
+        exactly why the rule is not on the form.
+        """
+        staff_only = self.staff_only()
+        with self.assertRaises(NotEligible) as refused:
+            sign_up(contact=self.outsider, event_role=staff_only)
+        self.assertIn("Coord", " ".join(refused.exception.messages))
+        self.assertFalse(Participation.objects.exists())
+
+    def test_not_being_eligible_is_answered_before_the_role_being_full(self):
+        """🔴 The order of the gates, and it is not cosmetic.
+
+        "It is full" sends somebody away to wait for a place that would never
+        have been theirs however many people withdrew.
+        """
+        staff_only = self.staff_only(needed_count=1)
+        sign_up(contact=self.a_staffer(), event_role=staff_only)
+        with self.assertRaises(NotEligible):
+            sign_up(contact=self.outsider, event_role=staff_only)
+
+    def test_signing_up_again_after_cancelling_meets_the_gate(self):
+        """⚠️ A behaviour change, recorded rather than discovered later.
+
+        Changing your mind must not be permanent (fixed in the browser on
+        2026-08-19) — but coming back is a fresh act of joining, and a role
+        narrowed in the meantime is no longer a place this person may take.
+        """
+        role = make_role(self.event, "lifting")
+        participation = sign_up(contact=self.outsider, event_role=role)
+        cancel(participation)
+
+        set_audience(role, Audience.Spec(outsiders=False, all_staff=True,
+                                         ministries=frozenset()))
+        with self.assertRaises(NotEligible):
+            sign_up(contact=self.outsider, event_role=role)
+        participation.refresh_from_db()
+        self.assertEqual(participation.status, Participation.Status.CANCELLED)
+
+    # --- the form draws from the same set ---------------------------------
+
+    def test_the_signup_form_offers_only_the_roles_that_are_theirs(self):
+        make_role(self.event, "lifting")
+        self.staff_only()
+        offered = SignUpForm(event=self.event, contact=self.outsider)
+        self.assertEqual(
+            [role.role.code for role in offered.fields["event_role"].queryset],
+            ["lifting"])
+        staffer = SignUpForm(event=self.event, contact=self.a_staffer())
+        self.assertEqual(
+            sorted(role.role.code
+                   for role in staffer.fields["event_role"].queryset),
+            ["coord", "lifting"])
+
+    def test_a_page_of_roles_is_one_query(self):
+        """The detail page and the dropdown both ask for a page at a time.
+
+        ⚠️ Pinned as a shape, not a number: what must stay true is that asking
+           costs the same for one role as for a dozen. A count nailed down here
+           becomes a rubber stamp the first time somebody adds a column.
+        """
+        for index in range(12):
+            make_role(self.event, f"job{index}")
+        staffer = self.a_staffer()
+        with self.assertNumQueries(1):
+            list(self.event.roles.for_audience(staffer).with_signup_counts())
+
+
 class AudienceShapeTests(TestCase):
     """L2.1: who an event is for, as a set of ticks rather than one tier.
 
@@ -3100,12 +3738,10 @@ class AudienceShapeTests(TestCase):
             password="a-good-long-password", email="zhang@example.com",
             legal_last_name="Zhang", legal_first_name="San")
         MinistryRole.objects.create(contact=self.zhang.contact, ministry=self.pantry)
-        self.event_type, _ = EventType.objects.get_or_create(
-            code="distribution", defaults={"name": "Distribution"})
 
     def payload(self, **extra):
         return {
-            "name": "Soup run", "event_type": self.event_type.pk,
+            "name": "Soup run",
             "ministry": self.pantry.pk,
             "start_time": "2026-09-01T09:00", "end_time": "2026-09-01T12:00",
             "status": Event.Status.OPEN,
@@ -3115,7 +3751,15 @@ class AudienceShapeTests(TestCase):
     def save(self, form):
         """⚠️ `owner` is not a form field — event_create() sets it after
         commit=False, so a test calling form.save() straight through hits a
-        NOT NULL. Same two lines as the view, on purpose.
+        NOT NULL. The same three lines as the view, on purpose.
+
+        🔴 It said "the same **two** lines" until 2026-09-08, and it was wrong
+           by exactly the line that mattered: the view had no `save_m2m()`, so
+           every event published through the page stored an audience with no
+           ministries in it while this whole class stayed green. A helper that
+           claims to mirror a view and is more correct than it does not test
+           that view — it tests a path nobody walks. If the view's shape changes
+           again, this is the first place to look.
         """
         event = form.save(commit=False)
         event.owner = self.zhang.contact
@@ -3712,9 +4356,8 @@ class MinistryAdminPageTests(PageTestCase):
         # The POST side. The narrowed dropdown stops a slip; this stops a
         # forged id, and only one of the two is a security check.
         self.login(self.zhang)
-        event_type = EventType.objects.first()
         response = self.client.post(reverse("events:event_create"), {
-            "name": "Sneaky", "event_type": event_type.pk, "ministry": self.tax.pk,
+            "name": "Sneaky", "ministry": self.tax.pk,
             "start_time": "2026-09-01T09:00", "end_time": "2026-09-01T12:00",
             "status": Event.Status.DRAFT, "visible_to_outsiders": True,
         })
@@ -3729,10 +4372,8 @@ class MinistryAdminPageTests(PageTestCase):
 
     def test_publishing_for_their_own_ministry_works(self):
         self.login(self.zhang)
-        event_type = EventType.objects.first()
         response = self.client.post(reverse("events:event_create"), {
-            "name": "Saturday pantry", "event_type": event_type.pk,
-            "ministry": self.pantry.pk,
+            "name": "Saturday pantry", "ministry": self.pantry.pk,
             "start_time": "2026-09-01T09:00", "end_time": "2026-09-01T12:00",
             "status": Event.Status.OPEN,
         # ⚠️ L2.1 rule 1: the form refuses an audience nobody is in, so
@@ -3743,6 +4384,295 @@ class MinistryAdminPageTests(PageTestCase):
         })
         self.assertEqual(response.status_code, 302)
         self.assertTrue(Event.objects.filter(name="Saturday pantry").exists())
+
+    def test_ticking_everyone_leaves_the_pair_it_covers_unticked(self):
+        """🔴 What makes the convenience tick work in both directions.
+
+        All three came back ticked until 2026-09-08, and audience() reads the
+        tick as `everyone or visible_to_outsiders` — so unticking "Everyone"
+        left the pair ticked, stored the audience it already had, and reported
+        success. Taking an event back off the public listing did nothing, and
+        said nothing.
+        """
+        self.event.visible_to_outsiders = True
+        self.event.visible_to_all_staff = True
+        self.event.save()
+        self.login(self.zhang)
+        form = self.client.get(
+            reverse("events:event_update", args=[self.event.pk])
+        ).context["form"]
+        self.assertTrue(form.initial[form.EVERYONE_FIELD])
+        self.assertFalse(form.initial["visible_to_outsiders"])
+        self.assertFalse(form.initial["visible_to_all_staff"])
+
+    def test_unticking_everyone_asks_who_it_is_for(self):
+        # The half that used to be a silent no-op. With the pair blank, taking
+        # the tick off leaves an audience of nobody — and that is refused out
+        # loud rather than saved as no change at all.
+        self.event.visible_to_outsiders = True
+        self.event.visible_to_all_staff = True
+        self.event.save()
+        self.role.visible_to_outsiders = True
+        self.role.visible_to_all_staff = True
+        self.role.save()
+        self.login(self.zhang)
+        response = self.client.post(
+            reverse("events:event_update", args=[self.event.pk]), {
+                "name": self.event.name, "ministry": self.pantry.pk,
+                "start_time": localtime(
+                    self.event.start_time).strftime("%Y-%m-%dT%H:%M"),
+                "end_time": localtime(
+                    self.event.end_time).strftime("%Y-%m-%dT%H:%M"),
+                "status": self.event.status,
+            })
+        self.assertEqual(response.status_code, 200)
+        self.event.refresh_from_db()
+        self.assertTrue(self.event.visible_to_outsiders)
+
+    def test_an_event_stored_as_everyone_comes_back_as_everyone(self):
+        # The round trip, so blanking the pair on the way out cannot be read as
+        # dropping it: audience() expands the tick again on the way in.
+        self.event.visible_to_outsiders = True
+        self.event.visible_to_all_staff = True
+        self.event.save()
+        self.login(self.zhang)
+        form = self.client.get(
+            reverse("events:event_update", args=[self.event.pk])
+        ).context["form"]
+        response = self.client.post(
+            reverse("events:event_update", args=[self.event.pk]), {
+                "name": self.event.name, "ministry": self.pantry.pk,
+                "start_time": localtime(
+                    self.event.start_time).strftime("%Y-%m-%dT%H:%M"),
+                "end_time": localtime(
+                    self.event.end_time).strftime("%Y-%m-%dT%H:%M"),
+                "status": self.event.status,
+                form.EVERYONE_FIELD: True,
+            })
+        self.assertEqual(response.status_code, 302)
+        self.event.refresh_from_db()
+        self.assertTrue(self.event.visible_to_outsiders)
+        self.assertTrue(self.event.visible_to_all_staff)
+
+    def test_the_detail_page_says_who_can_see_the_event(self):
+        """⭐ The audience was a value this system only ever wrote.
+
+        Three ticks decided who could find an event and no page showed them
+        back — the only way to check what you had chosen was to reopen the form
+        you chose it in. 06-roadmap's stated failure for this feature is
+        "published a leaving party to every outside volunteer, and nothing says
+        so"; until 2026-09-08 nothing could.
+        """
+        self.login(self.zhang)
+        html = self.client.get(
+            reverse("events:event_detail", args=[self.event.pk])).content.decode()
+        self.assertIn("Visible to", html)
+        self.assertIn("people with no current post", html)
+
+    def test_the_roles_table_says_who_may_sign_up_for_each_one(self):
+        # Requirement 8 from the publisher's side: one event recruiting inside
+        # and outside at once, and no page let them check they had done it.
+        for row in (self.event, self.role):
+            row.visible_to_outsiders = False
+            row.visible_to_all_staff = True
+            row.save()
+        self.login(self.zhang)      # can read records, so sees every role
+        html = self.client.get(
+            reverse("events:event_detail", args=[self.event.pk])).content.decode()
+        self.assertIn("Open to", html)
+        self.assertIn("everybody on the books", html)
+
+    def test_an_ordinary_participant_is_not_shown_the_open_to_column(self):
+        # For them the table is already filtered to roles they can take, so the
+        # column would read "you" on every row — words with no consequence.
+        self.login(self.lisi)
+        html = self.client.get(
+            reverse("events:event_detail", args=[self.event.pk])).content.decode()
+        self.assertNotIn("Open to", html)
+
+    def test_the_two_tick_groups_say_which_question_they_answer(self):
+        # Their four labels are identical (they come from the abstract model),
+        # they are drawn one above the other, and the lower one is pre-ticked to
+        # match the upper. "Seeing it is not the same as signing up for it" is
+        # this round's central sentence and this screen never said it.
+        self.login(self.zhang)
+        html = self.client.get(
+            reverse("events:event_update", args=[self.event.pk])).content.decode()
+        self.assertIn("Who can see this event", html)
+        self.assertIn("Who may sign up for this role", html)
+
+    def test_an_empty_event_list_admits_the_second_reason(self):
+        # "Try a wider date range" was the whole answer until L3 gave the page a
+        # second reason to be empty. Somebody outside every audience can widen
+        # the window to a year and still see nothing.
+        Event.objects.all().delete()
+        self.login(self.lisi)
+        html = self.client.get(reverse("events:event_list")).content.decode()
+        self.assertIn("only open to certain groups", html)
+
+    def test_the_delete_button_refuses_a_role_with_recorded_hours(self):
+        # Through the view, because the helper being right does not mean the
+        # door is shut — role_delete asked nothing at all until 2026-09-08.
+        Participation.objects.create(
+            contact=self.lisi.contact, event_role=self.role,
+            status=Participation.Status.ATTENDED, hours=Decimal("3.5"))
+        self.login(self.zhang)
+        self.client.post(reverse("events:role_delete", args=[self.role.pk]))
+        self.assertTrue(EventRole.objects.filter(pk=self.role.pk).exists())
+        self.assertEqual(Participation.objects.count(), 1)
+
+    def test_the_delete_button_still_removes_a_role_nobody_worked(self):
+        self.login(self.zhang)
+        self.client.post(reverse("events:role_delete", args=[self.role.pk]))
+        self.assertFalse(EventRole.objects.filter(pk=self.role.pk).exists())
+
+    def test_the_detail_page_still_opens_after_the_audience_is_narrowed(self):
+        """🔴 Narrowing takes away discovery, never a row somebody already holds.
+
+        06-roadmap L2.2 says it in those words, Participation.mine() says it in
+        its docstring, and the guard whitelist in core/tests.py gives it as the
+        reason mine() is exempt. The detail page did not say it until
+        2026-09-08 — so /me/participations/ listed the row and the link it
+        carried was a 404.
+        """
+        Participation.objects.create(
+            contact=self.lisi.contact, event_role=self.role)
+        for row in (self.event, self.role):
+            row.visible_to_outsiders = False
+            row.visible_to_all_staff = True
+            row.save()
+        self.login(self.lisi)      # an outsider: no post, so out of the audience
+        listed = self.client.get(reverse("events:my_participations"))
+        self.assertContains(listed, self.event.name)
+        detail = self.client.get(
+            reverse("events:event_detail", args=[self.event.pk]))
+        self.assertEqual(detail.status_code, 200)
+
+    def test_a_signup_survives_its_holders_tenure_ending(self):
+        # The path where nobody did anything wrong: staff signs up for a
+        # staff-only event, the post ends before the day itself. The audience
+        # answer flips without anybody editing the event.
+        post = Position.objects.create(
+            code="pantry_hand", name="Pantry hand", ministry=self.pantry,
+            kind=Position.Kind.STAFF)
+        Assignment.objects.create(
+            contact=self.lisi.contact, position=post,
+            start_date=datetime.date(2020, 1, 1),
+            end_date=local_today() - datetime.timedelta(days=1))
+        Participation.objects.create(
+            contact=self.lisi.contact, event_role=self.role)
+        for row in (self.event, self.role):
+            row.visible_to_outsiders = False
+            row.visible_to_all_staff = True
+            row.save()
+        self.login(self.lisi)
+        detail = self.client.get(
+            reverse("events:event_detail", args=[self.event.pk]))
+        self.assertEqual(detail.status_code, 200)
+
+    def test_a_draft_is_still_hidden_from_somebody_who_signed_up(self):
+        # The line the branch above deliberately does not cross. A draft is not
+        # a row anybody holds yet, and mine() excludes drafts too — so listing
+        # and page agree without help, and the exemption must not reach here.
+        Participation.objects.create(
+            contact=self.lisi.contact, event_role=self.role)
+        self.event.status = Event.Status.DRAFT
+        self.event.save()
+        self.login(self.lisi)
+        detail = self.client.get(
+            reverse("events:event_detail", args=[self.event.pk]))
+        self.assertEqual(detail.status_code, 404)
+
+    def test_narrowing_says_how_many_signed_up_people_fall_outside(self):
+        # The admin is told, and told only that. Nothing in this system can
+        # withdraw somebody else's signup, so the message names no action.
+        Participation.objects.create(
+            contact=self.lisi.contact, event_role=self.role)
+        self.role.visible_to_outsiders = False
+        self.role.visible_to_all_staff = True
+        self.role.save()
+        # ⚠️ Whole minutes **and** local time. The widget expresses local
+        #    minutes, so a stored time carrying seconds — or one printed in UTC
+        #    — reads back as a *changed* time, and the view then leaves down its
+        #    reschedule exit and never reaches the message this asserts. See
+        #    EventForm.time_changed.
+        self.event.start_time = self.event.start_time.replace(
+            second=0, microsecond=0)
+        self.event.end_time = self.event.end_time.replace(second=0, microsecond=0)
+        self.event.save()
+        self.login(self.zhang)
+        response = self.client.post(
+            reverse("events:event_update", args=[self.event.pk]), {
+                "name": self.event.name, "ministry": self.pantry.pk,
+                "start_time": localtime(
+                    self.event.start_time).strftime("%Y-%m-%dT%H:%M"),
+                "end_time": localtime(
+                    self.event.end_time).strftime("%Y-%m-%dT%H:%M"),
+                "status": self.event.status,
+                "visible_to_all_staff": True,
+            }, follow=True)
+        said = " ".join(m.message for m in response.context["messages"])
+        self.assertIn("1 person who signed up is outside", said)
+
+    def test_an_event_keeps_the_ministries_it_was_ticked_for(self):
+        """🔴 The audience a person ticked has to survive the save.
+
+        Until 2026-09-08 it did not: event_create called form.save(commit=False)
+        and never form.save_m2m(), so the only part of an audience that lives in
+        a many-to-many was dropped on the floor. An event ticked for one
+        ministry and nothing else therefore stored an audience of nobody, and
+        for_audience() then hid it from every account — including the person who
+        had just published it.
+
+        ⚠️ Every other POST in this file passes `visible_to_outsiders`, which is
+           an ordinary column and saved with the row. Not one of them passed
+           `visible_to_ministries`, which is why the whole class stayed green
+           over a field that never once reached the database.
+        """
+        self.login(self.zhang)
+        response = self.client.post(reverse("events:event_create"), {
+            "name": "Pantry staff briefing", "ministry": self.pantry.pk,
+            "start_time": "2026-09-01T09:00", "end_time": "2026-09-01T12:00",
+            "status": Event.Status.OPEN,
+            "visible_to_ministries": [self.pantry.pk],
+        })
+        self.assertEqual(response.status_code, 302)
+        event = Event.objects.get(name="Pantry staff briefing")
+        self.assertEqual(list(event.visible_to_ministries.all()), [self.pantry])
+
+    def test_editing_an_event_keeps_its_ministries(self):
+        """The other exit, taken on purpose.
+
+        ⚠️ The POST moves the time, so `form.time_changed()` is true and the
+           view leaves down its **reschedule** branch — which redirects to the
+           notice page before ever reaching the save at the bottom. That is
+           precisely the path that would drop the ticks if save_m2m() sat beside
+           either return instead of above the branch, so this test takes it
+           deliberately rather than by accident.
+        """
+        self.login(self.zhang)
+        # ⚠️ The role comes out of make_role() inheriting the event's audience,
+        #    so narrowing the event alone trips the containment invariant and
+        #    the form is refused for a reason that has nothing to do with what
+        #    this test is about. Both sides move together, then the POST
+        #    *widens* — role ⊆ event throughout.
+        for row in (self.event, self.role):
+            row.visible_to_outsiders = False
+            row.visible_to_all_staff = False
+            row.save()
+            row.visible_to_ministries.set([self.pantry])
+        moved = localtime(self.event.start_time) + datetime.timedelta(hours=1)
+        response = self.client.post(
+            reverse("events:event_update", args=[self.event.pk]), {
+                "name": self.event.name, "ministry": self.pantry.pk,
+                "start_time": moved.strftime("%Y-%m-%dT%H:%M"),
+                "end_time": (moved + 3 * HOUR).strftime("%Y-%m-%dT%H:%M"),
+                "status": self.event.status,
+                "visible_to_ministries": [self.pantry.pk, self.tax.pk],
+            })
+        self.assertEqual(response.status_code, 302)
+        self.assertCountEqual(
+            self.event.visible_to_ministries.all(), [self.pantry, self.tax])
 
     def test_viewing_another_ministrys_registrations_returns_403(self):
         # The GET side of the same rule.
@@ -4332,6 +5262,172 @@ class DetailPageBackLinkTests(PageTestCase):
         self.assertContains(response, "&larr; Events")
 
 
+class RolesOnTheDetailPageTests(PageTestCase):
+    """L2.4 on the page: which roles are drawn, and what the page says when none is.
+
+    ⭐ Three sentences that used to be one. "No roles opened yet", "these roles
+       are not for you" and (from L2.5) "this is an announcement" are three
+       different facts, and D27's standing rule is that nothing and not-counted
+       may not look alike. Until this step the second one was printed as the
+       first — a plain lie to every staff member of another ministry.
+
+    ⚠️ Every assertion here is about the **page**. The querysets underneath are
+       covered by EventRoleAudienceTests; what this class is for is the part
+       only a reader sees, which is where this round's holes have all been
+       (participants.md section 10, the two seed bugs).
+    """
+
+    def setUp(self):
+        super().setUp()
+        # self.event is open to everybody and self.role inherits that, so the
+        # narrowing below is always the role's own doing.
+        self.staff_only = make_role(
+            self.event, "coord", name="Coordinator",
+            visible_to_outsiders=False, visible_to_all_staff=True)
+
+    def url(self, event=None):
+        return reverse("events:event_detail", args=[(event or self.event).pk])
+
+    def open_as(self, user, event=None):
+        self.login(user)
+        return self.client.get(self.url(event))
+
+    def hide_every_role(self):
+        """Leave the event visible to everybody, and none of its roles."""
+        set_audience(self.role, Audience.Spec(
+            outsiders=False, all_staff=True, ministries=frozenset()))
+
+    # --- who sees which rows ----------------------------------------------
+
+    def test_an_outsider_is_not_shown_a_staff_only_role(self):
+        response = self.open_as(self.lisi)
+        self.assertContains(response, self.role.role.name)
+        self.assertNotContains(response, "Coordinator")
+
+    def test_the_page_distinguishes_no_roles_from_none_for_you(self):
+        """🔴 The two empty states, side by side — the point of this step.
+
+        Same viewer, same kind of blank table, two different facts.
+        """
+        self.hide_every_role()
+        self.staff_only.delete()
+        none_for_you = self.open_as(self.lisi)
+        self.assertContains(none_for_you, "none of them is open to you")
+        self.assertNotContains(none_for_you, "No roles opened yet")
+
+        empty = make_event(ministry=self.pantry, name="Nothing opened yet",
+                           owner=self.zhang.contact)
+        nothing_yet = self.client.get(self.url(empty))
+        self.assertContains(nothing_yet, "No roles opened yet")
+        self.assertNotContains(nothing_yet, "none of them is open to you")
+
+    def test_no_sign_up_button_when_nothing_is_open_to_them(self):
+        """⚠️ …and it does not fall back to "this event is not taking signups".
+
+        It is taking them. It is taking them from other people.
+        """
+        self.hide_every_role()
+        response = self.open_as(self.lisi)
+        self.assertNotContains(response, "Sign up")
+        self.assertContains(response, "none of its roles is open to you")
+        self.assertNotContains(response, "not taking signups")
+
+    def test_the_signup_page_is_a_404_when_no_role_is_theirs(self):
+        """The page behind the button that is no longer drawn.
+
+        ⚠️ 404 rather than an empty dropdown: a required field with no options
+           answers "Select a valid choice" to somebody who did nothing wrong,
+           and this view already answers 404 for every other "nothing here for
+           you" (draft, finished, not your audience).
+        """
+        self.hide_every_role()
+        self.login(self.lisi)
+        response = self.client.get(
+            reverse("events:event_signup", args=[self.event.pk]))
+        self.assertEqual(response.status_code, 404)
+
+    def test_signing_up_for_an_event_you_cannot_see_is_a_404(self):
+        """The **event-level** door on this view, which had nothing on it.
+
+        ⚠️ The test above it looks like this one and is not: hide_every_role()
+           leaves the event open to everybody and narrows only its roles, so it
+           exercises the second refusal in the view. The first — the audience on
+           the event itself — was never walked by any test, and the guard could
+           not see it either (event_signup narrows with open_for_signup(), which
+           was outside the guard's signal until 2026-09-08). Two blind spots
+           over one door.
+        """
+        # ⚠️ Roles first, then the event. The other order is refused by the
+        #    containment invariant — an event may not be narrower than a role
+        #    inside it — and the refusal is the rule working, not the test.
+        staff_only = Audience.Spec(
+            outsiders=False, all_staff=True, ministries=frozenset())
+        for role in self.event.roles.all():
+            set_audience(role, staff_only)
+        set_audience(self.event, staff_only)
+        self.login(self.lisi)      # holds no post, so not on the books
+        response = self.client.get(
+            reverse("events:event_signup", args=[self.event.pk]))
+        self.assertEqual(response.status_code, 404)
+
+    def test_a_hand_made_post_for_a_hidden_role_is_a_form_error_not_a_500(self):
+        # The dropdown holds one role; this posts the id of the other one.
+        self.login(self.lisi)
+        response = self.client.post(
+            reverse("events:event_signup", args=[self.event.pk]),
+            {"event_role": self.staff_only.pk})
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("event_role", response.context["form"].errors)
+        self.assertFalse(
+            Participation.objects.filter(event_role=self.staff_only).exists())
+
+    def test_a_signup_you_already_hold_survives_the_role_being_narrowed(self):
+        """⭐ Narrowing takes away **discovery**, never a row somebody holds.
+
+        The same rule that keeps my_participations and the check-in scanner out
+        of the audience filter (06-roadmap.md L2.2).
+        """
+        sign_up(contact=self.lisi.contact, event_role=self.role)
+        self.hide_every_role()
+        response = self.open_as(self.lisi)
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "What you signed up for")
+        self.assertContains(response, self.role.role.name)
+
+    # --- the exception: somebody who may read this event's records ---------
+
+    def test_somebody_who_may_read_the_records_sees_every_role(self):
+        """⚠️ A deliberate break in "the table and the dropdown are one set".
+
+        A ministry admin who has just opened a role and cannot find it on the
+        event page has no way to tell that from a bug — and they can already
+        see it on the signups page. So they get the full table **and** a
+        sentence saying that is what they are looking at.
+        """
+        response = self.open_as(self.zhang)
+        self.assertContains(response, "Coordinator")
+        self.assertContains(response, "every role is listed here")
+
+    def test_nobody_else_is_told_they_are_seeing_every_role(self):
+        # The sentence is the price of the exception, so it must not appear for
+        # the people the exception is not about — to them it would be false.
+        response = self.open_as(self.lisi)
+        self.assertNotContains(response, "every role is listed here")
+
+    def test_the_manager_still_only_gets_a_sign_up_button_for_their_own_roles(self):
+        """The full table is a **reading** privilege, never a signing-up one.
+
+        ⚠️ zhang runs the pantry but holds no post, so by audience they are an
+           outsider — which is the ordinary case for a ministry admin here and
+           exactly why the button is drawn from what they may take rather than
+           from what the table shows.
+        """
+        self.hide_every_role()
+        response = self.open_as(self.zhang)
+        self.assertContains(response, "Coordinator")
+        self.assertNotContains(response, "Sign up")
+
+
 class DraftPreviewTests(PageTestCase):
     """2026-08-06: an unpublished event opens for the people who may publish it.
 
@@ -4724,7 +5820,7 @@ class MergedEditAndRolesPageTests(PageTestCase):
     def test_creating_an_event_lands_on_the_merged_page(self):
         self.login(self.zhang)
         response = self.client.post(reverse("events:event_create"), {
-            "name": "Soup run", "event_type": EventType.objects.first().pk,
+            "name": "Soup run",
             "ministry": self.pantry.pk,
             "start_time": "2026-09-01T09:00", "end_time": "2026-09-01T12:00",
             "status": Event.Status.OPEN, "visible_to_outsiders": True,
@@ -5087,7 +6183,6 @@ class EventUpdatePageTests(PageTestCase):
     def payload(self, **overrides):
         fields = {
             "name": self.event.name,
-            "event_type": self.event.event_type_id,
             "ministry": self.event.ministry_id,
             "start_time": self.widget_value(self.event.start_time),
             "end_time": self.widget_value(self.event.end_time),
@@ -5098,7 +6193,14 @@ class EventUpdatePageTests(PageTestCase):
         #    every well-formed POST carries one. Public, because that is
         #    what these events were before the field existed and none of
         #    these tests is about the audience.
+        #
+        # ⚠️ **Both** ticks (L2.4), matching what make_event() gives the
+        #    fixture. Posting only the first is a *narrowing* — and since the
+        #    roles on this event inherit its audience, every edit here was then
+        #    refused for leaving a role behind: five tests failing on a rule
+        #    none of them is about.
         "visible_to_outsiders": True,
+        "visible_to_all_staff": True,
         }
         fields.update(overrides)
         return fields
@@ -5656,6 +6758,47 @@ class SeedDemoTests(TestCase):
     def seed(self):
         call_command("seed_demo", verbosity=0)
 
+    def test_running_it_twice_does_not_duplicate_anything(self):
+        """🔴 It is idempotent, and that has to be tested rather than assumed.
+
+        Every `get_or_create` in it matched on a value derived from
+        `local_today()` until 2026-09-02 — so "does this already exist" was
+        being asked about *today's* row, and a second run on a second day
+        answered no. The dashboard showed one person four identical posts,
+        one per day the command had been run.
+
+        ⚠️ Nothing raised and no constraint was violated: the unique constraint
+           on Assignment covers (contact, position, start_date), and those four
+           rows had four different start dates. The general rule the fix is
+           written under: **a get_or_create lookup key may not contain a value
+           that moves with the clock** — that is not "make it if missing", it is
+           "make one a day".
+
+        ⚠️ Asserted over every table the command touches, not just Assignment.
+           The bug was one call site's shape, and the same shape is available to
+           all of them.
+        """
+        with override_settings(DEBUG=True):
+            self.seed()
+            counts = {
+                model: model.objects.count()
+                for model in (Contact, Assignment, Position, Event, EventRole,
+                              Participation, Ministry)
+            }
+            # 🔴 **第二次必须发生在「第二天」，否则这条测试是假的。**
+            #    bug 的形状是「今天跑和昨天跑找的不是同一行」——
+            #    同一天连跑两次，`local_today()` 返回同一个值，
+            #    `get_or_create` 照样匹配得上，于是**有 bug 的代码也会绿**。
+            #    第一版就是那么写的，绿得毫无意义。
+            from unittest import mock
+
+            tomorrow = local_today() + datetime.timedelta(days=1)
+            with mock.patch.object(seed_demo, "local_today", return_value=tomorrow):
+                self.seed()
+        for model, before in counts.items():
+            with self.subTest(model=model.__name__):
+                self.assertEqual(model.objects.count(), before)
+
     def test_it_refuses_to_run_with_debug_off(self):
         # One mistaken run against production fills the contact table with
         # invented people who — by this system's own design — look exactly like
@@ -5923,12 +7066,32 @@ class AcceptanceWalkTests(TestCase):
     # --- ② the food pantry's admin ----------------------------------------
 
     def test_the_pantry_admin_sees_a_role_nobody_signed_up_for(self):
-        # ⭐ D19's acceptance point, walked: the event opened three roles and
-        # Interpreting has nobody in it, so it has three — not two.
+        # ⭐ D19's acceptance point, walked: the event opened four roles and
+        # Interpreting has nobody in it, so it has four — not three.
+        #
+        # ⚠️ Four since 2026-08-29, when the seed grew a staff-only role
+        #    (L2.4). The signups page is management side and is **not** narrowed
+        #    by audience — it answers "which roles did we open", and the walk
+        #    below checks the other half: what a volunteer sees on the event
+        #    page is three of them.
         self.as_role("pantry_admin")
         response = self.client.get(
             reverse("events:event_registrations", args=[self.open_event().pk]))
         self.assertContains(response, "Interpreting")
+        self.assertEqual(len(response.context["roles"]), 4)
+
+    def test_an_outside_volunteer_is_not_offered_the_staff_only_role(self):
+        """L2, walked on the demo data: one publish, two audiences.
+
+        The pantry's Saturday distribution opens three jobs anybody may take
+        and one only the foundation's own people may — requirement 8, on one
+        event, without publishing it twice.
+        """
+        self.as_role("participant_adult")
+        response = self.client.get(
+            reverse("events:event_detail", args=[self.open_event().pk]))
+        self.assertContains(response, "Interpreting")
+        self.assertNotContains(response, "Floor coordinator")
         self.assertEqual(len(response.context["roles"]), 3)
 
     def test_the_pantry_admin_is_refused_the_other_ministrys_event(self):
@@ -6869,6 +8032,215 @@ class ManageListPage:
         return page, cell[:cell.index("</td>")]
 
 
+class ManageListUndoTests(ManageListPage, PageTestCase):
+    """状态下拉的撤销（2026-09-03 设计评审第 1 条）。
+
+    🔴 那个下拉是「换一个就存」，而发布一场活动是**对外**的：志愿者从那一刻起
+       看得见它、能报名。整套界面里只有这一个控件按一下就有这种后果，
+       而它长得和一个普通筛选下拉一模一样，摆在几十行数据中间。
+       auto-save 的前提是**可逆**，不是「有提示」。
+    """
+
+    def change_to(self, status, **headers):
+        self.event.status = Event.Status.DRAFT
+        self.event.save(update_fields=["status"])
+        self.login(self.zhang)
+        return self.client.post(
+            self.url(), {"event": self.event.pk, "status": status}, **headers)
+
+    def test_changing_a_status_offers_a_way_back(self):
+        response = self.change_to(Event.Status.OPEN, headers={"hx-request": "true"})
+        html = response.content.decode()
+        self.assertIn("Undo", html, "改完状态没有给撤销的路")
+        self.assertRegex(html, r'name="status" value="draft"',
+                         "撤销表单带的不是改之前那个状态")
+
+    def test_the_undo_button_says_where_it_goes_back_to(self):
+        """⚠️ 光写「Undo」答不出「撤销到哪一档」—— 人在这一列上一秒钟点两次
+           的时候，那两个字本身没有信息。
+        """
+        html = self.change_to(Event.Status.OPEN,
+                              headers={"hx-request": "true"}).content.decode()
+        self.assertIn("back to Draft", html)
+
+    def test_the_label_describes_the_previous_status_not_the_new_one(self):
+        """🔴 第一版这里写的是 `event.get_status_display()` —— 而那是 `set_status`
+           **之后**的显示名，也就是刚设定的**新**状态。
+
+        按钮于是写着「Undo — back to Open for signup」，按下去回到 Draft：
+        一句读起来完全通顺、每次都渲染正常的假话。
+        """
+        html = self.change_to(Event.Status.OPEN,
+                              headers={"hx-request": "true"}).content.decode()
+        self.assertNotIn("back to Open for signup", html,
+                         "撤销按钮写的是新状态 —— 它说的和它做的不是一回事")
+
+    def test_pressing_it_puts_the_status_back(self):
+        self.change_to(Event.Status.OPEN, headers={"hx-request": "true"})
+        self.event.refresh_from_db()
+        self.assertEqual(self.event.status, Event.Status.OPEN)
+
+        self.client.post(self.url(),
+                         {"event": self.event.pk, "status": Event.Status.DRAFT},
+                         headers={"hx-request": "true"})
+        self.event.refresh_from_db()
+        self.assertEqual(self.event.status, Event.Status.DRAFT)
+
+    def test_it_survives_the_redirect_that_the_no_js_path_takes(self):
+        """🔴 这一条是这组里最要紧的。
+
+        没有 JS 的那条路是 POST → redirect → GET，而重定向之后 `wrote` 是假 ——
+        凭据只放在渲染上下文里的话，**撤销就成了一个只有 JS 的人才有的功能**，
+        而这正是 D24 一直拒绝的那种东西。放 session 才跨得过这一次重定向。
+        """
+        response = self.change_to(Event.Status.OPEN)          # 不带 hx-request
+        self.assertEqual(response.status_code, 302)
+        html = self.client.get(response["Location"]).content.decode()
+        self.assertIn("Undo", html, "没有 JS 的那条路上撤销消失了")
+        self.assertRegex(html, r'name="status" value="draft"')
+
+    def test_it_is_shown_once_and_then_gone(self):
+        """⚠️ 它是一次性的。留着的话，下一次打开这一页还会看到一颗撤销
+           **上上次**的按钮，而那时人已经不记得上上次是什么了。
+        """
+        self.change_to(Event.Status.OPEN, headers={"hx-request": "true"})
+        self.assertNotIn("Undo", self.client.get(self.url()).content.decode())
+
+    def test_reading_the_page_never_offers_one(self):
+        """⚠️ 筛选和翻页都是读操作 —— 它们不改任何东西，所以那里没有可撤销的事。"""
+        self.login(self.zhang)
+        for params in ({}, {"q": "garden"}, {"page": "1"}, {"report": "1"}):
+            with self.subTest(params=params):
+                self.assertNotIn(
+                    "Undo", self.client.get(self.url(), params).content.decode())
+
+    def test_undoing_somebody_elses_event_is_refused(self):
+        """⚠️ 撤销不是一条新路径，是同一条路反着走一次 —— 包括那一次
+           `_managed_event()` 权限检查。这条守卫钉的就是「没有绕过它」。
+        """
+        theirs = make_event(ministry=self.tax, owner=self.other_admin.contact)
+        self.login(self.zhang)
+        response = self.client.post(
+            self.url(), {"event": theirs.pk, "status": Event.Status.DRAFT})
+        self.assertIn(response.status_code, (403, 404))
+
+
+class ManageListPagingTests(ManageListPage, PageTestCase):
+    """这一页的翻页器（每页 50）—— 以及它那个 HTMX 目标。
+
+    ⚠️ 2026-09-03 翻页组件从写死 `#event-results` 改成了收一个 `target` 参数
+       （公告那两页也要翻页，而它们没有这个 id）。**活动这边必须把它传回来**：
+       忘了传的表现是翻页从 HTMX 快路退回整页加载 —— 点了 Next 页面确实翻了，
+       只是整页闪一下、右边那块报表面板跟着重来，没有任何东西报错。
+    """
+
+    def test_the_paginator_carries_the_htmx_target_back(self):
+        from events.models import Event
+        from events.views import MANAGED_EVENTS_PER_PAGE
+
+        for number in range(MANAGED_EVENTS_PER_PAGE + 1 - Event.objects.count()):
+            make_event(ministry=self.pantry, owner=self.zhang.contact,
+                       name=f"Filler {number}")
+        self.login(self.zhang)
+        html = self.client.get(self.url()).content.decode()
+
+        nav = re.search(r'<nav[^>]*aria-label="Pagination".*?</nav>', html, re.S)
+        self.assertIsNotNone(nav, "撑破一页了，翻页器却没画出来")
+        self.assertIn("Page 1 of 2", nav.group(0))
+        self.assertIn('hx-target="#event-results"', nav.group(0),
+                      "翻页器没拿到 HTMX 目标 —— 翻页会退回整页加载")
+
+
+class ManageListHeadTests(ManageListPage, PageTestCase):
+    """这一页 2026-09-03 也用上了页头条，两格：Events / Events I Manage。
+
+    ⚠️ 公告那两页先做的，这一页跟上 —— 全站四页一条 bar、一个顺序：**读的那一页
+       在左，管理的那一页在右**。这里钉的是「四页一致」这件事本身，因为不一致
+       的表现是从一页点到另一页时整个头横着挪一段，而每一页单独看都正常。
+    """
+
+    def head(self, html):
+        found = re.search(r'<div class="page-bar">(.*?)</nav>', html, re.S)
+        self.assertIsNotNone(found, "页头条没渲染出来")
+        return found.group(1)
+
+    def test_the_word_is_in_both_places_and_the_h1_is_the_one_in_the_page(self):
+        """两处都写着「Events I Manage」：页头条上一格，版心里一个标题
+        （2026-09-03 第二轮）。而 `<h1>` 只有版心里那一个 —— 页头条是下滑时的
+        路标，不是这一页的标题。
+
+        ⚠️ 两处的字**必须一样**，而它们各自读一次同一个 `can_manage`。这条守卫
+           因此同时断言两处都在、且写的是同一个词：只对上一处的话，只读身份
+           那一档会出现「页头条写 All Events、标题写 Events I Manage」。
+        """
+        self.login(self.zhang)
+        html = self.client.get(self.url()).content.decode()
+        self.assertEqual(html.count("<h1"), 1, "这一页出现了第二个 h1")
+        head = self.head(html)
+        self.assertIn("Events I Manage", head)
+        self.assertNotIn("<h1", head,
+                         "页头条又成了标题 —— 它是路标，不是这一页的标题")
+        self.assertRegex(html, r"<h1[^>]*>\s*Events I Manage\s*</h1>",
+                         "版心里那个标题不见了，或者写的不是同一个词")
+
+    def test_the_read_only_tier_gets_its_own_word_in_both_places(self):
+        """⚠️ 这一层看到的这一页叫「All Events」，而**页头条和版心标题必须写
+           同一句** —— 两处各判一次身份的话，迟早会出现「bar 上一个词、
+           标题另一个词」。现在两处都读 `manage_list_name`，一处算。
+        """
+        from django.contrib.auth.models import Group
+        from org.permissions import FOUNDATION_ADMIN_GROUP
+        chief = self.account("chief", "周", birth_date=datetime.date(1980, 1, 1))
+        chief.groups.add(Group.objects.get_or_create(name=FOUNDATION_ADMIN_GROUP)[0])
+        self.login(chief)
+
+        html = self.client.get(self.url()).content.decode()
+        head = self.head(html)
+        self.assertIn("All Events", head)
+        self.assertNotIn("Events I Manage", head)
+        self.assertRegex(html, r"<h1[^>]*>\s*All Events\s*</h1>")
+        # ⚠️ 而回去那一格仍然在（2026-09-03 第四轮）——
+        #    没有它这一页就回不到 /events/。
+        self.assertIn(">Events<", head, "回去那一格不见了")
+
+        # 🔴 **/events/ 那一页上不写这一页的名字**（用户 2026-09-03 定的）：
+        #    这两格是「你在哪儿 + 从哪儿来」，不是切换器。去管理页走那颗 ⋮。
+        #    ⚠️ 这条断言此前是反的（钉「两页的第二格写同一句话」），
+        #       那是两格互为切换器那一版的规矩。
+        board = self.head(
+            self.client.get(reverse("events:event_list")).content.decode())
+        self.assertNotIn("All Events", board,
+                         "读的那一页写上了管理页的名字 —— 那两格不是切换器")
+
+    def test_the_current_cell_points_at_this_page_and_keeps_its_query_string(self):
+        """🔴 `aria-current="page"` 说的是「你在这一页」，而这一页的**状态写在
+           查询串上**（筛选、页码、`?report=1`）。写成裸 URL 的话，那是一个
+           自称是本页、点了却把筛选和页码全丢掉的链接 —— 正是这条属性在防的
+           那种谎。
+
+        ⚠️ 这条守卫此前用的例子是 `?scope=all`（那时它决定这一页是「我管的」
+           还是「全基金会」）。参数 2026-09-03 随「一张列表」一起删了，
+           而这条规矩本身不变，所以换一个仍然存在的查询串来钉。
+        """
+        self.login(self.zhang)
+        head = self.head(
+            self.client.get(self.url(), {"q": "garden"}).content.decode())
+        current = re.search(r'<a class="page-bar-link" href="([^"]*)"[^>]*'
+                            r'aria-current="page"', head)
+        self.assertIsNotNone(current, "没有一格声称自己是当前页")
+        self.assertIn("q=garden", current.group(1),
+                      "当前那一格丢掉了这一页的查询串")
+
+    def test_the_board_offers_the_manage_page_only_to_the_two_tiers(self):
+        """⚠️ 画给别人就是一个点了必定 403 的链接 —— 读起来是「站坏了」。"""
+        self.login(self.lisi)
+        head = self.head(
+            self.client.get(reverse("events:event_list")).content.decode())
+        self.assertNotIn("Events I Manage", head)
+        self.assertNotIn("All Events", head)
+        self.assertIn("Events", head, "第一格也跟着没了")
+
+
 class ManageListRowLengthTests(ManageListPage, PageTestCase):
     """每一行从左到右正好是版心那么长（2026-08-29，第二轮）。
 
@@ -6932,9 +8304,13 @@ class ManageListRowLengthTests(ManageListPage, PageTestCase):
                 self.assertIn(f'class="{hook}"', page)
 
     def test_the_go_to_links_are_a_fixed_three_column_grid(self):
-        # 🔴 `grid-cols-3` 而不是 `flex-wrap`：自由折行的行数取决于字号、字体和
-        #    链接文案，改任何一个都可能悄悄从两排变成三排。固定三列则是
-        #    「六个就是两排」。守的是这条决定本身，不是某一次的渲染结果。
+        """🔴 `grid-cols-3` 而不是 `flex-wrap`：自由折行的行数取决于字号、字体和
+           链接文案，改任何一个都可能悄悄从两排变成三排。固定三列则是
+           「六个就是两排」。守的是这条决定本身，不是某一次的渲染结果。
+
+        ⚠️ 2026-09-03 这一格被收进过一个「⋯」菜单（设计评审第 6 条），当天撤回
+           —— 用户要六个链接留在表格里。这条守卫连同 app.css 那一段一起恢复了。
+        """
         self.login(self.zhang)
         page = self.client.get(self.url()).content.decode()
         goto = page[page.index('<td class="col-goto">'):]
@@ -7492,7 +8868,7 @@ class ManageListReportPageTests(PageTestCase):
                    name="Long ago", start_time=NOW - 400 * DAY,
                    end_time=NOW - 400 * DAY + HOUR)
         self.login(self.zhang)
-        window = (local_now() - datetime.timedelta(days=7)).date()
+        window = local_today() - datetime.timedelta(days=7)
         response = self.client.get(
             self.url(), {"report": "1", "start": window.isoformat()})
         self.assertEqual(response.context["report"]["figures"]["events"], 1)
@@ -7916,7 +9292,11 @@ class FoundationTierReadOnlyTests(PageTestCase):
         self.assertContains(response, "Tax one")
         self.assertContains(response, self.event.name)
         self.assertContains(response, "All Events")
-        self.assertFalse(response.context["can_manage"])
+        # ⚠️ 2026-09-03：页面级那个 `can_manage` 拆成了两个，因为它一直在同时
+        #    回答两个问题。这一层列的是全部（`showing_all`），而它自己没有
+        #    任何 ministry 的发布权（`can_publish`）。
+        self.assertTrue(response.context["showing_all"])
+        self.assertFalse(response.context["can_publish"])
 
     # --- may not write, anywhere -------------------------------------------
 
@@ -7979,15 +9359,22 @@ class FoundationTierReadOnlyTests(PageTestCase):
     def test_a_ministry_admin_who_is_also_foundation_keeps_managing(self):
         """⚠️ Being promoted must not take the publish button away.
 
-        zhang administers the pantry. Adding the foundation group as well has to
-        leave the managing view of their own ministries intact, not replace it
-        with the read-only view of everything.
+        🔴 **2026-09-03 重写**。这条断言原来是「他默认拿到的仍然是自己那几个
+           ministry 的**可管理视图**」—— 那是当时的实现，而它要保护的东西是
+           「不因为升职而失去发布权」。
+
+           现在一张列表列全部、权限逐行判：他既没失去任何写，还多看到了别人的。
+           所以这里钉的换成那件**真正要保护的事**：发布权还在，自己的行还能改。
         """
         self.zhang.groups.add(foundation_admin_group())
         self.login(type(self.zhang).objects.get(pk=self.zhang.pk))
         response = self.client.get(reverse("events:event_manage_list"))
-        self.assertTrue(response.context["can_manage"])
-        self.assertContains(response, "Events I Manage")
+
+        self.assertTrue(response.context["can_publish"], "发布权没了")
+        self.assertContains(response, "Publish a new event")
+        # 自己那几个 ministry 的行照样可改 —— 逐行标记为真。
+        mine = next(e for e in response.context["events"] if e.pk == self.event.pk)
+        self.assertTrue(mine.can_manage)
 
     def test_the_navigation_actually_offers_the_page(self):
         """⚠️ The seventh time this project has built a page nothing linked to.
@@ -7998,13 +9385,29 @@ class FoundationTierReadOnlyTests(PageTestCase):
         this class of gap invisible.
 
         Caught by looking at a screenshot, not by a test. This is the test.
+
+        ⚠️ 2026-09-03：入口从页头条那一格换成了标题行右端那颗 ⋮（站点菜单里
+           那几格同日撤走了）。这条守卫因此改钉 ⋮ —— 它钉的从来是
+           「**有东西指向那一页**」，不是某一版入口长什么样。
+           ⚠️ 「All Events」这几个字不再出现在这一页上，那是要的：那是
+              **另一页**的名字，而这条 bar 上的两格是「你在哪儿 + 从哪儿来」。
         """
         self.login(self.boss)
         page = self.client.get(reverse("events:event_list")).content.decode()
         self.assertIn(reverse("events:event_manage_list"), page)
-        self.assertIn("All Events", page)
+        self.assertIn("manage-link", page, "这一层看不到通往管理页的 ⋮")
 
-    # --- ?scope=all: the other view, for somebody who holds both hats --------
+    # --- 两顶帽子：一张列表，权限逐行（2026-09-03 起）-------------------------
+    #
+    # 🔴 这一组此前钉的是 `?scope=all`：管理页有两种模式，而两顶帽子的人默认
+    #    落在窄的那一种，靠站点菜单里一格带参数的链接切到宽的那一种。
+    #
+    #    用户推翻了那个设计，理由是它把「有没有权限看」和「页面列不列出来」
+    #    搞成了两件事：「既然老张有权看，那就给他啊。他的页面就该显示所有的
+    #    ministries，然后在所有的 events 里，只有 Food Pantry 他可以改。」
+    #
+    #    于是模式没有了，参数也没有了 —— 下面钉的是同样那几件事在新设计下的
+    #    说法：**看得见的更多了，能改的一个没多。**
 
     def both_hats(self):
         """zhang administers the pantry **and** is in the foundation group."""
@@ -8018,67 +9421,74 @@ class FoundationTierReadOnlyTests(PageTestCase):
         return make_event(ministry=self.tax, owner=self.other_admin.contact,
                           name="Tax clinic nobody here runs")
 
-    def test_scope_all_shows_another_ministrys_events_to_somebody_with_both_hats(self):
-        """⭐ The gap this closed: the foundation-wide **read** authority they
-        already held had no entrance for them at all, because the default view
-        (rightly) keeps their own ministries editable.
+    def test_both_hats_see_every_ministry_without_asking_for_it(self):
+        """⭐ 这一条替换掉的那一条钉的是「带上 `?scope=all` 才看得到」。
+
+        现在**默认**就看得到 —— 那个读权限他一直有，缺的只是一个把这些行
+        列出来的页面。
         """
         theirs = self.someone_elses_event()
         self.both_hats()
-        response = self.client.get(reverse("events:event_manage_list"), {"scope": "all"})
+        response = self.client.get(reverse("events:event_manage_list"))
         self.assertContains(response, theirs.name)
-        self.assertFalse(response.context["can_manage"])
+        self.assertContains(response, self.event.name, msg_prefix="自己的行不见了")
+        self.assertTrue(response.context["showing_all"])
 
-    def test_scope_all_does_not_hand_over_a_single_write(self):
-        """⚠️ The whole safety of this parameter. Read widens; write does not.
+    def test_the_rows_he_does_not_run_are_read_only(self):
+        """🔴 逐行 —— 这一批的核心。同一张表上两种行。"""
+        theirs = self.someone_elses_event()
+        self.both_hats()
+        rows = {e.pk: e for e in
+                self.client.get(reverse("events:event_manage_list")).context["events"]}
+        self.assertTrue(rows[self.event.pk].can_manage, "自己的行该能改")
+        self.assertFalse(rows[theirs.pk].can_manage, "别人的行不该能改")
 
-        The POST is on another ministry's event, from the page that is now
-        allowed to *show* it.
+    def test_seeing_more_hands_over_no_write_at_all(self):
+        """🔴 **这一组里最要紧的一条。** 看得见的多了，能改的一个没多。
+
+        ⚠️ 它走的是 POST，不是读 HTML：藏起一个下拉挡不住任何人 ——
+           一张从任何地方提交过来的表单，到视图那里长得一模一样。
         """
         theirs = self.someone_elses_event()
         self.both_hats()
         response = self.client.post(
-            f"{reverse('events:event_manage_list')}?scope=all",
+            reverse("events:event_manage_list"),
             {"event": theirs.pk, "status": Event.Status.CANCELLED})
         self.assertEqual(response.status_code, 403)
         theirs.refresh_from_db()
         self.assertNotEqual(theirs.status, Event.Status.CANCELLED)
 
-    def test_scope_all_is_ignored_for_somebody_not_in_the_tier(self):
-        # A plain ministry admin typing the parameter gets their own ministries,
-        # editable, exactly as before — not everybody's.
+    def test_a_plain_ministry_admin_still_sees_only_their_own(self):
+        """⚠️ 放宽的只有 foundation tier 那一层。少了这一条，
+           上面几条用一句「谁都看得到全部」也能满足。
+        """
         theirs = self.someone_elses_event()
         self.login(self.zhang)
-        response = self.client.get(reverse("events:event_manage_list"), {"scope": "all"})
-        self.assertTrue(response.context["can_manage"])
+        response = self.client.get(reverse("events:event_manage_list"))
         self.assertNotContains(response, theirs.name)
+        self.assertFalse(response.context["showing_all"])
+        self.assertTrue(response.context["can_publish"])
 
-    def test_the_filter_carries_the_scope_so_it_survives_a_click(self):
-        """⚠️ A method="get" form throws away the action's query string and sends
-        its own fields instead. Without a hidden field the page silently narrows
-        back to their own ministries on the first Filter — and the list looks
-        completely normal, only shorter.
+    def test_the_filter_offers_every_ministry_it_is_showing(self):
+        """⚠️ 这一条替换掉的那一条钉的是「`scope` 要有隐藏字段，否则一按筛选就
+           退回窄视图」。参数没了，但那件事的**新形态**要钉：列的是全部时，
+           下拉必须能选到全部 —— 否则筛选够不着眼前这些行，而页面看起来正常。
         """
+        self.someone_elses_event()
         self.both_hats()
-        page = self.client.get(
-            reverse("events:event_manage_list"), {"scope": "all"}).content.decode()
-        self.assertIn('name="scope" value="all"', page)
+        response = self.client.get(reverse("events:event_manage_list"))
+        offered = response.context["period"].fields["ministry"].queryset
+        self.assertIn(self.tax, offered, "筛选选不到眼前这些行的 ministry")
 
-    def test_the_full_report_stays_foundation_wide(self):
-        # It shares _scoped_events(), and the panel links to it with the whole
-        # query string — so a report that quietly covered a different set of
-        # events than the list it was opened from would be the one figure nobody
-        # could check.
-        theirs = self.someone_elses_event()
-        self.both_hats()
-        response = self.client.get(reverse("events:ministry_report"), {"scope": "all"})
-        self.assertContains(response, theirs.name)
-
-    def test_a_ministry_admin_still_sees_the_managing_label(self):
+    def test_a_ministry_admin_is_offered_the_manage_page_from_the_board(self):
+        """⚠️ 2026-09-03：/events/ 上那个入口从页头条第二格换成了标题行右端
+           那颗 ⋮ —— 而「读的那一页不写管理页的名字」是**要的**：
+           那两格是「你在哪儿 + 从哪儿来」，不是切换器。
+        """
         self.login(self.zhang)
         page = self.client.get(reverse("events:event_list")).content.decode()
-        self.assertIn("Events I Manage", page)
-        self.assertNotIn("All Events", page)
+        self.assertIn("manage-link", page, "看不到通往管理页的 ⋮")
+        self.assertIn(reverse("events:event_manage_list"), page)
 
     def test_a_plain_volunteer_is_offered_neither(self):
         self.login(self.lisi)
@@ -8120,7 +9530,7 @@ class EventImageUploadTests(PageTestCase):
         from events.forms import EventForm
         return EventForm(
             {
-                "name": "With a picture", "event_type": EventType.objects.first().pk,
+                "name": "With a picture",
                 "ministry": self.pantry.pk,
                 "start_time": "2026-09-01T09:00", "end_time": "2026-09-01T12:00",
                 "status": Event.Status.OPEN,
@@ -8343,7 +9753,7 @@ class EventImageUploadTests(PageTestCase):
     def test_an_event_without_a_picture_is_perfectly_valid(self):
         from events.forms import EventForm
         form = EventForm({
-            "name": "No picture", "event_type": EventType.objects.first().pk,
+            "name": "No picture",
             "ministry": self.pantry.pk,
             "start_time": "2026-09-01T09:00", "end_time": "2026-09-01T12:00",
             "status": Event.Status.OPEN,
@@ -9877,28 +11287,38 @@ class SchedulePageTests(PageTestCase):
     def cards(self, html):
         return re.findall(r'<a class="schedule-card[^"]*"[^>]*>(.*?)</a>', html, re.S)
 
-    def test_the_page_title_lives_in_the_head_and_only_there(self):
-        """「Events」这四个字 2026-08-28 从版心搬到了页头条（顶栏底下那一条）。
+    def test_the_word_is_in_both_places_and_only_one_of_them_is_the_h1(self):
+        """「Events」这个词在两处：页头条上一格，版心里一个标题（2026-09-03 第二轮）。
 
-        🔴 **搬走 ≠ 复制。**一页两个 `<h1>` 会让读屏的标题大纲变成两棵并列的树，
+        分工是用户定的：「顶栏的 title 是为了网页下滑可以看到这是哪一个页面，
+        但是页面本身也要有 title」。所以页头条那一格是 `<nav>` 里的链接，
+        版心里那个才是 `<h1>`。
+
+        🔴 **仍然只有一个 h1。**一页两个会让读屏的标题大纲变成两棵并列的树，
            而屏幕上看起来完全正常 —— 两处写着同一个词，谁也不会觉得不对。
-           （右面板里那份活动详情降成 `<h2>` 也是同一条规矩。）
+           （右面板里那份活动详情是 `<h2>` 也是同一条规矩。）
+           ⚠️ 2026-08-28 到 09-03 之间是**反过来**的：h1 在页头条上，版心里那个
+              被删了 —— 于是页面本身没有标题。这条守卫因此两头都钉。
 
         ⚠️ 页头条在 `<main>` **外面**：钉住的东西要横跨整个视口，而 main 有版心
            和左右内边距。
         """
         html = self.page()
         self.assertEqual(html.count("<h1"), 1, "这一页出现了第二个 h1")
-        bar = re.search(r'<div class="page-bar">(.*?)</div>\s*</div>', html, re.S)
+
+        bar = re.search(r'<div class="page-bar">(.*?)</nav>', html, re.S)
         self.assertIsNotNone(bar, "页头条没渲染出来")
         self.assertIn("Events", bar.group(1))
-        self.assertIn("<h1", bar.group(1), "标题不在页头条里了")
+        self.assertNotIn("<h1", bar.group(1),
+                         "页头条又成了标题 —— 它是下滑时的路标，不是这一页的标题")
 
         shell = re.search(r'<div class="events-shell".*?<div class="events-row"',
                           html, re.S)
         self.assertIsNotNone(shell)
-        self.assertNotIn("<h1", shell.group(0),
-                         "版心里又长回来一个标题 —— 一页两个 h1")
+        self.assertIn("<h1", shell.group(0),
+                      "版心里那个标题不见了 —— 这一页本身没有标题了")
+        self.assertRegex(shell.group(0), r"<h1[^>]*>\s*Events\s*</h1>",
+                         "版心里那个标题写的不是 Events")
 
     def test_the_title_links_to_this_page_and_says_so(self):
         """那一格是一个指向本页的链接（LV 那格也是），常亮的下划线就画在它上面。
@@ -9975,6 +11395,29 @@ class SchedulePageTests(PageTestCase):
                    start_time=self.at(9), end_time=self.at(10),
                    status=Event.Status.DRAFT)
         self.assertNotIn("Secret plan", self.page())
+
+    def test_the_schedule_narrows_by_audience_too(self):
+        """The second door on this page, and it had no behavioural test at all.
+
+        `AudienceIsAskedGuardTests` holds the structure — _schedule() may not
+        call visible_to_participants() without for_audience() beside it — but a
+        guard checks that a call is written, never that it narrows anything. Cut
+        the call and only the guard went red until 2026-09-08; not one
+        assertion in this class had ever looked at who was asking.
+
+        ⚠️ Same yardstick as the list page: an event the person cannot see is
+           not on their calendar either. "Missing from the list, drawn on the
+           calendar" is the exact split 06-roadmap L2.2 names.
+        """
+        internal = make_event(
+            ministry=self.pantry, owner=self.zhang.contact, name="Staff away day",
+            start_time=self.at(9), end_time=self.at(10))
+        internal.visible_to_outsiders = False
+        internal.visible_to_all_staff = True
+        internal.save()
+        # page() signs in as lisi, who holds no post — so "everybody on the
+        # books" is not them.
+        self.assertNotIn("Staff away day", self.page())
 
     def test_this_mornings_event_is_still_on_todays_column(self):
         """⚠️ 日程的查询里**没有** from_today()：那条按 start_time 切，会切掉

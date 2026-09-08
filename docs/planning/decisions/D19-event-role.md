@@ -69,6 +69,46 @@ P2 的原话是"event 会说明需要多少 volunteers"，它是需求本身，�
 3. **从人那头查"参加过哪些活动"多一跳 join**（`participations__event_role__event`）。
    数据量级下无所谓，`select_related("event_role__event", "event_role__role")` 一次带回。
 
+## 2026-08-29 增补：`EventRole` 长出「谁报得上」（L2）
+
+参与者那一轮（[`../participants.md`](../participants.md) 第六节）给这张表加了三列：
+
+```python
+EventRole(
+    …
+    visible_to_outsiders   = BooleanField(default=False),   # 没有在职任职的人
+    visible_to_all_staff   = BooleanField(default=False),   # 当天有在职任职的人
+    visible_to_ministries  = ManyToManyField(Ministry),     # 指名的几个部门
+)
+```
+
+`Event` 上有同名的三列（那是 L3「谁看得见这场活动」），两套加起来正是需求 8：
+**一次发布，同时招内外** —— 对外的角色所有人看得见，内部的角色只有在编的人看得见，
+而它们在同一场活动上。
+
+三件要写下来的事：
+
+1. **在角色这一层，看得见 = 报得上。** 需求 8 原文是 internal roles
+   「只会显示给 internal 的人」，所以不是给他的角色**根本不出现**在页面和报名
+   下拉框里，不是列出来附一句「你报不上」。判据只有一份实现
+   （`AudienceQuerySetMixin.for_audience()`），`Event` 和 `EventRole` 共用；
+2. **角色的范围不许超出活动的范围**（`refuse_wider_than_event()`）。
+   ⚠️ 它进不了 `CheckConstraint`：字段在两张表上，还多一张多对多。
+   照 D14 如实说，`bulk_create` 走得过去；
+3. **「外部人员」不是最宽的一档** —— 它只包含没有在职任职的人。最宽的是
+   「外部人员 + 全体在编」两个都勾。
+
+### L1（这一次是来给还是来受）为什么**不**落在这张表上
+
+同样是「这个位置是什么」，`nature` 落在字典表 `ParticipationRole` 上而不是这里，
+判据是 D10 那一条（「换个人来做这条信息还成立的，属于编制」）：
+「ESL 座位」不管哪一场课都是来接受服务的，「搬运」不管哪一场发放日都是来提供的 ——
+它属于**工种本身**，不属于某一场活动对它的一次开设。
+
+好处很具体：它不可能在两场活动之间被设成不一致。
+而受众相反 —— 同一个工种在这场活动只给在编的人、在另一场对外开放，是完全正常的，
+所以受众落在这张表上。**同一个问题问的是不同的东西，答案就落在不同的表上。**
+
 ## 这不是被否决过的 `Shift`
 
 `Shift` 的维度是**时间**（上午场 / 下午场），已按"多班次拆成多个 `Event`"否决，

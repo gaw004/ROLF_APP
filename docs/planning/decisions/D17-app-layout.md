@@ -14,7 +14,7 @@ core        TimeStampedModel、core/timeutils.py、共享的 .active() QuerySet 
 contact     Contact / RelationshipType / Relationship / Language / EmergencyContact
 accounts    User
 org         Ministry / Position / Assignment / EmploymentType / MinistryRole
-events      EventType / Event / EventRole / ParticipationRole / Participation
+events      Event / EventRole / ParticipationRole / Participation
             EventNotification
 volunteer   （已推迟）VolunteerProfile / BackgroundCheck
 finance     （Phase D 预留）Contribution / FinancialType / PaymentMethod

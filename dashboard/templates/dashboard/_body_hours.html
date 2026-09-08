@@ -1,0 +1,11 @@
+{% comment %}
+🔴 标题是**账本名**（Volunteer hours），不是「My hours」。后者在暗示这是全部，
+   而它不是 —— D36 写死两个账本永不相加，`Shift` 那本要等 D2a。
+   叫账本名则是一句 D2a 之后**一个字都不用改**的真话：那时 Work hours
+   并排加进来，天然不相加。
+
+⚠️ 0 也照画，不藏。对一个还没开始的人，0 是一个真答案；藏起来则会让他以为
+   这个功能坏了。
+{% endcomment %}
+<p class="text-3xl font-semibold tabular-nums">{{ hours_given|floatformat:"-2" }}</p>
+<p class="mt-1 text-xs text-ink-600 dark:text-ink-300">hours volunteered</p>

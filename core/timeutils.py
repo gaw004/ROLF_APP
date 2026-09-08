@@ -67,6 +67,17 @@ def local_day(field):
        is simply against the wrong day. That is D16's subject, and R8 shipped
        exactly this bug once already. Wrapped here, there is nowhere to forget
        it.
+
+    ⚠️ Corrected 2026-09-08. The paragraph above used to claim that leaving
+       `tzinfo` off truncates the UTC value — measured, and it does not:
+       with USE_TZ on, Django's TruncBase falls back to the current timezone,
+       so the bare call agrees with this one. So this function is **pinning a
+       default**, not fixing a bug: the default is right today and is not part
+       of any promise Django makes, and one place to state it is worth having.
+       The warning on local_date_of() above is the real one — `.date()` on a
+       stored instant genuinely gives the UTC day, and R8 shipped that once.
+       Keeping a corrected reason matters here because this repository has just
+       had to withdraw one self-consistent, well-cited, wrong conclusion.
     """
     return TruncDate(field, tzinfo=timezone.get_current_timezone())
 

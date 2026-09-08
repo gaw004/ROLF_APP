@@ -40,12 +40,26 @@
  *    而你唯一能指望的信号（「这个 class 没被生成」）已经被喂饱了。
  *
  * 所以显式列到 app 名一级。⚠️ 不写 ../**\/templates —— 那个会把 .venv 里
- * Django admin 的模板也扫进来，而显式 @source 是不看 .gitignore 的。 */
+ * Django admin 的模板也扫进来，而显式 @source 是不看 .gitignore 的。
+ *
+ * 🔴 **这份名单漏一行的代价，2026-09-03 真的付了一次。** notices 和 dashboard
+ *    两个新 app 建好之后没加进来，于是它们模板里的 class 一个都没生成。
+ *    而它**看起来是好的**：两个 app 复用的 card / table-wrap / prose-link 是
+ *    这个文件里手写的规则（不经扫描），text-sm / flex / space-y-3 又早被别的
+ *    模板生成过 —— 所以只有真正“第一次出现”的那几个类是缺的。
+ *    仪表盘的 lg:col-span-4 和 lg:order-first 就在其中，表现是一整个版面塌掉，
+ *    而在此之前那两个 app 的每一页看着都正常。
+ *
+ * ⚠️ 守卫：core.tests.TailwindSourcesGuardTests.test_every_app_with_templates_is_scanned。
+ *    这份名单和「磁盘上哪些 app 有 templates 目录」必须一致，
+ *    而人是记不住这件事的 —— 上面那段话已经证明了。 */
 @source "../accounts/templates";
 @source "../contact/templates";
 @source "../core/templates";
+@source "../dashboard/templates";
 @source "../events/templates";
 @source "../gallery/templates";
+@source "../notices/templates";
 @source "../org/templates";
 
 
@@ -228,7 +242,7 @@
      * ⚠️ 52px = 上下各 12 的内边距 + 一行 `text-base`（行高 28px）。
      *    守卫 core.tests.PageBarTests 钉着「这条里只有那一行字」——
      *    哪天塞进一颗按钮，这个数就得像顶栏那 68/76px 一样重新量。 */
-    --page-bar-h: 3rem;
+    --page-bar-h: 2.5rem;
     /* 页头条往上贴多少（2026-08-28 第二轮，用户：「两行中间留白太多了」）。
      * ⚠️ 贴进去的是**站头那条 bar 自己的下内边距**，也就是一片空白 ——
      *    它是 `py-4 / sm:py-5` 给的，而那三个字（padding）是工具类，改不动：
@@ -236,7 +250,7 @@
      *    （这一批已经栽过一次，见 `.site-head`）。所以往上贴，不去改它。
      * ⚠️ 贴上去之后整个头矮了这么多，`--head-total-h` 必须跟着减 ——
      *    少减的话，窄屏那张纸的上沿会离头 12px 远，多出一条缝。 */
-    --page-bar-pull: 0.75rem;
+    --page-bar-pull: 1rem;
   }
 
   @media (width >= 40rem) {
@@ -1881,7 +1895,7 @@
    *
    * ⚠️ `bottom: 0`, **not** a negative offset, and this is the one line in this
    *    block that is not obvious. Both callers clip: `.event-name` carries
-   *    `line-clamp-*` and `.page-bar-title` carries `truncate`, and both set
+   *    `line-clamp-*` and `.page-bar-cell` carries `truncate`, and both set
    *    `overflow: hidden` — so anything positioned outside the padding box is
    *    clipped and **never painted at all**. The first version of each used a
    *    negative offset and the underline simply did not exist; nothing errored,
@@ -2191,13 +2205,44 @@
     --cell-x: 1.375rem;
   }
 
-  /* ⚠️ 只覆盖左右，上下仍然取 `.table-wrap th/td` 那一份 —— 行高不是这一条要管
-   *    的事。 */
+  /* ⚠️ 只覆盖左右，上下仍然取 `.table-wrap th/td` 那一份 —— 内边距不是这一条
+   *    要管的事（行高由下面那条统一）。 */
   .manage-events th,
   .manage-events td {
     padding-left: var(--cell-x);
     padding-right: var(--cell-x);
   }
+
+  /* 🔴 **高行里，每一格的内容竖直居中**（2026-09-03，用户：「有的行是
+   *    『Ended 徽章 + 下拉』两行，这种行里面的东西都偏高，居中一下」）。
+   *
+   *    `.table-wrap td` 全站是 `vertical-align: top`。对一张每格都是一行字的
+   *    表，那是对的；而这两张管理列表里**同一行的各格高度差很多**（Status
+   *    有时是「徽章 + 下拉」两行、When 固定两行、Go to 两排），于是矮的那几格
+   *    吊在行的上沿，整行读起来是散的。
+   *
+   * ⚠️ **只给这两张表，不动那条全局规则。** 另外八张表（出勤、报名、报表、
+   *    工种面板、ministry admins…）里有一格多行、其余一行的情况，居中会让
+   *    那一行的首行文字彼此错开 —— 顶对齐在那些表上是对的。
+   *
+   * ⚠️ 行高本身仍然**自适应**（2026-09-03 试过固定 72px，同日撤回：
+   *    矮行被白白撑高，一屏少装两三行）。这一条改的是**格子里的东西怎么放**，
+   *    不是行有多高 —— 而节奏乱的观感，多半来自后者。 */
+  .manage-events td,
+  .notice-rows td {
+    vertical-align: middle;
+  }
+
+  /* ⚠️ **行高不写死**（2026-09-03 试过 72px，当天撤回：用户「自适应比较好」）。
+   *
+   *    那一版的观察仍然成立 —— 行高在 58–90px 之间跳（When 一格两行、
+   *    Go to 一格两排、Status 有时一行有时两行），而人是竖着扫这一列的。
+   *    但统一到一个数的代价是**矮行被撑高**：只有一个状态标签的行也占 72px，
+   *    一屏因此少装两三行。
+   *    ⚠️ 真要再动这件事，调节杆是让**格子内容**变整齐（比如 Status 那一格
+   *       固定两行高），不是给整行定死一个数 —— 前者不会浪费矮行的空间。
+   *
+   * ⚠️ 上下内边距仍然取 `.table-wrap th/td` 那一份；这里只覆盖左右（上面那条）。 */
 
   .manage-events .col-event {
     width: 100%;
@@ -2325,7 +2370,9 @@
    *    第 3 列 `Attendance` / `Notify`。
    *
    * ⚠️ 行距比列距小得多：两排属于同一格，靠得近才读成一组；
-   *    列距要够宽，否则相邻两个链接读起来像一个词组。 */
+   *    列距要够宽，否则相邻两个链接读起来像一个词组。
+   *
+   * ⚠️ 2026-09-03 这一段删过一次（六个链接收进「⋯」菜单），当天原样恢复。 */
   .manage-events .goto-grid {
     display: grid;
     grid-template-columns: repeat(3, max-content);
@@ -2353,6 +2400,40 @@
    * ⚠️ 那些「卡片 + 彩色边」的警示框（生日提示、只读提示等）现在在模板里各自
    *    显式写了 `border` —— Tailwind 的 `border-<色>` 只给颜色，宽度原来是这里给的。
    *    它们的轮廓不是装饰：那条线在说「这一行和周围的页面不一样」。 */
+  /* --- 仪表盘卡片上那个彩色小图标（2026-09-02）---------------------------
+   *
+   * ⚠️ 颜色是**认卡用的**，不是装饰。一屏五张卡，人靠颜色定位而不是读标题 ——
+   *    所以同一张卡的色档全站固定，换页面也不许变（tone 写在 me.html 里）。
+   *
+   * ⚠️ 一个 emoji 装在一个圆角方块里，不引图标库：这一页要五个图标，
+   *    为五个图标引一个字体文件是每一个访客都在付的账。
+   *
+   * ⚠️ 深色下底色降到 /15 而不是换一组色值 —— 五档各写一份深色色值，
+   *    就是五个将来会各自漂移的地方。 */
+  .dash-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 1.5rem;
+    height: 1.5rem;
+    border-radius: 0.5rem;
+    font-size: 0.8rem;
+    line-height: 1;
+    flex: none;
+  }
+
+  .dash-icon-sky     { background-color: color-mix(in srgb, #0ea5e9 18%, transparent); }
+  .dash-icon-violet  { background-color: color-mix(in srgb, #8b5cf6 18%, transparent); }
+  .dash-icon-amber   { background-color: color-mix(in srgb, #f59e0b 22%, transparent); }
+  .dash-icon-rose    { background-color: color-mix(in srgb, #f43f5e 18%, transparent); }
+  .dash-icon-emerald { background-color: color-mix(in srgb, #10b981 18%, transparent); }
+
+  .dark .dash-icon-sky     { background-color: color-mix(in srgb, #0ea5e9 15%, transparent); }
+  .dark .dash-icon-violet  { background-color: color-mix(in srgb, #8b5cf6 15%, transparent); }
+  .dark .dash-icon-amber   { background-color: color-mix(in srgb, #f59e0b 15%, transparent); }
+  .dark .dash-icon-rose    { background-color: color-mix(in srgb, #f43f5e 15%, transparent); }
+  .dark .dash-icon-emerald { background-color: color-mix(in srgb, #10b981 15%, transparent); }
+
   .card {
     /* 圆角 0.75rem（2026-08-06 从 0.5rem 加大）。 */
     border-radius: 0.75rem;
@@ -3536,17 +3617,214 @@
    *    居中的）。两行各自靠左的话，中轴上就有一条看得见的错位。
    *    以后那排小标题进来时，它们作为一组一起居中 —— 参考图里 LV 那一行
    *    就是这么排的。 */
+  /* --- 行内的「⋯」菜单（2026-09-03 设计评审第 3 + 6 条）--------------------
+   *
+   * 触发器：一颗安静的方块，三个点。它不是按钮的第四个变体 —— 变体是
+   * 「这颗按钮有多重要」，而这个东西的长相是「我是一个入口，不是一个动作」。 */
+  .row-menu-trigger {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.1875rem;
+    width: 2rem;
+    height: 2rem;
+    border-radius: 9999px;
+    color: var(--color-ink-500);
+    transition: background-color 150ms ease, color 150ms ease;
+  }
+
+  .row-menu-trigger:hover {
+    background-color: var(--color-ink-100);
+    color: var(--color-ink-800);
+  }
+
+  .dark .row-menu-trigger { color: var(--color-ink-400); }
+  .dark .row-menu-trigger:hover {
+    background-color: var(--color-ink-800);
+    color: var(--color-ink-100);
+  }
+
+  /* ⚠️ 点是画出来的，不是字符 —— 理由写在 row_menu.html 上。
+   *    `currentColor` 让它跟着上面那两档 hover 一起变。 */
+  .row-menu-dot {
+    width: 0.1875rem;
+    height: 0.1875rem;
+    border-radius: 9999px;
+    background-color: currentColor;
+  }
+
+  /* 面板。⚠️ 它在 **top layer**（`popover`），所以这里既不需要 z-index，
+   *    也不会被 `.table-wrap` 的 `overflow-x: auto` 裁掉、被 `.card` 的
+   *    `backdrop-filter` 抓住 —— 那三件事写在 row_menu.html 上，
+   *    每一件都是这个仓库付过学费的。
+   *
+   * 🔴 `margin: 0` 和 `inset: auto` 是**必需**的，不是重置洁癖：
+   *    `[popover]` 的 UA 样式表默认 `inset: 0` + `margin: auto`，也就是
+   *    **视口居中**。不清掉的话，app.js 写上去的 `top/left` 会被这两条按住 ——
+   *    坐标算对了，菜单还在屏幕中间。 */
+  .row-menu {
+    position: fixed;
+    inset: auto;
+    margin: 0;
+    min-width: 12rem;
+    padding: 0.375rem;
+    border: 1px solid var(--color-ink-200);
+    border-radius: 0.75rem;
+    background-color: #fff;
+    box-shadow: 0 12px 32px rgb(15 23 42 / 0.16), 0 2px 8px rgb(15 23 42 / 0.08);
+  }
+
+  .dark .row-menu {
+    border-color: var(--color-ink-700);
+    background-color: var(--color-ink-900);
+  }
+
+  /* 菜单里的一项 —— 链接和 `<button>` 长得必须一模一样：一半是导航、
+   * 一半是写操作，而对用的人来说它们是同一排东西。 */
+  .row-menu-item {
+    display: flex;
+    align-items: center;
+    width: 100%;
+    padding: 0.5rem 0.625rem;
+    border-radius: 0.5rem;
+    font-size: 0.875rem;
+    text-align: left;
+    color: var(--color-ink-800);
+  }
+
+  .row-menu-item:hover { background-color: var(--color-ink-100); }
+  .dark .row-menu-item { color: var(--color-ink-100); }
+  .dark .row-menu-item:hover { background-color: var(--color-ink-800); }
+
+  /* ⚠️ 破坏性那一项是**红色的字**，不是红色的块。整列红色药丸的时候红色
+   *    什么都不说；收进菜单、只让一行字带色，它才重新是个警示。 */
+  .row-menu-item-danger { color: var(--color-danger-fg); }
+  .dark .row-menu-item-danger { color: var(--color-danger-fg-dark); }
+
+  /* --- 标题行右端那颗「⋮」（2026-09-03）-----------------------------------
+   *
+   * 通往管理页的入口。安静，因为它待在一个**读**的页面上；而它在标题行最右端，
+   * 那本来就是这一行放操作的位置。全部理由写在 manage_link.html 上。 */
+  .manage-link {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.375rem;
+    padding: 0.25rem 0.25rem 0.25rem 0.5rem;
+    border-radius: 9999px;
+    color: var(--color-ink-500);
+    transition: color 150ms ease, background-color 150ms ease;
+  }
+
+  .manage-link:hover,
+  .manage-link:focus-visible {
+    color: var(--color-ink-800);
+    background-color: var(--color-ink-100);
+  }
+
+  .dark .manage-link { color: var(--color-ink-400); }
+  .dark .manage-link:hover,
+  .dark .manage-link:focus-visible {
+    color: var(--color-ink-100);
+    background-color: var(--color-ink-800);
+  }
+
+  /* 🔴 **"Manage" 这两个字只在能悬停的设备上收起来**（2026-09-04 修）。
+   *
+   *    初版无条件收起，于是触屏上这个入口是三个**没有任何文字**的点 ——
+   *    而它同时是两个管理页仅有的可见入口（站点菜单那三格同日撤掉了）。
+   *    当时把它记成「已知代价」，判据是「有人问起再说」；这一次不等了。
+   *
+   * ⚠️ 判据是 `(hover: hover)` 而不是屏幕宽度，也不是判 UA：
+   *    能不能悬停是**设备的能力**，不是牌子，也不是窗口有多宽 ——
+   *    同一条判据 app.js 里那个悬停小窗已经在用。
+   *    带鼠标的窄窗口照旧收起，触屏的大平板照旧常显。
+   *
+   * ⚠️ `:focus-visible` 必须和 `:hover` 一起写 —— 键盘用户拿不到 hover，
+   *    而这是免费的：少了它，Tab 到这里的人看到的是一个焦点环套着三个点，
+   *    没有任何东西说它是干什么的。
+   *
+   * ⚠️ 用 `opacity` + 固定 `width: 0`→`auto` 会让整行在 hover 时横着弹一下。
+   *    这里改成**始终占位**（`visibility` 不动、只动 opacity）不行 —— 那样
+   *    静息态就有一块空白。所以用 `max-width` 过渡：静息 0、hover 展开，
+   *    右端那颗点因此原地不动，字从它左边推出来。 */
+  .manage-link-label {
+    font-size: 0.875rem;
+    white-space: nowrap;
+  }
+
+  @media (hover: hover) {
+    .manage-link-label {
+      overflow: hidden;
+      max-width: 0;
+      opacity: 0;
+      transition: max-width 200ms ease, opacity 200ms ease;
+    }
+
+    .manage-link:hover .manage-link-label,
+    .manage-link:focus-visible .manage-link-label {
+      max-width: 6rem;
+      opacity: 1;
+    }
+  }
+
+  /* 三个点竖着排。⚠️ 点本身复用 `.row-menu-dot`（画出来的，不是字符「⋮」）——
+   *    两处必须是同一个画法，否则同一个符号在站里有两种长相。 */
+  .manage-link-dots {
+    display: inline-flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 0.1875rem;
+    width: 1.5rem;
+    height: 1.5rem;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .manage-link-label { transition: none; }
+  }
+
+  /* 🔴 **命中区，不是尺寸**（2026-09-03 设计评审第 2 条）。
+   *
+   *    表格行里的按钮视觉高度是 36px（`py-2` + `text-sm`），版面要它这么高；
+   *    而 HIG 要 44pt、Material 要 48dp。把 `py-2` 加到 `py-3` 能满足手指，
+   *    代价是管理列表每一行都高 8px —— 为了触屏去改所有人的版面。
+   *    Apple 和 Material 对密集表格给的都是这个答案：**伪元素把可点区域撑开，
+   *    一个像素的版面都不动**。36 + 4 + 4 = 44。
+   *
+   * ⚠️ 只撑竖直方向（`inset: -0.25rem 0`）。左右也撑的话，同一行里相邻两颗
+   *    按钮的命中区会重叠，于是点在缝里的那一下打给谁取决于 DOM 顺序 ——
+   *    而屏幕上两颗按钮之间明明是有空隙的。
+   *
+   * ⚠️ 伪元素在按钮**上方**（它是最后的子节点、且宿主 `position: relative`），
+   *    所以它接得到点击；按钮本身没有 `overflow: hidden`，裁不掉它。 */
+  .btn-hit {
+    position: relative;
+  }
+
+  .btn-hit::after {
+    content: "";
+    position: absolute;
+    inset: -0.25rem 0;
+  }
+
   .page-bar-inner {
     height: 100%;
     justify-content: center;
+    /* 两格之间的距离（2026-09-03）。⚠️ 写在这里而不是模板上的 `gap-7`：
+     *    它和 `justify-content: center` 是**一对** —— 这一排是作为一组居中的，
+     *    而「一组」有多宽正是这个数说了算。两处各写一半，改一处就会看到一排
+     *    字慢慢偏离上面那个字样的中轴，而两边各自看都正常。 */
+    gap: 1.75rem;
   }
 
   /* ⚠️ **字重 400，比顶栏那个字样（600）细。** 这一条是「你在哪一页」，
    *    不是这个头的主角；两行同样粗会互相抢。字距比正文宽一档，
    *    和上面那个字样是同一种排法 —— 两条 bar 上下叠着，排法不一样会读成
    *    两个网站拼在一起。
-   * ⚠️ `<h1>` 自带浏览器默认的粗体和字号，所以这两条都得写出来，
-   *    不能只写在里面那个 `<a>` 上。 */
+   * ⚠️ 字重写在**外层盒子**上而不是里面那个 `<a>` 上：`truncate` 和撑满行高
+   *    也都在这一层，四条声明描述的是同一个盒子。
+   * ⚠️ 字号不在这里 —— 它是格子模板上的 `text-sm`（2026-09-03 第二轮从
+   *    `text-base` 收小一档）。 */
   /* ⚠️ **标题和链接都撑满这一行的高度。** 下划线要落在整个头的下沿上
    *    （`::after` 的 `bottom: 0`），而 `bottom` 量的是它定位祖先的盒子 ——
    *    链接只有一行字那么高的话，线就画在字底下、离下沿还差十几像素。
@@ -3554,7 +3832,13 @@
    *    `overflow: hidden` **裁到内边距盒为止**。线画在盒子外面时会被整条裁掉 ——
    *    CSS 全对、`::after` 的 transform 也确实是 scaleX(1)，**屏幕上就是没有
    *    线**（量出来的）。现在线在盒子里面，裁不到。 */
-  .page-bar-title {
+  /* 🔴 **两格是同一个类**（2026-09-03 第二轮）。原来叫 `.page-bar-title`，而这一条
+   *    bar 不再是标题 —— 这一页的 `<h1>` 回到了版心里，这里只剩两个导航链接。
+   *    类名跟着改，是因为一个叫 title 的类画着不是标题的东西，下一个人会照着
+   *    它的名字去推断 DOM。
+   *    两格逐项相同：同样撑满行高（下划线要落在头的下沿上，且不能被 `truncate`
+   *    裁掉）、同样的字重和字距 —— 它们之间唯一的区别是 `aria-current`。 */
+  .page-bar-cell {
     display: flex;
     align-items: center;
     height: 100%;
@@ -3610,7 +3894,7 @@
    *    就是这样。第四轮把头自己那条边框撤掉之后，它成了这个头**唯一**的横线：
    *    既是「你在哪一页」，也是这个头的底在哪儿。 */
 
-  .dark .page-bar-title {
+  .dark .page-bar-cell {
     color: var(--color-ink-50);
   }
 

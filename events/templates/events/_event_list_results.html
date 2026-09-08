@@ -239,16 +239,22 @@ event_list 的结果区。整页和 HTMX 片段渲染的是同一份 —— 视�
     {% empty %}
       {% comment %}
       ⚠️ 空状态里**没有按钮了**（2026-08-17）。原来那句话把人推去 Past Events，
-         而那一页删了。没有拿别的页面顶上：这一页的空状态只有一个成因 ——
-         筛选窗口里没有活动 —— 所以它该说的就是这件事和怎么解决，
-         再挂一个通往别处的按钮只会让「这里为什么是空的」变得更难读。
+         而那一页删了。没有拿别的页面顶上：再挂一个通往别处的按钮只会让
+         「这里为什么是空的」变得更难读。
+
+      🔴 但成因**从一个变成了两个**（2026-08-26 起，措辞 2026-09-08 才跟上）。
+         这一段原来写着「只有一个成因 —— 筛选窗口里没有活动」，那句话在 L3
+         之前是对的；现在还有第二个：有活动，但没有一场是给他看的。
+         只说第一个的话，一个只被勾进某个 ministry 之外的在编成员会把日期拉到
+         一整年、还是空的，然后认为系统坏了 —— 正是 D27 那条「没有和没算不能
+         长得一样」。详情页的角色那一层早就为同一个问题做对了。
       {% endcomment %}
       <li>
-        {% include "core/components/empty.html" with message="No events in this period. Try a wider date range." %}
+        {% include "core/components/empty.html" with message="No events for you in this period. Try a wider date range — some events are only open to certain groups." %}
       </li>
     {% endfor %}
   </ul>
-  {% include "core/components/pagination.html" %}
+  {% include "core/components/pagination.html" with target="#event-results" %}
 </div>
 {% if schedule_oob %}
   {% comment %}

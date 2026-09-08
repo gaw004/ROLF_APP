@@ -1,0 +1,34 @@
+{% comment %}
+「快开始了」卡的内容。⚠️ 只列我**看得见、报得上、而且还没报**的活动 ——
+   已经报了的在 Coming up 那张卡上，两张卡说的不是同一件事。
+
+⚠️ 排序（缺人的排前，再按时间）落在 `EventQuerySet.with_shortfall()` 上，
+   不在这里。那是一条判断，不是一个 order_by。
+{% endcomment %}
+{% if happening_soon %}
+  <ul class="space-y-2">
+    {% for event in happening_soon %}
+      <li>
+        <a href="{% url 'events:event_detail' event.pk %}"
+           class="-mx-2 flex items-center gap-2 rounded-lg px-2 py-1.5 hover:bg-ink-50 dark:hover:bg-ink-800">
+          <span class="min-w-0 flex-1">
+            <span class="block truncate text-sm">{{ event.name }}</span>
+            <span class="block truncate text-xs text-ink-600 dark:text-ink-300">
+              {{ event.start_time|date:"D j M, H:i" }}
+              {% comment %}
+              ⚠️ 「还缺人」只在真的缺人时说一句，不缺就什么都不说 ——
+                 给每一行都挂一个状态徽章，等于没有徽章。
+              {% endcomment %}
+              {% if event.needs_people %}· still needs people{% endif %}
+            </span>
+          </span>
+          <span class="text-ink-400" aria-hidden="true">›</span>
+        </a>
+      </li>
+    {% endfor %}
+  </ul>
+{% else %}
+  <p class="text-sm text-ink-600 dark:text-ink-300">
+    Nothing coming up that you can join.
+  </p>
+{% endif %}

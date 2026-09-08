@@ -17,54 +17,93 @@
    不是把版心再加宽回去。
 {% endcomment %}
 
+{% comment %}
+页头条。**两格：Events（回去）· 这一页**（2026-09-03 第四轮）。
+
+🔴 第三轮把它收成了一格，而那样**回不去** —— 从 /events/ 点 ⋮ 进来之后，
+   这条 bar 上没有任何东西通向 /events/。用户报上来的原话：
+   「从 Events 点 manage 进去以后，回不到 Events 界面了」。
+
+⚠️ 而 /events/ 那一页**不画**这一页那一格：这两格是「你在哪儿 + 从哪儿来」，
+   不是一个切换器。去管理页的入口是那一页标题行右端那颗 ⋮，一个入口一处。
+{% endcomment %}
+{% block page_bar %}
+  {% comment %}
+  🔴 **地址用 `request.get_full_path`，不是 `{% templatetag openblock %} url {% templatetag closeblock %}`。**
+     这一页有查询串（period 筛选、`?report=1`、翻页），而 `aria-current="page"`
+     说的是「你在这一页」。写成裸 URL 的话，那是一个自称本页、点了却把你的
+     筛选和页码全丢掉的链接 —— 正是这条属性在防的那种谎。
+  {% endcomment %}
+  {% url 'events:event_list' as list_url %}
+  {% include "core/components/page_bar.html" with title=manage_list_name url=request.get_full_path parent="Events" parent_url=list_url %}
+{% endblock %}
+
 {% block content %}
   {% comment %}
   管理侧唯一的入口页。草稿和已结束的都在：报表恰恰是活动结束之后才要看的，
   而草稿在志愿者那一侧按设计是不可见的（Event.VISIBLE_TO_PARTICIPANTS 不含 draft）。
 
-  两种身份共用这一页（2026-08-05）：
+  两种身份共用这一页（2026-08-05；2026-09-03 收成一张列表）：
     · ministry admin —— 自己那几个 ministry 的活动，可改状态、可进 Edit / Notify；
-    · foundation tier —— **全部** ministry 的活动，只读。
-  区别由视图算好的 can_manage 决定，模板不自己判权限。
+    · foundation tier —— **全部** ministry 的活动；自己管的那几个照样可改，
+      其余只读。
+  🔴 **可不可改是逐行的**（`event.can_manage`，视图算好），不是整页的 ——
+     两顶帽子的人在同一张表上同时有两种行。模板不自己判权限。
 
   ⭐ 报表也共用这一条路径：它拿到的是**这一页已经筛过的那个 queryset**，
      所以 ministry admin 得到的是自己那几个 ministry 的报表，foundation admin
      得到的是全基金会的 —— 两边没有第二套权限判断（D27）。
   {% endcomment %}
+  {% comment %}
+  ⚠️ 标题左、按钮右，同一行 —— 和 2026-09-03 之前逐像素相同。这个 `<h1>` 是整页
+     唯一的一个：页头条那两格是 `<nav>` 里的链接。
+
+  ⚠️ 标题跟着身份变，按钮只画给能发布的人：只读身份看到的是一个标题独占的一行，
+     而不是一行里剩一个洞。
+  {% endcomment %}
+  {% comment %}
+  ⭐ **这一页叫什么，由 `manage_list_name` 一处决定**（2026-09-03）。
+     `_event_nav.html` 的面包屑读的是同一个值 —— 而它此前读的是**逐场活动**的
+     `can_manage`，于是一张列表之后，两顶帽子的人在自己的活动上会看到
+     「← Events I Manage」，而那一页的标题写着「All Events」：同一个页面两个名字。
+
+  ⚠️ 标题和按钮是**两个不同的问题**：叫什么由「列的是不是全部」决定，
+     那颗按钮由「有没有任何发布权」决定。两顶帽子的人两者都为真。
+  {% endcomment %}
   <div class="mb-6 flex flex-wrap items-center justify-between gap-3">
-    <h1 class="text-2xl font-semibold">
-      {% if can_manage %}Events I Manage{% else %}All Events{% endif %}
-    </h1>
-    {% if can_manage %}
+    <h1 class="text-2xl font-semibold">{{ manage_list_name }}</h1>
+    {% if can_publish %}
       {% url 'events:event_create' as create_url %}
       {% include "core/components/button.html" with label="Publish a new event" href=create_url variant="primary" %}
     {% endif %}
   </div>
 
-  {% if not can_manage %}
+  {% comment %}
+  🔴 **这段横幅 2026-09-03 重写了，因为原来那句话变成了假话。**
+
+     原文是「Every ministry's events, read only」—— 一句关于**整页**的断言。
+     而这一页现在一张列表列全部 ministry，可不可改是**逐行**的：两顶帽子的人
+     在自己那几个 ministry 的行上照样能改。对他来说原来那句话是错的。
+
+  ⚠️ 只对 `showing_all` 画（也就是 foundation tier）。纯 ministry admin 看到的
+     本来就只有自己的行，全都能改 —— 给他画一句解释「哪些行你改不了」，
+     是在回答一个他不会问的问题。
+
+  ⚠️ 原来那一句「你自己那几个 ministry 的可管理视图在菜单里」一并删掉：
+     那一格没了，而且它们现在就在同一页上 —— 这正是这一批要解决的事。
+  {% endcomment %}
+  {% if showing_all %}
     <div class="card mb-6 border border-info-fg/30 bg-info-bg dark:border-info-fg-dark/30 dark:bg-info-bg-dark">
       <p class="text-sm text-info-fg dark:text-info-fg-dark">
-        Every ministry's events, read only. Signups, attendance and reports are
-        open to you; publishing, editing and notifying stay with each ministry's
-        own admins.
+        Every ministry's events. Signups, attendance and reports are open to you
+        on all of them; publishing, editing and notifying stay with each
+        ministry's own admins — including yours, which stay editable here.
       </p>
-      {% comment %}
-      ⚠️ 只有既是 foundation admin 又管着某个 ministry 的人会看到下面这一句
-        （2026-08-06）。对他来说这一页是**特意点进来的另一个视图** ——
-        他自己那几个 ministry 的可管理视图在菜单的 Ministry admin 那一组里，
-        而这一页把他的编辑按钮全收走了。不说这一句，他会以为自己被降权了。
-      {% endcomment %}
-      {% if is_ministry_admin %}
-        <p class="mt-2 text-sm text-info-fg dark:text-info-fg-dark">
-          Your own ministries are still yours to run — open “Events I manage” from
-          the menu for the editable view.
-        </p>
-      {% endif %}
     </div>
   {% endif %}
 
   {% url 'events:event_manage_list' as manage_url %}
-  {% include "events/_period_filter.html" with action=manage_url report_button=1 scope=scope_param %}
+  {% include "events/_period_filter.html" with action=manage_url report_button=1 %}
 
   {% include "events/_event_manage_results.html" %}
 

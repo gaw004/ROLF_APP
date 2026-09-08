@@ -3,6 +3,30 @@
 把 [`../goal.md`](../goal.md) 和它下面那几份文档里已经拍板的东西画成图。
 文字仍然以那些文档为准 —— 这里是同一批决策的另一种读法，不是第二处真相。
 
+## 🔴 这张图停在 2026-08-03，落后四轮。下面逐条列出已知不准的地方
+
+**别拿它当现状读。** 2026-09-08 核对了一遍，欠的账写在这里 ——
+[`../06-roadmap.md`](../06-roadmap.md) 给过两条路（补全，或者写明停在哪天、
+哪几处不准），选的是第二条：补全是四轮的账，而**继续假装它是完整的**才是真正
+要避免的那件事（[D27](../decisions/D27-ministry-report.md)：没有和没算不能长得一样）。
+
+| 缺什么 / 错什么 | 真相在哪 |
+|---|---|
+| `Participation.served_as`（志愿 / 工作 / 不适用）整列没有 | [D38](../decisions/D38-served-as-volunteer-or-work.md) |
+| `ParticipationRole.nature`（helping / attending）整列没有 | [`../participants.md`](../participants.md) 第六节 L1 |
+| 受众四件套（`visible_to_outsiders` / `visible_to_all_staff` / `visible_to_ministries` / 两张 through 表）在 `Event` 和 `EventRole` 上都没有 | 同上 L2/L3 |
+| `EventRole.stop_at_needed_count` 没有 | [D19](../decisions/D19-event-role.md) |
+| `Position.compensation` 没有 | [D32](../decisions/D32-worker-axes-schedule-and-assignment.md) |
+| **整张 `Notice` 表**没有（以及 `notices` app 本身） | [D41](../decisions/D41-notices-are-not-events.md) |
+| **整张 `Session` 表**没有 | [`../06-roadmap.md`](../06-roadmap.md) L5.1 |
+| `Event.status` 画的是 `confirmed` | 2026-08-19 已改名 `full`（迁移 0011） |
+| 谓词画的是 `visible_to_volunteers` | 2026-08-20 已改名 `visible_to_participants` |
+| 画着 `EventType` 和 `Event.event_type` | 2026-09-04 连表一起删了 |
+
+⚠️ 下面那张「一节画什么」的表里写着「**全部字段**」和一个表数 —— 那句话今天不成立，
+上面这张表就是它的更正。真要重画，按本目录的重生成步骤走一次即可；
+在那之前，**这一份是 2026-08-03 的快照**。
+
 ## 怎么看
 
 用浏览器打开 [`data-and-flow.html`](data-and-flow.html)（双击即可，不需要起服务、不联网）。
@@ -10,7 +34,7 @@
 
 | 节 | 画什么 | 回答的问题 |
 |---|---|---|
-| 一 · ERD | 16 张业务表的全部字段、唯一约束、谓词，以及每条外键的 `on_delete` | 「这条信息存在哪、删一行会连带删掉什么」 |
+| 一 · ERD | 15 张业务表的全部字段、唯一约束、谓词，以及每条外键的 `on_delete` | 「这条信息存在哪、删一行会连带删掉什么」 |
 | 二 · DFD | Level 0 上下文 + Level 1 的十四条需求走的路，每个处理标了落在哪个文件 | 「这个动作从哪进来、经过谁、写到哪张表」 |
 | 三 · app 地图 | 五个 app 各自的表、11 条跨 app 外键、单向依赖链 | 「新模型该放哪个 app」（配合 [D17](../decisions/D17-app-layout.md)） |
 | 四 · 表册 | 逐表：记什么、连向谁、挂不挂 history、服务 R1–R8 / P1–P6 的哪几条 | 「这张表为什么存在」 |

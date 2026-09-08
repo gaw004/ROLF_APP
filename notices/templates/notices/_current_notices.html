@@ -1,0 +1,36 @@
+{% comment %}
+公告的那一条窄带 —— 一个 include，两个挂载点（本 app 的 /notices/，以及 N4 的仪表盘）。
+
+⚠️ 抽成 partial 而不是各写一份，理由和别处一样：同一条公告在两个页面上长得不一样，
+   是「这两个地方说的不是一回事」的开始。
+
+⚠️ **本模板不做任何过滤。** 传进来的 `notices` 必须已经过
+   `showing().for_audience(contact)` —— 在模板里过滤仍然会把行取出来，
+   而这张表最坏的失败正是「取出来了但不该给他看」。
+   守卫是 core/tests.py 的 NoticesAreNarrowedGuardTests。
+
+参数：notices 必填（一个列表）。
+{% endcomment %}
+<ul class="space-y-3">
+  {% for notice in notices %}
+    <li class="card">
+      <div class="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+        <h3 class="font-semibold">{{ notice.title }}</h3>
+        {% comment %}
+        ⚠️ 落款是 ministry 而不是人名。公告是机构在说话 —— 「Facilities 说停车场关了」
+           可以照着去问，「张三说停车场关了」不行。谁写的记在 owner 列上，
+           管理页看得到。
+        {% endcomment %}
+        <span class="text-xs text-ink-600 dark:text-ink-300">{{ notice.ministry.name }}</span>
+      </div>
+      <p class="mt-1 whitespace-pre-line text-sm text-ink-700 dark:text-ink-200">{{ notice.body }}</p>
+      {% comment %}
+      下架日期是**读者**要的信息，不是管理信息：「停车场关到 15 号」这句话里，
+      日期就是内容本身。所以它在这里，不只在管理页。
+      {% endcomment %}
+      <p class="mt-2 text-xs text-ink-500 dark:text-ink-400">
+        Until {{ notice.stops_showing|date:"j M Y" }}
+      </p>
+    </li>
+  {% endfor %}
+</ul>

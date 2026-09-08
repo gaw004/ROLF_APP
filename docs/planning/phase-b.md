@@ -23,7 +23,7 @@
 | ✅ `Position` | `org` | 编制表 —— 组织架构的骨架，与人无关（见 D11 第二次修订）。`code`（唯一·不可改，见 D5）/ `name`（职务名，给人看）/ `kind`（`TextChoices`：employee·volunteer·board）/ `ministry`(FK，**可空** —— 理事席位没有)/ `reports_to`(自引用 FK → `Position`，可空)/ `is_leader`（布尔，**给代码查**）/ `is_active` / `description`。**挂 simple-history**（组织架构变更必须留痕）。**一个 `Position` 可以有多个在职 `Assignment`** —— 它是编制类型不是座位，所以这张表是几十行量级 |
 | ✅ `Assignment` | `org` | 任职表 —— 谁在什么时候占了哪个编制。 `contact`(FK) / `position`(FK → `Position`) / `employment_type`(FK，**可空**) / **`status`（`TextChoices`：active·on_leave·suspended，默认 active）** / `start_date` / `end_date`。**没有 `kind` / `title` / `ministry` / `is_leader` / `reports_to`** —— 全部搬去 `Position` 了。**不加 `is_active`**，但**有 `status`** —— 状态和任期是正交的两个维度，见下面「`Assignment.status`」。**挂 simple-history** |
 | ✅ `EmploymentType` | `org` | 字典表：`code`（唯一·不可改）/ `name` / `is_active`。**取值基金会还没定**（全职 / 兼职 / 合同 / 实习只是我们猜的），所以做成字典表而不是 `TextChoices` —— 以后加一行就行，不改代码不写迁移。符合 D5 的判定规则：目前没有任何代码按它分支 |
-| `EventType` | `events` | 字典表：`code`（唯一·不可改）/ `name` / `is_active` |
+| ~~`EventType`~~ | `events` | ~~字典表：`code`（唯一·不可改）/ `name` / `is_active`~~<br>**2026-09-04 删除** —— 说不出谁读它（[06-roadmap L2.6](06-roadmap.md#l26-eventtype-上页面)）：那一列必填、而前台模板命中 0 次 |
 | `Event` | `events` | `name` / `event_type`(FK) / **`ministry`(FK，⚠️ 非空)** / `start_time` / `end_time` / `location` / `owner`(FK → `Contact`) / `status`（`TextChoices`：**draft·open**·confirmed·completed·cancelled）/ `description`。**挂 simple-history**。<br>⚠️ **三处改动（2026-07-29）**：① **`ministry` 从可空改成非空** —— R2 和 R8 都以它为轴，P2 的权限判断也以它为轴，为空就是一场无主、无人有权管的活动；② **`status` 加 `draft` 和 `open`** —— P3 要"看到**发布的** event"，可见性必须有一个明确的闸门，不能靠推断（`open` = 已发布且开放报名）；③ **删掉 `capacity`** —— 被 `EventRole.needed_count` 取代，见 D19。<br>**2026-07-29 晚补一条：可见性不能等于 `status=open`**，见下面「[可见性与生命周期](#可见性与生命周期两个谓词不是一个-status2026-07-29-晚新增)」——否则活动一 `confirmed`，已报名的人就打不开它了 |
 | `EventRole` | `events` | 新表（D19）—— 这场活动开了哪些工种、各要几人。 `event`(FK，`CASCADE`) / `role`(FK → `ParticipationRole`，`PROTECT`) / **`needed_count`**（`PositiveIntegerField`，可空 = 不限人数）/ `notes`。<br>**它之于 `Participation` 就是 `Position` 之于 `Assignment`** —— 没人报名的工种照样存在，这正是 R4 / R5 需要它的原因。`needed_count` 就是被推迟过的 `Position.headcount`，但**这次不能推迟**，它是 P2 的原话。<br>约束 `UniqueConstraint(event, role)`、`needed_count IS NULL OR needed_count > 0`。<br>**挂 simple-history**（2026-07-29 晚补上这个结论 —— 原文对它没表态）：`needed_count` 是**对外发布出去的承诺**（"搬运要 5 人"），改了要能追溯，同 `Event` 挂 history 的理由。它是几行/场的小表，成本可忽略 |
 | `ParticipationRole` | `events` | 字典表：`code`（唯一·不可改）/ `name` / `is_active`。装的是**一次活动之内**的工种（签到台、搬运、翻译），**≠ `Position.name`**，见下面那条一句话定义。<br>**必须 seed 一行 `code=general`**（"通用志愿者"）—— `Participation.event_role` 非空之后，"没有具体分工"要有地方落。<br>它是 schema 的不变量，所以落在**数据迁移**里，不落在 `seed_demo`（后者拒绝在 `DEBUG` 关掉时运行，只靠它的话生产库起来就缺这一行）。见 `02-roadmap.md` B6 |
@@ -54,7 +54,7 @@
 其余按依赖排：
 
 ```
-EventType / ParticipationRole（字典表）
+ParticipationRole（字典表）   ⚠️ EventType 原来也在这里，2026-09-04 删了
   └→ Event → EventRole → Participation        （R1–R7 的数据基础）
 MinistryRole → permissions.py                  （P2 / P4 / P5 的判断）
   └→ accounts 注册流程                          （P1）
@@ -155,7 +155,7 @@ A7 的原话是"等表里有了真数据再加，就得先清洗存量数据"。
 | ~~`Event`~~ | ~~`capacity IS NULL OR capacity > 0`~~ | **2026-07-29 删除** —— `capacity` 字段本身没了，被 `EventRole.needed_count` 取代（D19） |
 | `EmergencyContact` | `UniqueConstraint(person, Lower(Trim(name)), phone)` | 同一个人身上把同一个紧急联系人录两遍。归一化写进表达式，不靠 `save()` —— D9 归一化通则 |
 | `EmergencyContact` | `relationship_type` **FK 非空** | 记了联系人就必须写清关系。 拆成专用表之后这条从 `CheckConstraint` 降级成一个 `null=False`，是拆表白捡的简化 |
-| `Ministry` / `Position` / `EmploymentType` / `EventType` / `ParticipationRole` | `UniqueConstraint(Lower("code"))`（不是 `unique=True`）<br>⚠️ `EventRole` / `Participation` / `MinistryRole` **没有 `code`** —— 它们不是字典表，是业务记录，锚点是外键组合 | 见 D5：不唯一的 `code` 不是锚点，`get(code=...)` 会抛 `MultipleObjectsReturned`。**必须是 `Lower()` 版**，否则 `bulk_create` 能塞进 `Food_Pantry` + `food_pantry` 两行 —— D9 归一化通则 |
+| `Ministry` / `Position` / `EmploymentType` / ~~`EventType`~~ / `ParticipationRole` | `UniqueConstraint(Lower("code"))`（不是 `unique=True`）<br>⚠️ `EventRole` / `Participation` / `MinistryRole` **没有 `code`** —— 它们不是字典表，是业务记录，锚点是外键组合 | 见 D5：不唯一的 `code` 不是锚点，`get(code=...)` 会抛 `MultipleObjectsReturned`。**必须是 `Lower()` 版**，否则 `bulk_create` 能塞进 `Food_Pantry` + `food_pantry` 两行 —— D9 归一化通则 |
 | `RelationshipType` | `UniqueConstraint(Lower(Trim("name_a_to_b")))` | 缺口 2。`Trim` 不能省，理由同上 |
 
 按 D14：每条约束配 `violation_error_message` + `violation_error_code`，在 `CONSTRAINT_FIELD` 里登记一条映射，**不要再写一遍 `clean()`**。
@@ -309,7 +309,7 @@ Phase B 一次加十几个外键，其中一个选错是灾难级的：
 | `Assignment.employment_type` | `PROTECT` | 字典表，同 `Contact.preferred_language` |
 | `Position.ministry` | `PROTECT` | 删 ministry 不该静默带走编制 |
 | `Position.reports_to` | `PROTECT` | ⚠️ `CASCADE` 是灾难（删一个编制带走整棵下属子树）；但这里**也不用 `SET_NULL`** —— 那会把一整棵子树**静默地**变成组织架构图的根，看不出出过事。`PROTECT` 强迫你先把下属改挂到别处，是唯一会让你注意到的选项 |
-| `Event.event_type` / `Event.ministry` / `Event.owner` | `PROTECT` | `CASCADE` 会让删一个人带走整场活动 |
+| ~~`Event.event_type`~~ / `Event.ministry` / `Event.owner` | `PROTECT` | `CASCADE` 会让删一个人带走整场活动。<br>⚠️ `event_type` 那一格 **2026-09-04 删除** —— 说不出谁读它（[06-roadmap L2.6](06-roadmap.md#l26-eventtype-上页面)） |
 | `EventRole.event` | `CASCADE` | 活动删了，它开的工种没有意义（同 `Participation.event` 原来那条） |
 | `EventRole.role` | `PROTECT` | 字典表，同 `Contact.preferred_language` |
 | `Participation.event_role` | `CASCADE` | 工种删了，报它的记录没有意义。<br>⚠️ 这条链要看清楚：删 `Event` → 级联删 `EventRole` → 级联删 `Participation`，工时历史一起没。 和原来"删 `Event` 直接带走 `Participation`"的风险等价，不是新增的 —— 但两级级联更不显眼，所以**删活动这个动作在 admin 里不给普通 Group**（见 D21） |
@@ -832,6 +832,28 @@ class EventRoleQuerySet(models.QuerySet):
 
 ##### 可见性与生命周期：两个谓词，不是一个 `status`（2026-07-29 晚新增）
 
+> ### ⚠️ 2026-08-26 起是**三个**谓词，不是两个。本节只讲前两个
+>
+> 这一节把「可见性」定义成「志愿者能不能看到它」，而当时那个问题只有一个答案：
+> 已发布的活动，任何登录账号都看得见。L3 加了第三个谓词回答**「是给他看的吗」**——
+> `EventQuerySet.for_audience(contact)`，三个勾（外部人员 / 全体在编 / 各 ministry）。
+>
+> 三者永远分开写、永远不合并：`visible_to_participants()` 答「发布了吗」，
+> `open_for_signup()` 答「还收报名吗」（状态 + 时钟），`for_audience()` 答
+> 「是给他看的吗」。合并任何两个，失败方式都是静默的 —— 而两条守卫
+> （`AudienceIsAskedGuardTests` / `RolesAreNarrowedGuardTests`）强制第一个和
+> 第三个必须同时出现。
+>
+> 还有一层在角色上：`EventRole` 有自己的同一组勾，答的是**「谁报得上」**——
+> 而「看得见 ≠ 报得上」是那一轮的中心句。约束是角色的范围 ⊆ 活动的范围。
+>
+> 全文见 [`participants.md`](participants.md) 第六节 L2/L3 和
+> [`06-roadmap.md`](06-roadmap.md) 批二。
+>
+> ⚠️ 另有两处本节及邻近段落里已经过期的写法，一并记下不再逐处改：
+> `Event.status` 的 `confirmed` 2026-08-19 已改名 `full`（迁移 0011），
+> `event_type` 那一列 2026-09-04 连表一起删了。
+
 > 本节是一次自查的结果，改的是 `Event.status` 的用法，不是它的取值。
 > 起因：全文（含 `02-roadmap.md`）把志愿者侧的查询一律写成 `filter(status=OPEN)`。
 
@@ -985,7 +1007,7 @@ def check_out(participation, *, at=None):
 > 仍然成立，只是这一次前置条件不满足。
 
 **不要图省事用 `default=""` 一步到位** —— 那样所有行的 code 都是空字符串，
-唯一约束当场炸。新建的字典表（`Ministry` / `EmploymentType` / `EventType` /
+唯一约束当场炸。新建的字典表（`Ministry` / `EmploymentType` / `EventType`（后已删）/
 `ParticipationRole`）不受影响，建表时就带上。
 
 **"不可改"怎么落地**（D5 只写了要求，没写机制）：

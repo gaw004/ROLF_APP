@@ -64,9 +64,47 @@ from contact.models import Contact
 from org.models import Assignment, Position
 
 # Apps we wrote, as opposed to Django's and the third-party ones.
-OUR_APPS = {"core", "contact", "accounts", "org", "events", "volunteer", "finance", "payroll"}
+#
+# 🔴 **Derived, not listed** (2026-08-31). The hand-written set had drifted in
+#    both directions at once: it named three apps that do not exist (volunteer,
+#    finance, payroll — planned once, never built) and was missing two that do
+#    (gallery, and notices on the day it was added).
+#
+#    ⚠️ Being missing is the dangerous half, and it is **silent**: the two
+#       guards below walk `apps.get_models()` and skip anything not in here, so
+#       an app absent from this set has no constraint checked and no text field
+#       checked — and every one of those checks passes, because it never ran.
+#       Notices found it by accident (a mapping with no constraint went red);
+#       gallery had simply never been looked at.
+#
+#    The test is the same one `project_python_files()` uses without saying so:
+#    is this app's code inside this repository, and not in the virtualenv?
+#
+#    ⚠️ Both halves are needed, and the second is easy to leave out — `.venv`
+#       sits **inside** BASE_DIR, so "is it under the project root" on its own
+#       answers yes for every third-party app too (verified: it pulled in
+#       django.contrib.*, phonenumber_field and localflavor).
+OUR_APPS = {
+    config.label for config in apps.get_app_configs()
+    if Path(config.path).is_relative_to(Path(settings.BASE_DIR))
+    and not {".venv", "venv"} & set(
+        Path(config.path).relative_to(Path(settings.BASE_DIR)).parts)
+}
 
-SKIPPED_DIRS = {".venv", "venv", "migrations", "__pycache__", "staticfiles", "node_modules"}
+# ⚠️ `.claude` is here because a git worktree lives under it, and a worktree is
+#    a **complete second copy of this repository** on disk. Every guard below
+#    that says "this may appear in exactly one place" counted that copy as the
+#    second place, so five of them failed at once — not with a useful message,
+#    but with a list of paths under .claude/worktrees. Found 2026-08-31.
+#
+#    ⚠️ The dangerous part is not the red: it is that five guards go red
+#       **together, for a reason that has nothing to do with the code**, and a
+#       suite that cries wolf is one people learn to skip. That is exactly the
+#       failure these guards exist to prevent, arriving from underneath them.
+SKIPPED_DIRS = {
+    ".venv", "venv", "migrations", "__pycache__", "staticfiles", "node_modules",
+    ".claude",
+}
 
 
 def project_python_files(skip=()):
@@ -95,6 +133,17 @@ def project_markdown_files():
             continue
         yield relative, path.read_text(encoding="utf-8")
 
+
+#: Docstrings and comments, for the guards that scan **code** for a call.
+#:
+#: 🔴 Both halves are load-bearing, and the second one was learned the hard way
+#:    (2026-08-29): a guard that strips docstrings alone stays green when the
+#:    call it hunts for is deleted, as long as a `#` comment above the site
+#:    mentions it by name. A guard a comment can satisfy is worse than no guard
+#:    — it reports safety it never checked.
+#: ⚠️ `\x27` keeps this file from containing the literal it hunts for, so the
+#:    guards can scan themselves.
+PROSE = re.compile(r'("""|\x27\x27\x27).*?\1|#[^\n]*', re.S)
 
 LOOP_OPENER = re.compile(r"^\s*(async\s+for|for|while)\b")
 SCOPE_OPENER = re.compile(r"^\s*(async\s+def|def|class)\s+(\w+)")
@@ -168,6 +217,58 @@ def repeated_uses(pattern, skip=(), exempt="loop-guard-ok"):
             elif scope:
                 stack.append((indent, "scope", scope.group(2)))
     return hits
+
+
+def our_functions(skip=()):
+    """(where, name, code) for every function in our own non-test code.
+
+    `code` has docstrings and comments stripped: these callers are looking for
+    a **call**, and prose that discusses one is not one.
+
+    ⚠️ One walker, because "what counts as our code" must have one answer. Two
+       guards ask this — see functions_missing_a_call() below.
+    """
+    for relative, source in project_python_files(skip=list(skip)):
+        if relative.name == "tests.py":
+            continue
+        try:
+            tree = ast.parse(source)
+        except SyntaxError:  # pragma: no cover - caught by check, not here
+            continue
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                body = ast.get_source_segment(source, node) or ""
+                yield (f"{relative}:{node.lineno} {node.name}()", node.name,
+                       PROSE.sub("", body))
+
+
+def functions_missing_a_call(*, signal, asks, allowed, skip=()):
+    """Where `signal` appears in a function body and `asks` does not.
+
+    ⭐ The shape of both audience guards: "if you do this, you must also do
+       that". They differ in three constants and nothing else, so they share a
+       body — the alternative is what this project keeps convicting, two copies
+       of one rule where a fix reaches only the copy somebody was looking at.
+       (It happened to these two: the comment-blindness fix above landed on the
+       second guard and left the first one green on a comment.)
+
+    ⚠️ Deliberately narrow — **function bodies**, not whole files. A file-wide
+       version would go red on every docstring that discusses the pair (there
+       are several), and a guard that is red every day gets whitelisted until it
+       means nothing. Same reasoning ReportFigureNamesGuardTests writes out.
+
+    ⚠️ `signal` may be one string or several, and several means "any of these".
+       A narrowing predicate is not always the same call — see the note on
+       NARROWS below, where a second one had been quietly outside the net.
+    """
+    signals = (signal,) if isinstance(signal, str) else tuple(signal)
+    return [
+        where
+        for where, name, code in our_functions(skip=skip)
+        if name not in allowed
+        and any(one in code for one in signals)
+        and asks not in code
+    ]
 
 
 def offending_lines(pattern, skip=(), only_filenames=None):
@@ -285,6 +386,29 @@ class TimeSourceGuardTests(TestCase):
     # day off a stored DateTimeField. Every datetime column in this project is
     # named *_time or *_at, so that is what it looks for.
     STORED_INSTANT_DATE = r"\b\w+_(time|at)\.date\(\)"
+    # The fourth spelling, and the one the three above all miss: an aware
+    # datetime that is **not** a model field — `local_now()` itself, or the
+    # `NOW = local_now()` constant every test module in this project declares.
+    # `.date()` on either is still the UTC day.
+    #
+    # 🔴 It is the nastiest of the four, because it is only wrong for part of
+    #    the day. A test written at noon Pacific is green; the same test at 6pm
+    #    is red, because UTC has turned the page and "yesterday" now computes to
+    #    today's date. So it ships green, and goes red days later on a run that
+    #    changed nothing — which reads as "the code broke", not "the test was
+    #    always wrong". Found 2026-09-02, twice within an hour: once while
+    #    writing dashboard/tests.py, and then in notices/tests.py where it had
+    #    been sitting green since the day before.
+    #
+    # ⚠️ `[^\n]*` between the two halves so it catches the arithmetic form too
+    #    — subtracting a timedelta first and asking the result for its day.
+    #    Three of the four cases found in shipped code were written that way.
+    #
+    # ⚠️ And that example is described rather than written out, for the reason
+    #    the note at the top of this class gives: the file has to be able to
+    #    scan itself. Spelling it out here is what made the first run of this
+    #    very guard go red on its own comment.
+    AWARE_NOW_DATE = r"(local_now\(\)|\bNOW\b)[^\n]*\.date\(\)"
 
     def test_nobody_computes_today_outside_core_timeutils(self):
         # ruff's DTZ catches the first pattern but not the others: those are
@@ -307,6 +431,16 @@ class TimeSourceGuardTests(TestCase):
             hits,
             [],
             "That is the UTC day. Use core.timeutils.local_date_of():\n" + "\n".join(hits),
+        )
+
+    def test_nobody_takes_the_day_off_an_aware_now(self):
+        hits = offending_lines(self.AWARE_NOW_DATE, skip=["core/timeutils.py"])
+        self.assertEqual(
+            hits,
+            [],
+            "That is the UTC day, and it is only wrong for part of each day — "
+            "use core.timeutils.local_today(), or do the arithmetic on a date "
+            "rather than on an instant:\n" + "\n".join(hits),
         )
 
 
@@ -457,13 +591,25 @@ class AudienceContainmentGuardTests(TestCase):
        object alone, so seeing one outside the two files below means somebody
        is doing the comparison by hand.
 
-    ⚠️ forms.py is allowed because it *builds* Specs and hands them over;
-       models.py is allowed because refuse_wider_than_event() lives there.
+    ⚠️ The four allowed files are two pairs, and the split between them is the
+       point (2026-08-31, when Audience moved to org/):
+
+       · `org/audience.py` defines Spec and the two rules an audience obeys on
+         its own; `org/forms.py` builds a Spec out of what was submitted. Both
+         are general — they say nothing about events;
+       · `events/models.py` is allowed because refuse_wider_than_event() lives
+         there; `events/forms.py` because it hands Specs to it. That pair is
+         the containment rule, which is **not** general: only the arithmetic
+         travels, the sentence "a role inside it cannot be either" does not.
+
        Anywhere else is a second implementation.
     """
 
     SPEC_ATTRIBUTE = r"\.(outsiders|all_staff|ministries)\b"
-    ALLOWED = ["events/models.py", "events/forms.py"]
+    ALLOWED = [
+        "org/audience.py", "org/forms.py",
+        "events/models.py", "events/forms.py",
+    ]
 
     def test_only_one_place_compares_two_audiences(self):
         hits = offending_lines(self.SPEC_ATTRIBUTE, skip=self.ALLOWED)
@@ -485,28 +631,46 @@ class AudienceIsAskedGuardTests(TestCase):
        seeing every published event, with nothing raising and every page
        looking normal.
 
-    ⚠️ Deliberately narrow — it reads **function bodies**, not whole files. A
-       file-wide version would go red on every docstring that discusses the two
-       predicates (there are several, including this one), and a guard that is
-       red every day gets whitelisted until it means nothing. Same reasoning
-       ReportFigureNamesGuardTests writes out above.
+    ⚠️ The scan itself is functions_missing_a_call() above — shared with
+       RolesAreNarrowedGuardTests, which asks the same "if this, then that" of
+       the same corpus. This class is three constants and the sentence it
+       prints.
     """
 
-    NARROWS = "visible_to_participants("
+    #: Either way of narrowing a list of events down to the ones worth showing.
+    #:
+    #: 🔴 `open_for_signup(` joined it on 2026-09-08, and its absence was a real
+    #:    blind spot rather than a tidying-up: `event_signup` narrows with that
+    #:    call and never touches the other one, so the guard's signal never
+    #:    fired there at all. Deleting that view's audience door left this guard
+    #:    green — verified — and no behavioural test covered it either, which is
+    #:    the pair of holes that lets a leak ship. Both are closed now; the two
+    #:    live call sites (events.views.event_signup, dashboard.services) were
+    #:    already asking, so this pins what is true rather than fixing a breach.
+    NARROWS = ("visible_to_participants(", "open_for_signup(")
     ASKS = "for_audience("
-    #: Docstrings discuss this pair at length, so they are stripped before the
-    #: search — matching prose would make the guard lie in both directions.
-    DOCSTRING = re.compile(r'("""|\x27\x27\x27).*?\1', re.S)
 
     #: Named exemptions. Each is a decision, not an oversight — see the
     #: docstring at each site, and 06-roadmap.md L2.2.
     ALLOWED = {
         # The rows somebody already holds. Narrowing an audience afterwards must
         # not take away a signup they made while it was still open to them.
-        "my_participations",
-        # The two predicates defining themselves.
+        #
+        # ⚠️ The name moved on 2026-09-02: the predicate itself is now
+        #    `ParticipationQuerySet.mine()`, extracted so the dashboard and
+        #    /me/participations/ cannot disagree about what counts as mine.
+        #    The exemption travelled with the code, which is the point —
+        #    leaving it on the old name would have exempted a function that no
+        #    longer asks the question, and red-flagged the one that does.
+        "mine",
+        # The predicates defining themselves. ⚠️ `is_open_for_signup` is the
+        # row-level twin of the queryset one and names it in its own docstring,
+        # which is enough for the scan to see it — both are definitions of the
+        # signal, never uses of it.
         "visible_to_participants",
         "for_audience",
+        "open_for_signup",
+        "is_open_for_signup",
         # ⚠️ Somebody standing in front of the iPad, having already scanned the
         #    code. It refuses anybody without a signup two lines later, and a
         #    signup is proof enough that the event was once theirs to join —
@@ -516,34 +680,306 @@ class AudienceIsAskedGuardTests(TestCase):
         "checkin_confirm",
     }
 
-    def functions(self):
-        """(where, name, source) for every function in our own non-test code."""
-        for relative, source in project_python_files(skip=["tests.py"]):
-            if relative.name == "tests.py":
-                continue
-            try:
-                tree = ast.parse(source)
-            except SyntaxError:  # pragma: no cover - caught by check, not here
-                continue
-            for node in ast.walk(tree):
-                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                    body = ast.get_source_segment(source, node) or ""
-                    yield f"{relative}:{node.lineno} {node.name}()", node.name, body
-
     def test_narrowing_by_status_always_asks_who_is_looking(self):
-        offenders = [
-            where
-            for where, name, body in self.functions()
-            if name not in self.ALLOWED
-            and self.NARROWS in self.DOCSTRING.sub("", body)
-            and self.ASKS not in self.DOCSTRING.sub("", body)
-        ]
+        offenders = functions_missing_a_call(
+            signal=self.NARROWS, asks=self.ASKS, allowed=self.ALLOWED)
         self.assertEqual(
             offenders,
             [],
             "Published is not the same question as for-them. Add "
             "for_audience(contact), or name the function in ALLOWED with a "
             "reason:\n" + "\n".join(offenders),
+        )
+
+
+class HoursWriteGuardTests(TestCase):
+    """Lint-as-test: hours are written in one file, and it is events/services.py.
+
+    ⭐ Hours are the number that leaves this system — they go on grant reports
+       and into what the foundation tells funders it did. Every rule about them
+       lives in services.py: an attending place records none (NoHoursHere), a
+       no-show cannot have them, check_out() computes them from the two stamps.
+       A view or a form assigning `.hours` directly reaches the column without
+       passing any of that, and the result is a wrong total that nothing
+       contradicts.
+
+    ⚠️ This one pins a property that is **already true** — as of 2026-09-08 the
+       only assignments are the five in events/services.py — rather than fixing
+       a breach. 06-roadmap named it in the guard table for the round that
+       introduced not_applicable and it was never written; it is written now so
+       the next hours-adjacent feature cannot quietly open a second door.
+       L5.7 will add a second source of hours (SessionAttendance) and the
+       writes for it belong in the same file.
+
+    ⚠️ Assignment only: `record_hours(hours=…)`, `row.hours` reads and keyword
+       arguments are all left alone. The pattern therefore needs the `=` and
+       has to avoid `==`.
+    """
+
+    #: An assignment to the attribute, not a comparison against it. The leading
+    #: dot keeps it to attribute writes, so a local variable named `hours` in a
+    #: template tag or a test fixture is not swept in.
+    #:
+    #: ⚠️ Written as a regex and never spelled out in the prose above — these
+    #:    guards scan this file too, and a docstring quoting the literal form
+    #:    reports itself. Same reason the neighbours describe their signal
+    #:    instead of printing it.
+    HOURS_WRITE = r"\.hours\s*=(?!=)"
+
+    #: The one file allowed to hold them, and the reason is D18's: the rules
+    #: about hours live there, so the writes have to as well.
+    ALLOWED = ["events/services.py"]
+
+    def test_hours_are_only_written_in_the_service_layer(self):
+        hits = offending_lines(self.HOURS_WRITE, skip=self.ALLOWED)
+        self.assertEqual(
+            hits,
+            [],
+            "Hours are written through events/services.py, which is where the "
+            "rules about them live (an attending place records none; a no-show "
+            "cannot have them). Assigning the column directly skips all of "
+            "them and the total is wrong with nothing to say so:\n"
+            + "\n".join(hits),
+        )
+
+
+class LocalDayInSqlGuardTests(TestCase):
+    """Lint-as-test: a day taken in SQL is taken in the foundation's timezone.
+
+    ⭐ The database-side twin of the two guards above. `TruncDate` on a stored
+       instant asks Postgres for a day, and which day depends entirely on the
+       timezone handed to it — an event at 6pm Pacific belongs to the next UTC
+       day, so "was this person on the books on the day of the event" is asked
+       about the wrong date for six hours out of every twenty-four. Silent, and
+       wrong for only part of each day, which is the shape that survives a
+       casual test run.
+
+    ⚠️ The guard asks for two things at once, because either alone passes while
+       being wrong: the call may only appear in core/timeutils.py, **and** the
+       line it appears on must carry `tzinfo=`. Wrapped in local_day() there is
+       one place to get it right and nowhere to forget it.
+
+    ⚠️ The signal is a regex and is deliberately not spelled out in this
+       docstring — the scan reads this file too, so quoting the literal call
+       here would make the guard report itself.
+
+    ⚠️ 06-roadmap describes this guard as watching "the file on_the_books_exists()
+       lives in". That description is out of date and the guard is written to
+       today's layout instead: on_the_books_exists() moved to org/audience.py on
+       2026-08-31 while TruncDate stayed behind in core/timeutils.py, so the two
+       are no longer the same file. Following the prose would have pointed this
+       at a file with none of these calls in it — a guard watching nothing,
+       reporting a safety it never checked.
+    """
+
+    TRUNC_DATE = r"TruncDate\("
+    HOME = "core/timeutils.py"
+
+    def test_truncdate_lives_in_one_file(self):
+        hits = offending_lines(self.TRUNC_DATE, skip=[self.HOME])
+        self.assertEqual(
+            hits,
+            [],
+            f"TruncDate belongs in {self.HOME}, wrapped as local_day(), so the "
+            "timezone cannot be forgotten at a call site:\n" + "\n".join(hits),
+        )
+
+    def test_every_truncdate_names_its_timezone(self):
+        # The half the location check cannot make: a bare one inside the
+        # allowed file is exactly as wrong as one outside it, and reads as
+        # deliberate because of where it sits.
+        naked = [
+            hit for hit in offending_lines(
+                self.TRUNC_DATE, only_filenames=[Path(self.HOME).name])
+            if "tzinfo=" not in hit
+        ]
+        self.assertEqual(
+            naked,
+            [],
+            "TruncDate without tzinfo= truncates the UTC value, so the day is "
+            "wrong for part of every day. Pass the foundation's timezone:\n"
+            + "\n".join(naked),
+        )
+
+
+class TailwindSourcesGuardTests(TestCase):
+    """Lint-as-test: every app with templates is listed in `assets/app.css`.
+
+    ⭐ The stylesheet lists its scan roots **explicitly**, one line per app, and
+       that file explains at length why (automatic scanning treats the design
+       docs as a source of class names, which quietly hides typos). What it
+       could not do is notice when somebody adds an app and forgets the line.
+
+    🔴 And the failure is silent in the worst way: a new app's pages look
+       **fine**. Everything it reuses — `.card`, `.table-wrap`, `.prose-link` —
+       is hand-written CSS that no scanner is involved in, and the common
+       utilities (`text-sm`, `flex`, `space-y-3`) were already generated for
+       some other template. Only the classes that appear **for the first time**
+       in the new app go missing. On 2026-09-03 that was `lg:col-span-4` and
+       `lg:order-first`, and the symptom was one page's whole layout collapsing
+       while every other page in the same two new apps looked correct.
+
+    ⚠️ It checks presence, not order — the list is alphabetical today and that
+       is worth keeping, but a guard that enforced it would fail for a reason
+       nobody would call a bug.
+    """
+
+    STYLESHEET = Path(settings.BASE_DIR) / "assets" / "app.css"
+
+    def test_every_app_with_templates_is_scanned(self):
+        css = self.STYLESHEET.read_text(encoding="utf-8")
+        missing = sorted(
+            label for label in OUR_APPS
+            if (Path(settings.BASE_DIR) / label / "templates").is_dir()
+            and f'@source "../{label}/templates"' not in css
+        )
+        self.assertEqual(
+            missing,
+            [],
+            "These apps have templates that Tailwind never scans, so any class "
+            "used there for the first time is silently absent from the build. "
+            "Add an @source line to assets/app.css for:\n" + "\n".join(missing),
+        )
+
+
+class NoticesAreNarrowedGuardTests(TestCase):
+    """Lint-as-test: anything reaching for notices asks who is looking.
+
+    ⭐ The same shape as the two guards either side of it, and the reason it is
+       worth a third copy of that shape is that a notice is **louder** than an
+       event. An event that leaks sits in a list somebody has to open; a notice
+       that leaks is drawn straight onto the reader's page. "The staff away day
+       is on the 12th" reaching every outside volunteer is not a bug anybody
+       reports — it is one the foundation hears about from the wrong person.
+
+    ⚠️ The signal is the manager rather than a queryset method, unlike
+       AudienceIsAskedGuardTests. That table has one predicate you must not use
+       alone (`visible_to_participants`); this one has no safe way to touch the
+       manager at all — `showing()`, `past()` and `all()` are equally blind to
+       who is asking. So the rule is the blunt one: name `Notice.objects` and
+       you name `for_audience` too, or you say here why not.
+
+    🔴 **It is function-level, not call-level, and that limit is real.** A
+       function holding two queries catches nothing if *one* of them is
+       narrowed — verified by deleting a single `for_audience(contact)` from
+       notice_list() and watching this stay green (2026-08-31). It only goes red
+       when a function reaches for the table and asks nobody at all.
+
+       The limit is shared with the two guards either side of it and is not
+       worth fixing here: catching it properly means parsing the expression
+       rather than the function, and a guard that needs an AST walk is one the
+       next person cannot read or amend. What covers the gap is the tests that
+       assert on *rows* — `WhoSeesANoticeTests` in notices/tests.py — which is
+       the right division: this one catches the whole page somebody forgot,
+       those catch the row that should not be on it.
+    """
+
+    REACHES = "Notice.objects"
+    ASKS = "for_audience("
+
+    #: Named exemptions. Each is a decision with its reason written at the site.
+    ALLOWED = {
+        # The manage pages ask the *other* question — not "is it for you" but
+        # "are you answerable for it" — and they must not ask this one. An admin
+        # writing a notice for one ministry's staff is very often not in that
+        # ministry, and narrowing by audience would hide from them the thing
+        # they just wrote. Scoped by _mine_to_manage() instead.
+        "_mine_to_manage",
+        "notice_manage_list",
+        # Single-row lookups by primary key, each followed immediately by
+        # can_manage_notice(). Audience answers discovery; these three are
+        # already past it, holding an id somebody was given.
+        #
+        # ⚠️ `notice_publish` was added last and this guard caught it on the
+        #    first full run — which is the only evidence worth having that a
+        #    lint-as-test is doing anything. Adding a name here has to stay a
+        #    deliberate act with a reason beside it; the day this list grows
+        #    an entry nobody can explain, the guard is over.
+        "notice_update",
+        "notice_publish",
+        "notice_take_down",
+    }
+
+    def test_a_page_that_lists_notices_asks_who_is_looking(self):
+        offenders = functions_missing_a_call(
+            signal=self.REACHES, asks=self.ASKS, allowed=self.ALLOWED)
+        self.assertEqual(
+            offenders,
+            [],
+            "A notice is drawn straight onto somebody's page. Add "
+            "for_audience(contact), or name the function in ALLOWED with a "
+            "reason:\n" + "\n".join(offenders),
+        )
+
+
+class RolesAreNarrowedGuardTests(TestCase):
+    """Lint-as-test: a page that lists roles asks who is looking. L2.
+
+    ⭐ The role half of AudienceIsAskedGuardTests above. An event nobody
+       narrowed shows up on a list; a **role** nobody narrowed is worse than
+       that — requirement 8 is that internal roles are only *shown* to internal
+       people, so the failure is an internal job title (and its headcount)
+       printed on an outside volunteer's screen, with nothing raising and the
+       page looking exactly right.
+
+    ⚠️ The scan is functions_missing_a_call() above, shared with
+       AudienceIsAskedGuardTests — including the prose stripping, which this
+       guard is the reason for: written without it, it stayed **green** when
+       the call was deleted from SignUpForm.__init__, because the `#` comment
+       above that line names `for_audience()` and the guard read the comment as
+       the call. Found by the bidirectional check, which is why that check is a
+       rule here.
+
+    ⚠️ The signal is `select_related("role")`, which is what enumerating
+       EventRole **rows for a reader** looks like — not `with_signup_counts()`,
+       which every capacity question in the system also calls and would have
+       made this guard four-fifths whitelist. A whitelist longer than the thing
+       it protects is how these stop meaning anything (ReportFigureNamesGuard
+       says the same about itself).
+
+    ⚠️ events/models.py is out of scope, and that is the shape of the rule
+       rather than an exemption: `for_audience()` **is** there, and a queryset
+       method cannot ask who is looking — it is handed that. Compare
+       AudienceContainmentGuardTests, which allows only that file.
+
+    ⚠️ Its limit, stated rather than implied (D14's habit): it reads one call
+       per function body, so a function that narrows **events** already
+       satisfies it and it cannot then tell whether the roles beside them were
+       narrowed too. `views._detail()` is exactly that function, and what pins
+       it is RolesOnTheDetailPageTests, not this. What this catches is the new
+       page — batch three's sessions — that lists roles and asks nothing at all.
+    """
+
+    LISTS_ROLES = 'select_related("role")'
+    ASKS = "for_audience("
+    #: ⚠️ One entry, and it is the only one that does anything: our_functions()
+    #:    already drops every tests.py by name.
+    SKIP = ["events/models.py"]
+    #: Named exemptions, each a management-side page that answers "which roles
+    #: did we open", not "which are for me". All three are behind
+    #: can_view_event_records / _managed_event before they are reached.
+    ALLOWED = {
+        # The edit page's roles panel: the list somebody adds and deletes rows
+        # in. Narrowing it would hide from an admin the role they just made.
+        "_edit_page_context",
+        # The signups page — every name on every role, which is the point.
+        "event_registrations",
+        # R3–R7 for one event. The report page is admin-only, and a report that
+        # left out roles would answer "how many did we open" with a number that
+        # depends on who asked.
+        "event_summary",
+    }
+
+    def test_a_page_that_lists_roles_asks_who_is_looking(self):
+        offenders = functions_missing_a_call(
+            signal=self.LISTS_ROLES, asks=self.ASKS, allowed=self.ALLOWED,
+            skip=self.SKIP)
+        self.assertEqual(
+            offenders,
+            [],
+            "Roles are drawn per viewer (L2): add .for_audience(contact), or "
+            "name the function in ALLOWED with the reason it is management "
+            "side:\n" + "\n".join(offenders),
         )
 
 
@@ -1726,7 +2162,7 @@ class StylesheetReader:
        没有一起动 —— 但新的一处不该再多一份。
 
     ⚠️ 选择器是**整格**匹配的（逗号分开的每一格各自比对），不是子串：
-       比 `.page-bar` 会命中 `.page-bar-title`，而那是另一条规则。
+       比 `.page-bar` 会命中 `.page-bar-cell`，而那是另一条规则。
     """
 
     def styles(self):
@@ -2722,16 +3158,88 @@ class PageBarTests(StylesheetReader, SimpleTestCase):
                 self.declarations(selector), r"border(-bottom)?(-color|-width)?:",
                 f"`{selector}` 又画上边框了 —— 这个头是一条边都不要的")
 
-    def test_the_title_is_lighter_than_the_wordmark_and_centred(self):
+    def test_the_cells_are_lighter_than_the_wordmark_and_centred(self):
         """⚠️ 一个 600、一个 400：这一条说的是「你在哪一页」，不是这个头的主角，
            两行同样粗会互相抢。居中是为了和上面那个绝对居中的字样对同一条中轴。
         """
-        title = self.declarations(".page-bar-title")
+        title = self.declarations(".page-bar-cell")
         weight = re.search(r"font-weight:\s*(\d+)", title)
         self.assertIsNotNone(weight, "标题没写字重 —— 它会跟着 h1 的默认粗体走")
         self.assertLess(int(weight.group(1)), 600,
                         "页头条的标题不该和顶栏那个字样一样粗")
         self.assertRegex(self.declarations(".page-bar-inner"), r"justify-content:\s*center")
+
+    def test_both_cells_are_one_rule_not_two(self):
+        """🔴 第二格 2026-09-03 到位（Notices / Notices I publish，Events / Events
+           I Manage）。它和当前那一格只有一处不同：一个是 `<h1>`、带
+           `aria-current`，另一个不是。
+
+        排版**必须是同一条规则**：撑满行高（下划线要落在头的下沿上，且不能被
+        `truncate` 裁掉）、同样的字重和字距。抄一份的表现是两格基线差半个像素、
+        或者两条下划线一高一低 —— 截图上要盯很久才看得出来。
+        """
+        rules = [sel for sel, body in
+                 re.findall(r"([^{}]+?)\{([^{}]*?)\}", self.styles(), re.S)
+                 if ".page-bar-cell" in {one.strip() for one in sel.split(",")}
+                 and "height: 100%" in body]
+        self.assertEqual(len(rules), 1,
+                         "格子那个盒子被写在了不止一处（或一处都没有）")
+        self.assertNotIn(
+            ".page-bar-title", self.styles(),
+            "`.page-bar-title` 又回来了 —— 这一条 bar 不是标题（h1 在版心里），"
+            "一个叫 title 的类画着不是标题的东西，下一个人会照着名字推断 DOM")
+
+    def test_the_two_cells_are_spaced_by_the_stylesheet_not_the_template(self):
+        """⚠️ 间距和 `justify-content: center` 是**一对**：这一排是作为一组居中的，
+           而「一组」有多宽正是这个数说了算。写成模板上的 `gap-7` 的话，改一处就
+           会看到这一排慢慢偏离上面那个字样的中轴，而两边各自看都正常。
+        """
+        inner = self.declarations(".page-bar-inner")
+        self.assertRegex(inner, r"gap:\s*[\d.]+rem")
+        markup = (Path(settings.BASE_DIR) / "core" / "templates" / "core"
+                  / "components" / "page_bar.html").read_text()
+        nav = re.search(r'<nav class="page-bar-inner[^"]*"', markup)
+        self.assertIsNotNone(nav, "页头条那一层的钩子不见了")
+        self.assertNotRegex(nav.group(0), r"\bgap-\d",
+                            "间距又写回模板上了 —— 它和居中是一对，要在同一处")
+
+    def test_the_bar_is_navigation_and_carries_no_heading(self):
+        """🔴 **这一条 bar 里一个 `<h1>` 都没有**（2026-09-03 第二轮，用户：
+           「顶栏的 title 是为了网页下滑可以看到这是哪一个页面，但是页面本身
+           也要有 title」）。
+
+        分工写死在这里：这一条只回答「下滑之后我在哪一页」，而这一页的标题在
+        版心里。第一版反过来 —— 这里是 h1，版心里那个被删了 —— 于是页面本身
+        没有标题。两个版本都只有一个 h1，只有这一版两处都有字。
+
+        ⚠️ 钉的是那个 partial 自己，因为四个页面都从它长出来：它长回一个 h1 的
+           那一天，四页同时变成一页两棵标题树，而屏幕上一点都看不出来。
+        """
+        markup = (Path(settings.BASE_DIR) / "core" / "templates" / "core"
+                  / "components" / "_page_bar_cell.html").read_text()
+        body = re.sub(r"\{%\s*comment\s*%\}.*?\{%\s*endcomment\s*%\}", "",
+                      markup, flags=re.S)
+        self.assertNotIn("<h1", body, "页头条那一格又成了标题")
+        self.assertNotIn("<h2", body, "同上 —— 这一排是导航，不是标题层级")
+
+    def test_only_the_current_cell_says_it_is_the_current_page(self):
+        """🔴 `aria-current="page"` 是两格之间**唯一**的区别，而它不是装饰：
+           屏幕上「你在这一格」由那条常亮的下划线说，读屏软件看不见线。
+
+        ⚠️ 常亮那一档的 CSS 选中的也正是这个属性（上面那条守卫钉着），所以
+           两件事绑在同一处 —— 分家的表现是「线还亮着，读屏却说这不是当前页」。
+        """
+        markup = (Path(settings.BASE_DIR) / "core" / "templates" / "core"
+                  / "components" / "_page_bar_cell.html").read_text()
+        # ⚠️ 注释先剥掉：那段注释里就写着这个属性名两次，数原文会数到三。
+        markup = re.sub(r"\{%\s*comment\s*%\}.*?\{%\s*endcomment\s*%\}", "",
+                        markup, flags=re.S)
+        self.assertEqual(markup.count('aria-current="page"'), 1,
+                         "aria-current 不再是恰好一处 —— 要么两格都说自己是"
+                         "当前页，要么一格都不说")
+        self.assertRegex(
+            markup, r'\{%\s*if is_here\s*%\}\s*aria-current="page"',
+            "aria-current 没有挂在 `is_here` 上了")
 
     def test_the_underline_is_one_line_with_two_endpoints(self):
         """参考图那条线：鼠标滑过时**滑**出来，当前所在那一格一直亮着。
@@ -2799,7 +3307,7 @@ class PageBarTests(StylesheetReader, SimpleTestCase):
         after = self.declarations(".page-bar-link::after")
         self.assertRegex(after, r"bottom:\s*0",
                          "线又离开下沿了 —— 它该和整个头的那条边同一个高度")
-        for selector in (".page-bar-title", ".page-bar-link"):
+        for selector in (".page-bar-cell", ".page-bar-link"):
             self.assertRegex(
                 self.declarations(selector), r"height:\s*100%",
                 f"`{selector}` 没撑满行高 —— 线会落在字底下，还可能被 truncate 裁掉")
@@ -3622,7 +4130,9 @@ class SiteMenuTests(TestCase):
         MinistryRole.objects.create(contact=user.contact, ministry=pantry)
         menu = self.menu(user)
         self.assertEqual(self.headings(menu), ["Ministry Admin"])
-        self.assertIn("Events I Manage", self.labels(menu))
+        # ⚠️ 那一组现在只剩 Memories Photos：两个管理页 2026-09-03 从菜单里
+        #    撤走了，入口是各自页面标题行右端那颗 ⋮（见下面那条守卫）。
+        self.assertIn("Memories Photos", self.labels(menu))
 
     def test_a_foundation_admin_gets_the_foundation_heading_only(self):
         from org.permissions import foundation_admin_group
@@ -3631,7 +4141,6 @@ class SiteMenuTests(TestCase):
         user.groups.add(foundation_admin_group())
         menu = self.menu(get_user_model().objects.get(pk=user.pk))
         self.assertEqual(self.headings(menu), ["Foundation Admin"])
-        self.assertIn("All Events", self.labels(menu))
         self.assertIn("Ministry Admins", self.labels(menu))
 
     def test_somebody_with_both_hats_gets_both_headings_in_order(self):
@@ -3646,17 +4155,47 @@ class SiteMenuTests(TestCase):
         user.groups.add(foundation_admin_group())
         menu = self.menu(get_user_model().objects.get(pk=user.pk))
         self.assertEqual(self.headings(menu), ["Ministry Admin", "Foundation Admin"])
+        # ⚠️ 同一个 URL 在两顶帽子下只出现一次，不是两次 —— 那一页自己会为
+        #    foundation tier 变宽，第二份只会读成 bug。
+        self.assertEqual(self.labels(menu).count("Memories Photos"), 1)
 
-    def test_the_foundation_entry_asks_for_the_foundation_wide_view(self):
-        # ⚠️ Without ?scope=all, somebody who also runs a ministry would follow a
-        #    link labelled "All Events" onto a page showing only their own.
+    def test_the_two_management_pages_left_this_menu(self):
+        """🔴 **2026-09-03：三格撤走了** —— `Events I Manage`、`Notices I Publish`、
+           `All Events`。入口改成各自页面标题行右端那颗 ⋮，加上仪表盘那张卡。
+
+        ⚠️ 这条守卫钉的是**知情的收敛**，不是「这个项目又漏了一个入口」。
+           两者长得一模一样（菜单里没有那一格），区别只在有没有别的东西指向
+           那一页 —— 所以下面那半条一起钉：⋮ 那个组件必须存在且被两页调用。
+           光钉「菜单里没有」的话，哪天 ⋮ 被删了，这条守卫照样绿。
+
+        ⚠️ `?scope=all` 也一并消失：管理页从「两种模式」改成了「一张列表、
+           权限逐行」，没有模式可切了。
+        """
         from org.permissions import foundation_admin_group
+        from org.models import Ministry, MinistryRole
 
         user = self.volunteer()
+        pantry = Ministry.objects.create(code="food_pantry", name="Food Pantry")
+        MinistryRole.objects.create(contact=user.contact, ministry=pantry)
         user.groups.add(foundation_admin_group())
         menu = self.menu(get_user_model().objects.get(pk=user.pk))
-        entry = next(i for i in menu if i.get("label") == "All Events")
-        self.assertIn("scope=all", entry["url"])
+
+        labels = self.labels(menu)
+        for gone in ("Events I Manage", "All Events", "Notices I Publish"):
+            with self.subTest(label=gone):
+                self.assertNotIn(gone, labels, "这一格该在 ⋮ 那边，不在菜单里")
+        self.assertFalse([i for i in menu if "scope=all" in (i.get("url") or "")])
+
+        # …而那两页**有**入口：组件在，且两个读页面都调用了它。
+        component = (Path(settings.BASE_DIR) / "core" / "templates" / "core"
+                     / "components" / "manage_link.html")
+        self.assertTrue(component.exists(), "⋮ 那个组件不见了 —— 管理页没有入口了")
+        for path in [Path("notices") / "templates" / "notices" / "notice_list.html",
+                     Path("events") / "templates" / "events" / "event_list.html"]:
+            with self.subTest(path=str(path)):
+                markup = (Path(settings.BASE_DIR) / path).read_text()
+                self.assertIn("manage_link.html", markup,
+                              "这一页没有通往管理页的 ⋮ —— 那一页又只能手敲 URL 了")
 
     def test_the_admin_site_is_its_own_section_not_a_tier(self):
         # is_staff is a different axis from the two ministry tiers, so filing it
@@ -6575,10 +7114,13 @@ class CheckDeploymentCommandTests(TestCase):
 
     def test_an_empty_dictionary_table_is_called_out(self):
         # ⚠️ The failure this catches is not an error: a coordinator opens
-        #    "publish an event", the event-type dropdown is empty, and the page
+        #    "publish an event", the ministry dropdown is empty, and the page
         #    simply cannot be completed. Nothing is logged anywhere.
+        # ⚠️ This asked about EventType until 2026-09-04, when that table was
+        #    deleted (06-roadmap.md L2.6). Ministry is the same failure on the
+        #    same form — required FK, empty dropdown, page cannot be saved.
         text = self.report()
-        self.assertIn("EventType", text)
+        self.assertIn("Ministry", text)
         self.assertIn("empty, so the form that needs it", text)
 
     def test_the_role_check_still_asks_for_one_of_the_foundations_own(self):
@@ -7110,3 +7652,313 @@ class HealthCheckGuardTests(TestCase):
             logged, ["/", "/events/"],
             "the access log either still carries the health check, or has "
             "stopped carrying the requests somebody will need to read")
+
+
+class PaginationHelperTests(TestCase):
+    """`core/pagination.py` —— 翻页那两个函数（2026-09-03 从 events 搬来）。
+
+    搬家的理由和 `Audience` 去 `org` 那次一样：`notices` 的两页也要翻页，而让它
+    为一件和活动无关的事去 import `events` 是画错的依赖（D41 第四节）。
+    """
+
+    def test_a_models_own_ordering_survives_being_paginated(self):
+        """🔴 **`Meta.ordering` 必须被读到**，而这正是搬家时翻出来的那个坑。
+
+        `qs.query.order_by` 对一个没有自己调过 `.order_by()` 的 queryset 是**空的**
+        —— 模型的 `Meta.ordering` 要等编译 SQL 时才补上。所以旧版那句
+        「往 `query.order_by` 后面加一个 `-pk`」对这种 queryset 是**替换**掉排序，
+        不是补齐它。
+
+        活动那边一次都没碰上：`_scoped_events()` 显式排了序。`Notice` 没有 ——
+        它的排序写在 `Meta` 上 —— 于是公告管理页会从「最近上板的在最前」
+        变成「最后建的在最前」，而两者在测试数据里常常长得一模一样。
+        """
+        from core.pagination import ordering_for
+        from notices.models import Notice
+
+        self.assertEqual(Notice.objects.all().query.order_by, (),
+                         "前提变了：这个 queryset 现在自己带排序了")
+        self.assertEqual(ordering_for(Notice.objects.all()),
+                         ["-starts_showing", "-id", "-pk"])
+
+    def test_an_explicit_order_by_wins_over_the_models_default(self):
+        from core.pagination import ordering_for
+        from notices.models import Notice
+
+        self.assertEqual(ordering_for(Notice.objects.order_by("title")),
+                         ["title", "-pk"])
+
+    def test_the_ordering_always_ends_in_a_unique_column(self):
+        """🔴 少了它，翻页会说谎：两条排序键相同的行之间没有定义先后，
+           于是第 1 页和第 2 页可以各自把它排在前面 —— 一行出现两次，
+           或者一行凭空消失，而没有任何东西会报错。
+        """
+        from core.pagination import ordering_for
+        from notices.models import Notice
+        from events.models import Event
+
+        for rows in (Notice.objects.all(), Event.objects.order_by("-start_time"),
+                     Event.objects.all()):
+            with self.subTest(model=rows.model.__name__):
+                self.assertEqual(ordering_for(rows)[-1], "-pk")
+
+    def test_the_two_functions_sort_identically(self):
+        """🔴 `page_holding()` 和 `page_of()` 必须用**一模一样**的排序。
+
+        差一截的话，「跳到那一场所在的那一页」偶尔会跳到相邻的一页 ——
+        看起来像随机失灵。所以两个函数在同一个文件里，而且都问同一个
+        `ordering_for()`；这条守卫钉的是「都问它」，不是两串字面量相等。
+        """
+        source = (Path(settings.BASE_DIR) / "core" / "pagination.py").read_text()
+        for name in ("def page_of", "def page_holding"):
+            body = source[source.index(name):]
+            body = body[:body.index("\n\n\n")] if "\n\n\n" in body else body
+            self.assertIn("ordering_for(rows)", body,
+                          f"`{name}` 自己排序了 —— 两处排序迟早会差一截")
+
+
+class PaginationComponentTests(SimpleTestCase):
+    """翻页那个组件（`core/components/pagination.html`）。"""
+
+    def markup(self):
+        """模板本身，**注释剥掉**。
+
+        ⚠️ 剥注释不是可选的：那段注释里逐字写着它防的那个反面教材
+           （`hx-target="#event-results"`），数原文的守卫会当场把正确的代码
+           报成坏的。这个文件里同一件事已经栽过两次（`x-dialog="open"` 那条、
+           页头条那条），所以这里从第一版就剥。
+        """
+        markup = (Path(settings.BASE_DIR) / "core" / "templates" / "core"
+                  / "components" / "pagination.html").read_text()
+        return re.sub(r"\{%\s*comment\s*%\}.*?\{%\s*endcomment\s*%\}", "",
+                      markup, flags=re.S)
+
+    def test_the_htmx_target_is_a_parameter_and_not_a_hardcoded_id(self):
+        """🔴 原来这里写死着 `hx-target="#event-results"`（2026-09-03 改）。
+
+        公告那两页整页渲染，根本没有这个 id —— 照抄过去的话 HTMX 找不到目标，
+        屏幕上就是「点了 Next 什么都没发生」，控制台一句话，页面一个错都不报。
+        """
+        markup = self.markup()
+        self.assertNotIn('hx-target="#event-results"', markup,
+                         "翻页器又把活动列表那个 id 写死了")
+        self.assertIn('hx-target="{{ target }}"', markup)
+
+    def test_no_htmx_attribute_is_drawn_without_a_target(self):
+        """⚠️ 不给 `target` 就一个 hx-* 都不画 —— 而不是画一个指向空处的。
+           少的只是「不整页重载」那条快路：这两个 `<a>` 本来就是完整的 GET（D24）。
+        """
+        markup = self.markup()
+        for attribute in re.findall(r"hx-[a-z-]+=", markup):
+            with self.subTest(attribute=attribute):
+                before = markup[:markup.index(attribute)]
+                self.assertGreater(
+                    before.count("{% if target %}"), before.count("{% endif %}"),
+                    f"`{attribute}` 画在了 `target` 的判断外面")
+
+    def test_the_links_keep_the_rest_of_the_query_string(self):
+        """⚠️ `{% querystring %}` 保留当前所有查询参数、只换 page。手写 `?page=2`
+           会把筛选条件和管理列表上的 `report=1` 一起丢掉 —— 表现是
+           「翻一页，筛选没了」。
+        """
+        markup = self.markup()
+        self.assertNotRegex(markup, r'href="\?page=',
+                            "翻页链接又是手写的了 —— 它会丢掉筛选条件")
+        self.assertEqual(markup.count("{% querystring page="), 4)
+
+
+class TouchTargetTests(StylesheetReader, SimpleTestCase):
+    """行内按钮的命中区（2026-09-03 设计评审第 2 条）。
+
+    按钮视觉高度 36px（`py-2` + `text-sm`），HIG 要 44pt、Material 要 48dp。
+    表格行里每一颗都是这个尺寸，而 ministry admin 有相当一部分时间在手机上。
+    """
+
+    def test_the_hit_area_reaches_forty_four_pixels(self):
+        """🔴 36 + 4 + 4 = 44。这条守卫钉的是**那个数**，不是「有这条规则」——
+           伪元素还在、`inset` 被人调小了的表现是「还是不好点」，而看不出来。
+        """
+        after = self.declarations(".btn-hit::after")
+        found = re.search(r"inset:\s*(-?[\d.]+)rem\s+0", after)
+        self.assertIsNotNone(found, "命中区的几何不见了，或者不再只撑竖直方向")
+        grown = abs(float(found.group(1))) * 16 * 2
+        self.assertGreaterEqual(36 + grown, 44,
+                                "命中区撑得不够，行内按钮仍然低于 44pt")
+
+    def test_it_grows_only_vertically(self):
+        """⚠️ 左右也撑的话，同一行里相邻两颗按钮的命中区会重叠 —— 点在缝里的
+           那一下打给谁取决于 DOM 顺序，而屏幕上那里明明是有空隙的。
+        """
+        self.assertRegex(self.declarations(".btn-hit::after"),
+                         r"inset:\s*-?[\d.]+rem\s+0\b")
+
+    def test_the_host_is_positioned_or_the_pseudo_element_escapes(self):
+        """⚠️ 少了 `position: relative`，那个绝对定位的伪元素会去找**更外面**的
+           定位祖先 —— 命中区跑到表格外面某处，而按钮看起来一切正常。
+        """
+        self.assertRegex(self.declarations(".btn-hit"), r"position:\s*relative")
+
+    def test_the_row_buttons_ask_for_it(self):
+        """⚠️ 规则存在不等于用上了。这条钉的是公告管理页那一行里的每一颗按钮 ——
+           它是全站行内按钮最密的地方。
+        """
+        markup = (Path(settings.BASE_DIR) / "notices" / "templates" / "notices"
+                  / "notice_manage_list.html").read_text()
+        body = re.sub(r"\{%\s*comment\s*%\}.*?\{%\s*endcomment\s*%\}", "",
+                      markup, flags=re.S)
+        # ⚠️ 只看 `<tbody>` 里面。页面顶上那颗「Put up a notice」和空状态里那颗
+        #    是**独立**按钮，周围本来就有留白 —— 给它们也加，只会让命中区去和
+        #    别的东西重叠。这条守卫说的是「行内的那些」，所以它就该只看行内。
+        rows = re.search(r"<tbody>.*?</tbody>", body, re.S)
+        self.assertIsNotNone(rows, "这一页不画表格了？")
+        includes = re.findall(r'include "core/components/button\.html"[^%]*',
+                              rows.group(0))
+        self.assertTrue(includes, "行里不画按钮了？")
+        for one in includes:
+            with self.subTest(button=one[:70]):
+                self.assertIn("hit=1", one, "这颗行内按钮没有加大命中区")
+
+
+class RowMenuTests(StylesheetReader, SimpleTestCase):
+    """行内「⋯」菜单（2026-09-03 设计评审第 3 + 6 条）。
+
+    🔴 这个组件存在的全部理由是**三个都会静默失效的约束**，而它们各自都能让
+       另外两种写法看起来是对的。这些守卫钉的就是那三条。
+    """
+
+    def component(self):
+        markup = (Path(settings.BASE_DIR) / "core" / "templates" / "core"
+                  / "components" / "row_menu.html").read_text()
+        return re.sub(r"\{%\s*comment\s*%\}.*?\{%\s*endcomment\s*%\}", "",
+                      markup, flags=re.S)
+
+    def test_the_manage_entry_says_what_it_is_on_a_touch_screen(self):
+        """🔴 站点菜单那三格撤掉之后，标题行那颗 ⋮ 是那两页仅有的可见入口。
+
+        初版无条件把 "Manage" 收成 `max-width: 0`，只在 hover / focus 时展开
+        —— 而触屏两样都没有，于是手机上这个入口是三个不说明自己是什么的点。
+        修法是把**收起**那一段关进 `(hover: hover)`：能悬停的设备才收。
+
+        ⚠️ 钉的是「收起规则落在 hover 查询里」，不是「有没有 `max-width: 0`」——
+           后者两种写法下都在，断言它等于什么都没测。
+        ⚠️ 读的是剥掉注释的 `styles()`：这条规矩在源文件里被注释讲了两遍，
+           拿原文找字符串会命中注释而不是规则。
+        """
+        css = self.styles()
+        collapsed = css.index("max-width: 0")
+        # ⚠️ 先断言再 rindex：少了这一句，规则被搬出去时这条测试是抛
+        #    `ValueError` 而不是说人话 —— 一条读不懂的守卫会被当成守卫坏了。
+        self.assertTrue(
+            "(hover: hover)" in css[:collapsed],
+            "`.manage-link-label` 收起前没有任何 `(hover: hover)` 查询 —— "
+            "触屏上这个入口又变回三个没有说明的点了")
+        query = css.rindex("(hover: hover)", 0, collapsed)
+        # 收起规则必须在那个 media block 之内 —— 之间不能有闭合它的括号。
+        self.assertNotIn(
+            "\n  }\n", css[query:collapsed],
+            "`.manage-link-label` 的收起规则不在 `(hover: hover)` 里 —— "
+            "触屏上这个入口又变回三个没有说明的点了")
+
+    def test_an_open_menu_follows_its_row_when_the_page_scrolls(self):
+        """🔴 面板是 `position: fixed`，而 popover 不会因为滚动而关闭。
+
+        坐标是开的那一刻算出来的一对视口坐标，所以开着菜单再滚一下，
+        它就贴到别的行旁边去了 —— 而这张表里的动作是 Take down。
+        点下去仍然作用在正确的那一行（表单里是它自己的 pk），所以这个毛病
+        不报任何错，只让人以为自己点错了行。
+
+        ⚠️ `capture` 不能少：滚动事件在元素上不冒泡，而这张表自己就是一个
+           滚动容器（`.table-wrap` 是 `overflow-x: auto`）。
+        """
+        js = (Path(settings.BASE_DIR) / "assets" / "js" / "app.js").read_text()
+        body = js[js.index("function positionRowMenus"):js.index("positionRowMenus();")]
+        for needle, why in [
+            ('"scroll"', "开着的菜单不会跟着滚动走"),
+            ('"resize"', "改窗口大小之后菜单留在旧位置"),
+            ("capture: true", "表格内部滚动接不住 —— scroll 在元素上不冒泡"),
+            (":popover-open", "没有分辨哪个面板开着，会去摆所有的"),
+        ]:
+            with self.subTest(needle=needle):
+                self.assertIn(needle, body, why)
+
+    def test_it_is_a_popover_and_not_a_positioned_div(self):
+        """🔴 三条约束，缺一不可：
+
+        ① `.table-wrap` 是 `overflow-x: auto`，而 `overflow-x: auto` 之下
+           `overflow-y` **不可能**是 `visible` —— 绝对定位的面板会被裁掉。
+           ⚠️ 而且只在窗口窄到出现横向滚动条时才裁，宽屏上一切正常。
+        ② `position: fixed` 会被带 `backdrop-filter` 的祖先抓住，而 `.card`
+           在深色 + 有大图时正是这样一个祖先（这个仓库为此栽过两次）。
+        ③ D24：菜单里装着这一行仅有的几个写操作，开合不能只有 JS 一条路。
+
+        `popover` 一次答完三条：top layer（祖先够不着）+ `popovertarget`
+        （零 JS 开合）。
+        """
+        markup = self.component()
+        self.assertRegex(markup, r"<div[^>]*\spopover\b",
+                         "面板不再是 popover —— 它会被表格的横向滚动裁掉")
+        self.assertIn("popovertarget=", markup,
+                      "开合不再是原生的 —— 关掉 JS 就打不开了")
+        self.assertNotIn("x-show", markup,
+                         "改回 Alpine 了：那会同时踩中裁剪、backdrop-filter 和 D24")
+
+    def test_the_trigger_and_the_panel_agree_on_one_id(self):
+        """⚠️ 对不上的表现是**点了没反应**，控制台一句话都没有。
+           所以两处都从同一个 `id` 拼出来。
+        """
+        markup = self.component()
+        self.assertEqual(markup.count('popovertarget="row-menu-{{ id }}"'), 1)
+        self.assertEqual(markup.count('id="row-menu-{{ id }}"'), 1)
+
+    def test_the_panel_clears_the_user_agent_centring(self):
+        """🔴 `[popover]` 的 UA 样式是 `inset: 0` + `margin: auto` —— 也就是
+           **视口居中**。不清掉的话，app.js 写上去的 top/left 会被这两条按住：
+           坐标算对了，菜单还在屏幕正中间。
+        """
+        panel = self.declarations(".row-menu")
+        self.assertRegex(panel, r"inset:\s*auto")
+        self.assertRegex(panel, r"margin:\s*0")
+
+    def test_the_trigger_has_a_name_that_says_which_row(self):
+        """⚠️ 只写 "Actions" 的话，读屏用户在一页 50 行上听到的是五十遍一模一样的
+           「Actions 按钮」，分不出哪个是哪一行。所以 `aria-label` 收的是整句。
+        """
+        self.assertIn('aria-label="{{ label }}"', self.component())
+        # ⚠️ 只有公告管理页在用这个组件。活动那六个 Go to 链接 2026-09-03 收进来过，
+        #    当天撤回（用户要它们留在表格里）—— 撤的是那一处的应用，不是组件。
+        markup = (Path(settings.BASE_DIR) / "notices" / "templates" / "notices"
+                  / "notice_manage_list.html").read_text()
+        self.assertIn('label="Actions for "|add:', markup,
+                      "这一页给菜单的名字里没有带上这一行是谁")
+
+    def test_the_writes_inside_are_still_whole_server_forms(self):
+        """🔴 D24：收进菜单**一个字都没改**这些操作的提交路径。
+           菜单只是把它们藏起来；一个 GET 就能触发的写操作，是爬虫替你按的那种。
+        """
+        markup = (Path(settings.BASE_DIR) / "notices" / "templates" / "notices"
+                  / "_notice_menu_items.html").read_text()
+        body = re.sub(r"\{%\s*comment\s*%\}.*?\{%\s*endcomment\s*%\}", "",
+                      markup, flags=re.S)
+        forms = re.findall(r'<form method="post"', body)
+        self.assertEqual(len(forms), 3, "三档各一张表单（上板 / 下架 / 回草稿）")
+        self.assertEqual(body.count("{% csrf_token %}"), 3)
+        self.assertNotIn("<a ", body, "写操作变成链接了 —— GET 触发的写操作")
+
+    def test_the_confirm_uses_the_house_idiom_and_not_a_dead_attribute(self):
+        """🔴 第一版这里写的是 `data-confirm="…"` —— 而这个仓库里**没有任何东西
+           接这个属性**。表现是一个静默失效的确认框：模板上明明写着一句确认，
+           点下去直接就下架了。
+
+        确认必须和 `_button_tag.html` 用同一句 Alpine。
+        """
+        markup = (Path(settings.BASE_DIR) / "notices" / "templates" / "notices"
+                  / "_notice_menu_items.html").read_text()
+        # ⚠️ 先剥注释：那段注释里逐字写着它防的那个反面教材（`data-confirm`），
+        #    数原文的守卫会把正确的代码报成坏的。这个文件里同一件事已经栽过三次
+        #    （`x-dialog="open"`、页头条、翻页组件），所以这里也剥。
+        markup = re.sub(r"\{%\s*comment\s*%\}.*?\{%\s*endcomment\s*%\}", "",
+                        markup, flags=re.S)
+        self.assertNotIn("data-confirm", markup,
+                         "又用上了那个没人接的属性 —— 确认会静默失效")
+        self.assertEqual(markup.count("window.confirm("), 2,
+                         "两个破坏性动作各要一句确认（下架 / 回草稿）")

@@ -53,8 +53,8 @@
 | # | 问题 | 定案 |
 |---|---|---|
 | 1 | 全机构岗位（`Position.ministry` 为空，如执行主任）在「本 ministry 在编」这一档算不算 | 不算。它只满足「全体在编」 |
-| 2 | 公告怎么和「还没建完」区分 | 加 `Event.takes_signups` 显式开关 |
-| 3 | 想参加公告的人怎么「记住」它 | 不做新东西。需要被记住的一律开一个 `attending` 角色（`needed_count` 留空） |
+| 2 | ~~公告怎么和「还没建完」区分~~ | ❌ **2026-08-31 推翻**，见 [D41](decisions/D41-notices-are-not-events.md)。这个开关一行代码都没写过，而它两头都不成立：有固定时间的那一半归下面第 3 条，没固定时间的那一半**根本进不了 `Event`**（起止两列都是 NOT NULL）。公告改成独立的 `Notice` 表 |
+| 3 | 想参加公告的人怎么「记住」它 | 不做新东西。需要被记住的一律开一个 `attending` 角色（`needed_count` 留空）。**2026-08-31 起这一条承重**：删掉第 2 条那个开关之后，它是「有固定时间、想来就来」唯一的落点 |
 | 4 | L5 的载体 | 独立 `EventSeries` 表，规则必须带结束条件，一次生成完，不加 cron。⚠️ 2026-08-26 收窄：它**只服务 recurring events 那一档**，Programs 是另一个形状（[L5.0](#l50-六个决定以及为什么是三档不是四格)） |
 | 5 | 生成场次的角色从哪来 | `EventSeriesRole` 模板表，生成时逐场复制成真的 `EventRole`。⚠️ 同上，只对 recurring events |
 | 6 | 可见性判「哪一天在编」 | 活动当天，和 L2 资格同一把尺 |
@@ -96,7 +96,7 @@ ChurchSuite 的 event sequence 每一场都是真行，「更新整个序列」�
 | 批 | 装什么 | 为什么是这个顺序 |
 |---|---|---|
 | 批一 · L1 + L4 | 性质轴 + 记账口径 | 结构最小（字典表加一列），却当场修掉一个正在涨的静默 bug，并让报表第一次答得出「我们服务了多少人」。不依赖 L2 / L3 |
-| 批二 · L3 + L2 | 可见性 + 资格 + 公告 + `EventType` 上页面 | 一个整体：不变量横跨两层，拆开交付会留一个「角色比活动宽」的窗口期。本轮权限面最大的一批，必须配浏览器验收 |
+| 批二 · L3 + L2 | 可见性 + 资格 + 公告（`EventType` 上页面那一条作废，见 L2.6） | 一个整体：不变量横跨两层，拆开交付会留一个「角色比活动宽」的窗口期。本轮权限面最大的一批，必须配浏览器验收 |
 | 批三 · L5 | 一期 / 各报各的 / 单场 | 三张新表（`Session`、`SessionAttendance`、`EventSeries`）。⚠️ 2026-08-26 重写：初版只装了需求 4 的一半，另一半（Programs：报一次管全部）是 [`participants.md` 第九节](participants.md)第一条缺口的出栏 |
 
 ---
@@ -1040,8 +1040,13 @@ M2M 在 `save()` **之后**才写，`full_clean()` 在**之前**跑。所以：
 所以角色要**按看的人过滤掉**，不是列出来带一句「你报不上」。
 
 ⚠️ 于是多出一种空状态：**别的 ministry 的在编成员打开活动，看到零个角色** ——
-和「还没建完」「这是一条公告」长得一模一样。[L2.5](#l25-公告) 因此要从两句话变三句，
-而这正是 [D27](decisions/D27-ministry-report.md) 那条「没有和没算不能长得一样」。
+和「还没建完」长得一模一样，而这正是 [D27](decisions/D27-ministry-report.md) 那条
+「没有和没算不能长得一样」。所以这两种要分成两句话。
+
+> 本句原文还有第三种（「这是一条公告」），并因此写着「L2.5 要从两句话变三句」。
+> 2026-08-31 [D41](decisions/D41-notices-are-not-events.md) 把公告移出了 `Event`，
+> 第三种**自己消失了** —— 一个角色都没有的活动只剩「还没建完」一种含义。
+> 两句话就够，[L2.5](#l25-公告) 整节作废。
 
 ⚠️ [`participants.md` 第六节](participants.md)那个示意框写的是「外部人看得见活动，
 这个位置报不上」，和它自己第三节的 🔴 打架。需求原文 + 第三节的不变量，二比一，
@@ -1579,39 +1584,143 @@ issubset  /  <=  /  >=   出现在受众字段附近 → 只许在 events/models
 ⚠️ 于是那一页要说得出「这里有角色，只是没有一个是给你的」——
 见 [L2.5](#l25-公告)，那里现在有三种空状态要区分。
 
+> ### ⚠️ 2026-08-29 补：动手前这一节被逐条核对了一遍，四处要改
+>
+> 本节和 L2.1～L2.3 的落地对得上（`on_the_books_q()` 已经在 `models.py`、
+> 角色那头的反向名是 `eventrole_audience`、L2.3 已经让每个角色真的带着受众）。
+> 四处不对的地方写在下面，都在动手之前改掉了。
+>
+> #### 一、「共用同一条 `on_the_books_q()`」的共用不够
+>
+> 那只共用了判据的一半。真正容易写错的是外面那个三支析取，尤其是
+> `visible_to_outsiders & ~Exists(...)` ——「外部人员不是最宽的一档」这个坑
+> 在这个仓库里已经咬过一次（seed 只勾了外部人员，把整个演示库对自己人藏了起来）。
+> 照本节字面写，这个析取会有两份实现：`EventQuerySet.for_audience()` 一份、
+> `eligible()` 一份。而守卫二盯的是 `Spec` 的三个属性名，按模型字段写的第二份
+> 根本不碰那三个名字 —— 没有任何东西拦得住它。
+>
+> 落点：抽 `AudienceQuerySetMixin`，`EventQuerySet` 和 `EventRoleQuerySet` 各混入一次，
+> 差别只有两处 —— 判哪一天（`AUDIENCE_DAY`），以及那张多对多的反向名
+> （从 `model_name` 推，因为字段本来就是 `%(class)s_audience` 推出来的；
+> 写死两份的代价是批三第三张带受众的表会**静默落进 event 那一支**）。
+> `eligible()` 因此只剩一行 `.filter(pk=…).for_audience(contact).exists()`。
+>
+> #### 二、空状态不能推给 L2.5
+>
+> 本节写着「见 L2.5」，但 L2.4 正是**造出**这个状态的那一步。只做 L2.4 的话，
+> 别的 ministry 的在编成员打开活动，读到的是 "No roles opened yet." —— 一句假话，
+> 正是 D27 那条「没有和没算不能长得一样」。而批二的验收清单自己写着
+> 「看得见，报不上，页面说得出为什么」。
+>
+> 所以第二种空状态（有角色、没有一个是给你的）归 L2.4，L2.5 在它之上再加公告那一种。
+>
+> #### 三、Sign up 按钮会指向一个空下拉框
+>
+> `can_sign_up` 原来只等于 `event.accepting_signups`，和「有没有位子是给他的」无关。
+> 角色一被过滤掉，零资格的人照样看到按钮 → 点进去是一个必填却没有任何选项的下拉框
+> → 提交得到 "Select a valid choice"，而他什么都没做错。
+>
+> 落点三处：按钮按 `to_join` 画；活动详情多一句「这场活动在收报名，只是没有一个
+> 位子是给你的」（否则会掉进「本活动不收报名了」那一句，对他是假话）；
+> 报名页直接进来时 404 —— 和这个视图上面那道门、和详情页同一个答案。
+>
+> #### 四、走后门看详情的人该看到什么（定案：全表）
+>
+> `_detail()` 有一扇后门（`can_view_event_records`）。按人过滤之后，
+> 刚开完角色的 ministry admin 会看到一张缺行的表，而页面上没有任何东西说少了行。
+>
+> 定案：**这一类人看全表**，因为他们在报名页本来就看得见全部角色，
+> 而「我刚开的角色去哪了」是一个查不出原因的问题。
+> 代价照实写下来：角色表和报名下拉框对这一类人**不再是同一个集合**，
+> 而本节原文要求的是同一个 —— 所以页面自己要说出来是哪一件（一句常驻文案，不查库）。
+> 报名按钮仍然按他**自己**的资格画：全表是一种**读**的特权，不是报名的特权。
+>
+> #### 顺带：`eligible_role_ids()` 判它不建
+>
+> 详情页和 `SignUpForm` 要的是带 `with_signup_counts()` 的角色**对象**，
+> 直接 `.for_audience(contact)` 一次查询就有；再取一遍 id 是第二次查询。
+> 建一个没有调用方的函数，理由和删掉 `upcoming()`/`past()`、删掉 `Spec.__str__`
+> 是同一条：没有调用方的东西没有任何东西在查它，而下一个人读到的是一种受支持的做法。
+> 文件总表里那一行跟着改。
+
 ## L2.5 公告
 
-`takes_signups=False` 时：
+❌ **本节整个作废（2026-08-31）。**
 
-- `Event.accepting_signups` 属性把它 AND 进去（那是 `can_sign_up` 的唯一来源）；
-- 不许有角色。同 L2.3 一样是跨表的，落在 `EventRole.clean()` 和 `EventForm.clean()`；
-- 两处空状态分成两句话，这一格是[验收](#验收)里点名的一条：
+> 🔴 **原计划的 `Event.takes_signups` 是个伪需求，一行代码都没写过。**
+> 完整论证在 [D41](decisions/D41-notices-are-not-events.md)，短版是它两头都不成立：
+>
+> - **有**固定时间的公告不需要它 —— 上面[决定 3](#七个已定的决定2026-08-21) 已经写死了
+>   「需要被记住的一律开一个 `attending` 角色，`needed_count` 留空」；
+> - **没有**固定时间的公告装不进 `Event` —— `start_time` / `end_time` 都是 NOT NULL，
+>   编造时间之后它会进 R1 的活动条数、进日历、进 `.ics`。
+>
+> 落点改成 `notices` app 的 `Notice` 表（批四 N2 / N3，已落地）。
+>
+> ### ⚠️ 而「批四」没有自己的 roadmap，这是一处结构性欠账（2026-09-08 记）
+>
+> [`goal.md`](goal.md) 的约定 2 是「每个 Phase 开工前，把当时的实施细节写进一份新的
+> `0N-roadmap.md`」，而批四（公告）**没有那一份** —— 步骤散在这一节的更正框里，
+> 计划外记录没有落点，于是 `1a25ce5` 那三个坑当时无处可写（见文末补记的那一条）。
+>
+> **不补建 `07-roadmap.md`**，这是判断不是偷懒：批四已经交付完了，事后补一份
+> 「实施步骤」是写一份没有人会照着做的文档，而这个仓库刚为「说不出谁读它」删掉
+> 一整张表。真相分三处，各自有读者：形状在 [D41](decisions/D41-notices-are-not-events.md)、
+> 代码在 `notices/`、这一节记它为什么不是活动。
+>
+> ⚠️ 欠的那一样是**计划外记录没有家**。下一批开工时如果仍然挂在某一节的更正框
+> 底下，就必须建那份 roadmap —— 判据是「这一批会不会撞出值得记的坑」，
+> 而答案从来是会。
+>
+> **原来那三句空状态因此变回两句。** 本节曾要求把「这是一条公告」和
+> 「还没建完」区分开；公告不在 `Event` 那张表里之后，「一个角色都没有」只剩
+> 「还没建完」一种含义，那个歧义**自己消失了**，不需要任何文案去消解它。
+> `_event_roles_panel.html` 那句 empty 一个字不动。
+>
+> ⚠️ 本节引的 ChurchSuite 依据**过不来**：它的原文场景是
+> *"an internal reminder in the Calendar module of the weekly staff meeting"*，
+> 一条**日历条目** —— 而本仓库已经把例会判给了 `Shift`（[`phase-d.md`](phase-d.md)）。
+> 三家真有这个需求的产品（Viva、Planning Center、Chatter）全都建了独立对象。
 
-| 情况 | 文案 |
-|---|---|
-| `takes_signups=False` | This is an announcement — there is nothing to sign up for. |
-| `takes_signups=True` 且零角色 | 保持现在那句 No roles opened yet. |
+本节剩下的**唯一**一件事已经做完（2026-09-02，`8a8352a`），至此本节全部结清。
 
-⚠️ 现在这两种情况长得一模一样，正是 [D27](decisions/D27-ministry-report.md) 那条
-「没有和没算不能长得一样」。要改的文件是
-`_event_roles_panel.html`（第 55 行那句 empty）和 `_event_detail_body.html`（第 158 行那格）。
+它原本排在批四 N4（仪表盘）之后，实际是在 N4 里一并收掉的 —— 那句引导指向
+`/me/`，而 `/me/` 正是 N4 建出来的那一页，两件事分不开。
 
-行业依据写进 [D27](decisions/D27-ministry-report.md) 或 `participants.md`：
-ChurchSuite 从零设计就把报名做成每场活动的显式开关（开关关着时，
-Sign-Ups / Tickets 这些页签根本不出现），可见性是另一组设置；
-Planning Center 是被「有人以为在 Groups 里 RSVP 了就等于报名了」这个 bug
-逼着补上同一个开关的。两家最终落在同一个形状上。
+- ✅ `_event_detail_body.html` 角色空状态那一格，在 `No roles opened yet.` 之后补一句
+  指向 `/me/` 的英文引导。
+  ⚠️ 它是承重的：横幅那条被判不做（[D41 第六节](decisions/D41-notices-are-not-events.md)），
+  所以这是活动侧通向公告的**唯一**线索。
 
 ## L2.6 `EventType` 上页面
 
-`EventPeriodForm` 加一个 `event_type` 的 `ModelChoiceField`
-（`is_active=True`，`empty_label="All kinds"`），`narrow()` 里多一个 filter，
-`order_fields` 里排在 ministry 后面，`description()` 跟着补一句。
-详情页和管理列表显示类型。
+❌ **本节整个作废（2026-09-04）。这张表没有上页面 —— 它被整张删掉了。**
 
-目的只有一个：让这张字典表有真读者 ——
-[D5](decisions/D05-lookup-tables-not-enums.md) 那一行从「没有一处代码 branch 它、
-前台模板命中 0 次」变成「有页面」。
+> 原计划是给 `EventPeriodForm` 加一个 `event_type` 的下拉、`narrow()` 多一个
+> filter、详情页和管理列表显示类型，目的写着「让这张字典表有真读者」。
+>
+> 🔴 **而它是一个必填、却没有任何人读的字段，这两半同时成立。**
+> 单独一条都不足以推翻它，合起来足够：
+>
+> - **成本每天在付**：`Event.event_type` 是非空 FK，而且在 `EventForm.Meta.fields`
+>   里 —— 每一个 ministry admin 发布活动都必须选一个类型，不选就发不出去；
+> - **收益一次没有**：全仓 `*.html` 命中 **0** 次，唯一的读者是 admin 的 changelist；
+> - **没有人要过**：[`participants.md` 第六节](participants.md) 自己查证过
+>   「R1–R8 / P1–P6 里一条都没提到活动分类」。
+>
+> 于是只有三条路，而**继续保持现状是三条里最差的那一条**：给它上页面（本节原计划）、
+> 把表删掉、或者让每个人接着填一个没人看的框。选了第二条 ——
+> 迁移 `events/migrations/0021_drop_event_type.py`，代码 / 迁移 / 文档 / 图一处不留，
+> 照 `3b5c059` 删通用关系表那次的规矩办。
+>
+> ⚠️ 本节原文把「没有一处代码 branch 它、前台模板命中 0 次」记在 **D5** 名下，
+> 而那句话**不在 D5 里** —— 它在 [D41](decisions/D41-notices-are-not-events.md)
+> 和 `participants.md` 第六节。而且「没有一处代码 branch 它」恰恰是 D5 判定它
+> **该做成字典表的理由**，本来就该保持成立；只有「命中 0 次」那一半是缺陷。
+>
+> ⚠️ `participants.md` 那张「三件容易被塞进同一个字段的事」的表**仍然成立**，
+> 只是第一行没有了：L3「这场给谁看」和 L1「这个角色是来给还是来受」还在，
+> 而且正因为少了一个容易混进来的第三者，那条边界比原来更清楚。
 
 ## L2.7 批二的测试与验收
 
@@ -1623,9 +1732,6 @@ Planning Center 是被「有人以为在 Groups 里 RSVP 了就等于报名了�
 - `test_the_schedule_narrows_by_audience_too`
 - `test_signing_up_for_an_event_you_cannot_see_is_a_404`
 - `test_cancelling_visibility_does_not_hide_an_event_you_already_signed_up_for`
-- `test_an_announcement_says_it_takes_no_signups`
-- `test_an_announcement_cannot_have_roles`
-- `test_the_event_list_filters_by_kind`
 
 多选带来的那几条（2026-08-26 加）：
 
@@ -1722,10 +1828,69 @@ Planning Center 是被「有人以为在 Groups 里 RSVP 了就等于报名了�
 决定了要不要动一条已有的数据库约束。下一次遇到「这个数该怎么算」的问题时，
 值得先问一句：它会不会反过来决定形状。
 
+## 又七条（2026-09-05，页面安排）
+
+[L5.3](#l53-三档单选落在哪) 写的是「现有 `/events/` 列表页排不排除 Program 这一格留白 ——
+在设计出来之前替它决定，就是在猜」，[L5.8](#l58-页面与路由) 写的是「Programs 的页面本轮不设计」。
+设计现在有了，两格一起填。
+
+| # | 问题 | 定案 |
+|---|---|---|
+| 22 | Programs 出现在哪 | 自己的列表页 `/programs/`，**不进** `/events/` |
+| 23 | 日程 | Programs 有自己的 schedule，画**每一讲**，不画那条 111 天的横条；站点日程 `/events/schedule/` 不含 Programs |
+| 24 | recurring events | 不需要任何额外代码 —— 它生成的是 N 个各自独立的 `single` 活动，天然就在 `/events/` 里 |
+| 25 | 「挑哪几场」 | 不是第四种东西，是 Programs 下的副开关（决定 17），和「报一次管全部」同在 `/programs/` |
+| 26 | 我报名的 programs | 单开 `/me/programs/`，且**从 `/me/participations/` 里拿走** —— 各管各的，`/me/` 上两个入口 |
+| 27 | Program 的详情页 | **复用 `/events/<pk>/`**，按 `shape` 换一块（讲次表走独立 partial）。列表页各开各的，详情页只有一个 |
+| 28 | 拼写 | `program`（美式）。原文的 `PROGRAMME = "programme"` 作废 |
+
+### 决定 27 是这次走查买来的，理由要写下来
+
+列表页和详情页的答案不一样，而分界线是**持不持有不变量**：
+
+- **列表页放心新开**。它只是一个筛过的查询集，多一个列表页 = 多一行 `filter(shape=program)`，
+  没有第二处规则；
+- **详情页只许有一个**。一个 Program 的详情页要重新持有受众（`for_audience`）、报名门
+  （`eligible`）、草稿预览、监护人同意书、改期通知、L2×L3 含容不变量 —— 六样全是
+  「漏一处就静默泄露」的类型。
+
+而这不是推理，是本仓库正在为同一形状付的两笔账（2026-09-05 走查实测）：
+`event_signup`（`events/views.py`）漏了受众门，且 `AudienceIsAskedGuardTests` 的信号
+触发不到它；`event_create` / `event_update` 漏了 `form.save_m2m()`，而晚一个月写的
+`notices/views.py` 有 —— 同一形状的两处代码，新写的那处对、老的那处错。**两扇门，一扇忘了上锁。**
+
+还有一条本仓库自己的判据，在 `notices/models.py` 的 `Notice` docstring 上：
+「它没有场合，所以它没有场合带来的一切：没有角色、没有报名、没有出勤、没有工时。
+**这一行上要是哪天开始想要其中任何一样，那被描述的东西就是一个 Event，它就该是一个 Event。**」
+Program **四样全要**。按这张表它就是 Event，就走 Event 那条路。
+
+⚠️ 决定 23 让 [L5.1](#l51-session一期课的第几讲) 三条否定式里的第三条改了措辞：
+原文「不进活动列表页」会读错 —— 讲次确实要出现在 Program 自己那页的 schedule 里。
+准确说法是**不进站点级的活动列表和日程**。判据不变。
+
+⚠️ 决定 28 现在改是免费的，值写进库再改就是一次数据迁移。三处不一致（库里 `programme`、
+页面写 Programs、口头说 programs）的代价是以后 grep 不到彼此。
+
 ## L5.1 `Session`：一期课的第几讲
 
+> ### 2026-09-05 落地。本节初稿有六处照字面敲会出问题，逐条改在下面
+>
+> 开工前的走查把这一节和仓库现状对了一遍。形状是对的 —— 那三条否定式是本节最值钱的
+> 东西，它们把「什么时候该用 `Session`、什么时候该用 `Event`」写成了**可判定的判据**，
+> 不是描述。问题全在「照着敲」这一层：初稿的列名和全仓冲突、漏了一条别的表都有的约束、
+> 一条它自己的 docstring 隐含要求的规则没人挡，以及三处会让守卫当场变红的遗漏。
+
+落库的形状（已实现，`events/models.py`）：
+
 ```python
-class Session(TimeStampedModel):
+class Source(models.TextChoices):
+    """一份定义两处用：`Session.source`（本步）和 `Event.source`（L5.4）。"""
+
+    MANUAL = "manual", "Added by hand"
+    GENERATED = "generated", "Produced by a rule"
+
+
+class Session(ConstraintErrorFieldMixin, TimeStampedModel):
     """一期活动里的一次聚会。⚠️ 它不是 `Event`。
 
     ESL 春季班是**一个** `Event`（3/1 起、6/20 止），十二次聚会是它下面的
@@ -1736,7 +1901,7 @@ class Session(TimeStampedModel):
     ⚠️ 和 `Event` 的分工是硬的，三条都要成立：
        · `Session` **不能单独报名**（报名挂在 `Event` 的角色上，整期一次）
        · `Session` **没有自己的受众**（L2/L3 在 `Event` 和 `EventRole` 上）
-       · `Session` **不进活动列表页**（它不是一场活动，是一场活动的一次聚会）
+       · `Session` **不进站点级的活动列表和日程**（`/events/`、`/events/schedule/`）
        任何一条要破，说明那个东西其实是 `Event`，该走 recurring events 那一档。
 
     ⚠️ 和 `Shift` 的分界线也没有变（participants.md 第六节）：有固定岗位 +
@@ -1744,17 +1909,74 @@ class Session(TimeStampedModel):
     """
 
     event = models.ForeignKey(Event, on_delete=models.CASCADE, related_name="sessions")
-    starts_at / ends_at
-    # 由生成器造的还是人手加的 —— 同 Event.source 的用途，见 L5.4 那句删除
-    source = ...
+    start_time / end_time
+    source = ...                      # 默认 MANUAL
+    history = HistoricalRecords()
+
+    class Meta:
+        ordering = ["start_time", "id"]          # 正序，和 Event 相反
+        constraints = [唯一(event, start_time)、check(end_time >= start_time)]
+
+    def clean(self): ...              # 一讲必须落在这一期之内
 ```
 
-⚠️ 唯一约束 `(event, starts_at)`：同一期课不可能有两次同时开始的聚会。
+### 六处改动，逐条写明原文是什么、为什么改
+
+| # | 初稿写的 | 改成 | 为什么 |
+|---|---|---|---|
+| 1 | `starts_at / ends_at` | `start_time / end_time` | 仓库里 `_at` 一律是**动作发生的时刻**（`registered_at`、`checked_in_at`、`sent_at`、`consent_at`、`created_at`），排定的时间窗从来不用它（`Event.start_time`、`Notice.starts_showing`、`Assignment.start_date`）。用 `_at` 会被读成「这一讲实际开始的时刻」。而同 `Event` 命名还有第二个好处：`clean()` 里两者要直接比较 |
+| 2 | 只有唯一约束 | 加 `end_time >= start_time` 的 `CheckConstraint` | `Event` / `Assignment` / `MinistryRole` / `Notice` 各有一条。⚠️ 这一条是 L5.2 自己那句话的反面教材：「逐条抄，**不是**『大概同款』—— 抄漏一条的表现是那张表比它复制的那张松」，而初稿在 L5.1 上就先松了一条 |
+| 3 | 没有任何窗口检查 | `clean()` + `services.add_session()` | 春季班 3/1–6/20 可以存一个 8/1 的聚会，而**本节 docstring 自己说**「`Event` 一直有起止两列，缺的只是中间那些时刻」—— 中间的时刻能跑到两列外面，那句话就不成立。跨表条件（判据在 `event` 的两列上），`CheckConstraint` 看不见，同 L2×L3 那条和 `nature` 冻结那条 |
+| 4 | `source` 各写各的 | 枚举提到模块级 `Source`，L5.4 的 `Event.source` 复用同一份 | 初稿是「L5.1 给 Session 写一份、L5.4 给 Event 再写一份」，同一个概念两处定义 —— 这个项目判过三次的「第二份真相」 |
+| 5 | 没提 `ConstraintErrorFieldMixin` / `core/constraints.py` | 两者都补 | `core/tests.py` 那条守卫双向查：约束缺 `violation_error_code`、code 缺 `CONSTRAINT_FIELD` 映射、或留下没有约束的映射，三种都当场红。⚠️ 而「本轮要动的文件总表」里 `core/constraints.py` 只标了「批一」，批三这一格是漏的 |
+| 6 | 没有 `history` | `history = HistoricalRecords()` | 相邻的 `SessionAttendance` 初稿明写了它。「谁在什么时候把第 7 讲从周二挪到周四」会影响一批人的出勤记录，而 `Event` / `Participation` / `Notice` 全都有。两张相邻的表一张有一张没有，需要理由而不是默认 |
+
+⚠️ 第 3 条按 [D14](decisions/D14-constraint-is-the-only-rule.md) 的规矩**把缺口写出来而不是暗示**：
+`Session.objects.create()` 和 `bulk_create` 从它旁边走过去。这一条本身配了一条测试
+（`test_a_bare_create_walks_past_the_containment_rule`），钉的就是这个代价 ——
+免得下一个人把 docstring 读成承诺。
+
+⚠️ **不加 `indexes`，而这是决定不是遗漏。** 唯一约束 `(event, start_time)` 自带的复合索引
+正好服务那两个查询：「这一期的全部讲，按时间正序」和「下一讲是哪天」（`/me/programs/` 要用）。
+`Event` 那三条索引各自标了 R1/R2 的理由，「不加」同样要写。
 
 ⚠️ `Event.duration`（R3）对 Program 会变成「111 天」。**不改它** ——
 那两列说的就是这个，而报表上那一格对 Program 本来就没有意义。
 真要显示「每次两小时」，那是 `Session` 的时长，属于**新页面**的事。
 记在这里是因为它看起来像个 bug。
+
+### ⚠️ 这一步**不兑现** participants.md 第九节那条缺口
+
+第九节排第一位那条（「他报一次之后，后面每一场都不用再报」）的出栏要等
+[L5.2](#l52-sessionattendance他哪几场来没来干了多久) + [L5.3](#l53-三档单选落在哪)。
+L5.1 只提供承载 —— 记在这里是因为初稿没写这句，容易让人以为做完这一步就结清了。
+
+### 测试（`events/tests.py` · `SessionTests`）
+
+- `test_a_session_belongs_to_one_event`
+- `test_two_sessions_in_one_event_cannot_start_at_the_same_moment`
+- `test_two_events_may_hold_meetings_at_the_same_moment`
+  —— 唯一约束是**两列**而不是一列：两门课同一个晚上开是常事
+- `test_a_session_cannot_end_before_it_starts`
+- `test_a_session_outside_its_events_own_dates_is_refused`
+- `test_a_session_before_its_event_starts_is_refused`
+- `test_a_session_inside_its_events_dates_is_kept`
+- `test_the_service_refuses_a_session_outside_the_events_dates`
+- `test_the_service_keeps_a_session_inside_the_events_dates`
+- `test_a_bare_create_walks_past_the_containment_rule` —— D14 那个缺口
+- `test_deleting_an_event_takes_its_sessions_with_it`
+- `test_a_session_starts_out_marked_as_added_by_hand`
+- `test_moving_a_session_is_kept_in_its_history`
+- `test_sessions_come_back_in_the_order_they_are_taught`
+
+⚠️ 两条约束走**数据库**（裸 `create()` + `IntegrityError`），窗口那条走 `full_clean()`
+和服务层 —— 两层分开验。一条只在 `full_clean()` 下失败的「约束」，是穿着约束外衣的 `clean()`。
+
+### 迁移
+
+`events/migrations/0022_session.py` —— 纯 `CreateModel`（`Session` + `HistoricalSession`），
+无回填。docstring 写明：今天库里每一场活动都是没有聚会的单场，而「没有这些行」正是这个意思，
+所以这一步不改任何一行现有数据的含义。
 
 ## L5.2 `SessionAttendance`：他哪几场、来没来、干了多久
 
@@ -1774,7 +1996,9 @@ class SessionAttendance(TimeStampedModel):
     """
 
     participation = models.ForeignKey(
-        Participation, on_delete=models.CASCADE, related_name="sessions")
+        Participation, on_delete=models.CASCADE, related_name="attendances")
+    # ⚠️ `attendances`，不是初稿的 `sessions`：L5.1 已经把 `event.sessions` 用掉了
+    #    （→ `Session`），同一个词在两个方向上指两张表是下一个人必踩的一脚。
     session = models.ForeignKey(Session, on_delete=models.CASCADE, related_name="+")
     status = ...          # 同 Participation.Status，但只在这一场上成立
     hours = ...           # 决定 20
@@ -1783,6 +2007,8 @@ class SessionAttendance(TimeStampedModel):
 ```
 
 ⚠️ 唯一约束 `(participation, session)`。
+
+⚠️ L5.1 的列名改了（`starts_at` → `start_time`，见那一节第 1 条），本节和 L5.6 引用它的地方跟着改。
 
 ### 三条从 `Participation` 搬过来的规则，一条都不能漏
 
@@ -1809,7 +2035,7 @@ D38 第五节那张表问的是「他这次参加算什么」，而对一期课�
 class Event(...):
     class Shape(models.TextChoices):
         SINGLE = "single", "One occasion"
-        PROGRAMME = "programme", "A course or programme — sign up once"
+        PROGRAM = "program", "A course or program — sign up once"
 ```
 
 ⚠️ **枚举只有两档，而界面上是三档。** 第二档（recurring events：每周一场、
@@ -1826,13 +2052,20 @@ class Event(...):
 ### 两个谓词，页面怎么用**本轮不定**
 
 ```python
-    def programmes(self): ...      # Shape.PROGRAMME
+    def programs(self): ...        # Shape.PROGRAM
     def single_occasions(self): ...  # Shape.SINGLE
 ```
 
-⚠️ 基金会说 Programs 会有**自己的页面**，而页面设计要等后端定完。
-所以后端把两者分得开，而**现有 `/events/` 列表页排不排除 Program 这一格留白** ——
-在设计出来之前替它决定，就是在猜。
+> ### 2026-09-05：这一格不再留白了，见[又七条](#又七条2026-09-05页面安排)
+>
+> 原文是「基金会说 Programs 会有**自己的页面**，而页面设计要等后端定完。所以后端把两者
+> 分得开，而**现有 `/events/` 列表页排不排除 Program 这一格留白** —— 在设计出来之前
+> 替它决定，就是在猜」。
+>
+> 设计给出来了（决定 22–27），所以答案是**排除**：Programs 走 `/programs/`，
+> `/events/` 和 `/events/schedule/` 都只剩单场（含 recurring 生成的那些）。
+> 而它反过来证明了这一列该存在 —— 上面那两条理由（列表页要按它筛、一个还没排期的
+> Program 也是 Program）现在**各自都有了真实调用方**。
 
 ⚠️ 留白的是「用哪个」，不是「有没有」：两个谓词都要写、都要有测试。
 
@@ -1856,11 +2089,11 @@ class EventSeries(TimeStampedModel):
        明写「条件破了就必须升级成表」。
     """
 
-    name / ministry / event_type / owner
+    name / ministry / owner
     rule = models.TextField()          # RFC 5545 的 RRULE，不含 DTSTART
     starts_on / start_time / duration
     location / description / image
-    可见性三件套 / takes_signups / requires_guardian_consent   # 模板
+    可见性三件套 / requires_guardian_consent                  # 模板
     ended_on                            # 「即日停止」
     undone_at / undone_by               # 整批撤销
     history = HistoricalRecords(m2m_fields=["visible_to_ministries"])
@@ -1949,8 +2182,23 @@ def _drop_generated_after(series, after):
 
 ## L5.8 页面与路由
 
-⚠️ Programs 的页面**本轮不设计**（基金会明说要等后端定完）。本轮只做到：
-两个谓词、`Session` 和 `SessionAttendance` 两张表、以及 admin 能建能看。
+> ### 2026-09-05：页面定了，见[又七条](#又七条2026-09-05页面安排)
+>
+> 原文是「Programs 的页面**本轮不设计**（基金会明说要等后端定完）。本轮只做到：
+> 两个谓词、`Session` 和 `SessionAttendance` 两张表、以及 admin 能建能看」。
+
+按决定 22–27，本轮要出三张列表页和**零张**新详情页：
+
+| 路由 | 装什么 |
+|---|---|
+| `/programs/` | Programs 的列表（`shape=program`），两档共用一页 |
+| `/programs/schedule/` | Programs 的日程，画**每一讲**，不画那条 111 天的横条 |
+| `/me/programs/` | 我在上的课。⚠️ 同时要把 program 的报名**从 `/me/participations/` 里拿走**，并在 `/me/` 上挂第二个入口 |
+| ~~`/programs/<pk>/`~~ | ❌ 不新建视图。详情复用 `/events/<pk>/`，按 `shape` 换一块（讲次表走独立 partial，同 `_event_roles_panel.html` 那一级）。理由见决定 27 |
+
+⚠️ 三张列表页各自都要过 `for_audience()` —— `AudienceIsAskedGuardTests` 和
+`RolesAreNarrowedGuardTests` 会盯着，但**别指望守卫兜底**：本轮走查刚证实
+`event_signup` 那条路守卫的信号根本触发不到（它用的是 `open_for_signup()`）。
 
 recurring events 那一档的路由照初版：`events/series/new/`、
 `events/series/<int:pk>/`、`events/series/<int:pk>/undo/`。
@@ -1978,15 +2226,15 @@ recurring events 那一档的路由照初版：`events/series/new/`、
 
 Program（决定 16–20）：
 
-- `test_a_programme_is_one_event_with_many_sessions`
-- `test_signing_up_for_a_programme_creates_one_participation`
+- `test_a_program_is_one_event_with_many_sessions`
+- `test_signing_up_for_a_program_creates_one_participation`
   —— ⚠️ 决定 19。它同时钉住 `signups` 不会因为一期课暴涨
-- `test_signing_up_for_a_programme_covers_every_session`
+- `test_signing_up_for_a_program_covers_every_session`
 - `test_picking_some_sessions_leaves_the_others_alone`（决定 17）
 - `test_joining_in_week_five_is_not_four_absences`（决定 18）
   —— ⚠️ 出勤率的分母是 8 不是 12
 - `test_hours_on_a_session_are_counted_by_the_report`（决定 20 的 union）
-- `test_a_seat_in_a_programme_still_records_no_hours`
+- `test_a_seat_in_a_program_still_records_no_hours`
   —— L1/L4 那条规则在新表上同样成立
 - `test_a_session_somebody_attended_is_never_deleted_by_the_generator`
 
@@ -2005,11 +2253,12 @@ recurring events：
 
 ---
 
-# 本轮新增的守卫（五条）
+# 本轮新增的守卫（六条）
 
 | # | 名字 | 盯什么 |
 |---|---|---|
 | 1 | `AudienceIsAskedGuardTests` | 调用 `visible_to_participants()` 的函数体里必须同时调 `for_audience(` |
+| 1b | `RolesAreNarrowedGuardTests` | 2026-08-29 加的第六条：函数体里出现 `select_related("role")`（也就是在**列角色行给人看**）的，必须同时调 `for_audience(`。点名三处管理侧例外 |
 | 2 | `AudienceContainmentGuardTests` | 「角色的范围 ⊆ 活动的范围」那三条比较只许出现在 `refuse_wider_than_event()` 里。⚠️ 改成多选之后可比的东西变多了，这条比枚举时代更必要 |
 | 3 | `HoursWriteGuardTests` | `.hours =` 只出现在 `events/services.py`（现在就成立，这一条是把现状钉住） |
 | 4 | `GeneratedEventDeleteGuardTests` | 生成场次的那三个删除条件只出现在 `_drop_generated_after()` |
@@ -2018,14 +2267,21 @@ recurring events：
 每一条都要做双向验证：故意写错一处，确认它真的红 —— 这是本项目对守卫的既有要求，
 而守卫一和守卫五都属于「不做反向验证就等于没写」的那一类。
 
+⚠️ 第六条的双向验证当场抓到了它自己：初版**没红**，因为
+`SignUpForm.__init__` 里那行调用**上面的注释**写着 `for_audience()`，
+守卫把注释读成了调用。所以它先剥掉 docstring 和 `#` 注释再找 ——
+一个注释就能满足的守卫比没有守卫更糟，它报的是一份它从没检查过的安全。
+（信号选 `select_related("role")` 而不是 `with_signup_counts(`：后者每一处容量
+判断都在调，白名单会长到比被保护的地方还多，而那正是守卫失效的方式。）
+
 # 本轮要动的文件总表
 
 清点用。批次列写「一/二/三」。
 
 | 文件 | 批 | 干什么 |
 |---|---|---|
-| `events/models.py` | 一二三 | `nature`、`NOT_APPLICABLE`、新约束、第二个兜底工种、可见性的两个布尔 + 一张多对多（`Event` / `EventRole` 各一套）、`takes_signups`、`refuse_wider_than_event()`、`for_audience()`、`Event.shape` + 两个谓词、`Session`、`SessionAttendance`、`EventSeries`、`EventSeriesRole`、`Event.series` / `Event.source` |
-| `events/services.py` | 一二三 | `on_the_books_q()` / `on_the_books_exists()`、`default_served_as()`、`record_hours()`、`check_out()`、`create_participation_role()`、`ministry_report()`、`_people_served()`、`eligible()` / `eligible_role_ids()`、`sign_up()`、系列的生成与撤销、⚠️ L5.7：工时的四个口径要 union `SessionAttendance` |
+| `events/models.py` | 一二三 | `nature`、`NOT_APPLICABLE`、新约束、第二个兜底工种、可见性的两个布尔 + 一张多对多（`Event` / `EventRole` 各一套）、`refuse_wider_than_event()`（⚠️ `Audience` 和 `AudienceQuerySetMixin` **2026-08-31 搬去了 `org/audience.py`**，留在这里的只有事件×角色那条含容规则，见 [D41 第四节](decisions/D41-notices-are-not-events.md)）、`Event.shape` + 两个谓词、`Session`、`SessionAttendance`、`EventSeries`、`EventSeriesRole`、`Event.series` / `Event.source` |
+| `events/services.py` | 一二三 | `add_session()`（L5.1）；`on_the_books_q()` / `on_the_books_exists()`、`default_served_as()`、`record_hours()`、`check_out()`、`create_participation_role()`、`ministry_report()`、`_people_served()`、`eligible()`（⚠️ `eligible_role_ids()` 判它不建，见 L2.4 那个补框）、`sign_up()`、系列的生成与撤销、⚠️ L5.7：工时的四个口径要 union `SessionAttendance` |
 | `events/forms.py` | 一二三 | `RoleChoiceField`、`SignUpForm`、`EventRoleForm`、`EventForm`（加三档单选）、`EventPeriodForm`、新的 `EventSeriesForm` |
 | `events/views.py` | 一二三 | `_visible_events()`、`_schedule()`、`_detail()`、`event_signup`、`event_registrations`、`event_attendance`、系列的三个视图 |
 | `events/urls.py` | 三 | 系列的三条路由 |
@@ -2033,9 +2289,10 @@ recurring events：
 | `events/recurrence.py` | 三 | 新文件，纯函数 |
 | `events/migrations/0016_participationrole_nature.py` | 一 | 新 |
 | `events/migrations/0017_served_as_not_applicable.py` | 一 | 新 |
-| `events/migrations/0018_audience_and_signups.py` | 二 | 新 |
-| `events/migrations/0019_event_series.py` | 三 | 新 |
-| `core/constraints.py` | 一 | `CONSTRAINT_FIELD` 加一行 |
+| ~~`events/migrations/0018_audience_and_signups.py`~~ | 二 | ❌ **没有这个文件**，2026-09-05 划掉。批二实际拆成了四条：`0018_second_catch_all_role`（L1.6，下面单独列着）、`0019_event_audience`（含回填）、`0020_audience_reverse_name`、`0021_drop_event_type`。后三条各自在正文里有说明，唯独这一行从没跟着改 —— 于是总表里一度同时存在两个 0018 |
+| `events/migrations/0022_session.py` | 三 | 新（L5.1）。⚠️ 编号：批二实际拆成了 0018–0021，所以批三从 0022 起 |
+| `events/migrations/00NN_event_series.py` | 三 | 新（L5.4）。⚠️ 编号等落地时定，不预写 |
+| `core/constraints.py` | 一三 | `CONSTRAINT_FIELD` 加一行；⚠️ 批三 L5.1 又加两行（`Session` 的两条约束）—— 这一格 2026-09-05 之前写的是「一」，而批三加约束不改它，`core/tests.py` 那条守卫会当场红 |
 | `core/timeutils.py` | 一 | `local_day()` —— `local_date_of()` 的 ORM 双胞胎，`tzinfo` 包在里面 |
 | `core/querysets.py` | 一 | `in_effect_on()` 的 docstring：`on` 现在也可以是数据库表达式 |
 | `core/tests.py` | 一二三 | 五条新守卫 |
@@ -2046,9 +2303,9 @@ recurring events：
 | `events/templates/events/my_participations.html` | 一 | 不印 Not applicable |
 | `events/templates/events/event_report.html` | 一 | 同上 |
 | `events/templates/events/_event_roles_panel.html` | 一二 | 档位列；公告的空状态 |
-| `events/templates/events/_event_detail_body.html` | 一二 | 档位列；公告的空状态；报不上的角色带原因 |
+| `events/templates/events/_event_detail_body.html` | 一二 | 档位列；三种空状态（「还没开」/「没有一个是给你的」/ 公告）；看全表的人那一句常驻文案 |
 | `events/templates/events/_period_filter.html` | 二 | 多一个 kind 下拉 |
-| `events/templates/events/event_form.html` | 二三 | `audience` / `takes_signups`；系列入口 |
+| `events/templates/events/event_form.html` | 二三 | `audience`；系列入口 |
 | `events/management/commands/seed_demo.py` | 一二三 | ESL 工种与活动；一场内部活动；一个系列 |
 | `docs/planning/diagrams/src/page.html` | 三 | ERD 加三个字段和两张表，DFD 加一条生成的路，表册加两行。⚠️ 改完要按 `docs/planning/diagrams/README.md` 重新生成 `data-and-flow.html`，那一步要 `npm i mermaid puppeteer-core` |
 
@@ -2089,7 +2346,7 @@ grep 了一遍，它里面搜不到 `served_as`、`stop_at_needed_count`、`comp
 | [D38](decisions/D38-served-as-volunteer-or-work.md) | 加 `not_applicable` 一档，写明它不是身份、永远不出现在表单上、且它换来了一条真正的约束 |
 | [D27](decisions/D27-ministry-report.md) | 指标拆成两组并排不相加；`hours_per_participant` 的分母改口；新增 People served |
 | [D19](decisions/D19-event-role.md) | `EventRole` 长出「谁报得上」那一组勾选（两个布尔 + 一张多对多）；并写明 L1 为什么落在 `ParticipationRole` 而不是这里 |
-| [D5](decisions/D05-lookup-tables-not-enums.md) | `EventType` 从「没有 branch」变成「有页面」；`nature` 作为「字典表上的枚举列」的第二个例子 |
+| [D5](decisions/D05-lookup-tables-not-enums.md) | `EventType` 从字典表清单里**删掉**（说不出谁读它，L2.6）；`nature` 作为「字典表上的枚举列」的第二个例子 |
 | [`deferred.md`](deferred.md) | `Event.parent` 出栏，并注明载体判定作废的理由 |
 | [`phase-b.md`](phase-b.md) | 可见性那一节补 L3 这一维 |
 | [D32](decisions/D32-worker-axes-schedule-and-assignment.md) | ✅ 2026-08-21 已改：那条不变量的标题原来写的是「一个人在基金会里只有一条在编路径」，会被读成「一个人只能有一行任职」。改成「在编只有一套结构」，并补一小节写明一人多岗是常态、判据一律写成存在性判断 |
@@ -2140,7 +2397,7 @@ grep 了一遍，它里面搜不到 `served_as`、`stop_at_needed_count`、`comp
 - [ ] 执行主任（岗位没有 ministry）看得见「全体在编」的活动，报不上「仅本 ministry」的角色
 - [ ] 受众改窄之后，已经报了名的人仍然打得开那一页
 - [ ] 一场没有角色的公告 → 页面说得出它是故意不收报名，不是没建完
-- [ ] 活动列表可以按类型筛选
+- [x] ~~活动列表可以按类型筛选~~ —— ❌ **2026-09-04 随 `EventType` 一起作废**（L2.6）。那张表说不出谁读它，整表删掉，这一条也就没有了要验的东西。⚠️ 它在验收表里又挂了四天，而验收表上一条**已经不成立的条目**比缺一条更糟：它会让走查的人去找一个不存在的功能。
 
 批三：
 
@@ -2285,7 +2542,7 @@ self.assertNotIn("empty, so the form that needs it", text)          # 加了一�
 ```
 
 第二行当场红。原因不是门槛错了，是**那句话是所有字典表共用的** ——
-`Ministry` / `Position` / `EmploymentType` / `EventType` 在测试库里全是 0 行，
+`Ministry` / `Position` / `EmploymentType` / `EventType`（当时还在）在测试库里全是 0 行，
 每一个都在输出里印同一句。于是第一行的「通过」是靠别的表在报警混过去的，
 和 `ParticipationRole` 一点关系都没有。
 
@@ -2502,3 +2759,31 @@ L2.4 收尾时全量测试红了一条 `MinistryReportTests`，而**把本轮改
 ⚠️ 断言也跟着从「至少三根柱子」改成**逐根点名**（`["Jan 2026", "Feb 2026", "Mar 2026"]`
 以及 `["1 event", "0 events", "1 event"]`）。原来那句「至少三根」在场景摆错的时候
 才会红；点名之后，摆出来的是什么一眼就看得见。
+
+
+## 计划外 · 三个坑全是「测试绿、页面不对」（2026-08-31，补记于 2026-09-08）
+
+`1a25ce5`「公告有了自己的三个页面」那一批，提交标题自己写着「这一批里三个坑全是
+『测试绿、页面不对』」，而计划外记录里一条都没有 —— 补记在这里，因为
+[L2.7](#l27-批二的测试与验收) 早就预告过同一件事（「这一批的洞全是静默的，
+测试绿不代表页面对」），撞上了却没落到纸上。
+
+⚠️ 而这一条本身就是这一节存在的理由的例证：**最容易不写的，正是「这次很顺」
+之外的第二种情况 —— 顺到觉得不值得写**。一次交付三个页面、测试全绿，坑就显得像
+过程噪音。它们不是：它们是「哪一类东西测试盯不住」的样本，而那正是这份文件
+最贵的部分。
+
+## 计划外 · 一条决定晚于它的实现三个提交（2026-09-01，补记于 2026-09-08）
+
+`7eee471` 的标题是「D41：公告不是活动 —— 而这一条欠了三个提交，代码跑着、
+索引里一条都没有」。也就是说：`Notice` 表建了、三个页面上了、测试绿了，而
+**说明它为什么该这样的那份决策文件还不存在**，`decisions/README.md` 里也搜不到它。
+
+⚠️ 这和「先写文档再写代码」无关 —— 顺序本来就可以颠倒。问题在那三个提交之间，
+仓库处于一个特定状态：一个新 app、一张新表、一套新页面，而**任何人都查不到它凭
+什么存在**。这个项目对「说不出谁读它」判过死刑（`EventType`），对「清单和现实分了
+家」记过三次，而这一次是第三种形状：**现实跑在前面，索引里没有它**。
+
+⚠️ 处置不是「以后先写 D」，是**把决策文件和它的第一个提交绑在一起**：一个新表
+或一条推翻旧决定的改动，D 文件和代码进同一个提交，或者代码那个提交的正文里
+写明「D 还欠着，编号 DNN」。后者是本文件这一次采取的做法。

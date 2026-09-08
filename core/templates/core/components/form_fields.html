@@ -8,7 +8,20 @@ as_p 出来的标签结构我们控制不了，错误也会跑到字段上方去
 
 参数：form。
 {% endcomment %}
+{% comment %}
+⚠️ `audience_heading_before` 是可选的：只有带受众的表单（AudienceFormMixin）
+   有它，其余表单上它是空的，这个 {% if %} 于是什么都不做。
+
+⭐ 它存在是因为受众那一组勾的四个标签**两侧逐字相同** —— 它们来自同一个抽象
+   模型，所以活动和角色各说一遍 Everyone / People with no current post / …。
+   活动编辑页把两组画在同一屏、上下相邻，而角色那组还按决定 15 预勾成和活动
+   一样，于是读起来像「同一个设置渲染了两遍」，改下面那组的人以为自己在改活动
+   的可见性。而「看得见 ≠ 报得上」正是这一轮设计的中心句。
+{% endcomment %}
 {% include "core/components/_non_field_errors.html" %}
 {% for field in form %}
+  {% if field.name == form.audience_heading_before %}
+    <h3 class="mt-6 mb-2 text-sm font-semibold">{{ form.audience_heading }}</h3>
+  {% endif %}
   {% if field.is_hidden %}{{ field }}{% else %}{% include "core/components/field.html" %}{% endif %}
 {% endfor %}

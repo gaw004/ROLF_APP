@@ -67,7 +67,7 @@ Phase C 本来就要逐个模板上 Tailwind，**同一趟里改掉，边际成�
 | 例子 | 它在哪 |
 |---|---|
 | `Ministry.name` = "食物银行" | `org_ministry` 表的一行 |
-| `EventType.name` / `ParticipationRole.name` = "搬运" | 字典表的行（[D5](D05-lookup-tables-not-enums.md)） |
+| `ParticipationRole.name` = "搬运" | 字典表的行（[D5](D05-lookup-tables-not-enums.md)） |
 | `Event.name` = "周六食物发放" | 用户录进去的 |
 
 `makemessages` 扫不到它们，这不是疏忽，是原理。

@@ -789,15 +789,18 @@ R2 和 Sentry（都在免费额度内）—— 合计**每月十几美元量级*
 于是「日常不用 superuser 登录」这条规矩当天就破了，而且没人会注意到。
 
 **基础数据**：在 admin 里建齐 `Ministry` / `Position` / `EmploymentType` /
-`EventType` / `ParticipationRole`（`general` 那一行迁移已经灌了）。
+`ParticipationRole`（`general` 那一行迁移已经灌了）。
+⚠️ `EventType` 原来在这一行里，2026-09-04 连表一起删了（06-roadmap L2.6）。
 `RelationshipType` **不用手工录** —— C0.2.1 那条迁移会灌。
 
 ⚠️ **上面这两件（两个账号 + 基础数据）都不报错，所以都靠「记得做」在支撑** ——
 而这一整节其余的东西没有一件是靠记性的。2026-08-17 把它们接进了
 `manage.py check_deployment`：账号那一条查的是「有没有一个**非 superuser** 的
 foundation staff 账号」，字典表那几条查的是行数。
-空的 `EventType` 不是错误，是一个下拉框空着的「发布活动」页 —— 页面打得开、
+空的 `Ministry` 不是错误，是一个下拉框空着的「发布活动」页 —— 页面打得开、
 表单填不完、日志里什么都没有。
+（这句话原来举的是 `EventType`，那张表 2026-09-04 删了；同一张表单、同一种失败，
+换成 `Ministry` 一字不改地成立。）
 
 ### C3.6 备份 + 恢复演练
 

@@ -31,10 +31,11 @@ from django.db import transaction
 from accounts.services import mark_email_verified, register_account
 from contact.models import Contact, EmergencyContact, RelationshipType
 from core.timeutils import local_now, local_today
+from org.audience import Audience
+
 from events.models import (
     Event,
     EventRole,
-    EventType,
     Participation,
     ParticipationRole,
 )
@@ -44,6 +45,7 @@ from events.services import (
     mark_absent,
     inherit_audience,
     record_hours,
+    set_audience,
     set_served_as,
     sign_up,
 )
@@ -149,12 +151,6 @@ class Command(BaseCommand):
             code="full_time", defaults={"name": "Full time"})
         self.part_time, _ = EmploymentType.objects.get_or_create(
             code="part_time", defaults={"name": "Part time"})
-        self.distribution, _ = EventType.objects.get_or_create(
-            code="distribution", defaults={"name": "Distribution"})
-        # Stored on self from 2026-08-21: event 6 below is a class, and the
-        # demo had no event of any type but "distribution".
-        self.klass, _ = EventType.objects.get_or_create(
-            code="class", defaults={"name": "Class"})
         # The catch-all role has to exist: event_role is not nullable, so "no
         # particular job" needs somewhere to land.
         # One catch-all per half of the axis — "no particular job" and "no
@@ -169,6 +165,13 @@ class Command(BaseCommand):
             code="welcome", defaults={"name": "Welcome desk"})
         self.interpreting, _ = ParticipationRole.objects.get_or_create(
             code="interpreting", defaults={"name": "Interpreting"})
+        # ⚠️ L2's whole point on one row (2026-08-29): a job only the
+        #    foundation's own people may take. Without one in the demo, "one
+        #    publish recruits inside and outside" (requirement 8) has nothing to
+        #    show and the audience columns on EventRole are invisible on every
+        #    screen — the same argument as the ESL seat below it.
+        self.coordinating, _ = ParticipationRole.objects.get_or_create(
+            code="coordinating", defaults={"name": "Floor coordinator"})
         # ⚠️ L1's whole point on one row: the first role in this system where
         #    the person is receiving rather than giving. Without one in the
         #    demo, every screen the axis touches — the Kind column, the report's
@@ -415,16 +418,29 @@ class Command(BaseCommand):
             defaults={"contact_type": Contact.ContactType.INDIVIDUAL,
                       "birth_date": datetime.date(1985, 1, 1)},
         )[0]
+        # 🔴 `start_date` 在 `defaults` 里，**不在匹配键里** —— 而它一开始在。
+        #
+        # 匹配键里含一个 `local_today() - N 天` 的值，意思是「今天跑和昨天跑
+        # 找的不是同一行」：get_or_create 每天都匹配不上上一次那条，于是
+        # 再建一条。走查那天页面上出现了同一个人同一个岗位的**四行**任职，
+        # 对应这个命令被跑过的四天。
+        #
+        # ⚠️ 它不报错、也不违反约束：`UniqueConstraint(contact, position,
+        #    start_date)` 挡的是「同一天开始的两条」，而这四条的开始日期
+        #    恰恰各不相同。
+        #
+        # ⚠️ 通则：**get_or_create 的匹配键里不许出现一个随时间变的值。**
+        #    那样写出来的不是「有就用、没有就建」，是「每天建一条」。
         Assignment.objects.get_or_create(
             contact=self.pantry_admin.contact, position=self.pantry_lead,
-            start_date=local_today() - datetime.timedelta(days=400),
-            defaults={"employment_type": self.full_time},
+            defaults={"employment_type": self.full_time,
+                      "start_date": local_today() - datetime.timedelta(days=400)},
         )
         Assignment.objects.get_or_create(
             contact=self.leaver, position=self.pantry_staff,
-            start_date=local_today() - datetime.timedelta(days=400),
             defaults={
                 "employment_type": self.full_time,
+                "start_date": local_today() - datetime.timedelta(days=400),
                 "end_date": local_today() - datetime.timedelta(days=10),
             },
         )
@@ -438,8 +454,8 @@ class Command(BaseCommand):
         ).contact
         Assignment.objects.get_or_create(
             contact=self.unpaid_staff, position=self.pantry_helper,
-            start_date=local_today() - datetime.timedelta(days=300),
-            defaults={"employment_type": self.part_time},
+            defaults={"employment_type": self.part_time,
+                      "start_date": local_today() - datetime.timedelta(days=300)},
         )
         self.intern = Contact.objects.get_or_create(
             legal_last_name="Silva", legal_first_name="Rafa",
@@ -448,8 +464,8 @@ class Command(BaseCommand):
         )[0]
         Assignment.objects.get_or_create(
             contact=self.intern, position=self.pantry_intern,
-            start_date=local_today() - datetime.timedelta(days=120),
-            defaults={"employment_type": self.part_time},
+            defaults={"employment_type": self.part_time,
+                      "start_date": local_today() - datetime.timedelta(days=120)},
         )
 
     def events(self):
@@ -491,7 +507,7 @@ class Command(BaseCommand):
         self.open_event, created = Event.objects.get_or_create(
             name="Saturday distribution",
             defaults={
-                "event_type": self.distribution, "ministry": self.pantry,
+                "ministry": self.pantry,
                 "start_time": now + 7 * DAY, "end_time": now + 7 * DAY + 3 * HOUR,
                 "location": "Church ground floor", "owner": self.pantry_admin.contact,
                 "status": Event.Status.OPEN,
@@ -509,6 +525,17 @@ class Command(BaseCommand):
         welcome = self.role(self.open_event, self.welcome, 4)
         self.role(self.open_event, self.interpreting, 1,   # nobody signs up
                   stop_at_needed_count=False)
+        # ⭐ 第四个角色，L2（2026-08-29）：**同一场活动，一次发布，招内外两批人**。
+        #    上面三个跟着活动走（谁都看得见、谁都报得上），这一个只给在编的人。
+        #    于是演示库里第一次有了这一屏：外部志愿者打开这场活动，看到三个位子；
+        #    在编的人打开同一场，看到四个 —— 而这正是需求 8 的原话。
+        # ⚠️ 走 set_audience()，不是给 role() 传两个 False：那是**空受众**，
+        #    inherit_audience() 会把活动那份（谁都看得见）填回去，于是这一行
+        #    看起来收窄了、实际上比原来还宽。events/tests.py 那边踩过同一脚。
+        set_audience(
+            self.role(self.open_event, self.coordinating, 1),
+            Audience.Spec(outsiders=False, all_staff=True, ministries=frozenset()),
+        )
 
         if created:
             self.signup(self.adult, lifting)
@@ -521,7 +548,7 @@ class Command(BaseCommand):
         Event.objects.get_or_create(
             name="Christmas distribution (not published yet)",
             defaults={
-                "event_type": self.distribution, "ministry": self.pantry,
+                "ministry": self.pantry,
                 "start_time": now + 30 * DAY, "end_time": now + 30 * DAY + 2 * HOUR,
                 "owner": self.pantry_admin.contact, "status": Event.Status.DRAFT,
                 "visible_to_outsiders": True,
@@ -535,7 +562,7 @@ class Command(BaseCommand):
         confirmed, made = Event.objects.get_or_create(
             name="English corner (full)",
             defaults={
-                "event_type": self.distribution, "ministry": self.pantry,
+                "ministry": self.pantry,
                 "start_time": now + 3 * DAY, "end_time": now + 3 * DAY + 2 * HOUR,
                 "owner": self.pantry_admin.contact, "status": Event.Status.FULL,
                 "visible_to_outsiders": True,
@@ -550,7 +577,7 @@ class Command(BaseCommand):
         past, made = Event.objects.get_or_create(
             name="Last month's distribution",
             defaults={
-                "event_type": self.distribution, "ministry": self.pantry,
+                "ministry": self.pantry,
                 "start_time": now - 30 * DAY, "end_time": now - 30 * DAY + 3 * HOUR,
                 "owner": self.pantry_admin.contact, "status": Event.Status.COMPLETED,
                 "visible_to_outsiders": True,
@@ -626,7 +653,7 @@ class Command(BaseCommand):
         Event.objects.get_or_create(
             name="Tax clinic",
             defaults={
-                "event_type": self.distribution, "ministry": self.tax,
+                "ministry": self.tax,
                 "start_time": now + 5 * DAY, "end_time": now + 5 * DAY + 2 * HOUR,
                 "owner": self.tax_admin.contact, "status": Event.Status.OPEN,
                 "visible_to_outsiders": True,
@@ -648,7 +675,7 @@ class Command(BaseCommand):
         esl, made = Event.objects.get_or_create(
             name="ESL class",
             defaults={
-                "event_type": self.klass, "ministry": self.pantry,
+                "ministry": self.pantry,
                 "start_time": now + 4 * DAY, "end_time": now + 4 * DAY + 2 * HOUR,
                 "location": "Room 1A", "owner": self.pantry_admin.contact,
                 "status": Event.Status.OPEN,
@@ -747,7 +774,6 @@ class Command(BaseCommand):
             Event.objects.get_or_create(
                 name=name,
                 defaults={
-                    "event_type": self.distribution,
                     "ministry": self.pantry if ministry == "pantry" else self.tax,
                     "start_time": now + days * DAY,
                     "end_time": now + days * DAY + 3 * HOUR,
@@ -763,7 +789,6 @@ class Command(BaseCommand):
             event, _ = Event.objects.get_or_create(
                 name=name,
                 defaults={
-                    "event_type": self.distribution,
                     "ministry": self.pantry if ministry == "pantry" else self.tax,
                     "start_time": now - days * DAY,
                     "end_time": now - days * DAY + 3 * HOUR,

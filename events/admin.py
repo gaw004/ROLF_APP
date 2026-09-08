@@ -10,26 +10,14 @@ from django.db.models import Count
 from simple_history.admin import SimpleHistoryAdmin
 
 from .forms import AudienceAdminForm
+from org.audience import Audience
+
 from .models import (
-    Audience,
     Event,
     EventRole,
-    EventType,
     Participation,
     ParticipationRole,
 )
-
-
-@admin.register(EventType)
-class EventTypeAdmin(admin.ModelAdmin):
-    list_display = ["name", "code", "is_active"]
-    list_filter = ["is_active"]
-    search_fields = ["name", "code"]
-
-    def get_readonly_fields(self, request, obj=None):
-        # Same split as Ministry: editable while adding, frozen afterwards.
-        # clean() covers everything that is not the admin.
-        return ["code"] if obj else []
 
 
 @admin.register(ParticipationRole)
@@ -77,13 +65,13 @@ class EventAdmin(SimpleHistoryAdmin):
     # them from this changelist.
     form = AudienceAdminForm
     list_display = [
-        "name", "ministry", "event_type", "status", "start_time", "end_time", "duration",
+        "name", "ministry", "status", "start_time", "end_time", "duration",
     ]
-    list_filter = ["status", "ministry", "event_type", "visible_to_outsiders"]
+    list_filter = ["status", "ministry", "visible_to_outsiders"]
     search_fields = ["name", "location"]
     date_hierarchy = "start_time"
-    autocomplete_fields = ["event_type", "ministry", "owner"]
-    list_select_related = ["ministry", "event_type"]
+    autocomplete_fields = ["ministry", "owner"]
+    list_select_related = ["ministry"]
     inlines = [EventRoleInline]
 
     def get_list_display(self, request):
@@ -161,7 +149,10 @@ class ParticipationAdmin(SimpleHistoryAdmin):
         "contact__legal_last_name", "contact__legal_first_name",
         "contact__preferred_name", "event_role__event__name",
     ]
-    autocomplete_fields = ["contact", "event_role", "consent_relationship"]
+    # ⚠️ `event_role` is **not** here any more: it is readonly below, and
+    #    configuring a picker for a field nobody can edit is a control that
+    #    does nothing — the shape this project keeps deleting.
+    autocomplete_fields = ["contact", "consent_relationship"]
     list_select_related = ["contact", "event_role__event", "event_role__role"]
     # ⚠️ The admin is a write path that exists without anybody writing code for
     #    it, and the guard that keeps served_as to one setter greps source —
@@ -176,4 +167,16 @@ class ParticipationAdmin(SimpleHistoryAdmin):
     #
     #    Corrections go through the action on the signups page, which calls
     #    services.set_served_as() and stamps declared_by=admin.
-    readonly_fields = ["served_as", "served_as_declared_by", "checked_in_method"]
+    #
+    # 🔴 `event_role` too, since 2026-09-08, and for a different reason from the
+    #    three above. Those are frozen because they record *who said so*; this
+    #    one is frozen because moving a row between roles changes **which fact
+    #    it states**, and does it past every rule that would object. A signup
+    #    carrying served_as=volunteer and 3.5 hours, re-pointed at an attending
+    #    role, passes full_clean() — the no-hours constraint keys on served_as,
+    #    and this row does not claim not_applicable — and afterwards the
+    #    ministry report counts 0 hours for it (it filters on the role's nature)
+    #    while /me/ counts 3.5 (it filters on served_as). One row, two ledgers,
+    #    no error. Signing somebody up for a different role is a new signup.
+    readonly_fields = ["served_as", "served_as_declared_by", "checked_in_method",
+                       "event_role"]

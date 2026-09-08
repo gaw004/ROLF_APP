@@ -51,11 +51,21 @@ def _menu_for(user, administered, foundation):
        ministry admins and may read every ministry's records. Somebody who is
        both needs to see which hat each page belongs to.
 
-    ⚠️ `Events I Manage` and `All Events` are the same view, and the foundation
-       one carries `?scope=all` deliberately — see events/views._scoped_events.
-       Somebody who is both keeps the managing view of their own ministries by
-       default, so without the parameter the foundation-wide entry would land on
-       a page showing only their own ministries while the label said "All".
+    🔴 **两个管理页 2026-09-03 从这个菜单里撤走了**（`Events I Manage`、
+       `Notices I Publish`、`All Events` 三格）。入口改成每一页标题行右端那颗
+       ⋮，加上仪表盘「Needs you」那张卡的出口。
+
+       ⚠️ **这是一次知情的收敛，不是又一次「没有东西指向它」。** 这个模块开头
+          列的那五个缺口正是后者，而本次会话刚补过第八次（foundation tier 的
+          `Notices I Publish` 从来就不在这个菜单里）。区别在于：那几次是
+          **谁都没注意到**，这一次是用户看着代价拍的板。
+
+       ⚠️ `?scope=all` 一并消失。它当初存在，是因为管理页有两种模式而两顶帽子
+          的人默认落在窄的那一种；现在那一页一张列表列全部、权限逐行判，
+          没有第二种模式可切了（events/views._scoped_events）。
+
+       ⚠️ 重启条件：有人反映找不到管理页。那时该加回来的**不一定**是菜单 ——
+          先问是不是那颗 ⋮ 太安静（触屏上它没有任何文字说明，这是已知代价）。
 
     Headings are entries too, rather than a nested structure: a flat list is what
     lets one loop number every item, which is the whole point (above).
@@ -63,8 +73,8 @@ def _menu_for(user, administered, foundation):
     # ⚠️ "Past Events" left this menu on 2026-08-17 along with the page itself.
     #    Events now starts at today rather than at "not started yet", so the
     #    one entry covers what the two used to; a volunteer's own finished
-    #    events are on My Signups, and any period at all is on All Events for
-    #    the tier that has it.
+    #    events are on My Signups, and any period at all is on the management
+    #    list for the tier that has it.
     if not user.is_authenticated:
         return [
             _link("Events", "events:event_list"),
@@ -73,7 +83,15 @@ def _menu_for(user, administered, foundation):
         ]
 
     menu = [
+        # ⚠️ 第一条，因为它是登录之后的落脚点 —— 别的每一条都答一个他带着来的
+        #    问题，只有这一条告诉他「有什么在等你」。
+        _link("Home", "dashboard:me"),
         _link("Events", "events:event_list"),
+        # ⚠️ Second, above My Signups, and the order is the argument. A notice is
+        #    the one thing on this menu somebody might not know they need to
+        #    read — everything else answers a question they arrived with. It is
+        #    not first because Events is what most people came for.
+        _link("Notices", "notices:notice_list"),
         _link("My Signups", "events:my_participations"),
         _link("My Profile", "accounts:profile"),
     ]
@@ -81,11 +99,6 @@ def _menu_for(user, administered, foundation):
     if administered:
         menu += [
             {"heading": "Ministry Admin"},
-            # No "New event" entry: event_manage_list already carries a
-            # "Publish a new event" button, gated on the same permission. A
-            # second entrance means the same condition written in two places,
-            # and those two eventually disagree.
-            _link("Events I Manage", "events:event_manage_list"),
             # ⚠️ The **manage** page, not the wall. The wall's entrance is the
             #    feather (the drifting ones, and the still one in the top bar),
             #    and putting a second door to it in the menu would give away the
@@ -98,15 +111,10 @@ def _menu_for(user, administered, foundation):
         ]
 
     if foundation:
-        menu += [
-            {"heading": "Foundation Admin"},
-            _link("All Events", "events:event_manage_list", "?scope=all"),
-        ]
+        menu += [{"heading": "Foundation Admin"}]
         # ⚠️ Only when they are not already a ministry admin, so that somebody
-        #    holding both tiers gets one entry rather than two identical ones.
-        #    Unlike `Events I Manage` / `All Events` — which carry different
-        #    query strings and land on genuinely different lists — this is the
-        #    same URL either way; the page itself widens for the foundation
+        #    holding both tiers gets one entry rather than two identical ones:
+        #    it is the same URL either way, and the page itself widens for the
         #    tier. Two entries pointing at one page reads as a bug.
         if not administered:
             menu.append(_link("Memories Photos", "gallery:manage"))
@@ -141,6 +149,10 @@ def navigation(request):
             "can_grant_ministry_admin": False,
             "is_ministry_admin": False,
             "can_see_all_events": False,
+            # ⚠️ 匿名分支也要给这个键。管理页对他是 302 到登录，但
+            #    `_event_nav.html` 的面包屑在**活动详情页**上，而那一页匿名可达 ——
+            #    少了它面包屑会渲染成一个空字符串的链接，而模板不报错。
+            "manage_list_name": "Events I Manage",
             "site_menu": _menu_for(AnonymousUser(), set(), False),
         }
 
@@ -162,6 +174,18 @@ def navigation(request):
         #    rather than by any test.
         "can_see_all_events": bool(administered) or foundation,
         "can_grant_ministry_admin": can_grant_ministry_admin(user),
+        # ⭐ **这一页叫什么，只在这里定一次**（2026-09-03）。
+        #
+        #    `events/manage/` 的标题、页头条和 `_event_nav.html` 的面包屑都读它。
+        #    面包屑此前读的是**逐场活动**的 `can_manage`（`event_access` 算的），
+        #    而列表页读的是页面级那个 —— 一张列表之后这两个不再同步：
+        #    两顶帽子的人在自己的活动上会看到「← Events I Manage」，
+        #    而那一页的标题写着「All Events」。同一个页面两个名字，
+        #    正是 events.tests 那条「one page should not have two names」钉的。
+        #
+        # ⚠️ 判据是「这一页列的是不是全部」，不是「你能不能改」——
+        #    两顶帽子的人两者都为真，而页面上列的确实是全部。
+        "manage_list_name": "All Events" if foundation else "Events I Manage",
     }
 
 

@@ -26,19 +26,19 @@ from contact.models import Contact, ContactQuerySet
 from core.images import draft_to, over_pixel_budget, stored_size, upright_size
 from core.notifications.base import EMAIL, SMS, Message, get_backend
 from core.timeutils import local_date_of, local_day, local_now
-from org.models import Assignment, Position
+from org.audience import Audience, on_the_books_exists, on_the_books_q
+from org.models import Assignment
 
 from . import tokens
 from .models import (
-    Audience,
     refuse_bad_audience,
     Event,
     EventNotification,
     EventRole,
     Participation,
     ParticipationRole,
-    on_the_books_exists,
-    on_the_books_q,
+    Session,
+    Source,
 )
 
 
@@ -56,6 +56,23 @@ class RoleFull(ValidationError):
     Its own class for the same reason as ConsentRequired: a view may want to
     tell this apart from an ordinary form error — and because "full" is not a
     mistake anybody made, it is an answer.
+    """
+
+
+class NotEligible(ValidationError):
+    """This place is not open to this person. L2's refusal.
+
+    ⚠️ **Its readers are the doors that are not the website.** Somebody going
+       through the signup page never reaches it: SignUpForm's dropdown is
+       narrowed to the roles that are theirs, so a role they may not have is
+       not a choice and the form refuses it first (a hand-made POST therefore
+       gets an ordinary "Select a valid choice", not a 500). What is left is
+       every other door — an admin entering somebody from a paper list, an
+       importer, batch three's generator — and those are exactly the ones with
+       nobody watching, which is why the rule is here rather than on the form.
+
+    Its own class for the same reason as RoleFull: "not for you" is an answer,
+    not a mistake, and a caller may want to tell it apart from a form error.
     """
 
 
@@ -205,6 +222,22 @@ def is_on_the_books(contact, event):
     return _on_the_books(event).filter(contact=contact).exists()
 
 
+def eligible(contact, event_role):
+    """May this person sign up for this place? L2.
+
+    One row's form of EventRoleQuerySet.for_audience(), and deliberately
+    nothing more than that: the three branches are written once, in
+    org.audience.AudienceQuerySetMixin, and everything that asks this question
+    — the dropdown, the roles table, this gate — asks the same one. Spelling
+    the disjunction out again here is the second implementation that mixin's
+    docstring exists to prevent.
+
+    ⚠️ `.exists()`, so a person holding posts in two ministries at once is
+       asked "is there a qualifying tenure", never "which one is it" (D32).
+    """
+    return EventRole.objects.filter(pk=event_role.pk).for_audience(contact).exists()
+
+
 def default_served_as(contact, event_role, *, on_the_books=None):
     """(what to record, whether to put the question to them) for this signup.
 
@@ -323,6 +356,10 @@ def set_served_as(participation, value, *, declared_by):
 def sign_up(*, contact, event_role, consent=None, served_as=None):
     """Sign `contact` up for `event_role`. Returns the new Participation.
 
+    Three gates, in this order: may they have this place at all (L2), is there
+    room in it, and — for a minor — is there consent. The order is the order in
+    which the answers stop being useful; see each one.
+
     ⚠️ This is a hint layer, not enforcement, and is not dressed up as more.
        The consent rule spans two tables — the age is on Contact, the signup is
        here — so no CheckConstraint can express it and bulk_create walks
@@ -356,6 +393,34 @@ def sign_up(*, contact, event_role, consent=None, served_as=None):
        row predates D38", and nothing else may be allowed to mean it.
     """
     consent = dict(consent or {})
+
+    # 🔴 The eligibility gate (L2, 2026-08-29). Until this line existed the three
+    #    audience columns on EventRole were written by every door and read by
+    #    nothing: an outside volunteer who knew a role's id could put their name
+    #    down for a place the foundation had marked staff-only, and the failure
+    #    was silent on both sides.
+    #
+    # ⚠️ **Before the capacity gate, deliberately.** "That place is not open to
+    #    you" is the truer of the two answers, and answering "it is full" first
+    #    sends somebody off to wait for a place that would never have been
+    #    theirs however many people withdrew.
+    #
+    # ⚠️ It applies to a **re-signup after cancelling** too, further down. That
+    #    is a behaviour change to the path fixed in the browser on 2026-08-19
+    #    (changing your mind must not be permanent), and it is the right one:
+    #    coming back is a fresh act of joining, and if the role has been narrowed
+    #    since, it is no longer a place they may take. Pinned by its own test.
+    #
+    # ⚠️ Still a hint layer, not a lock — the same D14 caveat as the two gates
+    #    below. The columns are on two tables (plus a many-to-many), so no
+    #    CheckConstraint can express this and bulk_create walks past it.
+    if not eligible(contact, event_role):
+        raise NotEligible({
+            "event_role": f"“{event_role.role.name}” is not open to "
+                          f"{contact}. That place is for a different group of "
+                          "people — check who the role is open to, or pick "
+                          "another one.",
+        })
 
     # 🔴 The capacity gate (2026-08-19). Until this line existed, `needed_count`
     #    fed the "understaffed" reports and **stopped nobody**: a job wanting
@@ -1012,15 +1077,20 @@ def ministry_staff_participation(event):
        for about an hour; see 02-roadmap.md「计划外（B12）」.
     """
     on = local_date_of(event.start_time)
-    on_the_books_here = Assignment.objects.active(on=on).filter(
-        # ⚠️ No condition on compensation, and its absence is the whole of this
-        #    step. It said `PAID` for exactly one commit — long enough for the
-        #    axis split to change no answers — and deleting that line is what
-        #    changed R8's answer. See the docstring above.
-        position__kind=Position.Kind.STAFF,
-        position__ministry=event.ministry,
-        position__is_active=True,
-    )
+    # ⚠️ The definition of "on the books" comes from on_the_books_q(), never a
+    #    second spelling of it — that function's own docstring says it was
+    #    extracted so its callers would be callers rather than copies, and this
+    #    was the fourth shape and the only copy (fixed 2026-09-08). The two
+    #    agreed on the day; agreeing is not the same as being one rule, and the
+    #    way this one would have parted company is R8 quietly counting a
+    #    different set of people from the report beside it.
+    #
+    # ⚠️ No condition on compensation, and its absence is the whole of this
+    #    step. It said `PAID` for exactly one commit — long enough for the axis
+    #    split to change no answers — and deleting that line is what changed
+    #    R8's answer. See the docstring above.
+    on_the_books_here = Assignment.objects.filter(
+        on_the_books_q(on), position__ministry=event.ministry)
     return (
         Participation.objects.filter(
             event_role__event=event,
@@ -1048,7 +1118,7 @@ def events_in_period(start, end, ministry=None):
 
     events = (
         Event.objects.in_period(start, end)
-        .select_related("ministry", "event_type")
+        .select_related("ministry")
         .annotate(role_count=Count("roles", distinct=True))
     )
     return events.filter(ministry=ministry) if ministry is not None else events
@@ -1278,9 +1348,15 @@ def ministry_report(events):
     #    it is judged on its interpreter, not on its seats.
     helping_roles = EventRole.objects.exclude(
         role__nature=ParticipationRole.Nature.ATTENDING)
+    # ⚠️ Exists, not a join on roles. An event with three helping roles comes
+    #    back three times from the join — today the surrounding set() absorbs
+    #    that, so the answer is right by accident of its container rather than
+    #    by the query. It is the shape 06-roadmap L2.2 records as a 🔴, and the
+    #    one with_shortfall() and with_capacity() each chose Exists to avoid.
     staffable = set(
         events.filter(
-            roles__in=helping_roles.filter(needed_count__isnull=False),
+            models.Exists(helping_roles.filter(
+                event=models.OuterRef("pk"), needed_count__isnull=False))
         ).values_list("pk", flat=True)
     )
     short_events = set(
@@ -1913,6 +1989,104 @@ def create_participation_role(name, *, nature):
     role.full_clean()
     role.save()
     return role
+
+
+def hours_recorded_against(role):
+    """Total hours on this role's signups, as a phrase, or "" when there are none.
+
+    ⚠️ Returns the sentence fragment rather than a number, because the caller
+       needs "3.5 hours" and "1 hour" and the plural rule is not the caller's
+       business. Empty string is falsy, so `if hours_recorded_against(role)`
+       reads as the question it is.
+
+    Its one reader is role_delete, which refuses when this is non-empty: hours
+    are records that have already been reported, and EventRole cascades into
+    Participation, so deleting the role deletes them with nothing to say so.
+    """
+    total = (
+        Participation.objects.filter(event_role=role)
+        .aggregate(total=Sum("hours"))["total"] or 0
+    )
+    if not total:
+        return ""
+    # ⚠️ Not `:g` and not `.normalize()`. A Decimal keeps its trailing zeros, so
+    #    `:g` prints "3.50"; normalize() turns 10.00 into 1E+1. Fixed places,
+    #    then strip, is the one that reads right at both ends.
+    text = f"{total:.2f}".rstrip("0").rstrip(".")
+    return f"{text} hour" + ("" if total == 1 else "s")
+
+
+def signups_left_outside(event):
+    """How many people hold a signup this event's audience no longer covers.
+
+    Narrowing an audience is allowed to strand people — a role it would strand
+    is refused (refuse_wider_than_event), a *person* it strands is not, because
+    the signup they already hold is not taken away from them (L2.2: narrowing
+    takes away discovery, never a row you already hold). But the admin who just
+    narrowed it should be told, and this counts them.
+
+    ⚠️ It counts and stops there. It does not cancel anybody, does not write,
+       and does not point at a control for doing so — as of 2026-09-08 nothing
+       in this system can withdraw somebody else's signup, and that is
+       deliberate (the foundation tier holds view_participation only, and
+       ministry admins cannot reach the admin site at all). A message offering
+       an action that does not exist is worse than no message. See deferred.md.
+
+    ⚠️ The sibling of `EventQuerySet.for_audience()`, and the two have to agree.
+       The hard half — what "on the books" means — is not restated: it comes
+       from `on_the_books_q()`, the same call for_audience makes. What is
+       restated is the three-way OR, and only because this asks the question
+       from the other end (which people, for one event; not which events, for
+       one person). If for_audience ever grows a fourth branch, this grows one
+       too.
+
+    ⚠️ Two queries regardless of how many people signed up, rather than asking
+       for_audience() once per person. Cancelled rows are not counted: that
+       person already said they are not coming.
+    """
+    holders = set(
+        Participation.objects.filter(event_role__event=event)
+        .exclude(status=Participation.Status.CANCELLED)
+        .values_list("contact_id", flat=True)
+    )
+    if not holders:
+        return 0
+
+    on = local_date_of(event.start_time)
+    tenures = Assignment.objects.filter(
+        on_the_books_q(on), contact_id__in=holders)
+    on_the_books = set(tenures.values_list("contact_id", flat=True))
+    in_a_ticked_ministry = set(
+        tenures.filter(position__ministry__in=event.visible_to_ministries.all())
+        .values_list("contact_id", flat=True))
+
+    covered = set(in_a_ticked_ministry)
+    if event.visible_to_outsiders:
+        covered |= holders - on_the_books
+    if event.visible_to_all_staff:
+        covered |= on_the_books
+    return len(holders - covered)
+
+
+def add_session(event, *, start_time, end_time, source=Source.MANUAL):
+    """Put one meeting on a run. Returns the new Session.
+
+    The single programmatic way in, so the rule that a meeting falls inside its
+    run's own dates holds for code as well as for forms. `Session.clean()` is
+    where that rule is written; this function is what makes `full_clean()`
+    actually get called on a path that is not a ModelForm — D14's point being
+    that a rule nothing calls is a rule nothing enforces.
+
+    ⚠️ Until L5.6 its only callers are tests. Said plainly rather than left to
+       be discovered: the generator that will schedule a whole course is the
+       reader this exists for, and it is three steps away. The admin does not
+       need it — a ModelForm calls `full_clean()` on its own.
+    """
+    session = Session(
+        event=event, start_time=start_time, end_time=end_time, source=source)
+    session.full_clean()
+    session.save()
+    return session
 
 
 # --- P6: telling people the event changed --------------------------------

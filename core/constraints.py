@@ -48,8 +48,7 @@ CONSTRAINT_FIELD = {
     # org.MinistryRole
     "ministryrole_duplicate_grant": "start_date",
     "ministryrole_end_before_start": "end_date",
-    # events.EventType / events.ParticipationRole
-    "eventtype_code_taken": "code",
+    # events.ParticipationRole
     "participationrole_code_taken": "code",
     # events.Event
     "event_end_before_start": "end_time",
@@ -63,6 +62,13 @@ CONSTRAINT_FIELD = {
     "participation_hours_when_not_applicable": "hours",
     "participation_checkout_before_checkin": "checked_out_at",
     "participation_absent_after_checkin": "status",
+    # events.Session
+    #
+    # ⚠️ The duplicate lands on "start_time" rather than on "event": the event
+    #    is the page somebody is already on when they add a meeting, so it is
+    #    never the box they got wrong — the time is.
+    "session_duplicate_start": "start_time",
+    "session_end_before_start": "end_time",
     # core.HomePage
     #
     # ⚠️ One constraint covers both halves of the framing, so the message has to
@@ -70,6 +76,12 @@ CONSTRAINT_FIELD = {
     #    starts. If that ever reads wrong the fix is two constraints, not a
     #    cleverer mapping.
     "homepage_focus_out_of_range": "hero_focus_x",
+    # notices.Notice
+    #
+    # ⚠️ On "comes down" rather than "goes up": the two dates are entered in
+    #    reading order, so the second one is the one that was just typed and
+    #    the one the person is still looking at.
+    "notice_window_backwards": "stops_showing",
 }
 
 

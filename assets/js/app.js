@@ -1375,6 +1375,112 @@ function watchPageBar() {
 watchPageBar();
 
 // ---------------------------------------------------------------------------
+// 行内「⋯」菜单落在触发器旁边（2026-09-03 设计评审第 3 + 6 条）
+//
+// ⭐ **纯增强。** 开合、点外面关、Esc 关全是 `popovertarget` 给的，一行 JS 都不需要
+//    （D24：菜单里装的是这一行仅有的几个写操作，不能只有 JS 一条路）。
+//    这段只管**位置**：没有它，popover 落在规范的默认锚定 —— 视口正中央 ——
+//    菜单照样能开、能提交，只是位置在屏幕中间。
+//
+// ⚠️ 用 `beforetoggle` 而不是 `toggle`：要在它**画出来之前**把坐标写上去，
+//    否则会看到它先在屏幕中间闪一下再跳到旁边。
+//
+// ⚠️ 坐标是 `position: fixed` 的坐标，所以直接用 `getBoundingClientRect()`，
+//    不加 scrollY —— top layer 里的元素不跟着页面滚。
+//    ⚠️ 也正因为它不跟着滚，滚动时菜单会留在原地。浏览器对 `popover=auto` 的
+//       处理是留着（不像 `<select>` 会跟随），而这里可以接受：菜单一开就是要
+//       马上点的东西，而滚动本身不是关它的手势。
+//
+// ⚠️ 右边和下边都要兜底：最后一列的菜单往左够不到边就贴右缘，
+//    最后几行的菜单往下放不下就翻到触发器上方。少了这两句，表格最右下角那一行
+//    的菜单有一半在视口外 —— 而那一行恰恰是最常出现的位置（人滚到底再操作）。
+function positionRowMenus() {
+  const GAP = 6;
+  const FALLBACK_WIDTH = 192;          // .row-menu 的 min-width（12rem）
+
+  const place = (panel) => {
+    const trigger = document.querySelector(`[popovertarget="${panel.id}"]`);
+    if (!trigger) return;
+    const at = trigger.getBoundingClientRect();
+    const box = panel.getBoundingClientRect();
+    const width = box.width || FALLBACK_WIDTH;
+
+    let left = at.right - width;
+    if (left + width > window.innerWidth - GAP) left = window.innerWidth - width - GAP;
+    if (left < GAP) left = GAP;
+
+    // ⚠️ 只有量得到高度时才翻面（见下面 beforetoggle / toggle 两段的分工）。
+    let top = at.bottom + GAP;
+    if (box.height && top + box.height > window.innerHeight - GAP) {
+      top = at.top - box.height - GAP;
+    }
+    if (top < GAP) top = GAP;
+
+    panel.style.left = `${left}px`;
+    panel.style.top = `${top}px`;
+  };
+
+  const mine = (event) => {
+    const panel = event.target;
+    return panel?.classList?.contains("row-menu") ? panel : null;
+  };
+
+  // 🔴 **第三个参数 `true`（捕获阶段），少了它这段一次都不会跑。**
+  //
+  //    `beforetoggle` / `toggle` 在 popover 上**不冒泡**（ToggleEvent 的
+  //    `bubbles` 是 false），所以挂在 document 上的普通监听器永远收不到。
+  //    而**捕获阶段对不冒泡的事件照样走**（window → target 那一趟总是发生）。
+  //
+  //    ⚠️ 踩过：第一版没写这个 true，表现是菜单能开、能点、什么都不报错，
+  //       只是永远落在视口左上角 (0,0) —— 因为 `inset: auto` 已经把
+  //       UA 的居中清掉了，而没有人写 top/left。浏览器里看出来的。
+  document.addEventListener("beforetoggle", (event) => {
+    if (event.newState === "open") {
+      const panel = mine(event);
+      if (panel) place(panel);
+    }
+  }, true);
+
+  // ⚠️ 两段分工：`beforetoggle` 时面板还是 `display: none`，**量不到高度**，
+  //    所以那一次只定左右和「放在触发器下面」；等 `toggle`（已经显示）再量一次，
+  //    需要的话翻到上面去。常见情况下两次算出同一个值，屏幕上没有位移。
+  //    ⚠️ 少了第二段，表格最后几行的菜单会有一半在视口外 —— 而那恰恰是最常
+  //       操作的位置（人滚到底再动手）。
+  document.addEventListener("toggle", (event) => {
+    if (event.newState === "open") {
+      const panel = mine(event);
+      if (panel) place(panel);
+    }
+  }, true);
+
+  // 🔴 **开着的时候还要跟着滚**（2026-09-04 修）。
+  //
+  //    `.row-menu` 是 `position: fixed`，坐标是开的那一刻按触发器算出来的一对
+  //    视口坐标 —— 而 popover 不会因为滚动而关闭。于是开着菜单再滚一下，
+  //    面板钉在原地、它那一行走掉了，屏幕上它**贴在了另一行旁边**。
+  //    ⚠️ 这不只是难看：这张表里的动作是 Take down / Back to draft，
+  //       一个看起来指着隔壁行的菜单，是会让人对着错的那一行点下去的。
+  //       （点下去仍然作用在正确的那一行 —— 表单里是它自己的 pk ——
+  //       所以这个毛病不会有任何报错，只会让人以为自己点错了。）
+  //
+  // ⚠️ `capture: true`：滚动事件在元素上**不冒泡**，而这张表自己就是一个滚动
+  //    容器（`.table-wrap` 是 `overflow-x: auto`）。少了它，只有整页滚动会被
+  //    接住，表格内部横向滚动时面板照样掉队。
+  //
+  // ⚠️ `passive: true`：这两个监听器一行都不碰事件，声明出来浏览器才不用等
+  //    它们决定要不要 preventDefault —— 滚动手感的差别就在这里。
+  const followOpenMenus = () => {
+    document.querySelectorAll(".row-menu").forEach((panel) => {
+      if (panel.matches(":popover-open")) place(panel);
+    });
+  };
+  window.addEventListener("scroll", followOpenMenus, {passive: true, capture: true});
+  window.addEventListener("resize", followOpenMenus, {passive: true});
+}
+
+positionRowMenus();
+
+// ---------------------------------------------------------------------------
 // 「Clear」：清筛选，别的什么都不动（2026-08-28）
 //
 // 🔴 这颗按钮此前是一个普通链接，点下去**整页重新加载** —— 于是右边正开着的

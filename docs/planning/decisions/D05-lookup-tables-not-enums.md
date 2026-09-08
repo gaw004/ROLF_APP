@@ -6,8 +6,12 @@
 
 `RelationshipType` 是数据库表。基金会以后想加"推荐人"、"校友"这类关系，
 在 admin 里加一行就行 —— 不用改代码、不用写迁移、不用重新部署。
-**这是"需求变了还能用"最直接的体现**，后续 Ministry、Skill、活动类型、捐款类型、
+**这是"需求变了还能用"最直接的体现**，后续 Ministry、Skill、捐款类型、
 付款方式一律照此办理。
+
+> ⚠️ 「活动类型」原来也在这一行里，2026-09-04 删掉了 —— 不是判错了类，是那张表
+> 从头到尾没有读者，最后整张删了（[06-roadmap L2.6](../06-roadmap.md#l26-eventtype-上页面)）。
+> 判据留在这里：字典表答的是「以后想加一行不用改代码」，它答不了「谁会来读这一行」。
 
 > 注意"理事会成员"**不是**关系类型 —— 理事走 `kind=board` 的 `Position` + 一行 `Assignment`（见 D11）。
 > 判断方法：这个人在基金会担任的职务 → `Position` / `Assignment`；出事时该打谁的电话 → `EmergencyContact`。
@@ -28,13 +32,35 @@
 
 | `TextChoices`（代码按它分支） | 字典表 + `code`（纯标签） |
 |---|---|
-| `Contact.contact_type`、`Position.kind`、`Assignment.status`、`Event.status`、`Participation.status`、`Participation.consent_method`、`MinistryRole.role`、`EventNotification.reason`、`BackgroundCheck.status`（已推迟） | `RelationshipType`、`Ministry`、`EmploymentType`、`EventType`、`ParticipationRole`、`Skill`（已推迟）、Phase D 的 `financial_type` / `payment_method` |
+| `Contact.contact_type`、`Position.kind`、`Assignment.status`、`Event.status`、`Participation.status`、`Participation.consent_method`、`MinistryRole.role`、`EventNotification.reason`、`BackgroundCheck.status`（已推迟） | `RelationshipType`、`Ministry`、`EmploymentType`、`ParticipationRole`、`Skill`（已推迟）、Phase D 的 `financial_type` / `payment_method`<br>⚠️ `EventType` 2026-09-04 从这一列删掉，表也删了：见上面那条 |
 
 > **2026-07-29 晚补进三个**：`Participation.consent_method`、`MinistryRole.role`、
 > `EventNotification.reason`。本表自称"当前分配"，而这三个新的 `TextChoices`
 > 一直没登记；`financial_type` / `payment_method` 的 Phase 编号也随 C / D 对调改了。
 
 > `kind` 挂在 `Position` 而不是 `Assignment`，理由见 D11 —— 空缺编制也必须说得出自己是有薪岗还是志愿岗。
+
+## 第三种形状：**字典表上的一个枚举列**（2026-08-21 补）
+
+上面那张表把每个分类分给两边之一，而有一类东西两边都不是：一张由基金会自由增删的
+字典表，它的**每一行属于哪一档由代码决定**。这不是例外，是同一条判定规则用了两次 ——
+「行」不需要代码 branch，「档」需要。
+
+两个实例，形状一样：
+
+| 表 | 行由谁定 | 那一列 | 代码为什么必须 branch 它 |
+|---|---|---|---|
+| `RelationshipType` | 基金会 | `usable_as_emergency_contact` | 紧急联系人的下拉要按它筛 |
+| `ParticipationRole` | 基金会 | `nature`（`helping` / `attending`） | 五处：默认身份、拒绝工时、报表两个分母、`people_served` |
+
+⚠️ `nature` 是 `TextChoices` 而**不是**第二张字典表，判据就是上面那句：
+它有五处代码分支。基金会可以随时加一行「ESL 座位」，但不能发明第三种「性质」——
+发明了，那五处代码没有一处知道该拿它怎么办。
+
+⚠️ 反过来说也成立、也值得写下来：`ParticipationRole` 本身仍然是字典表，
+因为「有哪些工种」没有任何代码 branch。同一张表上两件事各按自己的判据落。
+
+全文见 [`../participants.md`](../participants.md) 第六节 L1。
 
 ## 通则：每张字典表都带一个唯一且不可改的 `code`
 

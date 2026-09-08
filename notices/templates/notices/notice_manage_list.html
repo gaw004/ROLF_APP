@@ -1,0 +1,154 @@
+{% extends "core/base.html" %}
+{% block title %}Notices I publish{% endblock %}
+{% block main_width %}max-w-5xl{% endblock %}
+
+{% comment %}
+自己的一页（2026-09-03）。在这之前它也是自己的一页，缺的是**看得见的入口**：
+标题在版心里，而通向它的唯一线索是菜单里那一格。现在它是页头条上的第二格，
+和 /notices/ 那一页共用同一条 bar —— 来回点的时候整条 bar 纹丝不动，
+动的只有那条下划线。
+
+🔴 **两处都有字，而 `<h1>` 只有版心里那一个**（2026-09-03 第二轮改）。第一版把
+   版心里那个删掉了，只剩一颗孤零零的按钮；页头条那两格现在是普通导航链接，
+   标题回到了它原来的位置和原来的那一行上。
+{% endcomment %}
+{% block page_bar %}
+  {% comment %}
+  **两格：Notices（回去）· 这一页**（2026-09-03 第四轮）。
+
+  🔴 第三轮收成过一格，而那样**回不去** —— 从 /notices/ 点 ⋮ 进来之后，
+     这条 bar 上没有任何东西通向 /notices/。
+
+  ⚠️ 而 /notices/ 那一页**不画**这一格：两格是「你在哪儿 + 从哪儿来」，
+     不是切换器。去管理页的入口是那一页标题行右端那颗 ⋮。
+  {% endcomment %}
+  {% url 'notices:notice_list' as board_url %}
+  {% url 'notices:notice_manage_list' as here_url %}
+  {% include "core/components/page_bar.html" with title="Notices I publish" url=here_url parent="Notices" parent_url=board_url %}
+{% endblock %}
+
+{% block content %}
+  {% comment %}
+  ⭐ **「Put up a notice」只在这一页有**（用户 2026-09-03）。/notices/ 那一页
+     曾经也有一颗一模一样的，条件也一样（`can_reach_notice_manage`）——
+     同一个动作的两个入口，而其中一个画在一个纯粹用来读的页面上。
+
+  ⚠️ 标题左、按钮右，同一行 —— 和 2026-09-03 之前逐像素相同。这一行里那个
+     `<h1>` 是整页唯一的一个：页头条那两格是 `<nav>` 里的链接。
+  {% endcomment %}
+  <div class="mb-6 flex flex-wrap items-center justify-between gap-3">
+    <h1 class="text-2xl font-semibold">Notices I publish</h1>
+    {% url 'notices:notice_create' as create_url %}
+    {% include "core/components/button.html" with label="Put up a notice" href=create_url variant="primary" %}
+  </div>
+
+  {% if notices %}
+    {% comment %}
+    ⚠️ `.table-wrap`，不是 Tailwind 的 `overflow-x-auto`。全站每一张表的外壳都是
+       它 —— 边框、圆角、表头底色、单元格内边距全在 app.css 那一段里，而它的
+       圆角特意和 `.card` 取同一个值。第一稿这里写的是 `overflow-x-auto`，
+       浏览器里就是一张没有底、没有边、表头和内容对不齐的表 ——
+       测试全绿，页面不对。
+    {% endcomment %}
+    <div class="table-wrap">
+      {% comment %}
+      ⚠️ `notice-rows` 只有一个用途：给「格子里的东西竖直居中」那条规则一个
+         作用域（app.css）。`.table-wrap > table` 是全站十张表共用的，
+         写在那儿会跟着跑到出勤页、报表页上去 —— 而那些表顶对齐才是对的。
+         同 `manage-events` 那个类的理由。
+      {% endcomment %}
+      <table class="notice-rows">
+        {% comment %}
+        ⚠️ 最后一格**不是空的**（2026-09-03 设计评审第 4 条）。原来是 `<th></th>`，
+           读屏软件会念出一个没有名字的列 —— 屏幕上完全正常，所以它躺了很久。
+           `sr-only` 让它只对读屏存在，视觉上仍然是一格空白。
+        {% endcomment %}
+        <thead><tr><th>Notice</th><th>Ministry</th><th>On the board</th>
+          <th><span class="sr-only">Actions</span></th></tr></thead>
+        <tbody>
+          {% for notice in notices %}
+            <tr>
+              {% comment %}
+              一格两行：上面主信息、下面次信息 —— 照上一版管理列表那次改动的样式
+              （「时间回到表格里一格两行」），主信息不藏进只有鼠标看得见的地方。
+              {% endcomment %}
+              <td>
+                <div class="font-medium">{{ notice.title }}</div>
+                <div class="text-xs text-ink-600 dark:text-ink-300">{{ notice.owner }}</div>
+              </td>
+              <td>{{ notice.ministry.name }}</td>
+              <td>
+                {% comment %}
+                🔴 三种状态各说各的，不合并。「还没上板」和「已经下板」在库里都是
+                   「不在 showing() 里」，而对写它的人是两件完全相反的事 ——
+                   一件还没发生，一件已经过去。D27：没有和没算不能长得一样。
+                {% endcomment %}
+                {% if notice.is_draft %}
+                  {% include "core/components/badge.html" with label="Draft" %}
+                {% elif notice.is_showing %}
+                  <div>Until {{ notice.stops_showing|date:"j M Y" }}</div>
+                  <div class="text-xs text-ink-600 dark:text-ink-300">Showing now</div>
+                {% elif notice.is_scheduled %}
+                  <div>From {{ notice.starts_showing|date:"j M Y" }}</div>
+                  <div class="text-xs text-ink-600 dark:text-ink-300">Not up yet</div>
+                {% else %}
+                  <div>{{ notice.stops_showing|date:"j M Y" }}</div>
+                  <div class="text-xs text-ink-600 dark:text-ink-300">Came down</div>
+                {% endif %}
+              </td>
+              {% comment %}
+              🔴 **一行只留一个主操作，其余进「⋯」**（2026-09-03 设计评审第 3 条）。
+
+                 原来这一格是 `Edit`（一个不起眼的文字链接）+ 一颗实心药丸，
+                 而那颗药丸在「正在展示」的行上是**红色**的 —— 权重正好反了：
+                 最高频、最安全的 Edit 最不显眼，低频、有后果的 Take down 是
+                 整行最抢眼的东西，而且每一行都有一颗，一整列红色之后红色
+                 什么都不说了。
+
+              ⚠️ 活动管理页那六个 Go to 链接**曾经也收进过同一个组件**，当天撤回
+                 （用户：「我只想要六个 Go to 链接回到表格里」）。公告这边留着 ——
+                 两边的理由本来就是两件事：那边是「300 个链接太吵」，
+                 这边是「权重反了、一整列红色」。
+              {% endcomment %}
+              <td class="whitespace-nowrap">
+                <div class="flex items-center justify-end gap-1">
+                  {% url 'notices:notice_update' notice.pk as edit_url %}
+                  {% include "core/components/button.html" with label="Edit" href=edit_url variant="secondary" hit=1 %}
+                  {% comment %}
+                  ⚠️ `label` 带上公告的名字。只写 "Actions" 的话，读屏用户在这一页
+                     上听到的是五十遍一模一样的「Actions 按钮」，分不出哪个是哪一行。
+
+                  🔴 **已经下架的那一档不画这颗「⋯」**（`has_actions`）。
+                     第一版画了，点开是一个**空面板** —— 浏览器里看出来的，
+                     而当时所有测试都是绿的：每一条断言的都是「该有的项在不在」，
+                     没有一条问过「会不会一项都没有」。
+                     ⚠️ 条件问的是模型上那个属性，不是在这里拼一遍
+                        `is_draft or is_showing or is_scheduled` —— 菜单内容那份
+                        模板里已经有一份同样的话，抄第二份迟早分家。
+                  {% endcomment %}
+                  {% if notice.has_actions %}
+                    {% include "core/components/row_menu.html" with id=notice.pk label="Actions for "|add:notice.title items="notices/_notice_menu_items.html" %}
+                  {% endif %}
+                </div>
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% comment %}
+    ⚠️ 50 条一页（`MANAGED_NOTICES_PER_PAGE`），和活动管理列表同一个数。
+       这一页最先撑不住的是 foundation admin：他拿到的是全部 ministry、
+       从第一天起、连已经下架的都在的那一份。
+
+    ⚠️ 同样不传 `target` —— 这一页整页渲染，没有 `#event-results` 那样的片段。
+    {% endcomment %}
+    {% include "core/components/pagination.html" %}
+  {% else %}
+    {% comment %}
+    ⚠️ 这里是「你还差一步」那一种，所以给下一步动作 —— 和 /notices/ 那一页的空态
+       正好相反，那边是「一切照常」，不给动作。同一个组件，两种空。
+    {% endcomment %}
+    {% include "core/components/empty.html" with message="You have not put up any notices yet." action_label="Put up a notice" action_href=create_url %}
+  {% endif %}
+{% endblock %}

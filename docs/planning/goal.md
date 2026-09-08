@@ -22,6 +22,8 @@
 > | [`phase-b.md`](phase-b.md) | Phase B 的模型表 + 全部实现要点 + 测试清单 + 验收 | 查 Phase B 建的表和它们的判据 |
 > | [`02-roadmap.md`](02-roadmap.md) | Phase B 的**实施步骤** B0–B13 | 查历史 |
 > | [`progress.md`](progress.md) | 已完成的部分（数据核心 / Phase A）+ Phase C / D 的计划 | 想知道"走到哪了" |
+> | [`participants.md`](participants.md) | **参与者六层框架**（性质 · 资格 · 可见性 · 记账 · 时间）· 第二批需求原文（九条）· 行业对照 · 已知缺口 | 想知道"活动上的人分几种、谁看得见谁报得上" |
+> | [`06-roadmap.md`](06-roadmap.md) | **参与者 L1–L5 的实施步骤**，三批交付 | 做参与者那一段动手写代码时 |
 > | [`deferred.md`](deferred.md) | 明确推迟的事 + 各自的重启条件 | 手痒想做某件事时 |
 > | [`revisions.md`](revisions.md) | 全部修订记录（2026-07-29 / 07-28 各轮） | 想知道"这条为什么改口" |
 > | [`01-roadmap.md`](01-roadmap.md) | Phase A 的实施手册，已完成 | 查历史 |

@@ -832,6 +832,28 @@ class EventRoleQuerySet(models.QuerySet):
 
 ##### 可见性与生命周期：两个谓词，不是一个 `status`（2026-07-29 晚新增）
 
+> ### ⚠️ 2026-08-26 起是**三个**谓词，不是两个。本节只讲前两个
+>
+> 这一节把「可见性」定义成「志愿者能不能看到它」，而当时那个问题只有一个答案：
+> 已发布的活动，任何登录账号都看得见。L3 加了第三个谓词回答**「是给他看的吗」**——
+> `EventQuerySet.for_audience(contact)`，三个勾（外部人员 / 全体在编 / 各 ministry）。
+>
+> 三者永远分开写、永远不合并：`visible_to_participants()` 答「发布了吗」，
+> `open_for_signup()` 答「还收报名吗」（状态 + 时钟），`for_audience()` 答
+> 「是给他看的吗」。合并任何两个，失败方式都是静默的 —— 而两条守卫
+> （`AudienceIsAskedGuardTests` / `RolesAreNarrowedGuardTests`）强制第一个和
+> 第三个必须同时出现。
+>
+> 还有一层在角色上：`EventRole` 有自己的同一组勾，答的是**「谁报得上」**——
+> 而「看得见 ≠ 报得上」是那一轮的中心句。约束是角色的范围 ⊆ 活动的范围。
+>
+> 全文见 [`participants.md`](participants.md) 第六节 L2/L3 和
+> [`06-roadmap.md`](06-roadmap.md) 批二。
+>
+> ⚠️ 另有两处本节及邻近段落里已经过期的写法，一并记下不再逐处改：
+> `Event.status` 的 `confirmed` 2026-08-19 已改名 `full`（迁移 0011），
+> `event_type` 那一列 2026-09-04 连表一起删了。
+
 > 本节是一次自查的结果，改的是 `Event.status` 的用法，不是它的取值。
 > 起因：全文（含 `02-roadmap.md`）把志愿者侧的查询一律写成 `filter(status=OPEN)`。
 

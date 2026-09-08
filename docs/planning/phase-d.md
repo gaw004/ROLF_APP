@@ -58,6 +58,20 @@ Phase C 之前的判据是「是不是那 14 条需求的前置条件」。
 ⚠️ 它要写进演示脚本 —— 这件事是基金会自己录数据时每天都要判一次的，
 而判错的成本不是一行数据，是**所有按"在编"分组的数字**。
 
+## ⚠️ 和参与者那一轮（`participants.md` / `06-roadmap.md`）的关系（2026-09-08 补）
+
+本阶段执行到 D1.3 就停了，中间插进了一整轮「参与者」。两轮有三处相邻，写在这里
+免得两份 roadmap 各说各的：
+
+| 本阶段的步骤 | 关系 |
+|---|---|
+| **D1.4**（R6/R7 换成 `served_as=volunteer` 一个 filter） | **正交**。参与者批一让 `attending` 的行根本没有工时，本步是把**剩下的**工时拆成志愿 / 工作。两件事作用在不同的行上，先做哪个都行。⚠️ 但报表的工时口径已经变了（分母收窄、多了 `people_served`、标题改成 Hours per helper），动手前先读 [D27](decisions/D27-ministry-report.md) 那个 2026-08-21 的框 |
+| **D2a** 的班次生成器 | **别再写一个** —— [`06-roadmap.md`](06-roadmap.md) L5.5 的 `events/recurrence.py` 是纯函数展开器，docstring 里就写着本阶段的 `WorkPattern` 是它第三个调用方。分歧只在「生成到哪一天为止」（活动要结束条件、班次是滚动窗口 + cron，判据见 [D33](decisions/D33-work-schedule.md) 末节），不在怎么展开规则 |
+| **D3** 指派与代录 | 会给 `Participation` 加两档状态，和参与者那一轮的 `nature` / `served_as` / 受众三列**不碰同一列** |
+
+⚠️ 出现出入时以 [`06-roadmap.md`](06-roadmap.md) 的实际操作为准 —— 它是后写的，
+而且是已经落地的那一份。
+
 ## 三、落点规矩
 
 [D18 的落点规矩](decisions/D18-admin-boundary.md)照旧：

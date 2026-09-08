@@ -2300,6 +2300,53 @@ class SessionTests(TestCase):
             list(self.spring.sessions.all()), [first, second, third])
 
 
+class AudienceBackfillTests(TestCase):
+    """Migration 0019's backfill, which decides what happens on launch day.
+
+    🔴 Every event and role that existed before the audience columns meant
+       "anybody signed in", and the backfill has to say that in **both** flags.
+       Setting `visible_to_outsiders` alone would hide every existing event from
+       the foundation's own staff — the opposite of what those rows meant — and
+       hide it silently, because an event nobody can see looks exactly like an
+       event that is not there.
+
+    ⚠️ The function is called directly rather than by replaying the migration.
+       Replaying needs a migration-testing dependency this project does not
+       have, and the backfill only shows itself on rows that existed *before*
+       it — which an empty test database has none of. Calling it gives the one
+       thing worth pinning: what it writes.
+
+    ⚠️ `apps` here is the live registry, not the historical one. Fine for this
+       function, which touches only columns that still exist — and the
+       difference is worth stating rather than leaving for somebody to discover
+       when a later migration changes the shape underneath it.
+    """
+
+    def test_existing_events_stay_visible_after_the_migration(self):
+        from importlib import import_module
+
+        from django.apps import apps as live_apps
+
+        # ⚠️ import_module, because the module name starts with a digit and
+        #    cannot be written as an import statement.
+        migration = import_module("events.migrations.0019_event_audience")
+
+        event = make_event(name="Before the columns existed")
+        role = make_role(event, "lifting")
+        Event.objects.update(visible_to_outsiders=False, visible_to_all_staff=False)
+        EventRole.objects.update(
+            visible_to_outsiders=False, visible_to_all_staff=False)
+
+        migration.open_to_everyone(live_apps, None)
+
+        event.refresh_from_db()
+        role.refresh_from_db()
+        for row in (event, role):
+            self.assertTrue(row.visible_to_outsiders)
+            # ⚠️ The half whose absence is the launch-day failure.
+            self.assertTrue(row.visible_to_all_staff)
+
+
 class DictionaryTableTests(TestCase):
     """D9's two rules, on whichever dictionary table is handy.
 
@@ -2855,11 +2902,27 @@ class AudienceContainmentTests(TestCase):
     # --- decision 15: a new role inherits ---------------------------------
 
     def test_a_new_role_inherits_what_the_event_can_see(self):
+        """Decision 15, and all **three** parts of an audience.
+
+        ⚠️ It asserted the two booleans and stopped until 2026-09-08, so
+           deleting the many-to-many half of the implementation left the whole
+           suite green. Its own sibling below writes the failure out in as many
+           words — "copying the two booleans and forgetting the ManyToMany
+           leaves a role open to nobody on precisely the events that named their
+           audience most carefully" — and the no-form path was pinned while the
+           path a person actually walks was not.
+        """
         wide = make_event(ministry=self.pantry, name="Wide",
                           visible_to_outsiders=True, visible_to_all_staff=True)
+        wide.visible_to_ministries.set([self.pantry])
         form = EventRoleForm(event=wide)
         self.assertTrue(form.initial["visible_to_outsiders"])
         self.assertTrue(form.initial["visible_to_all_staff"])
+        # ⚠️ Primary keys, not instances — that is what a ModelMultipleChoice
+        #    initial holds, and asserting instances passes only by accident of
+        #    __eq__ on some paths.
+        self.assertEqual(
+            list(form.initial["visible_to_ministries"]), [self.pantry.pk])
 
     def test_editing_a_role_does_not_re_inherit(self):
         # ⚠️ Re-inheriting would silently widen a role somebody had narrowed.
@@ -3179,6 +3242,11 @@ class ForAudienceTests(TestCase):
         return event
 
     def a_post(self, code, ministry):
+        # ⚠️ `ministry` may be None, and until 2026-09-08 nothing in this class
+        #    ever passed that — every fixture handed it one, so the whole
+        #    foundation-wide branch (an executive director, a finance officer:
+        #    on the books, in no single ministry) went untested. Decision 1 of
+        #    this round is *about* those posts.
         return Position.objects.create(
             code=code, name=code, kind=Position.Kind.STAFF,
             compensation=Position.Compensation.PAID, ministry=ministry)
@@ -3196,6 +3264,39 @@ class ForAudienceTests(TestCase):
 
     def test_an_outsider_sees_only_what_is_open_to_outsiders(self):
         self.assertEqual(self.seen_by(self.outsider), {"Open day"})
+
+    def test_the_executive_director_sees_all_staff_events_but_not_ministry_ones(self):
+        """Decision 1 of this round, and the branch no fixture here ever took.
+
+        A post with no ministry — the executive director, the finance officer —
+        is on the books, so "everybody on the books" includes them. It falls
+        into no single ministry's tick, so a pantry huddle does not. Both halves
+        matter: the first is what makes them staff at all, and the second is
+        what stops "no ministry" being read as "every ministry".
+        """
+        director = make_person("Director", birth_date=datetime.date(1970, 1, 1))
+        Assignment.objects.create(
+            contact=director,
+            position=self.a_post("executive_director", None),
+            start_date=local_date_of(self.public.start_time) - DAY)
+        self.assertEqual(self.seen_by(director), {"All-hands"})
+
+    def test_an_outsiders_only_event_is_hidden_from_the_admin_who_published_it(self):
+        """Decision 10's jarring half, pinned so it is not "fixed" later.
+
+        "Only people with no current post" is not the widest setting — it is a
+        setting staff are *outside*. So an event ticked that way disappears for
+        the person who published it, which reads as a bug the first time
+        somebody meets it and is the whole point of the tick: a food parcel
+        collection that employees should not be taking places in.
+        """
+        publisher = make_person("Publisher", birth_date=datetime.date(1975, 1, 1))
+        self.employ(publisher, self.pantry, code="pantry_lead")
+        parcels = self.an_event("Parcel collection", visible_to_outsiders=True)
+        parcels.owner = publisher
+        parcels.save()
+        self.assertNotIn("Parcel collection", self.seen_by(publisher))
+        self.assertIn("Parcel collection", self.seen_by(self.outsider))
 
     def test_staff_see_the_all_hands_and_not_the_public_one(self):
         """⚠️ "Open to outsiders" is not the widest setting — it **excludes**
@@ -5092,6 +5193,30 @@ class RolesOnTheDetailPageTests(PageTestCase):
         """
         self.hide_every_role()
         self.login(self.lisi)
+        response = self.client.get(
+            reverse("events:event_signup", args=[self.event.pk]))
+        self.assertEqual(response.status_code, 404)
+
+    def test_signing_up_for_an_event_you_cannot_see_is_a_404(self):
+        """The **event-level** door on this view, which had nothing on it.
+
+        ⚠️ The test above it looks like this one and is not: hide_every_role()
+           leaves the event open to everybody and narrows only its roles, so it
+           exercises the second refusal in the view. The first — the audience on
+           the event itself — was never walked by any test, and the guard could
+           not see it either (event_signup narrows with open_for_signup(), which
+           was outside the guard's signal until 2026-09-08). Two blind spots
+           over one door.
+        """
+        # ⚠️ Roles first, then the event. The other order is refused by the
+        #    containment invariant — an event may not be narrower than a role
+        #    inside it — and the refusal is the rule working, not the test.
+        staff_only = Audience.Spec(
+            outsiders=False, all_staff=True, ministries=frozenset())
+        for role in self.event.roles.all():
+            set_audience(role, staff_only)
+        set_audience(self.event, staff_only)
+        self.login(self.lisi)      # holds no post, so not on the books
         response = self.client.get(
             reverse("events:event_signup", args=[self.event.pk]))
         self.assertEqual(response.status_code, 404)
@@ -11090,6 +11215,29 @@ class SchedulePageTests(PageTestCase):
                    start_time=self.at(9), end_time=self.at(10),
                    status=Event.Status.DRAFT)
         self.assertNotIn("Secret plan", self.page())
+
+    def test_the_schedule_narrows_by_audience_too(self):
+        """The second door on this page, and it had no behavioural test at all.
+
+        `AudienceIsAskedGuardTests` holds the structure — _schedule() may not
+        call visible_to_participants() without for_audience() beside it — but a
+        guard checks that a call is written, never that it narrows anything. Cut
+        the call and only the guard went red until 2026-09-08; not one
+        assertion in this class had ever looked at who was asking.
+
+        ⚠️ Same yardstick as the list page: an event the person cannot see is
+           not on their calendar either. "Missing from the list, drawn on the
+           calendar" is the exact split 06-roadmap L2.2 names.
+        """
+        internal = make_event(
+            ministry=self.pantry, owner=self.zhang.contact, name="Staff away day",
+            start_time=self.at(9), end_time=self.at(10))
+        internal.visible_to_outsiders = False
+        internal.visible_to_all_staff = True
+        internal.save()
+        # page() signs in as lisi, who holds no post — so "everybody on the
+        # books" is not them.
+        self.assertNotIn("Staff away day", self.page())
 
     def test_this_mornings_event_is_still_on_todays_column(self):
         """⚠️ 日程的查询里**没有** from_today()：那条按 start_time 切，会切掉

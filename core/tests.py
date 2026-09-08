@@ -247,11 +247,18 @@ def functions_missing_a_call(*, signal, asks, allowed, skip=()):
        version would go red on every docstring that discusses the pair (there
        are several), and a guard that is red every day gets whitelisted until it
        means nothing. Same reasoning ReportFigureNamesGuardTests writes out.
+
+    ⚠️ `signal` may be one string or several, and several means "any of these".
+       A narrowing predicate is not always the same call — see the note on
+       NARROWS below, where a second one had been quietly outside the net.
     """
+    signals = (signal,) if isinstance(signal, str) else tuple(signal)
     return [
         where
         for where, name, code in our_functions(skip=skip)
-        if name not in allowed and signal in code and asks not in code
+        if name not in allowed
+        and any(one in code for one in signals)
+        and asks not in code
     ]
 
 
@@ -621,7 +628,17 @@ class AudienceIsAskedGuardTests(TestCase):
        prints.
     """
 
-    NARROWS = "visible_to_participants("
+    #: Either way of narrowing a list of events down to the ones worth showing.
+    #:
+    #: 🔴 `open_for_signup(` joined it on 2026-09-08, and its absence was a real
+    #:    blind spot rather than a tidying-up: `event_signup` narrows with that
+    #:    call and never touches the other one, so the guard's signal never
+    #:    fired there at all. Deleting that view's audience door left this guard
+    #:    green — verified — and no behavioural test covered it either, which is
+    #:    the pair of holes that lets a leak ship. Both are closed now; the two
+    #:    live call sites (events.views.event_signup, dashboard.services) were
+    #:    already asking, so this pins what is true rather than fixing a breach.
+    NARROWS = ("visible_to_participants(", "open_for_signup(")
     ASKS = "for_audience("
 
     #: Named exemptions. Each is a decision, not an oversight — see the
@@ -637,9 +654,14 @@ class AudienceIsAskedGuardTests(TestCase):
         #    leaving it on the old name would have exempted a function that no
         #    longer asks the question, and red-flagged the one that does.
         "mine",
-        # The two predicates defining themselves.
+        # The predicates defining themselves. ⚠️ `is_open_for_signup` is the
+        # row-level twin of the queryset one and names it in its own docstring,
+        # which is enough for the scan to see it — both are definitions of the
+        # signal, never uses of it.
         "visible_to_participants",
         "for_audience",
+        "open_for_signup",
+        "is_open_for_signup",
         # ⚠️ Somebody standing in front of the iPad, having already scanned the
         #    code. It refuses anybody without a signup two lines later, and a
         #    signup is proof enough that the event was once theirs to join —
@@ -658,6 +680,116 @@ class AudienceIsAskedGuardTests(TestCase):
             "Published is not the same question as for-them. Add "
             "for_audience(contact), or name the function in ALLOWED with a "
             "reason:\n" + "\n".join(offenders),
+        )
+
+
+class HoursWriteGuardTests(TestCase):
+    """Lint-as-test: hours are written in one file, and it is events/services.py.
+
+    ⭐ Hours are the number that leaves this system — they go on grant reports
+       and into what the foundation tells funders it did. Every rule about them
+       lives in services.py: an attending place records none (NoHoursHere), a
+       no-show cannot have them, check_out() computes them from the two stamps.
+       A view or a form assigning `.hours` directly reaches the column without
+       passing any of that, and the result is a wrong total that nothing
+       contradicts.
+
+    ⚠️ This one pins a property that is **already true** — as of 2026-09-08 the
+       only assignments are the five in events/services.py — rather than fixing
+       a breach. 06-roadmap named it in the guard table for the round that
+       introduced not_applicable and it was never written; it is written now so
+       the next hours-adjacent feature cannot quietly open a second door.
+       L5.7 will add a second source of hours (SessionAttendance) and the
+       writes for it belong in the same file.
+
+    ⚠️ Assignment only: `record_hours(hours=…)`, `row.hours` reads and keyword
+       arguments are all left alone. The pattern therefore needs the `=` and
+       has to avoid `==`.
+    """
+
+    #: An assignment to the attribute, not a comparison against it. The leading
+    #: dot keeps it to attribute writes, so a local variable named `hours` in a
+    #: template tag or a test fixture is not swept in.
+    #:
+    #: ⚠️ Written as a regex and never spelled out in the prose above — these
+    #:    guards scan this file too, and a docstring quoting the literal form
+    #:    reports itself. Same reason the neighbours describe their signal
+    #:    instead of printing it.
+    HOURS_WRITE = r"\.hours\s*=(?!=)"
+
+    #: The one file allowed to hold them, and the reason is D18's: the rules
+    #: about hours live there, so the writes have to as well.
+    ALLOWED = ["events/services.py"]
+
+    def test_hours_are_only_written_in_the_service_layer(self):
+        hits = offending_lines(self.HOURS_WRITE, skip=self.ALLOWED)
+        self.assertEqual(
+            hits,
+            [],
+            "Hours are written through events/services.py, which is where the "
+            "rules about them live (an attending place records none; a no-show "
+            "cannot have them). Assigning the column directly skips all of "
+            "them and the total is wrong with nothing to say so:\n"
+            + "\n".join(hits),
+        )
+
+
+class LocalDayInSqlGuardTests(TestCase):
+    """Lint-as-test: a day taken in SQL is taken in the foundation's timezone.
+
+    ⭐ The database-side twin of the two guards above. `TruncDate` on a stored
+       instant asks Postgres for a day, and which day depends entirely on the
+       timezone handed to it — an event at 6pm Pacific belongs to the next UTC
+       day, so "was this person on the books on the day of the event" is asked
+       about the wrong date for six hours out of every twenty-four. Silent, and
+       wrong for only part of each day, which is the shape that survives a
+       casual test run.
+
+    ⚠️ The guard asks for two things at once, because either alone passes while
+       being wrong: the call may only appear in core/timeutils.py, **and** the
+       line it appears on must carry `tzinfo=`. Wrapped in local_day() there is
+       one place to get it right and nowhere to forget it.
+
+    ⚠️ The signal is a regex and is deliberately not spelled out in this
+       docstring — the scan reads this file too, so quoting the literal call
+       here would make the guard report itself.
+
+    ⚠️ 06-roadmap describes this guard as watching "the file on_the_books_exists()
+       lives in". That description is out of date and the guard is written to
+       today's layout instead: on_the_books_exists() moved to org/audience.py on
+       2026-08-31 while TruncDate stayed behind in core/timeutils.py, so the two
+       are no longer the same file. Following the prose would have pointed this
+       at a file with none of these calls in it — a guard watching nothing,
+       reporting a safety it never checked.
+    """
+
+    TRUNC_DATE = r"TruncDate\("
+    HOME = "core/timeutils.py"
+
+    def test_truncdate_lives_in_one_file(self):
+        hits = offending_lines(self.TRUNC_DATE, skip=[self.HOME])
+        self.assertEqual(
+            hits,
+            [],
+            f"TruncDate belongs in {self.HOME}, wrapped as local_day(), so the "
+            "timezone cannot be forgotten at a call site:\n" + "\n".join(hits),
+        )
+
+    def test_every_truncdate_names_its_timezone(self):
+        # The half the location check cannot make: a bare one inside the
+        # allowed file is exactly as wrong as one outside it, and reads as
+        # deliberate because of where it sits.
+        naked = [
+            hit for hit in offending_lines(
+                self.TRUNC_DATE, only_filenames=[Path(self.HOME).name])
+            if "tzinfo=" not in hit
+        ]
+        self.assertEqual(
+            naked,
+            [],
+            "TruncDate without tzinfo= truncates the UTC value, so the day is "
+            "wrong for part of every day. Pass the foundation's timezone:\n"
+            + "\n".join(naked),
         )
 
 

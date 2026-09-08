@@ -51,7 +51,7 @@
                       hx-post="{% url 'events:role_delete' role.pk %}"
                       hx-target="#roles-panel" hx-swap="outerHTML">
                   {% csrf_token %}
-                  {% include "core/components/button.html" with label="Delete" variant="danger" confirm="Delete this role? Anyone signed up for it goes with it." %}
+                  {% include "core/components/button.html" with label="Delete" variant="danger" confirm="Delete this role? Anyone signed up for it goes with it, and so does anything recorded against those signups." %}
                 </form>
               </td>
             </tr>

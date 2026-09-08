@@ -502,12 +502,20 @@ class EventQuerySet(AudienceQuerySetMixin, models.QuerySet):
         """Everything a signed-in person may open: published, including full and over.
 
         ⚠️ This filters on **lifecycle status only** — it is not an audience.
-           Every signed-in account sees every published event, staff and
-           outsiders alike, because nothing anywhere narrows by who is asking.
-           That is a real gap rather than a design (participants.md section 1):
-           the first staff-only event to go up would appear on every outside
-           volunteer's list. Renamed from `visible_to_volunteers` on 2026-08-20
-           so the name stops implying an audience it never had.
+           "Is it for them" is a separate question with a separate answer:
+           `for_audience()` in org/audience.py, and AudienceIsAskedGuardTests
+           requires the two to appear together. Renamed from
+           `visible_to_volunteers` on 2026-08-20 so the name stops implying an
+           audience it never had.
+
+        ⚠️ The three lines here until 2026-09-08 said nothing anywhere narrowed
+           by who is asking, and that "a real gap rather than a design". True
+           when written (participants.md section 1), false from the day L3
+           landed — and left standing for a fortnight beside the very function
+           that closed it. org/audience.py states the rule this broke: a comment
+           promising a lock is worse than an unlocked door, because it stops
+           anybody looking. The same holds in reverse — a comment reporting a
+           hole that is filled sends the next person to fill it twice.
         """
         return self.filter(status__in=Event.VISIBLE_TO_PARTICIPANTS)
 

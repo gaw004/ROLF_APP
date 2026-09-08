@@ -31,8 +31,9 @@ from django.db import transaction
 from accounts.services import mark_email_verified, register_account
 from contact.models import Contact, EmergencyContact, RelationshipType
 from core.timeutils import local_now, local_today
+from org.audience import Audience
+
 from events.models import (
-    Audience,
     Event,
     EventRole,
     Participation,

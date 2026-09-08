@@ -510,11 +510,6 @@ class EventForm(EventAudienceFormMixin, forms.ModelForm):
         super().__init__(*args, **kwargs)
         administered = ministry_ids_administered_by(user)
         self.fields["ministry"].queryset = Ministry.objects.filter(id__in=administered)
-        # ⚠️ Same set the dropdown above is built from, not a second lookup.
-        #    Two answers to "which ministries are theirs" would drift apart on
-        #    exactly the account where it matters.
-        self.fields["visible_to_ministries"].queryset = Ministry.objects.filter(
-            is_active=True).order_by("name")
 
         # ⭐ Nothing else is pre-ticked, and that is the expensive decision of
         #    this form. Defaulting to everyone would match today's behaviour and
@@ -777,8 +772,6 @@ class EventRoleForm(EventAudienceFormMixin, forms.ModelForm):
         super().__init__(*args, **kwargs)
         self.instance.event = event
         self.fields["role"].queryset = ParticipationRole.objects.filter(is_active=True)
-        self.fields["visible_to_ministries"].queryset = Ministry.objects.filter(
-            is_active=True).order_by("name")
 
         # ⭐ A new role starts as wide as the event it belongs to — "if you can
         #    see it you can sign up for it" is requirement 6's ordinary case,

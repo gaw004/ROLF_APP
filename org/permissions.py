@@ -82,6 +82,29 @@ def administers(user, ministry, on=None) -> bool:
     return ministry_id in ministry_ids_administered_by(user, on=on)
 
 
+def administers_one_of(ministry, administered) -> bool:
+    """`administers()` for a page of rows: the same rule, asked with no query.
+
+    ⚠️ **The second implementation of one rule, and it lives here beside the
+       first for that reason** — the same arrangement core/querysets.py uses for
+       active()/is_currently_active and events/models.py for
+       recording_hours()/records_hours. Change one, change the other.
+
+    It was inlined in events/views.py until 2026-09-08 (`event.ministry_id in
+    administered`), which is this function's body written somewhere the grep
+    guard cannot see it: PermissionGuardTests looks for MinistryRole.objects,
+    and a set membership test names nothing it recognises. The rule that views
+    make exactly one call into this module was being broken by the only spelling
+    that could not be caught.
+
+    ⚠️ `administered` is the caller's already-fetched set of ids — one query for
+       a page rather than one per row, which is why the pair exists at all. It
+       decides **what to draw**; every write still goes through the real check.
+    """
+    ministry_id = getattr(ministry, "pk", ministry)
+    return ministry_id in administered
+
+
 def can_publish_event(user, ministry) -> bool:
     """P2: publish an event for this ministry, and say how many each role needs."""
     return administers(user, ministry)
@@ -300,10 +323,21 @@ FOUNDATION_ADMIN_PERMISSIONS = [
     # index entirely when you hold no permission on it, which is why this looked
     # like a missing page rather than a missing permission.
     #
-    # ⚠️ No delete_ministry, deliberately. Deleting a ministry cascades into its
-    #    events, and "we are not running this any more" is is_active=False —
-    #    the same "an ending is a date, not a deletion" rule the rest of this
-    #    project follows.
+    # ⚠️ No delete_ministry, deliberately, and "we are not running this any
+    #    more" is is_active=False — the same "an ending is a date, not a
+    #    deletion" rule the rest of this project follows.
+    #
+    # 🔴 The reason written here until 2026-09-08 was **wrong**: it said
+    #    deleting a ministry cascades into its events. It does not —
+    #    `Event.ministry` is PROTECT, so a ministry that owns events cannot be
+    #    deleted at all. What does cascade is the one nobody had written down:
+    #    the audience many-to-many. A ministry that owns nothing but is *ticked
+    #    into* other ministries' events takes those ticks with it, and an event
+    #    left with an empty audience disappears for everybody — the state
+    #    refuse_empty_audience() exists to prevent, arriving by a path it does
+    #    not watch. Deleting still needs a superuser, so the withholding above
+    #    is the protection; what changed here is that it now gives the reason
+    #    that is true.
     "org.add_ministry",
     "org.change_ministry",
     "org.view_ministry",

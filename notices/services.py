@@ -14,7 +14,7 @@ from core.timeutils import local_now
 
 
 @transaction.atomic
-def publish(notice, *, now=None):
+def publish(notice):
     """Put it on the board.
 
     ⚠️ `starts_showing` is left exactly as it is. Somebody may be publishing a

@@ -88,6 +88,7 @@ from .services import (
     apply_scan,
     TurnedUp,
     cancel,
+    hours_recorded_against,
     signups_asked_about_serving,
     inherit_audience,
     set_audience,
@@ -2924,6 +2925,81 @@ class AudienceContainmentTests(TestCase):
         self.assertEqual(
             list(form.initial["visible_to_ministries"]), [self.pantry.pk])
 
+    def test_the_admin_cannot_move_a_signup_to_another_role(self):
+        """Moving a row between roles changes which fact it states.
+
+        A signup with hours, re-pointed at an attending role, passes every
+        check — the no-hours constraint keys on served_as and this row does not
+        claim not_applicable — and afterwards the report counts nothing for it
+        while /me/ counts the hours. One row, two ledgers, no error.
+        """
+        from events.admin import ParticipationAdmin
+        self.assertIn("event_role", ParticipationAdmin.readonly_fields)
+        self.assertNotIn("event_role", ParticipationAdmin.autocomplete_fields)
+
+    def test_deleting_a_role_with_recorded_hours_is_refused(self):
+        """🔴 One POST used to take an attended signup and its hours with it.
+
+        EventRole cascades into Participation, and role_delete asked nothing —
+        so a row marked attended with 3.5 hours against it disappeared, the
+        ministry report's total dropped, and the only trace was in the shadow
+        table. The confirmation said "anyone signed up for it goes with it",
+        which reads as losing a place in a list.
+
+        ⚠️ Hours are the number that has already left this system. An ending is
+           a date, not a deletion — and there is no way back through the site.
+        """
+        role = EventRole.objects.create(
+            event=self.event, role=ParticipationRole.seed_catch_all(
+                ParticipationRole.Nature.HELPING))
+        Participation.objects.create(
+            contact=make_person("Worker"), event_role=role,
+            status=Participation.Status.ATTENDED, hours=Decimal("3.5"))
+        self.assertEqual(hours_recorded_against(role), "3.5 hours")
+
+    def test_a_role_nobody_has_worked_can_still_be_deleted(self):
+        # The other half, and the reason this is not a blanket refusal: a role
+        # opened by mistake is exactly what that button is for.
+        role = EventRole.objects.create(
+            event=self.event, role=ParticipationRole.seed_catch_all(
+                ParticipationRole.Nature.HELPING))
+        Participation.objects.create(
+            contact=make_person("Signed"), event_role=role)
+        self.assertEqual(hours_recorded_against(role), "")
+
+    def test_a_retired_ministry_stays_tickable_on_a_row_that_already_has_it(self):
+        """🔴 Otherwise retiring a ministry locks its events out of the site.
+
+        The tick stops being rendered, so the browser cannot submit it, so the
+        audience comes back narrower than it is stored, so the save is refused
+        with "narrow that role first" — and there is no page for narrowing a
+        role. The event then cannot be edited from the site again for any
+        reason, including a typo. Retiring is the act org/permissions.py
+        recommends in place of deleting, so this is not a corner.
+        """
+        retired = Ministry.objects.create(
+            code="retired_help", name="Retired Help", is_active=False)
+        role = EventRole.objects.create(
+            event=self.event, role=ParticipationRole.seed_catch_all(
+                ParticipationRole.Nature.HELPING))
+        role.visible_to_ministries.set([self.pantry, retired])
+        offered = list(EventRoleForm(instance=role, event=self.event)
+                       .fields["visible_to_ministries"].queryset)
+        self.assertIn(retired, offered)
+        # ⚠️ Offered, not re-ticked — the form only makes the stored value
+        #    expressible. Somebody may take it off; they may not be trapped by
+        #    a box they are not allowed to see.
+        self.assertIn(self.pantry, offered)
+
+    def test_a_retired_ministry_is_not_offered_on_a_row_without_it(self):
+        # The other half: retiring still takes it out of circulation for
+        # everything that was not already ticked into it.
+        Ministry.objects.create(
+            code="retired_help", name="Retired Help", is_active=False)
+        offered = {m.code for m in EventRoleForm(event=self.event)
+                   .fields["visible_to_ministries"].queryset}
+        self.assertNotIn("retired_help", offered)
+
     def test_editing_a_role_does_not_re_inherit(self):
         # ⚠️ Re-inheriting would silently widen a role somebody had narrowed.
         wide = make_event(ministry=self.pantry, name="Wide",
@@ -4376,6 +4452,22 @@ class MinistryAdminPageTests(PageTestCase):
         self.event.refresh_from_db()
         self.assertTrue(self.event.visible_to_outsiders)
         self.assertTrue(self.event.visible_to_all_staff)
+
+    def test_the_delete_button_refuses_a_role_with_recorded_hours(self):
+        # Through the view, because the helper being right does not mean the
+        # door is shut — role_delete asked nothing at all until 2026-09-08.
+        Participation.objects.create(
+            contact=self.lisi.contact, event_role=self.role,
+            status=Participation.Status.ATTENDED, hours=Decimal("3.5"))
+        self.login(self.zhang)
+        self.client.post(reverse("events:role_delete", args=[self.role.pk]))
+        self.assertTrue(EventRole.objects.filter(pk=self.role.pk).exists())
+        self.assertEqual(Participation.objects.count(), 1)
+
+    def test_the_delete_button_still_removes_a_role_nobody_worked(self):
+        self.login(self.zhang)
+        self.client.post(reverse("events:role_delete", args=[self.role.pk]))
+        self.assertFalse(EventRole.objects.filter(pk=self.role.pk).exists())
 
     def test_the_detail_page_still_opens_after_the_audience_is_narrowed(self):
         """🔴 Narrowing takes away discovery, never a row somebody already holds.

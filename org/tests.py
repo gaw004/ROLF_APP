@@ -885,10 +885,43 @@ class FoundationAdminGroupTests(TestCase):
         self.assertEqual(unresolved_permissions(), [])
 
     def test_it_never_grants_delete_ministry(self):
-        # Deleting a ministry cascades into its events. "We stopped running it"
-        # is is_active=False — an ending is a date, not a deletion.
+        # "We stopped running it" is is_active=False — an ending is a date, not
+        # a deletion. ⚠️ The comment here used to say deleting cascades into
+        # the ministry's events; it does not (Event.ministry is PROTECT). What
+        # cascades is the audience many-to-many — see the test below, and
+        # org/permissions.py for the corrected reason.
         granted = {p.codename for p in foundation_admin_group().permissions.all()}
         self.assertNotIn("delete_ministry", granted)
+
+    def test_deleting_a_ministry_empties_the_audiences_that_named_it(self):
+        """🔴 What actually cascades, pinned because the comments named the wrong thing.
+
+        A ministry that owns events cannot be deleted at all — Event.ministry is
+        PROTECT. A ministry that owns nothing but is *ticked into* somebody
+        else's event is a different row: the audience many-to-many has no
+        on_delete of its own, so the tick goes, and an event left with an empty
+        audience is invisible to everybody. That is exactly the state
+        refuse_empty_audience() exists to prevent, reached by a path it cannot
+        see.
+
+        ⚠️ Not a defence — this documents the consequence. Deleting needs a
+           superuser and the foundation tier is not granted it, which is the
+           protection; this test is here so the next person reads a true reason.
+        """
+        owner = make_person("Owner")
+        pantry = make_ministry()
+        spare = make_ministry(code="spare", name="Spare")
+        event = Event.objects.create(
+            name="Joint briefing", ministry=pantry, owner=owner,
+            start_time=local_now(), end_time=local_now(),
+            visible_to_outsiders=False, visible_to_all_staff=False)
+        event.visible_to_ministries.set([spare])
+        self.assertFalse(event.audience_is_empty)
+
+        spare.delete()
+
+        event.refresh_from_db()
+        self.assertTrue(event.audience_is_empty)
 
     def test_a_migrate_is_what_keeps_the_group_true_in_production(self):
         """⚠️ The second half of the same bug, and the half that mattered more.

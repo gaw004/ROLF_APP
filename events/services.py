@@ -26,7 +26,7 @@ from core.images import draft_to, stored_size, upright_size
 from core.notifications.base import EMAIL, SMS, Message, get_backend
 from core.timeutils import local_date_of, local_day, local_now
 from org.audience import Audience, on_the_books_exists, on_the_books_q
-from org.models import Assignment, Position
+from org.models import Assignment
 
 from . import tokens
 from .models import (
@@ -226,7 +226,7 @@ def eligible(contact, event_role):
 
     One row's form of EventRoleQuerySet.for_audience(), and deliberately
     nothing more than that: the three branches are written once, in
-    events.models.AudienceQuerySetMixin, and everything that asks this question
+    org.audience.AudienceQuerySetMixin, and everything that asks this question
     — the dropdown, the roles table, this gate — asks the same one. Spelling
     the disjunction out again here is the second implementation that mixin's
     docstring exists to prevent.
@@ -1076,15 +1076,20 @@ def ministry_staff_participation(event):
        for about an hour; see 02-roadmap.md「计划外（B12）」.
     """
     on = local_date_of(event.start_time)
-    on_the_books_here = Assignment.objects.active(on=on).filter(
-        # ⚠️ No condition on compensation, and its absence is the whole of this
-        #    step. It said `PAID` for exactly one commit — long enough for the
-        #    axis split to change no answers — and deleting that line is what
-        #    changed R8's answer. See the docstring above.
-        position__kind=Position.Kind.STAFF,
-        position__ministry=event.ministry,
-        position__is_active=True,
-    )
+    # ⚠️ The definition of "on the books" comes from on_the_books_q(), never a
+    #    second spelling of it — that function's own docstring says it was
+    #    extracted so its callers would be callers rather than copies, and this
+    #    was the fourth shape and the only copy (fixed 2026-09-08). The two
+    #    agreed on the day; agreeing is not the same as being one rule, and the
+    #    way this one would have parted company is R8 quietly counting a
+    #    different set of people from the report beside it.
+    #
+    # ⚠️ No condition on compensation, and its absence is the whole of this
+    #    step. It said `PAID` for exactly one commit — long enough for the axis
+    #    split to change no answers — and deleting that line is what changed
+    #    R8's answer. See the docstring above.
+    on_the_books_here = Assignment.objects.filter(
+        on_the_books_q(on), position__ministry=event.ministry)
     return (
         Participation.objects.filter(
             event_role__event=event,
@@ -1342,9 +1347,15 @@ def ministry_report(events):
     #    it is judged on its interpreter, not on its seats.
     helping_roles = EventRole.objects.exclude(
         role__nature=ParticipationRole.Nature.ATTENDING)
+    # ⚠️ Exists, not a join on roles. An event with three helping roles comes
+    #    back three times from the join — today the surrounding set() absorbs
+    #    that, so the answer is right by accident of its container rather than
+    #    by the query. It is the shape 06-roadmap L2.2 records as a 🔴, and the
+    #    one with_shortfall() and with_capacity() each chose Exists to avoid.
     staffable = set(
         events.filter(
-            roles__in=helping_roles.filter(needed_count__isnull=False),
+            models.Exists(helping_roles.filter(
+                event=models.OuterRef("pk"), needed_count__isnull=False))
         ).values_list("pk", flat=True)
     )
     short_events = set(
@@ -1966,6 +1977,31 @@ def create_participation_role(name, *, nature):
     role.full_clean()
     role.save()
     return role
+
+
+def hours_recorded_against(role):
+    """Total hours on this role's signups, as a phrase, or "" when there are none.
+
+    ⚠️ Returns the sentence fragment rather than a number, because the caller
+       needs "3.5 hours" and "1 hour" and the plural rule is not the caller's
+       business. Empty string is falsy, so `if hours_recorded_against(role)`
+       reads as the question it is.
+
+    Its one reader is role_delete, which refuses when this is non-empty: hours
+    are records that have already been reported, and EventRole cascades into
+    Participation, so deleting the role deletes them with nothing to say so.
+    """
+    total = (
+        Participation.objects.filter(event_role=role)
+        .aggregate(total=Sum("hours"))["total"] or 0
+    )
+    if not total:
+        return ""
+    # ⚠️ Not `:g` and not `.normalize()`. A Decimal keeps its trailing zeros, so
+    #    `:g` prints "3.50"; normalize() turns 10.00 into 1E+1. Fixed places,
+    #    then strip, is the one that reads right at both ends.
+    text = f"{total:.2f}".rstrip("0").rstrip(".")
+    return f"{text} hour" + ("" if total == 1 else "s")
 
 
 def signups_left_outside(event):

@@ -37,9 +37,9 @@ from org.models import Ministry
 from org.permissions import (
     SCOPED_DENIAL,
     in_foundation_tier,
+    administers_one_of,
     can_manage_event,
     can_publish_event,
-    can_view_event_records,
     event_access,
     ministry_ids_administered_by,
 )
@@ -99,6 +99,7 @@ from .services import (
     scheduled_hours,
     resolve_recipients,
     signups_asked_about_serving,
+    hours_recorded_against,
     signups_left_outside,
     set_served_as,
     set_status,
@@ -952,7 +953,7 @@ def event_manage_list(request):
         #    `_managed_event()` → `can_manage_event()`，问的是真实账号和真实
         #    活动。藏起一颗按钮挡不住任何人，真正的拒绝在视图里 ——
         #    `button.html` 的 `disabled` 那段注释写的是同一条。
-        event.can_manage = event.ministry_id in administered
+        event.can_manage = administers_one_of(event.ministry_id, administered)
     return render(request, _template(
         request, "events/event_manage_list.html",
         "events/_event_manage_results.html"), {
@@ -1217,6 +1218,26 @@ def role_delete(request, pk):
     if not can_manage_event(request.user, role.event):
         raise PermissionDenied(SCOPED_DENIAL)
     if request.method == "POST":
+        # 🔴 Hours are records, and deleting this row deletes them. Participation
+        #    cascades from event_role, so one POST took an attended signup and
+        #    the hours somebody had recorded against it — while the confirmation
+        #    said only "anyone signed up for it goes with it", which reads as
+        #    losing a place in a list, not losing a number that has already been
+        #    reported. Refused since 2026-09-08: an ending is a date, not a
+        #    deletion, and there is no way back from this one through the site.
+        #
+        # ⚠️ Only when hours exist. A role opened by mistake, or one people
+        #    signed up for and nobody has worked yet, is still deletable — that
+        #    is what this page is for, and the confirmation now says how many
+        #    signups go with it.
+        recorded = hours_recorded_against(role)
+        if recorded:
+            messages.error(request, (
+                f"“{role.role.name}” has {recorded} recorded against it, and "
+                "deleting the role would delete those hours too. Close signups "
+                "on it instead, or correct the hours first."
+            ))
+            return redirect("events:event_update", pk=role.event_id)
         role.delete()
         messages.success(request, "Role removed.")
         if request.headers.get("HX-Request"):
@@ -1245,9 +1266,12 @@ def event_registrations(request, pk):
        "who said so" beside it.
     """
     event = get_object_or_404(Event.objects.select_related("ministry"), pk=pk)
-    if not can_view_event_records(request.user, event):
+    # ⚠️ One read of the grant table, not two. org.permissions.event_access()
+    #    exists for exactly this and says so in its own docstring; three pages
+    #    were still asking each question separately until 2026-09-08.
+    can_manage, may_view_records = event_access(request.user, event)
+    if not may_view_records:
         raise PermissionDenied(SCOPED_DENIAL)
-    can_manage = can_manage_event(request.user, event)
 
     if request.method == "POST":
         if not can_manage:
@@ -1276,6 +1300,20 @@ def event_registrations(request, pk):
                     f"Recorded. {participation.contact} will see on their signups "
                     "page that an admin set this.",
                 )
+            else:
+                # ⚠️ Both refusals say so out loud (2026-09-08). They were
+                #    silent redirects: somebody pressed the control, the page
+                #    came back identical, and nothing distinguished a refused
+                #    write from a successful one — D27's rule that having
+                #    nothing and counting nothing must not look alike, applied
+                #    to an action instead of a figure.
+                messages.error(
+                    request, "That is not an identity somebody can be asked "
+                             "about, so nothing was recorded.")
+        else:
+            messages.error(
+                request, "This signup is on a place people attend, so it does "
+                         "not record an identity — nothing was changed.")
         return redirect("events:event_registrations", pk=event.pk)
 
     roles = event.roles.with_signup_counts().select_related("role").prefetch_related(
@@ -1319,9 +1357,9 @@ def event_attendance(request, pk):
     #    and interface keeps nobody out — a form posted from anywhere at all
     #    arrives at this view with the same shape.
     event = get_object_or_404(Event.objects.select_related("ministry"), pk=pk)
-    if not can_view_event_records(request.user, event):
+    can_manage, may_view_records = event_access(request.user, event)
+    if not may_view_records:
         raise PermissionDenied(SCOPED_DENIAL)
-    can_manage = can_manage_event(request.user, event)
 
     if request.method == "POST":
         if not can_manage:
@@ -1423,11 +1461,12 @@ def event_report(request, pk):
        any event's report without being able to touch the event.
     """
     event = get_object_or_404(Event.objects.select_related("ministry"), pk=pk)
-    if not can_view_event_records(request.user, event):
+    can_manage, may_view_records = event_access(request.user, event)
+    if not may_view_records:
         raise PermissionDenied(SCOPED_DENIAL)
     return render(request, "events/event_report.html", {
         "event": event,
-        "can_manage": can_manage_event(request.user, event),
+        "can_manage": can_manage,
         "summary": event_summary(event),
         "staff": ministry_staff_participation(event),
     })
@@ -1560,7 +1599,15 @@ def checkin_confirm(request):
 
     if targets is None or not targets.any_signup:
         return render(request, "events/checkin_refused.html", {
-            "event": event,
+            # ⚠️ **No `event` here**, and it is the only one of this page's four
+            #    refusals that withholds the name. The scan path does not ask
+            #    the audience — right, because somebody standing in the hall
+            #    with a signup should not be stopped by it (06-roadmap L2.2) —
+            #    but that reasoning is about people who **have** a signup, and
+            #    this is the branch for people who do not. A forwarded QR code
+            #    therefore named a staff-only event to somebody the event page
+            #    would 404 for. The template already draws the name only when
+            #    it is given one.
             "reason": "You are not signed up for this event.",
             # ⚠️ A link, never a signup. Creating the row here would walk past
             #    sign_up()'s two gates, and the state on the other side of them

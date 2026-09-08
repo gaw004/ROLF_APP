@@ -75,11 +75,6 @@ class NoticeForm(AudienceFormMixin, forms.ModelForm):
             Ministry.objects.filter(is_active=True).order_by("name")
             if in_foundation_tier(user)
             else Ministry.objects.filter(id__in=administered))
-        # ⚠️ The same set the dropdown above is built from, not a second lookup.
-        #    Two answers to "which ministries are theirs" drift apart on exactly
-        #    the account where it matters.
-        self.fields["visible_to_ministries"].queryset = Ministry.objects.filter(
-            is_active=True).order_by("name")
 
         if self.instance.pk is not None:
             return

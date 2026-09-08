@@ -10,6 +10,7 @@ exception to it.
 
 from django import forms
 from django.core.exceptions import ValidationError
+from django.db import models
 
 from contact.models import Contact
 from org.audience import (
@@ -125,6 +126,7 @@ class AudienceFormMixin:
         #    a way to dodge the crash: a convenience tick over two boxes nobody
         #    can edit is a control that does nothing, and audience() reads it
         #    with `.get()`, so its absence changes no answer.
+        self.offer_the_ministries()
         pair = ("visible_to_outsiders", "visible_to_all_staff")
         if not all(name in self.fields for name in pair):
             return
@@ -173,6 +175,56 @@ class AudienceFormMixin:
                 for name in pair:
                     self.initial[name] = False
         self.order_fields(None)
+
+    def offer_the_ministries(self):
+        """Which ministries this form may tick: the live ones, plus this row's own.
+
+        🔴 The second half is what stops a retired ministry locking an event out
+           of the site. `limit_choices_to={"is_active": True}` on the field, and
+           this queryset behind it, together meant the tick simply **stopped
+           being rendered** when a ministry was retired — so a browser could not
+           submit it, the audience came back narrower than it was stored, and
+           the save was refused by the containment rule with "narrow that role
+           first". There is no page for narrowing a role: events/urls.py has
+           create and delete and nothing between them. So the event could not be
+           saved from the site again, for any edit at all, including fixing a
+           typo. Reproduced 2026-09-05, fixed 2026-09-08.
+
+           ⚠️ Retiring a ministry is not an obscure act — org/permissions.py
+              recommends it in as many words ("we are not running this any more"
+              is is_active=False) and withholds delete_ministry on that basis.
+
+        ⚠️ Already-ticked rows are offered, never re-ticked: `initial` is
+           untouched, so this only makes the value expressible. Somebody can
+           take it off, or leave it — what they cannot do is be trapped by a box
+           they are not allowed to see.
+
+        ⚠️ One implementation, three forms. EventForm, EventRoleForm and
+           NoticeForm each wrote this line with its own copy of the comment
+           explaining it; the third was added by copying the second. It belongs
+           on the mixin they already share.
+
+        ⚠️ Not symmetrical with `ministry_ids_administered_by()`, which *does*
+           filter on is_active — retiring a ministry takes away its admin's
+           authority immediately, while `on_the_books_q()` does not, so its
+           staff keep seeing what they were already ticked into. Two different
+           questions ("who may act" against "who may look"), and the asymmetry
+           is deliberate rather than an oversight.
+        """
+        field = self.fields.get("visible_to_ministries")
+        if field is None:
+            return
+        # ⚠️ Built from the model's own manager, not from `field.queryset` —
+        #    that one already carries the field's `limit_choices_to`
+        #    (is_active=True), so filtering it again could only ever narrow.
+        #    Widening past limit_choices_to is the point here, and it is safe
+        #    because a submitted value is validated against *this* queryset.
+        ministries = field.queryset.model.objects
+        live = models.Q(is_active=True)
+        instance = getattr(self, "instance", None)
+        if instance is not None and instance.pk is not None:
+            live |= models.Q(pk__in=instance.visible_to_ministries.values("pk"))
+        field.queryset = ministries.filter(live).distinct().order_by("name")
 
     def order_fields(self, field_order):
         """Order as asked, then always re-seat the tick above the pair it fills in.

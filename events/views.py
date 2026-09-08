@@ -99,6 +99,7 @@ from .services import (
     scheduled_hours,
     resolve_recipients,
     signups_asked_about_serving,
+    signups_left_outside,
     set_served_as,
     set_status,
     sign_up,
@@ -423,7 +424,32 @@ def _detail(request, pk):
     #    of the most-hit page in the system. org.permissions composes them; the
     #    view must not, or the two ways in stop being one policy.
     can_manage, may_view_records = event_access(request.user, event)
-    if (preview or not for_them) and not may_view_records:
+    # 🔴 The third way in, and it is not a loophole in the rule above — it is
+    #    the rule 06-roadmap L2.2 states in as many words: **narrowing takes
+    #    away discovery, never a row you already hold.** An audience edited
+    #    after the fact, or a post that ended between signing up and the day
+    #    itself, must not make somebody's own event page disappear.
+    #
+    #    Participation.mine() has always had this half right — it deliberately
+    #    does not ask for_audience(), and the guard whitelist in core/tests.py
+    #    names it with this exact reason. This page did not, so the row stayed
+    #    listed on /me/participations/ and in the dashboard's "coming up" and
+    #    linked to a 404. Both halves say the same thing from 2026-09-08.
+    #
+    # ⚠️ Only asked when the audience says no, so the most-hit page in the
+    #    system does not pay for a query whose answer it already has.
+    #
+    # ⚠️ Deliberately **not** extended to `preview`. A draft is not a row
+    #    anybody holds yet, and mine() already excludes drafts — so there the
+    #    listing and the page agree without this, and adding it would make a
+    #    withdrawn draft readable to whoever had signed up before it went back.
+    holds_a_signup = (
+        contact is not None
+        and not for_them
+        and Participation.objects.filter(
+            event_role__event_id=pk, contact=contact).exists()
+    )
+    if (preview or not (for_them or holds_a_signup)) and not may_view_records:
         # Deliberately indistinguishable from "no such event" — see above.
         raise Http404("No event matches the given query.")
 
@@ -1035,6 +1061,15 @@ def event_create(request):
         event = form.save(commit=False)
         event.owner = _my_contact(request)
         event.save()
+        # ⚠️ **Not optional**, for the same reason request.FILES above is not:
+        #    without it the tick is silently dropped. `commit=False` defers the
+        #    many-to-many, and `visible_to_ministries` is the only part of an
+        #    audience that lives in one — so an event ticked for a ministry and
+        #    nothing else stored an audience of nobody, and 404'd for everyone
+        #    including the person who had just published it. Missing here and in
+        #    event_update until 2026-09-08; notices.views.notice_create had it
+        #    from the day it was written.
+        form.save_m2m()
         messages.success(request, "Event created. Next, open the roles it needs.")
         return redirect("events:event_update", pk=event.pk)
 
@@ -1069,6 +1104,14 @@ def event_update(request, pk):
         # can express. See EventForm.time_changed for the seconds trap.
         moved = form.time_changed()
         event = form.save(commit=False)
+        # ⚠️ Above the branch, not inside it, because **this view has two
+        #    exits** — the reschedule path redirects to the notice page and
+        #    never reaches the save below. Safe here: the row already has a pk,
+        #    so the through-table writes have something to point at, and they
+        #    are independent of the columns saved a few lines down.
+        #
+        #    See event_create for what its absence cost.
+        form.save_m2m()
         if moved:
             reschedule(
                 event,
@@ -1084,7 +1127,22 @@ def event_update(request, pk):
                 f"?reason={EventNotification.Reason.TIME_CHANGED}"
             )
         event.save()
-        messages.success(request, "Event updated.")
+        # Narrowing an audience may leave people who already signed up outside
+        # it. That is allowed — their signups stand and their event page still
+        # opens — but it is silent, and this is the one moment somebody can act
+        # on knowing. ⚠️ It states the fact and stops: nothing in this system
+        # can withdraw somebody else's signup, so naming an action here would
+        # send the reader looking for a control that is not there.
+        stranded = signups_left_outside(event)
+        if stranded:
+            who = ("1 person who signed up is" if stranded == 1
+                   else f"{stranded} people who signed up are")
+            messages.success(request, (
+                f"Event updated. {who} outside the audience you just set — "
+                "their signups stand, and they can still open this event."
+            ))
+        else:
+            messages.success(request, "Event updated.")
         return redirect("events:event_detail", pk=event.pk)
 
     return render(request, "events/event_form.html",

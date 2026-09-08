@@ -268,6 +268,30 @@ class Command(BaseCommand):
                 "empty, so the form that needs it offers an empty dropdown — "
                 "no error, just a page nobody can complete")
 
+        # ⚠️ The one thing in org/permissions.py that fails without a symptom.
+        #    Its builder skips a label it cannot resolve — right, because an app
+        #    that is not installed yet should not stop the group being built —
+        #    and the test on that list asserts a subset, so a name resolving to
+        #    nothing can never turn anything red. `events.view_eventtype`
+        #    outlived its model by three days that way, and a mistyped codename
+        #    grants nothing while looking correct in every listing.
+        #
+        #    Imported inside the method for the same reason as the models above:
+        #    D17 keeps core importable without the business apps.
+        try:
+            from org.permissions import unresolved_permissions
+            stale = unresolved_permissions()
+        except (ImportError, OperationalError, ProgrammingError) as error:
+            self.line(WARN, "Foundation permissions", type(error).__name__,
+                      str(error))
+        else:
+            self.line(
+                OK if not stale else BAD, "Foundation permissions",
+                "all resolve" if not stale else f"{len(stale)} name nothing",
+                "" if not stale else
+                f"{', '.join(stale)} — granted to nobody, silently. Either the "
+                "model went and the name stayed, or the name is a typo")
+
     def demo_residue(self):
         """Invented logins, still here on the day the real people arrive (C4.5).
 

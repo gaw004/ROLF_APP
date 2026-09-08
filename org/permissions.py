@@ -318,11 +318,48 @@ FOUNDATION_ADMIN_PERMISSIONS = [
     # have to be filled in before the pilot, and that is done by a staff account
     # in the admin — this tier can see what is there without being able to
     # rename a category out from under existing rows.
-    "events.view_eventtype",
+    # ⚠️ `events.view_eventtype` sat here until 2026-09-08, three days after
+    #    that table was deleted (commit d600bc9, "一处不留"). Nothing reported
+    #    it: the loop below skipped the label it could not resolve, and the test
+    #    on this list asserts a **subset**, so a name that resolves to nothing
+    #    can never fail. That is the third time this file has met "the list is
+    #    right, reality is not, and nothing says so" — see the note under
+    #    unresolved() for what now says so.
     "events.view_participationrole",
     "org.view_position",
     "org.view_employmenttype",
 ]
+
+
+def _named_permissions():
+    """Every label in FOUNDATION_ADMIN_PERMISSIONS, resolved — None where it is not.
+
+    One resolution, two readers: the group builder below takes what resolved,
+    and unresolved() reports what did not. Written as one function because the
+    two used to be one loop with the failures thrown away.
+    """
+    for label in FOUNDATION_ADMIN_PERMISSIONS:
+        app_label, codename = label.split(".")
+        yield Permission.objects.filter(
+            content_type__app_label=app_label, codename=codename).first()
+
+
+def unresolved_permissions():
+    """The labels naming a permission this database does not have.
+
+    ⚠️ Skipping them is still right — an app that is not installed yet should
+       not stop the group being built. What was wrong was skipping them
+       **silently**: `events.view_eventtype` outlived its model by three days
+       and the only thing that would ever have noticed was somebody reading this
+       file. A typo in a codename fails exactly the same way, and grants nothing
+       while looking correct in every listing.
+
+    Read by core.management.commands.check_deployment, so a stale name is
+    reported where the rest of "is this database ready" is reported.
+    """
+    return [label for label, found
+            in zip(FOUNDATION_ADMIN_PERMISSIONS, _named_permissions())
+            if found is None]
 
 
 def foundation_admin_group() -> Group:
@@ -337,13 +374,7 @@ def foundation_admin_group() -> Group:
        gets 403 from them. That is deliberate, not an oversight.
     """
     group, _ = Group.objects.get_or_create(name=FOUNDATION_ADMIN_GROUP)
-    wanted = []
-    for label in FOUNDATION_ADMIN_PERMISSIONS:
-        app_label, codename = label.split(".")
-        found = Permission.objects.filter(
-            content_type__app_label=app_label, codename=codename).first()
-        if found:
-            wanted.append(found)
+    wanted = [p for p in _named_permissions() if p is not None]
     # ⚠️ Reconciled every time, not only when the group is new or empty.
     #
     #    The earlier version was `if created or not group.permissions.exists()`,

@@ -3573,7 +3573,15 @@ class AudienceShapeTests(TestCase):
     def save(self, form):
         """⚠️ `owner` is not a form field — event_create() sets it after
         commit=False, so a test calling form.save() straight through hits a
-        NOT NULL. Same two lines as the view, on purpose.
+        NOT NULL. The same three lines as the view, on purpose.
+
+        🔴 It said "the same **two** lines" until 2026-09-08, and it was wrong
+           by exactly the line that mattered: the view had no `save_m2m()`, so
+           every event published through the page stored an audience with no
+           ministries in it while this whole class stayed green. A helper that
+           claims to mirror a view and is more correct than it does not test
+           that view — it tests a path nobody walks. If the view's shape changes
+           again, this is the first place to look.
         """
         event = form.save(commit=False)
         event.owner = self.zhang.contact
@@ -4198,6 +4206,223 @@ class MinistryAdminPageTests(PageTestCase):
         })
         self.assertEqual(response.status_code, 302)
         self.assertTrue(Event.objects.filter(name="Saturday pantry").exists())
+
+    def test_ticking_everyone_leaves_the_pair_it_covers_unticked(self):
+        """🔴 What makes the convenience tick work in both directions.
+
+        All three came back ticked until 2026-09-08, and audience() reads the
+        tick as `everyone or visible_to_outsiders` — so unticking "Everyone"
+        left the pair ticked, stored the audience it already had, and reported
+        success. Taking an event back off the public listing did nothing, and
+        said nothing.
+        """
+        self.event.visible_to_outsiders = True
+        self.event.visible_to_all_staff = True
+        self.event.save()
+        self.login(self.zhang)
+        form = self.client.get(
+            reverse("events:event_update", args=[self.event.pk])
+        ).context["form"]
+        self.assertTrue(form.initial[form.EVERYONE_FIELD])
+        self.assertFalse(form.initial["visible_to_outsiders"])
+        self.assertFalse(form.initial["visible_to_all_staff"])
+
+    def test_unticking_everyone_asks_who_it_is_for(self):
+        # The half that used to be a silent no-op. With the pair blank, taking
+        # the tick off leaves an audience of nobody — and that is refused out
+        # loud rather than saved as no change at all.
+        self.event.visible_to_outsiders = True
+        self.event.visible_to_all_staff = True
+        self.event.save()
+        self.role.visible_to_outsiders = True
+        self.role.visible_to_all_staff = True
+        self.role.save()
+        self.login(self.zhang)
+        response = self.client.post(
+            reverse("events:event_update", args=[self.event.pk]), {
+                "name": self.event.name, "ministry": self.pantry.pk,
+                "start_time": localtime(
+                    self.event.start_time).strftime("%Y-%m-%dT%H:%M"),
+                "end_time": localtime(
+                    self.event.end_time).strftime("%Y-%m-%dT%H:%M"),
+                "status": self.event.status,
+            })
+        self.assertEqual(response.status_code, 200)
+        self.event.refresh_from_db()
+        self.assertTrue(self.event.visible_to_outsiders)
+
+    def test_an_event_stored_as_everyone_comes_back_as_everyone(self):
+        # The round trip, so blanking the pair on the way out cannot be read as
+        # dropping it: audience() expands the tick again on the way in.
+        self.event.visible_to_outsiders = True
+        self.event.visible_to_all_staff = True
+        self.event.save()
+        self.login(self.zhang)
+        form = self.client.get(
+            reverse("events:event_update", args=[self.event.pk])
+        ).context["form"]
+        response = self.client.post(
+            reverse("events:event_update", args=[self.event.pk]), {
+                "name": self.event.name, "ministry": self.pantry.pk,
+                "start_time": localtime(
+                    self.event.start_time).strftime("%Y-%m-%dT%H:%M"),
+                "end_time": localtime(
+                    self.event.end_time).strftime("%Y-%m-%dT%H:%M"),
+                "status": self.event.status,
+                form.EVERYONE_FIELD: True,
+            })
+        self.assertEqual(response.status_code, 302)
+        self.event.refresh_from_db()
+        self.assertTrue(self.event.visible_to_outsiders)
+        self.assertTrue(self.event.visible_to_all_staff)
+
+    def test_the_detail_page_still_opens_after_the_audience_is_narrowed(self):
+        """🔴 Narrowing takes away discovery, never a row somebody already holds.
+
+        06-roadmap L2.2 says it in those words, Participation.mine() says it in
+        its docstring, and the guard whitelist in core/tests.py gives it as the
+        reason mine() is exempt. The detail page did not say it until
+        2026-09-08 — so /me/participations/ listed the row and the link it
+        carried was a 404.
+        """
+        Participation.objects.create(
+            contact=self.lisi.contact, event_role=self.role)
+        for row in (self.event, self.role):
+            row.visible_to_outsiders = False
+            row.visible_to_all_staff = True
+            row.save()
+        self.login(self.lisi)      # an outsider: no post, so out of the audience
+        listed = self.client.get(reverse("events:my_participations"))
+        self.assertContains(listed, self.event.name)
+        detail = self.client.get(
+            reverse("events:event_detail", args=[self.event.pk]))
+        self.assertEqual(detail.status_code, 200)
+
+    def test_a_signup_survives_its_holders_tenure_ending(self):
+        # The path where nobody did anything wrong: staff signs up for a
+        # staff-only event, the post ends before the day itself. The audience
+        # answer flips without anybody editing the event.
+        post = Position.objects.create(
+            code="pantry_hand", name="Pantry hand", ministry=self.pantry,
+            kind=Position.Kind.STAFF)
+        Assignment.objects.create(
+            contact=self.lisi.contact, position=post,
+            start_date=datetime.date(2020, 1, 1),
+            end_date=local_today() - datetime.timedelta(days=1))
+        Participation.objects.create(
+            contact=self.lisi.contact, event_role=self.role)
+        for row in (self.event, self.role):
+            row.visible_to_outsiders = False
+            row.visible_to_all_staff = True
+            row.save()
+        self.login(self.lisi)
+        detail = self.client.get(
+            reverse("events:event_detail", args=[self.event.pk]))
+        self.assertEqual(detail.status_code, 200)
+
+    def test_a_draft_is_still_hidden_from_somebody_who_signed_up(self):
+        # The line the branch above deliberately does not cross. A draft is not
+        # a row anybody holds yet, and mine() excludes drafts too — so listing
+        # and page agree without help, and the exemption must not reach here.
+        Participation.objects.create(
+            contact=self.lisi.contact, event_role=self.role)
+        self.event.status = Event.Status.DRAFT
+        self.event.save()
+        self.login(self.lisi)
+        detail = self.client.get(
+            reverse("events:event_detail", args=[self.event.pk]))
+        self.assertEqual(detail.status_code, 404)
+
+    def test_narrowing_says_how_many_signed_up_people_fall_outside(self):
+        # The admin is told, and told only that. Nothing in this system can
+        # withdraw somebody else's signup, so the message names no action.
+        Participation.objects.create(
+            contact=self.lisi.contact, event_role=self.role)
+        self.role.visible_to_outsiders = False
+        self.role.visible_to_all_staff = True
+        self.role.save()
+        # ⚠️ Whole minutes **and** local time. The widget expresses local
+        #    minutes, so a stored time carrying seconds — or one printed in UTC
+        #    — reads back as a *changed* time, and the view then leaves down its
+        #    reschedule exit and never reaches the message this asserts. See
+        #    EventForm.time_changed.
+        self.event.start_time = self.event.start_time.replace(
+            second=0, microsecond=0)
+        self.event.end_time = self.event.end_time.replace(second=0, microsecond=0)
+        self.event.save()
+        self.login(self.zhang)
+        response = self.client.post(
+            reverse("events:event_update", args=[self.event.pk]), {
+                "name": self.event.name, "ministry": self.pantry.pk,
+                "start_time": localtime(
+                    self.event.start_time).strftime("%Y-%m-%dT%H:%M"),
+                "end_time": localtime(
+                    self.event.end_time).strftime("%Y-%m-%dT%H:%M"),
+                "status": self.event.status,
+                "visible_to_all_staff": True,
+            }, follow=True)
+        said = " ".join(m.message for m in response.context["messages"])
+        self.assertIn("1 person who signed up is outside", said)
+
+    def test_an_event_keeps_the_ministries_it_was_ticked_for(self):
+        """🔴 The audience a person ticked has to survive the save.
+
+        Until 2026-09-08 it did not: event_create called form.save(commit=False)
+        and never form.save_m2m(), so the only part of an audience that lives in
+        a many-to-many was dropped on the floor. An event ticked for one
+        ministry and nothing else therefore stored an audience of nobody, and
+        for_audience() then hid it from every account — including the person who
+        had just published it.
+
+        ⚠️ Every other POST in this file passes `visible_to_outsiders`, which is
+           an ordinary column and saved with the row. Not one of them passed
+           `visible_to_ministries`, which is why the whole class stayed green
+           over a field that never once reached the database.
+        """
+        self.login(self.zhang)
+        response = self.client.post(reverse("events:event_create"), {
+            "name": "Pantry staff briefing", "ministry": self.pantry.pk,
+            "start_time": "2026-09-01T09:00", "end_time": "2026-09-01T12:00",
+            "status": Event.Status.OPEN,
+            "visible_to_ministries": [self.pantry.pk],
+        })
+        self.assertEqual(response.status_code, 302)
+        event = Event.objects.get(name="Pantry staff briefing")
+        self.assertEqual(list(event.visible_to_ministries.all()), [self.pantry])
+
+    def test_editing_an_event_keeps_its_ministries(self):
+        """The other exit, taken on purpose.
+
+        ⚠️ The POST moves the time, so `form.time_changed()` is true and the
+           view leaves down its **reschedule** branch — which redirects to the
+           notice page before ever reaching the save at the bottom. That is
+           precisely the path that would drop the ticks if save_m2m() sat beside
+           either return instead of above the branch, so this test takes it
+           deliberately rather than by accident.
+        """
+        self.login(self.zhang)
+        # ⚠️ The role comes out of make_role() inheriting the event's audience,
+        #    so narrowing the event alone trips the containment invariant and
+        #    the form is refused for a reason that has nothing to do with what
+        #    this test is about. Both sides move together, then the POST
+        #    *widens* — role ⊆ event throughout.
+        for row in (self.event, self.role):
+            row.visible_to_outsiders = False
+            row.visible_to_all_staff = False
+            row.save()
+            row.visible_to_ministries.set([self.pantry])
+        moved = localtime(self.event.start_time) + datetime.timedelta(hours=1)
+        response = self.client.post(
+            reverse("events:event_update", args=[self.event.pk]), {
+                "name": self.event.name, "ministry": self.pantry.pk,
+                "start_time": moved.strftime("%Y-%m-%dT%H:%M"),
+                "end_time": (moved + 3 * HOUR).strftime("%Y-%m-%dT%H:%M"),
+                "status": self.event.status,
+                "visible_to_ministries": [self.pantry.pk, self.tax.pk],
+            })
+        self.assertEqual(response.status_code, 302)
+        self.assertCountEqual(
+            self.event.visible_to_ministries.all(), [self.pantry, self.tax])
 
     def test_viewing_another_ministrys_registrations_returns_403(self):
         # The GET side of the same rule.

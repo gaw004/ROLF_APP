@@ -136,9 +136,42 @@ class AudienceFormMixin:
         )
         instance = getattr(self, "instance", None)
         if instance is not None and instance.pk is not None:
-            self.initial.setdefault(
-                self.EVERYONE_FIELD,
+            covers_both = (
                 instance.visible_to_outsiders and instance.visible_to_all_staff)
+            self.initial.setdefault(self.EVERYONE_FIELD, covers_both)
+            # 🔴 And the pair it stands for comes back **unticked**, which is
+            #    what makes this control work in both directions.
+            #
+            #    Until 2026-09-08 all three came back ticked, and the tick was
+            #    therefore one-way: audience() reads it as
+            #    `everyone or visible_to_outsiders`, so unticking "Everyone"
+            #    left the two below still ticked, stored the same audience it
+            #    already had, and reported success. The one thing somebody opens
+            #    this form to do — take an event back off the public listing —
+            #    did nothing at all and said nothing at all.
+            #
+            #    Unticked, the screen reads the way app.css already describes
+            #    the greying: they are not broken, they are *already covered*.
+            #    Untick "Everyone" and they come back live and empty, so the
+            #    save is refused by refuse_empty_audience() with "Say who this
+            #    is for" — which is the honest answer to what was just asked.
+            #
+            # ⚠️ Nothing is lost by blanking them: audience() expands the tick
+            #    back into both values on the way in (decision 11 — the tick is
+            #    a convenience on the form, the database stores the two).
+            #
+            # ⚠️ **The pair only.** The same move on visible_to_ministries would
+            #    be data loss, not presentation: those rows are what somebody
+            #    chose, and "Everybody on the books" covering them does not make
+            #    them recoverable from a boolean. That box keeps its state and
+            #    says so on the page instead.
+            # ⚠️ Assigned, not setdefault(). BaseModelForm has already filled
+            #    self.initial from model_to_dict(instance), so both keys are
+            #    there and holding True — setdefault would look right and do
+            #    nothing at all.
+            if covers_both:
+                for name in pair:
+                    self.initial[name] = False
         self.order_fields(None)
 
     def order_fields(self, field_order):

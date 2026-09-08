@@ -1968,6 +1968,58 @@ def create_participation_role(name, *, nature):
     return role
 
 
+def signups_left_outside(event):
+    """How many people hold a signup this event's audience no longer covers.
+
+    Narrowing an audience is allowed to strand people — a role it would strand
+    is refused (refuse_wider_than_event), a *person* it strands is not, because
+    the signup they already hold is not taken away from them (L2.2: narrowing
+    takes away discovery, never a row you already hold). But the admin who just
+    narrowed it should be told, and this counts them.
+
+    ⚠️ It counts and stops there. It does not cancel anybody, does not write,
+       and does not point at a control for doing so — as of 2026-09-08 nothing
+       in this system can withdraw somebody else's signup, and that is
+       deliberate (the foundation tier holds view_participation only, and
+       ministry admins cannot reach the admin site at all). A message offering
+       an action that does not exist is worse than no message. See deferred.md.
+
+    ⚠️ The sibling of `EventQuerySet.for_audience()`, and the two have to agree.
+       The hard half — what "on the books" means — is not restated: it comes
+       from `on_the_books_q()`, the same call for_audience makes. What is
+       restated is the three-way OR, and only because this asks the question
+       from the other end (which people, for one event; not which events, for
+       one person). If for_audience ever grows a fourth branch, this grows one
+       too.
+
+    ⚠️ Two queries regardless of how many people signed up, rather than asking
+       for_audience() once per person. Cancelled rows are not counted: that
+       person already said they are not coming.
+    """
+    holders = set(
+        Participation.objects.filter(event_role__event=event)
+        .exclude(status=Participation.Status.CANCELLED)
+        .values_list("contact_id", flat=True)
+    )
+    if not holders:
+        return 0
+
+    on = local_date_of(event.start_time)
+    tenures = Assignment.objects.filter(
+        on_the_books_q(on), contact_id__in=holders)
+    on_the_books = set(tenures.values_list("contact_id", flat=True))
+    in_a_ticked_ministry = set(
+        tenures.filter(position__ministry__in=event.visible_to_ministries.all())
+        .values_list("contact_id", flat=True))
+
+    covered = set(in_a_ticked_ministry)
+    if event.visible_to_outsiders:
+        covered |= holders - on_the_books
+    if event.visible_to_all_staff:
+        covered |= on_the_books
+    return len(holders - covered)
+
+
 def add_session(event, *, start_time, end_time, source=Source.MANUAL):
     """Put one meeting on a run. Returns the new Session.
 

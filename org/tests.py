@@ -29,6 +29,7 @@ from .permissions import (
     can_view_event_records,
     foundation_admin_group,
     ministry_ids_administered_by,
+    unresolved_permissions,
 )
 from .services import build_org_tree
 
@@ -862,10 +863,26 @@ class FoundationAdminGroupTests(TestCase):
         }
         # Subset rather than equality: a permission named in the list but absent
         # from this database (an app not installed yet) is skipped by design.
+        #
+        # ⚠️ Which is why this assertion can never catch a name that resolves to
+        #    nothing — it passes more easily the more of the list is broken.
+        #    That is what test_every_named_permission_resolves below is for; the
+        #    two are a pair and neither is sufficient alone.
         self.assertTrue(granted <= set(FOUNDATION_ADMIN_PERMISSIONS))
         self.assertIn("org.add_ministry", granted,
                       "A production database starts with no ministries and nothing "
                       "else can create one.")
+
+    def test_every_named_permission_resolves(self):
+        """🔴 A label that names nothing grants nothing, silently.
+
+        `events.view_eventtype` sat in the list for three days after its model
+        was deleted, and nothing went red: the builder skips what it cannot
+        resolve, and the subset assertion above gets *easier* to satisfy as the
+        list rots. A mistyped codename fails exactly the same way and looks
+        correct in every listing.
+        """
+        self.assertEqual(unresolved_permissions(), [])
 
     def test_it_never_grants_delete_ministry(self):
         # Deleting a ministry cascades into its events. "We stopped running it"

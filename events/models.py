@@ -19,7 +19,6 @@ from django.core.exceptions import ValidationError
 from django.db import models
 from django.db.models import Count, F, Q
 from django.db.models.functions import Lower
-from django.utils.text import get_text_list
 from phonenumber_field.modelfields import PhoneNumberField
 from simple_history.models import HistoricalRecords
 
@@ -322,10 +321,10 @@ def refuse_wider_than_event(*, event, role):
        people this is about", used by whichever page is asking.
     """
     if role.outsiders and not event.outsiders:
-        _refuse_too_wide("visible_to_outsiders", "people with no current post")
+        _refuse_too_wide("visible_to_outsiders", Audience.OUTSIDERS_ARE)
     if role.all_staff and not event.all_staff:
         _refuse_too_wide(
-            "visible_to_all_staff", "everybody on the books",
+            "visible_to_all_staff", Audience.ALL_STAFF_ARE,
             extra=" (Ticking every ministry is not the same thing — a ministry "
                   "added later would be covered by one and not the other.)")
     # A ministry-specific role is fine if the event covers all staff, and
@@ -348,20 +347,21 @@ def refuse_wider_than_event(*, event, role):
     if role.ministries and not event.all_staff:
         beyond = role.ministries - event.ministries
         if beyond:
-            # ⚠️ `get_text_list`, Django's own — "A", "A and B", "A, B and C".
-            #    A bare comma join reads as an unfinished sentence here: the
-            #    role names in these messages are each in quotes and delimit
-            #    themselves, while these sit unquoted inside a phrase. Written
-            #    by hand until 2026-08-27, with a test, for behaviour the
-            #    framework ships and translates.
-            names = get_text_list(
-                list(Ministry.objects.filter(pk__in=beyond).order_by("name")
-                     .values_list("name", flat=True)), "and")
+            # ⚠️ The joining ("A", "A and B", "A, B and C") is Django's own
+            #    get_text_list, now inside Audience.ministry_staff_are(). A bare
+            #    comma join reads as an unfinished sentence here: the role names
+            #    in these messages are each in quotes and delimit themselves,
+            #    while these sit unquoted inside a phrase. Written by hand until
+            #    2026-08-27, with a test, for behaviour the framework ships.
+            names = list(Ministry.objects.filter(pk__in=beyond).order_by("name")
+                         .values_list("name", flat=True))
             # ⚠️ "staff in X", not the bare name. The other two phrases describe
             #    people and this one has to read the same way in the same slot —
             #    "open to Tax Help, who could no longer see it" says a
-            #    department cannot see an event.
-            _refuse_too_wide("visible_to_ministries", f"staff in {names}",
+            #    department cannot see an event. All three now come from
+            #    org.audience so the refusal and the page cannot drift.
+            _refuse_too_wide("visible_to_ministries",
+                             Audience.ministry_staff_are(names),
                              stem="This event is not open to %(audience)s, so a "
                                   "role inside it cannot be.")
 

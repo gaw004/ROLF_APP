@@ -14,6 +14,7 @@ from django.db import models
 
 from contact.models import Contact
 from org.audience import (
+    AUDIENCE_HEADING,
     Audience,
     refuse_empty_audience,
     refuse_redundant_audience,
@@ -133,8 +134,15 @@ class AudienceFormMixin:
         self.fields[self.EVERYONE_FIELD] = forms.BooleanField(
             required=False,
             label="Everyone",
-            help_text="Outside volunteers and staff alike — the same as "
-                      "ticking both boxes below.",
+            # ⚠️ "volunteers" would be the wrong word here and it was the
+            #    word until 2026-09-08. participants.md section 5 keeps that
+            #    term for group A only — somebody giving their own time — and
+            #    this box is about everybody outside the foundation, the people
+            #    it serves included. Reading it as "tick this to recruit
+            #    volunteers" is exactly the narrowing that section exists to
+            #    stop.
+            help_text="People outside the foundation and staff alike — the "
+                      "same as ticking both boxes below.",
         )
         instance = getattr(self, "instance", None)
         if instance is not None and instance.pk is not None:
@@ -248,6 +256,25 @@ class AudienceFormMixin:
         names = [name for name in self.fields if name != self.EVERYONE_FIELD]
         names.insert(names.index("visible_to_outsiders"), self.EVERYONE_FIELD)
         super().order_fields(names)
+
+    @property
+    def audience_heading(self):
+        """"Who can see this event" / "Who may sign up for this role"."""
+        return AUDIENCE_HEADING[self.AUDIENCE_ON]
+
+    @property
+    def audience_heading_before(self):
+        """The field the heading sits above — whichever tick comes first.
+
+        ⚠️ Derived, not a constant, because order_fields() above re-seats the
+           "Everyone" tick to the top of the group and that tick is absent on a
+           read-only form. A hard-coded name would put the heading in the middle
+           of its own group on one of those two paths, and it is the kind of
+           wrong that only shows up on the screen.
+        """
+        if self.EVERYONE_FIELD in self.fields:
+            return self.EVERYONE_FIELD
+        return self.AUDIENCE_GROUP_FIELD if self.AUDIENCE_GROUP_FIELD in self.fields else ""
 
     def audience(self):
         """The submitted audience as an Audience.Spec.

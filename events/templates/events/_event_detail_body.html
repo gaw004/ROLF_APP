@@ -133,6 +133,25 @@
           <dd>{{ event.location }}</dd>
         </div>
       {% endif %}
+      {% comment %}
+      ⭐ 「谁看得见这一场」。2026-09-08 加的，而在此之前**没有任何页面显示过它** ——
+         三个勾决定了谁找得到这场活动，发出去之后却只能靠重新打开编辑表单才查得到。
+         而 06-roadmap 给这个功能写的失败方式正是「发一场欢送会忘了改，就公开给了
+         每一个外部志愿者，而这件事不报错、没有任何人会发现」。以前确实发现不了。
+
+      ⚠️ 反过来更难查：误勾成「只给外部人员」时，全体在编的人都看不见它 ——
+         **包括发布它的那个人自己**。他会以为活动没发出去，去查权限、查状态、
+         查账号，而真正的原因就在这一格上。
+
+      ⚠️ 措辞不在这里，来自 org/audience.py 的那三句 —— 拦人时说的和事后读到的
+         是同一份，见 Audience.audience_in_words。
+      {% endcomment %}
+      {% if event.audience_in_words %}
+        <div>
+          <dt class="text-xs text-ink-600 dark:text-ink-300">Visible to</dt>
+          <dd>{{ event.audience_in_words|join:", " }}</dd>
+        </div>
+      {% endif %}
     </dl>
     {% if event.description %}
       <p class="mt-4 text-sm text-ink-800 dark:text-ink-100">{{ event.description }}</p>
@@ -162,7 +181,15 @@
   {% endif %}
   <div class="table-wrap">
     <table>
-      <thead><tr><th>Role</th><th>Kind</th><th>Wanted</th><th>Signed up</th></tr></thead>
+      {% comment %}
+      ⚠️ 「Open to」这一列**只画给看全表的人**（2026-09-08）。对普通报名者，
+         这张表已经按他过滤过了 —— 列出来的每一行都是他报得上的，那一列对他
+         恒等于「你」，是没有后果的行话。
+         而对看全表的人它是上面那句文案缺的下半句：那句说「别人只看得见给他们
+         的角色」，这一列说**哪几行**。需求 8（一次发布同时招内外）在此之前
+         没有任何一页能让发布者验证自己做到了没有。
+      {% endcomment %}
+      <thead><tr><th>Role</th><th>Kind</th>{% if sees_every_role %}<th>Open to</th>{% endif %}<th>Wanted</th><th>Signed up</th></tr></thead>
       <tbody>
         {% for role in roles %}
           <tr>
@@ -172,6 +199,9 @@
             同一场发放日上两者会并排列在这张表里。
             {% endcomment %}
             <td class="text-ink-600 dark:text-ink-300">{{ role.role.get_nature_display }}</td>
+            {% if sees_every_role %}
+              <td class="text-ink-600 dark:text-ink-300">{{ role.audience_in_words|join:", " }}</td>
+            {% endif %}
             <td>{{ role.needed_count|default_if_none:"No limit" }}</td>
             <td>{{ role.registered_count }}</td>
           </tr>

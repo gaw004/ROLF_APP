@@ -477,7 +477,12 @@ def _detail(request, pk):
     #    twice, an annotation or a prefetch added for the table would land on
     #    one and not the other, and the records-reader's rows would quietly stop
     #    matching everybody else's — with the template unable to tell.
-    rows = event.roles.with_signup_counts().select_related("role")
+    # ⚠️ The prefetch is for the "Open to" column, drawn only for whoever sees
+    #    every role — one query for the lot instead of one per row. `.all()` in
+    #    audience_in_words is what lets it land; see audience_is_empty for why
+    #    that spelling matters.
+    rows = (event.roles.with_signup_counts().select_related("role")
+            .prefetch_related("visible_to_ministries"))
     to_join = list(rows.for_audience(contact))
     # ⚠️ A second query, and only for this viewer.
     roles = list(rows) if may_view_records else to_join
@@ -1317,6 +1322,7 @@ def event_registrations(request, pk):
         return redirect("events:event_registrations", pk=event.pk)
 
     roles = event.roles.with_signup_counts().select_related("role").prefetch_related(
+        "visible_to_ministries",
         Prefetch(
             "participations",
             queryset=Participation.objects.select_related("contact").order_by("contact"),

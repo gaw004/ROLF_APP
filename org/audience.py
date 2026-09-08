@@ -19,6 +19,7 @@ from typing import NamedTuple
 
 from django.core.exceptions import ValidationError
 from django.db import models
+from django.utils.text import get_text_list
 from django.db.models import Q
 
 from core.querysets import in_effect_on
@@ -214,7 +215,7 @@ class Audience(models.Model):
     visible_to_outsiders = models.BooleanField(
         default=False,
         verbose_name="People with no current post",
-        help_text="Outside volunteers and the people the foundation serves.",
+        help_text="People from outside the foundation — including the people it serves.",
     )
     visible_to_all_staff = models.BooleanField(
         default=False,
@@ -240,6 +241,61 @@ class Audience(models.Model):
         limit_choices_to={"is_active": True},
         verbose_name="Only these ministries' staff",
     )
+
+    #: The three phrases naming the people an audience covers, and the **only**
+    #: spelling of them. `events.models.refuse_wider_than_event()` interpolates
+    #: these into its refusals and `audience_in_words` below reads them out to a
+    #: page, so the sentence somebody is stopped by and the line they read
+    #: afterwards cannot come to disagree.
+    #:
+    #: ⚠️ This is what Spec's deleted `__str__` said to do rather than what it
+    #:    did: take the phrases from where they already have readers, and keep
+    #:    the database out of them. Its three lived beside these and nothing
+    #:    would have noticed them drifting.
+    #:
+    #: ⚠️ Each names **people**, never a setting or a department — they all land
+    #:    in the same slot as "…is not open to %s, who could no longer see it".
+    OUTSIDERS_ARE = "people with no current post"
+    ALL_STAFF_ARE = "everybody on the books"
+
+    @staticmethod
+    def ministry_staff_are(names):
+        """"staff in Tax Help" — the third phrase, which needs the names.
+
+        ⚠️ Takes names, never a queryset: whoever already has the rows passes
+           them in, so this cannot become the query in a `__str__` that the
+           deleted one was.
+        """
+        return f"staff in {get_text_list(list(names), 'and')}"
+
+    @property
+    def audience_in_words(self):
+        """Who can see this row, as phrases a page can print. Never empty-safe.
+
+        ⭐ Written 2026-09-08, because until then an audience was a value this
+           system only ever **wrote**. Three ticks decided who could find an
+           event and no page anywhere showed them back: not the detail page, not
+           the manage list, not the roles panel. The one way to check what you
+           had chosen was to reopen the form you chose it in — and the failure
+           06-roadmap names for this feature is "you published a leaving party
+           to every outside volunteer, and nothing says so". Nothing could.
+
+        ⚠️ Returns a list rather than a sentence, so the caller decides between
+           a comma list, one per line, or a column in a table.
+
+        ⚠️ `.all()` on the many-to-many, so a page that prefetches pays one
+           query for the lot — the same reason audience_is_empty above avoids
+           exists().
+        """
+        words = []
+        if self.visible_to_outsiders:
+            words.append(self.OUTSIDERS_ARE)
+        if self.visible_to_all_staff:
+            words.append(self.ALL_STAFF_ARE)
+        named = [m.name for m in self.visible_to_ministries.all()]
+        if named:
+            words.append(self.ministry_staff_are(sorted(named)))
+        return words
 
     @property
     def audience_is_empty(self):
@@ -330,6 +386,30 @@ class Audience(models.Model):
 #: What "nobody ticked" means on each of the two tables. One function, two
 #: sentences — the failure looks different from each side, and a message that
 #: covers both ends up describing neither.
+#: The heading over the group of ticks, per side. ⭐ Written 2026-09-08 because
+#: the four labels on the ticks are **identical on both sides** — they come from
+#: the abstract model, so an event and a role each say "Everyone / People with
+#: no current post / Everybody on the books / Only these ministries\' staff".
+#: The event form draws both groups on one screen, one above the other, with a
+#: role's group pre-ticked to match the event's (decision 15). Two identical
+#: sets of ticks showing identical values read as the same setting rendered
+#: twice, and somebody editing the lower one believes they are changing the
+#: event's visibility.
+#:
+#: 🔴 And "seeing it is not the same as being able to sign up for it" is the
+#:    sentence this whole round turns on (participants.md section 3). It was
+#:    written into the refusals, into for_audience(), into two guards — and on
+#:    the one screen where both questions are asked together, nowhere at all.
+#:
+#: ⚠️ Keyed by AUDIENCE_ON beside EMPTY_AUDIENCE_MESSAGE, so the heading and
+#:    the refusal for a side are edited in one place. A fourth audience-bearing
+#:    table adds one entry to each and is finished.
+AUDIENCE_HEADING = {
+    "event": "Who can see this event",
+    "role": "Who may sign up for this role",
+    "notice": "Who needs to know this",
+}
+
 EMPTY_AUDIENCE_MESSAGE = {
     "event": (
         "Say who this is for. Something published that nobody can see is a "

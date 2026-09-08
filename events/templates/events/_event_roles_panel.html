@@ -9,7 +9,7 @@
     <div class="table-wrap">
       <table>
         <thead>
-          <tr><th>Role</th><th>Kind</th><th>Wanted</th><th>Signed up</th><th>Notes</th><th></th></tr>
+          <tr><th>Role</th><th>Kind</th><th>Open to</th><th>Wanted</th><th>Signed up</th><th>Notes</th><th></th></tr>
         </thead>
         <tbody>
           {% for role in roles %}
@@ -23,6 +23,18 @@
                  这一格是既成事实，一个词就够。两半分别存在哪见 models.py。
               {% endcomment %}
               <td class="text-ink-600 dark:text-ink-300">{{ role.role.get_nature_display }}</td>
+              {% comment %}
+              ⭐ 「谁报得上这个位置」（2026-09-08）。和上一列并排是有意的：Kind 说
+                 这一行的人来做什么，Open to 说谁能站上去，而这两件事都是开角色时
+                 定下、之后再也没有页面显示过的。
+
+              ⚠️ 它和活动那一格问的**不是同一个问题** —— 活动那格是「谁看得见」，
+                 这一列是「谁报得上」。需求 8（一次发布同时招内外）就靠这两者不同，
+                 而在此之前发布者无法在任何一页上验证自己是不是真的做到了。
+
+              ⚠️ 同一份措辞，来自 org/audience.py 的那三句。
+              {% endcomment %}
+              <td class="text-ink-600 dark:text-ink-300">{{ role.audience_in_words|join:", " }}</td>
               {% comment %}
               ⚠️ 「要几个」这一格现在还要说**那个数字拦不拦人**（2026-08-19）。
                  光写「2」的话，屏幕上看不出这一格勾没勾「到这个人数就停止报名」——

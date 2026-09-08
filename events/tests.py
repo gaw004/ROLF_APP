@@ -4453,6 +4453,62 @@ class MinistryAdminPageTests(PageTestCase):
         self.assertTrue(self.event.visible_to_outsiders)
         self.assertTrue(self.event.visible_to_all_staff)
 
+    def test_the_detail_page_says_who_can_see_the_event(self):
+        """⭐ The audience was a value this system only ever wrote.
+
+        Three ticks decided who could find an event and no page showed them
+        back — the only way to check what you had chosen was to reopen the form
+        you chose it in. 06-roadmap's stated failure for this feature is
+        "published a leaving party to every outside volunteer, and nothing says
+        so"; until 2026-09-08 nothing could.
+        """
+        self.login(self.zhang)
+        html = self.client.get(
+            reverse("events:event_detail", args=[self.event.pk])).content.decode()
+        self.assertIn("Visible to", html)
+        self.assertIn("people with no current post", html)
+
+    def test_the_roles_table_says_who_may_sign_up_for_each_one(self):
+        # Requirement 8 from the publisher's side: one event recruiting inside
+        # and outside at once, and no page let them check they had done it.
+        for row in (self.event, self.role):
+            row.visible_to_outsiders = False
+            row.visible_to_all_staff = True
+            row.save()
+        self.login(self.zhang)      # can read records, so sees every role
+        html = self.client.get(
+            reverse("events:event_detail", args=[self.event.pk])).content.decode()
+        self.assertIn("Open to", html)
+        self.assertIn("everybody on the books", html)
+
+    def test_an_ordinary_participant_is_not_shown_the_open_to_column(self):
+        # For them the table is already filtered to roles they can take, so the
+        # column would read "you" on every row — words with no consequence.
+        self.login(self.lisi)
+        html = self.client.get(
+            reverse("events:event_detail", args=[self.event.pk])).content.decode()
+        self.assertNotIn("Open to", html)
+
+    def test_the_two_tick_groups_say_which_question_they_answer(self):
+        # Their four labels are identical (they come from the abstract model),
+        # they are drawn one above the other, and the lower one is pre-ticked to
+        # match the upper. "Seeing it is not the same as signing up for it" is
+        # this round's central sentence and this screen never said it.
+        self.login(self.zhang)
+        html = self.client.get(
+            reverse("events:event_update", args=[self.event.pk])).content.decode()
+        self.assertIn("Who can see this event", html)
+        self.assertIn("Who may sign up for this role", html)
+
+    def test_an_empty_event_list_admits_the_second_reason(self):
+        # "Try a wider date range" was the whole answer until L3 gave the page a
+        # second reason to be empty. Somebody outside every audience can widen
+        # the window to a year and still see nothing.
+        Event.objects.all().delete()
+        self.login(self.lisi)
+        html = self.client.get(reverse("events:event_list")).content.decode()
+        self.assertIn("only open to certain groups", html)
+
     def test_the_delete_button_refuses_a_role_with_recorded_hours(self):
         # Through the view, because the helper being right does not mean the
         # door is shut — role_delete asked nothing at all until 2026-09-08.

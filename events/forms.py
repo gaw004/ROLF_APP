@@ -772,6 +772,24 @@ class EventRoleForm(EventAudienceFormMixin, forms.ModelForm):
         super().__init__(*args, **kwargs)
         self.instance.event = event
         self.fields["role"].queryset = ParticipationRole.objects.filter(is_active=True)
+        # ⚠️ The definition goes on **this** field too, not only on the "kind"
+        #    picker beside it (2026-09-08). That one is on the path for somebody
+        #    inventing a new job; whoever picks an existing row from this list
+        #    never saw it — and the two catch-all rows sit next to each other
+        #    here reading "General participant (attending)" and
+        #    "(helping)", where "attending" in ordinary English means "coming
+        #    along". Choosing wrong is silent in every direction: no hours
+        #    recorded, out of the staffing denominator, into "people served".
+        #
+        # ⚠️ Composed from NATURE_EXPLANATIONS rather than retyped, so the two
+        #    halves of each term cannot drift.
+        self.fields["role"].help_text = "; ".join(
+            f"{label.lower()} — {gloss}"
+            for label, gloss in (
+                (ParticipationRole.Nature(value).label, gloss)
+                for value, gloss in NATURE_EXPLANATIONS.items()
+            )
+        ).capitalize() + "."
 
         # ⭐ A new role starts as wide as the event it belongs to — "if you can
         #    see it you can sign up for it" is requirement 6's ordinary case,

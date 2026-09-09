@@ -19,6 +19,7 @@
 | `Position.compensation` 没有 | [D32](../decisions/D32-worker-axes-schedule-and-assignment.md) |
 | **整张 `Notice` 表**没有（以及 `notices` app 本身） | [D41](../decisions/D41-notices-are-not-events.md) |
 | **整张 `Session` 表**没有 | [`../06-roadmap.md`](../06-roadmap.md) L5.1 |
+| **整张 `SessionAttendance` 表**没有（以及 `Participation` 下面多出来的那一层） | [`../06-roadmap.md`](../06-roadmap.md) L5.2 |
 | `Event.status` 画的是 `confirmed` | 2026-08-19 已改名 `full`（迁移 0011） |
 | 谓词画的是 `visible_to_volunteers` | 2026-08-20 已改名 `visible_to_participants` |
 | 画着 `EventType` 和 `Event.event_type` | 2026-09-04 连表一起删了 |

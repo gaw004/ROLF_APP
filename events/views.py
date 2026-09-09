@@ -96,7 +96,7 @@ from .services import (
     notify_event_change,
     record_hours,
     reschedule,
-    scheduled_hours,
+    prefillable_hours,
     resolve_recipients,
     signups_asked_about_serving,
     hours_recorded_against,
@@ -1429,7 +1429,11 @@ def event_attendance(request, pk):
             return render(request, "events/_attendance_row_swap.html", {
                 "row": participation,
                 "hours_form": HoursForm(),
-                "scheduled_hours": scheduled_hours(event),
+                # ⚠️ The same helper as the full-page render below, not
+                #    scheduled_hours(): the swapped row and the page it lands in
+                #    must agree about what the box starts at, and the HTMX path
+                #    is the one that gets forgotten.
+                "scheduled_hours": prefillable_hours(event),
                 "can_manage": True,
             })
         return redirect("events:event_attendance", pk=event.pk)
@@ -1454,7 +1458,17 @@ def event_attendance(request, pk):
         # What the box starts at for somebody with no hours yet. Computed in
         # services, never here — this is date arithmetic, and there is a grep
         # guard on views doing any (D18).
-        "scheduled_hours": scheduled_hours(event),
+        #
+        # 🔴 None on a run, so the box starts empty. The prefill assumes
+        #    `end − start` is a plausible number of hours for one person, and a
+        #    term running March to June makes that **2664.00** — a figure an
+        #    admin can enter with one click, that is authoritative the moment it
+        #    lands, and that mark_absent() will refuse the row over from then
+        #    on. The accepted cost noted below ("a prefilled number looks
+        #    exactly like a confirmed one") was written before runs existed.
+        #    A run's hours are recorded per meeting anyway (decision 20), so
+        #    there is nothing here for the prefill to have been right about.
+        "scheduled_hours": prefillable_hours(event),
     })
 
 

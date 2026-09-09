@@ -257,6 +257,15 @@ class Audience(models.Model):
     #:    in the same slot as "…is not open to %s, who could no longer see it".
     OUTSIDERS_ARE = "people with no current post"
     ALL_STAFF_ARE = "everybody on the books"
+    #: Both of the above at once. The two ticks are complementary and exhaustive
+    #: — every contact either holds a current post or does not — so ticking both
+    #: is not "two groups", it is everybody there is.
+    #:
+    #: ⚠️ Never lands in the "…is not open to %s" slot the three above are
+    #:    written for: that refusal names **one tick at a time** (see
+    #:    events.models._refuse_too_wide), and an audience of everyone is the
+    #:    widest there is, so nothing can be too wide for it.
+    EVERYONE_IS = "everyone"
 
     @staticmethod
     def ministry_staff_are(names):
@@ -287,6 +296,23 @@ class Audience(models.Model):
            query for the lot — the same reason audience_is_empty above avoids
            exists().
         """
+        # 🔴 Both ticks collapse to one word, and this is the read-back half of
+        #    a rule the **form already keeps** (org.forms.AudienceFormMixin, and
+        #    decision 11 before it): somebody who ticked "Everyone" gets
+        #    "Everyone" back when they reopen the form, because — in that
+        #    docstring's words — showing them the two separate ticks instead
+        #    "would make the convenience a one-way trip and teach them not to
+        #    use it". Until 2026-09-08 this side did exactly that: you ticked
+        #    one box called Everyone and the page read back "people with no
+        #    current post, everybody on the books", which is the same audience
+        #    described as two groups nobody had chosen.
+        #
+        # ⚠️ Ministries cannot survive this branch: refuse_redundant_audience()
+        #    forbids all-staff together with a named ministry, so an audience
+        #    that reaches here with both flags has none. No third phrase is
+        #    being swallowed.
+        if self.visible_to_outsiders and self.visible_to_all_staff:
+            return [self.EVERYONE_IS]
         words = []
         if self.visible_to_outsiders:
             words.append(self.OUTSIDERS_ARE)

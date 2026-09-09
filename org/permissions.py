@@ -317,6 +317,27 @@ FOUNDATION_ADMIN_PERMISSIONS = [
     "events.view_event",
     "events.view_eventrole",
     "events.view_participation",
+    # L5.2's two tables, on the same footing and for the same reason: a run's
+    # meetings and its register are part of "what did this ministry run", which
+    # is what R1–R3 are read off.
+    #
+    # 🔴 Registering a model in admin.py is **not** what makes it reachable.
+    #    Django hides a model from the admin index entirely when you hold no
+    #    permission on it, so a table that is registered but not named here is
+    #    invisible to every account except a superuser — and it looks exactly
+    #    like a page that was never built. That is how add_ministry went
+    #    missing, and it is written a few lines above; L5.2 walked into the same
+    #    hole on 2026-09-08 and this is the second half of the fix.
+    #
+    # ⚠️ View only, deliberately — no add/change, matching the three lines
+    #    above. Scheduling a course's meetings is an act on **one ministry's**
+    #    event, and by D20's test ("does the sentence contain 'of some
+    #    ministry'?") that belongs to the ministry tier, not to a
+    #    foundation-wide grant. Its door is the Programmes pages (06-roadmap
+    #    L5.8), scoped by MinistryRole, and until those exist the only writer is
+    #    a superuser — the same footing event creation is on.
+    "events.view_session",
+    "events.view_sessionattendance",
     # Ministries themselves. A production database comes up with none, and
     # nothing else in the interface can create one — so without these the
     # foundation cannot get started at all. Django hides a model from the admin

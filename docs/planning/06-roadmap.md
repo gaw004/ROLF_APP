@@ -350,6 +350,17 @@ def askable_served_as():
 不写这句的后果是下一个人跑完 L1.2 的测试，发现约束从没在真实流程里触发过，
 于是怀疑它是不是接错了。
 
+> ### 2026-09-08 补：这条约束**到不了场次那一层**
+>
+> [L5.2](#l52-sessionattendance他哪几场来没来干了多久) 的 `SessionAttendance`
+> 复制了这张表的五条规则，唯独这一条复制不了：它能成立**全靠行上存着**
+> `not_applicable`，而那一档是身份轴的一部分，整期声明一次，不往场次上搬。
+> 于是那张表上没有任何一列可供 `CheckConstraint` 检验，那条规则在下面一层
+> 只能是 `clean()` 加服务层。
+>
+> 写在这里是因为「这一档换来一条真正的约束」这句话本身没错，
+> 但它换来的是**这一张表上**的一条约束 —— 不是一条会跟着形状一起复制下去的保证。
+
 ### 迁移
 
 `events/migrations/0017_served_as_not_applicable.py`：
@@ -514,8 +525,16 @@ L1.1 把「报名下拉里标出档位」推到了这里，理由是「后果要
 
 - 详情页的角色表已经有 Kind 那一列（L1.1 加的），「这是什么」已经答过；
 - 在下拉里挂一个「— attending」是分类学名词，而人在那一刻要的不是分类；
-- 真正的后果（不记工时）对一个来占座位的人**不是他关心的事** ——
-  那是机构记账的事。
+- 真正的后果对一个来占座位的人**不是他关心的事** —— 那是机构记账的事。
+
+> ### 2026-09-08 更正：上面那句原来写的是「不记工时…不是他关心的事」
+>
+> 结论不变（下拉里仍然不挂分类学名词），但那半句话不成立了。
+> [D43](decisions/D43-hours-given-and-hours-received.md) 之后，一个来占座位的人
+> **恰恰关心自己被服务了多久** —— 成人教育那一行按 contact hours 报表，
+> 而基金会走查时提的正是这句话。他不关心的是 `hours` **那一列**：
+> 那一列装的是他给出去的时间，而他给出的是零。
+> 两个数方向相反，所以「不记工时」从来不等于「他的时间不算数」。
 
 真正需要说明的是另一件事，而它不在下拉里：一场同时开了两种角色的活动，
 那道身份题会被画出来，但选了 attending 的角色时它被忽略。
@@ -627,6 +646,17 @@ def local_day(field):
 | `hours_per_participant` | `hours / participants` | `hours / recording_hours() 里的 distinct contact` | L1 一上线，ESL 学员进了分母却永远不贡献分子，人均工时会被稀释，而且不报错 |
 | `people_served` | 不存在 | `attending 的参与 × 活动当天没有在职 Assignment 的人` | [D38 第七节](decisions/D38-served-as-volunteer-or-work.md) 说的那两个问题，这是第二个第一次答得出来。乘号右边不能省：没有它，来听讲座的员工会被算进「我们服务了 N 位社区成员」 |
 | `fully_staffed` / `staffable_events` | 数所有开了人数的角色 | 只数 **helping** 的角色 | 初稿漏了这一格，见下 |
+
+> ### 2026-09-08 补：这四个口径全都只管一个方向
+>
+> 上面四格改的都是「别人给基金会的时间」那个账本。
+> [D43](decisions/D43-hours-given-and-hours-received.md) 之后还有一个反方向的数
+> ——「基金会花在他身上多少时间」—— 它**不进这张表的任何一格**，
+> 而是并排加一个数，落点在 [L5.7](#l57-l14-那几个工时口径要改决定-20-的代价)。
+>
+> ⚠️ 尤其是 `hours_per_participant` 那一格：它把 ESL 学员从**分母**里拿掉，
+> 是对的（他不贡献分子）。但那不等于这些人的时间无处可去 ——
+> 它去了另一个数，而两个数永远不相加。
 
 ### ⚠️ 第四处：满员率，而 D27 自己已经写好了它的理由
 
@@ -851,6 +881,12 @@ ESL 课那三个座位坐的是「一个志愿者、一个联系不上的志愿�
 所以这一步要补的不是「给新那行找个用处」，是**补上那个人群**：
 两位只来领取的社区成员，报上个月那场发放日的「General participant (attending)」，
 签到、不记工时。
+
+⚠️ 2026-09-08 补一句，因为它正是 [D43](decisions/D43-hours-given-and-hours-received.md)
+第五节最容易被写错的那一格：那场是**发放日，没有讲次**，所以
+「基金会花在他身上多久」这个问题在那两行上**不成立** —— 不是 0。
+一个人来领了一箱食物，说他「接受了 0 小时服务」是错的，
+而 `Sum` 的空值离被渲染成 `0` 只差一个 `or 0`。
 
 三件事一次到位：新那行有了真读者；`people_served` 在演示库里第一次反映
 **一门课 + 一场发放**的混合，而不是只有课；以及界面上第一次出现一个
@@ -1945,6 +1981,20 @@ class Session(ConstraintErrorFieldMixin, TimeStampedModel):
 真要显示「每次两小时」，那是 `Session` 的时长，属于**新页面**的事。
 记在这里是因为它看起来像个 bug。
 
+> ### 2026-09-08 更正：上面那句把它推给了「新页面」，而新页面被取消了
+>
+> 决定 27（晚三周）判 Program **不新建详情页**，复用 `/events/<pk>/`。
+> 于是这一句寄存在「新页面」上的东西**没有人接** —— 两份文档各自把它推给了对方，
+> 而中间那一格是空的。走查时基金会打开一个有讲次的活动，看到的是这一行：
+>
+> ```
+> When: Aug. 9, 2026, 4:05 p.m. — Nov. 7, 2026, 3:05 p.m.
+> ```
+>
+> 🔴 它不是「少了信息」，是**一句假话**：读起来像一场从八月某个下午一直开到十一月
+> 某个下午的活动，而三讲一讲都没出现。落点和验收写在
+> [L5.8](#l58-页面与路由)，`Event.duration` 本身仍然不改（那两列说的确实是这个）。
+
 ### ⚠️ 这一步**不兑现** participants.md 第九节那条缺口
 
 第九节排第一位那条（「他报一次之后，后面每一场都不用再报」）的出栏要等
@@ -1980,8 +2030,17 @@ L5.1 只提供承载 —— 记在这里是因为初稿没写这句，容易让�
 
 ## L5.2 `SessionAttendance`：他哪几场、来没来、干了多久
 
+> ### 2026-09-08 落地。本节初稿有八处照字面敲会出问题，逐条改在下面
+>
+> 开工前的走查把这一节和仓库现状对了一遍。形状是对的，而**决定 18 那一段是本节最值钱的
+> 东西**：「中途加入不是一个字段，是哪几行存在」把两条需求（决定 17、决定 18）收敛成一个
+> 实现。问题有两类：一类和 L5.1 那次一样，是「照着敲」这一层的漏抄；另一类更重 ——
+> 本节有两条规则**照字面敲会落成一张比它复制的那张更松的表**，而其中一条是它自己要求的。
+
+落库的形状（已实现，`events/models.py`）：
+
 ```python
-class SessionAttendance(TimeStampedModel):
+class SessionAttendance(ConstraintErrorFieldMixin, TimeStampedModel):
     """一个人的一次聚会。行业里这一层各有各的名字，形状是同一个。
 
     Salesforce PMM 叫 `ServiceDelivery`（报名是 `ServiceParticipant`），
@@ -1992,34 +2051,55 @@ class SessionAttendance(TimeStampedModel):
     ⚠️ 它**不是**一行 `Participation`，而这是决定 19 换掉的那个形状。
        两者的字段确实很像，区别在语义：`Participation` 是「他报了这一期」，
        报表数它得到「多少人报名」；这张表是「他来了第几讲」，数它得到的是
-       「课时人次」——两个不同的数，而合成一个正是本项目判过三次的病。
+       「出勤人次」——两个不同的数，而合成一个正是本项目判过三次的病。
     """
 
-    participation = models.ForeignKey(
-        Participation, on_delete=models.CASCADE, related_name="attendances")
-    # ⚠️ `attendances`，不是初稿的 `sessions`：L5.1 已经把 `event.sessions` 用掉了
-    #    （→ `Session`），同一个词在两个方向上指两张表是下一个人必踩的一脚。
-    session = models.ForeignKey(Session, on_delete=models.CASCADE, related_name="+")
-    status = ...          # 同 Participation.Status，但只在这一场上成立
-    hours = ...           # 决定 20
+    participation = FK(Participation, CASCADE, related_name="attendances")
+    session       = FK(Session,       CASCADE, related_name="attendances")
+    status  = ...          # 复用 Participation.Status，只在这一场上成立
+    hours   = ...          # 决定 20。⚠️ 只装「给出去的」那一半，见 D43
     checked_in_at / checked_out_at / checked_in_method
     history = HistoricalRecords()
+
+    class Meta:
+        constraints = [五条，见下]        # ⚠️ 无 ordering、无 indexes，两者都是决定
+
+    @property
+    def records_hours(self): ...          # 委托给 participation
+    @property
+    def hours_received(self): ...         # D43：这一讲有多长
+    def clean(self): ...                  # 两条跨表规则
 ```
 
-⚠️ 唯一约束 `(participation, session)`。
+### 八处改动，逐条写明原文是什么、为什么改
 
-⚠️ L5.1 的列名改了（`starts_at` → `start_time`，见那一节第 1 条），本节和 L5.6 引用它的地方跟着改。
+| # | 初稿写的 | 改成 | 为什么 |
+|---|---|---|---|
+| 1 | 「三条从 `Participation` 搬过来的规则」，第一条是那条 `CheckConstraint` | 那条约束**搬不过来**，只能是 `clean()` + 服务层 | 🔴 初稿在同一行里写了两句互相否定的话：要求照搬那条约束，又注明「判据仍然读 `participation.event_role.role.nature`」。后者成立前者就不成立 —— `Participation` 上那条能落地，靠的是行上存着 `served_as=not_applicable` **把跨表判据搬到了本行**；而本节判了 `served_as` 不搬，这张表上就没有任何一列可供检验。⚠️ 附带一处：不搬的理由（「身份是整期一次的声明」）只覆盖 `volunteer`/`work` 两档，而 `not_applicable` 按 [D38 第五节](decisions/D38-served-as-volunteer-or-work.md) 根本不是身份，是结构性标记 —— 顺手带走的正是那个锚点 |
+| 2 | 没有任何规则说两个外键要指向同一场活动 | `clean()` 第一条 | 🔴 `participation` 的活动在 `event_role.event` 上，`session` 的在 `session.event` 上。不一致时存下来的是「他来了一门他没报的课的第 7 讲」——读得出、印得出、页面正常。这正是 `Participation` docstring 自己点名的那个坑（当年的解法是删掉一列），而这里两个外键都删不掉，所以改成检查它们是否一致 |
+| 3 | 「三条规则」 | 五条，两条都是同款 | ⚠️ 和这张表字段重合的约束 `Participation` 上有五条，初稿漏了 `checkout 不早于 checkin` 和 `checked in 的人不能标成缺席` —— 而这张表 `checked_in_at` / `checked_out_at` / `status` 三列都有。「抄漏一条的表现是那张表比它复制的那张松」这句话就写在本节自己那一行上，L5.1 落地时刚在它身上应验过一次 |
+| 4 | `class SessionAttendance(TimeStampedModel)` | 加 `ConstraintErrorFieldMixin`，`core/constraints.py` 补五行 | 和 L5.1 初稿第 5 条一模一样的遗漏。`ConstraintMappingGuardTests` 四向查（缺 code、缺映射、留下没有约束的映射、映射到不存在的字段），少哪一样当场红 |
+| 5 | 没说这张表的行是谁建的 | `services.add_attendance()`，单行 | L5.1 有 `add_session()`，本节没有对应的东西 —— 而两条跨表规则全靠它才被调用到。⚠️ 批量建行（报一次管全部 / 决定 17 / 决定 18）**要等 L5.3**：`sign_up()` 在 `Event.shape` 之前分不出一门课和一场周六发放，这句话写进 docstring，免得这张表读起来像没做完 |
+| 6 | `session` 用 `related_name="+"` | 两头都叫 `attendances` | 「第 7 讲今天谁来了」是点名页的第一个查询，`"+"` 把它从 `Session` 那头挡死了。而初稿担心的那件事不成立：`event.sessions` 和 `participation.sessions` 会是**一个词指两张表**，而这两个是**一个词指同一张表的两个方向** —— 那正是反向名字的用途 |
+| 7 | 没提 `Meta.ordering` | 明写**不设**，改出两个 queryset 方法 | 两个方向要两种顺序（按讲次时间 / 按人），一个 `Meta` 服务不了两个；而跨关系的默认排序还有第二笔代价 —— Django 会把它塞进 `values().annotate()` 的 GROUP BY，而 [L5.7](#l57-l14-那几个工时口径要改决定-20-的代价) 正要写那种查询。L5.1 那条「不加索引是决定不是遗漏」在这里是同一种要写下来的「不加」 |
+| 8 | 没有这个数 | `hours_received` + `services.hours_received()` | 走查时基金会提出：来接受服务的人也想知道自己被服务了多久。查证下来这不是可选项（成人教育按 contact hours 报，还有 12 小时门槛），但答案**不是放开 `hours`** —— 那是方向相反的第三个数，见 [D43](decisions/D43-hours-given-and-hours-received.md)。不加列，从 `Session` 的起止两列算 |
 
-### 三条从 `Participation` 搬过来的规则，一条都不能漏
+### 五条规则，逐条抄齐
 
-| 规则 | 为什么在这里同样成立 |
+| 规则 | 落成什么 |
 |---|---|
-| 「来参加的位置不记工时」的那条 `CheckConstraint` | 角色的档位没变。⚠️ 判据仍然读 `participation.event_role.role.nature`，所以 `records_hours` 那个属性要能从这一层问出来 |
-| 工时非负 / 只有出席过才有工时 | 同款，逐条抄，**不是**「大概同款」—— 抄漏一条的表现是那张表比它复制的那张松 |
+| 唯一：一个人一场只有一行 | `UniqueConstraint(participation, session)` |
+| 工时非负 | `CheckConstraint`，同款 |
+| 只有出席过才有工时 | `CheckConstraint`，同款 |
+| 签退不早于签到 | `CheckConstraint`。⚠️ 初稿漏的那两条之一 |
+| 签到过的人不能是缺席 | `CheckConstraint`。⚠️ 另一条 |
+| 「来参加的位置不记工时」 | 🔴 **不是约束** —— `clean()` + `record_session_hours()`，见上表第 1 条 |
 | `hours` 是 `Decimal` 不是 `Float` | D 那条老规矩 |
 
-⚠️ `served_as`（身份）**不搬**：它是整期一次的声明，留在 `Participation` 上。
-D38 第五节那张表问的是「他这次参加算什么」，而对一期课来说「这次」就是这一期。
+⚠️ `served_as`（身份）不搬：它是整期一次的声明，留在 `Participation` 上。
+[D38 第五节](decisions/D38-served-as-volunteer-or-work.md)那张表问的是「他这次参加算什么」，
+而对一期课来说「这次」就是这一期。代价是上表第 1 条那一条，已就地写进
+[D38](decisions/D38-served-as-volunteer-or-work.md) 第五节。
 
 ### ⚠️ 决定 18（中途加入）不是一个字段，是「哪几行存在」
 
@@ -2028,6 +2108,97 @@ D38 第五节那张表问的是「他这次参加算什么」，而对一期课�
 
 ⚠️ 这也正好是决定 17（挑哪几场）的机制：只为选中的那几场建行。
 两条需求一个实现，而不是两个字段。
+
+⚠️ 而它同时是 D43 那个数的分母：他接受到的时数是那 8 讲里他到场的那几讲之和，
+没有任何一处需要去减掉前四讲。
+
+### D43：接受到的时数是第三个数，方向相反
+
+`hours` 这一列装的是**他给出去的时间**（决定 20：一个助教在十二讲里帮了六次，
+就是六个数）。**他被服务了多久**是另一个数，方向相反，
+[D43](decisions/D43-hours-given-and-hours-received.md) 判它**不存、用算的**：
+
+> 他接受到的时数 ＝ 他出勤过的那几讲的时长之和
+
+⚠️ 两者永远并排、永远不相加 —— 加起来是「我们收到的时间 ＋ 我们发出的时间」，
+一个没有定义而且看起来完全合理的量。这是 [D36](decisions/D36-two-hour-ledgers.md)
+那条不变量的第四次应用，两处都已就地写了修订说明。
+
+⚠️ 报表上怎么摆属于 [L5.7](#l57-l14-那几个工时口径要改决定-20-的代价)，本步只提供这个数。
+
+### ⚠️ 这一步同样**不兑现** participants.md 第九节那条缺口
+
+L5.1 那一节写了这句，本节初稿没写 —— 而本节更容易被读成做完了。
+「他报一次之后，后面每一场都不用再报」要等 [L5.3](#l53-三档单选落在哪)：
+本步只有单行的门，批量建行在 `Event.shape` 之前写不出来。
+
+### 测试（`events/tests.py`）
+
+`SessionAttendanceTests` —— 五条约束走**裸 `create()` + `IntegrityError`**，
+两条跨表规则走 `full_clean()` 和服务层，两层分开验（同 L5.1）：
+
+- `test_one_person_at_one_meeting_is_one_row`
+- `test_a_new_row_starts_out_expected_rather_than_present`
+- `test_two_people_may_attend_the_same_meeting`
+- `test_the_same_person_cannot_be_marked_twice_for_one_meeting`
+- `test_one_person_may_be_on_the_register_for_every_meeting`
+- `test_hours_cannot_be_negative`
+- `test_somebody_who_did_not_attend_cannot_have_hours`
+- `test_check_out_cannot_be_before_check_in` —— 初稿漏的那两条之一
+- `test_somebody_who_checked_in_cannot_be_marked_absent` —— 另一条
+- `test_a_meeting_from_another_run_is_refused`
+- `test_the_service_refuses_a_meeting_from_another_run`
+- `test_a_place_people_attend_records_no_hours`
+- `test_the_service_refuses_hours_on_a_place_people_attend`
+- `test_the_rule_is_read_off_the_role_through_the_signup`
+- `test_a_bare_create_walks_past_the_same_run_rule`
+- `test_a_bare_create_walks_past_the_no_hours_rule`
+  —— ⚠️ D14 那两个缺口。第二条钉的是「不搬 `served_as`」的代价：
+  同一行在 `Participation` 上被数据库拒绝，在这里存得下
+- `test_an_assistant_records_hours_for_one_meeting`
+- `test_who_first_recorded_the_row_is_not_rewritten_by_a_correction`
+- `test_deleting_a_signup_takes_its_register_entries_with_it`
+- `test_deleting_a_meeting_takes_its_register_with_it`
+- `test_correcting_a_register_entry_is_kept_in_its_history`
+- `test_one_persons_register_reads_in_teaching_order`
+- `test_one_meetings_register_reads_by_person`
+
+`SessionsThroughTheAdminTests` —— 两张表今天唯一的门。⚠️ 计划里这一格原本是
+一次手工走查，改成测试是因为仓库自己已经有先例（`AudienceThroughTheAdminTests`
+抓的正是「页面侧看不见的洞」），而一次点击留不下任何东西：
+
+- `test_the_meetings_table_is_reachable_at_all` —— 钉住 L5.1 那三天的缺口
+- `test_the_register_pages_render`
+- `test_the_admin_refuses_a_meeting_from_another_run`
+- `test_the_admin_refuses_hours_on_a_place_people_attend`
+  —— ⚠️ 四条里最要紧的一条：这条规则背后**没有约束**，而 admin 是今天唯一
+  一个人能往点名册里敲工时的地方
+- `test_who_recorded_the_row_cannot_be_edited_here`
+
+`HoursReceivedTests` —— D43：
+
+- `test_a_meeting_knows_how_long_it_runs`
+- `test_the_hours_column_stays_empty_for_somebody_being_served`
+- `test_hours_received_add_up_the_meetings_they_attended`
+- `test_a_meeting_they_missed_adds_nothing`
+- `test_a_meeting_they_missed_has_no_length_of_its_own` —— None 不是 0
+- `test_meetings_before_they_joined_are_not_missing_hours` —— 决定 18 在时长这一维
+- `test_somebody_who_came_to_nothing_receives_nothing`
+- `test_hours_given_and_hours_received_are_two_different_numbers`
+- `test_an_event_with_no_meetings_has_no_register_to_read`
+  —— ⚠️ 一场发放日没有讲次，这个数在那里**不是 0 是不适用**
+
+### 迁移与 admin
+
+`events/migrations/0024_session_attendance.py` —— 纯 `CreateModel`
+（`SessionAttendance` + `HistoricalSessionAttendance`），无回填，同 0022 的形状。
+⚠️ 编号是 **0024** 不是 0023：批二之后还落了一条 `0023_audience_help_text`，
+而文件总表里两条都没有。
+
+⚠️ 顺带补上 L5.1 欠的一笔：`Session` **当时没有注册进 admin**，于是那张表从
+2026-09-05 起只有测试碰得到。批三的文件总表是承诺过的，而漏掉它没有任何症状 ——
+一张没人打得开的表，和一张没人需要的表，长得一模一样。本步两张一起挂。
+
 
 ## L5.3 三档单选落在哪
 
@@ -2176,6 +2347,29 @@ def _drop_generated_after(series, after):
 ⚠️ `people_served` **不用改**：它数的是 distinct contact，一个人上了 12 讲仍然是 1。
 ⚠️ 满员率 **不用改**：它数角色和报名，和场次无关。
 
+### 还要多一个数，而它不在上面那张表里
+
+[D43](decisions/D43-hours-given-and-hours-received.md)（2026-09-08，随 L5.2 一起定）：
+上面四格 union 的都是**给出去的**工时。「基金会花在他身上多久」是方向相反的第三个数，
+`services.hours_received()` 已经算得出来，本步把它摆上报表。
+
+| | 装什么 | 怎么来 |
+|---|---|---|
+| 上面那四格 | 人给基金会的时间 | 两列 `hours` 相加 |
+| 新的这一个 | 基金会给人的时间 | 出勤过的讲次时长之和，不存 |
+
+🔴 **并排，永远不相加。** 加起来是「我们收到的 ＋ 我们发出的」，一个没有定义的量，
+而它看起来完全合理 —— [D36](decisions/D36-two-hour-ledgers.md) 那条不变量的第四次应用。
+
+⚠️ 三件事这一步一起做，少一件这个数就会骗人：
+
+1. 它要有自己的标题，**不许**和 Hours 那一组画在一起，更不许有合计；
+2. 没有讲次的活动上它**不是 0 是不适用** —— `Sum` 的空值离 `or 0` 只差一个字符，
+   而 [D27](decisions/D27-ministry-report.md) 那条「没有和没算不能长得一样」正管这一格；
+3. 守卫：D43 第五节把「不许相加」记成了一个**没有守卫的缺口**，重启条件写的就是
+   「同屏打印两个数的那一刻」—— 也就是本步。所以这条守卫在这一步补上，
+   而不是继续记在缺口清单里。
+
 🔴 这是决定 20（每场一个工时数）唯一的、也是全部的代价，
 选的时候就摆出来了。⚠️ 而它带来一条必须写下来的话：
 **「工时」这个词从此在两张表上**，任何新写的汇总都要问一句「另一半算了吗」。
@@ -2195,6 +2389,37 @@ def _drop_generated_after(series, after):
 | `/programs/schedule/` | Programs 的日程，画**每一讲**，不画那条 111 天的横条 |
 | `/me/programs/` | 我在上的课。⚠️ 同时要把 program 的报名**从 `/me/participations/` 里拿走**，并在 `/me/` 上挂第二个入口 |
 | ~~`/programs/<pk>/`~~ | ❌ 不新建视图。详情复用 `/events/<pk>/`，按 `shape` 换一块（讲次表走独立 partial，同 `_event_roles_panel.html` 那一级）。理由见决定 27 |
+
+### 🔴 详情页那行 When 也要换，而决定 27 只说了「换一块」
+
+走查（2026-09-08）打开一个有讲次的活动，页顶是：
+
+```
+When: Aug. 9, 2026, 4:05 p.m. — Nov. 7, 2026, 3:05 p.m.
+```
+
+三讲一讲都没出现。所以本步要动的是**三样**，不是一样 —— 决定 27 只写了第一样：
+
+| # | 要什么 | 为什么它不能省 |
+|---|---|---|
+| 1 | 讲次表（独立 partial，按形状换进来） | 决定 27 已写。「这门课都哪几天」得有地方答 |
+| 2 | 那行 When **换掉** | 🔴 对 Program，那两列是**学期的两端**，不是一个时段。照现在渲染成带时分的区间，说的是一句假话 —— 而 L5.1 那条注只预料到报表上的 `duration` 会难看，没预料到它会在详情页顶上变成一句错话 |
+| 3 | 一句**摘要**（「每周二 19:00–21:00，共 12 讲」） | ⚠️ 十二行日期**不等于**一句摘要。要决定报不报名的人问的是「每周几次、什么时间」，而一张十二行的表把这个问题留给他自己数。这一条决定 22–27 一条都没写 |
+
+⚠️ 第 3 条要从讲次行里**推**出来，不新增字段：规律就在那些行上（同 D43 不存那个数的理由）。
+规律不成立时（有人挪了第 7 讲）**如实说**，不要硬凑一句整齐的话 ——
+[D27](decisions/D27-ministry-report.md) 那条「没有和没算不能长得一样」在措辞上同样成立。
+
+⚠️ 判据用「**这场活动有没有讲次**」而不是 `shape`，且这不和
+[L5.3](#l53-三档单选落在哪) 那条「不靠 `sessions.exists()` 判形状」冲突：
+那条说的是**分类**（一个还没排期的 Program 也是 Program），这里问的是**显示**
+（有讲次就把它们画出来）。两个问题，两个判据。
+
+验收：
+
+- [ ] 打开一个跨期、有讲次的活动 → 页顶不出现那种带时分的长区间
+- [ ] 同一页说得出「每周几次、什么时间」，而不用读者自己去数那张表
+- [ ] 挪掉其中一讲之后，那句摘要**改口或退让**，不继续声称「每周二」
 
 ⚠️ 三张列表页各自都要过 `for_audience()` —— `AudienceIsAskedGuardTests` 和
 `RolesAreNarrowedGuardTests` 会盯着，但**别指望守卫兜底**：本轮走查刚证实
@@ -2280,19 +2505,22 @@ recurring events：
 
 | 文件 | 批 | 干什么 |
 |---|---|---|
-| `events/models.py` | 一二三 | `nature`、`NOT_APPLICABLE`、新约束、第二个兜底工种、可见性的两个布尔 + 一张多对多（`Event` / `EventRole` 各一套）、`refuse_wider_than_event()`（⚠️ `Audience` 和 `AudienceQuerySetMixin` **2026-08-31 搬去了 `org/audience.py`**，留在这里的只有事件×角色那条含容规则，见 [D41 第四节](decisions/D41-notices-are-not-events.md)）、`Event.shape` + 两个谓词、`Session`、`SessionAttendance`、`EventSeries`、`EventSeriesRole`、`Event.series` / `Event.source` |
-| `events/services.py` | 一二三 | `add_session()`（L5.1）；`on_the_books_q()` / `on_the_books_exists()`、`default_served_as()`、`record_hours()`、`check_out()`、`create_participation_role()`、`ministry_report()`、`_people_served()`、`eligible()`（⚠️ `eligible_role_ids()` 判它不建，见 L2.4 那个补框）、`sign_up()`、系列的生成与撤销、⚠️ L5.7：工时的四个口径要 union `SessionAttendance` |
+| `events/models.py` | 一二三 | `nature`、`NOT_APPLICABLE`、新约束、第二个兜底工种、可见性的两个布尔 + 一张多对多（`Event` / `EventRole` 各一套）、`refuse_wider_than_event()`（⚠️ `Audience` 和 `AudienceQuerySetMixin` **2026-08-31 搬去了 `org/audience.py`**，留在这里的只有事件×角色那条含容规则，见 [D41 第四节](decisions/D41-notices-are-not-events.md)）、`Event.shape` + 两个谓词、`Session`（+ `duration`）、`SessionAttendance`（+ `records_hours` / `hours_received`）、`EventSeries`、`EventSeriesRole`、`Event.series` / `Event.source` |
+| `events/services.py` | 一二三 | `add_session()`（L5.1）、`add_attendance()` / `record_session_hours()` / `hours_received()`（L5.2）；`on_the_books_q()` / `on_the_books_exists()`、`default_served_as()`、`record_hours()`、`check_out()`、`create_participation_role()`、`ministry_report()`、`_people_served()`、`eligible()`（⚠️ `eligible_role_ids()` 判它不建，见 L2.4 那个补框）、`sign_up()`、系列的生成与撤销、⚠️ L5.7：工时的四个口径要 union `SessionAttendance` |
 | `events/forms.py` | 一二三 | `RoleChoiceField`、`SignUpForm`、`EventRoleForm`、`EventForm`（加三档单选）、`EventPeriodForm`、新的 `EventSeriesForm` |
 | `events/views.py` | 一二三 | `_visible_events()`、`_schedule()`、`_detail()`、`event_signup`、`event_registrations`、`event_attendance`、系列的三个视图 |
 | `events/urls.py` | 三 | 系列的三条路由 |
-| `events/admin.py` | 一二三 | `ParticipationRoleAdmin` 加 `nature`；`EventAdmin` 和 `EventRoleAdmin` 各加三个可见性字段；`Session` / `SessionAttendance` / `EventSeries` 注册 |
+| `org/permissions.py` | 三 | ⚠️ 原计划列在「不动」里，L5.2 推翻了 —— `FOUNDATION_ADMIN_PERMISSIONS` 加 `events.view_session` / `events.view_sessionattendance`，否则注册了也在 admin 首页上看不见 |
+| `events/admin.py` | 一二三 | `ParticipationRoleAdmin` 加 `nature`；`EventAdmin` 和 `EventRoleAdmin` 各加三个可见性字段；`Session` / `SessionAttendance` / `EventSeries` 注册。⚠️ `Session` 那一笔 L5.1 落地时漏了，L5.2 一起补 —— 在那之前那张表只有测试碰得到 |
 | `events/recurrence.py` | 三 | 新文件，纯函数 |
 | `events/migrations/0016_participationrole_nature.py` | 一 | 新 |
 | `events/migrations/0017_served_as_not_applicable.py` | 一 | 新 |
 | ~~`events/migrations/0018_audience_and_signups.py`~~ | 二 | ❌ **没有这个文件**，2026-09-05 划掉。批二实际拆成了四条：`0018_second_catch_all_role`（L1.6，下面单独列着）、`0019_event_audience`（含回填）、`0020_audience_reverse_name`、`0021_drop_event_type`。后三条各自在正文里有说明，唯独这一行从没跟着改 —— 于是总表里一度同时存在两个 0018 |
 | `events/migrations/0022_session.py` | 三 | 新（L5.1）。⚠️ 编号：批二实际拆成了 0018–0021，所以批三从 0022 起 |
+| `events/migrations/0023_audience_help_text.py` | 二 | ⚠️ 2026-09-08 补进总表 —— 它 2026-09-04 就落了地，而这张表从没记过它。于是 L5.2 的编号是 **0024** 不是 0023 |
+| `events/migrations/0024_session_attendance.py` | 三 | 新（L5.2）。纯 `CreateModel`，无回填，同 0022 的形状 |
 | `events/migrations/00NN_event_series.py` | 三 | 新（L5.4）。⚠️ 编号等落地时定，不预写 |
-| `core/constraints.py` | 一三 | `CONSTRAINT_FIELD` 加一行；⚠️ 批三 L5.1 又加两行（`Session` 的两条约束）—— 这一格 2026-09-05 之前写的是「一」，而批三加约束不改它，`core/tests.py` 那条守卫会当场红 |
+| `core/constraints.py` | 一三 | `CONSTRAINT_FIELD` 加一行；⚠️ 批三 L5.1 又加两行（`Session` 的两条约束）—— 这一格 2026-09-05 之前写的是「一」，而批三加约束不改它，`core/tests.py` 那条守卫会当场红。L5.2 再加**五行**（`SessionAttendance` 那一组） |
 | `core/timeutils.py` | 一 | `local_day()` —— `local_date_of()` 的 ORM 双胞胎，`tzinfo` 包在里面 |
 | `core/querysets.py` | 一 | `in_effect_on()` 的 docstring：`on` 现在也可以是数据库表达式 |
 | `core/tests.py` | 一二三 | 五条新守卫 |
@@ -2307,13 +2535,20 @@ recurring events：
 | `events/templates/events/_period_filter.html` | 二 | 多一个 kind 下拉 |
 | `events/templates/events/event_form.html` | 二三 | `audience`；系列入口 |
 | `events/management/commands/seed_demo.py` | 一二三 | ESL 工种与活动；一场内部活动；一个系列 |
-| `docs/planning/diagrams/src/page.html` | 三 | ERD 加三个字段和两张表，DFD 加一条生成的路，表册加两行。⚠️ 改完要按 `docs/planning/diagrams/README.md` 重新生成 `data-and-flow.html`，那一步要 `npm i mermaid puppeteer-core` |
+| `docs/planning/diagrams/src/page.html` | 三 | ⚠️ 2026-09-08 起**不重画**，改为在 `README.md` 的已知不准清单里逐张记（`Session`、`SessionAttendance` 都已在册）。原计划：ERD 加三个字段和两张表，DFD 加一条生成的路，表册加两行。⚠️ 改完要按 `docs/planning/diagrams/README.md` 重新生成 `data-and-flow.html`，那一步要 `npm i mermaid puppeteer-core` |
 
 | `core/management/commands/check_deployment.py` | 一 | L1.6：工种表的门槛从 2 提到 3 |
 | `events/migrations/0018_second_catch_all_role.py` | 一 | 新（L1.6），数据迁移 |
 
 ⚠️ 不动的文件，写下来是因为它们看起来该动：
-`org/permissions.py`（受众不是授权，是可见性；授权仍然只有 MinistryRole 那一套）、
+~~`org/permissions.py`~~（受众不是授权，是可见性；授权仍然只有 MinistryRole 那一套）
+—— 🔴 **2026-09-08 划掉，这句话在 L5.2 上不成立**，理由和受众无关：
+把模型注册进 `admin.py` **不等于**它可达。持有零权限时 Django 会把模型整个从
+admin 首页藏掉，于是两张新表对除超级用户外的每一个账号都不存在，
+而症状是「一页没做」——`add_ministry` 当年就是这么丢的，理由就写在那个文件里。
+所以 `FOUNDATION_ADMIN_PERMISSIONS` 加两行 `view_`（⚠️ **只给 view**：
+排讲次是「某个 ministry 的活动」上的动作，按 D20 的分层判据属于 ministry 那一层，
+它的门是 L5.8 的 Programs 页面）、
 `events/tokens.py` 与扫码那几个视图（收窄的是发现，不是已经拥有的行）、
 `render.yaml`（决定 4 之后不需要第三条 cron，`RenderBlueprintGuardTests` 因此不用改）、
 `gallery/`（Memories 墙没有指向 `Event` 的外键，核对过，所以 L3 不会从那边漏出去）。
@@ -2343,7 +2578,9 @@ grep 了一遍，它里面搜不到 `served_as`、`stop_at_needed_count`、`comp
 | 文档 | 改什么 |
 |---|---|
 | [`participants.md`](participants.md) | 第八节改口清单里 D38 那一行从「不改口」改成「加一档 `not_applicable`」；第十节加三批的执行记录；第十一节的验收逐条打勾 |
-| [D38](decisions/D38-served-as-volunteer-or-work.md) | 加 `not_applicable` 一档，写明它不是身份、永远不出现在表单上、且它换来了一条真正的约束 |
+| [D38](decisions/D38-served-as-volunteer-or-work.md) | 加 `not_applicable` 一档，写明它不是身份、永远不出现在表单上、且它换来了一条真正的约束。⚠️ L5.2 又就地补了一条：那条约束**到不了场次那一层**，因为这一档不往下搬 |
+| [D43](decisions/D43-hours-given-and-hours-received.md) | 新开（2026-09-08，随 L5.2）：给出去的时间和接受到的时间是两个方向相反的数，后者不存、用算的 |
+| [D36](decisions/D36-two-hour-ledgers.md) | 就地补：有第三个数，方向相反，同样不许加进那两个账本 |
 | [D27](decisions/D27-ministry-report.md) | 指标拆成两组并排不相加；`hours_per_participant` 的分母改口；新增 People served |
 | [D19](decisions/D19-event-role.md) | `EventRole` 长出「谁报得上」那一组勾选（两个布尔 + 一张多对多）；并写明 L1 为什么落在 `ParticipationRole` 而不是这里 |
 | [D5](decisions/D05-lookup-tables-not-enums.md) | `EventType` 从字典表清单里**删掉**（说不出谁读它，L2.6）；`nature` 作为「字典表上的枚举列」的第二个例子 |

@@ -58,13 +58,14 @@ from .management.commands.seed_demo import demo_login
 
 from . import schedule, tokens
 from .forms import (
+    FILTER_PARAMS,
     AudienceAdminForm,
     EventForm,
     EventPeriodForm,
     EventRoleForm,
     SignUpForm,
 )
-from .views import EVENTS_PER_PAGE
+from .views import EVENTS_PER_PAGE, LIST_STATE
 from org.audience import Audience
 from org.forms import AudienceFormMixin
 from .models import (
@@ -11488,7 +11489,9 @@ class ScheduleToggleTests(PageTestCase):
         # ⚠️ 2026-08-19：两个布尔搬进了 app.js 的 `Alpine.data("eventsShell")`，
         #    所以这里查的是**挂上那个组件**的位置，而不是 `schedule: false` 那串
         #    字面量。规矩一个字没变：声明它的地方必须在被换掉的那块之外。
-        shell = html.index('x-data="eventsShell"')
+        #    ⚠️ 2026-09-09 起它带一个参数（`?panel=` 进来时面板一开始就开着），
+        #       所以这里匹配的是**前缀**。
+        shell = html.index('x-data="eventsShell(')
         results = html.index('id="event-results"')
         self.assertLess(shell, results,
                         "the schedule state must be declared before, and outside, "
@@ -13190,7 +13193,9 @@ class SchedulePanelTests(PageTestCase):
         # ⚠️ 两个布尔 2026-08-19 搬进了 app.js 的 `Alpine.data("eventsShell")`，
         #    所以这里查的是**挂上那个组件**，而不是 `detail: false` 那串字面量。
         #    要守的东西没变：两块并存，由一个布尔选。
-        self.assertIn('x-data="eventsShell"', html)
+        #    ⚠️ 2026-09-09 起它带一个参数（`?panel=` 进来时面板一开始就开着），
+        #       所以这里匹配的是**前缀**。要守的东西还是没变。
+        self.assertIn('x-data="eventsShell(', html)
         self.assertIn('id="schedule-detail"', html)
         self.assertRegex(html, r'x-show="!detail"')
 
@@ -13263,10 +13268,465 @@ class SchedulePanelTests(PageTestCase):
         #    两个布尔又一起搬进了 app.js 的 `Alpine.data("eventsShell")`，所以这里
         #    钉的不再是「`detail: false` 这串字出现在哪儿」，而是**声明它们的那个
         #    `x-data` 在哪儿** —— 规矩没变，写法变了。
-        state = html.index('x-data="eventsShell"')
+        state = html.index('x-data="eventsShell(')
         self.assertLess(state, html.index('id="event-results"'))
         self.assertLess(state, html.index('id="schedule"'))
         self.assertLess(state, html.index('id="schedule-detail"'))
+
+
+class RoleKindFilterTests(PageTestCase):
+    """筛「我能去帮忙的」和「我能去参加的」（2026-09-08）。
+
+    L1 那根轴（`ParticipationRole.Nature`）一直画在活动详情页角色表的 Kind
+    那一列上，而在此之前**没有任何一页能按它筛**。一个只想来接受服务的人，
+    得把活动一场一场点开才知道哪一场有他的位子。
+    """
+
+    def setUp(self):
+        super().setUp()
+        # PageTestCase 自带一场活动 + 一个 helping 角色（lifting）。这里再加
+        # 一场只招学员的，和一场两种都招的 —— 后者是这一批口径的关键标本。
+        self.helping_only = self.event
+        self.attending_only = make_event(
+            ministry=self.pantry, owner=self.zhang.contact,
+            name="Thursday ESL class")
+        make_role(self.attending_only, "student", nature="attending")
+        self.both = make_event(
+            ministry=self.pantry, owner=self.zhang.contact,
+            name="Saturday tutoring")
+        make_role(self.both, "tutor", nature="helping")
+        make_role(self.both, "learner", nature="attending")
+
+    def names(self, user=None, **params):
+        self.login(user or self.lisi)
+        html = self.client.get(reverse("events:event_list"), params).content.decode()
+        return {event.name for event in Event.objects.all() if event.name in html}
+
+    def test_helping_keeps_the_events_with_somewhere_to_help(self):
+        self.assertEqual(
+            self.names(nature="helping"),
+            {self.helping_only.name, self.both.name})
+
+    def test_attending_keeps_the_events_with_a_seat(self):
+        self.assertEqual(
+            self.names(nature="attending"),
+            {self.attending_only.name, self.both.name})
+
+    def test_an_event_recruiting_both_is_under_both(self):
+        """🔴 The decision this batch had to make, written down as a test.
+
+        The literal request was "events with a helping role, **or events with
+        only attending roles**", which partitions them. It was settled the
+        other way (2026-09-08) and this class is the reason: a course that
+        recruits teachers and students at once is exactly what somebody looking
+        for a seat wants to find, and under the partition it would vanish from
+        "Attending" because of a role they were never interested in.
+        """
+        self.assertIn(self.both.name, self.names(nature="helping"))
+        self.assertIn(self.both.name, self.names(nature="attending"))
+
+    def test_an_empty_box_keeps_everything(self):
+        self.assertEqual(len(self.names(nature="")), 3)
+
+    def test_an_event_with_two_matching_roles_is_listed_once(self):
+        """🔴 子查询而不是 join，钉在这里。
+
+        写成 `filter(roles__role__nature=...)` 的话，一场开了两个 helping 角色的
+        活动会**回来两次** —— 分页和它下面每一个计数一起烂掉，而屏幕上只表现为
+        「这一行怎么列了两遍」。org/audience.py 已经为同一件事付过一次学费。
+        """
+        make_role(self.helping_only, "driving", nature="helping")
+        # 直接问那个查询集，因为页面上活动名会在好几处出现（列表行、日程卡片、
+        # 读屏用的那段 sr-only），数字符串数的是渲染次数、不是行数。
+        form = EventPeriodForm({"nature": "helping"}, audience=self.lisi.contact)
+        narrowed = form.narrow(Event.objects.all())
+        self.assertEqual(list(narrowed).count(self.helping_only), 1)
+        self.assertEqual(narrowed.count(), 2)
+        # 页面上那行计数同样只数一次 —— 分页正是被重复行毁掉的第一样东西。
+        self.login(self.lisi)
+        html = self.client.get(
+            reverse("events:event_list"), {"nature": "helping"}).content.decode()
+        self.assertIn("2</span>\n    event", html)
+
+    def test_a_role_that_is_not_open_to_them_does_not_pull_its_event_in(self):
+        """🔴 判据是 `for_audience()`，不是这场活动的全部角色。
+
+        活动页上那张角色表本来就按人收窄过（views.py 的 `to_join`）。用全表筛的
+        话会筛出一场活动，而人点进去看不到那种角色 —— 同一份数据的两个答案，
+        而两边都渲染成功。
+        """
+        staff_seat = make_event(
+            ministry=self.pantry, owner=self.zhang.contact,
+            name="Staff debrief", visible_to_outsiders=True,
+            visible_to_all_staff=True)
+        # 这场活动李四看得见，但那个 attending 的位子只开给在编的人。
+        seat = make_role(staff_seat, "debriefed", nature="attending")
+        set_audience(seat, Audience.Spec(False, True, frozenset()))
+        self.assertIn(staff_seat.name, self.names())
+        self.assertNotIn(staff_seat.name, self.names(nature="attending"))
+
+    def test_the_schedule_is_narrowed_too(self):
+        """🔴 三处视图都要传 `audience=contact`，这一条钉的是第二处。
+
+        左边列表和右边日程共用 `period.narrow()`，而它们各自 `EventPeriodForm(...)`
+        一次。漏掉任意一处的表现是**同一张筛选卡画出两个答案** ——
+        筛成 Helping 之后按一下日程的箭头，日程悄悄变回全部。
+        """
+        self.login(self.lisi)
+        html = self.client.get(
+            reverse("events:event_schedule"), {"nature": "helping"}).content.decode()
+        self.assertIn(self.both.name, html)
+        self.assertNotIn(self.attending_only.name, html)
+
+    def test_the_box_is_drawn_on_the_events_page(self):
+        # ⚠️ 只钉「这一格在不在」。措辞归下面那条测试，别在两处各钉一半 ——
+        #    改一次文案要改两个地方，而漏掉的那个会红得莫名其妙。
+        self.login(self.lisi)
+        html = self.client.get(reverse("events:event_list")).content.decode()
+        self.assertIn('name="nature"', html)
+
+    def test_the_filter_names_are_declared_once(self):
+        """🔴 `FILTER_PARAMS` 必须和这张表真正长出来的字段一致。
+
+        它有第二个读者：`events.views.LIST_STATE` 靠它把筛选带上活动的链接、
+        再从返回链接上带回来。两处各写一份的话，加一格就得改两个文件 ——
+        而这一批自己就漏过一次的机会摆在那里。失败是**静默**的：新那一格点进
+        活动再返回时自己没了，页面看起来完全正常。
+        """
+        drawn = EventPeriodForm(audience=self.lisi.contact).fields
+        self.assertEqual(set(FILTER_PARAMS), set(drawn))
+
+    def test_the_box_speaks_to_the_person_choosing(self):
+        """🔴 「give your time」，不是「they give their time」（2026-09-08）。
+
+        另一张表（`NATURE_EXPLANATIONS`）说的是「他们」，而它出现的地方是
+        ministry admin 在开一个工种、描述将来坐在那个位子上的人 —— 在那里
+        「他们」正是他指的人。这一格不一样：读它的人**就是**那个人，用第三人称
+        等于当着他的面把他称作别人。
+        """
+        self.login(self.lisi)
+        html = self.client.get(reverse("events:event_list")).content.decode()
+        self.assertIn("Helping (give your time)", html)
+        self.assertIn("Attending (receive a service)", html)
+        self.assertNotIn("they give their time", html)
+
+    def test_the_management_list_has_no_such_box_and_ignores_the_parameter(self):
+        """🔴 那一页**没有这个字段**，所以伪造一个参数什么都不会发生。
+
+        画不出控件却在后台悄悄筛，是这一格最坏的形态：人看到的列表比他以为的短，
+        而屏幕上没有任何东西说明为什么。
+        """
+        self.login(self.zhang)
+        url = reverse("events:event_manage_list")
+        self.assertNotIn('name="nature"', self.client.get(url).content.decode())
+        html = self.client.get(url, {"nature": "attending"}).content.decode()
+        self.assertIn(self.helping_only.name, html)
+
+
+class ListStateTravelsWithTheLinkTests(PageTestCase):
+    """筛选和页码跟着链接走，「← Events」再把它们带回来（2026-09-08）。
+
+    在此之前那条返回链接指向一张**空筛选**的列表：筛到「食物银行 · 十月」、翻到
+    第 3 页、点开一场活动，再点返回 —— 刚才做的三件事一起没了，而页面本身完全
+    正常。适老化那一批把这条路变成了主路（面板右下角那颗圆球通向的就是这一页），
+    所以它必须退得回原处。
+    """
+
+    def detail(self, **params):
+        self.login(self.lisi)
+        return self.client.get(
+            reverse("events:event_detail", args=[self.event.pk]), params,
+        ).content.decode()
+
+    def test_back_carries_the_filter_and_the_page(self):
+        html = self.detail(q="Saturday", page="2")
+        self.assertIn("/events/?q=Saturday&amp;page=2", html)
+
+    def test_back_is_bare_when_nothing_was_filtered(self):
+        html = self.detail()
+        self.assertIn(f'href="{reverse("events:event_list")}"', html)
+
+    def test_the_schedule_window_is_not_carried(self):
+        """⚠️ `from` 是**来路标记**的名字，同时又是日程窗口那个隐藏字段的名字。
+
+        两个意思共用一个参数名本来就是一颗雷。`LIST_STATE` 故意不含它 ——
+        带上去只会让一条返回链接掉进 `_back_link()` 那张白名单的兜底分支。
+        """
+        html = self.detail(q="Saturday", **{"from": "2026-09-08"})
+        self.assertIn("/events/?q=Saturday", html)
+        self.assertNotIn("2026-09-08", html)
+
+    def test_the_other_two_markers_still_work(self):
+        self.assertIn(reverse("events:my_participations"),
+                      self.detail(**{"from": "mine"}))
+
+    def test_the_row_link_carries_it(self):
+        """⚠️ 卡片上那条 `href` 和面板里那颗圆球必须带**同一份**。
+
+        走这条路的正是窄屏和没有 JS 的那一档 —— 而窄屏恰恰是适老化最要紧的一档。
+        """
+        self.login(self.lisi)
+        html = self.client.get(
+            reverse("events:event_list"), {"q": "Saturday"}).content.decode()
+        self.assertIn(
+            f'href="{reverse("events:event_detail", args=[self.event.pk])}'
+            f'?q=Saturday"', html)
+
+
+class PanelStateInTheUrlTests(PageTestCase):
+    """`?panel=<pk>` —— 面板开着没有、开的是哪一场，进了 URL（2026-09-09）。
+
+    🔴 **它修的是「回去时不是同一个页面」。** 实测对照（浏览器里量的）：从面板里
+       那颗圆球进整页详情，再点那一页的「← Events」，回来的是一张**面板关着**的
+       列表 —— 筛选和页码都在，而右边空了；可**浏览器的后退键**（走 bfcache）
+       回来的是开着的。同一页上两条「回去」的路给出两种结果。
+
+       根因不在那条返回链接上，在**面板状态只活在浏览器内存里**。
+    """
+
+    def page(self, **params):
+        self.login(self.lisi)
+        return self.client.get(reverse("events:event_list"), params)
+
+    def test_the_panel_comes_back_open_with_that_event_in_it(self):
+        html = self.page(panel=self.event.pk).content.decode()
+        # 面板里那一块由**服务端**填好，不是等页面加载完再补一次请求。
+        self.assertIn("schedule-detail", html)
+        self.assertIn(self.event.name, html)
+        # Alpine 一开始就是开着的。
+        self.assertIn('x-data="eventsShell(true)"', html)
+
+    def test_the_left_hand_row_is_highlighted_to_match(self):
+        """⚠️ 高亮和面板是同一件事的两半 —— 高亮的意思只有一个：
+        「右边正开着的是这一场」。少了它，回来的那一页右边开着、左边没标记。
+        """
+        html = self.page(panel=self.event.pk).content.decode()
+        self.assertIn("is-picked", html)
+
+    def test_without_it_the_shell_starts_closed(self):
+        html = self.page().content.decode()
+        self.assertIn('x-data="eventsShell(false)"', html)
+        self.assertNotIn("is-picked", html)
+
+    def test_a_stale_pk_still_renders_the_list(self):
+        """🔴 拿不到就当没写，**不是 404**。
+
+        一个过期的 `?panel=` —— 活动删了、改回草稿了、或者链接被转给了看不见它的
+        人 —— 不许把整张列表页打成 404。那读起来是「站坏了」，而实际上只是右边那
+        一块开不出来。
+        """
+        response = self.page(panel=999999)
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(self.event.name, response.content.decode())
+
+    def test_a_non_numeric_pk_is_not_a_500(self):
+        """⚠️ 这一条挡的是 **500**，不是 404。
+
+        `get_object_or_404` 只接得住「查不到」，而 `pk="abc"` 在字段层就抛
+        `ValueError`（Django 的「expected a number」），根本走不到 404 那一步 ——
+        一个手改过 URL 的人、或者一条被聊天软件截断的链接，会把整张列表页变成
+        一个错误页。
+        """
+        self.assertEqual(self.page(panel="abc").status_code, 200)
+        self.assertEqual(self.page(panel="").status_code, 200)
+
+    def test_a_draft_does_not_leak_through_this_new_path(self):
+        """🔴 权限走 `_detail()`，和整页、和 HTMX 那条面板路径**同一条**。
+
+        这是第三条通向同一块内容的路径，而新开的取数路径正是权限最容易漏掉的
+        地方。⚠️ 对没权限的人，草稿在这里和「不存在」完全一样 —— 页面照画，
+        面板不开。
+        """
+        draft = make_event(ministry=self.pantry, owner=self.zhang.contact,
+                           name="Secret planning day", status=Event.Status.DRAFT)
+        html = self.page(panel=draft.pk).content.decode()
+        self.assertNotIn("Secret planning day", html)
+        self.assertIn(self.event.name, html)
+
+    def test_the_ball_carries_it_back_out(self):
+        """🔴 圆球的链接必须带 `panel`，而服务端得**自己补**上。
+
+        面板是 HTMX 换进来的，而「地址栏里记下这一场」是浏览器在同一下里做的
+        （`hx-replace-url`）—— 渲染那一份响应时 `request.GET` 里还没有它。
+        不补的话，人从圆球进整页详情再返回，面板是关着的：这一整批要修的那件事，
+        在最主要的那条路上原样复发。**实测抓到的，不是推出来的。**
+        """
+        self.login(self.lisi)
+        html = self.client.get(
+            reverse("events:event_detail_panel", args=[self.event.pk]),
+            {"from_list": 1, "q": "Saturday"},
+        ).content.decode()
+        self.assertIn(f"?q=Saturday&amp;panel={self.event.pk}", html)
+
+    def test_the_back_link_brings_it_home(self):
+        self.login(self.lisi)
+        html = self.client.get(
+            reverse("events:event_detail", args=[self.event.pk]),
+            {"q": "Saturday", "panel": self.event.pk},
+        ).content.decode()
+        self.assertIn(f"/events/?q=Saturday&amp;panel={self.event.pk}", html)
+
+    def test_the_row_link_writes_it_into_the_address_bar(self):
+        html = self.page().content.decode()
+        self.assertIn(f'hx-replace-url="/events/?panel={self.event.pk}"', html)
+
+    def test_panel_is_carried_but_is_not_one_of_the_form_fields(self):
+        """⚠️ `FILTER_PARAMS` 是这张表单的**字段名**；`panel` 不是一个框。
+
+        它属于 `LIST_STATE`，因为那一条问的是「你刚才在看的是哪一份列表」——
+        而那份列表右边开着一块面板，也是答案的一部分。
+        """
+        self.assertIn("panel", LIST_STATE)
+        self.assertNotIn("panel", FILTER_PARAMS)
+
+    def test_the_management_list_has_no_panel_to_open(self):
+        self.login(self.zhang)
+        response = self.client.get(
+            reverse("events:event_manage_list"), {"panel": self.event.pk})
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn("schedule-detail", response.content.decode())
+
+    def test_a_filter_keystroke_does_not_refetch_the_panel(self):
+        """⚠️ HTMX 那条路上不做：片段请求换的是 `#event-results`，面板在那块外面、
+        原样待着。照做一遍就是每敲一个筛选字符白取一次活动详情。
+        """
+        self.login(self.lisi)
+        fragment = self.client.get(
+            reverse("events:event_list"), {"panel": self.event.pk},
+            HTTP_HX_REQUEST="true",
+        ).content.decode()
+        # ⚠️ 查的是**面板里那块内容**画出来没有，不是 `schedule-detail` 这串字 ——
+        #    每一行卡片上都有一个指向它的 `hx-target`，那不代表内容被渲染了。
+        #    `panel-expand`（那颗圆球）只在真的画出一块面板时才存在。
+        self.assertNotIn("panel-expand", fragment)
+
+class PanelExpandBallTests(PageTestCase):
+    """面板右下角那颗圆球：把这一块放大成它自己的整页（2026-09-08，适老化）。
+
+    🔴 它存在的理由是一个数：`.schedule-detail` 的 `zoom: 0.85` —— 面板里的每一个
+       字都比整页详情小 15%，而账是老年用户在付。
+    """
+
+    def panel(self, **params):
+        self.login(self.lisi)
+        return self.client.get(
+            reverse("events:event_detail_panel", args=[self.event.pk]), params,
+        ).content.decode()
+
+    def test_the_detail_ball_points_at_the_full_event_page(self):
+        # ⚠️ 后面那个 `?panel=` 是 2026-09-09 加的，而且**必须在**：它是「回去时
+        #    面板还开着」的全部实现。这一次响应正是「把面板打开到这一场」，而地址栏
+        #    里那一下是浏览器做的（`hx-replace-url`），所以服务端要自己补上。
+        html = self.panel(from_list=1)
+        self.assertIn(
+            f'class="panel-expand" href='
+            f'"{reverse("events:event_detail", args=[self.event.pk])}'
+            f'?panel={self.event.pk}"', html)
+
+    def test_the_signup_ball_points_at_the_full_signup_page(self):
+        """⚠️ 报名表单那一份指向**整页报名**，不是整页详情。
+
+        圆球的意思是「把我现在看的这一块放大」，而现在看的是这张表单 ——
+        通向详情页的话，人填到一半按下去会发现表单没了。
+        """
+        self.login(self.lisi)
+        html = self.client.get(
+            reverse("events:event_signup", args=[self.event.pk]),
+            HTTP_HX_REQUEST="true").content.decode()
+        self.assertIn(
+            f'class="panel-expand" href='
+            f'"{reverse("events:event_signup", args=[self.event.pk])}'
+            f'?panel={self.event.pk}"', html)
+
+    def test_it_carries_the_filter_state(self):
+        html = self.panel(from_list=1, q="Saturday")
+        self.assertIn(
+            f'{reverse("events:event_detail", args=[self.event.pk])}?q=Saturday',
+            html)
+
+    def test_it_is_a_real_link_not_a_button(self):
+        """⭐ 一个真的 `<a href>`，通向一个**已经存在**的页面。
+
+        所以：没有 JS 能用、浏览器后退键就是退路、可以在新标签页里打开。
+        这一批考虑过「原地铺满视口」的做法，判掉的理由就是最后两条 ——
+        URL 不变的全屏层，后退键关不掉它。
+        """
+        html = self.panel(from_list=1)
+        ball = html[html.index("panel-expand\" href="):]
+        self.assertNotIn("hx-get", ball[:200])
+        self.assertNotIn("x-on:click", ball[:200])
+
+    def test_it_is_not_the_same_button_as_the_close_cross(self):
+        """⚠️ 两颗按钮、两个意思：× 关掉整块面板，球把这一块放大。
+
+        `aria-label` 因此必须不一样 —— 两颗都不能只靠形状说话。
+        """
+        html = self.panel(from_list=1)
+        self.assertIn('aria-label="Close event"', html)
+        self.assertIn('aria-label="Open this on its own page"', html)
+
+    def test_it_floats_over_the_panel_and_lives_outside_the_zoomed_layer(self):
+        """🔴 浮在**右面板**上，而且它在 `.schedule-detail` **外面**。
+
+        位置是四轮改出来的，用户最后两句原话是「悬浮在右边面板」和「我不想要往下
+        滚就能看到」。两件事互相打架：`fixed` 到视口右下角的那一版落在面板
+        **外面**的页面底色上，读起来是一颗全局按钮；而 `absolute` 钉在面板下沿的
+        那一版在 `scrollY = 0` 时落到视口外面（面板下沿量到在视口下面约 132px）。
+        解法是 `fixed` + 由 app.js 实测面板算出来的两个偏移量。
+        ⚠️「悬浮」在这里是**不跟着内容滚**（它在滚动区外面），不是「脱离那块面板」。
+
+        外面：最早那版照上面那颗 × 写成 `sticky` + `bottom` 放在详情那一层里面。
+        浏览器里量出来球在 `y 149.6–204`，而面板上沿是 `188` —— 它画在了**面板
+        外面**，被面板的 `overflow: hidden` 裁掉，屏幕上什么都没有。成因：
+        `sticky` 配 `bottom` 只把一个本来要滑到线以下的东西往上顶，它不会把一个
+        在顶上的东西往下拉。三个计算值全是对的，`getBoundingClientRect()` 才说
+        的实话。⚠️ 顺带的第二条：在那一层里面还会被 `zoom: 0.85` 缩掉。
+        """
+        css = (Path(settings.BASE_DIR) / "assets" / "app.css").read_text()
+        rule = css[css.index("\n  .panel-expand {"):]
+        rule = rule[:rule.index("}")]
+        self.assertIn("position: fixed;", rule)
+        self.assertNotIn("sticky", rule)
+        # 🔴 两个偏移量来自实测，不是在 CSS 里把外壳那套几何再推一遍。
+        self.assertIn("var(--panel-fab-right", rule)
+        self.assertIn("var(--panel-fab-bottom", rule)
+        # 模板上：球是第二个根元素，排在 `.schedule-detail` 那个 div 关掉之后。
+        markup = (Path(settings.BASE_DIR) / "events" / "templates" / "events"
+                  / "_panel_frame.html").read_text()
+        self.assertLess(markup.index("{% include body %}"),
+                        markup.index('class="panel-expand"'))
+
+    def test_the_ball_is_never_pushed_off_the_bottom_of_the_screen(self):
+        """🔴 「不用往下滚就看得见」的实现只有一处：app.js 里那个 `Math.max`。
+
+        面板 `sticky` 之后停在 `top: --head-h + 1rem`（56），而没吸住之前自然位置
+        在标题行下面（量到 188），可它的 `height` 是按吸住之后那一档算的 ——
+        于是 `scrollY = 0` 时面板下沿在视口下面约 132px。纵向偏移取「面板下沿往上
+        16px」和「视口下沿往上 16px」里靠内的那一个，球因此永远在屏幕里。
+
+        ⚠️ 钉住的是这条规则**在 JS 里**，因为 CSS 表达不了它：一个纯 CSS 的写法
+           要么跟着面板掉出屏幕，要么脱离面板飘到页面底色上（两版都试过，都被
+           当场看出来）。
+        """
+        js = (Path(settings.BASE_DIR) / "assets" / "js" / "app.js").read_text()
+        block = js[js.index("function watchExpandBall()"):]
+        block = block[:block.index("watchExpandBall();")]
+        self.assertIn("--panel-fab-bottom", block)
+        self.assertIn("window.innerHeight - box.bottom", block)
+        self.assertIn("Math.max(GAP", block)
+        # 面板是 sticky 的，它在视口里的位置跟着滚动变 —— 少了这一条，
+        # 球会停在页面刚加载时的那个位置上。
+        self.assertIn('"scroll"', block)
+
+    def test_the_small_ball_keeps_a_full_size_hit_area(self):
+        """⚠️ 球从 3.5rem 收到 2.5rem 是用户的决定（两轮，都是看过屏幕之后），
+        而 40px 低于 44px 的触控目标下限。热区靠一圈透明的 `::after` 补回来 ——
+        「点不中」不该是那个决定的附带损失。同 `.btn-hit`。
+        """
+        css = (Path(settings.BASE_DIR) / "assets" / "app.css").read_text()
+        rule = css[css.index(".panel-expand::after {"):]
+        rule = rule[:rule.index("}")]
+        self.assertIn("inset: -0.25rem;", rule)
 
 
 class EventsShellStateTests(TestCase):

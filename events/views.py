@@ -30,6 +30,7 @@ from django.db.models import Prefetch
 from django.http import Http404, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
+from django.utils.http import urlencode
 from django.utils.text import get_text_list
 from django_ratelimit.decorators import ratelimit
 
@@ -47,6 +48,7 @@ from org.permissions import (
 
 from . import schedule, tokens
 from .forms import (
+    FILTER_PARAMS,
     EventForm,
     EventPeriodForm,
     EventRoleForm,
@@ -128,6 +130,62 @@ def _template(request, full, fragment):
     return fragment if request.headers.get("HX-Request") else full
 
 
+#: 「你刚才在看的是哪一份列表」—— 筛选卡上的每一格，加上页码（2026-09-08）。
+#:
+#: ⭐ **一份名单，两个使用方**：通向整页详情的链接把它带走（列表行、日程卡片、
+#:    面板右下角那颗圆球），`_back_link()` 再把它带回来。各写一份的话，退回去的
+#:    那一页迟早和走的时候不是同一份 —— 而那件事在屏幕上读起来是「筛选自己没了」。
+#:
+#: ⚠️ 故意**不含 `from`**，尽管日程窗口就叫这个名字。`_back_link()` 把 `from` 当成
+#:    来路标记读（`?from=mine` / `?from=manage`），而日程那个隐藏字段的值是一个
+#:    `Y-m-d` 日期 —— 带上去只会掉进那张白名单的兜底分支。今天无害，但两个意思
+#:    共用一个参数名本来就是一颗雷，别再往上堆。
+#:
+#: ⚠️ 也不含 `report` / `print` / `from_list` 这类**动作**参数：它们说的是
+#:    「这一次请求要干什么」，不是「你在看哪一份列表」。带回去就会让一条返回链接
+#:    重新触发一次那个动作。
+#:
+#: ⚠️ 筛选那几格的名字**不在这里抄第二遍**，从 `EventPeriodForm.FILTER_PARAMS`
+#:    取。抄一遍的代价这一批自己付过：加 `nature` 时两个文件都得改，而漏掉这边
+#:    不报任何错 —— 表现只是那一格点进活动再返回时自己没了。
+#:
+#: ⚠️ `panel`（2026-09-09）**不在 `FILTER_PARAMS` 里**，故意的：那个常量是这张
+#:    表单的**字段名**（守卫 `test_the_filter_names_are_declared_once` 钉着它和
+#:    真正长出来的字段一致），而 `panel` 不是一个框，是「右边正开着什么」。
+#:    它属于这一条名单，因为这一条问的是「你刚才在看的是哪一份列表」—— 而那份
+#:    列表右边开着一块面板，也是答案的一部分。见 `_open_panel()`。
+LIST_STATE = (*FILTER_PARAMS, "page", "panel")
+
+
+def _list_state(request, page=None, panel=None):
+    """筛选串，形如 `?q=food&page=2&panel=7`；一格都没填就是空串。
+
+    ⚠️ 路径永远由 `reverse()` 给，这里只拼**查询串**，而且每个值都过
+       `urlencode`。`_back_link()` 那段「绝不把查询串里的东西当 URL 用」仍然成立：
+       用户控得住的部分从头到尾都只是查询串里的一个值，不是路径的任何一段。
+
+    ⚠️ `page` 收一个 `Page` 而不是一个数：从日程上点一张卡时，左边那一列会被翻到
+       **另一页**（`page_holding` 算出来的），而 `request.GET["page"]` 还停在旧的
+       那个。给了就以真实渲染出来的那一页为准。第一页不写进去 —— 一条
+       `?page=1` 的链接和不写是同一页，而它会让每一个 URL 都长出一截噪音。
+
+    ⚠️ `panel` 同理，而它的时间差更刁：面板是 HTMX 换进来的，而「地址栏里记下
+       这一场」是**浏览器**在同一下里做的（`hx-replace-url`）—— 服务端渲染那一份
+       响应时，`request.GET` 里还没有 `panel`。不给这个参数的话，面板里那颗圆球
+       的链接就少一截，人从它进整页详情再返回，面板是关着的 —— 也就是这一整批
+       要修的那件事，在最主要的那条路上原样复发。
+    """
+    values = {key: request.GET[key] for key in LIST_STATE
+              if request.GET.get(key, "").strip()}
+    if page is not None:
+        values.pop("page", None)
+        if page.number > 1:
+            values["page"] = str(page.number)
+    if panel is not None:
+        values["panel"] = str(panel)
+    return f"?{urlencode(values)}" if values else ""
+
+
 def _back_link(request):
     """Where "back" goes from an event's page, and what it should be called.
 
@@ -152,9 +210,21 @@ def _back_link(request):
        button that 403s — a link that refuses the person who clicked it reads
        as a broken site rather than as a page not meant for them.
     """
+    # 🔴 **带着筛选串回去**（2026-09-08），三支都带。在此之前这条链接指向一张
+    #    **空筛选**的列表：一个人筛到「食物银行 · 十月」、翻到第 3 页、点开一场
+    #    活动，再点这条返回，回到的是全部活动的第 1 页 —— 他刚才做的三件事一起
+    #    没了，而页面本身完全正常。适老化那一批把这条路变成了主路（面板里那颗
+    #    圆球就通向这一页），所以它必须退得回原处。
+    #
+    # ⚠️ **不挑分支。** `_list_state()` 是一张白名单，一格没填就返回空串 ——
+    #    于是它在 My Signups 上恒为无害（那一页没有筛选卡也不翻页），在管理列表
+    #    上恰好正确（同一张筛选卡、同一套翻页，`nature` 那一格不存在因而被忽略）。
+    #    只给其中一支带的话，「从这一页返回记得住、从那一页返回记不住」会是下一个
+    #    人眼里的 bug，而它没有任何理由可以被读出来。
+    state = _list_state(request)
     marker = request.GET.get("from")
     if marker == "mine":
-        return reverse("events:my_participations"), "My Signups"
+        return reverse("events:my_participations") + state, "My Signups"
     # ⚠️ `past` was a marker here until 2026-08-17. It is not merely unused now
     #    — the page it pointed at is gone, so honouring it would send people to
     #    a 404. Unknown markers fall through to the default below, which is the
@@ -166,8 +236,8 @@ def _back_link(request):
             # Same label the navigation uses for this account, so the two do
             # not name one page two different things.
             label = "Events I Manage" if administers_any else "All Events"
-            return reverse("events:event_manage_list"), label
-    return reverse("events:event_list"), "Events"
+            return reverse("events:event_manage_list") + state, label
+    return reverse("events:event_list") + state, "Events"
 
 
 #: How many events one page of each list holds (2026-08-05).
@@ -194,6 +264,26 @@ def _my_contact(request):
     cope with it rather than raising, the same rule permissions.py follows.
     """
     return getattr(request.user, "contact", None)
+
+
+def _volunteer_period(request):
+    """志愿者那三页共用的那一张筛选表（2026-09-08 抽出来）。
+
+    🔴 **抽出来的理由不是少打字，是那三处必须一字不差。** 左边的列表、右边的
+       日程、以及点开一场活动时顺手翻页的那一次，各自 `EventPeriodForm(...)`
+       一遍；而 `audience=` 决定「按角色种类筛」那一格存不存在。少传一处的表现
+       是**同一张筛选卡画出两个答案** —— 列表筛过了、日程没有（或者反过来），
+       而两边都渲染成功。
+       `_visible_events()` 和 `_schedule()` 共用 `period.narrow()` 正是为了防
+       这件事，而在此之前构造这一步是唯一还各写各的一环。
+       守卫：events.tests.RoleKindFilterTests.test_the_schedule_is_narrowed_too
+
+    ⚠️ 管理列表页和报表页**不走这里**：那两页要传 `ministries=`、而且不传
+       `audience=`（于是那一格根本不存在，伪造一个 `?nature=helping` 过去什么
+       都不会发生）。它们要答的是另一个问题，共用一个构造器只会让这个函数长出
+       一串参数。
+    """
+    return EventPeriodForm(request.GET or None, audience=_my_contact(request))
 
 
 # --- B9: the volunteer's own pages --------------------------------------
@@ -223,11 +313,13 @@ def event_list(request):
     event 404s there no matter how it is listed. What the row carries now is its
     status, so the page says which of the two it is instead of hiding one.
     """
-    period = EventPeriodForm(request.GET or None)
     contact = _my_contact(request)
+    period = _volunteer_period(request)
     return render(request, _template(
         request, "events/event_list.html", "events/_event_list_results.html"), {
         "period": period,
+        # 右边那块面板开着没有、开的是哪一场（2026-09-09）。见 `_open_panel()`。
+        **_open_panel(request),
         **_listing(request, period, contact),
         # 右边那块日程。⚠️ 它和上面那个 `events` 是**两个不同的集合**，故意的：
         #    列表是分页的二十条，日程是那几天的全部。两边共用的只有筛选。
@@ -242,6 +334,63 @@ def event_list(request):
         "schedule_oob": bool(request.headers.get("HX-Request")),
         "schedule_partial": bool(request.headers.get("HX-Request")),
     })
+
+
+def _open_panel(request):
+    """`?panel=<pk>` —— 进这一页的时候右边那块面板就开着，里面是那一场活动。
+
+    🔴 **它存在的理由是「回去时不是同一个页面」**（2026-09-09 实测）。
+       从面板里那颗圆球进整页详情，再点那一页的「← Events」，回来的是一张
+       **面板关着**的列表：筛选和页码都在（`LIST_STATE` 带回来了），而「右边开着
+       什么」从来没有进过 URL，所以服务端答不出来。浏览器的后退键反而是对的 ——
+       它走 bfcache，把整页原样端回来 —— 于是同一页上两条「回去」的路给出两种
+       结果，而这正是这个项目一直在防的那种不一致。
+
+       修的不是那条返回链接，是**面板状态只活在浏览器内存里**这件事本身。
+       进了 URL 之后白拿三件：刷新不丢面板、这一页可以收藏、链接可以发给同事。
+
+    🔴 **拿不到就当没写，不是 404。** 一个过期的 `?panel=` —— 活动删了、改回草稿
+       了、或者链接被转给了看不见它的人 —— 不许把**整张列表页**打成 404。那读起来
+       是「站坏了」，而实际上只是右边那一块开不出来。
+       ⚠️ 吞的是 `Http404`，不是所有异常：`_detail()` 里别的错该照常炸出来。
+
+    ⭐ 权限走 `_detail()`，和整页、和 HTMX 那条面板路径**同一个**。这是第三条通向
+       同一块内容的路径，而新开的取数路径正是权限最容易漏掉的地方 —— 草稿在这里
+       同样 404（然后被上面那一条吞成「不开面板」，对没权限的人和不存在完全一样）。
+
+    ⚠️ `panel` **不进 `EventPeriodForm`**：它不是一个筛选框，是「右边正开着什么」。
+       混进那张表单就会出现在 `FILTER_PARAMS` 里，于是管理列表页也长出一个它根本
+       没有面板去开的参数。
+
+    ⚠️ HTMX 那条路上**不做**：片段请求换的是 `#event-results`，面板在那块外面、
+       原样待着。照做一遍就是每敲一个筛选字符白取一次活动详情。
+    """
+    pk = request.GET.get("panel", "")
+    # ⚠️ `isdigit()` 不是多余的校验，它挡的是一个 **500**：`get_object_or_404` 只
+    #    接得住「查不到」，而 `pk="abc"` 在字段层就抛 `ValueError`（Django 的
+    #    「expected a number」），根本走不到 404 那一步。一个手改过 URL 的人、
+    #    或者一条被聊天软件截断的链接，会把整张列表页变成一个错误页。
+    if not pk.isdigit() or request.headers.get("HX-Request"):
+        return {}
+    try:
+        context = _detail(request, pk)
+    except Http404:
+        return {}
+    return {
+        **context,
+        # 模板据此知道「这一块要画出来、而且 Alpine 一开始就是开着的」。
+        # ⚠️ 单独一个键，不是让模板去判 `event` 在不在：`_detail()` 的上下文里
+        #    有十几个键，而整页详情那边也叫 `event` —— 用它当开关，改天谁给这一页
+        #    加一个同名变量，面板就会自己打开。
+        "panel_open": True,
+        # 左边那一行的高亮。⚠️ 和面板是同一件事的两半：高亮的意思只有一个 ——
+        #    「右边正开着的是这一场」—— 所以它不能由别处算。
+        "picked_pk": context["event"].pk,
+        # 面板里那一份详情画的是「在面板里的样子」（不画返回链接、活动名降 h2、
+        # 报名按钮就地开表单）。⚠️ 少了它，服务端渲染出来的这一份会和 HTMX 换进来
+        # 的那一份**长得不一样**，而两边都渲染成功。
+        "in_panel": True,
+    }
 
 
 def _visible_events(period, contact):
@@ -285,6 +434,10 @@ def _listing(request, period, contact, page_number=None):
         # for. ⚠️ The whole filtered set, not this page — "20 events" under a
         # filter that matched 180 would answer a question nobody asked.
         "total": page.paginator.count,
+        # 每一行通向整页详情的那条链接要带上的筛选串（2026-09-08）。
+        # ⚠️ 传 `page` 而不是让它去读 `request.GET["page"]` —— 从日程点过来的那一次
+        #    请求里，这一列被翻到了另一页，见 `_list_state` 的 docstring。
+        "list_state": _list_state(request, page),
     }
 
 
@@ -333,13 +486,20 @@ def event_schedule(request):
     ⚠️ 它是个**读**操作，所以按 D24 可以只有 HTMX 一条路 —— 但它偏偏也不需要：
        箭头是真的 `<a href>`，没有 JS 时点下去整页重来，日程停在新的窗口上。
     """
-    period = EventPeriodForm(request.GET or None)
     contact = _my_contact(request)
+    period = _volunteer_period(request)
     return render(request, "events/_schedule.html", {
         "period": period,
         # 箭头翻页要顺手把筛选卡里那个隐藏的 `from` 也改掉，否则下一次筛选会
         # 把窗口拽回起点 —— 见 _period_filter.html 里那一段。
         "schedule_partial": True,
+        # 日程卡片上那条通向整页详情的 `href` 要带的筛选串。
+        #
+        # ⚠️ 在这里给，**不放进 `_schedule()`**：那个函数的 docstring 写着它
+        #    「只做取数和夹紧」，而且整页那一次的 `list_state` 由 `_listing()` 出
+        #    （它知道左边那一列真的停在第几页）。放进 `_schedule()` 就会有两份，
+        #    而后铺开的那一份会盖掉带页码修正的那一份。
+        "list_state": _list_state(request),
         **_schedule(request, period, contact),
     })
 
@@ -563,6 +723,14 @@ def _detail(request, pk):
         "preview": preview,
         "back_url": back_url,
         "back_label": back_label,
+        # 面板里那颗圆球通向的整页 URL 要带上的筛选串（2026-09-08）。
+        #
+        # ⚠️ 在这里给，而不是只在 `_listing()` 里 —— 面板那两个模板
+        #    （`_schedule_detail` / `_schedule_signup`）拿得到的只有这一份上下文，
+        #    而报名成功换回详情的那一次**根本不经过 `_listing()`**。
+        # ⚠️ `event_detail_panel` 里 `_listing()` 在这之后 `update`，于是那一份
+        #    （带页码修正的）赢。这是对的先后：它知道左边那一列真的停在第几页。
+        "list_state": _list_state(request),
     }
 
 
@@ -580,8 +748,8 @@ def event_detail_panel(request, pk):
     ⭐ 它是**读**操作，所以按 D24 可以只有 HTMX 一条路。日程上那张卡仍然是一个
        真的 `<a href>`，指向整页详情：没有 JS 时点下去就是整页跳过去。
     """
-    period = EventPeriodForm(request.GET or None)
     contact = _my_contact(request)
+    period = _volunteer_period(request)
     context = _detail(request, pk)
     # ⚠️ 先算页码，再取那一页 —— 两次都用 `_listing` 的同一份查询。
     #    算不出来（那一场不在左边的列表里）时 `page_number` 是 None，
@@ -603,6 +771,12 @@ def event_detail_panel(request, pk):
     #
     # ⚠️ 日程那边照旧要这一块 —— 它可能得翻到别的页去。
     if request.GET.get("from_list"):
+        # 🔴 `panel=pk` 得**在这里补上**（2026-09-09）。这一次响应正是「把面板打开
+        #    到这一场」，而地址栏里那一下是**浏览器**做的（`hx-replace-url`）——
+        #    渲染这一份的时候 `request.GET` 里还没有它。不补的话，面板里那颗圆球
+        #    的链接就少一截，人从它进整页详情再返回，面板是关着的：这一整批要修的
+        #    那件事，在最主要的那条路上原样复发。实测抓到的，不是推出来的。
+        context["list_state"] = _list_state(request, panel=pk)
         return render(request, "events/_schedule_detail.html", context)
 
     number = page_holding(_visible_events(period, contact), pk, EVENTS_PER_PAGE)
@@ -613,6 +787,9 @@ def event_detail_panel(request, pk):
         # 高亮哪一行。⚠️ 算不出页码时是 None —— 模板据此**不画**高亮，
         #    而不是高亮一个碰巧在第一页的别人。
         "picked_pk": pk if number else None,
+        # ⚠️ 同上，而且必须写在 `_listing()` 那一次 update **之后** —— 它也出
+        #    `list_state`（带页码修正的那一份），写在前面会被它盖掉。
+        "list_state": _list_state(request, context["page"], panel=pk),
     })
     return render(request, "events/_schedule_detail.html", context)
 
@@ -712,6 +889,14 @@ def event_signup(request, pk):
         request, "events/event_signup.html", "events/_schedule_signup.html"), {
         "event": event, "form": form, "needs_consent": form.needs_consent,
         "in_panel": in_panel,
+        # ⚠️ 手搭的上下文，所以这一份要单独补 —— 这一次 render 不走 `_detail()`。
+        #    少了它，面板里报名表单右下角那颗圆球会通向一个**丢掉筛选**的整页，
+        #    而同一块面板上的详情那颗不会。两颗球两种行为，正是这一格要防的。
+        # ⚠️ 面板里那一档要带 `panel`，理由同 `event_detail_panel`：地址栏里那一下
+        #    是浏览器做的，渲染这一份时 `request.GET` 里还没有它。
+        #    ⭐ 带回去的是**这场活动的详情**，不是这张填了一半的表单 —— 面板还原
+        #       到详情是对的：一份半填的表单被 URL 复活，比丢掉它更让人意外。
+        "list_state": _list_state(request, panel=event.pk if in_panel else None),
     })
 
 

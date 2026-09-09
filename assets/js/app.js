@@ -360,9 +360,73 @@ window.onGoogleCredential = function (response) {
 //    （原来这里有**两条** $watch。「开日程 = 让开详情」那条 2026-08-28 搬进了
 //     `showSchedule()`：翻开 `schedule` 的不再是模板里一句直接赋值，而是这个
 //     方法本身，所以那条规则不必再靠监听才能听见。）
-Alpine.data("eventsShell", () => ({
+// ⚠️ 收一个初值（2026-09-09）：`?panel=<pk>` 进来时面板一开始就是开着的，而
+//    模板把服务端的答案插进 `x-data="eventsShell(true)"`。
+//    ⚠️ 默认值 `false` 不能省 —— 别的地方（真站上只有这一处，但守卫和将来的
+//       调用方不一定）写 `x-data="eventsShell"` 时 Alpine 是**不带参数**调用它的。
+// 筛选卡收起来了没有（2026-09-09）。
+//
+// 🔴 **为什么是 class 而不是 `x-show`。** 收起态要在 Alpine 加载**之前**就画对
+//    （否则记着「收起」的人会先看到一整张 330px 的卡再看到它塌成一行），而那件事
+//    只有一段内联脚本做得到 —— 它写 `<html>` 上的一个 class。若这边再用 `x-show`
+//    的内联 `display`，两套机制会在同一个元素上打架：Alpine 说「显示」写的是
+//    `display: ''`，而那正好把权力交回给那个 class 规则，于是展开点不动。
+//    所以两边都用 class，而且**接手时立刻把 html 上那个摘掉**：任何时刻只有一套
+//    在管这件事。
+//
+// ⚠️ 键里带 `pathname`：这张卡 Events 和管理列表两页共用，但那是两件事 ——
+//    在一页收起不该把另一页也收了。键的形状和模板里那段 boot 脚本**必须一致**，
+//    两处分家的表现是「收起之后刷新又回来了」。
+//
+// ⚠️ 读写都包在 try 里（隐私模式下 localStorage 直接抛）。读不到就当没收起 ——
+//    默认展开，和这一页一直以来的样子相同。
+const FILTERS_KEY = () => `filters:${window.location.pathname}`;
+
+Alpine.data("filterCard", () => ({
+  open: true,
+
+  init() {
+    const root = document.documentElement;
+    // 接手：先认下 boot 脚本已经画出来的那个状态，再把它的 class 摘掉。
+    // ⚠️ 顺序不能反 —— 先摘再读的话，读到的是「没收起」，卡片会当场弹开。
+    this.open = !root.classList.contains("filters-collapsed");
+    root.classList.remove("filters-collapsed");
+  },
+
+  // ⚠️ 一个开关，而 2026-08-28 从 `button.html` 删掉过 `toggles` —— 不冲突。
+  //    当时删的理由是「一颗按钮同时是打开和关掉，而它旁边没有任何东西说明此刻
+  //    按下去是哪一件」。这一颗有：箭头跟着转、`aria-expanded` 跟着变、
+  //    读屏念的那句也跟着变。所以它不走那个组件，直接用共享的图标按钮长相。
+  // 收起时整张卡都能点开（2026-09-09）。
+  //
+  // 🔴 **两道闸，缺一个就出一种毛病：**
+  //    ① `!this.open` —— 展开着的时候这一层完全不管事。少了它，点一下输入框、
+  //       点一下下拉、点一下 Clear，卡片自己就收起来了。
+  //    ② 让开那颗箭头 —— 它自己的 `x-on:click` 先跑，然后这一下会**冒泡**到
+  //       表单上。少了它，展开态点箭头是「收起，然后立刻又展开」，
+  //       而屏幕上什么都不动，读起来像按钮坏了。
+  //
+  // ⚠️ 用 `closest()` 而不是 `event.target === button`：点中的可能是箭头里面那个
+  //    `<svg>`（或者它里面的 `<path>`），那时 target 根本不是按钮本身。
+  expandFromCard(event) {
+    if (this.open) return;
+    if (event.target.closest(".filter-toggle")) return;
+    this.toggleFilters();
+  },
+
+  toggleFilters() {
+    this.open = !this.open;
+    try {
+      localStorage.setItem(FILTERS_KEY(), this.open ? "open" : "collapsed");
+    } catch (e) {
+      /* A blocked localStorage costs the memory of this choice, nothing more. */
+    }
+  },
+}));
+
+Alpine.data("eventsShell", (openWithDetail = false) => ({
   schedule: false,
-  detail: false,
+  detail: openWithDetail,
 
   get isOpen() {
     return this.schedule || this.detail;
@@ -381,6 +445,25 @@ Alpine.data("eventsShell", () => ({
 
   closeDetail() {
     this.detail = false;
+    // 🔴 **把 `panel` 从地址栏里拿走**（2026-09-09）。少了这一句，「关掉」就不是
+    //    关掉：刷新一下面板自己回来了，而人明明关过它。同一个地址被收藏、被转发
+    //    出去也一样 —— 它会一直声称那一块是开着的。
+    //
+    // ⚠️ `replaceState` 而不是 `pushState`：关掉一块面板不是一次导航，留一条历史
+    //    记录会让后退键先去撤销这一下、而不是回到进这一页之前。同 htmx 那边
+    //    卡片点击用 `hx-replace-url` 的理由。
+    //
+    // ⚠️ 包在 try 里：`history` 在少数嵌入环境里会抛（沙箱 iframe 的
+    //    SecurityError），而关不掉一块面板不该把整页的 JS 带下去。
+    try {
+      const url = new URL(window.location.href);
+      if (url.searchParams.has("panel")) {
+        url.searchParams.delete("panel");
+        history.replaceState(null, "", url.pathname + url.search + url.hash);
+      }
+    } catch (e) {
+      /* A blocked history API must not take the page down with it. */
+    }
   },
 
   // 「亮出日程」。⚠️ **两件事，一个方法**（2026-08-28 从一个 `$watch` 改过来）：
@@ -1346,6 +1429,91 @@ function watchFilterHeight() {
 watchFilterHeight();
 
 // ---------------------------------------------------------------------------
+// 面板上那颗圆球钉在哪儿：实测面板的位置，写成两个变量（2026-09-08）
+//
+// 🔴 **要同时满足两件互相打架的事**：球要浮在**右面板**上（用户第三次的原话就是
+//    「悬浮在右边面板」），而且**不许滚一下才看得见**。
+//
+//    纯 CSS 做不到，原因是面板自己的一条老性质：它 `sticky` 之后的位置是
+//    `top: --head-h + 1rem`（56），而**没吸住之前**自然位置在标题行下面
+//    （量到 188），可 `height` 是按吸住之后那一档算的（`100svh - --head-h - 2rem`）。
+//    于是 `scrollY = 0` 时面板下沿在视口下面约 132px —— 一颗 `absolute` 钉在
+//    面板下沿的球就落在视口外面。而 `fixed` 到视口右下角的那一版（试过）球会落在
+//    面板**外面**的页面底色上，读起来是一颗全局按钮。
+//
+// ⭐ 所以球是 `fixed`，而它的两个偏移量**由这里实测**：
+//      · 横向 —— 面板右沿往里 16px，于是它永远压在面板上；
+//      · 纵向 —— 面板下沿往上 16px，**但不许低于视口下沿 16px**（那个 `Math.max`
+//        就是全部机关）。面板下沿在屏幕里时球贴着面板的角，面板垂到屏幕外时
+//        球停在视口底上。
+//
+// ⚠️ 不写死一个数、也不在 CSS 里把外壳那套几何（62rem/78rem 两档宽度加负外边距）
+//    再推一遍：那就是把同一份布局算两遍，而分家的表现是某个宽度上球飘在面板外面。
+//    `--panel-fits` 那条注释写的是同一件事。
+//
+// ⚠️ 没有 JS 时退回 CSS 里的默认值（视口右下角 1rem）。球仍然看得见、点得动、
+//    通向同一页 —— 只是不压在面板上。这是知情的降级，不是坏掉。
+//
+// ⚠️ `scroll` 必须监听：面板是 sticky 的，它在视口里的位置跟着滚动变。
+//    每帧最多算一次（rAF 合并），而这一段只读 `getBoundingClientRect()`、
+//    不改任何布局，所以不会自己制造回流风暴。
+//
+// ⚠️ ResizeObserver 盯的是**面板**：开关日程那 560ms 的过渡里它的宽度一直在变，
+//    而那个过程根本不触发 `resize` —— 同 `--filter-h` 那一段踩过的坑。
+function watchExpandBall() {
+  const shell = document.querySelector(".events-shell");
+  const panel = document.querySelector(".schedule-panel");
+  if (!shell || !panel) return;
+
+  const GAP = 16;
+  let queued = false;
+  // 上一次真的写进去的两个值。⚠️ 不是优化洁癖：滚动过程中这两个数**几乎从不变**
+  //    （面板吸住之后 `box.bottom` 相对视口是定的，吸住之前 `Math.max` 把它钳成
+  //    一个常数），而自定义属性是**继承**的 —— 写在外壳上就等于每帧让整页
+  //    （二十行活动加一整块日程）重新算一次样式，为了两个一模一样的数。
+  let written = "";
+
+  const place = () => {
+    queued = false;
+    // 🔴 面板关着的时候整段不做事。球长在 `#schedule-detail` 里，而那一块默认是
+    //    空的、且被 `x-show` 藏着 —— 但 `.schedule-panel` 一直在 DOM 里
+    //    （关着时是 `visibility: hidden`）。不挡这一下的话，**每一个打开
+    //    /events/ 却从不开面板的人**（也就是默认视图）每滚一帧都要为一个不存在
+    //    的球做一次强制重排。这一行读的是 class，不碰布局。
+    if (!shell.classList.contains("is-open")) return;
+    const box = panel.getBoundingClientRect();
+    // 🔴 那两个 `Math.max` 就是「不用往下滚也看得见」的全部实现。
+    const right = Math.round(Math.max(GAP, window.innerWidth - box.right + GAP));
+    const bottom = Math.round(Math.max(GAP, window.innerHeight - box.bottom + GAP));
+    const now = `${right} ${bottom}`;
+    if (now === written) return;
+    written = now;
+    shell.style.setProperty("--panel-fab-right", `${right}px`);
+    shell.style.setProperty("--panel-fab-bottom", `${bottom}px`);
+  };
+
+  const soon = () => {
+    if (queued) return;
+    queued = true;
+    requestAnimationFrame(place);
+  };
+
+  window.addEventListener("scroll", soon, { passive: true });
+  // ⚠️ `resize` 留着是给没有 ResizeObserver 的浏览器兜底 —— 有它的时候下面那个
+  //    观察器已经覆盖了拖窗口这件事（面板的宽高都是视口推出来的）。
+  window.addEventListener("resize", soon);
+  // ⚠️ **不监听 `htmx:afterSettle`。** 换进面板的是 `#schedule-detail` 的
+  //    innerHTML，而这两个数量的是 `.schedule-panel` 的盒子 —— 那个盒子在
+  //    任何一次 swap 里都不变，写在外壳上的变量也活得下来。挂上去的代价是
+  //    全站每一次落地（而它一次请求会响**两下**，见 `startSchedule()` 那条注释）
+  //    都白排一帧。开关面板那 560ms 的过渡里盒子确实在变，那件事归下面那个观察器。
+  if (typeof ResizeObserver !== "undefined") new ResizeObserver(soon).observe(panel);
+  place();
+}
+
+watchExpandBall();
+
+// ---------------------------------------------------------------------------
 // 页头条：钉住了没有（2026-08-28）
 //
 // 静息态那一行是**透明**的 —— 底由站头那块向下延的面板画，这样两行在屏幕上是
@@ -1568,6 +1736,16 @@ window.panelFits = function () {
 // 🔴 这里**不记「哪一页」**，只记一个 pk。记页码的话，筛选一变，同一个页码
 //    指向的是另一批人 —— 而高亮会安静地落在一个陌生的活动上。
 let pickedEvent = null;
+
+// ⚠️ 服务端画出来的那一圈高亮要认回来（2026-09-09）。`?panel=<pk>` 进来时
+//    `is-picked` 已经在某一行上了，而这个变量还是 null —— 于是关掉面板时
+//    `paintPicked()` 不知道该清谁，那一圈会一直亮着，指向一块已经关掉的面板。
+//    ⚠️ 从 DOM 认，不再从服务端插一个值进 JS：那一行上的 class 已经是答案，
+//       插第二份就是同一件事的两个来源。
+{
+  const already = document.querySelector(".event-row.is-picked");
+  if (already) pickedEvent = already.dataset.event;
+}
 
 function paintPicked() {
   for (const row of document.querySelectorAll("[data-event]")) {

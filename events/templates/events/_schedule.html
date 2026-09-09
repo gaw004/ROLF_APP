@@ -146,10 +146,16 @@
                偏多远是设计，两件事分开放。
             {% endcomment %}
             <a class="schedule-card{% if card.is_cancelled %} is-cancelled{% else %} schedule-card--{{ card.colour }}{% endif %}{% if card.is_past %} is-past{% endif %}"
-               href="{% url 'events:event_detail' card.event.pk %}"
+               href="{% url 'events:event_detail' card.event.pk %}{{ list_state }}"
                {% comment %}
                ⚠️ `href` 指向整页详情，`hx-get` 就地在面板里开 —— 没有 JS 时
                   点下去是整页跳转（D24 的渐进增强），有 JS 时页面不动。
+
+               ⚠️ `href` 后面那个 `list_state` 是当前的筛选和页码（2026-09-08），
+                  详情页那条「← Events」据此退回同一份列表。⚠️ 它**不是**
+                  `{% templatetag openblock %} querystring {% templatetag closeblock %}`：那一个会把日程窗口 `from` 也带上，
+                  而 `from` 这个名字在详情页那边已经是「来路标记」了
+                  （见 views.py 的 `LIST_STATE`）。
 
                ⚠️ 查询串跟着一起送（`{% templatetag openblock %} querystring {% templatetag closeblock %}`）：那一次请求还要
                   算「这一场在左边列表的第几页」，而那取决于当前的筛选。
@@ -160,6 +166,14 @@
                {% endcomment %}
                hx-get="{% url 'events:event_detail_panel' card.event.pk %}{% querystring %}"
                hx-target="#schedule-detail" hx-swap="innerHTML"
+               {% comment %}
+               ⚠️ 和左边那一列同一条（2026-09-09）：把「右边开着这一场」写进地址栏，
+                  否则从圆球出去再回来，面板是关着的。理由写全在
+                  `_event_list_results.html` 那一条上。
+                  ⚠️ 这里的 `{% templatetag openblock %} querystring {% templatetag closeblock %}` 会保留日程窗口 `from` ——
+                     在这一侧那正是要的：人是从翻到某一天的日程上点开的。
+               {% endcomment %}
+               hx-replace-url="{% url 'events:event_list' %}{% querystring panel=card.event.pk %}"
                x-on:click="detail = true"
                style="top: {{ card.top }}px; height: {{ card.height }}px; --depth: {{ card.depth }}"
                data-schedule-card data-event="{{ card.event.pk }}"

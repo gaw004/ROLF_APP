@@ -607,6 +607,125 @@
       visibility 560ms;
   }
 
+  /* 筛选卡收起来的样子（2026-09-09）。展开时是这张卡一直以来的样子，
+   * 收起时只剩一行：一句摘要 + 那颗展开键。
+   *
+   * 🔴 **为什么收起是必要的，而 2026-09-03 那次折成一条又被撤回。**
+   *    那一次是**永远**一条（搜索框因此失去了可对齐的对象，见
+   *    `FilterSearchAlignmentTests`），用户当天判它「保留两层更好用」。
+   *    这一次是**默认两层、可以手动收起** —— 展开态一个像素都没动，那三条对齐
+   *    守卫照样守着它。真正逼出这一版的是上一批：Role kind 那一格让这张卡长到
+   *    330.5px，而开着日程时它是**钉住的**，800px 高的窗口上只剩约 3 张卡片。
+   *
+   * 🔴 **两套选择器，因为有两个时刻。**
+   *    `html.filters-collapsed …` 是 Alpine 加载**之前**那一段（由模板里那段内联
+   *    boot 脚本写上，同深色模式那次）；`.filter-card.is-collapsed …` 是 Alpine
+   *    接手之后。接手时那段 JS 会把 html 上的 class 摘掉，所以两套永远不同时活着 ——
+   *    真让它们并存就是一场特异性官司，而输的那一次表现为「点了收起没反应」。
+   *
+   * ⚠️ 用 `display: none` 收起来，字段因此**照样跟着表单提交**（隐藏字段是提交的）。
+   *    收起一张筛选卡不该顺手把筛选清掉。
+   *
+   * ⚠️ 没有 JS 时两套都不生效 —— 脚本不跑、Alpine 不在，卡片就是展开的那个样子。
+   *    `<noscript>` 里那颗 Filter 按钮因此照样够得着。 */
+  /* 摘要那一句：**只有收起的时候才出现**。展开时卡片就摆在屏幕上，再说一遍
+   * 「你筛了什么」是同一件事说两遍。
+   * ⚠️ 一行不折、放不下就省略号：开着日程时这张卡只有 34rem，而摘要可能是
+   *    "Food Pantry · 1 Oct 2026 – 31 Oct 2026 · matching “kitchen” · helping roles"。
+   *    折成两行就不是「收起来只有一行」了。
+   * ⚠️ 右边给箭头让开 2.75rem + 一点余量 —— 它是绝对定位的，不占位置，
+   *    不让的话长摘要会从它底下穿过去。 */
+  .filter-card-summary {
+    display: none;
+    min-width: 0;
+    padding-right: 3.25rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 0.875rem;
+    color: var(--color-ink-600);
+  }
+
+  .dark .filter-card-summary {
+    color: var(--color-ink-300);
+  }
+
+  /* 箭头。**没有圆底**（2026-09-09，用户：「不要圆圈，只要箭头可以不？」）。
+   *
+   * ⚠️ 它一度用的是 `.panel-close`（全站共享的圆形图标按钮，面板那颗 × 用的就是
+   *    它）。撤掉不是因为「不好看」：那个圆底在面板那两处是**浮在内容之上**的，
+   *    需要一块自己的底才看得清；而这一颗待在卡片里、四周是留白，圆底只是多一层
+   *    没有工作要做的装饰。
+   *
+   * 🔴 **圆底一去，可点区域就只剩那个字形了** —— 所以这里必须自己把热区撑回来。
+   *    `min-width` / `min-height` 写死 2.75rem = **44px**，触控目标的下限，
+   *    而屏幕上看到的只是一个箭头。这是这次改动**唯一**要补的东西，别删。
+   *    ⚠️ 靠 `padding` 撑**不够**：量出来是 32×40（内边距加上字形自己的宽高），
+   *       两个方向都差一点，而这种差一点在截图上完全看不出来。写死那个数。
+   *
+   * ⚠️ 收起时转 180°，展开时朝下（「按我收起来」）。这个旋转不是装饰：它是这颗
+   *    开关**说出自己此刻是哪一件事**的方式，而那正是 2026-08-28 删掉 `toggles`
+   *    时缺的东西。所以 reduced-motion 下**只去掉过渡，不去掉那个角度**。
+   *
+   * 🔴 **里面画的是 SVG，不是一个箭头字符。** 用 `&#x2304;` 那一版盒子上下对称、
+   *    **墨迹不对称**（那个字形在字框里偏下），于是转 180° 之后它偏上，和旁边
+   *    那句摘要不在一条线上。⚠️ 这一条量不出来 —— `getBoundingClientRect()`
+   *    报的是 20/20，因为它量的是盒子；差的是盒子里那笔墨。而且它跟着字体走。 */
+  .filter-toggle {
+    /* 🔴 **绝对定位在卡片右下角，两个状态一个位置。** 用户报过两次，两次都在这一
+     *    点上：「箭头应该跟 clear 和 schedule 在一条线上，现在因为箭头，filter
+     *    卡片下面多了很多空白」（它当时自己占一行），以及「箭头上下都应该在一个
+     *    位置，偏移让我很难受」（收 / 展之间它在跳）。
+     *    在流里做不到这两条：展开时它得落在控件行那一条线上，而那一行在 `w-fit`
+     *    的内层里（宽度是内容宽，不是卡片宽）；收起时控件行整块藏起来了。
+     *    绝对定位一次答完 —— 展开时它正落在卡片最后一行（Clear / Schedule）那条
+     *    线上，收起时落在那一句摘要旁边，**x 一个像素都没变**。
+     * ⚠️ 定位父级是 `.card` 自己的 `position: relative`（那一行在 `.card` 上，
+     *    注释写着它是给亮边那个 `::after` 用的 —— 这里是第二个使用者）。
+     * ⚠️ 因此它**不占流内高度**：卡片下面不会再多出一截空白，而这一整件事就是
+     *    为了给这张卡减高度。 */
+    position: absolute;
+    right: 0.5rem;
+    /* ⚠️ 0.75rem 是量出来的，不是挑的：0.5rem 时箭头的中线比 Clear 的中线低 4px
+     *    （386 对 382）。4px 在截图上看不出来，在屏幕上是「这一行有点歪」。 */
+    bottom: 0.75rem;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 2.75rem;
+    min-height: 2.75rem;
+    line-height: 1;
+    color: var(--color-ink-600);
+    transition: transform 200ms ease, color 150ms ease;
+  }
+
+  .filter-toggle:hover {
+    color: var(--color-ink-900);
+  }
+
+  .dark .filter-toggle {
+    color: var(--color-ink-300);
+  }
+
+  .dark .filter-toggle:hover {
+    color: var(--color-ink-50);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .filter-toggle {
+      transition: none;
+    }
+  }
+
+  /* 收起之后卡片和下面结果区之间那 24px（`mb-6`）显得太空 —— 一行高的卡片配
+   * 一整个行距，读起来像它掉队了。⚠️ 改的是这一档的外边距，不是模板上的
+   * `mb-6`：展开态那个数是对的，而它同时也是 `#event-results` 那条
+   * `scroll-margin-top` 公式里的一项。 */
+  html.filters-collapsed .filter-card,
+  .filter-card.is-collapsed {
+    margin-bottom: 1rem;
+  }
+
   /* 日程开着时，筛选卡钉在顶上（2026-08-18）。
    *
    * ⚠️ **只在开着的时候**（选择器带 `.is-open`）。关着那一档是全站最常打开的
@@ -626,8 +745,13 @@
    *    材质该有的样子，不是 bug。真要遮住只能给它一个不透明底，而那会让它和
    *    旁边的日程面板变成两种材质（design-system.md 判过刑的那件事）。
    *
-   * ⚠️ 代价如实说：这张卡连下边距约 257px，钉住之后那一列永久少掉这么多。
-   *    800px 高的窗口上剩给活动卡片的约 2.9 张。这是知情的取舍，不是没量。 */
+   * ⚠️ 代价如实说：这张卡连下边距**量到 330.5px**（306.5 + `mb-6` 的 24），
+   *    钉住之后那一列永久少掉这么多。
+   *    🔴 这个数 2026-09-08 从约 257px 涨上来 —— 那一天多了一格 Role kind，
+   *       而开着日程时这一列只有 34rem 宽，四个控件必然折成两行。涨的那 70px
+   *       是这一格的价钱，写在这里是因为下一个往这张卡上加东西的人要先看见它。
+   *    800px 高的窗口上剩给活动卡片的约 3 张（一行量到 112px，加 `space-y-3`
+   *    的 12px）。这是知情的取舍，不是没量。 */
   .events-shell.is-open .filter-card {
     position: sticky;
     top: calc(var(--head-h) + 1rem);
@@ -1029,6 +1153,103 @@
     top: 0;
     z-index: 10;
     float: right;
+  }
+
+  /* 那颗悬浮的圆球：把面板里的这一块放大成它自己的整页（2026-09-08，适老化）。
+   *
+   * 🔴 **这颗球存在的理由是上面那个 `zoom: 0.85`。** 面板里的每一个字都比整页
+   *    小 15%，而账是老年用户在付。球是那条出路，通向一个已经存在的整页。
+   *
+   * 🔴 **它浮在右面板上：`position: fixed`，而两个偏移量由 app.js 实测面板算出来
+   *    （`--panel-fab-right` / `--panel-fab-bottom`）。**
+   *    这个位置是四轮改出来的，四轮的原话都记在这里，因为它们各否掉了一种写法：
+   *
+   *      ① `sticky` + `bottom`，放在 `.schedule-detail` **里面** ——
+   *         量出来球在 `y 149.6–204`，而面板上沿是 `188`：画到了面板外面，
+   *         被 `overflow: hidden` 裁掉，屏幕上什么都没有。成因见下面那条 🔴。
+   *      ② `fixed` 到**视口**右下角 —— 「他要是真的悬浮」那一句照字面做的结果，
+   *         球落在了屏幕角上、面板**外面**的页面底色上，读起来是一颗全局按钮，
+   *         而它说的是「把右边这一块放大」。
+   *      ③ `absolute` 钉在面板下沿 —— **整页停在最顶上时球在视口下面**，要往下
+   *         滚一点才看得见。成因是面板自己的一条老性质：它 `sticky` 之后的位置是
+   *         `top: --head-h + 1rem`（56），而**没吸住之前**自然位置在标题行下面
+   *         （量到 188），可 `height` 是按吸住之后那一档算的
+   *         （`100svh - --head-h - 2rem`）—— 于是 `scrollY = 0` 时面板下沿在视口
+   *         下面约 132px。日程那一侧的最后一小时一直也是这么被切掉的，只是那边
+   *         没有东西非看不可。
+   *      ④ 现在这一版：`fixed`，偏移量实测面板得来，两件事一起满足 ——
+   *         **压在面板上**，而且**不用往下滚就看得见**。
+   *
+   * ⚠️ 「悬浮」在这里是**不跟着内容滚**，不是「脱离那块面板」。它在滚动区
+   *    （`.schedule-detail`）外面，所以详情怎么滚它都不动，而它盖住的是面板
+   *    自己的内容 —— 这正是一颗浮动按钮该有的样子。
+   *
+   * ⚠️ 这里**不许把外壳那套几何（62rem/78rem 两档宽度加负外边距）再推一遍**去
+   *    算横向偏移。那就是把同一份布局算两遍，而分家的表现是某个宽度上球飘在
+   *    面板外面 —— `--panel-fits` 那条注释写的是同一件事。数由 app.js 实测。
+   *
+   * ⚠️ 两个变量的默认值（1rem / 1rem）是**没有 JS 时的样子**：球回到视口右下角，
+   *    看得见、点得动、通向同一页，只是不压在面板上。知情的降级。
+   *
+   * 🔴 **它必须画在 `.schedule-detail` 外面**，而不只是「不在滚动区里」：
+   *    那一层带着 `zoom: 0.85`，写在里面的话 2.5rem 渲染出来只剩 34px。
+   *    ⚠️ 上面 ① 那条错**在计算值上完全看不出来**（`position`/`bottom`/`height`
+   *       三个值全是对的），是 `getBoundingClientRect()` 才说的实话 ——
+   *       和这个文件里另外两次教训一模一样的形状。成因：`sticky` 配 `bottom`
+   *       只把一个本来要滑到线以下的东西**往上顶**，它不会把一个在顶上的东西
+   *       往下拉。
+   *
+   * ⚠️ **2.5rem = 40px**，两轮收下来的（3.5 → 3 → 2.5，后两轮都是用户看过屏幕
+   *    之后要求的）。代价如实说：**它低于 44px 的触控目标下限**，而这一批的名字
+   *    叫适老化 —— 这是看过实物之后做的取舍，不是没量。热区靠下面那一圈透明的
+   *    `::after` 补回 48px，别把这个数改回去。
+   *
+   * ⚠️ 配色取 `btn-primary` 那一档（brand-600 / 深色 brand-500 + ink-950），
+   *    不另调一套：全站只有一种「主要动作」的颜色，第二种单独看没问题、
+   *    和第一种放在一起就是业余感（design-system.md 开头那条判据）。
+   *
+   * ⚠️ 影子直接写，不走 `--card-elevation`：那个变量是给卡片用的，而这颗球浮在
+   *    卡片**上面**，两者用同一层落影会读成「它和卡片在同一个平面」。 */
+  .panel-expand {
+    position: fixed;
+    right: var(--panel-fab-right, 1rem);
+    bottom: var(--panel-fab-bottom, 1rem);
+    z-index: 30;
+    display: inline-flex;
+    height: 2.5rem;
+    width: 2.5rem;
+    align-items: center;
+    justify-content: center;
+    border-radius: 9999px;
+    background-color: var(--color-brand-600);
+    color: #fff;
+    font-size: 1rem;
+    line-height: 1;
+    box-shadow:
+      0 10px 30px -8px rgb(0 0 0 / 0.35),
+      0 2px 8px -2px rgb(0 0 0 / 0.2);
+    transition: background-color 150ms ease;
+  }
+
+  /* ⚠️ 一圈看不见的热区，把 40px 的球补回 48px 的可点范围（同 `.btn-hit`）。
+   *    球本身小了是用户的决定，而「点不中」不该是那个决定的附带损失。 */
+  .panel-expand::after {
+    content: "";
+    position: absolute;
+    inset: -0.25rem;
+  }
+
+  .panel-expand:hover {
+    background-color: var(--color-brand-700);
+  }
+
+  .dark .panel-expand {
+    background-color: var(--color-brand-500);
+    color: var(--color-ink-950);
+  }
+
+  .dark .panel-expand:hover {
+    background-color: var(--color-brand-400);
   }
 
   /* 左边列表上那一圈霓虹：右边正开着的就是这一场（2026-08-18 重做）。
@@ -2476,6 +2697,38 @@
   }
 
   .dark .prose-link {
+    color: var(--color-brand-300);
+  }
+
+  /* 卡底那条出口（2026-09-08）。首页五张卡的 `View all …`，外加 Coming up 空态里
+   * 那条 `Find something to join →`。
+   *
+   * 🔴 **它不是 `prose-link`，而且这两条不许合并。** 上面那一个是**正文里的链接**，
+   *    而 design-system.md 判过：段落里的链接去掉下划线就只剩颜色，那就撞上
+   *    「颜色不许是唯一的信息载体」。这一档不一样 —— 它的每一条都以 ` →` 结尾，
+   *    箭头就是那个非颜色的载体。
+   *
+   * 🔴 所以「以 → 结尾」**不是排版口味，是这条规则成立的前提**。哪天有人写了一条
+   *    不带箭头的 `.card-exit`，它就变成一条只靠颜色说话的链接了。
+   *    守卫：core.tests.CardExitLinkTests。
+   *
+   * ⚠️ hover 和 `:focus-visible` **两个都要**。只写 hover 的话，这个提示对键盘
+   *    用户不存在 —— 同 `.event-row` 那条下划线的规矩（`:focus-within` 那一条）。
+   *
+   * ⚠️ 颜色和 `prose-link` 同一档（brand-700 / 深色 brand-300），对比度已经量过：
+   *    白底 7.17:1、ink-950 底 10.10:1。两者不同的只有下划线。 */
+  .card-exit {
+    color: var(--color-brand-700);
+    text-decoration: none;
+  }
+
+  .card-exit:hover,
+  .card-exit:focus-visible {
+    text-decoration: underline;
+    text-underline-offset: 2px;
+  }
+
+  .dark .card-exit {
     color: var(--color-brand-300);
   }
   /* HTMX 的加载态。⚠️ htmx 的 JS 包**不带**这几条规则 —— 它只负责在请求期间
@@ -4218,6 +4471,76 @@
   @page {
     margin: 14mm;
   }
+}
+
+/* --- 筛选卡收起来的那一档（2026-09-09）------------------------------------------
+ *
+ * 🔴 **这一段故意写在 `@layer components` 外面**，和下面那段玻璃按钮一模一样的
+ *    理由：被收起来的那一层在模板上带着 Tailwind 的 `flex`（那是
+ *    `FilterSearchAlignmentTests` 守着的对齐机制的一部分，动不得），而工具类在
+ *    `@layer utilities` —— **层的顺序压过特异性**，所以写在 components 里的
+ *    `display: none` 再具体也赢不了一个 `.flex`。
+ *    实测到的表现很有意思：点了收起，卡片**反而高了 14px**（241.5 → 255.5）——
+ *    字段一个没藏起来，而摘要那一行又加了上去。没有任何报错。
+ *    **未分层的作者样式胜过所有层**，所以这里是唯一正确的位置。
+ *
+ * 🔴 **两套选择器，因为有两个时刻。** `html.filters-collapsed …` 是 Alpine 加载
+ *    **之前**那一段（由 `_period_filter.html` 里那段内联 boot 脚本写上，同深色模式
+ *    那次）；`.filter-card.is-collapsed …` 是 Alpine 接手之后。接手时那段 JS 会把
+ *    html 上的 class 摘掉，所以两套永远不同时活着 —— 真让它们并存就是一场特异性
+ *    官司，而输的那一次表现为「点了收起没反应」。
+ *
+ * ⚠️ 用 `display: none` 收起来，字段因此**照样跟着表单提交**（隐藏字段是提交的）。
+ *    收起一张筛选卡不该顺手把筛选清掉。
+ *
+ * ⚠️ 没有 JS 时两套都不生效 —— 脚本不跑、Alpine 不在，卡片就是展开的那个样子。
+ *    `<noscript>` 里那颗 Filter 按钮因此照样够得着。 */
+html.filters-collapsed .filter-card-body,
+.filter-card.is-collapsed .filter-card-body {
+  display: none;
+}
+
+html.filters-collapsed .filter-card-summary,
+.filter-card.is-collapsed .filter-card-summary {
+  display: block;
+}
+
+/* 收起之后这张卡只剩那一句摘要，而箭头是绝对定位的、不占高度 —— 所以要给卡片
+ * 一个下限，否则 44px 的箭头会从一行文字的卡片里探出去。
+ * ⚠️ 量出来的：摘要一行 21px + 卡片上下内边距 32px = 53px，而箭头是 44px。
+ *    取 3.75rem = 60px，两个都容得下且不显空。
+ *
+ * 🔴 **`min-height` 不会把里面的东西居中，它只是把多出来的高度堆在下面。**
+ *    所以这一档必须自己 `display: flex` + `align-items: center` —— 少了这两行，
+ *    那 7px 全落在摘要下面，读起来是「这句话偏上了」（用户报的：「收起来以后的
+ *    summary 感觉也不居中」）。 */
+html.filters-collapsed .filter-card,
+.filter-card.is-collapsed {
+  display: flex;
+  align-items: center;
+  min-height: 3.75rem;
+  /* 整张卡都能点开，所以整张卡都要说自己可点（2026-09-09）。
+   * ⚠️ 只在这一档：展开着的时候卡片里是一堆输入框，一个 pointer 光标会让人
+   *    以为哪儿都能点出点什么来。 */
+  cursor: pointer;
+}
+
+/* 🔴 **收起时箭头改成上下居中，不再锚在底部。**
+ *    展开时锚底是对的（它要落在 Clear / Schedule 那条线上，那是卡片最后一行）；
+ *    而收起时卡片只有 60px，锚底意味着上边只剩 4px、下边 12px —— 用户报的
+ *    「向下的箭头和下边的距离，和向上的箭头和上边的距离不太一致」就是这 8px。
+ * ⚠️ `top: 0; bottom: 0` + `margin-block: auto` 是绝对定位里的垂直居中写法：
+ *    两端都给了值、而高度是内容定的，剩下的空间由 auto 外边距平分。 */
+html.filters-collapsed .filter-toggle,
+.filter-card.is-collapsed .filter-toggle {
+  top: 0;
+  bottom: 0;
+  margin-block: auto;
+}
+
+html.filters-collapsed .filter-toggle,
+.filter-card.is-collapsed .filter-toggle {
+  transform: rotate(180deg);
 }
 
 /* --- 深色 + 照片下的玻璃按钮（2026-08-06）--------------------------------------

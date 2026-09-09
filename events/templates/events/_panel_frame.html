@@ -10,7 +10,16 @@
    zoom、一个没有），而两边都渲染成功。
 
 参数：
-  body  要画在框里的模板路径。调用方给，这里不认识它是什么。
+  body       要画在框里的模板路径。调用方给，这里不认识它是什么。
+  expand_view 这一块**自己的整页**那条路由的名字（右下角那颗圆球通向哪儿）。
+             详情那一份给 `events:event_detail`，报名那一份给 `events:event_signup`。
+             ⚠️ 和 `body` 一起给，理由一样 —— 「我是什么、我放大之后是哪一页」
+                是同一个问题的两半，知道答案的是那个文件，不是这个框。
+             ⚠️ 收的是**路由名**而不是拼好的 URL：URL 后面还要接当前的筛选串
+                （`list_state`），而那件事全站有四处在做 —— 让调用方各拼一次，
+                四处就会有两种拼法（这里一度是 `{% templatetag openblock %} url … as x {% templatetag closeblock %}` 加
+                `|add:`，别处是 `{% templatetag openvariable %} list_state {% templatetag closevariable %}` 直接跟在后面）。
+                在这里拼，四处就只有一种。
 
 ⚠️ `{% templatetag openblock %} include body {% templatetag closeblock %}` 吃的是一个**变量**，而这个变量只能由模板自己给
    （见 `_schedule_detail.html` / `_schedule_signup.html`），不许来自请求 ——
@@ -40,3 +49,43 @@
 
   {% include body %}
 </div>
+
+{% comment %}
+右下角那颗圆球：把这一块放大成它自己的整页（2026-09-08，适老化）。
+
+🔴 **它存在的理由是一个数：`zoom: 0.85`。** 上面那一层的那个缩放让面板里的每一个
+   字都比整页详情小 15% —— 那是当初为了把一页 680px 的内容塞进面板付的账，
+   而账是老年用户在付。面板本身要留（它换来的是不丢筛选、页码和滚动位置），
+   但必须有一条出路。
+
+⭐ 它是一个**真的 `<a href>`**，通向一个**已经存在**的页面。所以：没有 JS 能用、
+   浏览器后退键就是退路、可以在新标签页里打开、可以收藏。这一批一开始考虑过
+   「原地铺满视口」的做法，判掉的理由就是最后那两条 —— URL 不变的全屏层，
+   后退键关不掉它。
+
+⚠️ 它和上面那颗 × 是**两颗按钮、两个意思**：× 关掉整块面板，球把这一块放大。
+   所以 `aria-label` 必须不一样，而且两颗都不能只靠形状说话。
+
+🔴 **它浮在右面板上，不是浮在视口上，也不是钉在面板的一个角上。**
+   三轮改出来的，三轮的原话各否掉一种写法：`sticky` 放在详情那一层里面（画到了
+   面板外面，被裁掉）→ `fixed` 到视口右下角（落在面板**外面**的页面底色上，
+   读起来是一颗全局按钮，而它说的是「把右边这一块放大」）→ 现在这一版。
+   ⚠️ 「悬浮」在这里是**不跟着内容滚**，不是「脱离那块面板」。几何写在 app.css。
+
+🔴 **它在 `.schedule-detail` 外面，和它平级 —— 两个理由，都是量出来的。**
+
+   ① 最早那版照上面那颗 × 写成 `sticky` + `bottom` 放在那一层里面。浏览器里
+      量出来球在 `y 149.6–204`，而面板的上沿是 `188` —— 球画在了**面板外面**，
+      被 `overflow: hidden` 裁掉，屏幕上什么都没有。成因：`position: sticky`
+      配 `bottom` 只会把一个本来要滑到线以下的东西**往上顶**，它**不会把一个
+      在顶上的东西往下拉**。三个计算值全是对的。
+
+   ② **`zoom` 会跟着缩它。** 在那一层里面的话 2.5rem 渲染出来只剩 34px。
+
+⚠️ 因此这个模板有**两个根元素**。htmx 的 `hx-swap="innerHTML"` 两个都插进
+   `#schedule-detail`，而那一层带着 `x-show="detail"`，所以球跟着整块一起显示和
+   隐藏 —— 不需要为它再判一次「面板开着没有」。
+{% endcomment %}
+<a class="panel-expand" href="{% url expand_view event.pk %}{{ list_state }}"
+   aria-label="Open this on its own page"
+   title="Open this on its own page"><span aria-hidden="true">&#x2922;</span></a>

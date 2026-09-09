@@ -40,15 +40,30 @@
      「挪到顶上之后……**少了一条分隔线**」。同一个判断，第二次做。
      一张卡本来就有边框，里面再画一条横线是在同一件事上说两遍。
 
-  ⚠️ 样式和那两个出口**取同一套**：`text-sm` + `prose-link`
-     （brand 色、常驻下划线、正常字重）。原来这里是 `font-medium` + 只有
-     hover 才有下划线 —— 同一个站上两种「次要链接」，单独看都行，
-     放在一起就是不齐。
+  🔴 **2026-09-08：不再是 `prose-link`，改成 `.card-exit`（常态没有下划线）。**
 
-  ⚠️ `mt-auto` 保留：几张卡的出口仍然必须落在同一个高度上，那是
-     `flex-col` + 内容 `flex-1` 那一套的目的。
+     这里原先写着「样式和报表面板那两个出口**取同一套**：`text-sm` + `prose-link`」。
+     那句话现在是假的，所以整句改掉而不是留着 —— 留着的话，下一个人会照它把
+     `prose-link` 改回来。用户 2026-09-08 的原话是首页这几条「全部不要下划线」。
+
+     ⚠️ 两处从此不同，而且这是知情的：报表面板那两个出口
+     （`events/_report_panel.html`）仍然是 `prose-link`。它们和这里的差别不在
+     长相偏好上 —— 那两条挤在一个固定 24rem 的标题行里、并排放着，常驻下划线是
+     它们「是两条链接而不是一句话」的唯一线索；而这一条独占卡底一整行，
+     后面还跟着一个 →。
+
+  🔴 **箭头因此是承重的，不是装饰。** 去掉下划线之后，一条只靠颜色说话的链接
+     就撞上「颜色不许是唯一的信息载体」（design-system.md）。所以
+     `{% templatetag openvariable %} href_label {% templatetag closevariable %} →` 里那个 → 不许省，也不许挪进
+     `href_label`（调用方各写一份，第二个人就会漏）。守卫：
+     core.tests.CardExitLinkTests。
+
+  ⚠️ 把它推到卡底的是**上面内容那一层的 `flex-1`**，不是这一行上的外边距
+     （这段注释一度写着「`mt-auto` 保留」，而这个类根本不在下面那一行上 ——
+     顺手改掉，2026-09-08）。几张卡的出口必须落在同一个高度上，靠的是
+     `flex-col` + 内容 `flex-1` 那一套。
   {% endcomment %}
   {% if href %}
-    <a href="{{ href }}" class="prose-link mt-4 block text-sm">{{ href_label }} →</a>
+    <a href="{{ href }}" class="card-exit mt-4 block text-sm">{{ href_label }} →</a>
   {% endif %}
 </section>

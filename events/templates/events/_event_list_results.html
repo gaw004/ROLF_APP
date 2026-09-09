@@ -228,10 +228,34 @@ event_list 的结果区。整页和 HTMX 片段渲染的是同一份 —— 视�
         ⚠️ `x-on:click` 不加条件：窄屏上这一行根本不会执行到（htmx 没接管，
            页面已经跳走了）。加了反而要在两处各写一遍同一个判断。
         {% endcomment %}
-        <a href="{% url 'events:event_detail' event.pk %}" class="event-row-link"
+        {% comment %}
+        ⚠️ `href` 上带 `list_state`（2026-09-08）—— 也就是当前的筛选和页码。
+           走这条路的正是**窄屏和没有 JS 的那一档**（htmx 那个触发器过滤掉了），
+           而详情页那条「← Events」据此退回同一份列表。少了它，手机上点开一场
+           活动再点返回，人回到的是全部活动的第一页。
+           ⚠️ 和面板里那颗圆球带的是**同一份**（见 `_panel_frame.html`）：
+              两边不一样的话，「从这边点退得回去、从那边点退不回去」。
+        {% endcomment %}
+        {% comment %}
+        ⚠️ `hx-replace-url` 把「右边现在开着这一场」写进地址栏（2026-09-09）。
+           少了它，从圆球进整页详情再点那一页的「← Events」，回来的是一张**面板
+           关着**的列表 —— 而浏览器的后退键（走 bfcache）回来的是开着的。
+           同一页上两条「回去」的路给出两种结果。判据和还原都在视图的
+           `_open_panel()` 上。
+
+        ⚠️ `replace` 不是 push：连点五张卡片不该在后退键上堆五层，后退要退的是
+           「我进这一页之前在哪」。日程的翻页箭头同一个理由，同一个写法。
+
+        ⚠️ 用 `{% templatetag openblock %} querystring {% templatetag closeblock %}` 而不是 `{% templatetag openvariable %} list_state {% templatetag closevariable %}`：
+           这里要的是「当前 URL **再加**一个 panel」，正是那个标签的语义；
+           而 `list_state` 是一张白名单，用它会把日程窗口 `from` 洗掉 ——
+           表现是点一张卡片，右边的日程自己跳回今天。
+        {% endcomment %}
+        <a href="{% url 'events:event_detail' event.pk %}{{ list_state }}" class="event-row-link"
            hx-get="{% url 'events:event_detail_panel' event.pk %}{% querystring from_list=1 %}"
            hx-target="#schedule-detail" hx-swap="innerHTML"
            hx-trigger="click[panelFits()]"
+           hx-replace-url="{% url 'events:event_list' %}{% querystring panel=event.pk %}"
            x-on:click="detail = true">
           <span class="sr-only">{{ event.name }}</span>
         </a>

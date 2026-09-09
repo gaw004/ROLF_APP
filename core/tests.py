@@ -3820,6 +3820,215 @@ class FilterSearchAlignmentTests(TestCase):
         self.assertNotIn("w-full", search_line)
 
 
+
+
+class FilterCollapseTests(TestCase):
+    """筛选卡收起来那一档（2026-09-09）。
+
+    上一批给这张卡加了第四格（Role kind），量到连下边距 330.5px —— 而开着日程时
+    它是**钉住的**，800px 高的窗口上留给活动卡片的只剩约 3 张。用户要一个收起
+    功能，「收起来的时候只有一行」。
+
+    ⚠️ 这和 2026-09-03 那次「折成一条」不冲突：那次是**永远**一条（搜索框因此
+       失去了可对齐的对象），当天被撤回；这次是**默认两层、可以手动收起**，
+       展开态一个像素都没动，`FilterSearchAlignmentTests` 三条照样守着它。
+    """
+
+    def markup(self):
+        return (Path(settings.BASE_DIR) / "events" / "templates" / "events"
+                / "_period_filter.html").read_text()
+
+    def css(self):
+        return (Path(settings.BASE_DIR) / "assets" / "app.css").read_text()
+
+    def test_the_summary_is_the_form_s_own_sentence(self):
+        """🔴 摘要复用 `EventPeriodForm.description()`，模板里不另写一份。
+
+        那个方法已经把四格都说全了，而完整报表页顶上印的、以及它变成的那张纸上
+        印的，就是同一句。⚠️ 代价：改那句措辞会同时改这两处 —— 这条测试存在，
+        是为了让下一个在模板里手写一句摘要的人当场变红。
+        """
+        self.assertIn("{{ period.description }}", self.markup())
+
+    def test_the_toggle_says_which_way_it_goes(self):
+        """⚠️ 2026-08-28 从 `button.html` 删掉过 `toggles`，理由是「一颗按钮同时
+        是打开和关掉，而它旁边没有任何东西说明此刻按下去是哪一件」。
+
+        这一颗是开关，所以它必须自己把那句话补上：`aria-expanded` 跟着状态变、
+        读屏念的那句也跟着变、箭头跟着转。三样缺一条，那条决定就被悄悄撤销了。
+        """
+        markup = _blank_out_comments(self.markup())
+        self.assertIn('x-bind:aria-expanded="open"', markup)
+        self.assertIn("x-bind:aria-label=", markup)
+        self.assertIn('aria-controls="filter-card-body"', markup)
+        self.assertIn("rotate(180deg)", self.css())
+
+    def test_there_is_exactly_one_arrow_and_it_never_moves(self):
+        """🔴 一个箭头，两个状态**同一个位置**。用户报过两次，两次都在这一点上：
+        「箭头应该跟 clear 和 schedule 在一条线上，现在因为箭头，filter 卡片下面
+        多了很多空白」，以及「箭头上下都应该在一个位置，偏移让我很难受」。
+
+        中间试过 include 成一份、放在两个位置（控件行一份、摘要行一份）—— 那是在
+        **忠实地复现**用户抱怨的那个跳动，因为两个位置就是两个位置。绝对定位到
+        卡片右下角之后，位置只有一个，重复也就不存在了。
+        ⚠️ 所以这条测试钉的是「只有一个」，而不是「两份长得一样」。
+        """
+        markup = _blank_out_comments(self.markup())
+        self.assertEqual(markup.count('class="filter-toggle"'), 1)
+        rule = self.css()[self.css().index("  .filter-toggle {"):]
+        rule = rule[:rule.index("}")]
+        self.assertIn("position: absolute;", rule)
+
+    def test_the_bare_arrow_keeps_a_touch_sized_hit_area(self):
+        """🔴 圆底撤掉之后（用户：「不要圆圈，只要箭头可以不？」）可点区域只剩字形。
+
+        ⚠️ 靠 `padding` 撑不够 —— 量出来是 32×40，两个方向都差一点，而这种差一点
+           在截图上完全看不出来。所以那个数是写死的。
+        """
+        rule = self.css()[self.css().index("  .filter-toggle {"):]
+        rule = rule[:rule.index("}")]
+        self.assertIn("min-width: 2.75rem;", rule)
+        self.assertIn("min-height: 2.75rem;", rule)
+        self.assertNotIn("panel-close", _blank_out_comments(self.markup()))
+
+    def test_the_collapse_rules_sit_outside_the_component_layer(self):
+        """🔴 被收起的那一层带着 Tailwind 的 `flex`（对齐机制的一部分，动不得），
+        而工具类在 `@layer utilities` —— **层的顺序压过特异性**。
+
+        写在 components 里的 `display: none` 再具体也赢不了一个 `.flex`：实测点了
+        收起卡片**反而高了 14px**（241.5 → 255.5），字段一个没藏起来，而摘要那一行
+        又加了上去，没有任何报错。未分层的作者样式胜过所有层，所以只有那里是对的。
+        """
+        css = self.css()
+        rule = css.index("html.filters-collapsed .filter-card-body,")
+        # 那条规则之前最后一次出现的 `@layer` 必须已经闭合 —— 用缩进当判据：
+        # 层里的规则缩进两格，未分层的顶格。
+        self.assertTrue(
+            css[rule - 1] == "\n",
+            "the collapse rules must be unlayered (top-level), or a Tailwind "
+            "utility will beat them")
+
+    def test_the_boot_script_runs_before_the_card_and_cannot_take_the_page_down(self):
+        """🔴 没有它，记着「收起」的人每次进页面都会先看到整张卡再看到它塌下去。
+
+        同深色模式那次（`_theme_boot.html`），三条一样：内联、在那张卡**之前**、
+        整段包在 try 里（隐私模式下 localStorage 直接抛）。
+        ⚠️ 脚本里的注释写英文 —— 它进了发给浏览器的 HTML，而界面语言守卫的口径是
+           「模板里注释块之外没有汉字」。
+        """
+        markup = self.markup()
+        script = markup.index("<script>")
+        self.assertLess(script, markup.index("<form method=\"get\""))
+        body = markup[script:markup.index("</script>", script)]
+        self.assertIn("try {", body)
+        self.assertIn("localStorage", body)
+        self.assertNotIn("filters-collapsed\"", body.split("classList")[0][-40:])
+        self.assertEqual([c for c in body if _is_cjk(c)], [])
+
+    def test_the_arrow_stays_symmetric_so_the_rotation_costs_nothing(self):
+        """🔴 画的是 SVG，不是一个箭头字符。
+
+        `&#x2304;` 那一版盒子上下对称、**墨迹不对称**（那个字形在字框里偏下），
+        于是转 180° 之后它偏上，和旁边那句摘要不在一条线上。
+        ⚠️ 这一条**量不出来**：`getBoundingClientRect()` 报的是 20/20，因为它量的
+           是盒子；差的是盒子里那笔墨。而且它跟着字体走 —— 换一次字体栈这个偏移量
+           就变一次，没有任何东西会提醒你。
+        ⚠️ 两笔加起来是 4.5..13.5，中点正是 10 —— 加第二笔（用户要的「两个箭头
+           叠一起」）不许把这条性质弄丢。
+        """
+        markup = _blank_out_comments(self.markup())
+        self.assertNotIn("&#x2304;", markup)
+        self.assertIn('d="M5 4.5l5 5 5-5"', markup)
+        self.assertIn('d="M5 8.5l5 5 5-5"', markup)
+        # ⚠️ 渐变靠两笔各自的 opacity，不是 `<linearGradient>` —— 后者要一个 id，
+        #    而这张卡在站上有两个页面在用，id 撞了之后是个只在某些浏览器上出现的
+        #    毛病。
+        self.assertNotIn("linearGradient", markup)
+
+    def test_the_whole_collapsed_card_expands_but_only_when_collapsed(self):
+        """⚠️ 两道闸，缺一个就出一种毛病：展开着的时候这一层必须完全不管事
+        （否则点一下输入框卡片就收起来了），而箭头自己那一下会**冒泡**上来
+        （否则展开态点箭头是「收起，然后立刻又展开」，屏幕上什么都不动）。
+        """
+        self.assertIn('x-on:click="expandFromCard($event)"',
+                      _blank_out_comments(self.markup()))
+        js = (Path(settings.BASE_DIR) / "assets" / "js" / "app.js").read_text()
+        block = js[js.index("  expandFromCard(event) {"):]
+        block = block[:block.index("  toggleFilters()")]
+        self.assertIn("if (this.open) return;", block)
+        self.assertIn('closest(".filter-toggle")', block)
+
+    def test_the_key_is_per_page(self):
+        """⚠️ 这张卡 Events 和管理列表两页共用，但那是两件事 —— 在一页收起不该把
+        另一页也收了。⚠️ 两处（boot 脚本和 app.js）的键必须同形，分家的表现是
+        「收起之后刷新又回来了」。
+        """
+        self.assertIn('"filters:" + location.pathname', self.markup())
+        js = (Path(settings.BASE_DIR) / "assets" / "js" / "app.js").read_text()
+        self.assertIn("`filters:${window.location.pathname}`", js)
+
+
+class CardExitLinkTests(TestCase):
+    """卡底那条出口：常态没有下划线，而箭头是它的承重结构（2026-09-08）。
+
+    用户 2026-09-08 的原话是首页这几条「全部不要下划线」。照做之后有一条规矩
+    立刻变成承重的：design-system.md 判过「段落里的链接去掉下划线只剩颜色，
+    那就撞上『颜色不许是唯一的信息载体』」—— 这一档躲开它靠的是每条末尾那个
+    ` →`。哪天有人写了一条不带箭头的 `.card-exit`，它就变成一条只靠颜色说话的
+    链接了，而屏幕上一切正常。
+    """
+
+    #: 用这个类的每一处。⚠️ 走查过全仓，不是记在心里的一张名单。
+    USERS = [
+        Path("dashboard") / "templates" / "dashboard" / "_card.html",
+        Path("dashboard") / "templates" / "dashboard" / "_body_coming.html",
+    ]
+
+    def markup(self, relative):
+        return _blank_out_comments(
+            (Path(settings.BASE_DIR) / relative).read_text())
+
+    def test_every_card_exit_ends_in_an_arrow(self):
+        """🔴 箭头不是装饰，是这条规则成立的前提。"""
+        for relative in self.USERS:
+            with self.subTest(template=str(relative)):
+                markup = self.markup(relative)
+                for anchor in re.findall(r"<a\b[^>]*card-exit[^>]*>(.*?)</a>",
+                                         markup, re.S):
+                    self.assertTrue(
+                        anchor.strip().endswith("→"),
+                        f"A .card-exit with no arrow: {anchor.strip()!r}. Without "
+                        "the underline, colour would be the only thing marking "
+                        "this as a link.")
+
+    def test_the_two_of_them_are_the_only_look(self):
+        """⚠️ 空态那条原来是一串手抄的 class，也就是同一屏上第二种「次要链接」。"""
+        for relative in self.USERS:
+            with self.subTest(template=str(relative)):
+                markup = self.markup(relative)
+                self.assertIn("card-exit", markup)
+                self.assertNotIn("prose-link", markup)
+                self.assertNotIn("hover:underline", markup)
+
+    def test_the_class_itself_lights_up_on_hover_and_on_focus(self):
+        """⚠️ 只写 hover 的话，这个提示对键盘用户不存在。"""
+        css = (Path(settings.BASE_DIR) / "assets" / "app.css").read_text()
+        rule = css[css.index(".card-exit:hover,"):]
+        rule = rule[:rule.index("}")]
+        self.assertIn(":focus-visible", rule)
+        self.assertIn("text-decoration: underline;", rule)
+
+    def test_prose_link_still_carries_its_underline(self):
+        """🔴 这两条**不许合并**。
+
+        `prose-link` 是段落里的链接，去掉下划线就只剩颜色 —— 而它全站到处都是。
+        这条守卫存在是因为「统一一下」看起来永远像是对的。
+        """
+        css = (Path(settings.BASE_DIR) / "assets" / "app.css").read_text()
+        rule = css[css.index("\n  .prose-link {"):]
+        rule = rule[:rule.index("}")]
+        self.assertIn("text-decoration: underline;", rule)
+
 class ReportPanelExitsTests(TestCase):
     """The panel's two exits sit in its title row, outside the scrolling area.
 

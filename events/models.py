@@ -240,6 +240,30 @@ NATURE_EXPLANATIONS = {
 }
 
 
+#: The same axis said to the person who **is** the participant (2026-09-08).
+#:
+#: 🔴 Two dictionaries, and the split is the point rather than a duplication.
+#:    The one above is spoken by an admin about other people — it appears where
+#:    a ministry admin is opening a job and deciding what the people in it will
+#:    be doing, and "they" is exactly who they mean. This one appears in the
+#:    volunteer's own filter on the events page, where "they" would be talking
+#:    about the reader in the third person while asking them to choose. Same
+#:    two terms, two audiences, so two phrasings.
+#:
+#: ⚠️ Kept **here, beside the other one**, precisely because they are so close.
+#:    Written into the form instead, the day somebody rewords "receive a
+#:    service" they would reword one of the two and leave the other — and
+#:    nothing renders differently enough for anyone to notice.
+#:
+#: ⚠️ Not sentences and not capitalised: both halves get composed into a label
+#:    (`Helping (give your time)`), so the punctuation belongs to whoever
+#:    composes it.
+NATURE_INVITATIONS = {
+    ParticipationRole.Nature.HELPING: "give your time",
+    ParticipationRole.Nature.ATTENDING: "receive a service",
+}
+
+
 #: The sentence all three containment refusals share. The phrase that fills
 #: `%(audience)s` is the half both doors need — the role page prints this whole
 #: sentence, the event page composes its own around the phrase.

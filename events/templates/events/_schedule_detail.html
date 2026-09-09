@@ -12,8 +12,14 @@
 
 ⚠️ 外框（`.schedule-detail` 那一层和右上角那颗 ×）2026-08-19 抽到了
    `_panel_frame.html` —— 报名表单进面板之后，那一层有了第二个使用者。
+
+⚠️ `expand_view` 是右下角那颗圆球通向的地方（2026-09-08）：这一块的整页形态，
+   也就是这场活动自己的详情页。当前的筛选和页码由框自己接在后面（`list_state`），
+   详情页那条「← Events」据此退回同一份列表 —— 和左边列表行上那条 `href` 带的
+   **是同一份**（见 `_event_list_results.html`）。两边不一样的话，
+   「从这边点退得回去、从那边点退不回去」。
 {% endcomment %}
-{% include "events/_panel_frame.html" with body="events/_event_detail_body.html" %}
+{% include "events/_panel_frame.html" with body="events/_event_detail_body.html" expand_view="events:event_detail" %}
 
 {% if messages_oob %}
   {% comment %}

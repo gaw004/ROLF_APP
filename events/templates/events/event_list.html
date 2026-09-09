@@ -88,7 +88,15 @@
      那两条规则要用 `$watch` —— 一个 `x-effect` 会把它读到的所有东西都变成
      依赖，于是「日程开着时点一张卡」会被第一条规则当场关掉。
   {% endcomment %}
-  <div class="events-shell" x-data="eventsShell"
+  {% comment %}
+  ⚠️ `eventsShell(…)` 收一个初值（2026-09-09）：`?panel=<pk>` 进来时面板一开始
+     就是开着的，而这个布尔正是「开着没有」。服务端的值插进 `x-data` 这件事仓库
+     里有先例（`gallery/manage.html` 的 `cap: {{ removal_cap }}`）。
+     判据在视图的 `_open_panel()` 上，模板不自己看 `?panel` 有没有 —— 那个参数
+     可能指向一场已经删掉的、或者不给这个人看的活动，而「拿不拿得到」只有服务端
+     知道。
+  {% endcomment %}
+  <div class="events-shell" x-data="eventsShell({{ panel_open|yesno:'true,false' }})"
        x-bind:class="isOpen ? 'is-open' : ''">
     {% comment %}
     ⚠️ 标题 2026-09-03 第二轮回到了这一层，而且仍然在下面那一行 `.events-row`
@@ -157,10 +165,19 @@
            挪到外壳还有第二个理由：左边那些活动卡片也要翻这个开关，而它们够不着
            面板的作用域。
 
-        ⚠️ 不需要 `x-cloak`：没有 JS 时两块都显示，而详情那块是空的 ——
-           也就是和现在一模一样。
+        🔴 **`x-cloak` 只在面板一开始就开着的时候加**（2026-09-09）。
+
+           原来这里写着「不需要 x-cloak：没有 JS 时两块都显示，而详情那块是空的 ——
+           也就是和现在一模一样」。`?panel=<pk>` 之后那句话只在一半的情况下还成立：
+           详情那块**不再是空的**，于是 Alpine 接手之前两块会同时显示，日程和一整块
+           活动详情叠在一起闪一下。
+
+           ⚠️ 而**不能无条件加**：那会让没有 JS 的人永远看不到日程 —— x-cloak 是
+              一条 `display: none` 的 CSS 规则，没有 Alpine 来摘掉它。
+              有条件地加，两边都对：面板开着时无 JS 的人看到的是那块详情（正是他
+              点进来要看的），面板关着时看到的是日程，和这一行加进来之前一模一样。
         {% endcomment %}
-        <div class="schedule-pane" x-show="!detail">
+        <div class="schedule-pane" x-show="!detail"{% if panel_open %} x-cloak{% endif %}>
           {% include "events/_schedule.html" %}
         </div>
         {% comment %}
@@ -171,7 +188,21 @@
            `overflow: hidden` 裁掉，**而且滚不到**。屏幕上看起来只是「这个活动
            没写那么多」。
         {% endcomment %}
-        <div class="schedule-pane" id="schedule-detail" x-show="detail"></div>
+        {% comment %}
+        ⚠️ `?panel=<pk>` 进来时这一块**由服务端填好**（2026-09-09），而不是等页面
+           加载完再由 JS 补发一次请求。补发那条路会让人先看到一块空面板、再看到
+           内容跳进来，而且在慢网上那一下有半秒 —— 服务端本来就已经知道答案了。
+
+        ⚠️ 填的是 `_schedule_detail.html`，**和 HTMX 换进来的是同一份**。
+           在这里就地 include `_event_detail_body.html` 会漏掉外框（那颗 ×、
+           那颗圆球、`.schedule-detail` 那一层的几何），而那正是
+           `_panel_frame.html` 抽出来时写下的第一条规矩：不许有第二份。
+           ⚠️ 那份模板里另外两块（`messages_oob` / `results_oob`）在这条路上都是
+              假的，所以不会跟着画出来。
+        {% endcomment %}
+        <div class="schedule-pane" id="schedule-detail" x-show="detail">
+          {% if panel_open %}{% include "events/_schedule_detail.html" %}{% endif %}
+        </div>
       </aside>
     </div>
   </div>

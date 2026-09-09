@@ -24,6 +24,7 @@ from org.permissions import ministry_ids_administered_by
 from .models import (
     NARROWING_MESSAGE,
     NATURE_EXPLANATIONS,
+    NATURE_INVITATIONS,
     SERVED_AS_EXPLANATIONS,
     Event,
     EventRole,
@@ -579,6 +580,29 @@ class EventForm(EventAudienceFormMixin, forms.ModelForm):
         )
 
 
+#: "This form was never asked to filter by the kind of role." (2026-09-08)
+#:
+#: ⚠️ `None` cannot carry that meaning, and the reason is not style: `None` is a
+#:    **legitimate audience**. An account with no Contact is an outsider —
+#:    org/audience.py says so in as many words, and every superuser is one — so
+#:    a `None` doubling as "not asked" would quietly turn the filter off for
+#:    exactly the accounts hardest to notice it on.
+NO_AUDIENCE = object()
+
+
+#: Every name this form's boxes can ever submit — including `nature`, which
+#: only exists when an audience was passed.
+#:
+#: ⚠️ Declared **here**, beside the fields, because there is a second reader:
+#:    `events.views.LIST_STATE` carries these onto an event's link and back off
+#:    it again. Written out there as well, the two lists drift the first time a
+#:    box is added — and this very batch proved it, having had to edit both
+#:    files to add `nature`. The failure is silent: the new box simply stops
+#:    surviving a click into an event and back.
+#:    守卫：events.tests.RoleKindFilterTests.test_the_filter_names_are_declared_once
+FILTER_PARAMS = ("q", "ministry", "nature", "start", "end")
+
+
 class EventPeriodForm(forms.Form):
     """R1: "how many events in this window", plus which ministry ran them.
 
@@ -626,8 +650,20 @@ class EventPeriodForm(forms.Form):
         required=False, label="Ministry", empty_label="All ministries",
     )
 
-    def __init__(self, *args, ministries=None, **kwargs):
+    def __init__(self, *args, ministries=None, audience=NO_AUDIENCE, **kwargs):
         """`ministries` narrows the dropdown to a scope the page already has.
+
+        `audience` (2026-09-08) is the person the "kind of role" box is judged
+        for. Passing it is what **creates** that box: pages that do not pass it
+        have no such field, so a forged `?nature=helping` on the management list
+        filters nothing rather than filtering something with no control on
+        screen saying so.
+
+        ⚠️ One keyword, not two (a flag plus a contact). Two would have to be
+           kept in step by hand, and the way they come apart is silent: the flag
+           on and the contact missing means the box is drawn and narrows by the
+           wrong person's eligibility.
+        ⚠️ `NO_AUDIENCE`, never `None` — see the sentinel's own note.
 
         ⚠️ Interface only — it is not a permission. The pages that pass it have
            already narrowed their **queryset**, so a forged ministry id in the
@@ -639,6 +675,36 @@ class EventPeriodForm(forms.Form):
         super().__init__(*args, **kwargs)
         if ministries is not None:
             self.fields["ministry"].queryset = ministries
+        self._audience = audience
+        if audience is not NO_AUDIENCE:
+            # L1's axis, finally askable (2026-09-08). Until now `nature` was
+            # displayed — the Kind column on an event's page — and filterable
+            # nowhere, so somebody who only ever comes to *receive* a service
+            # had to open events one at a time to find out which ones had a seat
+            # for them.
+            #
+            # ⚠️ The choices are **built from the model**, never typed out a
+            #    second time here. ParticipationRole.Nature's own note says a
+            #    label carrying its gloss "reads well on the form that asks and
+            #    badly in the table cell that reports" — this is the form that
+            #    asks, so this is where the gloss belongs.
+            #
+            # 🔴 `NATURE_INVITATIONS`, **not** `NATURE_EXPLANATIONS`
+            #    (2026-09-08). The other dictionary says "they give their time",
+            #    and it is right where it is used — a ministry admin opening a
+            #    job, talking about the people who will fill it. Here the person
+            #    reading the box **is** that person, so it reads "give your
+            #    time". Both live side by side in events/models.py; the reason
+            #    there are two is written there.
+            #
+            # ⚠️ The empty option says "All events", not "Any kind": the box
+            #    filters *events*, and an event is not a kind of anything.
+            self.fields["nature"] = forms.ChoiceField(
+                required=False, label="Role kind",
+                choices=[("", "All events")] + [
+                    (value, f"{label} ({NATURE_INVITATIONS[value]})")
+                    for value, label in ParticipationRole.Nature.choices],
+            )
         # ⚠️ Ministry first (2026-08-05). Declared after the dates because it was
         #    added later, and declaration order is render order — so the box most
         #    people reach for first was sitting third. Which ministry you are
@@ -647,7 +713,25 @@ class EventPeriodForm(forms.Form):
         # ⚠️ `q` first (2026-08-06). Somebody who already knows which event they
         #    want types its name; scanning a dropdown is what you do when you do
         #    not know. The narrower action goes first.
-        self.order_fields(["q", "ministry", "start", "end"])
+        #
+        # ⚠️ `nature` sits next to `ministry` (2026-09-08): both answer "what
+        #    kind of thing am I looking at", and the dates answer "when". A name
+        #    absent from the list is simply left where it was declared, so this
+        #    stays correct on the pages that have no `nature` field at all.
+        self.order_fields(["q", "ministry", "nature", "start", "end"])
+
+    @property
+    def by_role_kind(self):
+        """Was this form asked for the "kind of role" box?
+
+        ⚠️ The template asks **this**, not `{% if period.nature %}`. That
+           spelling works only by accident: `Form.__getitem__` raises KeyError
+           for a missing field, the template engine swallows it and hands back
+           the empty string. It is a failure path standing in for a question,
+           and the day the engine stops swallowing it the box appears on two
+           pages that must not have it, with nothing behind it.
+        """
+        return "nature" in self.fields
 
     def clean(self):
         cleaned = super().clean()
@@ -701,6 +785,15 @@ class EventPeriodForm(forms.Form):
         search = (self.cleaned_data.get("q") or "").strip()
         if search:
             parts.append(f"matching “{search}”")
+        # ⚠️ Written even though the one page that prints this line — the full
+        #    report — is not passed an audience today and so has no such box.
+        #    It is here for the same reason the search term is: a report that
+        #    does not state what it covers gets read as "everything", and the
+        #    day somebody hands this form an audience on that page, the line
+        #    would go on claiming to cover every event while covering half.
+        nature = self.cleaned_data.get("nature")
+        if nature:
+            parts.append(f"{ParticipationRole.Nature(nature).label.lower()} roles")
         return " · ".join(parts)
 
     def narrow(self, events):
@@ -727,6 +820,28 @@ class EventPeriodForm(forms.Form):
             #    apparently holding a perfectly good word.
             events = events.filter(
                 Q(name__icontains=search) | Q(location__icontains=search))
+        nature = self.cleaned_data.get("nature") if self.is_valid() else ""
+        if nature:
+            # 🔴 **A subquery, never a join.** Written
+            #    `filter(roles__role__nature=nature)`, an event that opened two
+            #    helping roles comes back **twice** — paging and every count
+            #    under it corrupted, and on the page it reads only as "why is
+            #    this event listed twice". org/audience.py has already paid for
+            #    this exact lesson once, on `visible_to_ministries__in`.
+            #
+            # 🔴 **`for_audience()`, not every role on the event.** An event's
+            #    page already narrows its role table to the roles open to the
+            #    person reading it (views.py's `to_join`). Filtering on the full
+            #    table would list events under "Attending" whose attending role
+            #    that person cannot see — filtered in by something the page then
+            #    refuses to show. Two answers from one set of data.
+            #
+            # ⚠️ `self._audience` can only be a real audience here: `nature` is
+            #    empty unless the field exists, and the field exists only when
+            #    an audience was passed.
+            events = events.filter(pk__in=(
+                EventRole.objects.for_audience(self._audience)
+                .filter(role__nature=nature).values("event_id")))
         return events
 
 

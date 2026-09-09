@@ -356,7 +356,7 @@ def set_served_as(participation, value, *, declared_by):
     return participation
 
 
-def sign_up(*, contact, event_role, consent=None, served_as=None):
+def sign_up(*, contact, event_role, consent=None, served_as=None, sessions=None):
     """Sign `contact` up for `event_role`. Returns the new Participation.
 
     Three gates, in this order: may they have this place at all (L2), is there
@@ -387,6 +387,12 @@ def sign_up(*, contact, event_role, consent=None, served_as=None):
        the shape this project has already been bitten by — and the half that
        gets forgotten is the second one, leaving a signup with no identity on
        it and nothing raising.
+
+    ⚠️ `sessions` is decision 17 — the meetings this person picked, on a course
+       published as one people choose between. It is handed to
+       `open_register()`, which **refuses** it on any other kind of event rather
+       than ignoring it: a request that cannot be honoured must not come back
+       looking as though it was. None means the ordinary case, "all of them".
 
     ⚠️ What the caller passes is a request, not an instruction: the value is
        checked against default_served_as() below, so a POST that carries an
@@ -424,6 +430,10 @@ def sign_up(*, contact, event_role, consent=None, served_as=None):
                           "people — check who the role is open to, or pick "
                           "another one.",
         })
+    # Decision 17, and before anything is written: a request to attend only some
+    # of a run that is not offered that way is not a signup with a bad extra on
+    # it, it is a different signup from the one being asked for.
+    _refuse_unchosen_meetings(event_role.event, sessions)
 
     # 🔴 The capacity gate (2026-08-19). Until this line existed, `needed_count`
     #    fed the "understaffed" reports and **stopped nobody**: a job wanting
@@ -541,7 +551,39 @@ def sign_up(*, contact, event_role, consent=None, served_as=None):
             (served_as or default) if asked else default,
             declared_by=Participation.DeclaredBy.SELF if asked else "",
         )
+        # L5.3. On a course this one act covers every meeting — the register is
+        # opened here, inside the same transaction, because "sign up, then open
+        # the register" is another pair that must always happen together, and
+        # the half that gets forgotten is always the second one. Same reasoning
+        # as `served_as` above it.
+        #
+        # ⚠️ Does nothing at all on a one-off occasion, which is every event
+        #    that existed before L5.3.
+        open_register(participation, sessions=sessions)
     return participation
+
+
+def _refuse_unchosen_meetings(event, sessions):
+    """Decision 17: only a run published that way lets somebody pick.
+
+    ⚠️ Asked here rather than inside `open_register()`, and the split is the
+       point: **this** is where the choosing happens, so this is where the right
+       to choose is checked. That function's `sessions` argument is a narrowing
+       — "look only at these" — which is also what `add_session()` uses it for,
+       and one parameter carrying both meanings makes a top-up look like an
+       illegal choice.
+
+    ⚠️ Refuses rather than ignores. A chosen set that was never going to be
+       honoured must not come back looking as though it was, and this is also
+       what gives `people_pick_meetings` a reader from the day it lands.
+    """
+    if sessions is None:
+        return
+    if event.shape != Event.Shape.PROGRAM or not event.people_pick_meetings:
+        raise ValidationError({"sessions": (
+            f"“{event.name}” is signed up to as a whole — signing up covers "
+            "every meeting, so there is nothing to choose between."
+        )})
 
 
 def _mark_attended(participation):
@@ -614,6 +656,14 @@ def cancel(participation):
     participation.status = (Participation.Status.WITHDREW if came
                             else Participation.Status.CANCELLED)
     participation.save(update_fields=["status", "updated_at"])
+    # ⚠️ **After** the status is read off the register, not before. This clears
+    #    the meetings ahead of them, and the line above needs the register as it
+    #    stood — reversing the two would still write the right word today (it
+    #    only deletes rows at `registered`, and `attended()` does not count
+    #    those), but it would make the answer depend on the order of two
+    #    statements, which is how it comes out wrong the next time somebody
+    #    edits either one.
+    close_future_register(participation)
     return participation
 
 
@@ -2011,10 +2061,59 @@ def set_status(event, status):
        it is the moment volunteers can see the event at all, and it should fail
        loudly on a row that would not otherwise validate rather than quietly
        publishing a broken one.
+
+    🔴 **Calling off a course in week seven, and putting it back on** (L5.3).
+       Two transitions and nothing else — into `cancelled`, and back out of it.
+       Everything already taught stays exactly as it is: the six meetings
+       happened, the register proves it, and the hours on both sides of D43's
+       ledger were earned. What goes is each person's place at the meetings
+       still to come, by the rule one person's own withdrawal follows —
+       otherwise the attendance rate divides by twelve for the rest of time
+       while only six of them could ever have happened.
+
+    ⚠️ The `Session` rows themselves are **kept**. They are what the term was
+       planned to be, and the only thing that can ever answer "why did this run
+       stop at six?". L5.6 says a meeting somebody attended is never deleted by
+       a generator; this is the same rule reaching the manual path.
+
+    ⚠️ **A run people pick their own meetings for does not come back the same**,
+       and D14 says to write that out rather than let it be discovered. Calling
+       it off clears the weeks ahead, and putting it back on cannot restore who
+       had chosen what — the choices were those rows. Everybody keeps their
+       signup and their history; nobody is on the register for anything future
+       until somebody puts them there. Acceptable today because
+       `people_pick_meetings` has no interface until L5.8, so no such choice
+       exists yet to be lost; revisit on the day that page is built, when the
+       answer is probably to keep the rows and mark them rather than delete.
+
+    ⚠️ Nobody's signup status is touched, and that is the load-bearing half.
+       `cancel()` decides between *cancelled* and *withdrew* by asking whether
+       this person had turned up — it is a statement about what **they** did.
+       The foundation calling a course off is not something they did, and
+       writing `withdrew` across the run would put "six people dropped out" into
+       a report whose truth is "we stopped teaching it". The event's own status
+       says that once; saying it again on their rows is a second truth free to
+       disagree with the first.
     """
+    # ⚠️ The previous status is read from the **database**, not from
+    #    `event.status`, and that is not caution — the in-memory value is
+    #    already the new one on the path that matters. `event_manage_list` binds
+    #    an `EventStatusForm` to this very instance, and `is_valid()` writes the
+    #    submitted status onto it during `_post_clean()`; that view carries its
+    #    own 🔴 about the same trap, having shipped an Undo button that undid to
+    #    the status it had just set. Trusting the attribute here would make the
+    #    two transitions below invisible on the one door a person actually uses.
+    was = (Event.objects.filter(pk=event.pk)
+           .values_list("status", flat=True).first() if event.pk else None)
     event.status = status
     event.full_clean(exclude=["created_at", "updated_at"])
     event.save()
+    called_off = Event.Status.CANCELLED
+    if was != called_off and status == called_off:
+        for participation in _signed_up_to(event):
+            close_future_register(participation)
+    elif was == called_off and status != called_off:
+        open_registers_for(event)
     return event
 
 
@@ -2452,7 +2551,199 @@ def add_session(event, *, start_time, end_time, source=Source.MANUAL):
         event=event, start_time=start_time, end_time=end_time, source=source)
     session.full_clean()
     session.save()
+    # Decision 18's other end. Somebody who signed up in week two must appear on
+    # the register of a meeting added in week ten — otherwise the mechanism is
+    # only half built, and the symptom of the missing half is a register that is
+    # simply empty on the day, with nothing raising anywhere.
+    open_registers_for(session.event, sessions=[session])
     return session
+
+
+#: The signup statuses whose holder is still expected at the meetings ahead.
+#: Named because both functions below key on it and a literal in each is how two
+#: rules about the same set come to disagree.
+_ON_THE_REGISTER = frozenset({
+    Participation.Status.REGISTERED, Participation.Status.ATTENDED,
+})
+
+
+def _signed_up_to(event):
+    """Everybody whose place on this run's register is still live.
+
+    ⚠️ One spelling, because both directions need it — opening registers when a
+       meeting is added, and closing them when the run is called off — and two
+       filters saying "who is signed up" are two answers the day a fourth status
+       joins `Participation.Status`.
+    """
+    return Participation.objects.filter(
+        event_role__event=event, status__in=_ON_THE_REGISTER
+    ).select_related("event_role__role", "event_role__event")
+
+
+def _meetings_still_to_come(event, now=None):
+    """The meetings of `event` that have not finished yet.
+
+    ⚠️ The cut is `end_time`, never `start_time`, and it is the same cut
+       `open_for_signup()`, `Event.is_over` and `from_today()` make — one
+       predicate, one column, one question, which this codebase merged its way
+       to on 2026-08-18. Somebody who signs up half an hour into tonight's
+       class is at tonight's class; a register that had already closed it would
+       be describing a room they are standing in.
+    """
+    return event.sessions.filter(end_time__gt=now or local_now())
+
+
+def open_register(participation, *, sessions=None, now=None):
+    """Put this person on the register of every meeting they can still reach.
+
+    This is「报一次管全部」— the half of requirement 4 the foundation added on
+    2026-08-26 ("signing up once means they have signed up for all of them"),
+    and the gap that has sat at the top of participants.md section 9. One signup
+    stays one row (decision 19, so `signups` does not balloon when a course
+    runs); what a course adds is **which register rows exist**, and that single
+    mechanism carries three separate requirements:
+
+      · signing up once covering every meeting;
+      · decision 17, picking only some of them (`sessions=`);
+      · decision 18, joining in week five — the first four meetings do not
+        exist for him, so his attendance rate is out of eight and nothing
+        anywhere has to subtract four absences he never had.
+
+    ⭐ **Tops up, never rebuilds.** Rows already there are left exactly as they
+       are, which is what makes this safe on the four paths that call it more
+       than once for the same person: signing up again after cancelling reuses
+       the very same Participation row (see `sign_up()`), so creating blindly
+       would hit the unique (participation, session) constraint — a 500 that
+       only ever fires for somebody who changed their mind, which is the kind of
+       failure this project has been bitten by before.
+
+    ⚠️ `sessions` narrows **which meetings are being considered** and nothing
+       more. It is not the place decision 17 is decided — whether this person
+       was entitled to choose at all is `sign_up()`'s question, because that is
+       where the choosing happens. Keeping the two apart matters: the same
+       argument is also how `add_session()` says "only this new meeting", and
+       one parameter meaning both "the person picked these" and "look only at
+       these" is how a top-up came to be refused as an illegal choice — found by
+       a test, having been written that way first.
+
+    ⚠️ Reads `shape`, not `sessions.exists()`. The question here is what kind of
+       thing this is, and a course with no dates on it yet is still a course —
+       it simply opens an empty register today and a full one once somebody
+       schedules the term. What to *draw* is the other question; see
+       `Event.Shape`.
+
+    ⚠️ Nothing here checks consent. New rows land at `registered`, which asserts
+       nothing about anybody having turned up — the consent gate belongs on the
+       transition to attended, and `add_attendance()`, `record_session_hours()`
+       and `check_in_session()` each hold it there.
+    """
+    event = participation.event_role.event
+    if event.shape != Event.Shape.PROGRAM:
+        return []
+    if participation.status not in _ON_THE_REGISTER:
+        return []
+    now = now or local_now()
+    # ⚠️ Given rows are filtered in memory rather than fed back into a query.
+    #    `open_registers_for()` hands the same list down for every person on the
+    #    run, so re-querying here would be one round trip per signup for an
+    #    answer that cannot have changed between them.
+    # 🔴 `one.event_id == event.pk` is not decoration. Meetings handed in by a
+    #    caller are decision 17's chosen set, and that arrives from a form — so
+    #    without this test somebody could put themselves on the register of a
+    #    meeting belonging to a run they never signed up for. It used to be
+    #    implicit, back when this filtered `event.sessions` in the database;
+    #    moving the filter into memory to save a query per person took the
+    #    guarantee with it, which is the whole reason it is written out here.
+    wanted = ([one for one in sessions
+               if one.event_id == event.pk and one.end_time > now]
+              if sessions is not None
+              else list(_meetings_still_to_come(event, now)))
+    already = set(
+        participation.attendances.values_list("session_id", flat=True))
+    # ⚠️ Through `add_attendance()`, not `SessionAttendance.objects.create()`.
+    #    Both cross-table rules on that table are satisfied here by construction
+    #    (the meetings are read off this signup's own event, and no hours are
+    #    written), so the checks cannot fail — which is exactly the argument for
+    #    walking through the door anyway. A second way of making a register row,
+    #    justified by what is true today, is how the two come to disagree the
+    #    day a third rule is added to one of them.
+    return [
+        add_attendance(participation, session)
+        for session in sorted(wanted, key=lambda one: one.start_time)
+        if session.pk not in already
+    ]
+
+
+def open_registers_for(event, *, sessions=None, now=None):
+    """`open_register()` for everybody currently signed up to this run.
+
+    Three callers, and all three are the same event seen from the run's side
+    rather than one person's: a meeting added after people signed up, a meeting
+    added through the admin, and a called-off run being put back on.
+
+    🔴 **Silent on a run where people choose their own meetings**, and that is
+       the decision rather than a gap. On such a run "signed up" does not mean
+       "coming to all of it" — everybody named a set, and a meeting added in
+       week ten was in nobody's. Adding them to it would enrol fifteen people in
+       an evening none of them asked for, and then count each of them absent.
+       They can be added one at a time, by somebody who knows, through
+       `add_attendance()`.
+    """
+    if event.shape != Event.Shape.PROGRAM or event.people_pick_meetings:
+        return []
+    now = now or local_now()
+    # Once for the run, not once per person: every signup is being asked about
+    # the same set of meetings.
+    if sessions is None:
+        sessions = list(_meetings_still_to_come(event, now))
+    opened = []
+    for participation in _signed_up_to(event):
+        opened += open_register(participation, sessions=sessions, now=now)
+    return opened
+
+
+def close_future_register(participation, *, now=None):
+    """Take this person off the meetings that have not happened yet.
+
+    ⭐ **The only place a register row is ever deleted**, and it is written once
+       for the same reason L5.6's `_drop_generated_after()` is: this project has
+       already paid for a delete with more than one spelling — deleting a role
+       took a whole term's register with it, because the protection read
+       `Participation.hours` while a course keeps its hours on the register.
+       `RegisterDeleteGuardTests` holds the line.
+
+    🔴 **What already happened is never touched.** Six meetings taught are six
+       meetings taught, and the rows carry the attendance, the hours given and
+       the hours received that the sector reports on. `cancel()` is itself built
+       on reading them — whether somebody *withdrew* or merely cancelled is a
+       question only the register can answer — so deleting them would take away
+       the evidence for the status being written in the same breath.
+
+    ⚠️ Rows ahead are deleted rather than marked absent. A meeting that will not
+       happen for this person is not an absence, and the per-meeting attendance
+       rate divides by **the rows that exist** — leaving them would keep a
+       withdrawn person in the denominator of every remaining week, quietly, and
+       for good. This is decision 18 read backwards: which rows exist is the
+       whole of it, at both ends.
+
+    🔴 **Two conditions, not one.** The meeting has to be unfinished *and* the
+       row still untouched at `registered`. The clock alone is not enough: a
+       class runs for two hours, somebody checks in and then withdraws before it
+       ends, and a row filtered only by `end_time` would take his check-in and
+       his hours with it — deleting a record of something that had already
+       happened, inside the very function whose rule is that it never does.
+       Found here rather than in the browser, which is the cheap place.
+
+    ⚠️ A `registered` row on a meeting that has already finished is left alone
+       too, and that is not an oversight: it means nobody marked the register up
+       that week. `_session_attendance()` counts it as neither attendance nor
+       absence, and deleting it here would quietly rewrite an unanswered
+       question into one that was never asked.
+    """
+    return participation.attendances.filter(
+        status=Participation.Status.REGISTERED,
+        session__in=_meetings_still_to_come(
+            participation.event_role.event, now)).delete()
 
 
 #: The register statuses that assert somebody was actually there. Named because
@@ -2473,23 +2764,36 @@ def add_attendance(participation, session,
       · the meeting has to belong to the run this person signed up for;
       · a place somebody attends records no hours.
 
-    ⚠️ One row, deliberately. The three requirements that create rows in bulk —
-       signing up once covering every meeting, decision 17's "pick which ones",
-       and decision 18's joining in week five — are all the same mechanism
-       (**which rows exist**) and none of them can be written yet: `sign_up()`
-       cannot tell a course from a Saturday distribution until `Event.shape`
-       lands in L5.3. Said here rather than left to be noticed, because a table
-       with no bulk door reads like an unfinished step instead of a deliberate
-       one.
-
-    ⚠️ Until then its callers are tests and the admin's inline. Same footing
-       `add_session()` was on between L5.1 and L5.6.
+    ⚠️ One row, deliberately — this is the door for putting **one** person on
+       **one** register, by hand. The three requirements that create rows in
+       bulk (signing up once covering every meeting, decision 17's "pick which
+       ones", decision 18's joining in week five) are all one mechanism —
+       **which rows exist** — and since L5.3 they live in `open_register()`,
+       which `sign_up()` calls. This note used to say they could not be written
+       until `Event.shape` existed; it does now, and they are.
     """
     if status in _PRESENT_STATUSES:
         _refuse_without_consent(participation)
     attendance = SessionAttendance(
         participation=participation, session=session, status=status)
-    attendance.full_clean()
+    # ⚠️ `validate_constraints=False`, and it costs nothing this table was
+    #    relying on. Django's constraint validation re-asks the database, one
+    #    `SELECT` per CheckConstraint, whether the row it is about to insert
+    #    would satisfy constraints the database is about to enforce anyway —
+    #    measured at 13 of the 15 queries this call used to make, on a path that
+    #    runs once per meeting of a course. D14 is the doctrine that settles it:
+    #    **the constraint is the rule**, and checking it in Python beforehand
+    #    only changes which kind of error a caller sees.
+    #
+    #    Everything that is not the database's job still runs: the field checks,
+    #    `clean()`'s two cross-table rules — the ones no constraint can express,
+    #    and the half that actually catches mistakes here — and the uniqueness
+    #    test. Those cost two queries between them.
+    #
+    # ⚠️ The admin is unaffected: its ModelForm validates the instance itself,
+    #    constraints included, so `ConstraintErrorFieldMixin` still puts a
+    #    violation under the right box on the page.
+    attendance.full_clean(validate_constraints=False)
     attendance.save()
     return attendance
 

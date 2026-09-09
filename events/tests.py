@@ -82,7 +82,9 @@ from .models import (
 from .services import (
     NoHoursHere,
     add_attendance,
+    check_in_session,
     add_session,
+    set_status,
     audience_gaps,
     NotEligible,
     RoleFull,
@@ -219,10 +221,22 @@ def another_run(like, name="Tuesday citizenship class"):
     fixture and a method on one of them cannot be reached from the other — which
     is how the admin test came to hold a verbatim copy of it.
     """
-    other = make_event(ministry=like.ministry, name=name,
-                       start_time=NOW + DAY, end_time=NOW + 100 * DAY)
+    other = make_run(ministry=like.ministry, name=name,
+                     start_time=NOW + DAY, end_time=NOW + 100 * DAY)
     return add_session(other, start_time=NOW + 3 * DAY,
                        end_time=NOW + 3 * DAY + 2 * HOUR)
+
+
+def make_run(**kwargs):
+    """A course: an Event shaped `program`, which is the kind that has meetings.
+
+    ⚠️ Its own helper rather than a keyword on make_event(), because since L5.3
+       the two are different kinds of thing: `Session.clean()` refuses a meeting
+       on a one-off occasion, so every fixture that schedules one is a course
+       whether or not it used to say so. A test that reads `make_run` knows
+       which it is holding without going to look.
+    """
+    return make_event(**{"shape": Event.Shape.PROGRAM, **kwargs})
 
 
 def make_role(event, code, name=None, needed_count=None, nature=None, **fields):
@@ -2173,7 +2187,7 @@ class SessionTests(TestCase):
 
     def setUp(self):
         # A run with real width, so "inside" and "outside" are both reachable.
-        self.spring = make_event(
+        self.spring = make_run(
             name="ESL spring term",
             start_time=NOW + DAY,
             end_time=NOW + 100 * DAY,
@@ -2203,8 +2217,8 @@ class SessionTests(TestCase):
         # The other half of the uniqueness, and the reason it is a pair of
         # columns rather than one: two courses running the same evening is
         # ordinary, and a constraint on start_time alone would forbid it.
-        other = make_event(ministry=self.spring.ministry, name="Tuesday ESL",
-                           start_time=NOW + DAY, end_time=NOW + 100 * DAY)
+        other = make_run(ministry=self.spring.ministry, name="Tuesday ESL",
+                         start_time=NOW + DAY, end_time=NOW + 100 * DAY)
         self.make_session()
         Session.objects.create(
             event=other, start_time=self.first_week,
@@ -2341,7 +2355,7 @@ class SessionAttendanceTests(TestCase):
     """
 
     def setUp(self):
-        self.spring = make_event(
+        self.spring = make_run(
             name="ESL spring term",
             start_time=NOW + DAY,
             end_time=NOW + 100 * DAY,
@@ -2353,18 +2367,22 @@ class SessionAttendanceTests(TestCase):
         self.job = make_role(self.spring, "esl_assistant")
         # ⚠️ Birth dates: see HoursReceivedTests below for why. An unknown date
         #    counts as a minor, and this event requires consent by default.
-        self.learner = Participation.objects.create(
-            contact=make_person("Wang", birth_date=datetime.date(1980, 5, 5)),
-            event_role=self.seat)
-        self.assistant = Participation.objects.create(
-            contact=make_person("Helper", birth_date=datetime.date(1980, 5, 5)),
-            event_role=self.job)
+        # ⚠️ Meetings first, signups second, and the order is load-bearing since
+        #    L5.3: `add_session()` puts everybody already signed up onto the new
+        #    meeting's register. Scheduled first, there is nobody to put there,
+        #    so the rows this class is about are the ones it makes itself.
         self.week_one = add_session(
             self.spring, start_time=NOW + 2 * DAY,
             end_time=NOW + 2 * DAY + 2 * HOUR)
         self.week_two = add_session(
             self.spring, start_time=NOW + 9 * DAY,
             end_time=NOW + 9 * DAY + 2 * HOUR)
+        self.learner = Participation.objects.create(
+            contact=make_person("Wang", birth_date=datetime.date(1980, 5, 5)),
+            event_role=self.seat)
+        self.assistant = Participation.objects.create(
+            contact=make_person("Helper", birth_date=datetime.date(1980, 5, 5)),
+            event_role=self.job)
 
     def test_one_person_at_one_meeting_is_one_row(self):
         row = add_attendance(self.learner, self.week_one)
@@ -2573,10 +2591,17 @@ class SessionHoursAreProtectedTests(TestCase):
     """
 
     def setUp(self):
-        self.spring = make_event(
+        self.spring = make_run(
             name="ESL spring term",
             start_time=NOW + DAY, end_time=NOW + 100 * DAY)
         self.job = make_role(self.spring, "esl_assistant")
+        # ⚠️ Meetings before signups, and the order matters since L5.3:
+        #    `add_session()` puts everybody already signed up onto the new
+        #    meeting's register, so scheduling first leaves the rows below
+        #    to the tests that are about them.
+        self.week_one = add_session(
+            self.spring, start_time=NOW + 2 * DAY,
+            end_time=NOW + 2 * DAY + 2 * HOUR)
         # ⚠️ A birth date, because `requires_guardian_consent` defaults to True
         #    and a contact with no date on file counts as a minor (B4.5). Every
         #    fixture in this file that records hours does the same; without it
@@ -2584,9 +2609,6 @@ class SessionHoursAreProtectedTests(TestCase):
         self.helper = Participation.objects.create(
             contact=make_person("Helper", birth_date=datetime.date(1980, 5, 5)),
             event_role=self.job)
-        self.week_one = add_session(
-            self.spring, start_time=NOW + 2 * DAY,
-            end_time=NOW + 2 * DAY + 2 * HOUR)
 
     def test_hours_on_the_register_are_seen_by_the_delete_guard(self):
         row = add_attendance(self.helper, self.week_one)
@@ -2621,7 +2643,7 @@ class SessionConsentGateTests(TestCase):
     """
 
     def setUp(self):
-        self.spring = make_event(
+        self.spring = make_run(
             name="Teen ESL", start_time=NOW + DAY, end_time=NOW + 100 * DAY,
             requires_guardian_consent=True)
         self.seat = make_role(self.spring, "esl_seat",
@@ -2630,13 +2652,17 @@ class SessionConsentGateTests(TestCase):
         self.child = make_person(
             "Young", birth_date=local_today() - datetime.timedelta(days=12 * 365))
         give_emergency_contact(self.child)
+        # ⚠️ Meetings before signups, and the order matters since L5.3:
+        #    `add_session()` puts everybody already signed up onto the new
+        #    meeting's register, so scheduling first leaves the rows below
+        #    to the tests that are about them.
+        self.week_one = add_session(
+            self.spring, start_time=NOW + 2 * DAY,
+            end_time=NOW + 2 * DAY + 2 * HOUR)
         # ⚠️ Created directly, which is the whole point: sign_up() would refuse
         #    this row, and the admin and any importer reach the table without it.
         self.unconsented = Participation.objects.create(
             contact=self.child, event_role=self.seat)
-        self.week_one = add_session(
-            self.spring, start_time=NOW + 2 * DAY,
-            end_time=NOW + 2 * DAY + 2 * HOUR)
 
     def test_a_minor_with_no_consent_cannot_be_put_on_the_register_as_present(self):
         with self.assertRaises(ConsentRequired):
@@ -2670,13 +2696,16 @@ class SessionConsentGateTests(TestCase):
         self.unconsented.consent_at = local_now()
         self.unconsented.consent_method = Participation.ConsentMethod.PAPER
         self.unconsented.save()
+        # ⚠️ Since L5.3 the row is already there — `add_session()` puts everybody
+        #    signed up onto the new meeting's register — so presence is recorded
+        #    on it rather than created. That makes the point more sharply, not
+        #    less: the gate is met by a row nobody typed.
         for week in range(2):
             session = add_session(
                 self.spring, start_time=NOW + (9 + 7 * week) * DAY,
                 end_time=NOW + (9 + 7 * week) * DAY + 2 * HOUR)
-            add_attendance(self.unconsented, session,
-                           status=Participation.Status.ATTENDED)
-        self.assertEqual(self.unconsented.attendances.count(), 2)
+            check_in_session(self.unconsented.attendances.get(session=session))
+        self.assertEqual(self.unconsented.attendances.attended().count(), 2)
 
 
 class WithdrawalTests(TestCase):
@@ -2689,7 +2718,7 @@ class WithdrawalTests(TestCase):
     """
 
     def setUp(self):
-        self.spring = make_event(
+        self.spring = make_run(
             name="ESL spring term",
             start_time=NOW - 30 * DAY, end_time=NOW + 60 * DAY)
         self.seat = make_role(self.spring, "esl_seat",
@@ -2769,7 +2798,7 @@ class HoursOnTwoTablesTests(TestCase):
     """
 
     def setUp(self):
-        self.spring = make_event(
+        self.spring = make_run(
             name="ESL spring term",
             start_time=NOW - 30 * DAY, end_time=NOW + 60 * DAY)
         self.job = make_role(self.spring, "esl_assistant")
@@ -2836,7 +2865,7 @@ class RescheduleKeepsItsMeetingsTests(TestCase):
     """
 
     def setUp(self):
-        self.spring = make_event(
+        self.spring = make_run(
             name="ESL spring term",
             start_time=NOW + DAY, end_time=NOW + 100 * DAY)
         self.week_ten = add_session(
@@ -2868,8 +2897,8 @@ class AttendancePrefillTests(TestCase):
     """The hours box does not offer a term's length as one person's work."""
 
     def test_a_run_offers_no_prefill(self):
-        run = make_event(name="ESL spring term",
-                         start_time=NOW + DAY, end_time=NOW + 100 * DAY)
+        run = make_run(name="ESL spring term",
+                       start_time=NOW + DAY, end_time=NOW + 100 * DAY)
         add_session(run, start_time=NOW + 2 * DAY,
                     end_time=NOW + 2 * DAY + 2 * HOUR)
         # 2664.00 was what this offered, one click from being authoritative.
@@ -2889,7 +2918,7 @@ class SessionScheduleTests(TestCase):
     """
 
     def setUp(self):
-        self.spring = make_event(
+        self.spring = make_run(
             name="ESL spring term",
             start_time=NOW + DAY, end_time=NOW + 100 * DAY)
         self.first = add_session(
@@ -2941,7 +2970,7 @@ class MeetingSummaryTests(TestCase):
     """"Tuesdays, 7pm – 9pm · 12 sessions" — and what it says when that is false."""
 
     def setUp(self):
-        self.spring = make_event(
+        self.spring = make_run(
             name="ESL spring term",
             start_time=NOW + DAY, end_time=NOW + 100 * DAY)
 
@@ -2986,8 +3015,8 @@ class EventWhenLineTests(TestCase):
     """The line at the top of the event page, and the sentence in a message."""
 
     def test_a_run_shows_its_term_as_dates_and_its_rhythm_underneath(self):
-        run = make_event(name="ESL spring term",
-                         start_time=NOW + DAY, end_time=NOW + 100 * DAY)
+        run = make_run(name="ESL spring term",
+                       start_time=NOW + DAY, end_time=NOW + 100 * DAY)
         for week in range(3):
             add_session(run, start_time=NOW + (2 + 7 * week) * DAY,
                         end_time=NOW + (2 + 7 * week) * DAY + 2 * HOUR)
@@ -3011,8 +3040,8 @@ class EventWhenLineTests(TestCase):
         It printed the term's first date beside its closing clock time
         ("2026-08-29 23:28 — 23:28"), which is not true of anything.
         """
-        run = make_event(name="ESL spring term",
-                         start_time=NOW + DAY, end_time=NOW + 100 * DAY)
+        run = make_run(name="ESL spring term",
+                       start_time=NOW + DAY, end_time=NOW + 100 * DAY)
         for week in range(3):
             add_session(run, start_time=NOW + (2 + 7 * week) * DAY,
                         end_time=NOW + (2 + 7 * week) * DAY + 2 * HOUR)
@@ -3033,7 +3062,7 @@ class SessionAbsenceTests(TestCase):
     """
 
     def setUp(self):
-        self.spring = make_event(
+        self.spring = make_run(
             name="ESL spring term",
             start_time=NOW - 30 * DAY, end_time=NOW + 60 * DAY)
         self.seat = make_role(self.spring, "esl_seat",
@@ -3129,6 +3158,462 @@ class SessionAbsenceTests(TestCase):
         self.assertIsNone(figures["session_attendance_rate"])
 
 
+class EventShapeTests(TestCase):
+    """L5.3: which kind of thing this event is, and when it stops being free.
+
+    The column exists to answer a **classification** question — is this signed
+    up to once, or is it one occasion — and it is deliberately not the same
+    question the schedule and the detail page ask (they ask whether there are
+    meetings to draw). These tests hold the two apart: a course with no dates on
+    it yet is still a course.
+    """
+
+    def setUp(self):
+        self.saturday = make_event(name="Saturday distribution")
+        self.spring = make_run(
+            ministry=self.saturday.ministry, name="ESL spring term",
+            start_time=NOW + DAY, end_time=NOW + 100 * DAY)
+
+    def test_a_new_event_is_one_occasion(self):
+        # Which is what every event in this database was before L5.3, and what
+        # migration 0026's default therefore says.
+        another = make_event(ministry=self.spring.ministry,
+                             name="Another Saturday")
+        self.assertEqual(another.shape, Event.Shape.SINGLE)
+
+    def test_the_two_predicates_do_not_overlap(self):
+        """The partition, and the reason both halves are written.
+
+        ⚠️ Neither overlap nor gap. This is what makes `programs()` and
+           `single_occasions()` different from the `upcoming()` / `past()` pair
+           EventQuerySet deleted: those were two independent questions, these
+           are two halves of one, and a third shape added later has to be given
+           somewhere to belong rather than falling between them.
+        """
+        programs = set(Event.objects.programs())
+        singles = set(Event.objects.single_occasions())
+        self.assertEqual(programs, {self.spring})
+        self.assertEqual(singles, {self.saturday})
+        self.assertEqual(programs & singles, set())
+        self.assertEqual(programs | singles, set(Event.objects.all()))
+
+    def test_a_course_with_no_dates_yet_is_still_a_course(self):
+        # 🔴 The whole reason this is a column rather than `sessions.exists()`.
+        #    Deciding the shape and then scheduling the term is the ordinary
+        #    order, and for those minutes the derived answer would be wrong.
+        self.assertFalse(self.spring.sessions.exists())
+        self.assertIn(self.spring, Event.objects.programs())
+
+    def test_an_empty_run_can_still_change_its_mind(self):
+        # Nobody has used it, so nothing has been written under what it says.
+        self.spring.shape = Event.Shape.SINGLE
+        self.spring.full_clean()
+        self.spring.save()
+        self.assertIn(self.spring, Event.objects.single_occasions())
+
+    def test_a_run_with_meetings_cannot_be_turned_into_a_one_off(self):
+        add_session(self.spring, start_time=NOW + 2 * DAY,
+                    end_time=NOW + 2 * DAY + 2 * HOUR)
+        self.spring.shape = Event.Shape.SINGLE
+        with self.assertRaises(ValidationError) as caught:
+            self.spring.full_clean()
+        self.assertIn("shape", caught.exception.message_dict)
+
+    def test_a_run_with_signups_cannot_be_turned_into_a_one_off(self):
+        seat = make_role(self.spring, "esl_seat",
+                         nature=ParticipationRole.Nature.ATTENDING)
+        Participation.objects.create(contact=make_person("Wang"), event_role=seat)
+        self.spring.shape = Event.Shape.SINGLE
+        with self.assertRaises(ValidationError) as caught:
+            self.spring.full_clean()
+        self.assertIn("shape", caught.exception.message_dict)
+
+    def test_calling_off_a_run_is_not_blocked_by_the_freeze(self):
+        """🔴 The freeze holds one column and must never reach the others.
+
+        A course that has to stop in week seven has to be able to stop. If the
+        rule above ever grew into "a used run cannot be edited", this is the
+        test that goes red instead of the foundation finding out on the day.
+        """
+        add_session(self.spring, start_time=NOW + 2 * DAY,
+                    end_time=NOW + 2 * DAY + 2 * HOUR)
+        set_status(self.spring, Event.Status.CANCELLED)
+        self.spring.refresh_from_db()
+        self.assertEqual(self.spring.status, Event.Status.CANCELLED)
+        self.assertEqual(self.spring.shape, Event.Shape.PROGRAM)
+
+    def test_a_bare_update_walks_past_the_freeze(self):
+        # D14: say the gap out loud rather than let the docstring read as a
+        # promise. The rule spans two tables, so no constraint can hold it.
+        add_session(self.spring, start_time=NOW + 2 * DAY,
+                    end_time=NOW + 2 * DAY + 2 * HOUR)
+        Event.objects.filter(pk=self.spring.pk).update(shape=Event.Shape.SINGLE)
+        self.spring.refresh_from_db()
+        self.assertEqual(self.spring.shape, Event.Shape.SINGLE)
+
+    def test_picking_meetings_is_refused_on_a_one_off(self):
+        self.saturday.people_pick_meetings = True
+        with self.assertRaises(ValidationError) as caught:
+            self.saturday.full_clean()
+        self.assertIn("people_pick_meetings", caught.exception.message_dict)
+
+    def test_a_meeting_cannot_be_added_to_a_one_off_occasion(self):
+        """Having meetings implies being a course; the converse stays free.
+
+        Without this an occasion could carry meetings that the schedule and the
+        detail page would both draw — they key on having meetings, which is the
+        right test for what to draw — while `sign_up()` opened no register for
+        anybody, because it keys on the shape. Meetings, an empty register, and
+        nothing raising.
+        """
+        meeting = Session(
+            event=self.saturday,
+            start_time=self.saturday.start_time,
+            end_time=self.saturday.end_time)
+        with self.assertRaises(ValidationError) as caught:
+            meeting.full_clean()
+        self.assertIn("event", caught.exception.message_dict)
+
+    def test_the_service_refuses_a_meeting_on_a_one_off_occasion(self):
+        with self.assertRaises(ValidationError):
+            add_session(self.saturday,
+                        start_time=self.saturday.start_time,
+                        end_time=self.saturday.end_time)
+
+
+class ProgramSignUpTests(TestCase):
+    """L5.3: signing up once covers every meeting.
+
+    ⭐ The foundation's own sentence — "signing up once means they have signed
+       up for all of them" — and the gap that has sat at the top of
+       participants.md section 9 since it was written. Three requirements come
+       out of one mechanism here, **which rows exist**: signing up covering the
+       term, decision 17's picking some of it, and decision 18's joining in
+       week five.
+    """
+
+    def setUp(self):
+        # Half the term behind us, half ahead: the cut has to be reachable from
+        # both sides or the tests below cannot see it at all.
+        self.spring = make_run(
+            name="ESL spring term",
+            start_time=NOW - 30 * DAY, end_time=NOW + 60 * DAY)
+        self.seat = make_role(self.spring, "esl_seat",
+                              nature=ParticipationRole.Nature.ATTENDING)
+        self.weeks = [
+            add_session(self.spring,
+                        start_time=NOW + (week * 7 - 21) * DAY,
+                        end_time=NOW + (week * 7 - 21) * DAY + 2 * HOUR)
+            for week in range(8)
+        ]
+        # weeks[0..2] are over, weeks[3..7] are still to come.
+        self.past = self.weeks[:3]
+        self.ahead = self.weeks[3:]
+        self.learner = make_person("Wang", birth_date=datetime.date(1980, 5, 5))
+
+    def join(self, contact=None, **kwargs):
+        return sign_up(contact=contact or self.learner,
+                       event_role=self.seat, **kwargs)
+
+    def register_of(self, signup):
+        return list(signup.attendances.in_teaching_order()
+                    .values_list("session_id", flat=True))
+
+    def test_signing_up_for_a_program_creates_one_participation(self):
+        """Decision 19, and it is what keeps the reports honest.
+
+        Twelve evenings is one person signing up once. Counting the register
+        instead would make `signups` jump by twelve for one course, and the
+        figure would go on looking plausible.
+        """
+        self.join()
+        self.assertEqual(
+            Participation.objects.filter(event_role=self.seat).count(), 1)
+
+    def test_signing_up_for_a_program_covers_every_session(self):
+        signup = self.join()
+        self.assertEqual(self.register_of(signup),
+                         [meeting.pk for meeting in self.ahead])
+
+    def test_joining_in_week_five_is_not_four_absences(self):
+        """Decision 18. The meetings before they joined do not **exist** for them.
+
+        ⚠️ Which is the whole of it: no column says "joined late", and nothing
+           anywhere subtracts the weeks they missed. Their attendance rate
+           divides by the rows that are there.
+        """
+        signup = self.join()
+        self.assertEqual(len(self.register_of(signup)), len(self.ahead))
+        for meeting in self.past:
+            self.assertFalse(
+                signup.attendances.filter(session=meeting).exists())
+
+    def test_a_meeting_still_running_is_put_on_their_register(self):
+        """The cut is `end_time`, matching every other "is it over" in the app.
+
+        Somebody who walks in half an hour into tonight's class is at tonight's
+        class. A register cut at `start_time` would have closed it while they
+        were standing in the room.
+        """
+        tonight = add_session(self.spring, start_time=NOW - HOUR,
+                              end_time=NOW + HOUR)
+        signup = self.join()
+        self.assertIn(tonight.pk, self.register_of(signup))
+
+    def test_a_meeting_already_over_is_not_put_on_their_register(self):
+        signup = self.join()
+        self.assertNotIn(self.past[-1].pk, self.register_of(signup))
+
+    def test_signing_up_for_a_one_off_occasion_opens_no_register(self):
+        saturday = make_event(ministry=self.spring.ministry, name="Saturday")
+        lifting = make_role(saturday, "lifting")
+        signup = sign_up(contact=self.learner, event_role=lifting)
+        self.assertEqual(signup.attendances.count(), 0)
+
+    def test_a_program_with_no_meetings_yet_opens_an_empty_register(self):
+        # Not an error, and not a different kind of event: the term simply has
+        # not been scheduled yet. Adding the meetings later reaches them — see
+        # the test two below.
+        Session.objects.all().delete()
+        signup = self.join()
+        self.assertEqual(signup.attendances.count(), 0)
+
+    def test_picking_some_sessions_leaves_the_others_alone(self):
+        """Decision 17, and it is the same mechanism as decision 18.
+
+        Not a second field and not a second table: the meetings somebody chose
+        are the rows that get made, exactly as the meetings somebody was there
+        for are the rows a late joiner gets.
+        """
+        self.spring.people_pick_meetings = True
+        self.spring.save()
+        chosen = self.ahead[:2]
+        signup = self.join(sessions=chosen)
+        self.assertEqual(self.register_of(signup),
+                         [meeting.pk for meeting in chosen])
+
+    def test_a_meeting_added_later_skips_a_run_people_pick_from(self):
+        """Nobody chose an evening that did not exist when they chose.
+
+        Adding fifteen people to a week-ten meeting none of them asked for, and
+        then counting each of them absent, is worse than leaving the register
+        for somebody to fill in who knows what was agreed.
+        """
+        self.spring.people_pick_meetings = True
+        self.spring.save()
+        signup = self.join(sessions=self.ahead[:1])
+        add_session(self.spring, start_time=NOW + 55 * DAY,
+                    end_time=NOW + 55 * DAY + 2 * HOUR)
+        self.assertEqual(self.register_of(signup), [self.ahead[0].pk])
+
+    def test_a_chosen_meeting_from_another_run_is_ignored(self):
+        """🔴 The chosen set arrives from a form, so it is not to be trusted.
+
+        Nothing caught this when the filter briefly moved from the database into
+        memory and lost the event test with it: every other test hands in
+        meetings of the right run, so the hole was only reachable by a POST
+        naming somebody else's. `SessionAttendance.clean()` refuses such a row
+        as well — this pins the door in front of it.
+        """
+        self.spring.people_pick_meetings = True
+        self.spring.save()
+        elsewhere = another_run(self.spring)
+        signup = self.join(sessions=[self.ahead[0], elsewhere])
+        self.assertEqual(self.register_of(signup), [self.ahead[0].pk])
+
+    def test_picking_meetings_is_refused_when_the_run_does_not_allow_it(self):
+        """A request that cannot be honoured must not look as though it was.
+
+        ⚠️ This is what gives `people_pick_meetings` a reader. Ignoring the
+           argument instead would leave the switch consulted by nothing, and
+           "pick which ones" quietly on offer for every course.
+        """
+        with self.assertRaises(ValidationError) as caught:
+            self.join(sessions=self.ahead[:2])
+        self.assertIn("sessions", caught.exception.message_dict)
+
+    def test_signing_up_again_after_cancelling_tops_up_rather_than_duplicating(self):
+        """🔴 The row is reused, so the register has to be topped up, not rebuilt.
+
+        `sign_up()` reuses the very same Participation when somebody who
+        cancelled comes back — changing your mind must not be permanent, which
+        was found in the browser in August. Creating register rows blindly here
+        would hit the unique (participation, session) constraint: a 500 that
+        fires only for the people who changed their mind.
+        """
+        signup = self.join()
+        cancel(signup)
+        again = self.join()
+        self.assertEqual(again.pk, signup.pk)
+        self.assertEqual(self.register_of(again),
+                         [meeting.pk for meeting in self.ahead])
+
+    def test_a_meeting_added_later_reaches_everybody_already_signed_up(self):
+        """Decision 18's other end, and the half with no symptom.
+
+        A meeting added in week ten for somebody who signed up in week two: no
+        error, no warning — the register is simply empty on the night.
+        """
+        signup = self.join()
+        week_nine = add_session(self.spring, start_time=NOW + 55 * DAY,
+                                end_time=NOW + 55 * DAY + 2 * HOUR)
+        self.assertIn(week_nine.pk, self.register_of(signup))
+
+    def test_a_meeting_added_later_skips_somebody_who_pulled_out(self):
+        signup = self.join()
+        cancel(signup)
+        add_session(self.spring, start_time=NOW + 55 * DAY,
+                    end_time=NOW + 55 * DAY + 2 * HOUR)
+        self.assertEqual(signup.attendances.count(), 0)
+
+    def test_cancelling_clears_the_meetings_that_have_not_happened(self):
+        signup = self.join()
+        cancel(signup)
+        self.assertEqual(signup.attendances.count(), 0)
+
+    def test_cancelling_leaves_the_meetings_they_already_attended(self):
+        """🔴 What happened, happened.
+
+        `cancel()` itself is built on reading these rows — whether this is a
+        withdrawal or a cancellation is a question only the register answers —
+        so clearing them would delete the evidence for the word being written
+        in the same breath.
+        """
+        # An assistant, not a seat: the hours are the point, and L4 records
+        # none against a place people attend.
+        job = make_role(self.spring, "esl_assistant")
+        helper = sign_up(
+            contact=make_person("Helper", birth_date=datetime.date(1980, 5, 5)),
+            event_role=job)
+        record_session_hours(
+            helper.attendances.get(session=self.ahead[0]), Decimal("2.00"))
+        cancel(helper)
+        helper.refresh_from_db()
+        self.assertEqual(helper.status, Participation.Status.WITHDREW)
+        kept = helper.attendances.get()
+        self.assertEqual(kept.session_id, self.ahead[0].pk)
+        self.assertEqual(kept.hours, Decimal("2.00"))
+
+    def test_cancelling_leaves_a_meeting_they_are_in_the_middle_of(self):
+        """The clock alone is not enough — two conditions, and here is why.
+
+        A class runs for two hours. Somebody checks in and withdraws before it
+        ends, so the meeting is unfinished *and* the row already records
+        something. Filtered on the clock alone this would take their check-in
+        and their hours with it.
+        """
+        tonight = add_session(self.spring, start_time=NOW - HOUR,
+                              end_time=NOW + HOUR)
+        signup = self.join()
+        row = signup.attendances.get(session=tonight)
+        row.status = Participation.Status.ATTENDED
+        row.save()
+        cancel(signup)
+        self.assertEqual(list(signup.attendances.values_list("session_id", flat=True)),
+                         [tonight.pk])
+
+    def test_a_bare_create_walks_past_the_register(self):
+        # D14 again: Participation.objects.create() is not sign_up(), and a
+        # signup made that way has no register. Said out loud so the docstring
+        # above does not read as a guarantee.
+        signup = Participation.objects.create(
+            contact=make_person("Zhao"), event_role=self.seat)
+        self.assertEqual(signup.attendances.count(), 0)
+
+
+class RunCalledOffTests(TestCase):
+    """L5.3: a course that stops in week seven, and one that starts again.
+
+    ⭐ The sector reports enrolled / completed / withdrew separately precisely
+       for this: a programme ending early does not unmake the service already
+       delivered. What was taught stays; what was only planned stops being
+       somebody's expected attendance.
+    """
+
+    def setUp(self):
+        self.spring = make_run(
+            name="ESL spring term",
+            start_time=NOW - 30 * DAY, end_time=NOW + 60 * DAY)
+        self.seat = make_role(self.spring, "esl_seat",
+                              nature=ParticipationRole.Nature.ATTENDING)
+        self.taught = add_session(self.spring, start_time=NOW - 7 * DAY,
+                                  end_time=NOW - 7 * DAY + 2 * HOUR)
+        self.ahead = [
+            add_session(self.spring, start_time=NOW + week * 7 * DAY,
+                        end_time=NOW + week * 7 * DAY + 2 * HOUR)
+            for week in range(1, 4)
+        ]
+        self.learner = sign_up(
+            contact=make_person("Wang", birth_date=datetime.date(1980, 5, 5)),
+            event_role=self.seat)
+        # They were there for the one that already ran. add_attendance rather
+        # than the bulk door, because that meeting is behind the cut.
+        self.attended = add_attendance(
+            self.learner, self.taught,
+            status=Participation.Status.ATTENDED)
+
+    def test_calling_off_a_run_clears_everybodys_future_register(self):
+        set_status(self.spring, Event.Status.CANCELLED)
+        for meeting in self.ahead:
+            self.assertFalse(
+                self.learner.attendances.filter(session=meeting).exists())
+
+    def test_calling_off_a_run_leaves_what_was_already_taught(self):
+        set_status(self.spring, Event.Status.CANCELLED)
+        self.assertEqual(
+            list(self.learner.attendances.values_list("session_id", flat=True)),
+            [self.taught.pk])
+
+    def test_calling_off_a_run_leaves_the_meetings_themselves(self):
+        """The Session rows are the plan, and the only answer to "why six?".
+
+        ⚠️ Same rule L5.6 states for the generator, reaching the manual path: a
+           meeting people attended is never deleted out from under them, and the
+           ones that never happened are the record of what was intended.
+        """
+        set_status(self.spring, Event.Status.CANCELLED)
+        self.assertEqual(self.spring.sessions.count(), 1 + len(self.ahead))
+
+    def test_calling_off_a_run_does_not_mark_anybody_as_withdrawn(self):
+        """🔴 "We stopped teaching it" is not "six people dropped out".
+
+        `cancel()` writes *withdrew* or *cancelled* from what **this person**
+        did. The foundation calling a course off is not something they did, and
+        the event's own status already says it once.
+        """
+        set_status(self.spring, Event.Status.CANCELLED)
+        self.learner.refresh_from_db()
+        self.assertEqual(self.learner.status, Participation.Status.REGISTERED)
+
+    def test_putting_a_called_off_run_back_on_rebuilds_the_register(self):
+        set_status(self.spring, Event.Status.CANCELLED)
+        set_status(self.spring, Event.Status.OPEN)
+        self.assertEqual(
+            list(self.learner.attendances.in_teaching_order()
+                 .values_list("session_id", flat=True)),
+            [self.taught.pk] + [meeting.pk for meeting in self.ahead])
+
+    def test_an_ordinary_status_change_leaves_the_register_alone(self):
+        # ⚠️ Only the two transitions in and out of cancelled do anything. A run
+        #    marked full must not lose everybody's remaining weeks.
+        set_status(self.spring, Event.Status.FULL)
+        self.assertEqual(self.learner.attendances.count(), 1 + len(self.ahead))
+
+    def test_the_attendance_rate_counts_only_the_meetings_that_happened(self):
+        """The number the clearing exists for.
+
+        Left in place, the three cancelled weeks would divide the rate for the
+        rest of time — and nothing on the page would say why a run that was
+        fully attended reads as a quarter.
+        """
+        set_status(self.spring, Event.Status.CANCELLED)
+        figures = ministry_report(
+            Event.objects.filter(pk=self.spring.pk))["figures"]
+        self.assertEqual(figures["session_marked"], 1)
+        self.assertEqual(figures["session_attended"], 1)
+        self.assertEqual(figures["session_attendance_rate"], 100)
+
+
 class SessionsThroughTheAdminTests(TestCase):
     """L5.2's two tables from the only door a person has to them today.
 
@@ -3153,16 +3638,19 @@ class SessionsThroughTheAdminTests(TestCase):
         self.user = get_user_model().objects.create_superuser(
             email="root@example.com", password="a-good-long-password")
         self.client.force_login(self.user)
-        self.spring = make_event(
+        self.spring = make_run(
             name="ESL spring term",
             start_time=NOW + DAY, end_time=NOW + 100 * DAY)
         self.seat = make_role(self.spring, "esl_seat",
                               nature=ParticipationRole.Nature.ATTENDING)
-        self.learner = Participation.objects.create(
-            contact=make_person("Wang"), event_role=self.seat)
+        # ⚠️ Meetings before signups, and the order matters since L5.3:
+        #    `add_session()` puts everybody already signed up onto the new
+        #    meeting's register, and these tests count the rows the admin makes.
         self.week_one = add_session(
             self.spring, start_time=NOW + 2 * DAY,
             end_time=NOW + 2 * DAY + 2 * HOUR)
+        self.learner = Participation.objects.create(
+            contact=make_person("Wang"), event_role=self.seat)
 
     def test_the_meetings_table_is_reachable_at_all(self):
         """⚠️ It was not, from 2026-09-05 to 2026-09-08.
@@ -3236,7 +3724,7 @@ class HoursReceivedTests(TestCase):
     """
 
     def setUp(self):
-        self.run = make_event(
+        self.run = make_run(
             name="Financial coaching, spring",
             start_time=NOW + DAY, end_time=NOW + 100 * DAY)
         self.seat = make_role(self.run, "coaching_seat",
@@ -3247,17 +3735,21 @@ class HoursReceivedTests(TestCase):
         #    without them these fixtures manufacture the exact state the consent
         #    gate exists to forbid, and every "attended" below is refused. It
         #    caught them the day the gate reached the register entrances.
+        # ⚠️ Meetings before signups, and the order matters since L5.3:
+        #    `add_session()` puts everybody already signed up onto the new
+        #    meeting's register, so scheduling first leaves the rows below
+        #    to the tests that are about them.
+        self.weeks = [
+            add_session(self.run, start_time=NOW + (2 + 7 * week) * DAY,
+                        end_time=NOW + (2 + 7 * week) * DAY + 2 * HOUR)
+            for week in range(4)
+        ]
         self.served = Participation.objects.create(
             contact=make_person("Zhou", birth_date=datetime.date(1980, 5, 5)),
             event_role=self.seat)
         self.coach = Participation.objects.create(
             contact=make_person("Coach", birth_date=datetime.date(1980, 5, 5)),
             event_role=self.job)
-        self.weeks = [
-            add_session(self.run, start_time=NOW + (2 + 7 * week) * DAY,
-                        end_time=NOW + (2 + 7 * week) * DAY + 2 * HOUR)
-            for week in range(4)
-        ]
 
     def attend(self, participation, session):
         row = add_attendance(participation, session,
@@ -3583,6 +4075,7 @@ class AudienceContainmentTests(TestCase):
             "ministry": event.ministry_id,
             "start_time": "2026-09-01T09:00", "end_time": "2026-09-01T12:00",
             "status": event.status,
+            "shape": Event.Shape.SINGLE,
             **ticks,
         }, instance=event, user=self.an_admin())
 
@@ -3755,6 +4248,7 @@ class AudienceContainmentTests(TestCase):
                 "ministry": event.ministry_id,
                 "start_time": "2026-09-01T09:00", "end_time": "2026-09-01T12:00",
                 "status": event.status,
+                "shape": Event.Shape.SINGLE,
                 "visible_to_all_staff": "on",
             }, instance=event, user=self.an_admin())
             with CaptureQueriesContext(connection) as captured:
@@ -3943,6 +4437,7 @@ class AudienceContainmentTests(TestCase):
                     "ministry": event.ministry_id,
                     "start_time": "2026-09-01T09:00",
                     "end_time": "2026-09-01T12:00", "status": event.status,
+                    "shape": Event.Shape.SINGLE,
                     **ticks,
                 }, instance=event, user=self.an_admin())
                 self.assertFalse(form.is_valid(), f"the form allowed {name}")
@@ -3973,6 +4468,7 @@ class AudienceContainmentTests(TestCase):
             "ministry": self.pantry.pk,
             "start_time": "2026-09-01T09:00", "end_time": "2026-09-01T12:00",
             "status": Event.Status.OPEN, "visible_to_outsiders": True,
+            "shape": Event.Shape.SINGLE,
         }, user=self.a_user())
         self.assertTrue(form.is_valid(), form.errors)
 
@@ -4281,6 +4777,7 @@ class AudienceThroughTheAdminTests(TestCase):
             "location": "", "description": "",
             "owner": self.owner.pk,
             "status": Event.Status.OPEN,
+            "shape": Event.Shape.SINGLE,
             "visible_to_ministries": [self.pantry.pk],
             "roles-TOTAL_FORMS": "1", "roles-INITIAL_FORMS": "0",
             "roles-MIN_NUM_FORMS": "0", "roles-MAX_NUM_FORMS": "1000",
@@ -4820,6 +5317,7 @@ class AudienceShapeTests(TestCase):
             "ministry": self.pantry.pk,
             "start_time": "2026-09-01T09:00", "end_time": "2026-09-01T12:00",
             "status": Event.Status.OPEN,
+            "shape": Event.Shape.SINGLE,
             **extra,
         }
 
@@ -5405,7 +5903,7 @@ class SessionCheckInTests(PageTestCase):
 
     def setUp(self):
         super().setUp()
-        self.spring = make_event(
+        self.spring = make_run(
             ministry=self.pantry, owner=self.zhang.contact,
             name="ESL spring term",
             start_time=NOW - 30 * DAY, end_time=NOW + 60 * DAY)
@@ -5699,6 +6197,7 @@ class MinistryAdminPageTests(PageTestCase):
             "name": "Sneaky", "ministry": self.tax.pk,
             "start_time": "2026-09-01T09:00", "end_time": "2026-09-01T12:00",
             "status": Event.Status.DRAFT, "visible_to_outsiders": True,
+            "shape": Event.Shape.SINGLE,
         })
         self.assertIn(response.status_code, (403, 200))
         self.assertFalse(Event.objects.filter(name="Sneaky").exists())
@@ -5715,6 +6214,7 @@ class MinistryAdminPageTests(PageTestCase):
             "name": "Saturday pantry", "ministry": self.pantry.pk,
             "start_time": "2026-09-01T09:00", "end_time": "2026-09-01T12:00",
             "status": Event.Status.OPEN,
+            "shape": Event.Shape.SINGLE,
         # ⚠️ L2.1 rule 1: the form refuses an audience nobody is in, so
         #    every well-formed POST carries one. Public, because that is
         #    what these events were before the field existed and none of
@@ -5763,6 +6263,7 @@ class MinistryAdminPageTests(PageTestCase):
                 "end_time": localtime(
                     self.event.end_time).strftime("%Y-%m-%dT%H:%M"),
                 "status": self.event.status,
+                "shape": Event.Shape.SINGLE,
             })
         self.assertEqual(response.status_code, 200)
         self.event.refresh_from_db()
@@ -5786,6 +6287,7 @@ class MinistryAdminPageTests(PageTestCase):
                 "end_time": localtime(
                     self.event.end_time).strftime("%Y-%m-%dT%H:%M"),
                 "status": self.event.status,
+                "shape": Event.Shape.SINGLE,
                 form.EVERYONE_FIELD: True,
             })
         self.assertEqual(response.status_code, 302)
@@ -5958,6 +6460,7 @@ class MinistryAdminPageTests(PageTestCase):
                 "end_time": localtime(
                     self.event.end_time).strftime("%Y-%m-%dT%H:%M"),
                 "status": self.event.status,
+                "shape": Event.Shape.SINGLE,
                 "visible_to_all_staff": True,
             }, follow=True)
         said = " ".join(m.message for m in response.context["messages"])
@@ -5983,6 +6486,7 @@ class MinistryAdminPageTests(PageTestCase):
             "name": "Pantry staff briefing", "ministry": self.pantry.pk,
             "start_time": "2026-09-01T09:00", "end_time": "2026-09-01T12:00",
             "status": Event.Status.OPEN,
+            "shape": Event.Shape.SINGLE,
             "visible_to_ministries": [self.pantry.pk],
         })
         self.assertEqual(response.status_code, 302)
@@ -6017,6 +6521,7 @@ class MinistryAdminPageTests(PageTestCase):
                 "start_time": moved.strftime("%Y-%m-%dT%H:%M"),
                 "end_time": (moved + 3 * HOUR).strftime("%Y-%m-%dT%H:%M"),
                 "status": self.event.status,
+                "shape": Event.Shape.SINGLE,
                 "visible_to_ministries": [self.pantry.pk, self.tax.pk],
             })
         self.assertEqual(response.status_code, 302)
@@ -7173,6 +7678,7 @@ class MergedEditAndRolesPageTests(PageTestCase):
             "ministry": self.pantry.pk,
             "start_time": "2026-09-01T09:00", "end_time": "2026-09-01T12:00",
             "status": Event.Status.OPEN, "visible_to_outsiders": True,
+            "shape": Event.Shape.SINGLE,
         })
         created = Event.objects.get(name="Soup run")
         self.assertRedirects(
@@ -7537,6 +8043,7 @@ class EventUpdatePageTests(PageTestCase):
             "end_time": self.widget_value(self.event.end_time),
             "location": self.event.location,
             "status": self.event.status,
+            "shape": Event.Shape.SINGLE,
             "description": self.event.description,
         # ⚠️ L2.1 rule 1: the form refuses an audience nobody is in, so
         #    every well-formed POST carries one. Public, because that is
@@ -8271,6 +8778,37 @@ class SeedDemoTests(TestCase):
         with self.subTest("a role nobody signed up for — R4 answers 3, not 2"):
             self.assertTrue(
                 EventRole.objects.filter(participations__isnull=True).exists())
+
+        with self.subTest("a course — L5.3, and half of it already taught"):
+            # ⚠️ Half over, deliberately. Every screen the shape touches only
+            #    has something to show on a run in progress: the per-meeting
+            #    attendance rate, an assistant's hours one evening at a time,
+            #    and decision 18's late joiner.
+            course = Event.objects.programs().get(name="ESL spring term")
+            self.assertEqual(course.sessions.count(), 12)
+            self.assertTrue(course.sessions.filter(
+                end_time__lte=local_now()).exists())
+            self.assertTrue(course.sessions.filter(
+                end_time__gt=local_now()).exists())
+
+        with self.subTest("two learners whose registers are different lengths"):
+            # 🔴 Decision 18 on one screen: both signed up once, and the
+            #    meetings before somebody joined do not exist for them. If these
+            #    two ever match, the seed has stopped demonstrating it.
+            lengths = sorted(
+                signup.attendances.count()
+                for signup in Participation.objects.filter(
+                    event_role__event__name="ESL spring term",
+                    event_role__role__nature=ParticipationRole.Nature.ATTENDING)
+            )
+            self.assertEqual(len(lengths), 2)
+            self.assertLess(lengths[0], lengths[1])
+
+        with self.subTest("hours given a meeting at a time — decision 20"):
+            self.assertTrue(
+                SessionAttendance.objects.filter(
+                    session__event__name="ESL spring term",
+                    hours__isnull=False).exists())
 
         with self.subTest("somebody with no email and no phone — P6's third group"):
             self.assertTrue(
@@ -10883,6 +11421,7 @@ class EventImageUploadTests(PageTestCase):
                 "ministry": self.pantry.pk,
                 "start_time": "2026-09-01T09:00", "end_time": "2026-09-01T12:00",
                 "status": Event.Status.OPEN,
+                "shape": Event.Shape.SINGLE,
                 # ⚠️ L2.1 rule 1 — see EventUpdatePageTests.payload().
                 "visible_to_outsiders": True,
             },
@@ -11106,6 +11645,7 @@ class EventImageUploadTests(PageTestCase):
             "ministry": self.pantry.pk,
             "start_time": "2026-09-01T09:00", "end_time": "2026-09-01T12:00",
             "status": Event.Status.OPEN,
+            "shape": Event.Shape.SINGLE,
             # ⚠️ L2.1 rule 1 — see EventUpdatePageTests.payload().
             "visible_to_outsiders": True,
         }, user=self.zhang)

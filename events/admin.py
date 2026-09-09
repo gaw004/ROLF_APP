@@ -9,7 +9,7 @@ from django.contrib import admin
 from django.db.models import Count
 from simple_history.admin import SimpleHistoryAdmin
 
-from .forms import AudienceAdminForm
+from .forms import AudienceAdminForm, SessionForm
 from org.audience import Audience
 
 from .models import (
@@ -50,6 +50,37 @@ class EventRoleInline(admin.TabularInline):
     show_change_link = True
 
 
+class ShapeFilter(admin.SimpleListFilter):
+    """Courses / one-off occasions. One QuerySet call per branch, as above.
+
+    ⚠️ A `SimpleListFilter` rather than `list_filter = ["shape"]`, and the
+       difference is not cosmetic: Django builds the plain version from the
+       field's own choices and applies `filter(shape__exact=…)`, so it never
+       reaches `EventQuerySet` at all. Here the two branches call the two
+       predicates, which is what keeps a single definition of each half — and
+       what gives them a reader from the day they land, months before
+       `/programs/` (L5.8) becomes the second one.
+
+    ⚠️ Cleaner than `UnderstaffedFilter` above in one respect worth noting: both
+       branches have a predicate of their own, because the two are a partition.
+       That one has to spell its "no" side as an exclusion.
+    """
+
+    title = "Kind of event"
+    parameter_name = "shape"
+
+    def lookups(self, request, model_admin):
+        return [("program", "Courses and programs"),
+                ("single", "One-off occasions")]
+
+    def queryset(self, request, queryset):
+        if self.value() == "program":
+            return queryset.programs()
+        if self.value() == "single":
+            return queryset.single_occasions()
+        return queryset
+
+
 @admin.register(Event)
 class EventAdmin(SimpleHistoryAdmin):
     """SimpleHistoryAdmin: what the time and place used to be, and who moved them.
@@ -67,9 +98,10 @@ class EventAdmin(SimpleHistoryAdmin):
     # them from this changelist.
     form = AudienceAdminForm
     list_display = [
-        "name", "ministry", "status", "start_time", "end_time", "duration",
+        "name", "ministry", "shape", "status", "start_time", "end_time",
+        "duration",
     ]
-    list_filter = ["status", "ministry", "visible_to_outsiders"]
+    list_filter = ["status", ShapeFilter, "ministry", "visible_to_outsiders"]
     search_fields = ["name", "location"]
     date_hierarchy = "start_time"
     autocomplete_fields = ["ministry", "owner"]
@@ -198,6 +230,12 @@ class SessionAdmin(SimpleHistoryAdmin):
     so who did it is part of the record.
     """
 
+    # ⚠️ The form is not decoration: it is what makes adding a meeting here
+    #    reach `services.open_registers_for()`, so somebody who signed up in
+    #    week two lands on the register of a meeting added in week ten. The
+    #    alternative hook, `save_model`, is one of the four hooks
+    #    AdminHasNoLogicGuardTests refuses — see the form's own docstring.
+    form = SessionForm
     list_display = ["event", "start_time", "end_time", "source"]
     # ⚠️ RelatedOnlyFieldListFilter, not a bare "event": the default loads every
     #    row of the related table into the dropdown on every page view, so a

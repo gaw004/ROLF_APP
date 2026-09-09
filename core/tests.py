@@ -743,6 +743,60 @@ class HoursWriteGuardTests(TestCase):
         )
 
 
+class RegisterDeleteGuardTests(TestCase):
+    """Lint-as-test: a register row is deleted in one function, and only there.
+
+    ⭐ The register is where a course keeps everything it knows: who came, the
+       hours somebody gave that evening, and the meetings D43 reads to work out
+       what they were given. Deleting a row of it is deleting a fact, and there
+       is exactly one case where that is right — a meeting that has not happened
+       yet, for somebody who will not be at it. `close_future_register()` holds
+       both halves of that condition (the clock **and** the row still being
+       untouched), and it has two callers already: one person withdrawing, and a
+       whole run being called off.
+
+    🔴 This project has paid for the second spelling of a delete once. Removing
+       a role took an entire term's register with it, because the protection
+       around it read `Participation.hours` while a course keeps its hours on
+       these rows — fixed 2026-09-08, and the fix was to make the check see the
+       other table rather than to add a second delete. The sibling guard
+       06-roadmap L5.6 names for `_drop_generated_after()` is this same rule one
+       level up, on the meetings themselves.
+
+    ⚠️ The signal is a function body mentioning both the reverse accessor and a
+       delete, which is deliberately broader than "the exact queryset below".
+       A cascade set up elsewhere, or a bulk delete written from the other
+       direction, is the same loss — and this is a function-body scan, so a
+       docstring discussing either one does not trip it (our_functions strips
+       prose, the lesson the roadmap records about a guard satisfied by a
+       comment).
+    """
+
+    #: Both have to be present in one function body for it to count.
+    TOUCHES = "attendances"
+    DELETES = ".delete("
+
+    #: The one place, and its reason is in its own docstring.
+    ALLOWED = {"close_future_register"}
+
+    def test_register_rows_are_deleted_in_one_place(self):
+        offenders = [
+            where
+            for where, name, code in our_functions()
+            if name not in self.ALLOWED
+            and self.TOUCHES in code
+            and self.DELETES in code
+        ]
+        self.assertEqual(
+            offenders,
+            [],
+            "A register row is a record of what happened — who came, what they "
+            "gave, what they were given. events.services.close_future_register()"
+            " is the one place deleting one is right, and it checks two things "
+            "before it does:\n" + "\n".join(offenders),
+        )
+
+
 class LocalDayInSqlGuardTests(TestCase):
     """Lint-as-test: a day taken in SQL is taken in the foundation's timezone.
 

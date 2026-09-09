@@ -40,11 +40,14 @@ from events.models import (
     ParticipationRole,
 )
 from events.services import (
+    add_attendance,
+    add_session,
     check_in,
     check_out,
     mark_absent,
     inherit_audience,
     record_hours,
+    record_session_hours,
     set_audience,
     set_served_as,
     sign_up,
@@ -716,6 +719,68 @@ class Command(BaseCommand):
             # numbers, so that the report reads "3 signed up" beside "People
             # served: 2". The missing one is Ada, who is one of ours.
             self.joins(self.silent, seats)
+
+        # 7. A course — L5.3. **One** event with twelve meetings under it, not
+        #    twelve events, and signing up once covers all of them.
+        #
+        # ⚠️ The demo needs one, and needs it to be half over. Every screen the
+        #    shape touches only has something to show on a run in progress: the
+        #    per-meeting attendance rate divides by the meetings that have
+        #    happened, the hours an assistant gave are one number per evening,
+        #    and decision 18 is only visible if somebody joined after it began.
+        #    Event 6 above is the one-evening class; this is the term.
+        #
+        # ⚠️ Matched on the name alone, and no date goes anywhere near the match
+        #    key — see the note on the accounts above. A key built from
+        #    `now - N days` matches nothing tomorrow, and re-seeding would build
+        #    a second term beside the first.
+        spring, made = Event.objects.get_or_create(
+            name="ESL spring term",
+            defaults={
+                "ministry": self.pantry,
+                "shape": Event.Shape.PROGRAM,
+                "start_time": now - 35 * DAY, "end_time": now + 44 * DAY,
+                "location": "Room 1A", "owner": self.pantry_admin.contact,
+                "status": Event.Status.OPEN,
+                "visible_to_outsiders": True,
+                "visible_to_all_staff": True,
+            },
+        )
+        if made:
+            meetings = [
+                add_session(
+                    spring,
+                    start_time=now + (week * 7 - 35) * DAY,
+                    end_time=now + (week * 7 - 35) * DAY + 2 * HOUR)
+                for week in range(12)
+            ]
+            taught = [one for one in meetings if one.end_time <= now]
+            seats = self.role(spring, self.esl_seat, 12)
+            assisting = self.role(spring, self.interpreting, 2)
+
+            # ⭐ Two learners, and the pair is the demonstration. Both signed up
+            #    once; the register underneath them is a different length,
+            #    because the meetings before somebody joined **do not exist**
+            #    for them (decision 18). Nothing subtracts anything — the rows
+            #    are simply not there, and their attendance rates divide by
+            #    different numbers with no column anywhere saying "joined late".
+            from_the_start = self.joins(self.unpaid_staff, seats)
+            for meeting in taught:
+                add_attendance(from_the_start, meeting,
+                               status=Participation.Status.ATTENDED)
+            # Signing up today, five weeks in. sign_up() opens the register from
+            # here on by itself, which is the whole of the mechanism.
+            self.joins(self.adult, seats)
+
+            # An assistant, so the demo has both directions of D43 on one
+            # event: he **gives** two hours an evening (decision 20 — one number
+            # per meeting, not one for the term), and the learners beside him
+            # are **given** the length of the meetings they attended. The two
+            # are never added together, and the report draws them apart.
+            assistant = self.joins(self.intern, assisting)
+            for meeting in taught[:3]:
+                record_session_hours(
+                    add_attendance(assistant, meeting), Decimal("2.00"))
 
         self.filler_events(now)
 

@@ -1163,6 +1163,21 @@ def mark_absent(participation):
             "checked_in_at": "This signup was checked in, so it cannot be marked "
                              "as a no-show.",
         })
+    # 🔴 On a run, "did they come" is not a question this row answers, and the
+    #    two refusals above cannot see that: a term's evidence is all on the
+    #    register, so both columns here are legitimately empty and the row went
+    #    to no-show even for somebody the register shows at every meeting.
+    #    One click, twelve weeks of attendance contradicted, nothing raised.
+    #
+    # ⚠️ Refused rather than derived. "He came to nine of twelve" has no single
+    #    answer at this level, and inventing one (any? most? all?) would put a
+    #    number nobody chose into the place a person looks for a fact.
+    if participation.event_role.event.sessions.exists():
+        raise TurnedUp({
+            "status": "This is a run with its own register, so whether somebody "
+                      "came is recorded meeting by meeting. Mark the absence on "
+                      "the meeting they missed.",
+        })
     participation.status = Participation.Status.ABSENT
     participation.save(update_fields=["status", "updated_at"])
     return participation
@@ -1599,6 +1614,12 @@ def ministry_report(events):
         "minors_without_consent": minors_without_consent,
         "people_served": _people_served(events, parts),
         **absence,
+        # ⚠️ Beside the event-level rate, never folded into it. They count two
+        #    different things over two different populations — signups at
+        #    occasions, and meetings of runs — and one number over both would be
+        #    a quantity with no definition, the same objection D36 raises about
+        #    the two hour ledgers.
+        **_session_attendance(events),
     }
     return {"figures": figures, "charts": _report_charts(events, parts=parts, helped=helped)}
 
@@ -1694,6 +1715,17 @@ def _absence(events, parts):
        careless — the same reason `fully_staffed` excludes events that opened no
        numbered role.
     """
+    # 🔴 Runs are taken out **explicitly**, and saying so is the whole point.
+    #    They were already absent from this figure, silently: nothing ever moves
+    #    a run's signup off `registered` (its evidence is on the register), so
+    #    every course sat permanently in `still_registered` and never reached
+    #    the denominator — while the caption underneath went on reporting the
+    #    ministry as not having gone through its lists. Their attendance is
+    #    counted below, meeting by meeting, where it can be counted honestly.
+    runs = set(
+        Event.objects.filter(pk__in=with_signups_all(parts), sessions__isnull=False)
+        .values_list("pk", flat=True))
+    parts = parts.exclude(event_role__event_id__in=runs)
     with_signups = set(parts.values_list("event_role__event_id", flat=True))
     still_registered = set(
         parts.filter(status=Participation.Status.REGISTERED)
@@ -1713,6 +1745,44 @@ def _absence(events, parts):
         # no idea how much of the period it speaks for.
         "marked_up_events": len(marked_up),
         "events_with_signups": len(with_signups),
+        # ⚠️ Named so the page can say "and N runs are counted separately"
+        #    rather than leaving them out of both the number and the sentence.
+        "runs_counted_separately": len(runs),
+    }
+
+
+def with_signups_all(parts):
+    """Every event `parts` touches, before any narrowing this module does."""
+    return parts.values("event_role__event_id")
+
+
+def _session_attendance(events):
+    """How often people came to the meetings they were on the register for.
+
+    ⭐ The figure a run can actually answer, and the one the event-level absence
+       rate cannot: a course's signup never says whether anybody came, because
+       that is recorded meeting by meeting (decision 19).
+
+    ⚠️ The denominator is **the rows that exist**, which is decision 18 doing
+       its work: somebody who joined in week five has eight rows, not twelve, so
+       nothing has to subtract the four weeks that never happened to them. A
+       denominator of "meetings × people" would invent four absences for him.
+
+    ⚠️ Rows still at `registered` are left out of both halves, exactly as the
+       event-level figure leaves out events nobody marked up: a meeting that has
+       not happened yet is not an attendance and not an absence, and counting it
+       as either is the dishonesty D27 spends a section on.
+    """
+    rows = SessionAttendance.objects.filter(session__event__in=events)
+    counted = rows.exclude(status=Participation.Status.REGISTERED).aggregate(
+        marked=Count("pk"),
+        attended=Count("pk", filter=Q(status=Participation.Status.ATTENDED)),
+    )
+    return {
+        "session_marked": counted["marked"],
+        "session_attended": counted["attended"],
+        "session_attendance_rate": _percent(
+            counted["attended"], counted["marked"]),
     }
 
 

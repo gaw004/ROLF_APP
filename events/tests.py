@@ -3019,6 +3019,115 @@ class EventWhenLineTests(TestCase):
         self.assertIn("3 sessions", body)
 
 
+class SessionAbsenceTests(TestCase):
+    """Whether somebody came is recorded meeting by meeting on a run.
+
+    ⭐ Two things were wrong at once and both were silent. A run's signup could
+       be marked no-show even for somebody the register shows at every meeting —
+       the two refusals on mark_absent() read columns that are legitimately
+       empty on a run. And no run ever reached the absence rate's denominator,
+       because nothing moves its signup off `registered` — while the caption
+       under that rate went on reporting the ministry as not having gone through
+       its lists.
+    """
+
+    def setUp(self):
+        self.spring = make_event(
+            name="ESL spring term",
+            start_time=NOW - 30 * DAY, end_time=NOW + 60 * DAY)
+        self.seat = make_role(self.spring, "esl_seat",
+                              nature=ParticipationRole.Nature.ATTENDING)
+        self.learner = Participation.objects.create(
+            contact=make_person("Wang", birth_date=datetime.date(1980, 5, 5)),
+            event_role=self.seat)
+        self.weeks = [
+            add_session(self.spring, start_time=NOW - (20 - 7 * week) * DAY,
+                        end_time=NOW - (20 - 7 * week) * DAY + 2 * HOUR)
+            for week in range(3)
+        ]
+
+    def report(self):
+        return ministry_report(Event.objects.filter(pk=self.spring.pk))["figures"]
+
+    def test_a_whole_run_cannot_be_marked_as_a_no_show(self):
+        add_attendance(self.learner, self.weeks[0],
+                       status=Participation.Status.ATTENDED)
+        with self.assertRaises(TurnedUp) as caught:
+            mark_absent(self.learner)
+        self.assertIn("status", caught.exception.message_dict)
+        self.learner.refresh_from_db()
+        self.assertEqual(self.learner.status, Participation.Status.REGISTERED)
+
+    def test_a_single_occasion_is_still_marked_up_the_old_way(self):
+        # ⚠️ The half that must not move: an occasion has no register, so its
+        #    signup is the only place the fact can live.
+        one_off = make_event(ministry=self.spring.ministry, name="Saturday")
+        lifting = make_role(one_off, "lifting")
+        signup = Participation.objects.create(
+            contact=make_person("Zhao", birth_date=datetime.date(1980, 5, 5)),
+            event_role=lifting)
+        mark_absent(signup)
+        signup.refresh_from_db()
+        self.assertEqual(signup.status, Participation.Status.ABSENT)
+
+    def test_a_missed_meeting_is_recorded_on_that_meeting(self):
+        add_attendance(self.learner, self.weeks[0],
+                       status=Participation.Status.ABSENT)
+        self.assertEqual(
+            self.learner.attendances.get(session=self.weeks[0]).status,
+            Participation.Status.ABSENT)
+
+    def test_the_run_is_counted_separately_and_the_page_says_so(self):
+        """🔴 It was already out of the denominator — silently.
+
+        Which is worse than being in it wrongly: the number was right and the
+        sentence under it was not, and nothing anywhere said a course had been
+        left out of the reckoning.
+        """
+        figures = self.report()
+        self.assertEqual(figures["runs_counted_separately"], 1)
+        self.assertEqual(figures["events_with_signups"], 0)
+
+    def test_the_rate_is_over_the_meetings_they_were_on_the_register_for(self):
+        add_attendance(self.learner, self.weeks[0],
+                       status=Participation.Status.ATTENDED)
+        add_attendance(self.learner, self.weeks[1],
+                       status=Participation.Status.ATTENDED)
+        add_attendance(self.learner, self.weeks[2],
+                       status=Participation.Status.ABSENT)
+        figures = self.report()
+        self.assertEqual(figures["session_attended"], 2)
+        self.assertEqual(figures["session_marked"], 3)
+        # ⚠️ 66, not 67: _percent() truncates, the same as every other rate on
+        #    this page. Asserted rather than rounded here so the two cannot
+        #    disagree about what "two out of three" prints.
+        self.assertEqual(figures["session_attendance_rate"], 66)
+
+    def test_joining_late_is_not_counted_as_absences(self):
+        """Decision 18, in the denominator.
+
+        Somebody who joins for the last meeting has one row, not three — so his
+        rate is over the one meeting that happened to him, and nothing anywhere
+        has to subtract the two that did not.
+        """
+        latecomer = Participation.objects.create(
+            contact=make_person("Late", birth_date=datetime.date(1980, 5, 5)),
+            event_role=self.seat)
+        add_attendance(latecomer, self.weeks[2],
+                       status=Participation.Status.ATTENDED)
+        figures = self.report()
+        self.assertEqual(figures["session_marked"], 1)
+        self.assertEqual(figures["session_attendance_rate"], 100)
+
+    def test_a_meeting_nobody_has_marked_up_counts_as_neither(self):
+        # ⚠️ Same rule the event-level figure follows: a meeting that has not
+        #    happened yet is not an attendance and not an absence.
+        add_attendance(self.learner, self.weeks[0])
+        figures = self.report()
+        self.assertEqual(figures["session_marked"], 0)
+        self.assertIsNone(figures["session_attendance_rate"])
+
+
 class SessionsThroughTheAdminTests(TestCase):
     """L5.2's two tables from the only door a person has to them today.
 

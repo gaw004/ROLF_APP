@@ -1873,12 +1873,31 @@ issubset  /  <=  /  >=   出现在受众字段附近 → 只许在 events/models
 | # | 问题 | 定案 |
 |---|---|---|
 | 22 | Programs 出现在哪 | 自己的列表页 `/programs/`，**不进** `/events/` |
-| 23 | 日程 | Programs 有自己的 schedule，画**每一讲**，不画那条 111 天的横条；站点日程 `/events/schedule/` 不含 Programs |
+| 23 | 日程 | Programs 有自己的 schedule，画**每一讲**，不画那条 111 天的横条。⚠️ 后半句「站点日程不含 Programs」**2026-09-08 作废** —— 见下 |
 | 24 | recurring events | 不需要任何额外代码 —— 它生成的是 N 个各自独立的 `single` 活动，天然就在 `/events/` 里 |
 | 25 | 「挑哪几场」 | 不是第四种东西，是 Programs 下的副开关（决定 17），和「报一次管全部」同在 `/programs/` |
 | 26 | 我报名的 programs | 单开 `/me/programs/`，且**从 `/me/participations/` 里拿走** —— 各管各的，`/me/` 上两个入口 |
 | 27 | Program 的详情页 | **复用 `/events/<pk>/`**，按 `shape` 换一块（讲次表走独立 partial）。列表页各开各的，详情页只有一个 |
 | 28 | 拼写 | `program`（美式）。原文的 `PROGRAMME = "programme"` 作废 |
+
+> ### 2026-09-08：决定 23 的后半句改了 —— 站点日程**按讲次**画 Programs
+>
+> 原文是「站点日程不含 Programs」，而排除需要 `Event.shape`（L5.3 还没做），
+> 于是它在落地之前就先被走查撞上了：一门跨三个月的课在两端之间的**每一列**
+> 都画一个占满全天的方块，包括一次聚会都没有的那些天。实测 8/29 那天 ——
+> 24 小时高，把其他活动全压在底下。不是一条长条，是一堵墙。
+>
+> 而「排除」本来就答错了问题：一门课的各讲**就是这个月要发生的事**，
+> 站点日程不画它们，等于让一个志愿者看不到自己周二晚上有课。
+> 所以改成：把活动摊成它实际占用的那些段（`schedule.occurrences`），
+> 单场是它自己，有讲次的是它的各讲。卡片带「Session N」。
+>
+> ⚠️ 判据是「**有没有讲次**」而不是 `shape`，且这不和
+> [L5.3](#l53-三档单选落在哪) 那条「不靠 `sessions.exists()` 判形状」冲突：
+> 那条说的是**分类**（一个还没排期的 Program 也是 Program），
+> 这里问的是**画什么**（有讲次就把它们画出来）。两个问题，两个判据。
+>
+> `/programs/schedule/` 仍然在 L5.8，届时复用同一段。
 
 ### 决定 27 是这次走查买来的，理由要写下来
 
@@ -2347,6 +2366,25 @@ def _drop_generated_after(series, after):
 ⚠️ `people_served` **不用改**：它数的是 distinct contact，一个人上了 12 讲仍然是 1。
 ⚠️ 满员率 **不用改**：它数角色和报名，和场次无关。
 
+> ### 2026-09-08：上面那张表**漏了两个读者**，而两个今天都在印 0
+>
+> 「工时」在两张表上之后，要改的不只是 `ministry_report` 的四个口径。走查跑出来
+> 两处已经在骗人的地方，都已随本轮修掉：
+>
+> | 漏掉的读者 | 症状 |
+> |---|---|
+> | `event_summary()`（R6 / R7） | 一门有五小时助教工时的课，活动报表印 **0**。⚠️ 而 [D38 第七节](decisions/D38-served-as-volunteer-or-work.md) 早就点名说它要和报表一起改 |
+> | `/me/` 的 Volunteer hours 卡 | 整学期做了 24 小时的助教，自己的主页上写 **0 小时** —— 那是他最会相信的一页 |
+>
+> ⚠️ 改法**不是** `Sum` 跨 join（会按点名行数把报名的工时翻倍），
+> 也**不是** `distinct=True`（那是对不同的**值**求和，两个 2.5 会折成一个）。
+> 两者都静默地错，方向相反，而第二个更糟因为它看起来像是修好了。
+> 落法是子查询 / 分开两次聚合。
+>
+> ⚠️ 还没做完的那半：`_top_participants()` 和 `_monthly_series()` 仍然只读一列。
+> 它们排序和分月用，不像上面两处那样印一个绝对数，但同一句话适用 ——
+> **「工时」这个词从此在两张表上**。
+
 ### 还要多一个数，而它不在上面那张表里
 
 [D43](decisions/D43-hours-given-and-hours-received.md)（2026-09-08，随 L5.2 一起定）：
@@ -2389,6 +2427,12 @@ def _drop_generated_after(series, after):
 | `/programs/schedule/` | Programs 的日程，画**每一讲**，不画那条 111 天的横条 |
 | `/me/programs/` | 我在上的课。⚠️ 同时要把 program 的报名**从 `/me/participations/` 里拿走**，并在 `/me/` 上挂第二个入口 |
 | ~~`/programs/<pk>/`~~ | ❌ 不新建视图。详情复用 `/events/<pk>/`，按 `shape` 换一块（讲次表走独立 partial，同 `_event_roles_panel.html` 那一级）。理由见决定 27 |
+
+> ### 2026-09-08：下面这三样**已经做了**，L5.8 剩下的是三张列表页
+>
+> 走查当天就落了地（详情页的讲次表、那行 When、以及那句摘要），
+> 因为第 2 条是一句会发到监护人手机上的假话，不适合排队等一个步骤。
+> 本节保留原文，是因为它记着这三样各自为什么不能省。
 
 ### 🔴 详情页那行 When 也要换，而决定 27 只说了「换一块」
 
@@ -2511,6 +2555,9 @@ recurring events：
 | `events/views.py` | 一二三 | `_visible_events()`、`_schedule()`、`_detail()`、`event_signup`、`event_registrations`、`event_attendance`、系列的三个视图 |
 | `events/urls.py` | 三 | 系列的三条路由 |
 | `org/permissions.py` | 三 | ⚠️ 原计划列在「不动」里，L5.2 推翻了 —— `FOUNDATION_ADMIN_PERMISSIONS` 加 `events.view_session` / `events.view_sessionattendance`，否则注册了也在 admin 首页上看不见 |
+| `events/tokens.py` | 三 | ⚠️ 同样原计划列在「不动」里（理由是「收窄的是发现，不是已经拥有的行」—— 那句话对受众成立，对讲次不成立）。码从按活动改成按讲次，取消 `WINDOW_BEFORE`，见 [D28](decisions/D28-qr-checkin.md) |
+| `events/schedule.py` | 三 | 新的 `Occurrence` / `occurrences()` / `meeting_summary()` / `when_line()` —— 日程按讲次画，详情页那行 When |
+| `dashboard/services.py` | 三 | L5.7 漏列的读者之一：`/me/` 的工时卡只读一列，一个整学期的助教在自己主页上看到 0 |
 | `events/admin.py` | 一二三 | `ParticipationRoleAdmin` 加 `nature`；`EventAdmin` 和 `EventRoleAdmin` 各加三个可见性字段；`Session` / `SessionAttendance` / `EventSeries` 注册。⚠️ `Session` 那一笔 L5.1 落地时漏了，L5.2 一起补 —— 在那之前那张表只有测试碰得到 |
 | `events/recurrence.py` | 三 | 新文件，纯函数 |
 | `events/migrations/0016_participationrole_nature.py` | 一 | 新 |
@@ -2540,7 +2587,10 @@ recurring events：
 | `core/management/commands/check_deployment.py` | 一 | L1.6：工种表的门槛从 2 提到 3 |
 | `events/migrations/0018_second_catch_all_role.py` | 一 | 新（L1.6），数据迁移 |
 
-⚠️ 不动的文件，写下来是因为它们看起来该动：
+⚠️ 不动的文件，写下来是因为它们看起来该动
+（⚠️ 这一段 2026-09-08 划掉了三行中的两行 —— `org/permissions.py` 和
+`events/tokens.py`，各自的理由见上表。留下来的那条判据本身没问题，
+错在它假设「本轮不碰这些东西」，而本轮碰了）：
 ~~`org/permissions.py`~~（受众不是授权，是可见性；授权仍然只有 MinistryRole 那一套）
 —— 🔴 **2026-09-08 划掉，这句话在 L5.2 上不成立**，理由和受众无关：
 把模型注册进 `admin.py` **不等于**它可达。持有零权限时 Django 会把模型整个从
@@ -2549,7 +2599,8 @@ admin 首页藏掉，于是两张新表对除超级用户外的每一个账号�
 所以 `FOUNDATION_ADMIN_PERMISSIONS` 加两行 `view_`（⚠️ **只给 view**：
 排讲次是「某个 ministry 的活动」上的动作，按 D20 的分层判据属于 ministry 那一层，
 它的门是 L5.8 的 Programs 页面）、
-`events/tokens.py` 与扫码那几个视图（收窄的是发现，不是已经拥有的行）、
+~~`events/tokens.py` 与扫码那几个视图~~（原理由：收窄的是发现，不是已经拥有的行
+—— 对受众成立，而讲次是另一件事，见上表）、
 `render.yaml`（决定 4 之后不需要第三条 cron，`RenderBlueprintGuardTests` 因此不用改）、
 `gallery/`（Memories 墙没有指向 `Event` 的外键，核对过，所以 L3 不会从那边漏出去）。
 

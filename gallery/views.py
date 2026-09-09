@@ -106,8 +106,39 @@ def wall(request):
         #    temporary (see config/settings/prod.py), so this block is the one
         #    place the full-size links live, and it is why the lightbox opens
         #    without a round trip.
+        #
+        # 🔴 `thumb` and `ar` ride along, and both are about the moment
+        #    **between** two photographs (2026-09-09). The window paints the
+        #    thumbnail — already on the page, already in the browser's cache —
+        #    while the large one is fetched and decoded off-screen. Without
+        #    them it goes on painting the *previous* photograph for the
+        #    150–400ms that fetch takes, which is what it did for a month:
+        #    every click showed the last picture you looked at, and then jumped.
+        #
+        #    ⚠️ The **same `urls` batch the strips use**, so this string is
+        #       character-for-character the one the browser already holds. A
+        #       fresh signature here would be a new cache key, the placeholder
+        #       would go to the network, and the instant swap — the entire
+        #       reason for carrying it — would be gone.
+        #
+        #    ⚠️ `ar` is what lets the CSS size the box before *either* image has
+        #       arrived. Sized by the pictures themselves, a 700px thumbnail
+        #       lays out at 700px and the 1600px original at the box's limit, so
+        #       the placeholder would visibly jump the moment it was replaced.
+        #       The working is in app.css, at `--ar`.
+        #
+        #    ⚠️ `item.aspect`, **not** `item.photo.aspect`. `WallPhoto` already
+        #       carries the ratio the layout is built from, and the strip band
+        #       draws with that same field (`--ar` in `_wall_strip.html`). Going
+        #       back to the model for it would be a second source for one
+        #       number: the two would agree today and have no reason to keep
+        #       agreeing, and a lightbox shaped differently from the tile it
+        #       was opened from is exactly the jump this change removes.
         "sequence": [
-            {"src": urls[item.photo.pk]["image"], "caption": item.photo.caption}
+            {"src": urls[item.photo.pk]["image"],
+             "thumb": urls[item.photo.pk]["thumb"],
+             "ar": round(item.aspect, 4),
+             "caption": item.photo.caption}
             for photos in strips for item in photos
         ],
     })

@@ -625,12 +625,17 @@ class BothNoticePagesTurnPagesTests(TestCase):
         html = self.client.get(url, {"page": page} if page else {}).content.decode()
         return re.findall(r">(Notice \d{3})<", html), html
 
-    def test_the_manage_page_stops_at_fifty(self):
+    def test_the_manage_page_stops_at_twenty(self):
+        """2026-09-09：四个列表统一 20（原来这一页是 50）。
+
+        ⚠️ 断言那个常量的**值**，不只是「翻页器画出来了」：这一条要钉住的正是
+           那个数字本身，而「超过一页就分页」那件事任何一个数都成立。
+        """
         from notices.views import MANAGED_NOTICES_PER_PAGE
-        self.assertEqual(MANAGED_NOTICES_PER_PAGE, 50)
-        self.make_many(51)
+        self.assertEqual(MANAGED_NOTICES_PER_PAGE, 20)
+        self.make_many(21)
         rows, html = self.rows_on("/notices/manage/")
-        self.assertEqual(len(rows), 50)
+        self.assertEqual(len(rows), 20)
         self.assertIn("Page 1 of 2", html)
 
     def test_the_board_stops_at_twenty(self):
@@ -648,16 +653,28 @@ class BothNoticePagesTurnPagesTests(TestCase):
     def test_no_row_is_shown_twice_or_lost_between_pages(self):
         """🔴 这一条是整组里最要紧的：**翻页不许说谎**。
 
-        51 条起止时刻一模一样的公告，两页拼起来必须正好是这 51 条 ——
+        51 条起止时刻一模一样的公告，**每一页拼起来**必须正好是这 51 条 ——
         不多一条、不少一条。排序末尾少了唯一列时这一条会红，而屏幕上只是
         「某一行好像见过两次」。
+
+        ⚠️ 走完所有页，页数由 `MANAGED_NOTICES_PER_PAGE` 算出来，不写死。
+           2026-09-09 每页从 50 改成 20 时，原来那版（只读第 1、2 页）当场变红 ——
+           它没有说谎，它只是把「翻完」写成了「翻两页」。那两个数字本来就
+           不该在这一条里出现：它问的是「拼起来对不对」，不是「一页装几行」。
         """
+        from notices.views import MANAGED_NOTICES_PER_PAGE
+
         made = {n.title for n in self.make_many(51)}
-        first, _ = self.rows_on("/notices/manage/")
-        second, _ = self.rows_on("/notices/manage/", page=2)
-        self.assertEqual(len(first) + len(second), 51)
-        self.assertEqual(set(first) | set(second), made)
-        self.assertEqual(set(first) & set(second), set(),
+        pages = -(-len(made) // MANAGED_NOTICES_PER_PAGE)   # 向上取整
+        seen = []
+        for page in range(1, pages + 1):
+            rows, _ = self.rows_on("/notices/manage/", page=page)
+            seen.append(rows)
+
+        flat = [title for rows in seen for title in rows]
+        self.assertEqual(len(flat), 51)
+        self.assertEqual(set(flat), made)
+        self.assertEqual(len(set(flat)), len(flat),
                          "有公告同时出现在两页上 —— 排序末尾没有唯一列")
 
     def test_the_manage_page_keeps_its_own_order_across_paging(self):

@@ -52,17 +52,26 @@ PAST_SHOWN = 20
 #:    「不可能很多」—— 没有它的那一版是**完全无上限**的。
 BOARD_PER_PAGE = 20
 
-#: How many rows on one page of the manage list (2026-09-03).
+#: How many rows on one page of the manage list (2026-09-03, 50 → 20 改于
+#: 2026-09-09).
 #:
-#: ⚠️ 50, matching `events.views.MANAGED_EVENTS_PER_PAGE` for the same reason the
-#:    two above match: it is the same kind of page, and this one has the same
-#:    reason to be longer than the reading list — it carries drafts, scheduled
-#:    ones and everything that has already come down.
+#: ⚠️ 20, still matching `events.views.MANAGED_EVENTS_PER_PAGE` — 那条「照抄活动
+#:    那边」的关系没变，变的是被照抄的那个数。2026-09-09 拍板四个列表统一 20：
+#:    「admin 的 event manage 和 notice manage 翻页都要 50 行才行，改成和 event
+#:    一样的条数」。
+#:
+#: ⚠️ 原来这里写的是「它和阅读列表一样有理由更长 —— 它装着草稿、定时的、
+#:    以及所有已经撤下来的」。那条理由**随这次决定作废**，不是留着当注脚：
+#:    留着的话，下一个人读到的是一段主张 50 的论证和一个写着 20 的赋值。
+#:
+#: ⚠️ 字面量而不是 `from events.views import ...`：`notices` 不能依赖 `events`
+#:    （D41 第四节，也是 `page_of` 当初搬去 `core/pagination.py` 的理由）。
+#:    两个数要一起改，靠的是这条注释和 revisions.md，不是 import。
 #:
 #: 🔴 The account this was missing for is the foundation tier: `_mine_to_manage()`
 #:    hands it `Notice.objects.all()` — every ministry, since the first day, past
 #:    ones included — on one unbounded page.
-MANAGED_NOTICES_PER_PAGE = 50
+MANAGED_NOTICES_PER_PAGE = 20
 
 #: The sentence both admin pages refuse with. ⚠️ Written once — two doors onto
 #: the same room that disagree about why it is locked is how a refusal starts

@@ -163,12 +163,31 @@ Memories —— 羽毛后面那条照片带（2026-08-06 新增，2026-08-07 按
 
       <figure class="wall-lightbox-figure">
         {% comment %}
-        ⚠️ `x-bind:key` 让 Alpine 在换图时重建这个 <img>，而不是改它的 src。
-           改 src 的话，新图到达之前旧图还挂在那里 —— 翻页看起来像卡了一拍。
+        🔴 **绑的是 `shown`，不是 `current.src`**（2026-09-09）。这两个不是一回事：
+           `current` 是「现在选中第几张」，`shown` 是「此刻真的贴在这个 img 上的
+           那个 URL」—— 先是缩略图，大图**离屏解码完**之后才换成大图。
+           三条规矩都在 app.js 的 `load()` 里，那里写着每一条挡的是什么。
+
+        🔴 **这里原来是 `x-bind:key="index"`，那一行从来没有生效过。**
+           它旁边的注释写着「让 Alpine 在换图时重建这个 <img>，而不是改它的 src；
+           改 src 的话，新图到达之前旧图还挂在那里」—— 那句话**完全正确**，
+           而它描述的是一件代码没有做的事：Alpine 的 `:key` 只被 `x-for` 读
+           （`x-bind` 的 handler 见到 `key` 就 `storeKeyForXFor` 然后 return），
+           这个 img 不在任何 `x-for` 里，于是那个 key 存下来没有任何人看。
+           元素从不重建，永远是改 src —— 也就是那句注释里写的那个坏结果。
+           表现：每次点开先显示上一张，几百毫秒后跳到对的那张。
+           ⚠️ 守卫在 `core.tests.AlpineKeysBelongToXForGuardTests`：
+              `:key` 只许出现在 `x-for` 上。一条注释拦不住它复发，它已经证明过了。
+
+        ⚠️ `--ar` 是**数据**（和带子上那个 `--ar` 同一个来路）：框的尺寸由它和视口
+           算出来，不由图片自己的像素算 —— 否则 700 的缩略图排在 700px、
+           1600 的大图排在框宽，换的那一下会看见照片突然变大。
+
         ⚠️ alt 用的是那行小字。照片本身没有描述可用，而「Youth Ministry · 2026」
            至少说出了它是什么；空 alt 在这里是错的，这张图就是内容。
         {% endcomment %}
-        <img x-bind:src="current.src" x-bind:alt="current.caption" x-bind:key="index">
+        <img x-bind:src="shown" x-bind:alt="current.caption"
+             x-bind:style="`--ar: ${current.ar || 1}`">
         <figcaption class="wall-lightbox-caption" x-text="current.caption"></figcaption>
       </figure>
 

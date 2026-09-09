@@ -10013,7 +10013,7 @@ class ManageListUndoTests(ManageListPage, PageTestCase):
 
 
 class ManageListPagingTests(ManageListPage, PageTestCase):
-    """这一页的翻页器（每页 50）—— 以及它那个 HTMX 目标。
+    """这一页的翻页器（每页 20，2026-09-09 前是 50）—— 以及它那个 HTMX 目标。
 
     ⚠️ 2026-09-03 翻页组件从写死 `#event-results` 改成了收一个 `target` 参数
        （公告那两页也要翻页，而它们没有这个 id）。**活动这边必须把它传回来**：
@@ -10797,11 +10797,18 @@ class PaginationTests(PageTestCase):
         #    under a filter that matched 26 answers a question nobody asked.
         self.assertEqual(response.context["total"], 26)
 
-    def test_the_management_list_holds_fifty(self):
-        self.make_many(55)
+    def test_the_management_list_holds_twenty_too(self):
+        """2026-09-09：管理列表从 50 改成 20，四个列表一个数。
+
+        ⚠️ 名字里的数字跟着改了。留着 `..._holds_fifty` 而断言 20 的话，
+           下一个人按名字找「哪一条钉住 50」会找到一条说 20 的测试。
+        """
+        from events.views import MANAGED_EVENTS_PER_PAGE
+        self.assertEqual(MANAGED_EVENTS_PER_PAGE, 20)
+        self.make_many(25)
         self.login(self.zhang)
         response = self.client.get(reverse("events:event_manage_list"))
-        self.assertEqual(len(response.context["events"]), 50)
+        self.assertEqual(len(response.context["events"]), 20)
 
     def test_no_event_is_repeated_or_skipped_across_pages(self):
         """⚠️ Ordering by `-start_time` alone is not a total order.
@@ -10840,11 +10847,16 @@ class PaginationTests(PageTestCase):
     def test_the_report_covers_the_filter_not_the_page(self):
         # ⭐ The invariant restated for pagination (D27). A figure that moved
         #    when you clicked Next would mean nothing at all.
+        #
+        # ⚠️ 56 行、每页 20，所以走到**最后一页**（第 3 页，16 行）—— 故意挑一个
+        #    装不满的页：这一条要对比的是「页上有几行」和「报表数的是几行」，
+        #    而一个正好装满的页会让 20 和 20 撞在一起，对比就消失了。
+        #    （2026-09-09 前每页 50，这里是第 2 页的 6 行，同一个用意。）
         self.make_many(55)
         self.login(self.zhang)
         response = self.client.get(
-            reverse("events:event_manage_list"), {"report": "1", "page": 2})
-        self.assertEqual(len(response.context["events"]), 6)
+            reverse("events:event_manage_list"), {"report": "1", "page": 3})
+        self.assertEqual(len(response.context["events"]), 16)
         self.assertEqual(response.context["report"]["figures"]["events"], 56)
 
 

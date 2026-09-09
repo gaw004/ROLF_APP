@@ -166,6 +166,15 @@
                data-start="{{ card.start_ms }}" data-end="{{ card.end_ms }}">
               <span class="schedule-card-name">{{ card.event.name }}</span>
               {% comment %}
+              「第几讲」。一门课在日程上是它的**各讲**，而十二个同名同色的方块
+              不告诉人哪一个是第七讲 —— 读者只能自己数。这一行说的就是那个数。
+              ⚠️ 单场活动没有这一行（`ordinal` 是 None），不是写「Session 1」：
+                 一场周六发放不是任何东西的第一讲。
+              {% endcomment %}
+              {% if card.ordinal %}
+                <span class="schedule-card-time">Session {{ card.ordinal }}</span>
+              {% endif %}
+              {% comment %}
               ⚠️ 跨夜的那一段在两列里各有一张卡，而两张写的都是**整场**活动的
                  起止。第二天那张写「12am – 1am」是错的：人是拿这行字安排时间的。
                  箭头说明它是从哪一边延过来的。

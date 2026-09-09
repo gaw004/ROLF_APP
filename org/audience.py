@@ -264,8 +264,17 @@ class Audience(models.Model):
     #: ⚠️ Never lands in the "…is not open to %s" slot the three above are
     #:    written for: that refusal names **one tick at a time** (see
     #:    events.models._refuse_too_wide), and an audience of everyone is the
-    #:    widest there is, so nothing can be too wide for it.
-    EVERYONE_IS = "everyone"
+    #:    widest there is, so nothing can be too wide for it. Nor does it reach
+    #:    audience_beyond()'s sentences, which name one group at a time too.
+    #:
+    #: ⚠️ Capitalised, unlike its three lowercase neighbours, and that is the
+    #:    point rather than an inconsistency: this is the **label on the tick**
+    #:    (org.forms.AudienceFormMixin offers a box called "Everyone"), and the
+    #:    whole reason the two flags collapse here is so the page reads back the
+    #:    word the person chose. Spelling it differently from the box would undo
+    #:    half of that. The other three have no box of their own to match — they
+    #:    are phrases about people, and they sit mid-sentence.
+    EVERYONE_IS = "Everyone"
 
     @staticmethod
     def ministry_staff_are(names):

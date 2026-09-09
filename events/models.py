@@ -405,6 +405,80 @@ def roles_left_behind(event, roles):
             yield field, reported[0].params["audience"], role.role.name
 
 
+def audience_beyond(*, event, role):
+    """Who can see this event but not this role, as phrases. Requirement 8.
+
+    ⭐ The reverse of refuse_wider_than_event() above, and the reason it exists
+       is that requirement 8 makes this state **normal**: one event published
+       once, recruiting inside and outside at the same time, each person seeing
+       only the roles that are open to them. That is intended — and it is also
+       what an oversight looks like, because the two are the same state. The
+       only thing that separates them is whether the person publishing meant it,
+       so the site's job is to say who it happened to and let them decide.
+
+    ⚠️ **Not** refuse_wider_than_event() with the arguments swapped, and that is
+       the trap worth writing down because the swap looks obviously right. On an
+       event open to all staff with a role open only to Tax Help, swapping
+       answers "everybody on the books" — while Tax Help's own staff can see the
+       role perfectly well. It would print a sentence that is simply untrue. The
+       comparisons are not symmetrical: `all_staff` sits above every ministry on
+       one side of the containment and is a plain boolean on the other, which is
+       exactly the asymmetry that function's docstring spends a paragraph on.
+
+    ⚠️ Phrases come from org.audience, the same three the refusals use. A fourth
+       spelling of "people with no current post" is how a page and a refusal
+       come to describe the same group differently.
+    """
+    words = []
+    if event.outsiders and not role.outsiders:
+        words.append(Audience.OUTSIDERS_ARE)
+    if event.all_staff and not role.all_staff:
+        # ⚠️ Minus whatever the role does cover. A role open to Tax Help is open
+        #    to those people, so "everybody on the books" would be false of them
+        #    — this is the half the naive swap gets wrong.
+        if role.ministries:
+            covered = list(
+                Ministry.objects.filter(pk__in=role.ministries).order_by("name")
+                .values_list("name", flat=True))
+            words.append(
+                f"{Audience.ALL_STAFF_ARE} except "
+                f"{Audience.ministry_staff_are(covered)}")
+        else:
+            words.append(Audience.ALL_STAFF_ARE)
+    elif not event.all_staff:
+        # Both sides name ministries, so the difference is the ones only the
+        # event names. (When the event covers all staff the branch above has
+        # already said everything there is to say about staff.)
+        beyond = event.ministries - role.ministries
+        if beyond:
+            names = list(
+                Ministry.objects.filter(pk__in=beyond).order_by("name")
+                .values_list("name", flat=True))
+            words.append(Audience.ministry_staff_are(names))
+    return words
+
+
+def roles_narrower_than_event(event, roles):
+    """Yield (role name, audience phrases) for every role not open to everybody
+    who can see the event.
+
+    ⚠️ The same walk as roles_left_behind() above and deliberately beside it:
+       same query hints, same Spec.of(), same phrases. What differs is the
+       direction and what it is for — that one refuses a save, this one reports
+       on one that succeeded.
+
+    ⚠️ Yields rather than returning a sentence, because the two callers word it
+       differently: a message shown once at publish time, and a line that sits
+       on the event page afterwards.
+    """
+    event_spec = Audience.Spec.of(event)
+    for role in roles.select_related("role").prefetch_related(
+            "visible_to_ministries"):
+        words = audience_beyond(event=event_spec, role=Audience.Spec.of(role))
+        if words:
+            yield role.role.name, words
+
+
 def refuse_bad_audience(*, row, spec):
     """Every rule that applies to `row`, for a caller with no form to run them.
 

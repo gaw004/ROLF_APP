@@ -30,6 +30,7 @@ from django.db.models import Prefetch
 from django.http import Http404, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
+from django.utils.text import get_text_list
 from django_ratelimit.decorators import ratelimit
 
 from core.pagination import page_holding, page_of
@@ -100,6 +101,7 @@ from .services import (
     resolve_recipients,
     signups_asked_about_serving,
     hours_recorded_against,
+    audience_gaps,
     signups_left_outside,
     set_served_as,
     set_status,
@@ -306,9 +308,13 @@ def _schedule(request, period, contact):
     #    而窗口可以翻到下个月 —— 再叠一道「今天起」只会把它自己的下界抄第二遍。
     # ⚠️ `for_audience()` 和左边那一列同一道门。少了它就是「列表里没有、
     #    日程上画着」—— 而那是同一份筛选画出来的两个答案。
+    # ⚠️ `prefetch_related("sessions")`：日程把一门课画成它的各讲（schedule.
+    #    occurrences），而那要读每一场的 sessions。少了它是一场一次查询，
+    #    在系统里最常打开的这一页上，且它不报错 —— 只是变慢。
     events = period.narrow(
         Event.objects.visible_to_participants()
-        .for_audience(contact).select_related("ministry"))
+        .for_audience(contact).select_related("ministry")
+        .prefetch_related("sessions"))
     events = events.filter(start_time__lt=end, end_time__gte=start).order_by("start_time")
     return {
         "schedule_columns": schedule.columns(events, days),
@@ -400,7 +406,9 @@ def _detail(request, pk):
        取数路径。分叉在这里的名字叫「草稿从侧边栏漏出去了」。
     """
     event = get_object_or_404(
-        Event.objects.select_related("ministry"), pk=pk)
+        Event.objects.select_related("ministry").prefetch_related("sessions"),
+        pk=pk)
+    when_headline, when_detail = schedule.when_line(event)
     contact = _my_contact(request)
     preview = event.status not in Event.VISIBLE_TO_PARTICIPANTS
     # L3 (2026-08-26): not for them is the same kind of answer as not published.
@@ -514,6 +522,14 @@ def _detail(request, pk):
             not roles and not may_view_records and event.roles.exists()),
         # 那句常驻文案的开关：这张表对他是全的，对别人不是。⚠️ 不查库。
         "sees_every_role": may_view_records,
+        # 「谁看得见这一场，却看不全它」。⚠️ 只在看全表的人那里算 —— 对一个
+        #    普通报名者这句话既无意义也无处置，而它要遍历角色的受众。
+        "audience_gaps": audience_gaps(event) if may_view_records else [],
+        # 「什么时候」。⚠️ 一门课的两列是**学期的两端**，照单场那样带时分印出来
+        #    说的是一句假话（读起来像一场开三个月的活动）。两个值：上面一行是
+        #    学期，下面一行是从讲次推出来的节奏。
+        "when_headline": when_headline,
+        "when_detail": when_detail,
         "mine": mine,
         # ⚠️ The property, not `status in OPEN_FOR_SIGNUP` (2026-08-19). It asks
         #    the clock as well, exactly as the `open_for_signup()` queryset
@@ -1149,10 +1165,38 @@ def event_update(request, pk):
             ))
         else:
             messages.success(request, "Event updated.")
+        _mention_audience_gaps(request, event)
         return redirect("events:event_detail", pk=event.pk)
 
     return render(request, "events/event_form.html",
                   _edit_page_context(event, form=form))
+
+
+def _mention_audience_gaps(request, event):
+    """Say who can see this event without seeing all of its roles.
+
+    Requirement 8 makes this state ordinary — one event, published once,
+    recruiting inside and outside at the same time — so this is **not** a
+    warning and must not read as one. It is also exactly what a mistyped
+    audience looks like, and the two are the same state: only the person
+    publishing knows which it is, and until now nothing told them there was
+    anything to know.
+
+    ⚠️ `messages.info`, not `warning`. The events this fires on are mostly
+       correct, and a scolding tone on a correct action is how people learn to
+       click past a message — which would cost the wrong half.
+
+    ⚠️ Wording, not logic. Which groups and which roles is
+       services.audience_gaps(); this turns the pairs into a sentence, and the
+       fact that it takes a request is why it lives here and not there.
+    """
+    for phrase, roles in audience_gaps(event):
+        named = get_text_list([f"“{name}”" for name in roles], "and")
+        messages.info(request, (
+            f"Note: {phrase} can see this event, but not {named}. "
+            "That is how one event recruits inside and outside at once — "
+            "check it is what you meant."
+        ))
 
 
 def _edit_page_context(event, *, form=None, role_form=None, user=None):
@@ -1198,6 +1242,10 @@ def event_roles(request, pk):
     if form.is_valid():
         form.save()
         messages.success(request, "Role added.")
+        # ⚠️ Here as well as on the event's own form, because a role is the
+        #    other half of the pair: the gap appears when either side moves, and
+        #    this is the side somebody is usually on when it appears.
+        _mention_audience_gaps(request, event)
         # ⭐ The plain-form path is the one that must always work: redirect, so a
         #    refresh cannot post twice. HTMX gets the list back instead — same
         #    write, same message, one fewer full page.

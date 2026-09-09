@@ -29,9 +29,10 @@ from core.timeutils import local_date_of, local_day, local_now
 from org.audience import Audience, on_the_books_exists, on_the_books_q
 from org.models import Assignment
 
-from . import tokens
+from . import schedule, tokens
 from .models import (
     NOT_COMING,
+    roles_narrower_than_event,
     refuse_bad_audience,
     Event,
     EventNotification,
@@ -2225,6 +2226,26 @@ def signups_left_outside(event):
     return len(holders - covered)
 
 
+def audience_gaps(event):
+    """Who can see this event without seeing all of it — one line per group.
+
+    Requirement 8's other half. Publishing once to recruit inside and outside at
+    the same time is the feature; the same state also arises from ticking the
+    wrong box, and nothing on either side of the screen could tell the two
+    apart. This is what the page says so the person publishing can.
+
+    Returns a list of (phrase, [role names]) — grouped by **who**, not by role,
+    because "outsiders cannot see Lifting or Driving" is one fact about one
+    group and reads as one sentence. Empty when every role is open to everybody
+    who can see the event, which is the ordinary case and prints nothing.
+    """
+    by_group = {}
+    for role_name, words in roles_narrower_than_event(event, event.roles.all()):
+        for phrase in words:
+            by_group.setdefault(phrase, []).append(role_name)
+    return [(phrase, names) for phrase, names in by_group.items()]
+
+
 def add_session(event, *, start_time, end_time, source=Source.MANUAL):
     """Put one meeting on a run. Returns the new Session.
 
@@ -2591,6 +2612,18 @@ def confirm_signup(participation, *, backend=None):
     ])
 
 
+def _when_sentence(event):
+    """One line saying when, for a message rather than a page.
+
+    The page shows the term and its rhythm on two lines (schedule.when_line);
+    a message has no second line, so they are joined by a comma. One helper so
+    an email and the page it is about cannot describe the same event
+    differently.
+    """
+    headline, detail = schedule.when_line(event)
+    return f"{headline}, {detail}" if detail else headline
+
+
 def default_message(event, reason):
     """The body offered on the preview page, editable before it goes.
 
@@ -2608,7 +2641,14 @@ def default_message(event, reason):
             EventNotification.Reason.CANCELLED: "This event has been cancelled.",
         }.get(reason, "This event has changed."),
         "",
-        f"Now: {event.start_time:%Y-%m-%d %H:%M} — {event.end_time:%H:%M}",
+        # 🔴 Through schedule.when_line(), not formatted here. On a run the two
+        #    columns are the ends of a term, and the old line printed the term's
+        #    first date beside its closing clock time — "2026-08-29 23:28 —
+        #    23:28", a sentence that is not true of anything. ⚠️ And this one
+        #    **leaves the database**: it is emailed and texted, to guardians
+        #    among others, which is why it is the first of the four places that
+        #    printed it to be fixed.
+        f"Now: {_when_sentence(event)}",
     ]
     if event.location:
         lines.append(f"Where: {event.location}")

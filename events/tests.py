@@ -82,6 +82,7 @@ from .services import (
     NoHoursHere,
     add_attendance,
     add_session,
+    audience_gaps,
     NotEligible,
     RoleFull,
     CHECKIN_CREDENTIAL_KEY,
@@ -2878,6 +2879,141 @@ class AttendancePrefillTests(TestCase):
         self.assertEqual(prefillable_hours(one_off), scheduled_hours(one_off))
 
 
+class SessionScheduleTests(TestCase):
+    """A run is drawn as its meetings, not as one block across the term.
+
+    ⭐ What it drew before: a twelve-week course filled **every** column between
+       its two dates, at full height, including the days it does not meet. Not a
+       long bar — a wall, with every other event behind it.
+    """
+
+    def setUp(self):
+        self.spring = make_event(
+            name="ESL spring term",
+            start_time=NOW + DAY, end_time=NOW + 100 * DAY)
+        self.first = add_session(
+            self.spring, start_time=NOW + 2 * DAY,
+            end_time=NOW + 2 * DAY + 2 * HOUR)
+        self.second = add_session(
+            self.spring, start_time=NOW + 9 * DAY,
+            end_time=NOW + 9 * DAY + 2 * HOUR)
+
+    def cards_on(self, offset):
+        day = local_date_of(NOW + offset * DAY)
+        return schedule.columns([self.spring], [day], now=NOW)[0].cards
+
+    def test_a_day_the_run_does_not_meet_draws_nothing(self):
+        # 🔴 The failure this fixes: day 20 is inside the term and has no
+        #    meeting, and it used to carry a full-height block.
+        self.assertEqual(self.cards_on(20), [])
+
+    def test_a_meeting_is_drawn_at_its_own_length(self):
+        card = self.cards_on(2)[0]
+        self.assertEqual(card.height, schedule._px(2 * HOUR))
+
+    def test_each_meeting_is_numbered_within_its_run(self):
+        self.assertEqual(self.cards_on(2)[0].ordinal, 1)
+        self.assertEqual(self.cards_on(9)[0].ordinal, 2)
+
+    def test_a_single_occasion_is_drawn_exactly_as_before(self):
+        # ⚠️ The half that must not move. Single occasions are the whole system
+        #    today and have no meetings, so nothing about this reaches them.
+        one_off = make_event(ministry=self.spring.ministry, name="Saturday",
+                             start_time=NOW + 3 * DAY,
+                             end_time=NOW + 3 * DAY + 3 * HOUR)
+        day = local_date_of(NOW + 3 * DAY)
+        card = schedule.columns([one_off], [day], now=NOW)[0].cards[0]
+        self.assertIsNone(card.ordinal)
+        self.assertEqual(card.height, schedule._px(3 * HOUR))
+
+    def test_every_meeting_of_one_run_keeps_the_same_colour(self):
+        # Twelve colours would stop them reading as one course.
+        self.assertEqual(self.cards_on(2)[0].colour, self.cards_on(9)[0].colour)
+
+
+class MeetingSummaryTests(TestCase):
+    """"Tuesdays, 7pm – 9pm · 12 sessions" — and what it says when that is false."""
+
+    def setUp(self):
+        self.spring = make_event(
+            name="ESL spring term",
+            start_time=NOW + DAY, end_time=NOW + 100 * DAY)
+
+    def weekly(self, count, offset=2):
+        return [add_session(self.spring,
+                            start_time=NOW + (offset + 7 * week) * DAY,
+                            end_time=NOW + (offset + 7 * week) * DAY + 2 * HOUR)
+                for week in range(count)]
+
+    def test_a_steady_weekly_run_is_stated_as_one(self):
+        summary = schedule.meeting_summary(self.weekly(4))
+        weekday = localtime(NOW + 2 * DAY).strftime("%A")
+        self.assertIn(f"{weekday}s", summary)
+        self.assertIn("4 sessions", summary)
+
+    def test_a_broken_pattern_says_only_what_is_true(self):
+        """🔴 The half that keeps this honest.
+
+        One meeting moved to another weekday and the run is no longer
+        "Tuesdays". Saying it anyway is a tidy sentence that sends somebody to
+        the wrong room on the wrong evening.
+        """
+        meetings = self.weekly(4)
+        moved = meetings[2]
+        moved.start_time += 2 * DAY
+        moved.end_time += 2 * DAY
+        moved.save()
+        summary = schedule.meeting_summary(
+            list(self.spring.sessions.all()))
+        self.assertEqual(summary, "4 sessions")
+
+    def test_two_meetings_are_not_yet_a_pattern(self):
+        # Two is a coincidence; three is a habit.
+        self.assertEqual(schedule.meeting_summary(self.weekly(2)), "2 sessions")
+
+    def test_one_meeting_says_when_it_is(self):
+        summary = schedule.meeting_summary(self.weekly(1))
+        self.assertIn("1 session", summary)
+
+
+class EventWhenLineTests(TestCase):
+    """The line at the top of the event page, and the sentence in a message."""
+
+    def test_a_run_shows_its_term_as_dates_and_its_rhythm_underneath(self):
+        run = make_event(name="ESL spring term",
+                         start_time=NOW + DAY, end_time=NOW + 100 * DAY)
+        for week in range(3):
+            add_session(run, start_time=NOW + (2 + 7 * week) * DAY,
+                        end_time=NOW + (2 + 7 * week) * DAY + 2 * HOUR)
+        headline, detail = schedule.when_line(run)
+        # 🔴 No clock time in the headline: those two columns are the ends of a
+        #    term, and "Aug 9, 4:05 p.m. — Nov 7, 3:05 p.m." reads as one
+        #    sitting that lasts three months.
+        self.assertNotIn("p.m.", headline)
+        self.assertNotIn("a.m.", headline)
+        self.assertIn("3 sessions", detail)
+
+    def test_a_single_occasion_keeps_its_familiar_line(self):
+        one_off = make_event(name="Saturday distribution")
+        headline, detail = schedule.when_line(one_off)
+        self.assertIsNone(detail)
+        self.assertIn("–", headline)
+
+    def test_the_notification_says_when_without_lying(self):
+        """⚠️ This one leaves the database — it is emailed and texted.
+
+        It printed the term's first date beside its closing clock time
+        ("2026-08-29 23:28 — 23:28"), which is not true of anything.
+        """
+        run = make_event(name="ESL spring term",
+                         start_time=NOW + DAY, end_time=NOW + 100 * DAY)
+        for week in range(3):
+            add_session(run, start_time=NOW + (2 + 7 * week) * DAY,
+                        end_time=NOW + (2 + 7 * week) * DAY + 2 * HOUR)
+        body = default_message(run, EventNotification.Reason.TIME_CHANGED)
+        self.assertIn("3 sessions", body)
+
+
 class SessionsThroughTheAdminTests(TestCase):
     """L5.2's two tables from the only door a person has to them today.
 
@@ -5040,6 +5176,108 @@ class PageTestCase(TestCase):
         return user
 
 
+class AudienceGapTests(PageTestCase):
+    """Who can see an event without seeing all of it — requirement 8's other half.
+
+    ⭐ The state is **normal**: one event published once, recruiting inside and
+       outside at the same time. It is also what a mistyped audience looks like,
+       and the two are the same state — so the site's job is not to refuse it
+       but to say who it happened to.
+    """
+
+    def setUp(self):
+        # PageTestCase's cast: two ministries, an admin of each, and an event on
+        # the first with one role already open to everybody.
+        super().setUp()
+        self.event.roles.all().delete()
+
+    def role_open_to(self, code, outsiders=False, all_staff=False, ministries=()):
+        """A role with exactly this audience.
+
+        ⚠️ Through set_audience() rather than by passing fields to make_role():
+           that helper calls inherit_audience(), which fills in an audience that
+           came out empty — so a role meant to be ministry-only would silently
+           come back as wide as its event, and the test would pass by testing
+           nothing.
+        """
+        role = make_role(self.event, code)
+        set_audience(role, Audience.Spec(
+            outsiders=outsiders, all_staff=all_staff,
+            ministries=frozenset(m.pk for m in ministries)))
+        return role
+
+    def gaps(self):
+        return dict(audience_gaps(self.event))
+
+    def test_a_role_as_wide_as_its_event_leaves_no_gap(self):
+        # The ordinary case, and it must print nothing at all: a note on every
+        # event is a note nobody reads.
+        self.role_open_to("lifting", outsiders=True, all_staff=True)
+        self.assertEqual(self.gaps(), {})
+
+    def test_outsiders_are_named_when_a_role_is_staff_only(self):
+        self.role_open_to("counting", all_staff=True)
+        self.assertEqual(self.gaps(), {"people with no current post": ["Counting"]})
+
+    def test_staff_are_named_when_a_role_is_for_outsiders_only(self):
+        self.role_open_to("greeting", outsiders=True)
+        self.assertEqual(self.gaps(), {"everybody on the books": ["Greeting"]})
+
+    def test_a_ministry_role_on_an_all_staff_event_excludes_that_ministry(self):
+        """🔴 The sentence the obvious implementation gets wrong.
+
+        Swapping the arguments of refuse_wider_than_event() looks like the whole
+        job and answers "everybody on the books" here — while Tax Help's own
+        staff can see the role perfectly well. The comparisons are not
+        symmetrical: all-staff sits above every ministry on one side of the
+        containment and is a plain boolean on the other.
+        """
+        self.role_open_to("filing", ministries=[self.tax])
+        # ⚠️ Both groups, because the event is open to both. The one that
+        #    matters here is the second: Tax Help's own staff **can** see this
+        #    role, so a bare "everybody on the books" would be untrue of them.
+        self.assertEqual(self.gaps(), {
+            "people with no current post": ["Filing"],
+            "everybody on the books except staff in Tax Help": ["Filing"],
+        })
+
+    def test_a_narrower_ministry_role_names_only_the_ministries_left_out(self):
+        # Neither side covers all staff, so the difference really is a set.
+        self.event.visible_to_outsiders = False
+        self.event.visible_to_all_staff = False
+        self.event.save()
+        self.event.visible_to_ministries.set([self.pantry, self.tax])
+        self.role_open_to("filing", ministries=[self.tax])
+        self.assertEqual(self.gaps(), {"staff in Food Pantry": ["Filing"]})
+
+    def test_two_roles_shut_out_of_the_same_group_are_one_sentence(self):
+        # Grouped by who, not by role: "outsiders cannot see A or B" is one
+        # fact about one group and reads as one line.
+        self.role_open_to("counting", all_staff=True)
+        self.role_open_to("banking", all_staff=True)
+        self.assertEqual(sorted(self.gaps()["people with no current post"]),
+                         ["Banking", "Counting"])
+
+    def test_the_page_says_it_to_somebody_who_can_read_the_records(self):
+        role = self.role_open_to("counting", all_staff=True)
+        self.login(self.zhang)
+        html = self.client.get(
+            reverse("events:event_detail", args=[self.event.pk])).content.decode()
+        self.assertIn("but not", html)
+        self.assertIn(role.role.name, html)
+
+    def test_a_plain_volunteer_is_not_told_about_roles_they_cannot_see(self):
+        # ⚠️ The half that keeps this from being noise. A person who only ever
+        #    sees the roles open to them cannot act on "there are others", and
+        #    the line would describe a situation they have no part in.
+        self.role_open_to("counting", all_staff=True)
+        self.role_open_to("lifting", outsiders=True, all_staff=True)
+        self.login(self.lisi)
+        html = self.client.get(
+            reverse("events:event_detail", args=[self.event.pk])).content.decode()
+        self.assertNotIn("but not", html)
+
+
 class ParticipantPageTests(PageTestCase):
     """P3, tested by hitting URLs — the isolation is in the query, not the page."""
 
@@ -5297,7 +5535,10 @@ class MinistryAdminPageTests(PageTestCase):
         #    and reads back. Until 2026-09-08 this side answered a question
         #    nobody asked ("which two groups?") for a person who had ticked one
         #    box called Everyone. See Audience.audience_in_words.
-        self.assertIn("everyone", html)
+        # ⚠️ Capital E: it is the label on the tick the person actually
+        #    clicked, and reading it back in a different case would undo half of
+        #    why the two flags collapse into one word at all.
+        self.assertIn("Everyone", html)
         self.assertNotIn("people with no current post", html)
 
     def test_the_roles_table_says_who_may_sign_up_for_each_one(self):

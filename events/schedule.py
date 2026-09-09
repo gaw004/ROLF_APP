@@ -27,6 +27,7 @@ import zlib
 from dataclasses import dataclass
 
 from django.utils import timezone
+from django.utils.timezone import localtime
 
 from core.timeutils import day_start, local_date_of, local_now, local_today
 
@@ -106,6 +107,55 @@ VISIBLE_DAYS = (4, 2, 3)           # ≥80rem / 64–80rem / <64rem
 
 
 @dataclass(frozen=True)
+class Occurrence:
+    """One stretch of time an event actually occupies on the schedule.
+
+    ⭐ For a single occasion this is the event itself, and nothing changes. For a
+       run it is **one meeting** — because the alternative, which is what this
+       drew until 2026-09-08, is a block from the term's first day to its last:
+       a twelve-week course filled every column between them, including the
+       days it does not meet, at full height. Not a long bar, a wall.
+
+    ⚠️ Keyed on "does this event have meetings", not on what the event calls
+       itself. L5.3 will add a column saying which shape it is, and that column
+       answers a different question (a course with no dates yet is still a
+       course); this one asks what to draw, and an event with meetings is drawn
+       as its meetings whatever it is called.
+
+    ⚠️ `ordinal` is worked out from the run's own order, never stored — the
+       meetings already know their sequence (Session.Meta.ordering), so a column
+       holding "this is the seventh" would be a second truth free to disagree
+       with them the moment one is inserted. Same reasoning D43 gives for not
+       storing received hours.
+    """
+
+    event: object
+    start_time: object
+    end_time: object
+    ordinal: int | None = None      # "Session 7"; None on a single occasion
+
+
+def occurrences(events):
+    """Expand each event into the stretches it actually occupies.
+
+    ⚠️ Reads `event.sessions`, so the caller prefetches — `_visible_events()`
+       and `_schedule()` both do. Without it this is one query per event on the
+       busiest page in the system, and it would be invisible: the page would
+       simply be slower.
+    """
+    found = []
+    for event in events:
+        meetings = list(event.sessions.all())
+        if not meetings:
+            found.append(Occurrence(event, event.start_time, event.end_time))
+            continue
+        for number, meeting in enumerate(meetings, 1):
+            found.append(
+                Occurrence(event, meeting.start_time, meeting.end_time, number))
+    return found
+
+
+@dataclass(frozen=True)
 class Card:
     """一张日程卡：一个活动落在某一天里的那一段。
 
@@ -118,7 +168,8 @@ class Card:
     height: float
     depth: int                     # 偏移档，0 = 不偏
     colour: int | None             # 0..PALETTE-1；None = 已取消，不配色
-    label: str                     # "3pm – 5pm"，活动**真实**的起止，不是裁过的
+    label: str                     # "3pm – 5pm"，这一段**真实**的起止，不是裁过的
+    ordinal: int | None            # 「第几讲」，单场活动是 None
     continues_before: bool         # 这一段是从前一天延过来的
     continues_after: bool
     start_ms: int                  # 真实起止的 epoch 毫秒，给 app.js 算红线用
@@ -334,8 +385,12 @@ def _base_colour(pk):
     return zlib.crc32(str(pk).encode()) % PALETTE
 
 
-def _segments(events, day):
-    """把活动裁成「这一天里的那一段」，按开始时间排好。
+def _segments(rows, day):
+    """把每一段裁成「这一天里的那一截」，按开始时间排好。
+
+    ⚠️ 收的是 `Occurrence` 而不是活动：一门课在这里已经被摊成了它的各讲，
+       所以「裁到这一天」对两者是同一句话。在此之前它收的是活动，于是一门
+       跨三个月的课在**每一天**都裁出一整天的方块。
 
     ⚠️ 用 `>` / `<` 而不是 `>=` / `<=` 判交集：正好在 0:00 结束的活动属于前一天，
        不该在第二天顶上留一张零高度的卡。
@@ -343,22 +398,23 @@ def _segments(events, day):
     start_of_day = day_start(day)
     end_of_day = day_start(day + datetime.timedelta(days=1))
     found = []
-    for event in events:
-        if event.end_time <= start_of_day or event.start_time >= end_of_day:
+    for row in rows:
+        if row.end_time <= start_of_day or row.start_time >= end_of_day:
             # ⚠️ 零长度的活动（模型只约束 end >= start）会被上面第一条判掉，
             #    因为它的 end 等于 start。补一条：它落在这一天里就要画。
-            if not (event.start_time == event.end_time
-                    and start_of_day <= event.start_time < end_of_day):
+            if not (row.start_time == row.end_time
+                    and start_of_day <= row.start_time < end_of_day):
                 continue
         found.append((
-            max(event.start_time, start_of_day),
-            min(event.end_time, end_of_day),
-            event,
+            max(row.start_time, start_of_day),
+            min(row.end_time, end_of_day),
+            row,
         ))
     # ⚠️ 排序键里带 pk：同一分钟开始、同样长的两场活动，光靠前两项是并列的，
     #    而并列的顺序在 Python 里取决于查询回来的次序 —— 于是偏移的前后关系
     #    和颜色会在两次请求之间自己换位。
-    found.sort(key=lambda row: (row[0], -(row[1] - row[0]).total_seconds(), row[2].pk))
+    found.sort(key=lambda row: (row[0], -(row[1] - row[0]).total_seconds(),
+                                row[2].event.pk, row[2].ordinal or 0))
     return found, start_of_day
 
 
@@ -385,18 +441,29 @@ def _place(seg_start, seg_end, start_of_day):
 
 def _soonest_ending(cards, now):
     """红线压着的那些卡里，最快结束的那一场还剩多久。"""
+    # ⚠️ 读卡片自己的那一段（`start_ms` / `end_ms`），不是活动的两端：一门
+    #    三个月的课按活动问「现在正在进行吗」，答案是整整三个月都在，于是红线
+    #    上会常年挂着一个倒计时。卡片这一段说的才是这一讲。
     live = [card for card in cards
-            if card.event.start_time <= now < card.event.end_time]
+            if card.start_ms <= now.timestamp() * 1000 < card.end_ms]
     if not live:
         return None
-    return remaining(min(card.event.end_time for card in live) - now)
+    return remaining(
+        datetime.datetime.fromtimestamp(
+            min(card.end_ms for card in live) / 1000, tz=now.tzinfo) - now)
 
 
-def _cards_for(day, events, now):
-    """一列。摆放、偏移、配色，一趟走完。"""
-    rows, start_of_day = _segments(events, day)
+def _cards_for(day, rows, now):
+    """一列。摆放、偏移、配色，一趟走完。
+
+    ⚠️ 收的是 `Occurrence`（见上），所以一门课在这里是它的各讲，各自一张卡。
+       配色仍然按**活动**的 pk 算 —— 同一门课的十二讲要是十二个颜色，日程上
+       就看不出它们是一件事。
+    """
+    rows, start_of_day = _segments(rows, day)
     cards = []
-    for seg_start, seg_end, event in rows:
+    for seg_start, seg_end, occurrence in rows:
+        event = occurrence.event
         top, height = _place(seg_start, seg_end, start_of_day)
         bottom = top + height
 
@@ -448,15 +515,17 @@ def _cards_for(day, events, now):
             # ⚠️ 标签写活动**真实**的起止，不是裁过的那一段。跨夜那张卡上写
             #    「10pm – 12am」是错的 —— 它到第二天一点才结束，而人是拿这行字
             #    安排自己的时间的。
-            label=f"{clock(event.start_time.astimezone(start_of_day.tzinfo))} – "
-                  f"{clock(event.end_time.astimezone(start_of_day.tzinfo))}",
-            continues_before=event.start_time < start_of_day,
-            continues_after=event.end_time > start_of_day + datetime.timedelta(days=1),
-            start_ms=int(event.start_time.timestamp() * 1000),
-            end_ms=int(event.end_time.timestamp() * 1000),
+            label=f"{clock(occurrence.start_time.astimezone(start_of_day.tzinfo))} – "
+                  f"{clock(occurrence.end_time.astimezone(start_of_day.tzinfo))}",
+            ordinal=occurrence.ordinal,
+            continues_before=occurrence.start_time < start_of_day,
+            continues_after=(occurrence.end_time
+                             > start_of_day + datetime.timedelta(days=1)),
+            start_ms=int(occurrence.start_time.timestamp() * 1000),
+            end_ms=int(occurrence.end_time.timestamp() * 1000),
             # ⚠️ 半开区间，和下面 now_left 用的是同一条界线：正好结束的那一刻
             #    既不算「还剩 0m」，也已经算过去了。
-            is_past=event.end_time <= now,
+            is_past=occurrence.end_time <= now,
         ))
     return cards
 
@@ -466,8 +535,12 @@ def columns(events, days, now=None):
 
     `events` 是已经取好的那一批（视图负责查询和筛选）—— 这里不碰数据库，
     于是它可以拿一串普通对象测。
+
+    ⚠️ 摊成 `Occurrence` **一次**，在循环外面。摊在里面的话一门十二讲的课，
+       每一列都要重摊一遍它的十二讲，而窗口有四列。
     """
     now = now or local_now()
+    rows = occurrences(events)
     # ⚠️ `local_date_of(now)`，不是 `local_today()`：测试会把 `now` 冻在某个时刻，
     #    而 `local_today()` 读的是真实时钟 —— 两者一分岔，「今天是哪一列」就和
     #    红线画在哪一列不是同一个答案了。
@@ -475,7 +548,7 @@ def columns(events, days, now=None):
     built = []
     for day in days:
         is_today = day == today
-        cards = _cards_for(day, events, now)
+        cards = _cards_for(day, rows, now)
         built.append(Column(
             day=day,
             day_start_ms=int(day_start(day).timestamp() * 1000),
@@ -485,6 +558,70 @@ def columns(events, days, now=None):
             now_left=_soonest_ending(cards, now) if is_today else None,
         ))
     return built
+
+
+def when_line(event, meetings=None):
+    """The "When" line for one event: a moment, or a term and its rhythm.
+
+    🔴 A run's two columns are the **ends of a term**, not a time window, and
+       printing them the way a single occasion is printed says something untrue:
+       "Aug 9, 4:05 p.m. — Nov 7, 3:05 p.m." reads as one sitting that lasts
+       three months. It was on the page from the day `Session` landed, because
+       L5.1 pushed the question to "a new page" and decision 27 (three weeks
+       later) abolished the new page — each document handed it to the other and
+       the middle was empty.
+
+    Returns (headline, detail): the term as **dates** and, under it, what
+    meeting_summary() can honestly say about the rhythm. A single occasion gets
+    its familiar line back unchanged and no detail.
+    """
+    if meetings is None:
+        meetings = list(event.sessions.all())
+    if not meetings:
+        return (f"{_when_line(event.start_time).text} – "
+                f"{_when_line(event.end_time).text}"), None
+    return (f"{local_date_of(event.start_time):%-d %B %Y} – "
+            f"{local_date_of(event.end_time):%-d %B %Y}"), meeting_summary(meetings)
+
+
+#: How many meetings a pattern has to hold before it is worth stating as one.
+#: Two is a coincidence; three is a habit.
+PATTERN_MINIMUM = 3
+
+
+def meeting_summary(meetings):
+    """"Tuesdays, 7pm – 9pm · 12 sessions", or the honest short version.
+
+    ⭐ What somebody deciding whether to join actually asks: how often is this,
+       and when. A table of twelve dates does not answer it — it leaves the
+       reader to work the pattern out by eye, which is the question, not the
+       answer.
+
+    ⚠️ Derived from the meetings, never stored. The pattern is already in those
+       rows; a column holding "Tuesdays 7pm" would be a second truth, free to go
+       on saying Tuesday after somebody moves week seven to a Thursday. Same
+       reasoning D43 gives for not storing received hours.
+
+    🔴 And when the pattern is **not** true it says less rather than saying it
+       anyway. A term with one meeting moved is not "Tuesdays"; claiming it is
+       would be a tidy sentence that sends somebody to the wrong room. D27's
+       rule about nothing and not-counted, applied to wording: the fallback
+       states only the count, which is always true.
+    """
+    if not meetings:
+        return None
+    count = len(meetings)
+    if count == 1:
+        return f"1 session, {clock(localtime(meetings[0].start_time))}"
+    weekdays = {localtime(m.start_time).weekday() for m in meetings}
+    starts = {localtime(m.start_time).strftime("%H:%M") for m in meetings}
+    ends = {localtime(m.end_time).strftime("%H:%M") for m in meetings}
+    if (count >= PATTERN_MINIMUM and len(weekdays) == 1
+            and len(starts) == 1 and len(ends) == 1):
+        first = localtime(meetings[0].start_time)
+        return (f"{first.strftime('%A')}s, {clock(first)} – "
+                f"{clock(localtime(meetings[0].end_time))} · {count} sessions")
+    return f"{count} sessions"
 
 
 def hours():

@@ -2918,10 +2918,15 @@ class SessionScheduleTests(TestCase):
     def test_a_single_occasion_is_drawn_exactly_as_before(self):
         # ⚠️ The half that must not move. Single occasions are the whole system
         #    today and have no meetings, so nothing about this reaches them.
+        # ⚠️ Pinned to mid-morning rather than "NOW + 3 days": NOW is the real
+        #    clock, so a run of this test late in the evening puts a three-hour
+        #    event across midnight and the card is legitimately clipped. The
+        #    assertion is about the height a whole segment gets, so the fixture
+        #    has to be a whole segment whatever time the suite runs.
+        start = (NOW + 3 * DAY).replace(hour=9, minute=0, second=0, microsecond=0)
         one_off = make_event(ministry=self.spring.ministry, name="Saturday",
-                             start_time=NOW + 3 * DAY,
-                             end_time=NOW + 3 * DAY + 3 * HOUR)
-        day = local_date_of(NOW + 3 * DAY)
+                             start_time=start, end_time=start + 3 * HOUR)
+        day = local_date_of(start)
         card = schedule.columns([one_off], [day], now=NOW)[0].cards[0]
         self.assertIsNone(card.ordinal)
         self.assertEqual(card.height, schedule._px(3 * HOUR))
@@ -5276,6 +5281,168 @@ class AudienceGapTests(PageTestCase):
         html = self.client.get(
             reverse("events:event_detail", args=[self.event.pk])).content.decode()
         self.assertNotIn("but not", html)
+
+
+class SessionCheckInTests(PageTestCase):
+    """⭐ The code belongs to one meeting, so "which meeting" is never guessed.
+
+    What it did before: a twelve-week course had one code for all twelve
+    evenings. The window stood open for 111 days; from late April the screen
+    opened on "Check out" for a queue of arrivals; and from week two every scan
+    answered "you already checked in at 10:28 AM" — with no date, so it read as
+    tonight, eleven weeks running. A reassuring sentence about the wrong day.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.spring = make_event(
+            ministry=self.pantry, owner=self.zhang.contact,
+            name="ESL spring term",
+            start_time=NOW - 30 * DAY, end_time=NOW + 60 * DAY)
+        self.job = make_role(self.spring, "esl_assistant")
+        self.signup = Participation.objects.create(
+            contact=self.lisi.contact, event_role=self.job)
+        # ⚠️ Both inside their own four-hour tail, because that is what a screen
+        #    being open means now: an earlier meeting whose window has closed is
+        #    correctly refused, and using one here would be testing the refusal
+        #    rather than the two-meetings case.
+        self.week_one = add_session(
+            self.spring, start_time=NOW - 4 * HOUR, end_time=NOW - 2 * HOUR)
+        self.week_seven = add_session(
+            self.spring, start_time=NOW - HOUR, end_time=NOW + HOUR)
+
+    def scan(self, session, mode=tokens.CHECK_IN):
+        """Walk the real path: mint on the screen, scan, then confirm."""
+        self.login(self.zhang)
+        payload = self.client.get(
+            reverse("events:session_checkin_token", args=[session.pk]),
+            {"mode": mode}).json()
+        token = payload["url"].rstrip("/").rsplit("/", 1)[-1]
+        self.client.logout()
+        self.login(self.lisi)
+        self.client.get(reverse("events:checkin_scan", args=[token]))
+        return self.client.post(reverse("events:checkin_confirm"),
+                                {"participation": self.signup.pk}, follow=True)
+
+    def test_a_scan_writes_the_meetings_row_and_not_the_signup(self):
+        self.scan(self.week_seven)
+        self.signup.refresh_from_db()
+        # 🔴 The signup says "he is on this course" and must stay saying it.
+        #    Decision 19: one signup for the whole term, whatever happens weekly.
+        self.assertIsNone(self.signup.checked_in_at)
+        row = self.signup.attendances.get(session=self.week_seven)
+        self.assertIsNotNone(row.checked_in_at)
+        self.assertEqual(row.status, Participation.Status.ATTENDED)
+        self.assertEqual(row.checked_in_method,
+                         Participation.CheckInMethod.SELF_QR)
+
+    def test_each_meeting_is_checked_into_separately(self):
+        self.scan(self.week_one)
+        self.scan(self.week_seven)
+        self.assertEqual(self.signup.attendances.count(), 2)
+
+    def test_a_second_scan_at_the_same_meeting_says_which_day(self):
+        """⚠️ The sentence that was quietly wrong for eleven weeks.
+
+        A repeat has to carry the date on a run: "you already checked in at
+        10:28" is true of some evening, and without the date the reader takes it
+        for this one.
+        """
+        self.scan(self.week_one)
+        response = self.scan(self.week_one)
+        told = [str(m) for m in response.context["messages"]]
+        self.assertTrue(any("already checked in" in m for m in told), told)
+        self.assertTrue(any("on " in m for m in told), told)
+
+    def test_a_code_for_one_meeting_does_not_work_at_another(self):
+        # The kind and the id both travel inside the signature, so week one's
+        # code cannot be replayed against week seven by editing a URL.
+        token = tokens.issue(self.week_one.pk, tokens.CHECK_IN,
+                             kind=tokens.SESSION)
+        kind, target_id, _ = tokens.verify(token)
+        self.assertEqual((kind, target_id), (tokens.SESSION, self.week_one.pk))
+        self.assertNotEqual(target_id, self.week_seven.pk)
+
+    def test_the_screen_opens_on_check_in_for_the_evening_being_taught(self):
+        """🔴 A term's midpoint is some day in May.
+
+        Reading the event's midpoint meant that from then on every evening's
+        screen opened on "Check out", for a queue of people walking in.
+        """
+        later = add_session(self.spring, start_time=NOW + 40 * DAY,
+                            end_time=NOW + 40 * DAY + 2 * HOUR)
+        self.assertEqual(default_checkin_mode(later, at=NOW + 40 * DAY - HOUR),
+                         tokens.CHECK_IN)
+        # And the event-level answer for the same instant is the wrong one.
+        self.assertEqual(default_checkin_mode(self.spring, at=NOW + 40 * DAY),
+                         tokens.CHECK_OUT)
+
+    def test_the_window_follows_the_meeting_not_the_term(self):
+        # 111 days of standing-open window was what the old rule gave a course.
+        self.assertFalse(tokens.window_is_open(
+            self.week_one, at=self.week_one.end_time + 5 * HOUR))
+        self.assertTrue(tokens.window_is_open(
+            self.week_seven, at=self.week_seven.start_time))
+
+    def test_a_meeting_of_a_draft_run_hands_out_nothing(self):
+        # The published gate is still the event's: a course nobody published
+        # does not become checkin-able one evening at a time.
+        self.spring.status = Event.Status.DRAFT
+        self.spring.save()
+        self.assertFalse(tokens.window_is_open(self.week_seven, at=NOW))
+
+    def test_the_screen_names_the_meeting_not_the_term(self):
+        self.login(self.zhang)
+        html = self.client.get(reverse(
+            "events:session_checkin_display", args=[self.week_seven.pk])
+        ).content.decode()
+        # This evening's own date, and **not** the term's closing one — that is
+        # the line somebody reads while standing in front of the screen.
+        self.assertIn(f"{localtime(self.week_seven.start_time):%-d}", html)
+        self.assertNotIn(
+            f"{localtime(self.spring.end_time):%B %-d, %Y}", html)
+
+    def test_a_meeting_whose_window_has_closed_hands_out_nothing(self):
+        # Four hours after it ends, the honest description of what is happening
+        # is back-filling a register — and that belongs on the attendance page,
+        # where it is recorded as an admin's entry rather than a volunteer scan.
+        old = add_session(self.spring, start_time=NOW - 20 * DAY,
+                          end_time=NOW - 20 * DAY + 2 * HOUR)
+        self.login(self.zhang)
+        response = self.client.get(
+            reverse("events:session_checkin_token", args=[old.pk]),
+            {"mode": "in"})
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("closed", response.json()["error"].lower())
+
+    def test_only_somebody_who_manages_the_event_can_mint_a_code(self):
+        # This check **is** the scheme: without it any signed-in volunteer
+        # fetches a live token from their sofa.
+        self.login(self.lisi)
+        response = self.client.get(
+            reverse("events:session_checkin_token", args=[self.week_seven.pk]),
+            {"mode": "in"})
+        self.assertEqual(response.status_code, 403)
+
+    def test_the_sessions_table_offers_a_screen_per_meeting(self):
+        self.login(self.zhang)
+        html = self.client.get(
+            reverse("events:event_detail", args=[self.spring.pk])).content.decode()
+        for session in (self.week_one, self.week_seven):
+            with self.subTest(session=session.pk):
+                self.assertIn(
+                    reverse("events:session_checkin_display", args=[session.pk]),
+                    html)
+
+    def test_a_single_occasion_still_checks_in_through_its_event(self):
+        """⚠️ The half that must not move — single occasions are the whole
+        system today, and their check-in is untouched."""
+        self.login(self.zhang)
+        payload = self.client.get(
+            reverse("events:checkin_token", args=[self.event.pk]),
+            {"mode": "in"}).json()
+        token = payload["url"].rstrip("/").rsplit("/", 1)[-1]
+        self.assertEqual(tokens.verify(token)[0], tokens.EVENT)
 
 
 class ParticipantPageTests(PageTestCase):
@@ -11325,13 +11492,14 @@ class CheckInTokenTests(SimpleTestCase):
 
     def test_a_fresh_token_gives_back_what_was_signed(self):
         token = tokens.issue(12, tokens.CHECK_IN)
-        self.assertEqual(tokens.verify(token), (12, tokens.CHECK_IN))
+        self.assertEqual(tokens.verify(token), (tokens.EVENT, 12, tokens.CHECK_IN))
 
     def test_it_is_still_valid_one_second_before_the_limit(self):
         at = local_now()
         token = tokens.issue(12, tokens.CHECK_IN, at=at)
         later = at + datetime.timedelta(seconds=tokens.MAX_AGE_SECONDS - 1)
-        self.assertEqual(tokens.verify(token, at=later), (12, tokens.CHECK_IN))
+        self.assertEqual(tokens.verify(token, at=later),
+                         (tokens.EVENT, 12, tokens.CHECK_IN))
 
     def test_it_is_refused_one_second_after_the_limit(self):
         at = local_now()
@@ -11351,7 +11519,8 @@ class CheckInTokenTests(SimpleTestCase):
             token = tokens.issue(12, tokens.CHECK_IN, at=at)
             edge = at + datetime.timedelta(seconds=tokens.MAX_AGE_SECONDS)
             with self.subTest(offset=offset):
-                self.assertEqual(tokens.verify(token, at=edge), (12, tokens.CHECK_IN))
+                self.assertEqual(tokens.verify(token, at=edge),
+                                     (tokens.EVENT, 12, tokens.CHECK_IN))
                 with self.assertRaises(tokens.InvalidCheckInToken):
                     tokens.verify(token, at=edge + datetime.timedelta(seconds=2))
 
@@ -11392,13 +11561,13 @@ class CheckInTokenTests(SimpleTestCase):
         # class of "which one wins" bugs that this shape simply does not have.
         self.assertNotEqual(
             tokens.issue(12, tokens.CHECK_IN), tokens.issue(13, tokens.CHECK_IN))
-        self.assertEqual(tokens.verify(tokens.issue(13, tokens.CHECK_IN))[0], 13)
+        self.assertEqual(tokens.verify(tokens.issue(13, tokens.CHECK_IN))[1], 13)
 
     def test_the_direction_is_signed_too(self):
         # Otherwise a volunteer holding a check-in code could edit the URL into
         # a check-out and write their own hours.
         self.assertEqual(
-            tokens.verify(tokens.issue(12, tokens.CHECK_OUT))[1], tokens.CHECK_OUT)
+            tokens.verify(tokens.issue(12, tokens.CHECK_OUT))[2], tokens.CHECK_OUT)
         self.assertNotEqual(
             tokens.issue(12, tokens.CHECK_IN), tokens.issue(12, tokens.CHECK_OUT))
 
@@ -11417,7 +11586,8 @@ class CheckInTokenTests(SimpleTestCase):
         #    exactly like a live one.
         at = local_now()
         token, expires_at = tokens.issue_with_expiry(12, tokens.CHECK_IN, at=at)
-        self.assertEqual(tokens.verify(token, at=at), (12, tokens.CHECK_IN))
+        self.assertEqual(tokens.verify(token, at=at),
+                         (tokens.EVENT, 12, tokens.CHECK_IN))
         self.assertEqual(
             expires_at, int(at.timestamp()) + tokens.MAX_AGE_SECONDS)
 
@@ -11440,11 +11610,18 @@ class CheckInWindowTests(TestCase):
         self.assertTrue(tokens.window_is_open(
             self.event, at=self.event.start_time + HOUR))
 
-    def test_it_is_shut_more_than_two_hours_before_the_start(self):
-        just_early = self.event.start_time - tokens.WINDOW_BEFORE - datetime.timedelta(minutes=1)
-        just_late = self.event.start_time - tokens.WINDOW_BEFORE + datetime.timedelta(minutes=1)
-        self.assertFalse(tokens.window_is_open(self.event, at=just_early))
-        self.assertTrue(tokens.window_is_open(self.event, at=just_late))
+    def test_a_screen_may_be_opened_as_early_as_somebody_wants(self):
+        """🔴 2026-09-08: the two-hour early limit is gone, by decision.
+
+        Setting a room up the night before is ordinary, and the rule turned that
+        into "the button does nothing yet" — a refusal people work around rather
+        than learn from. Nothing was protected by it either: somebody has to be
+        standing in front of the screen either way.
+        """
+        for early in (HOUR, 6 * HOUR, 30 * DAY):
+            with self.subTest(early=early):
+                self.assertTrue(tokens.window_is_open(
+                    self.event, at=self.event.start_time - early))
 
     def test_it_is_shut_more_than_four_hours_after_the_end(self):
         inside = self.event.end_time + tokens.WINDOW_AFTER - datetime.timedelta(minutes=1)
@@ -11461,15 +11638,18 @@ class CheckInWindowTests(TestCase):
             with self.subTest(status=status):
                 self.assertFalse(tokens.window_is_open(self.event, at=during))
 
-    def test_the_explanation_comes_from_the_same_two_constants(self):
-        # ⚠️ Not from the template. "Opens two hours before" written in markup is
-        #    a second copy of a rule, free to drift from the one enforced above.
-        early = self.event.start_time - tokens.WINDOW_BEFORE - HOUR
+    def test_the_explanation_comes_from_the_same_constant(self):
+        # ⚠️ Not from the template. A number written in markup is a second copy
+        #    of a rule, free to drift from the one enforced above.
         late = self.event.end_time + tokens.WINDOW_AFTER + HOUR
-        self.assertIn("opens", tokens.window_message(self.event, at=early).lower())
         self.assertIn("closed", tokens.window_message(self.event, at=late).lower())
         self.assertIsNone(
             tokens.window_message(self.event, at=self.event.start_time + HOUR))
+        # ⚠️ And no "opens in two hours" case survives: there is nothing left to
+        #    wait for, so a message saying otherwise would describe a rule that
+        #    is not enforced anywhere.
+        self.assertIsNone(tokens.window_message(
+            self.event, at=self.event.start_time - 30 * DAY))
 
 
 class CheckInMethodTests(TestCase):
@@ -11535,7 +11715,8 @@ class CheckInCredentialTests(TestCase):
         credential = issue_credential(7, tokens.CHECK_IN, at=at)
         still_fine = at + CREDENTIAL_MAX_AGE - datetime.timedelta(seconds=1)
         self.assertEqual(
-            read_credential(credential, at=still_fine), (7, tokens.CHECK_IN))
+            read_credential(credential, at=still_fine),
+            (tokens.EVENT, 7, tokens.CHECK_IN))
 
     def test_it_does_not_survive_for_ever(self):
         at = local_now()
@@ -11612,14 +11793,14 @@ class ApplyScanTests(TestCase):
         #    second tap as a failure sends that person off to find an admin over
         #    something that already worked.
         _, changed = apply_scan(
-            self.row.pk, contact=self.person, event_id=self.event.pk,
+            self.row.pk, contact=self.person, target=self.event,
             mode=tokens.CHECK_IN)
         self.assertTrue(changed)
         self.row.refresh_from_db()
         first_time = self.row.checked_in_at
 
         row, changed_again = apply_scan(
-            self.row.pk, contact=self.person, event_id=self.event.pk,
+            self.row.pk, contact=self.person, target=self.event,
             mode=tokens.CHECK_IN)
         self.assertFalse(changed_again)
         self.assertEqual(row.checked_in_at, first_time)
@@ -11628,10 +11809,10 @@ class ApplyScanTests(TestCase):
         # The visible half of the test above. A no-op that still writes would
         # put a meaningless revision into the one table this project relies on
         # to recover a value somebody deleted.
-        apply_scan(self.row.pk, contact=self.person, event_id=self.event.pk,
+        apply_scan(self.row.pk, contact=self.person, target=self.event,
                    mode=tokens.CHECK_IN)
         before = self.row.history.count()
-        apply_scan(self.row.pk, contact=self.person, event_id=self.event.pk,
+        apply_scan(self.row.pk, contact=self.person, target=self.event,
                    mode=tokens.CHECK_IN)
         self.assertEqual(self.row.history.count(), before)
 
@@ -11640,14 +11821,14 @@ class ApplyScanTests(TestCase):
         # event before the primary key is applied at all.
         theirs = sign_up(contact=self.other, event_role=self.role)
         with self.assertRaises(Participation.DoesNotExist):
-            apply_scan(theirs.pk, contact=self.person, event_id=self.event.pk,
+            apply_scan(theirs.pk, contact=self.person, target=self.event,
                        mode=tokens.CHECK_IN)
 
     def test_checking_out_writes_the_hours_and_the_source(self):
         check_in(self.row, at=local_now() - 2 * HOUR,
                  method=Participation.CheckInMethod.SELF_QR)
         row, changed = apply_scan(
-            self.row.pk, contact=self.person, event_id=self.event.pk,
+            self.row.pk, contact=self.person, target=self.event,
             mode=tokens.CHECK_OUT)
         self.assertTrue(changed)
         self.assertEqual(row.hours, Decimal("2.00"))
@@ -11655,7 +11836,7 @@ class ApplyScanTests(TestCase):
 
     def test_checking_out_without_checking_in_does_nothing(self):
         _, changed = apply_scan(
-            self.row.pk, contact=self.person, event_id=self.event.pk,
+            self.row.pk, contact=self.person, target=self.event,
             mode=tokens.CHECK_OUT)
         self.assertFalse(changed)
         self.row.refresh_from_db()
@@ -11898,17 +12079,30 @@ class CheckInDisplayTests(PageTestCase):
         payload = self.client.get(self.token_url, {"mode": "in"}).json()
         self.assertIn(payload["url"], payload["url"])
         token = payload["url"].rstrip("/").rsplit("/", 1)[-1]
-        self.assertEqual(tokens.verify(token), (self.event.pk, tokens.CHECK_IN))
+        self.assertEqual(tokens.verify(token),
+                         (tokens.EVENT, self.event.pk, tokens.CHECK_IN))
         self.assertGreater(payload["expires_at"], local_now().timestamp())
 
-    def test_outside_the_window_it_refuses_and_explains(self):
-        self.event.start_time = local_now() + DAY
-        self.event.end_time = local_now() + DAY + 3 * HOUR
+    def test_after_the_window_it_refuses_and_explains(self):
+        # ⚠️ The **late** end. The early one was removed on 2026-09-08 — a
+        #    screen may now be opened whenever somebody wants one — so the case
+        #    this used to assert (a code refused the day before) is a case that
+        #    no longer exists.
+        self.event.start_time = local_now() - 2 * DAY
+        self.event.end_time = local_now() - 2 * DAY + 3 * HOUR
         self.event.save()
         self.login(self.zhang)
         response = self.client.get(self.token_url, {"mode": "in"})
         self.assertEqual(response.status_code, 409)
-        self.assertIn("opens", response.json()["error"].lower())
+        self.assertIn("closed", response.json()["error"].lower())
+
+    def test_a_screen_opened_the_day_before_hands_out_a_code(self):
+        self.event.start_time = local_now() + DAY
+        self.event.end_time = local_now() + DAY + 3 * HOUR
+        self.event.save()
+        self.login(self.zhang)
+        self.assertEqual(
+            self.client.get(self.token_url, {"mode": "in"}).status_code, 200)
 
     def test_a_draft_event_hands_out_nothing(self):
         self.event.status = Event.Status.DRAFT

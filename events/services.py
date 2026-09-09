@@ -742,7 +742,7 @@ class CredentialExpired(ValidationError):
     """The proof of presence is gone or too old. Scan again."""
 
 
-def issue_credential(event_id, mode, *, at=None):
+def issue_credential(target_id, mode, *, kind=None, at=None):
     """A plain dict recording that somebody stood in front of the screen.
 
     ⚠️ Returned rather than written, because nothing in this module may know
@@ -751,22 +751,29 @@ def issue_credential(event_id, mode, *, at=None):
        since sessions are serialised as JSON.
     """
     return {
-        "event": event_id,
+        "kind": kind or tokens.EVENT,
+        "target": target_id,
         "mode": mode,
         "at": (at or local_now()).timestamp(),
     }
 
 
 def read_credential(data, *, at=None):
-    """(event_id, mode) from a stored credential, or raise CredentialExpired."""
+    """(kind, target_id, mode) from a stored credential, or raise CredentialExpired.
+
+    ⚠️ `kind` defaults to an event when it is missing, so a credential already
+       sitting in somebody's session when this shipped still resolves rather
+       than throwing them out mid-check-in.
+    """
     try:
-        event_id, mode, issued_at = data["event"], data["mode"], float(data["at"])
-    except (TypeError, KeyError, ValueError) as error:
+        kind = data.get("kind", tokens.EVENT)
+        target_id, mode, issued_at = data["target"], data["mode"], float(data["at"])
+    except (TypeError, KeyError, ValueError, AttributeError) as error:
         raise CredentialExpired(_CREDENTIAL_MESSAGE) from error
     age = (at or local_now()).timestamp() - issued_at
     if age < 0 or age > CREDENTIAL_MAX_AGE.total_seconds():
         raise CredentialExpired(_CREDENTIAL_MESSAGE)
-    return event_id, mode
+    return kind, target_id, mode
 
 
 _CREDENTIAL_MESSAGE = (
@@ -796,8 +803,67 @@ class ScanTargets:
         return bool(self.pending or self.done or self.needs_check_in)
 
 
-def scan_targets(contact, event, mode):
-    """Sort this contact's live signups at `event` into what the scan can do.
+def check_in_session(attendance, *, at=None,
+                     method=Participation.CheckInMethod.ADMIN):
+    """They turned up to this meeting. Records the time and marks them present."""
+    _refuse_without_consent(attendance.participation)
+    attendance.checked_in_at = at or local_now()
+    attendance.status = Participation.Status.ATTENDED
+    _record_method(attendance, method)
+    attendance.full_clean()
+    attendance.save()
+    return attendance
+
+
+def check_out_session(attendance, *, at=None,
+                      method=Participation.CheckInMethod.ADMIN):
+    """They left this meeting, and — on a helping place — that writes the hours.
+
+    ⚠️ Only on a helping place. What somebody **received** is worked out from
+       the meeting's own two ends (D43), so computing anything into `hours` here
+       for a learner would put the other direction into a column the report adds
+       up. The timestamps are still written: they came, they left, both true.
+    """
+    at = at or local_now()
+    attendance.checked_out_at = at
+    if (attendance.records_hours and attendance.checked_in_at
+            and attendance.hours is None):
+        elapsed = at - attendance.checked_in_at
+        attendance.hours = (
+            Decimal(elapsed.total_seconds()) / Decimal(3600)
+        ).quantize(Decimal("0.01"))
+    if attendance.hours is not None:
+        _refuse_without_consent(attendance.participation)
+        _record_method(attendance, method)
+        attendance.status = Participation.Status.ATTENDED
+    attendance.full_clean()
+    attendance.save()
+    return attendance
+
+
+def register_row(participation, session):
+    """This person's row for this meeting, made if it is not there yet.
+
+    ⚠️ Creating on a scan is right and is not a hole in decision 18. That
+       decision says which rows exist encodes who was on the course when — and
+       somebody standing in the room scanning the code **is** on it for this
+       evening. The rows it is careful about are the ones nobody has any
+       evidence for, and this is the evidence.
+    """
+    row = SessionAttendance.objects.filter(
+        participation=participation, session=session).first()
+    return row or add_attendance(participation, session)
+
+
+def scan_targets(contact, target, mode):
+    """Sort this contact's live signups at `target` into what the scan can do.
+
+    ⚠️ `target` is an event **or** one meeting of a run, and the lists hold
+       signups either way — because the question the phone asks is still "which
+       of your places is this about", and on a run a person holds the same
+       several places all term. What changes is where the answer is written:
+       for a meeting it is that meeting's register row, made on the spot if this
+       is the first evidence of them being there (see register_row above).
 
     ⚠️ Cancelled rows are excluded, not listed as "done". Somebody who pulled
        out and then scanned should be told they are not signed up — the row
@@ -809,6 +875,8 @@ def scan_targets(contact, event, mode):
        volunteer's call, not this function's: the other two options both invent
        a number. See D28「五、一个人报了两个工种」.
     """
+    session = target if isinstance(target, Session) else None
+    event = session.event if session else target
     rows = list(
         Participation.objects
         .filter(contact=contact, event_role__event=event)
@@ -816,20 +884,32 @@ def scan_targets(contact, event, mode):
         .select_related("event_role__role", "event_role__event")
         .order_by("event_role__role__name")
     )
+    # On a meeting, the state that decides the three lists is the register row's
+    # — not the signup's, which is about the whole term and never moves.
+    marks = {}
+    if session is not None:
+        marks = {
+            row.participation_id: row
+            for row in SessionAttendance.objects.filter(
+                session=session, participation__in=rows)
+        }
     pending, done, needs_check_in = [], [], []
     for row in rows:
+        state = marks.get(row.pk) if session is not None else row
+        checked_in = state.checked_in_at if state else None
+        checked_out = state.checked_out_at if state else None
         if mode == tokens.CHECK_IN:
-            (done if row.checked_in_at else pending).append(row)
-        elif row.checked_out_at:
+            (done if checked_in else pending).append(row)
+        elif checked_out:
             done.append(row)
-        elif row.checked_in_at:
+        elif checked_in:
             pending.append(row)
         else:
             needs_check_in.append(row)
     return ScanTargets(pending=pending, done=done, needs_check_in=needs_check_in)
 
 
-def apply_scan(participation_pk, *, contact, event_id, mode, at=None):
+def apply_scan(participation_pk, *, contact, target, mode, at=None):
     """Write one scanned check-in or check-out. Atomic, and safe to repeat.
 
     Returns (participation, changed). `changed` is False when the row was
@@ -859,6 +939,8 @@ def apply_scan(participation_pk, *, contact, event_id, mode, at=None):
        event, so a primary key from somebody else's row cannot be posted into
        this function at all.
     """
+    session = target if isinstance(target, Session) else None
+    event_id = session.event_id if session else target.pk
     with transaction.atomic():
         participation = (
             Participation.objects
@@ -869,48 +951,84 @@ def apply_scan(participation_pk, *, contact, event_id, mode, at=None):
             .get(pk=participation_pk)
         )
         method = Participation.CheckInMethod.SELF_QR
+        # ⚠️ On a meeting the row that moves is the register's, not the signup's.
+        #    The signup says "he is on this course" and must not be turned into
+        #    "he came" by one evening's scan — that is decision 19's whole point,
+        #    and reading the wrong one is how a term ended up with a single
+        #    check-in standing for twelve weeks.
+        row = register_row(participation, session) if session else participation
         if mode == tokens.CHECK_IN:
-            if participation.checked_in_at:
+            if row.checked_in_at:
                 return participation, False
-            check_in(participation, at=at, method=method)
+            (check_in_session if session else check_in)(row, at=at, method=method)
         else:
-            if participation.checked_out_at or participation.checked_in_at is None:
+            if row.checked_out_at or row.checked_in_at is None:
                 return participation, False
-            check_out(participation, at=at, method=method)
+            (check_out_session if session else check_out)(row, at=at, method=method)
     return participation, True
 
 
-def default_checkin_mode(event, *, at=None):
+def default_checkin_mode(target, *, at=None):
     """Which way round the iPad should start when the page is opened.
 
-    Before the midpoint of the event, people are arriving; after it, they are
-    leaving. ⚠️ Read **once**, at page load, and never again — the display does
-    not follow this as the afternoon goes on. An iPad that switched itself would
+    Before the midpoint, people are arriving; after it, they are leaving.
+    ⚠️ Read **once**, at page load, and never again — the display does not
+    follow this as the afternoon goes on. An iPad that switched itself would
     turn the queue standing in front of it into check-outs, with nothing on the
     screen having changed to say so.
+
+    ⚠️ The midpoint of the **meeting** on a run, which is the whole reason this
+       function now takes a target rather than an event. A term's midpoint is
+       some day in May: opening the screen for any evening after that started it
+       on "Check out", for a queue of people walking in.
     """
-    midpoint = event.start_time + (event.end_time - event.start_time) / 2
+    midpoint = target.start_time + (target.end_time - target.start_time) / 2
     return tokens.CHECK_IN if (at or local_now()) < midpoint else tokens.CHECK_OUT
 
 
-def checkin_result_message(participation, mode, changed):
+def checkin_result_message(participation, mode, changed, *, session=None):
     """The sentence that lands on My Signups after a scan.
 
     ⚠️ A repeat is phrased as a statement of fact, not as a failure. The most
        common way to arrive here twice is a slow page and an impatient thumb,
        and an error would send that person off to find an admin over something
        that already worked.
+
+    🔴 On a run it reads the **meeting's** row, and a repeat carries the date.
+       Before this, one check-in in week one made every later scan answer "you
+       already checked in at 10:28 AM" — no date, so it read as this evening,
+       for eleven more weeks. A reassuring sentence about the wrong day is worse
+       than a refusal, because nobody goes looking.
     """
+    row = participation
+    if session is not None:
+        row = SessionAttendance.objects.filter(
+            participation=participation, session=session).first() or participation
     if mode == tokens.CHECK_IN:
-        when = timezone.localtime(participation.checked_in_at)
+        when = timezone.localtime(row.checked_in_at)
         if changed:
             return f"Checked in at {when:%-I:%M %p}."
-        return f"You already checked in at {when:%-I:%M %p}."
-    when = timezone.localtime(participation.checked_out_at)
+        return f"You already checked in at {_scan_moment(when, session)}."
+    when = timezone.localtime(row.checked_out_at)
     if not changed:
-        return f"You already checked out at {when:%-I:%M %p}."
-    return (f"Checked out at {when:%-I:%M %p} — "
-            f"{participation.hours} hours recorded.")
+        return f"You already checked out at {_scan_moment(when, session)}."
+    if row.hours is None:
+        # A place somebody attends records no hours (L4/D43) — saying "0 hours
+        # recorded" there would print the wrong direction's zero.
+        return f"Checked out at {when:%-I:%M %p}."
+    return f"Checked out at {when:%-I:%M %p} — {row.hours} hours recorded."
+
+
+def _scan_moment(when, session):
+    """A time, plus the date when it might not be today's.
+
+    ⚠️ Only on a run. A single occasion's repeat scan is minutes after the
+       first, so a date would be noise; a run's can be a week later, and there
+       the bare time is the whole problem.
+    """
+    if session is None:
+        return f"{when:%-I:%M %p}"
+    return f"{when:%-I:%M %p} on {when:%-d %B}"
 
 
 def undo_attendance(participation):

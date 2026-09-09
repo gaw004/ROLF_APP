@@ -268,6 +268,36 @@
     </table>
   </div>
 
+  {% comment %}
+  讲次表。⚠️ 只画给**看得到这场活动记录**的人（同上面那张角色表的 Open to
+     列）：普通报名者要的是「这门课什么时候上」，那句话已经在页顶的 When
+     那一行上了，而这张表带着签到屏的入口 —— 那是管理动作。
+
+  ⭐ 每一行一个签到屏，而这正是「今天是哪一讲」不需要被猜的原因：老师开的是
+     哪一讲的屏，扫出来就是哪一讲。一天排两讲也不冲突，那是两块屏。
+  {% endcomment %}
+  {% if sees_every_role and sessions %}
+    <h2 class="mb-3 mt-8 text-lg font-semibold">Sessions</h2>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>#</th><th>When</th><th>Attended</th><th></th></tr></thead>
+        <tbody>
+          {% for row in sessions %}
+            <tr>
+              <td>{{ forloop.counter }}</td>
+              <td>{{ row.start_time }} &ndash; {{ row.end_time|time }}</td>
+              <td>{{ row.attendances.count }}</td>
+              <td>
+                <a href="{% url 'events:session_checkin_display' row.pk %}"
+                   class="prose-link">Check-in screen</a>
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% endif %}
+
   {% if mine %}
     <h2 class="mb-3 mt-8 text-lg font-semibold">What you signed up for</h2>
     <ul class="space-y-2">

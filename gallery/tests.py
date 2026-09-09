@@ -1059,6 +1059,99 @@ class WallPageTests(PageTestCase):
         response = self.client.get(reverse("gallery:wall"))
         self.assertEqual(len(response.context["sequence"]), 5)
 
+    def test_every_sequence_entry_carries_a_placeholder_and_a_shape(self):
+        """The two fields the window needs **before** the large image arrives.
+
+        🔴 Without them the lightbox paints the *previous* photograph for the
+           150–400ms the full-size fetch takes, which is the bug reported on
+           2026-09-09: "点开一张照片，都会显示上次打开的照片，然后会转跳".
+           `thumb` is what it shows instead — already on the page, already in
+           the browser's cache — and `ar` is what lets the CSS size the box
+           before either image is in hand, so the swap does not jump.
+        """
+        for _ in range(3):
+            self.add_photo(self.pantry)
+        self.login(self.lisi)
+        sequence = self.client.get(reverse("gallery:wall")).context["sequence"]
+
+        self.assertEqual(len(sequence), 3)
+        for entry in sequence:
+            self.assertEqual(sorted(entry), ["ar", "caption", "src", "thumb"])
+            self.assertTrue(entry["thumb"], "no placeholder to show while the "
+                                            "large image is on its way")
+            self.assertGreater(entry["ar"], 0, "a zero or missing aspect ratio "
+                                               "collapses the box to no height")
+
+    def test_the_placeholder_is_the_very_string_the_strip_already_loaded(self):
+        """🔴 Character-for-character, not merely "a URL for the same photo".
+
+        The browser keys its cache on the URL. These are presigned links, and a
+        presigned link is **different every time it is generated** — so a second
+        signature for the same photograph is a second cache key, and the
+        placeholder that was supposed to appear instantly would go to the
+        network instead. That is the whole reason `views.wall` reads both out of
+        one `wall_urls` batch rather than touching `.url` again, and this is the
+        assertion that keeps it that way.
+
+        ⚠️ Compared against the strip's own `thumb_url` rather than against the
+           markup: the seam clones repeat that string, so a substring check
+           would pass on a page where the two had drifted apart.
+        """
+        self.add_photo(self.pantry)
+        self.login(self.lisi)
+        response = self.client.get(reverse("gallery:wall"))
+
+        on_the_strip = [item.thumb_url
+                        for strip in response.context["strips"]
+                        for item in strip["photos"]]
+        self.assertEqual([entry["thumb"] for entry in response.context["sequence"]],
+                         on_the_strip)
+
+    def test_the_wall_costs_the_same_number_of_queries_at_any_size(self):
+        """🔴 No per-photo query, pinned by comparing two sizes rather than by
+        naming a number.
+
+        Every photo on this page is asked for its caption, and a caption is
+        `ministry.name` — a related object. Without `select_related("ministry")`
+        on `on_the_wall()` that is one query per photo: sixty on a full wall,
+        each one fast, none of them visible, and nothing goes red. The queryset
+        does select it today; what was missing is anything that notices when it
+        stops.
+
+        ⚠️ Asserted as "the count does not grow", not `assertNumQueries(7)`.
+           The exact figure moves for reasons that are nobody's bug — a new
+           middleware, a session write — and a guard that cries wolf on those
+           gets deleted rather than fixed. Growth with the number of rows is
+           the actual defect, and it is what this compares.
+
+        ⚠️ The signed-URL cache is cleared between the two renders. Left warm,
+           the second render would skip the write `wall_urls` does on a miss and
+           come out one query cheaper — the test would fail while the page was
+           perfectly correct.
+        """
+        for _ in range(3):
+            self.add_photo(self.pantry)
+        self.login(self.lisi)
+        url = reverse("gallery:wall")
+
+        cache.clear()
+        with CaptureQueriesContext(connection) as few:
+            self.assertEqual(self.client.get(url).status_code, 200)
+
+        for _ in range(9):
+            self.add_photo(self.pantry)
+
+        cache.clear()
+        with CaptureQueriesContext(connection) as many:
+            self.assertEqual(self.client.get(url).status_code, 200)
+
+        self.assertEqual(
+            len(many), len(few),
+            f"the wall costs {len(few)} queries for 3 photos and {len(many)} for "
+            f"12 — something asks the database once per photograph. The usual "
+            f"cause is a lost select_related('ministry') on on_the_wall(), "
+            f"reached through every photo's caption.")
+
     def test_the_seam_clone_is_hidden_from_assistive_technology(self):
         """⚠️ The clone exists to hide the loop's seam. Left in the
         accessibility tree it means every photo announced twice, and a keyboard

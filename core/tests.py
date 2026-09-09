@@ -6467,6 +6467,172 @@ class SharedFragmentGuardTests(TestCase):
                 self.assertIn("⚠️", self.markup(path))
 
 
+class AlpineKeysBelongToXForGuardTests(TestCase):
+    """Lint-as-test: `:key` may only sit on an `x-for` (2026-09-09).
+
+    🔴 Alpine's `:key` is **read by `x-for` and by nothing else**. Its own bind
+       handler says so in one line — `if (value === "key") return
+       storeKeyForXFor(el, expression)` — it files the expression away for a
+       loop to collect and returns. On any other element the key is stored and
+       never read again.
+
+    So `<img :key="index">` does nothing at all. Not "less than you hoped":
+    nothing. And the way it fails is the reason this is a guard rather than a
+    note — the Memories lightbox carried exactly that line for a month with
+    this comment beside it:
+
+        ⚠️ `x-bind:key` 让 Alpine 在换图时重建这个 <img>，而不是改它的 src。
+           改 src 的话，新图到达之前旧图还挂在那里 —— 翻页看起来像卡了一拍。
+
+    Every word of that is **correct**, and it describes something the code was
+    not doing. The `<img>` was never rebuilt, its `src` was mutated, and the
+    browser went on painting the previously decoded photograph until the new
+    one arrived — 150–400ms in which the window showed the wrong picture. Every
+    reader who checked that line read the comment, agreed with it, and moved
+    on. The reported symptom was "点开一张照片，都会显示上次打开的照片，然后会
+    转跳。这很莫名其妙" — and it is: it does not look like loading, it looks
+    like the click went to the wrong photograph.
+
+    ⚠️ A comment cannot hold this line down, which is the whole argument for
+       putting it here: the wrong version reads better than the right one.
+    """
+
+    #: ⚠️ `:key=` catches `x-bind:key=` too — that is the same directive spelled
+    #:    out, and the dead line was spelled the long way.
+    KEY_BINDING = re.compile(r":key\s*=")
+
+    #: A tag, with quoted attribute values matched as units.
+    #:
+    #: 🔴 **Not `<[^>]*>`.** That stops at the first `>` whether or not it is
+    #:    inside a quoted value, and this very template has one: the Back link
+    #:    carries `x-on:click.prevent="window.history.length > 1 ? …"`. A tag
+    #:    written `<img x-on:click="a > b" :key="i">` would be cut at that `>`,
+    #:    the fragment holding no `:key`, and the remainder never matching for
+    #:    want of a `<`. The dead binding would sail past **the guard written to
+    #:    catch it** — and silently, which is the failure this whole class is
+    #:    about.
+    TAG = re.compile(r"<[^>\"']*(?:(?:\"[^\"]*\"|'[^']*')[^>\"']*)*>")
+
+    def test_no_key_binding_sits_outside_an_x_for(self):
+        # ⚠️ Comments are blanked out because this guard's own subject is quoted
+        #    inside one: `wall.html` now explains at length why the dead line was
+        #    taken out, and a guard that read prose would fail on the note left
+        #    there to stop it coming back.
+        #
+        # ⚠️ `project_template_files` / `_blank_out_comments` rather than a walk
+        #    and a regex of its own — the shared pair also blanks the one-line
+        #    `{# … #}` form and keeps line numbers honest, and it walks the tree
+        #    instead of a list of apps, so a template added tomorrow is covered
+        #    without anyone remembering this file.
+        offenders = []
+        for path, source in project_template_files():
+            for tag in self.TAG.findall(_blank_out_comments(source)):
+                if self.KEY_BINDING.search(tag) and "x-for" not in tag:
+                    offenders.append(f"{path}: {tag.strip()[:90]}")
+
+        self.assertEqual(
+            offenders, [],
+            "`:key` outside an x-for does nothing — Alpine stores it for a loop "
+            "that will never collect it. If this was meant to force the element "
+            "to be rebuilt, drive the state explicitly instead (see the wall "
+            "lightbox's `shown` in assets/js/app.js):\n" + "\n".join(offenders))
+
+    def test_the_guard_can_see_a_key_hiding_behind_a_greater_than(self):
+        """⚠️ The guard checking itself, because the naive tag split is wrong in
+        a way this very codebase triggers.
+
+        `<[^>]*>` ends a tag at the first `>` even inside a quoted value, and
+        `wall.html` has one: `x-on:click.prevent="window.history.length > 1 …"`.
+        Under that pattern a dead `:key` written after such an attribute is
+        never seen — the guard passes, and the thing it exists to catch ships.
+        """
+        hidden = '<img x-on:click="a > b" :key="i">'
+        found = [tag for tag in self.TAG.findall(hidden)
+                 if self.KEY_BINDING.search(tag) and "x-for" not in tag]
+        self.assertEqual(len(found), 1, "a `:key` slipped past behind a `>`")
+
+        # And the real back-link must not be mistaken for one.
+        innocent = '<a x-on:click.prevent="window.history.length > 1 ? b() : c()">'
+        self.assertEqual(
+            [tag for tag in self.TAG.findall(innocent)
+             if self.KEY_BINDING.search(tag)], [])
+
+
+class TheLightboxNeverShowsTheWrongPhotoGuardTests(TestCase):
+    """Lint-as-test: 悬浮窗换图的四条规矩还在 `assets/js/app.js` 里（2026-09-09）。
+
+    这一组守的是一段**没有单元测试的 JS**（本项目没有 JS 测试基建）。
+    它读源码，所以它证明不了行为对 —— 它只保证这四行不会在某次整理中被顺手删掉，
+    而它们每一条都对应一个已经发生过、或者已经被指出来会发生的坏结果。
+
+    ⚠️ 一个只会「读起来对」的检查有它的上限，这里如实写下来：真正的验证是
+       2026-09-09 在浏览器里走的那一遍（`docs/planning/revisions.md` 第六十节）。
+    """
+
+    SOURCE = Path(settings.BASE_DIR) / "assets" / "js" / "app.js"
+
+    def source(self):
+        """`wall` 组件里 `load()` 那一段，注释剥掉。
+
+        🔴 **切到这一段，不读整个文件。** 一个判据只要在文件别处也成立，它就是
+           恒真的，也就守不住任何东西。2026-09-09 写这一组时踩过：兜底那条查的是
+           「整份 app.js 里出现过 `document.hidden`」，而它在日程那边另有五处
+           （动画切走就停），于是把 `load()` 整个换回旧实现，那条守卫照样绿。
+           一个永远绿的守卫比没有守卫更坏：它让人以为这里有人看着。
+
+        ⚠️ 每条断言都要在旧实现上真的变红 —— 这一组四条都验过两遍：
+           把 `load()` 换回旧版全红，换回来全绿。
+
+        ⚠️ 注释也剥掉：下面那几个名字在注释里逐个讲了一遍，读注释等于没检查。
+           ⚠️ 但 `DECODE_CEILING_MS` 的**定义**在组件外面，这一段里只有它的用处；
+              查用处正是要查的东西（常量定义还在、却没人读它，是同一个坑）。
+        """
+        text = self.SOURCE.read_text(encoding="utf-8")
+        body = text[text.index("  load(i) {"):text.index("  prefetch(i) {")]
+        return re.sub(r"//[^\n]*", "", body)
+
+    def test_the_window_paints_a_placeholder_before_the_large_image(self):
+        """少了它：那 150–400ms 里屏幕上是**上一张照片**，也就是最初报的那个 bug。"""
+        self.assertRegex(
+            self.source(), r"this\.shown\s*=.*photo\.thumb",
+            "悬浮窗不再先贴缩略图 —— 大图在路上的那几百毫秒会画着上一张")
+
+    def test_it_waits_for_an_off_screen_decode(self):
+        """少了它：换图那一帧在主线程上解码 1600px，老设备上看得见地顿一下。"""
+        self.assertIn("decode()", self.source(),
+                      "大图不再离屏解码，换上去的那一帧会卡")
+
+    def test_a_late_arrival_cannot_overwrite_a_newer_choice(self):
+        """少了它：连按方向键时「翻到第 5 张，屏幕上是第 3 张」。"""
+        # ⚠️ 只钉「比过 `this.index !== i` 之后 return」，不钉那一行长什么样：
+        #    条件里还可以有别的（现在就多一个 `done ||`），而写死整行的那一版
+        #    会因为一次无害的改写变红 —— 一条动不动就假红的守卫，
+        #    最后总是被删掉，而不是被修好。
+        self.assertRegex(
+            self.source(), r"this\.index\s*!==\s*i[^;{]*\)\s*return",
+            "先发后到的那张会盖掉现在选中的那张")
+
+    def test_a_stalled_decode_cannot_strand_the_photo_on_its_thumbnail(self):
+        """🔴 少了它：**照片永远停在 700px**，不报错、不空白，只是一直有点糊。
+
+        `decode()` 没有延迟上界。已知会踩到的一例是隐藏标签页 —— Chrome 不跑
+        解码管线，那个 promise 既不成功也不失败地挂着（2026-09-09 实测）——
+        但可见标签页上解码卡住是同一个坑。所以兜底判的是**时间**，
+        而不是 `document.hidden`：后者只挡得住测到的那一个实例。
+
+        ⚠️ 计时器必须挂在 `load` 上。和 `decode()` 直接赛跑的话，`load` 早于像素
+           解码完成，于是每次换图都走没解码那条路 —— `decode()` 就白写了。
+        """
+        source = self.source()
+        self.assertIn("DECODE_CEILING_MS", source,
+                      "解码没有上限了 —— 它一挂住，照片就永远停在缩略图上")
+        # ⚠️ `[\s\S]{0,120}?` 而不是 `[^)]*`：中间隔着一个箭头函数，
+        #    它自己带括号，按「不含右括号」写的那一版永远匹配不上自己要守的代码。
+        self.assertRegex(
+            source, r'addEventListener\(\s*"load"[\s\S]{0,120}?setTimeout',
+            "上限没有挂在 load 上 —— 和 decode() 直接赛跑会让 decode() 形同虚设")
+
+
 class OverlaysLiveInTheTopLayerGuardTests(TestCase):
     """Lint-as-test: every overlay opens with dialog.showModal() (2026-08-09).
 

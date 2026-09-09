@@ -240,14 +240,34 @@ def _back_link(request):
     return reverse("events:event_list") + state, "Events"
 
 
-#: How many events one page of each list holds (2026-08-05).
+#: How many events one page of each list holds (2026-08-05, 改成同一个数
+#: 2026-09-09).
 #:
-#: Two different numbers because the rows are two different heights: the
-#: volunteer lists are cards with a thumbnail, the management list is a table
-#: row. Fifty cards is a very long page; fifty table rows is one screen and a
-#: bit, and the person reading that page is scanning across everything.
+#: **One number for every list in the project.** 「admin 的 event manage 和
+#: notice manage 翻页都要 50 行才行，改成和 event 一样的条数」—— 也就是
+#: `EVENTS_PER_PAGE` 这个数，四个列表从此对齐。
+#:
+#: ⚠️ 这**推翻了 2026-09-03 同一个人的决定**（那次的原话是「加上翻页，每页 50 条，
+#:    跟 events 一样」，见 revisions.md 第五十六节）。当时「跟 events 一样」指的是
+#:    管理列表那个 50，这次指的是志愿者列表那个 20 —— 同一句话，两个所指。
+#:
+#: ⚠️ 那句话**当面问清楚了才改的**（2026-09-09）：「都要 50 行才行」这半句单独读
+#:    是「保持 50」，而两个管理列表当时本来就是 50，那样这次改动等于什么都不做。
+#:    把两种读法摆出来问过，答复是四个列表都用 20。写在这里是因为下一个人会
+#:    重新读到那句话，并且有很大机会得出相反的结论 —— 这条注释就是给那个人的。
+#:
+#: ⚠️ 这里原来写着一段论证：「两个数，因为行高不同 —— 志愿者列表是带缩略图的卡片，
+#:    管理列表是表格行；五十张卡片是很长的一页，五十行表格只有一屏多一点」。
+#:    那段话**删掉而不是留着**：论证本身没有错，但它得出的结论已经不是现在的行为，
+#:    而一段和代码打架的理由比没有理由更贵 —— 下一个人会以为代码错了。
+#:    要翻旧账去 revisions.md，那里记着它是被谁、在哪一天、因为什么换掉的。
+#:
+#: ⚠️ 写成字面量 20，**不写成 `MANAGED_EVENTS_PER_PAGE = EVENTS_PER_PAGE`**：
+#:    别名的意思是「这两个数从此必须相等」，而拍板的是「现在都用 20」。
+#:    这四个列表仍然是四页给不同的人看的东西，把它们焊死是这次没有人要求的决定。
+#:    `notices` 那两个同理，而且它还多一条理由：它不能 import `events`（D41）。
 EVENTS_PER_PAGE = 20
-MANAGED_EVENTS_PER_PAGE = 50
+MANAGED_EVENTS_PER_PAGE = 20
 
 
 # ⚠️ 翻页那两个函数 2026-09-03 搬去了 `core/pagination.py`（`page_of` /

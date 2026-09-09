@@ -3626,6 +3626,36 @@
    *    现在走 `showModal()` 进 top layer，包含块永远是视口，`.wall` 怎么变都够不着。
    */
   .wall-lightbox {
+    /* 照片能占的那个框（2026-09-09）。**图片的尺寸必须算得出来，不能等图片自己说**
+     * —— 理由在 `.wall-lightbox-figure img` 上。
+     *
+     * 🔴 **`--wall-pad-y` 和 `--wall-caption-gap` 各有两个读者**：一个是这里的
+     *    高度预算，一个是真正画出来的 padding / gap。它们存在就是为了让那两处
+     *    不可能对不上 —— 第一版把 `3.5rem × 2` 和 `0.875rem` 手抄进 calc，
+     *    再在注释里写一句「那两处改了这里要跟着改」，而那条纪律防的错
+     *    **不报错也不错位**：照片比它能占的地方小一圈，看得见，但不像 bug。
+     *    ⚠️ `--wall-caption-block` 只有这一个读者，它不防分叉，只是给
+     *       「两行图注有多高」这个推导一个名字。别照着它给每个数都起个名 ——
+     *       一个只有一处读的变量挡不住任何东西，只是多一层间接。
+     *
+     * 🔴 **图注按两行留，不按一行。** 它是 `Ministry 名 · 年份`，而 ministry 名字是
+     *    管理员填的、长度没有上限；窄屏上（92vw 在 360px 手机上只有 331px）
+     *    一个长名字会折成两行。而**照片不会再为它让位** —— 高度是算出来的定值，
+     *    不再是「有多少地方占多少」，`max-height: 100%` 也指望不上：
+     *    父级 `.wall-lightbox-figure` 高度是 auto，百分比 max-height 无从解析。
+     *    少留一行的表现是图注被裁、或照片下沿被切，只在窄屏 + 长名字上出现；
+     *    多留的代价是高屏上照片矮 1.25rem，量不出来。 */
+    --wall-pad-y: 3.5rem;
+    --wall-caption-gap: 0.875rem;
+    /* 图注两行的行盒。字号 0.8125rem，行高按 1.5 算 ≈ 1.25rem 一行。 */
+    --wall-caption-block: 2.5rem;
+
+    /* ⚠️ `--wall-photo-w` 和 `.wall-lightbox-figure` 的 max-width 是同一个数
+     *    （那边仍然管着 figcaption 的宽度）。 */
+    --wall-photo-w: min(92vw, 1400px);
+    --wall-photo-h: calc(100dvh - var(--wall-pad-y) * 2
+                         - var(--wall-caption-block) - var(--wall-caption-gap));
+
     /* ⚠️ UA 样式给 `dialog:modal` 的就是 `position: fixed`，而这里它是**安全的**：
      *    top layer 的包含块是视口本身，不再由祖先决定。同一个属性，
      *    在 top layer 里和在普通流里是两件事。 */
@@ -3635,7 +3665,9 @@
     max-height: 100dvh;
     margin: 0;
     border: 0;
-    padding: 3.5rem 1rem;
+    /* ⚠️ 纵向取自变量，不写字面量：`--wall-photo-h` 要减掉它，两处各写各的
+     *    就会悄悄对不上（见那一段的 🔴）。横向没有第二个读者，写字面量。 */
+    padding: var(--wall-pad-y) 1rem;
     /* 两档都用同一层黑。浅色模式下也是黑的 —— 这一层的作用是把周围压掉让照片
      * 站出来，而不是「页面背景的深色版」。
      * ⚠️ 画在元素自己身上而不是 `::backdrop`：这一层要**接点击**（点空白处关窗），
@@ -3675,16 +3707,40 @@
   .wall-lightbox-figure {
     display: flex;
     max-height: 100%;
-    max-width: min(92vw, 1400px);
+    /* ⚠️ 和 `--wall-photo-w` 同一个数：那个管照片，这个还管着 figcaption 的宽度。 */
+    max-width: var(--wall-photo-w);
     flex-direction: column;
     align-items: center;
-    gap: 0.875rem;
+    /* ⚠️ 取自变量：`--wall-photo-h` 把这个 gap 减掉了。 */
+    gap: var(--wall-caption-gap);
   }
 
-  /* ⚠️ `min-height: 0` 在这里是必需的，不是保险。flex 子项的默认
+  /* 🔴 **尺寸由「框 + 宽高比」算出来，不由图片自己的像素决定**（2026-09-09）。
+   *
+   *    这一格里先后会挂两张**同一张照片的两个尺寸**：先是 700px 的缩略图（占位，
+   *    已在缓存里），大图解码完再换成 1600px 的那张。按固有尺寸排版的话，
+   *    前者画 700px、后者画到框宽（约 1325px）—— 换的那一下照片会当场变大一圈，
+   *    figcaption 跟着往下弹。那等于把「先看到上一张」换成了「跳一下」，
+   *    没解决任何问题。给定 `--ar`（服务端算好放进 sequence 的宽高比），
+   *    两个尺寸算出来的框**完全一样**，换图时一个像素都不动。
+   *
+   *    ⚠️ 唯一的行为变化：长边小于框宽的照片会被放大到框宽，不再按原尺寸画。
+   *       上传管线把长边压到 `GALLERY_IMAGE_MAX_EDGE`(1600)，手机和相机的照片
+   *       必然撞上限 —— 本机 14 张实测长边全是 1600。所以这条只会落在将来某张
+   *       小截图或扫描件上，而那时「小图占满框」也仍然是这一页想要的样子。
+   *
+   *    ⚠️ `--ar` 缺省 1：JSON 里没有这个字段的旧页面（或者序列坏掉时）退回方形框，
+   *       而不是塌成 0 高度。
+   *
+   * ⚠️ `min-height: 0` 在这里是必需的，不是保险。flex 子项的默认
    *    `min-height: auto` 会让图片把容器顶出屏幕 —— 横幅照片在窄窗口上会
-   *    超出视口顶部，而那正好是没有滚动条的一层。 */
+   *    超出视口顶部，而那正好是没有滚动条的一层。
+   * ⚠️ `max-*: 100%` 留着当兜底：上面那两个变量要是算错了，结果只会是照片小一圈，
+   *    不会溢出这一层。 */
   .wall-lightbox-figure img {
+    aspect-ratio: var(--ar, 1);
+    width: min(var(--wall-photo-w), calc(var(--wall-photo-h) * var(--ar, 1)));
+    height: auto;
     min-height: 0;
     max-height: 100%;
     max-width: 100%;

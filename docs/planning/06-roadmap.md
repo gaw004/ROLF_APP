@@ -1866,7 +1866,7 @@ issubset  /  <=  /  >=   出现在受众字段附近 → 只许在 events/models
 
 ## 又七条（2026-09-05，页面安排）
 
-[L5.3](#l53-三档单选落在哪) 写的是「现有 `/events/` 列表页排不排除 Program 这一格留白 ——
+[L5.3](#l53-三档单选落在哪以及报一次管全部) 写的是「现有 `/events/` 列表页排不排除 Program 这一格留白 ——
 在设计出来之前替它决定，就是在猜」，[L5.8](#l58-页面与路由) 写的是「Programs 的页面本轮不设计」。
 设计现在有了，两格一起填。
 
@@ -1893,7 +1893,7 @@ issubset  /  <=  /  >=   出现在受众字段附近 → 只许在 events/models
 > 单场是它自己，有讲次的是它的各讲。卡片带「Session N」。
 >
 > ⚠️ 判据是「**有没有讲次**」而不是 `shape`，且这不和
-> [L5.3](#l53-三档单选落在哪) 那条「不靠 `sessions.exists()` 判形状」冲突：
+> [L5.3](#l53-三档单选落在哪以及报一次管全部) 那条「不靠 `sessions.exists()` 判形状」冲突：
 > 那条说的是**分类**（一个还没排期的 Program 也是 Program），
 > 这里问的是**画什么**（有讲次就把它们画出来）。两个问题，两个判据。
 >
@@ -2017,8 +2017,10 @@ class Session(ConstraintErrorFieldMixin, TimeStampedModel):
 ### ⚠️ 这一步**不兑现** participants.md 第九节那条缺口
 
 第九节排第一位那条（「他报一次之后，后面每一场都不用再报」）的出栏要等
-[L5.2](#l52-sessionattendance他哪几场来没来干了多久) + [L5.3](#l53-三档单选落在哪)。
+[L5.2](#l52-sessionattendance他哪几场来没来干了多久) + [L5.3](#l53-三档单选落在哪以及报一次管全部)。
 L5.1 只提供承载 —— 记在这里是因为初稿没写这句，容易让人以为做完这一步就结清了。
+
+> ✅ 2026-09-09 由 [L5.3](#l53-三档单选落在哪以及报一次管全部) 结清。
 
 ### 测试（`events/tests.py` · `SessionTests`）
 
@@ -2098,7 +2100,7 @@ class SessionAttendance(ConstraintErrorFieldMixin, TimeStampedModel):
 | 2 | 没有任何规则说两个外键要指向同一场活动 | `clean()` 第一条 | 🔴 `participation` 的活动在 `event_role.event` 上，`session` 的在 `session.event` 上。不一致时存下来的是「他来了一门他没报的课的第 7 讲」——读得出、印得出、页面正常。这正是 `Participation` docstring 自己点名的那个坑（当年的解法是删掉一列），而这里两个外键都删不掉，所以改成检查它们是否一致 |
 | 3 | 「三条规则」 | 五条，两条都是同款 | ⚠️ 和这张表字段重合的约束 `Participation` 上有五条，初稿漏了 `checkout 不早于 checkin` 和 `checked in 的人不能标成缺席` —— 而这张表 `checked_in_at` / `checked_out_at` / `status` 三列都有。「抄漏一条的表现是那张表比它复制的那张松」这句话就写在本节自己那一行上，L5.1 落地时刚在它身上应验过一次 |
 | 4 | `class SessionAttendance(TimeStampedModel)` | 加 `ConstraintErrorFieldMixin`，`core/constraints.py` 补五行 | 和 L5.1 初稿第 5 条一模一样的遗漏。`ConstraintMappingGuardTests` 四向查（缺 code、缺映射、留下没有约束的映射、映射到不存在的字段），少哪一样当场红 |
-| 5 | 没说这张表的行是谁建的 | `services.add_attendance()`，单行 | L5.1 有 `add_session()`，本节没有对应的东西 —— 而两条跨表规则全靠它才被调用到。⚠️ 批量建行（报一次管全部 / 决定 17 / 决定 18）**要等 L5.3**：`sign_up()` 在 `Event.shape` 之前分不出一门课和一场周六发放，这句话写进 docstring，免得这张表读起来像没做完 |
+| 5 | 没说这张表的行是谁建的 | `services.add_attendance()`，单行 | L5.1 有 `add_session()`，本节没有对应的东西 —— 而两条跨表规则全靠它才被调用到。⚠️ 批量建行（报一次管全部 / 决定 17 / 决定 18）**要等 L5.3**：`sign_up()` 在 `Event.shape` 之前分不出一门课和一场周六发放，这句话写进 docstring，免得这张表读起来像没做完。✅ 2026-09-09 L5.3 落地时那句 docstring 已就地兑现 |
 | 6 | `session` 用 `related_name="+"` | 两头都叫 `attendances` | 「第 7 讲今天谁来了」是点名页的第一个查询，`"+"` 把它从 `Session` 那头挡死了。而初稿担心的那件事不成立：`event.sessions` 和 `participation.sessions` 会是**一个词指两张表**，而这两个是**一个词指同一张表的两个方向** —— 那正是反向名字的用途 |
 | 7 | 没提 `Meta.ordering` | 明写**不设**，改出两个 queryset 方法 | 两个方向要两种顺序（按讲次时间 / 按人），一个 `Meta` 服务不了两个；而跨关系的默认排序还有第二笔代价 —— Django 会把它塞进 `values().annotate()` 的 GROUP BY，而 [L5.7](#l57-l14-那几个工时口径要改决定-20-的代价) 正要写那种查询。L5.1 那条「不加索引是决定不是遗漏」在这里是同一种要写下来的「不加」 |
 | 8 | 没有这个数 | `hours_received` + `services.hours_received()` | 走查时基金会提出：来接受服务的人也想知道自己被服务了多久。查证下来这不是可选项（成人教育按 contact hours 报，还有 12 小时门槛），但答案**不是放开 `hours`** —— 那是方向相反的第三个数，见 [D43](decisions/D43-hours-given-and-hours-received.md)。不加列，从 `Session` 的起止两列算 |
@@ -2148,8 +2150,12 @@ class SessionAttendance(ConstraintErrorFieldMixin, TimeStampedModel):
 ### ⚠️ 这一步同样**不兑现** participants.md 第九节那条缺口
 
 L5.1 那一节写了这句，本节初稿没写 —— 而本节更容易被读成做完了。
-「他报一次之后，后面每一场都不用再报」要等 [L5.3](#l53-三档单选落在哪)：
+「他报一次之后，后面每一场都不用再报」要等 [L5.3](#l53-三档单选落在哪以及报一次管全部)：
 本步只有单行的门，批量建行在 `Event.shape` 之前写不出来。
+
+> ✅ 2026-09-09 由 [L5.3](#l53-三档单选落在哪以及报一次管全部) 结清 —— 批量建行落在
+> `open_register()` 上，`sign_up()` 调它。⚠️ 而 L5.3 那一节当时**并没有写要做这件事**，
+> 三处指着它的话里就有上面这一句；见[计划外那一条](#计划外--一步被三处指着而它自己那一节是空的2026-09-09l53-开工走查)。
 
 ### 测试（`events/tests.py`）
 
@@ -2219,45 +2225,226 @@ L5.1 那一节写了这句，本节初稿没写 —— 而本节更容易被读�
 一张没人打得开的表，和一张没人需要的表，长得一模一样。本步两张一起挂。
 
 
-## L5.3 三档单选落在哪
+## L5.3 三档单选落在哪，以及「报一次管全部」
+
+> ### 2026-09-09 落地。本节初稿有两处开工前的走查就撞上了，逐条改在下面
+>
+> 形状是对的，两条「为什么要一列」的理由也站得住。问题不在写错，在**写漏**：
+> 这一节自己只写了列和谓词，而全仓有三处指着它说「报一次管全部要等 L5.3」。
+> 中间那一格是空的 —— 和 L5.1 那条 2026-09-08 更正判过的是同一个病。
+
+| # | 初稿写的 | 改成 | 为什么 |
+|---|---|---|---|
+| 1 | 只有枚举、两条理由、两个谓词。**批量建点名行一个字都没有** | 本节同时交付 `open_register()` / `close_future_register()` 和六个调用方 | 🔴 三处指着这一步：`events/services.py` 里 `add_attendance()` 的 docstring 明写「…until `Event.shape` lands in L5.3」、L5.1 和 L5.2 各有一条 ⚠️「要等 L5.3」、`participants.md` 第十一节验收「前半句要等 L5.3」。而 L5.10 那张批次级测试清单里的 `test_signing_up_for_a_program_covers_every_session` 等四条，没有任何一步描述怎么做。**两份文档各自把它推给了对方** |
+| 2 | 2026-09-05 补框：「`/events/` 和 `/events/schedule/` 都只剩单场」 | 日程那半句**作废**；列表那半句**推到 L5.8** | 三天后的[又七条 2026-09-08 补框](#又七条2026-09-05页面安排)已经推翻了日程那一半（站点日程按讲次画 Programs），而代码早按新的落了地（`events/schedule.py` 的 `Occurrence`）。照初稿敲会把修好的东西改回去。列表那半推到 L5.8 和 `/programs/` 同批，中间就不会出现「一门课在站点上没有任何入口」的窗口；同时它也避开了 `events/views.py` 那条注释点名的坑 ——「列表里没有、日程上画着」是同一份筛选画出的两个答案 |
+
+> ### 被这两处取代的原文，照本文件的规矩留在这里
+>
+> 2026-09-05 那一格写的是：
+>
+> > 原文是「基金会说 Programs 会有**自己的页面**，而页面设计要等后端定完。所以后端把
+> > 两者分得开，而**现有 `/events/` 列表页排不排除 Program 这一格留白** —— 在设计
+> > 出来之前替它决定，就是在猜」。
+> >
+> > 设计给出来了（决定 22–27），所以答案是**排除**：Programs 走 `/programs/`，
+> > `/events/` 和 `/events/schedule/` 都只剩单场（含 recurring 生成的那些）。
+> > 而它反过来证明了这一列该存在 —— 上面那两条理由（列表页要按它筛、一个还没排期的
+> > Program 也是 Program）现在**各自都有了真实调用方**。
+>
+> 最后那句现在由 admin 的 `ShapeFilter` 兑现，而不是由列表页 —— 结论没变，
+> 兑现它的是另一个调用方。日程那一句在三天后作废，列表那一句推到 L5.8。
+
+### 落库的形状（已实现，`events/models.py`）
 
 ```python
 class Event(...):
     class Shape(models.TextChoices):
         SINGLE = "single", "One occasion"
         PROGRAM = "program", "A course or program — sign up once"
+
+    shape = ...                       # 默认 SINGLE
+    people_pick_meetings = ...        # 决定 17 的副开关，默认 False
 ```
 
 ⚠️ **枚举只有两档，而界面上是三档。** 第二档（recurring events：每周一场、
 各自报名）生成的是 **N 个独立的 `Event`，每个都是 `single`** ——
 它是建活动时的一个**生成选项**，不是 `Event` 上的一个状态。
 三档单选是发布表单上的一个 `ChoiceField`，其中两档写进这一列、
-一档触发生成器。
+一档触发生成器（L5.4，届时加进同一个字段）。
 
 ⚠️ 那为什么不靠 `sessions.exists()` 判、非要一列？两条：
 一是列表页要按它筛（`Exists` 子查询每次都要 join）；
 二是**一个还没排期的 Program 也是 Program** —— 建的时候先定形状、再排日期，
 是很自然的顺序，而 `sessions.exists()` 在那一刻会答错。
 
-### 两个谓词，页面怎么用**本轮不定**
+⚠️ 这一列问的是**分类**，日程和详情页问的是**画什么**（判据是「有没有讲次」）。
+两个问题、两个判据，这一点 [L5.8](#l58-页面与路由) 和 2026-09-08 那条补框已经写死。
+
+### 两个谓词，这一步就有调用方
 
 ```python
-    def programs(self): ...        # Shape.PROGRAM
-    def single_occasions(self): ...  # Shape.SINGLE
+def programs(self): ...          # Shape.PROGRAM
+def single_occasions(self): ...  # Shape.SINGLE
 ```
 
-> ### 2026-09-05：这一格不再留白了，见[又七条](#又七条2026-09-05页面安排)
->
-> 原文是「基金会说 Programs 会有**自己的页面**，而页面设计要等后端定完。所以后端把两者
-> 分得开，而**现有 `/events/` 列表页排不排除 Program 这一格留白** —— 在设计出来之前
-> 替它决定，就是在猜」。
->
-> 设计给出来了（决定 22–27），所以答案是**排除**：Programs 走 `/programs/`，
-> `/events/` 和 `/events/schedule/` 都只剩单场（含 recurring 生成的那些）。
-> 而它反过来证明了这一列该存在 —— 上面那两条理由（列表页要按它筛、一个还没排期的
-> Program 也是 Program）现在**各自都有了真实调用方**。
+⚠️ `EventQuerySet` 自己那段注释写着「没有调用方的谓词不留」（`upcoming()` /
+`past()` 就是这么删掉的）。所以两件事一起做：一是在那段注释旁写明**这两个是一个
+完备划分的两半**（`test_the_two_predicates_do_not_overlap` 钉的是不重不漏，
+而 `upcoming` / `past` 是两个各自独立的查询，两种东西）；二是给它们一个真读者 ——
+`events/admin.py` 的 `ShapeFilter`。
 
-⚠️ 留白的是「用哪个」，不是「有没有」：两个谓词都要写、都要有测试。
+⚠️ `list_filter = ["shape"]` 那条路**接不上**：Django 从字段的 `choices` 生成
+`ChoicesFieldListFilter`，执行的是 `filter(shape__exact=…)`，永远碰不到
+`EventQuerySet`。要调谓词必须是 `SimpleListFilter` —— 同一个文件里的
+`UnderstaffedFilter` 就是先例，它的 docstring 第一句正是「每个分支一次 QuerySet
+调用，这里不做算术」。而 L5.8 之前 admin 是 Program 唯一管得到的地方，
+所以这个筛选不是为了满足规矩硬造的。
+
+### 两个互为镜像的函数，四条规则全落在它们身上
+
+```python
+def open_register(participation, *, sessions=None, now=None): ...
+def close_future_register(participation, *, now=None): ...
+```
+
+| 规则 | 落在哪 |
+|---|---|
+| 报一次管全部 | `sign_up()` → `open_register()`，和 `set_served_as()` 同一个事务 |
+| 决定 17「挑哪几场」 | `sign_up(sessions=…)`，由 `people_pick_meetings` 放行 |
+| 决定 18「中途加入」 | 同一个机制：**哪几行存在**。切点 `end_time > now` |
+| 后加的讲次要补建 | `add_session()` → `open_registers_for()`（admin 走 `SessionForm.save()`） |
+| 重新报名只补缺的行 | `open_register()` 是补齐不是重建 |
+| 取消/退出清掉未来的行 | `cancel()` → `close_future_register()` |
+| 整门课停办 / 复办 | `set_status()`，只在进出 `cancelled` 这两个转换上动 |
+
+**切点一律 `end_time > now`** —— 仓库那条硬规矩「是否结束一律读 `end_time`」
+（`open_for_signup()` / `is_over` / `from_today()` 三处，2026-08-18 为此合并过一次）。
+晚到半小时当场报名的人，仍在今晚这一讲的点名册上。
+
+⚠️ **`sessions=` 在两个函数里只有一个意思：收窄看哪几讲。** 决定 17 那道
+「他有没有资格挑」的门在 `sign_up()` 上，因为**挑**这件事发生在那里。初稿把两者
+写成同一个参数，结果 `add_session()` 的补建被当成一次非法的挑选拒掉了 ——
+测试当场抓到。
+
+🔴 **`close_future_register()` 要两个条件，不是一个。** 讲次还没结束**且**那一行
+还停在 `registered`。只按时钟筛的话，一堂课上到一半、已经签到的人中途退出，
+会把他的签到和工时一起删掉 —— 在一个规矩是「已经发生的绝不动」的函数里。
+同样测试抓到的。
+
+### 整门课停办到一半
+
+| 东西 | 怎么处理 | 为什么 |
+|---|---|---|
+| 已上的那几讲 | 一行不动 | 那几讲真的发生了。停办不能倒过来说它没发生 |
+| 剩下几讲的 `Session` 行 | 保留 | 它们是当初的计划，也是「为什么只上了六讲」的唯一证据。同 L5.6「有出勤的讲次不许自动删」的手工路径版 |
+| 那几讲上每个人的预期点名行 | 清掉 | 不清的话出勤率分母永远是 12，而只有 6 讲可能发生 |
+| 报名行的状态 | 不动 | 🔴 `cancel()` 判的是「**这个人自己**不来了」。基金会停办不是他做的事 —— 写成 withdrew，报表会说「六个人退出了」，而事实是「我们停开了」。活动的 `status` 已经说了一遍，往人身上再写就是第二份真相 |
+
+⚠️ **一条写下来的缺口（D14）**：`people_pick_meetings` 为真的那种课停办之后再复办，
+**恢复不了谁当初挑了哪几讲** —— 那些选择就是那些行。今天可以接受，因为这个开关
+在 L5.8 之前没有界面，还不存在真的选择可丢；重启条件就是那一页做出来的时候，
+届时的答案多半是「留着行并标记」而不是删。
+
+### `Session.clean()` 补一条：讲次只挂在 Program 上
+
+跨表规则（判据在 `event.shape` 上），`CheckConstraint` 看不见 —— 同 L5.1 那条窗口
+规则、L2×L3 那条含容规则。
+
+⚠️ 它堵的正是这一列自己会开的口子：一个 `single` 活动挂上讲次之后，日程和详情页
+都会把它们画出来（两者判据是「有没有讲次」，而那是对的），可 `sign_up()` 读的是
+`shape`，于是谁的点名册都不会开 —— 讲次在、点名册永远空、什么都不报错。
+反方向自由：**一门还没排期的 Program 仍然是 Program**。
+
+### `Event.clean()` 补两条
+
+1. **`shape` 冻结**：已有讲次或已有报名之后不许改，照 `ParticipationRole.clean()`
+   那条「已有报名的工种不许改 `nature`」的形状。
+   🔴 **只冻这一列。** 取消活动改的是 `status`、走 `set_status()`，那条路不读
+   `shape` —— 冻结永远拦不住「这门课不办了」，且有一条测试专钉这一点。
+2. 副开关只在 Program 上成立。
+
+⚠️ 不新增任何 `CheckConstraint`，因此 **`core/constraints.py` 不动**。
+写下来是因为 L5.1 和 L5.2 各在这一格上漏过一次（方向相反：那两次是该加没加）。
+
+### 迁移
+
+- `0026_event_shape.py` —— 纯 `AddField` × 2（连 `HistoricalEvent`）
+- `0027_backfill_event_shape.py` —— **已经有讲次的活动回填成 `program`**
+
+⚠️ 回填不是可选的。L5.1 / L5.2 是 9 月 5 日和 8 日落的，开发库从那天起就长出了
+带讲次的活动，所以「库里每一场都是没有聚会的单场」这句话在这一列到来之前三天就
+不成立了。不回填的话第一天就存在上面那种「讲次在、点名册空」的行 ——
+而那正是本步要堵的东西，不能和它同一个提交一起发出去。
+
+### 表单与 admin
+
+- `EventForm` 加 `shape`（两档 `RadioSelect`）和 `people_pick_meetings`，
+  位置在 `start_time` / `end_time` **之前** —— 它改变那两列的**含义**
+  （对 Program 那是学期的两端），先填日期的人已经在答另一个问题了。
+- 新 `SessionForm`，`save()` 调 `open_registers_for()`。
+  ⚠️ 为什么是表单而不是 `admin.save_model()`：那个钩子被
+  `AdminHasNoLogicGuardTests` 禁了，而 `form = ` 是这个文件里的现成做法。
+  而这项目里没有任何信号（signal），本轮**不引入第一个**。
+
+### 演示数据
+
+`seed_demo` 里原来一个 `Session` 都没有。加一门 **ESL spring term**：跨期一个
+`Event` + 12 讲（5 讲已上、7 讲未上）、学员与助教两个角色、三个人 ——
+从第一讲就在的、今天才报名的（决定 18 在一屏上可见）、以及一个按讲记工时的助教
+（决定 20 + D43 两个方向的数并排）。
+
+⚠️ 匹配键只用活动名，**不含任何日期** —— 这个文件第 423 行专门有一条注释说明
+含 `local_today() - N 天` 的匹配键会让今天跑和昨天跑造出两份。
+
+### 测试
+
+`EventShapeTests`、`ProgramSignUpTests`、`RunCalledOffTests` 三个新类，
+另加 `SessionsThroughTheAdminTests` 与 `EventFormTests` 的补充。裸名如下：
+
+- `test_a_new_event_is_one_occasion`
+- `test_the_two_predicates_do_not_overlap`
+- `test_a_course_with_no_dates_yet_is_still_a_course`
+- `test_an_empty_run_can_still_change_its_mind`
+- `test_a_run_with_meetings_cannot_be_turned_into_a_one_off`
+- `test_a_run_with_signups_cannot_be_turned_into_a_one_off`
+- `test_calling_off_a_run_is_not_blocked_by_the_freeze` —— 冻结只碰一列
+- `test_a_bare_update_walks_past_the_freeze` —— D14
+- `test_picking_meetings_is_refused_on_a_one_off`
+- `test_a_meeting_cannot_be_added_to_a_one_off_occasion`
+- `test_the_service_refuses_a_meeting_on_a_one_off_occasion`
+- `test_signing_up_for_a_program_creates_one_participation` —— 决定 19
+- `test_signing_up_for_a_program_covers_every_session`
+- `test_joining_in_week_five_is_not_four_absences` —— 决定 18
+- `test_a_meeting_still_running_is_put_on_their_register` —— 切点
+- `test_a_meeting_already_over_is_not_put_on_their_register`
+- `test_signing_up_for_a_one_off_occasion_opens_no_register`
+- `test_a_program_with_no_meetings_yet_opens_an_empty_register`
+- `test_picking_some_sessions_leaves_the_others_alone` —— 决定 17
+- `test_picking_meetings_is_refused_when_the_run_does_not_allow_it`
+- `test_signing_up_again_after_cancelling_tops_up_rather_than_duplicating`
+- `test_a_meeting_added_later_reaches_everybody_already_signed_up`
+- `test_a_meeting_added_later_skips_a_run_people_pick_from`
+- `test_a_meeting_added_later_skips_somebody_who_pulled_out`
+- `test_cancelling_clears_the_meetings_that_have_not_happened`
+- `test_cancelling_leaves_the_meetings_they_already_attended`
+- `test_cancelling_leaves_a_meeting_they_are_in_the_middle_of` —— 两个条件那条
+- `test_a_bare_create_walks_past_the_register` —— D14
+- `test_calling_off_a_run_clears_everybodys_future_register`
+- `test_calling_off_a_run_leaves_what_was_already_taught`
+- `test_calling_off_a_run_leaves_the_meetings_themselves`
+- `test_calling_off_a_run_does_not_mark_anybody_as_withdrawn`
+- `test_putting_a_called_off_run_back_on_rebuilds_the_register`
+- `test_an_ordinary_status_change_leaves_the_register_alone`
+- `test_the_attendance_rate_counts_only_the_meetings_that_happened`
+
+### 守卫（本轮第七条，不在原来那张表里）
+
+`RegisterDeleteGuardTests` —— 点名行的删除只许出现在 `close_future_register()`。
+
+理由：这个删除现在有两个调用方（个人退出 / 整门课停办），而本轮已经为同一形状
+付过一次账 ——「删一个角色会把整学期的点名册一起删掉」是 2026-09-08 修掉的 🔴，
+当时的成因正是保护条件只看 `Participation.hours`，而一门课的工时全在点名册上。
+它是[守卫 4](#本轮新增的守卫六条)（`GeneratedEventDeleteGuardTests`）在低一层上的同一条。
 
 ## L5.4 recurring events 那一档：`EventSeries` + 生成器
 
@@ -2455,7 +2642,7 @@ When: Aug. 9, 2026, 4:05 p.m. — Nov. 7, 2026, 3:05 p.m.
 [D27](decisions/D27-ministry-report.md) 那条「没有和没算不能长得一样」在措辞上同样成立。
 
 ⚠️ 判据用「**这场活动有没有讲次**」而不是 `shape`，且这不和
-[L5.3](#l53-三档单选落在哪) 那条「不靠 `sessions.exists()` 判形状」冲突：
+[L5.3](#l53-三档单选落在哪以及报一次管全部) 那条「不靠 `sessions.exists()` 判形状」冲突：
 那条说的是**分类**（一个还没排期的 Program 也是 Program），这里问的是**显示**
 （有讲次就把它们画出来）。两个问题，两个判据。
 
@@ -2532,6 +2719,7 @@ recurring events：
 | 3 | `HoursWriteGuardTests` | `.hours =` 只出现在 `events/services.py`（现在就成立，这一条是把现状钉住） |
 | 4 | `GeneratedEventDeleteGuardTests` | 生成场次的那三个删除条件只出现在 `_drop_generated_after()` |
 | 5 | `LocalDayInSqlGuardTests` | `TruncDate(` 只出现在 `on_the_books_exists()` 所在的文件，且那一行带 `tzinfo=` |
+| 6 | `RegisterDeleteGuardTests` | 2026-09-09 随 L5.3 加的第七条：点名行的删除只许出现在 `close_future_register()`。守卫 4 在低一层上的同一条，而这一层已经出过一次事故（删角色带走整学期的点名册） |
 
 每一条都要做双向验证：故意写错一处，确认它真的红 —— 这是本项目对守卫的既有要求，
 而守卫一和守卫五都属于「不做反向验证就等于没写」的那一类。
@@ -2558,6 +2746,8 @@ recurring events：
 | `events/tokens.py` | 三 | ⚠️ 同样原计划列在「不动」里（理由是「收窄的是发现，不是已经拥有的行」—— 那句话对受众成立，对讲次不成立）。码从按活动改成按讲次，取消 `WINDOW_BEFORE`，见 [D28](decisions/D28-qr-checkin.md) |
 | `events/schedule.py` | 三 | 新的 `Occurrence` / `occurrences()` / `meeting_summary()` / `when_line()` —— 日程按讲次画，详情页那行 When |
 | `dashboard/services.py` | 三 | L5.7 漏列的读者之一：`/me/` 的工时卡只读一列，一个整学期的助教在自己主页上看到 0 |
+| `events/admin.py` | 三 | ⚠️ 原计划整张表都没列它。L5.2 挂了 `Session` / `SessionAttendance` 两张表，L5.3 加 `ShapeFilter`（两个谓词今天唯一的读者）和 `SessionAdmin.form` |
+| `events/management/commands/seed_demo.py` | 三 | ⚠️ 同样没列。批一有整整一步（L1.5）在做演示数据，批三一步都没有 —— 而 L5.3 是「一门课报一次」第一次能在浏览器里走通的时刻 |
 | `events/admin.py` | 一二三 | `ParticipationRoleAdmin` 加 `nature`；`EventAdmin` 和 `EventRoleAdmin` 各加三个可见性字段；`Session` / `SessionAttendance` / `EventSeries` 注册。⚠️ `Session` 那一笔 L5.1 落地时漏了，L5.2 一起补 —— 在那之前那张表只有测试碰得到 |
 | `events/recurrence.py` | 三 | 新文件，纯函数 |
 | `events/migrations/0016_participationrole_nature.py` | 一 | 新 |
@@ -2641,6 +2831,7 @@ grep 了一遍，它里面搜不到 `served_as`、`stop_at_needed_count`、`comp
 | [D33](decisions/D33-work-schedule.md) | 第三节旁边补一句：活动的系列选了「必须有结束条件、一次生成完」，和班次的滚动窗口不同，理由在本文件 L5.1 |
 | [`05-roadmap.md`](05-roadmap.md) | D1.4 与本轮的关系；D2a 的生成器要调 `events/recurrence.py` |
 | [`phase-d.md`](phase-d.md) | 同上 |
+| [D14](decisions/D14-constraint-is-the-only-rule.md) | 就地补 L5.3 的三处缺口：`Event.objects.update(shape=…)` 绕过冻结、`Participation.objects.create()` 不开点名册、以及「挑讲次的课停办再复办恢复不了谁挑了什么」 |
 | [`goal.md`](goal.md) | ⚠️ 核对时发现的一处欠账：goal.md 自称是「唯一入口」，而它开头那张「去哪找」的表里列了 01–05 和 phase-b/c/d，**没有 `participants.md`** —— 那份文档从 2026-08-20 起就一直不在索引里。本轮把它和本文件一起补进去 |
 
 ⚠️ [`revisions.md`](revisions.md) 不在上表里，而这是判断不是遗漏：那份文档记的是
@@ -2688,6 +2879,26 @@ grep 了一遍，它里面搜不到 `served_as`、`stop_at_needed_count`、`comp
 - [x] ~~活动列表可以按类型筛选~~ —— ❌ **2026-09-04 随 `EventType` 一起作废**（L2.6）。那张表说不出谁读它，整表删掉，这一条也就没有了要验的东西。⚠️ 它在验收表里又挂了四天，而验收表上一条**已经不成立的条目**比缺一条更糟：它会让走查的人去找一个不存在的功能。
 
 批三：
+
+L5.3（Programs）—— ⚠️ 下面这些是**浏览器**验收，一条都没走。
+自动化那半已经绿了：全量 1959 条测试、`ruff`、`makemigrations --check`、四条文档守卫，
+以及 `RegisterDeleteGuardTests` 的双向验证。回填迁移在一个**跑到 0025、塞进 L5.2 期
+数据、再往前迁**的临时库上验过（有讲次的活动变成 `program`，普通活动不变）；
+开发库里今天一个 `Session` 都没有，所以 0027 在那上面是空操作。
+
+
+- [ ] 发布页出现两档单选；建一门 Program，排讲次**之前**改回 One occasion → 可以；排了之后 → 被拦住，且话里说得出为什么
+- [ ] 把一门排了讲次的课取消掉 → **没有被冻结规则拦住**
+- [ ] 学员报名一门课 → 报名只有一行，而点名册上他出现在**还没结束的每一讲**上
+- [ ] 今天才报名的那位，出勤率分母比从第一讲就在的那位小，且没有任何一处在减
+- [ ] 给一个 single 活动加讲次 → 被拒，话里说得出它是一场而不是一门课
+- [ ] admin 加一讲 → 已报名的人自动出现在那一讲的点名册上
+- [ ] 停办这门课 → 已上那几讲一行没少、未来那几讲的预期行没了、**没有人被标成 withdrew**
+- [ ] 复办 → 未来那几讲的点名行回来了
+- [ ] admin 活动列表的 Kind of event 筛选真的筛得动
+- [ ] 报表上「接受到的时数」和「工时」并排，没有合计
+
+L5.4–L5.6（recurring events）:
 
 - [ ] 一门课按规则生成 N 场，N 场归成一组，每一场都带着角色
 - [ ] 改规则只动未来的场次，且有人报名的那一场一行没动
@@ -3075,3 +3286,86 @@ L2.4 收尾时全量测试红了一条 `MinistryReportTests`，而**把本轮改
 ⚠️ 处置不是「以后先写 D」，是**把决策文件和它的第一个提交绑在一起**：一个新表
 或一条推翻旧决定的改动，D 文件和代码进同一个提交，或者代码那个提交的正文里
 写明「D 还欠着，编号 DNN」。后者是本文件这一次采取的做法。
+
+## 计划外 · 一步被三处指着，而它自己那一节是空的（2026-09-09，L5.3 开工走查）
+
+L5.3 那一节写完的时候只有三样东西：一个枚举、两条「为什么要一列」的理由、
+两个谓词。而全仓有三处指着它说别的：
+
+- `events/services.py` 里 `add_attendance()` 的 docstring —— *"…none of them can
+  be written yet: `sign_up()` cannot tell a course from a Saturday distribution
+  until `Event.shape` lands in L5.3"*；
+- 本文件 L5.1 和 L5.2 各有一条 ⚠️「这一步不兑现第九节那条缺口……要等 L5.3」；
+- [`participants.md`](participants.md) 第十一节验收：「前半句要等 L5.3」。
+
+三处都在说「报一次管全部归 L5.3」，而 L5.3 自己一个字都没写。
+[L5.10](#l510-测试) 那张批次级测试清单里倒是有四条它的测试
+（`test_signing_up_for_a_program_covers_every_session` 等），但没有任何一步描述
+怎么做 —— 测试名挂在那里，实现无人认领。
+
+⚠️ 这不是新病。L5.1 那条 2026-09-08 更正写的是同一句话：「两份文档各自把它推给了
+对方，而中间那一格是空的」，说的是 `Event.duration` 在详情页上的落点。相隔一天，
+同一个形状又出现一次 —— 而两次的成因也一样：**一段话被写在「谁不做它」那一侧，
+从来没有人回来写「谁做它」**。
+
+⚠️ 处置不是「以后写全一点」，那是决心不是机制。可用的判据是：**一句「这件事要等
+X」写进代码或文档的那一刻，X 那一节就欠一条对应的正文** —— 而它是可查的，
+`grep -rn "等 L5\." docs/ events/` 找得到每一处。本轮顺手查了一遍，剩下的两处
+（L5.7 的报表 union、L5.8 的三张列表页）在它们自己那一节里都有正文，没有第三处。
+
+## 计划外 · 一个「性能 vs 安全」的取舍，量了之后发现是假的（2026-09-09，L5.3）
+
+`open_register()` 一次报名要建十二行点名记录，每一行走一次 `add_attendance()`，
+而那里面是一次 `full_clean()`。实测：**一次报名 208 条查询**，一门课复办
+（15 人 × 12 讲）**3087 条**。
+
+第一反应是那个熟悉的取舍：「要快就得拆掉逐行校验，可那张网刚刚接住过一个真 bug」。
+于是它被记成一条需要人来定的设计题。
+
+🔴 **量一下就发现这个取舍不存在。** 把 `full_clean()` 拆开数：
+
+| | 查询数 |
+|---|---|
+| `full_clean()` 全套 | 15 |
+| `full_clean(validate_constraints=False)` | 2 |
+| 只跑 `clean()`（两条跨表规则） | 0 |
+
+十五条里有**十三条**是 Django 在插入之前，用 SQL 把五条 `CheckConstraint` 又问了
+一遍 —— 而那五条就在数据库里，插入时一定会执行。而真正接住那个 bug 的
+`clean()`，一条查询都不花。
+
+所以改法是 `full_clean(validate_constraints=False)`：字段校验、两条跨表规则、
+唯一性全部保留，只把「替数据库预演一遍它自己的约束」这件事去掉。
+报名 208 → 52，复办 3087 → 807，安全性没有任何一处下降 ——
+[D14](decisions/D14-constraint-is-the-only-rule.md) 本来就是这么判的：
+**约束是唯一的规则**，在 Python 里提前问一遍只改变调用方看到的错误长什么样。
+（admin 不受影响：它的 ModelForm 自己校验实例，含约束，
+所以 `ConstraintErrorFieldMixin` 照旧把违规挂到对应的框上。）
+
+⚠️ 值得记的不是这个数，是**「先量再选」**。那条取舍写下来的时候听起来完全合理，
+而它之所以是假的，只因为没有人问过「十五条里，哪一条贵」。
+本项目已经为「听起来合理的量」判过一次（[D36](decisions/D36-two-hour-ledgers.md)
+那条「两个账本永远不相加」），这是同一种错误的另一面：
+一个**没被拆开**的总数，和一个没有定义的总数，一样会把人引到错的地方。
+
+## 计划外 · 两条设计缺陷是测试抓的，不是走查（2026-09-09，L5.3）
+
+L5.3 落地时红了两条，各自都是**照字面读需求会写出来的那个写法**：
+
+1. **`sessions=` 一个参数装了两个意思。** 决定 17 说「他可以挑哪几讲」，
+   于是 `open_register(sessions=…)` 被写成「他挑的这几讲」，并在里面检查
+   `people_pick_meetings`。而 `add_session()` 给已报名的人补建时，用的是同一个参数
+   表达「只看这一讲」—— 于是一次正常的补建被当成一次非法的挑选拒掉了。
+   改法是把「他有没有资格挑」那道门搬到 `sign_up()`：**挑**这件事发生在那里。
+2. **清理未来的点名行只按时钟筛。** 一堂课两小时，有人签到之后中途退出 ——
+   那一讲还没结束，于是他的签到和工时被一起删掉了，而这发生在一个规矩是
+   「已经发生的绝不动」的函数里。改成两个条件：讲次还没结束**且**那一行还停在
+   `registered`。
+
+⚠️ 两条的共同点是**它们都不会在浏览器里被撞见**：第一条要有人在补讲次的同时
+已经有人报了名，第二条要有人在一堂正在进行的课上中途退出。走查走不到，
+而写测试的时候会自然而然地写出这两种情形。
+
+⚠️ 记下来是因为本轮前几步的坑清一色是「照字面敲会漏抄一条」（L5.1 六处、
+L5.2 八处），那类靠对着仓库现状走查就能挑出来。这一次两条都是**设计本身**的
+歧义，走查挑不出来 —— 它们要跑起来才现形。两种坑，两种工具。

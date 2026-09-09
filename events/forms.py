@@ -30,6 +30,7 @@ from .models import (
     EventRole,
     Participation,
     ParticipationRole,
+    Session,
     askable_served_as,
     refuse_wider_than_event,
     roles_left_behind,
@@ -459,7 +460,18 @@ class EventForm(EventAudienceFormMixin, forms.ModelForm):
     class Meta:
         model = Event
         fields = [
-            "name", "ministry", "start_time", "end_time",
+            # L5.3. Before the two times deliberately: it changes what they
+            # *mean*. On a course they are the two ends of a term, not one
+            # sitting, and somebody who fills the dates in first has already
+            # answered a different question.
+            #
+            # ⚠️ Two options here, three in the requirement. The third —
+            #    recurring events, a weekly occasion each signed up for
+            #    separately — is a generator (L5.4) rather than a value, and it
+            #    joins this field when the generator exists. Offering it now
+            #    would be a radio button that saves nothing.
+            "name", "ministry", "shape", "people_pick_meetings",
+            "start_time", "end_time",
             "location", "status", "requires_guardian_consent",
             # L3. Right after the lifecycle fields and before the prose, because
             # "who is this for" is a publishing decision rather than a detail.
@@ -467,6 +479,11 @@ class EventForm(EventAudienceFormMixin, forms.ModelForm):
             "description", "image",
         ]
         widgets = {
+            # Radios, not a dropdown: two options that mean genuinely different
+            # things have to be readable side by side, the same reasoning the
+            # audience tick-boxes below are written down with. A closed select
+            # shows one of them and hides the choice.
+            "shape": forms.RadioSelect,
             "start_time": forms.DateTimeInput(attrs={"type": "datetime-local"}),
             "end_time": forms.DateTimeInput(attrs={"type": "datetime-local"}),
             # Tick-boxes, not a multi-select list: every option has to be
@@ -1086,3 +1103,38 @@ class EventStatusForm(forms.ModelForm):
     class Meta:
         model = Event
         fields = ["status"]
+
+
+class SessionForm(forms.ModelForm):
+    """One meeting on a course — the admin's door onto `Session`.
+
+    ⚠️ It exists so that adding a meeting through the admin reaches the same
+       service `add_session()` gives the programmatic path. Decision 18's mechanism has two ends
+       — rows appearing when somebody signs up, and rows appearing when a
+       meeting is added after they did — and the second end has to hold on every
+       door or the symptom is a register that is simply empty on the day, with
+       nothing raising.
+
+    ⚠️ Why a form and not `ModelAdmin.save_model()`: that hook is one of the
+       four `AdminHasNoLogicGuardTests` refuses, and rightly — admin.py renders,
+       it does not decide. Pointing `SessionAdmin.form` at a form that delegates
+       to `events.services` is the arrangement `EventAdmin` and `EventRoleAdmin`
+       already use for their audience rules, and `EventRoleForm.save()` above
+       is the precedent for a form's save() doing more than one thing.
+
+    ⚠️ Not a signal, either. There is not one anywhere in this codebase, and the
+       reason to keep it that way is the reason signals are tempting here: the
+       work would happen with nothing at the call site saying so.
+    """
+
+    class Meta:
+        model = Session
+        fields = ["event", "start_time", "end_time", "source"]
+
+    def save(self, commit=True):
+        session = super().save(commit=commit)
+        if commit:
+            from .services import open_registers_for
+
+            open_registers_for(session.event, sessions=[session])
+        return session

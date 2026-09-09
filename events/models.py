@@ -761,6 +761,28 @@ class EventQuerySet(AudienceQuerySetMixin, models.QuerySet):
         """
         return self.filter(start_time__gte=start, start_time__lt=end)
 
+    # ⚠️ The two below are a **partition**, and that is what makes them
+    #    different from the `upcoming()` / `past()` pair deleted above. Those
+    #    were two independent questions that happened to sit together; these are
+    #    the two halves of one question, and `test_the_two_predicates_do_not_
+    #    overlap` pins that they neither overlap nor leave a gap. The day a
+    #    third shape is added, that test is what refuses to let it belong to
+    #    neither.
+    #
+    # ⚠️ They are not speculative either — `events.admin.ShapeFilter` calls both
+    #    from the day they land, which is the only thing the note above actually
+    #    asks of a predicate. `/programs/` (L5.8) is the second reader.
+
+    def programs(self):
+        """Courses and programs: one event, many meetings, sign up once."""
+        return self.filter(shape=Event.Shape.PROGRAM)
+
+    def single_occasions(self):
+        """One-off occasions — a Saturday food distribution, and every event
+        `EventSeries` generates (L5.4 makes N independent single occasions,
+        never one program)."""
+        return self.filter(shape=Event.Shape.SINGLE)
+
 
 class Event(Audience, ConstraintErrorFieldMixin, TimeStampedModel):
     """One occasion: a food distribution on Saturday morning.
@@ -772,6 +794,35 @@ class Event(Audience, ConstraintErrorFieldMixin, TimeStampedModel):
     """
 
     IMAGE_DIR = "event-images"
+
+    class Shape(models.TextChoices):
+        """Is this one occasion, or a course people sign up to once? L5.3.
+
+        ⚠️ **Two values here, three options on the publish form.** The third —
+           recurring events, a weekly occasion each signed up for separately —
+           produces N independent events that are every one of them `single`.
+           It is something you *do* when creating (L5.4's generator), not
+           something an event *is*, and giving it a value here would be the
+           fourth cell of decision 16's table: an event you click in week three
+           and find you have signed up for all twelve.
+
+        ⚠️ Why a column at all, rather than asking `sessions.exists()`. Two
+           reasons, and they answer **classification**, which is a different
+           question from what the schedule and the detail page ask:
+
+             · a list page filters on it, and `Exists` means a subquery on every
+               read of the busiest page in the system;
+             · **a course with no dates on it yet is still a course.** Deciding
+               the shape and then scheduling the meetings is the natural order,
+               and `sessions.exists()` answers wrongly for as long as that takes.
+
+           What to *draw* is the other question, and it is keyed on having
+           meetings — see `schedule.Occurrence`. Two questions, two tests; they
+           do not compete.
+        """
+
+        SINGLE = "single", "One occasion"
+        PROGRAM = "program", "A course or program — sign up once"
 
     class Status(models.TextChoices):
         DRAFT = "draft", "Draft"                      # only this ministry sees it
@@ -872,6 +923,29 @@ class Event(Audience, ConstraintErrorFieldMixin, TimeStampedModel):
                   "adult. Ticked, they need consent on file and somebody to call.",
     )
 
+    # L5.3. Default `single`, which is what every event in the database was
+    # before this column existed — see migration 0027 for the one kind of row
+    # that is not.
+    shape = models.CharField(
+        max_length=20, choices=Shape.choices, default=Shape.SINGLE,
+        verbose_name="What kind of event is this",
+        help_text="A course runs over weeks and is signed up to once — its "
+                  "start and end are the term's two ends, not one sitting.",
+    )
+    # Decision 17. Only means anything on a course, and Event.clean() says so.
+    #
+    # ⚠️ It has a reader from the day it lands: services.sign_up() **refuses** a
+    #    chosen set of meetings unless this is ticked. Without that the "pick
+    #    which ones" behaviour would be available on every course whatever the
+    #    publisher decided, and this would be a switch nothing consults — the
+    #    shape this project keeps deleting.
+    people_pick_meetings = models.BooleanField(
+        default=False,
+        verbose_name="People choose which meetings they attend",
+        help_text="Leave unticked and signing up covers every meeting. Tick it "
+                  "for a group somebody joins for a few weeks of a term.",
+    )
+
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.DRAFT)
     # Capped. Every volunteer-facing list renders this, so an unbounded column
     # is one pasted document away from a page that will not load on a phone.
@@ -924,6 +998,57 @@ class Event(Audience, ConstraintErrorFieldMixin, TimeStampedModel):
             # P3's volunteer list page — the most-hit query in the system.
             models.Index(fields=["status", "start_time"]),
         ]
+
+    def clean(self):
+        """`shape` freezes once it has been used, and one switch needs it set.
+
+        The first half is the rule `ParticipationRole.clean()` already writes
+        for `nature`, and for the same reason: turning a course into a one-off
+        occasion rewrites what the rows underneath it mean. Twelve meetings and
+        a term's worth of register entries stay in the database, and nothing
+        reads them any more — the signup path stops opening registers, and the
+        hours recorded against those meetings go on existing with no shape of
+        event that admits to holding them. Nothing raises.
+
+        🔴 **It freezes one column and nothing else.** Calling a course off is a
+           `status` change; it goes through `services.set_status()`, which never
+           touches this field. A run that has to stop in week seven must always
+           be able to stop — see that function for what happens to the register.
+
+        ⚠️ An event nobody has used yet stays free to change its mind, which is
+           the whole point of the column existing: deciding the shape and *then*
+           scheduling the meetings is the order this is built for, and the
+           minutes in between are exactly when somebody notices they picked the
+           wrong one.
+
+        ⚠️ A hint layer, not a rule — the same D14 caveat `nature` carries.
+           `Event.objects.update(shape=…)` walks straight past this, and no
+           CheckConstraint can replace it: the test is whether another table has
+           rows pointing here, and a check constraint cannot see another table.
+        """
+        super().clean()
+        if self.shape != self.Shape.PROGRAM and self.people_pick_meetings:
+            raise ValidationError({"people_pick_meetings": (
+                "Only a course has meetings to choose between. A one-off "
+                "occasion is signed up to once, and that is all of it."
+            )})
+        if self.pk is None:
+            return
+        was = (type(self).objects.filter(pk=self.pk)
+               .values_list("shape", flat=True).first())
+        if was is None or was == self.shape:
+            return
+        if self.sessions.exists():
+            raise ValidationError({"shape": (
+                "This run already has meetings scheduled. Remove them first, "
+                "or leave the shape as it is — the register and the hours "
+                "recorded against those meetings were written under it."
+            )})
+        if Participation.objects.filter(event_role__event_id=self.pk).exists():
+            raise ValidationError({"shape": (
+                "People have already signed up for this event, and what their "
+                "signups cover was decided by what it says now."
+            )})
 
     @property
     def duration(self):
@@ -1883,7 +2008,7 @@ class Session(ConstraintErrorFieldMixin, TimeStampedModel):
         return self.end_time - self.start_time
 
     def clean(self):
-        """A meeting falls inside the run it belongs to.
+        """A meeting hangs on a course, and it falls inside that course's dates.
 
         The two ends of an `Event` say when the run starts and stops, so a
         meeting outside them contradicts the row it hangs on: a spring class
@@ -1891,17 +2016,32 @@ class Session(ConstraintErrorFieldMixin, TimeStampedModel):
         docstring above — "what was missing is the moments in between" — stops
         being true of the table.
 
+        The first rule is L5.3's, and it closes the gap the shape column would
+        otherwise open. Meetings on a **one-off occasion** would be drawn by the
+        schedule and listed on the detail page (both key on having meetings,
+        which is the right test for what to draw) while `sign_up()` — which asks
+        the shape, because it is classifying — opened no register for anybody.
+        Meetings that exist, a register permanently empty, and nothing raising.
+        So: having meetings implies being a course. The converse stays free, and
+        deliberately: a course with no dates on it yet is still a course.
+
         ⚠️ A hint layer, not a rule, and D14 asks for that to be said plainly:
            `Session.objects.create(...)` and `bulk_create` walk straight past
            it. It cannot become a CheckConstraint either, for the same reason
            the L2×L3 invariant and ParticipationRole's frozen `nature` cannot —
-           the test is in another table (the event's two columns), and a check
+           the test is in another table (the event's own columns), and a check
            constraint cannot see one. The programmatic path that is meant to
            obey it is `services.add_session()`, which calls `full_clean()`.
         """
         super().clean()
         if self.event_id is None or self.start_time is None or self.end_time is None:
             return
+        if self.event.shape != Event.Shape.PROGRAM:
+            raise ValidationError({"event": (
+                f"“{self.event.name}” is a one-off occasion, so it has no "
+                "meetings — it is the occasion. Change it to a course first, "
+                "then schedule them."
+            )})
         # Errors land on a field rather than the form as a whole, and on the end
         # that is actually outside — telling somebody "this is out of range"
         # without saying which end is a second lookup they have to do by hand.

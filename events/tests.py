@@ -74,12 +74,15 @@ from .models import (
     Participation,
     ParticipationRole,
     Session,
+    SessionAttendance,
     Source,
     refuse_wider_than_event,
 )
 from .services import (
     NoHoursHere,
+    add_attendance,
     add_session,
+    audience_gaps,
     NotEligible,
     RoleFull,
     CHECKIN_CREDENTIAL_KEY,
@@ -89,7 +92,10 @@ from .services import (
     apply_scan,
     TurnedUp,
     cancel,
+    hours_received,
     hours_recorded_against,
+    prefillable_hours,
+    record_session_hours,
     signups_asked_about_serving,
     inherit_audience,
     set_audience,
@@ -106,6 +112,7 @@ from .services import (
     ministry_report,
     ministry_staff_participation,
     notify_event_change,
+    reschedule,
     record_hours,
     issue_credential,
     read_credential,
@@ -202,6 +209,19 @@ def give_emergency_contact(contact, name="Emergency Kin", phone="+14085550177"):
         person=contact, name=name, phone=phone,
         relationship_type=RelationshipType.objects.get(code="parent"),
     )
+
+
+def another_run(like, name="Tuesday citizenship class"):
+    """A second multi-session event under the same ministry, with one meeting.
+
+    Module level rather than a method, because two TestCases need the identical
+    fixture and a method on one of them cannot be reached from the other — which
+    is how the admin test came to hold a verbatim copy of it.
+    """
+    other = make_event(ministry=like.ministry, name=name,
+                       start_time=NOW + DAY, end_time=NOW + 100 * DAY)
+    return add_session(other, start_time=NOW + 3 * DAY,
+                       end_time=NOW + 3 * DAY + 2 * HOUR)
 
 
 def make_role(event, code, name=None, needed_count=None, nature=None, **fields):
@@ -2302,6 +2322,1060 @@ class SessionTests(TestCase):
             list(self.spring.sessions.all()), [first, second, third])
 
 
+class SessionAttendanceTests(TestCase):
+    """L5.2: the register — one person at one meeting.
+
+    Signing up once is not attending once. `Participation` says "he is on this
+    course"; these rows say "he came to week seven", and the two are counted to
+    get two different numbers (decision 19).
+
+    The layers are held apart the same way SessionTests holds them apart: the
+    five constraints are asserted through bare creates, and the two cross-table
+    rules through full_clean() and the service — because that is all they can
+    ever be. ⚠️ And unlike Participation, this table has **no** constraint
+    behind the no-hours rule at all: the value that one keys on
+    (served_as=not_applicable) is deliberately not copied down here, so the
+    service layer is the only thing holding it. Two tests are named after the
+    gap rather than leaving the docstrings to be read as promises.
+    """
+
+    def setUp(self):
+        self.spring = make_event(
+            name="ESL spring term",
+            start_time=NOW + DAY,
+            end_time=NOW + 100 * DAY,
+        )
+        # One run, two kinds of place: a seat somebody takes, and a job somebody
+        # does. L4's rule runs between them and both are needed to see it.
+        self.seat = make_role(self.spring, "esl_seat",
+                              nature=ParticipationRole.Nature.ATTENDING)
+        self.job = make_role(self.spring, "esl_assistant")
+        # ⚠️ Birth dates: see HoursReceivedTests below for why. An unknown date
+        #    counts as a minor, and this event requires consent by default.
+        self.learner = Participation.objects.create(
+            contact=make_person("Wang", birth_date=datetime.date(1980, 5, 5)),
+            event_role=self.seat)
+        self.assistant = Participation.objects.create(
+            contact=make_person("Helper", birth_date=datetime.date(1980, 5, 5)),
+            event_role=self.job)
+        self.week_one = add_session(
+            self.spring, start_time=NOW + 2 * DAY,
+            end_time=NOW + 2 * DAY + 2 * HOUR)
+        self.week_two = add_session(
+            self.spring, start_time=NOW + 9 * DAY,
+            end_time=NOW + 9 * DAY + 2 * HOUR)
+
+    def test_one_person_at_one_meeting_is_one_row(self):
+        row = add_attendance(self.learner, self.week_one)
+        self.assertEqual(list(self.learner.attendances.all()), [row])
+        self.assertEqual(list(self.week_one.attendances.all()), [row])
+
+    def test_a_new_row_starts_out_expected_rather_than_present(self):
+        # The register is written before the meeting happens, so the default
+        # says "due here", not "was here". Nothing may claim attendance until
+        # somebody records it.
+        self.assertEqual(
+            add_attendance(self.learner, self.week_one).status,
+            Participation.Status.REGISTERED,
+        )
+
+    def test_two_people_may_attend_the_same_meeting(self):
+        add_attendance(self.learner, self.week_one)
+        add_attendance(self.assistant, self.week_one)
+        self.assertEqual(self.week_one.attendances.count(), 2)
+
+    def test_the_same_person_cannot_be_marked_twice_for_one_meeting(self):
+        # Asserted through the database: this one really is a constraint.
+        add_attendance(self.learner, self.week_one)
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            SessionAttendance.objects.create(
+                participation=self.learner, session=self.week_one)
+
+    def test_one_person_may_be_on_the_register_for_every_meeting(self):
+        # The other half of the uniqueness, and the reason it is a pair of
+        # columns: signing up once covers twelve meetings, which is the whole
+        # point of a programme.
+        add_attendance(self.learner, self.week_one)
+        add_attendance(self.learner, self.week_two)
+        self.assertEqual(self.learner.attendances.count(), 2)
+
+    def test_hours_cannot_be_negative(self):
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            SessionAttendance.objects.create(
+                participation=self.assistant, session=self.week_one,
+                status=Participation.Status.ATTENDED, hours=Decimal("-1"),
+            )
+
+    def test_somebody_who_did_not_attend_cannot_have_hours(self):
+        # "No-show, five hours" must not be storable, here as on a signup.
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            SessionAttendance.objects.create(
+                participation=self.assistant, session=self.week_one,
+                status=Participation.Status.ABSENT, hours=Decimal("5"),
+            )
+
+    def test_check_out_cannot_be_before_check_in(self):
+        """⚠️ One of the two rules L5.2's draft left off its list.
+
+        Participation carries it, this table has both columns, and a table that
+        dropped one of the rules it copied is looser than the table it copied —
+        with nothing to say so. That is the failure the draft's own line warned
+        about, one section after it happened to L5.1.
+        """
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            SessionAttendance.objects.create(
+                participation=self.assistant, session=self.week_one,
+                checked_in_at=NOW + 2 * DAY,
+                checked_out_at=NOW + 2 * DAY - HOUR,
+            )
+
+    def test_somebody_who_checked_in_cannot_be_marked_absent(self):
+        """The other one. "Did they turn up" may only have one answer."""
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            SessionAttendance.objects.create(
+                participation=self.assistant, session=self.week_one,
+                status=Participation.Status.ABSENT,
+                checked_in_at=NOW + 2 * DAY,
+            )
+
+    def test_a_meeting_from_another_run_is_refused(self):
+        """Two foreign keys that have to agree about a third row.
+
+        Without this the table stores "he came to week one of a course he never
+        signed up for" — readable, printable, and wrong. It is the corner
+        Participation sidesteps by having no event column of its own; here
+        neither key can be dropped, so the agreement is checked instead.
+        """
+        stray = SessionAttendance(
+            participation=self.learner, session=another_run(self.spring))
+        with self.assertRaises(ValidationError) as caught:
+            stray.full_clean()
+        self.assertIn("session", caught.exception.message_dict)
+
+    def test_the_service_refuses_a_meeting_from_another_run(self):
+        with self.assertRaises(ValidationError):
+            add_attendance(self.learner, another_run(self.spring))
+        self.assertEqual(SessionAttendance.objects.count(), 0)
+
+    def test_a_place_people_attend_records_no_hours(self):
+        row = SessionAttendance(
+            participation=self.learner, session=self.week_one,
+            status=Participation.Status.ATTENDED, hours=Decimal("2"),
+        )
+        with self.assertRaises(ValidationError) as caught:
+            row.full_clean()
+        self.assertIn("hours", caught.exception.message_dict)
+
+    def test_the_service_refuses_hours_on_a_place_people_attend(self):
+        row = add_attendance(self.learner, self.week_one)
+        with self.assertRaises(NoHoursHere):
+            record_session_hours(row, Decimal("2"))
+        row.refresh_from_db()
+        self.assertIsNone(row.hours)
+
+    def test_the_rule_is_read_off_the_role_through_the_signup(self):
+        # One spelling of L4's rule, asked from a layer that is two joins away
+        # from the column it reads. Re-deriving it here would be a second answer
+        # free to drift from the first.
+        self.assertFalse(add_attendance(self.learner, self.week_one).records_hours)
+        self.assertTrue(add_attendance(self.assistant, self.week_one).records_hours)
+
+    def test_a_bare_create_walks_past_the_same_run_rule(self):
+        """D14 asks for the gap to be stated rather than implied."""
+        stray = SessionAttendance.objects.create(
+            participation=self.learner, session=another_run(self.spring))
+        self.assertEqual(SessionAttendance.objects.count(), 1)
+        self.assertNotEqual(
+            stray.session.event_id, stray.participation.event_role.event_id)
+
+    def test_a_bare_create_walks_past_the_no_hours_rule(self):
+        """⚠️ The costly half of not copying served_as down to this table.
+
+        On Participation this exact row is refused by the database, because that
+        row stores not_applicable and a CheckConstraint can see it. Here there
+        is nothing on the row to test, so it stores — and pinning that is what
+        keeps the model's docstring an honest description instead of a promise.
+        """
+        row = SessionAttendance.objects.create(
+            participation=self.learner, session=self.week_one,
+            status=Participation.Status.ATTENDED, hours=Decimal("2"),
+        )
+        self.assertEqual(row.hours, Decimal("2"))
+        self.assertFalse(row.records_hours)
+
+    def test_an_assistant_records_hours_for_one_meeting(self):
+        # Decision 20 from the front: a run records hours a meeting at a time,
+        # so somebody who helped on six of twelve evenings has six numbers.
+        row = add_attendance(self.assistant, self.week_one)
+        record_session_hours(row, Decimal("2.5"))
+        row.refresh_from_db()
+        self.assertEqual(row.hours, Decimal("2.50"))
+        self.assertEqual(row.status, Participation.Status.ATTENDED)
+        self.assertEqual(row.checked_in_method, Participation.CheckInMethod.ADMIN)
+
+    def test_who_first_recorded_the_row_is_not_rewritten_by_a_correction(self):
+        # First write wins, same rule as a signup's: an admin fixing the number
+        # afterwards must not turn "the volunteer filled this in" into "I did".
+        row = add_attendance(self.assistant, self.week_one)
+        record_session_hours(row, Decimal("2"),
+                             method=Participation.CheckInMethod.SELF_QR)
+        record_session_hours(row, Decimal("3"))
+        row.refresh_from_db()
+        self.assertEqual(row.checked_in_method, Participation.CheckInMethod.SELF_QR)
+        self.assertEqual(row.hours, Decimal("3.00"))
+
+    def test_deleting_a_signup_takes_its_register_entries_with_it(self):
+        add_attendance(self.learner, self.week_one)
+        add_attendance(self.learner, self.week_two)
+        self.learner.delete()
+        self.assertEqual(SessionAttendance.objects.count(), 0)
+
+    def test_deleting_a_meeting_takes_its_register_with_it(self):
+        add_attendance(self.learner, self.week_one)
+        self.week_one.delete()
+        self.assertEqual(SessionAttendance.objects.count(), 0)
+
+    def test_correcting_a_register_entry_is_kept_in_its_history(self):
+        # Somebody moved from absent to attended is a change to a person's
+        # record of a course, so it gets the audit trail Participation has.
+        row = add_attendance(self.learner, self.week_one)
+        row.status = Participation.Status.ATTENDED
+        row.save()
+        self.assertEqual(row.history.count(), 2)
+        self.assertEqual(
+            row.history.earliest().status, Participation.Status.REGISTERED)
+
+    def test_one_persons_register_reads_in_teaching_order(self):
+        second = add_attendance(self.learner, self.week_two)
+        first = add_attendance(self.learner, self.week_one)
+        self.assertEqual(
+            list(self.learner.attendances.in_teaching_order()), [first, second])
+
+    def test_one_meetings_register_reads_by_person(self):
+        # ⚠️ The two directions want two orders, which is why this table has no
+        #    Meta.ordering: a default that crossed a relation would also land in
+        #    the GROUP BY of L5.7's aggregates.
+        helper = add_attendance(self.assistant, self.week_one)
+        learner = add_attendance(self.learner, self.week_one)
+        self.assertEqual(
+            list(self.week_one.attendances.by_person()), [helper, learner])
+
+
+class SessionHoursAreProtectedTests(TestCase):
+    """🔴 Deleting a role must not take a term's register with it.
+
+    The refusal on role_delete and the second hours column (decision 20) landed
+    on the same day and nobody connected them. On a run `Participation.hours` is
+    `None` by design — every hour is on the register — so the guard read a total
+    of zero for a term with six evenings of assistant time on it, said nothing,
+    and the delete cascaded two levels.
+    """
+
+    def setUp(self):
+        self.spring = make_event(
+            name="ESL spring term",
+            start_time=NOW + DAY, end_time=NOW + 100 * DAY)
+        self.job = make_role(self.spring, "esl_assistant")
+        # ⚠️ A birth date, because `requires_guardian_consent` defaults to True
+        #    and a contact with no date on file counts as a minor (B4.5). Every
+        #    fixture in this file that records hours does the same; without it
+        #    these tests would be exercising the consent gate instead.
+        self.helper = Participation.objects.create(
+            contact=make_person("Helper", birth_date=datetime.date(1980, 5, 5)),
+            event_role=self.job)
+        self.week_one = add_session(
+            self.spring, start_time=NOW + 2 * DAY,
+            end_time=NOW + 2 * DAY + 2 * HOUR)
+
+    def test_hours_on_the_register_are_seen_by_the_delete_guard(self):
+        row = add_attendance(self.helper, self.week_one)
+        record_session_hours(row, Decimal("2.5"))
+        self.assertIn("2.5", hours_recorded_against(self.job))
+
+    def test_a_role_with_no_hours_anywhere_is_still_deletable(self):
+        # The other half: this page exists to remove a role opened by mistake,
+        # and a register with no hours on it must not freeze one in place.
+        add_attendance(self.helper, self.week_one)
+        self.assertEqual(hours_recorded_against(self.job), "")
+
+    def test_hours_on_the_signup_are_still_seen(self):
+        # The original half, unchanged — a single occasion records hours on the
+        # signup itself and nothing about this round moves that.
+        one_off = make_event(ministry=self.spring.ministry, name="Saturday")
+        lifting = make_role(one_off, "lifting")
+        signup = Participation.objects.create(
+            contact=make_person("Zhao", birth_date=datetime.date(1980, 5, 5)),
+            event_role=lifting)
+        record_hours(signup, Decimal("3"))
+        self.assertIn("3", hours_recorded_against(lifting))
+
+
+class SessionConsentGateTests(TestCase):
+    """P3's gate, on the two entrances L5.2 added.
+
+    `_mark_attended()` says all routes to attended come through one guard,
+    because a rule with more entrances than guards is a rule with ways round it.
+    L5.2 added two that write presence onto a different table, so they could not
+    reuse the status transition — and until 2026-09-08 they reused nothing.
+    """
+
+    def setUp(self):
+        self.spring = make_event(
+            name="Teen ESL", start_time=NOW + DAY, end_time=NOW + 100 * DAY,
+            requires_guardian_consent=True)
+        self.seat = make_role(self.spring, "esl_seat",
+                              nature=ParticipationRole.Nature.ATTENDING)
+        self.job = make_role(self.spring, "esl_assistant")
+        self.child = make_person(
+            "Young", birth_date=local_today() - datetime.timedelta(days=12 * 365))
+        give_emergency_contact(self.child)
+        # ⚠️ Created directly, which is the whole point: sign_up() would refuse
+        #    this row, and the admin and any importer reach the table without it.
+        self.unconsented = Participation.objects.create(
+            contact=self.child, event_role=self.seat)
+        self.week_one = add_session(
+            self.spring, start_time=NOW + 2 * DAY,
+            end_time=NOW + 2 * DAY + 2 * HOUR)
+
+    def test_a_minor_with_no_consent_cannot_be_put_on_the_register_as_present(self):
+        with self.assertRaises(ConsentRequired):
+            add_attendance(self.unconsented, self.week_one,
+                           status=Participation.Status.ATTENDED)
+        self.assertEqual(SessionAttendance.objects.count(), 0)
+
+    def test_the_same_row_can_still_be_expected_at_a_meeting(self):
+        # ⚠️ Expected is not present. The register has to be writable before the
+        #    evening happens — that is decision 18's whole mechanism — and the
+        #    gate is about claiming somebody turned up, not about listing them.
+        add_attendance(self.unconsented, self.week_one)
+        self.assertEqual(self.unconsented.attendances.count(), 1)
+
+    def test_hours_cannot_be_recorded_for_an_unconsented_minor(self):
+        helper = Participation.objects.create(
+            contact=self.child, event_role=self.job)
+        row = add_attendance(helper, self.week_one)
+        with self.assertRaises(ConsentRequired):
+            record_session_hours(row, Decimal("2"))
+        row.refresh_from_db()
+        self.assertIsNone(row.hours)
+
+    def test_consent_on_the_signup_covers_every_meeting_of_the_run(self):
+        """The reason the gate reads the signup rather than the meeting.
+
+        Consent is given once for the whole term, so week seven must not ask
+        again for a permission granted in week one.
+        """
+        self.unconsented.consent_given_by = "A Parent"
+        self.unconsented.consent_at = local_now()
+        self.unconsented.consent_method = Participation.ConsentMethod.PAPER
+        self.unconsented.save()
+        for week in range(2):
+            session = add_session(
+                self.spring, start_time=NOW + (9 + 7 * week) * DAY,
+                end_time=NOW + (9 + 7 * week) * DAY + 2 * HOUR)
+            add_attendance(self.unconsented, session,
+                           status=Participation.Status.ATTENDED)
+        self.assertEqual(self.unconsented.attendances.count(), 2)
+
+
+class WithdrawalTests(TestCase):
+    """Leaving partway through a run is a different fact from never starting.
+
+    ⭐ And the difference is a figure the foundation reports: somebody who came
+       to six evenings and then stopped **was served**, so `people_served` must
+       not lose him the moment he presses withdraw — while the register still
+       holds the hours that prove it happened.
+    """
+
+    def setUp(self):
+        self.spring = make_event(
+            name="ESL spring term",
+            start_time=NOW - 30 * DAY, end_time=NOW + 60 * DAY)
+        self.seat = make_role(self.spring, "esl_seat",
+                              nature=ParticipationRole.Nature.ATTENDING)
+        self.learner = Participation.objects.create(
+            contact=make_person("Wang", birth_date=datetime.date(1980, 5, 5)),
+            event_role=self.seat)
+        self.week_one = add_session(
+            self.spring, start_time=NOW - 20 * DAY,
+            end_time=NOW - 20 * DAY + 2 * HOUR)
+
+    def test_leaving_before_anything_happened_is_a_cancellation(self):
+        cancel(self.learner)
+        self.learner.refresh_from_db()
+        self.assertEqual(self.learner.status, Participation.Status.CANCELLED)
+
+    def test_leaving_after_attending_is_a_withdrawal(self):
+        add_attendance(self.learner, self.week_one,
+                       status=Participation.Status.ATTENDED)
+        cancel(self.learner)
+        self.learner.refresh_from_db()
+        self.assertEqual(self.learner.status, Participation.Status.WITHDREW)
+
+    def test_being_listed_for_a_meeting_is_not_attending_one(self):
+        # ⚠️ The register row exists from the moment somebody joins; what makes
+        #    it a withdrawal is having actually been there.
+        add_attendance(self.learner, self.week_one)
+        cancel(self.learner)
+        self.learner.refresh_from_db()
+        self.assertEqual(self.learner.status, Participation.Status.CANCELLED)
+
+    def test_somebody_who_withdrew_is_still_somebody_we_served(self):
+        """🔴 The figure that goes into the annual report and grant applications.
+
+        Without this the number drops the moment somebody leaves, while the
+        attendance record it is drawn from still proves the teaching happened.
+        """
+        add_attendance(self.learner, self.week_one,
+                       status=Participation.Status.ATTENDED)
+        cancel(self.learner)
+        report = ministry_report(Event.objects.filter(pk=self.spring.pk))
+        self.assertEqual(report["figures"]["people_served"], 1)
+
+    def test_somebody_who_never_came_is_not_counted_as_served(self):
+        # The other direction, and the one that keeps the figure honest: a
+        # cancellation with nothing behind it takes the person out.
+        cancel(self.learner)
+        report = ministry_report(Event.objects.filter(pk=self.spring.pk))
+        self.assertEqual(report["figures"]["people_served"], 0)
+
+    def test_somebody_who_withdrew_is_not_told_the_time_changed(self):
+        # notifiable() covers both ways of saying "not coming": telling somebody
+        # who stopped in week six that week nine has moved is noise.
+        add_attendance(self.learner, self.week_one,
+                       status=Participation.Status.ATTENDED)
+        cancel(self.learner)
+        recipients, _ = resolve_recipients(self.spring)
+        self.assertEqual(list(recipients), [])
+
+    def test_a_register_row_cannot_claim_somebody_withdrew(self):
+        # "Withdrew" is about a whole run, so it is not one of the four answers
+        # a single evening may give — and the column opts values in rather than
+        # filtering them out, so nothing can offer it by forgetting to.
+        values = [value for value, _ in
+                  SessionAttendance._meta.get_field("status").choices]
+        self.assertNotIn(Participation.Status.WITHDREW, values)
+        self.assertIn(Participation.Status.ATTENDED, values)
+
+
+class HoursOnTwoTablesTests(TestCase):
+    """Every reader of "hours given" has to ask both columns — D43 / L5.7.
+
+    🔴 On a run `Participation.hours` is `None` by design: decision 20 records
+       hours per meeting. So every summary that read only that column answered
+       **0** for a term with real hours on it, and the zero looked exactly like
+       the honest one ("nobody has recorded any yet").
+    """
+
+    def setUp(self):
+        self.spring = make_event(
+            name="ESL spring term",
+            start_time=NOW - 30 * DAY, end_time=NOW + 60 * DAY)
+        self.job = make_role(self.spring, "esl_assistant")
+        self.helper = make_person("Helper", birth_date=datetime.date(1980, 5, 5))
+        self.signup = Participation.objects.create(
+            contact=self.helper, event_role=self.job)
+        set_served_as(self.signup, Participation.ServedAs.VOLUNTEER,
+                      declared_by=Participation.DeclaredBy.SELF)
+        for week in range(2):
+            session = add_session(
+                self.spring, start_time=NOW - (20 - 7 * week) * DAY,
+                end_time=NOW - (20 - 7 * week) * DAY + 2 * HOUR)
+            record_session_hours(
+                add_attendance(self.signup, session), Decimal("2.5"))
+
+    def test_the_event_report_counts_hours_from_the_register(self):
+        # R6 and R7. Before this they read 0 for a term with five hours on it.
+        summary = event_summary(self.spring)
+        self.assertEqual(summary["total_hours"], Decimal("5.00"))
+        self.assertEqual(summary["roles"][0].hours_total, Decimal("5.00"))
+
+    def test_a_persons_own_volunteer_hours_count_the_register(self):
+        # The /me/ card. Same failure, on the page the volunteer reads about
+        # themselves — which is the one that would have been believed.
+        mine = Participation.objects.mine(self.helper).volunteering()
+        self.assertEqual(mine.hours_given(), Decimal("5.00"))
+
+    def test_hours_on_a_single_occasion_are_unchanged(self):
+        """⚠️ The half that must not move. Single occasions are the whole system
+        today, and they record hours on the signup exactly as before."""
+        one_off = make_event(ministry=self.spring.ministry, name="Saturday")
+        lifting = make_role(one_off, "lifting")
+        signup = Participation.objects.create(
+            contact=make_person("Zhao", birth_date=datetime.date(1980, 5, 5)),
+            event_role=lifting)
+        set_served_as(signup, Participation.ServedAs.VOLUNTEER,
+                      declared_by=Participation.DeclaredBy.SELF)
+        record_hours(signup, Decimal("3"))
+        self.assertEqual(event_summary(one_off)["total_hours"], Decimal("3.00"))
+        self.assertEqual(
+            Participation.objects.mine(signup.contact).volunteering().hours_given(),
+            Decimal("3.00"))
+
+    def test_a_run_and_a_single_occasion_add_up_for_one_person(self):
+        # ⚠️ The case a join-based Sum gets wrong: two register rows on one
+        #    signup must not multiply the signup's own hours.
+        one_off = make_event(ministry=self.spring.ministry, name="Saturday")
+        lifting = make_role(one_off, "lifting")
+        other = Participation.objects.create(
+            contact=self.helper, event_role=lifting)
+        set_served_as(other, Participation.ServedAs.VOLUNTEER,
+                      declared_by=Participation.DeclaredBy.SELF)
+        record_hours(other, Decimal("3"))
+        mine = Participation.objects.mine(self.helper).volunteering()
+        self.assertEqual(mine.hours_given(), Decimal("8.00"))
+
+
+class RescheduleKeepsItsMeetingsTests(TestCase):
+    """Moving a run must not leave its own meetings outside it.
+
+    `Session.clean()` is checked when the meeting is written and never when the
+    run's two ends move underneath it — so narrowing a term left a meeting
+    stored in a state its own full_clean() rejects, still holding a register.
+    """
+
+    def setUp(self):
+        self.spring = make_event(
+            name="ESL spring term",
+            start_time=NOW + DAY, end_time=NOW + 100 * DAY)
+        self.week_ten = add_session(
+            self.spring, start_time=NOW + 70 * DAY,
+            end_time=NOW + 70 * DAY + 2 * HOUR)
+
+    def test_pulling_a_run_in_behind_its_own_meeting_is_refused(self):
+        with self.assertRaises(ValidationError) as caught:
+            reschedule(self.spring, start_time=NOW + DAY, end_time=NOW + 30 * DAY)
+        self.assertIn("start_time", caught.exception.message_dict)
+        self.spring.refresh_from_db()
+        self.assertEqual(self.spring.end_time, NOW + 100 * DAY)
+
+    def test_a_move_that_keeps_every_meeting_inside_is_allowed(self):
+        reschedule(self.spring, start_time=NOW, end_time=NOW + 110 * DAY)
+        self.spring.refresh_from_db()
+        self.assertEqual(self.spring.end_time, NOW + 110 * DAY)
+
+    def test_an_event_with_no_meetings_reschedules_as_before(self):
+        # The half that must not move: single occasions have no sessions and
+        # this rule cannot reach them.
+        one_off = make_event(ministry=self.spring.ministry, name="Saturday")
+        reschedule(one_off, start_time=NOW + 5 * DAY, end_time=NOW + 5 * DAY + HOUR)
+        one_off.refresh_from_db()
+        self.assertEqual(one_off.end_time, NOW + 5 * DAY + HOUR)
+
+
+class AttendancePrefillTests(TestCase):
+    """The hours box does not offer a term's length as one person's work."""
+
+    def test_a_run_offers_no_prefill(self):
+        run = make_event(name="ESL spring term",
+                         start_time=NOW + DAY, end_time=NOW + 100 * DAY)
+        add_session(run, start_time=NOW + 2 * DAY,
+                    end_time=NOW + 2 * DAY + 2 * HOUR)
+        # 2664.00 was what this offered, one click from being authoritative.
+        self.assertIsNone(prefillable_hours(run))
+
+    def test_a_single_occasion_still_prefills_its_own_length(self):
+        one_off = make_event(name="Saturday distribution")
+        self.assertEqual(prefillable_hours(one_off), scheduled_hours(one_off))
+
+
+class SessionScheduleTests(TestCase):
+    """A run is drawn as its meetings, not as one block across the term.
+
+    ⭐ What it drew before: a twelve-week course filled **every** column between
+       its two dates, at full height, including the days it does not meet. Not a
+       long bar — a wall, with every other event behind it.
+    """
+
+    def setUp(self):
+        self.spring = make_event(
+            name="ESL spring term",
+            start_time=NOW + DAY, end_time=NOW + 100 * DAY)
+        self.first = add_session(
+            self.spring, start_time=NOW + 2 * DAY,
+            end_time=NOW + 2 * DAY + 2 * HOUR)
+        self.second = add_session(
+            self.spring, start_time=NOW + 9 * DAY,
+            end_time=NOW + 9 * DAY + 2 * HOUR)
+
+    def cards_on(self, offset):
+        day = local_date_of(NOW + offset * DAY)
+        return schedule.columns([self.spring], [day], now=NOW)[0].cards
+
+    def test_a_day_the_run_does_not_meet_draws_nothing(self):
+        # 🔴 The failure this fixes: day 20 is inside the term and has no
+        #    meeting, and it used to carry a full-height block.
+        self.assertEqual(self.cards_on(20), [])
+
+    def test_a_meeting_is_drawn_at_its_own_length(self):
+        card = self.cards_on(2)[0]
+        self.assertEqual(card.height, schedule._px(2 * HOUR))
+
+    def test_each_meeting_is_numbered_within_its_run(self):
+        self.assertEqual(self.cards_on(2)[0].ordinal, 1)
+        self.assertEqual(self.cards_on(9)[0].ordinal, 2)
+
+    def test_a_single_occasion_is_drawn_exactly_as_before(self):
+        # ⚠️ The half that must not move. Single occasions are the whole system
+        #    today and have no meetings, so nothing about this reaches them.
+        # ⚠️ Pinned to mid-morning rather than "NOW + 3 days": NOW is the real
+        #    clock, so a run of this test late in the evening puts a three-hour
+        #    event across midnight and the card is legitimately clipped. The
+        #    assertion is about the height a whole segment gets, so the fixture
+        #    has to be a whole segment whatever time the suite runs.
+        start = (NOW + 3 * DAY).replace(hour=9, minute=0, second=0, microsecond=0)
+        one_off = make_event(ministry=self.spring.ministry, name="Saturday",
+                             start_time=start, end_time=start + 3 * HOUR)
+        day = local_date_of(start)
+        card = schedule.columns([one_off], [day], now=NOW)[0].cards[0]
+        self.assertIsNone(card.ordinal)
+        self.assertEqual(card.height, schedule._px(3 * HOUR))
+
+    def test_every_meeting_of_one_run_keeps_the_same_colour(self):
+        # Twelve colours would stop them reading as one course.
+        self.assertEqual(self.cards_on(2)[0].colour, self.cards_on(9)[0].colour)
+
+
+class MeetingSummaryTests(TestCase):
+    """"Tuesdays, 7pm – 9pm · 12 sessions" — and what it says when that is false."""
+
+    def setUp(self):
+        self.spring = make_event(
+            name="ESL spring term",
+            start_time=NOW + DAY, end_time=NOW + 100 * DAY)
+
+    def weekly(self, count, offset=2):
+        return [add_session(self.spring,
+                            start_time=NOW + (offset + 7 * week) * DAY,
+                            end_time=NOW + (offset + 7 * week) * DAY + 2 * HOUR)
+                for week in range(count)]
+
+    def test_a_steady_weekly_run_is_stated_as_one(self):
+        summary = schedule.meeting_summary(self.weekly(4))
+        weekday = localtime(NOW + 2 * DAY).strftime("%A")
+        self.assertIn(f"{weekday}s", summary)
+        self.assertIn("4 sessions", summary)
+
+    def test_a_broken_pattern_says_only_what_is_true(self):
+        """🔴 The half that keeps this honest.
+
+        One meeting moved to another weekday and the run is no longer
+        "Tuesdays". Saying it anyway is a tidy sentence that sends somebody to
+        the wrong room on the wrong evening.
+        """
+        meetings = self.weekly(4)
+        moved = meetings[2]
+        moved.start_time += 2 * DAY
+        moved.end_time += 2 * DAY
+        moved.save()
+        summary = schedule.meeting_summary(
+            list(self.spring.sessions.all()))
+        self.assertEqual(summary, "4 sessions")
+
+    def test_two_meetings_are_not_yet_a_pattern(self):
+        # Two is a coincidence; three is a habit.
+        self.assertEqual(schedule.meeting_summary(self.weekly(2)), "2 sessions")
+
+    def test_one_meeting_says_when_it_is(self):
+        summary = schedule.meeting_summary(self.weekly(1))
+        self.assertIn("1 session", summary)
+
+
+class EventWhenLineTests(TestCase):
+    """The line at the top of the event page, and the sentence in a message."""
+
+    def test_a_run_shows_its_term_as_dates_and_its_rhythm_underneath(self):
+        run = make_event(name="ESL spring term",
+                         start_time=NOW + DAY, end_time=NOW + 100 * DAY)
+        for week in range(3):
+            add_session(run, start_time=NOW + (2 + 7 * week) * DAY,
+                        end_time=NOW + (2 + 7 * week) * DAY + 2 * HOUR)
+        headline, detail = schedule.when_line(run)
+        # 🔴 No clock time in the headline: those two columns are the ends of a
+        #    term, and "Aug 9, 4:05 p.m. — Nov 7, 3:05 p.m." reads as one
+        #    sitting that lasts three months.
+        self.assertNotIn("p.m.", headline)
+        self.assertNotIn("a.m.", headline)
+        self.assertIn("3 sessions", detail)
+
+    def test_a_single_occasion_keeps_its_familiar_line(self):
+        one_off = make_event(name="Saturday distribution")
+        headline, detail = schedule.when_line(one_off)
+        self.assertIsNone(detail)
+        self.assertIn("–", headline)
+
+    def test_the_notification_says_when_without_lying(self):
+        """⚠️ This one leaves the database — it is emailed and texted.
+
+        It printed the term's first date beside its closing clock time
+        ("2026-08-29 23:28 — 23:28"), which is not true of anything.
+        """
+        run = make_event(name="ESL spring term",
+                         start_time=NOW + DAY, end_time=NOW + 100 * DAY)
+        for week in range(3):
+            add_session(run, start_time=NOW + (2 + 7 * week) * DAY,
+                        end_time=NOW + (2 + 7 * week) * DAY + 2 * HOUR)
+        body = default_message(run, EventNotification.Reason.TIME_CHANGED)
+        self.assertIn("3 sessions", body)
+
+
+class SessionAbsenceTests(TestCase):
+    """Whether somebody came is recorded meeting by meeting on a run.
+
+    ⭐ Two things were wrong at once and both were silent. A run's signup could
+       be marked no-show even for somebody the register shows at every meeting —
+       the two refusals on mark_absent() read columns that are legitimately
+       empty on a run. And no run ever reached the absence rate's denominator,
+       because nothing moves its signup off `registered` — while the caption
+       under that rate went on reporting the ministry as not having gone through
+       its lists.
+    """
+
+    def setUp(self):
+        self.spring = make_event(
+            name="ESL spring term",
+            start_time=NOW - 30 * DAY, end_time=NOW + 60 * DAY)
+        self.seat = make_role(self.spring, "esl_seat",
+                              nature=ParticipationRole.Nature.ATTENDING)
+        self.learner = Participation.objects.create(
+            contact=make_person("Wang", birth_date=datetime.date(1980, 5, 5)),
+            event_role=self.seat)
+        self.weeks = [
+            add_session(self.spring, start_time=NOW - (20 - 7 * week) * DAY,
+                        end_time=NOW - (20 - 7 * week) * DAY + 2 * HOUR)
+            for week in range(3)
+        ]
+
+    def report(self):
+        return ministry_report(Event.objects.filter(pk=self.spring.pk))["figures"]
+
+    def test_a_whole_run_cannot_be_marked_as_a_no_show(self):
+        add_attendance(self.learner, self.weeks[0],
+                       status=Participation.Status.ATTENDED)
+        with self.assertRaises(TurnedUp) as caught:
+            mark_absent(self.learner)
+        self.assertIn("status", caught.exception.message_dict)
+        self.learner.refresh_from_db()
+        self.assertEqual(self.learner.status, Participation.Status.REGISTERED)
+
+    def test_a_single_occasion_is_still_marked_up_the_old_way(self):
+        # ⚠️ The half that must not move: an occasion has no register, so its
+        #    signup is the only place the fact can live.
+        one_off = make_event(ministry=self.spring.ministry, name="Saturday")
+        lifting = make_role(one_off, "lifting")
+        signup = Participation.objects.create(
+            contact=make_person("Zhao", birth_date=datetime.date(1980, 5, 5)),
+            event_role=lifting)
+        mark_absent(signup)
+        signup.refresh_from_db()
+        self.assertEqual(signup.status, Participation.Status.ABSENT)
+
+    def test_a_missed_meeting_is_recorded_on_that_meeting(self):
+        add_attendance(self.learner, self.weeks[0],
+                       status=Participation.Status.ABSENT)
+        self.assertEqual(
+            self.learner.attendances.get(session=self.weeks[0]).status,
+            Participation.Status.ABSENT)
+
+    def test_the_run_is_counted_separately_and_the_page_says_so(self):
+        """🔴 It was already out of the denominator — silently.
+
+        Which is worse than being in it wrongly: the number was right and the
+        sentence under it was not, and nothing anywhere said a course had been
+        left out of the reckoning.
+        """
+        figures = self.report()
+        self.assertEqual(figures["runs_counted_separately"], 1)
+        self.assertEqual(figures["events_with_signups"], 0)
+
+    def test_the_rate_is_over_the_meetings_they_were_on_the_register_for(self):
+        add_attendance(self.learner, self.weeks[0],
+                       status=Participation.Status.ATTENDED)
+        add_attendance(self.learner, self.weeks[1],
+                       status=Participation.Status.ATTENDED)
+        add_attendance(self.learner, self.weeks[2],
+                       status=Participation.Status.ABSENT)
+        figures = self.report()
+        self.assertEqual(figures["session_attended"], 2)
+        self.assertEqual(figures["session_marked"], 3)
+        # ⚠️ 66, not 67: _percent() truncates, the same as every other rate on
+        #    this page. Asserted rather than rounded here so the two cannot
+        #    disagree about what "two out of three" prints.
+        self.assertEqual(figures["session_attendance_rate"], 66)
+
+    def test_joining_late_is_not_counted_as_absences(self):
+        """Decision 18, in the denominator.
+
+        Somebody who joins for the last meeting has one row, not three — so his
+        rate is over the one meeting that happened to him, and nothing anywhere
+        has to subtract the two that did not.
+        """
+        latecomer = Participation.objects.create(
+            contact=make_person("Late", birth_date=datetime.date(1980, 5, 5)),
+            event_role=self.seat)
+        add_attendance(latecomer, self.weeks[2],
+                       status=Participation.Status.ATTENDED)
+        figures = self.report()
+        self.assertEqual(figures["session_marked"], 1)
+        self.assertEqual(figures["session_attendance_rate"], 100)
+
+    def test_a_meeting_nobody_has_marked_up_counts_as_neither(self):
+        # ⚠️ Same rule the event-level figure follows: a meeting that has not
+        #    happened yet is not an attendance and not an absence.
+        add_attendance(self.learner, self.weeks[0])
+        figures = self.report()
+        self.assertEqual(figures["session_marked"], 0)
+        self.assertIsNone(figures["session_attendance_rate"])
+
+
+class SessionsThroughTheAdminTests(TestCase):
+    """L5.2's two tables from the only door a person has to them today.
+
+    ⚠️ Written for the same reason AudienceThroughTheAdminTests exists: what
+       breaks here is invisible everywhere else. There are no site-facing pages
+       for these two tables yet, so a misspelled `list_select_related`, an
+       `autocomplete_fields` entry whose target has no `search_fields`, or a
+       readonly field that is not a field at all all fail at the moment somebody
+       opens the page — which no other test in this file does.
+
+    ⚠️ And one of them is a rule rather than configuration:
+       `SessionAttendance.clean()` holds the two cross-table refusals, and a
+       ModelForm is what calls it. This class is what proves that reaches a
+       person rather than only a test.
+
+    Superuser here, unlike the audience admin tests next door: those need an
+    account **missing** permissions to build the readonly form they are about,
+    and these are about the pages rendering at all.
+    """
+
+    def setUp(self):
+        self.user = get_user_model().objects.create_superuser(
+            email="root@example.com", password="a-good-long-password")
+        self.client.force_login(self.user)
+        self.spring = make_event(
+            name="ESL spring term",
+            start_time=NOW + DAY, end_time=NOW + 100 * DAY)
+        self.seat = make_role(self.spring, "esl_seat",
+                              nature=ParticipationRole.Nature.ATTENDING)
+        self.learner = Participation.objects.create(
+            contact=make_person("Wang"), event_role=self.seat)
+        self.week_one = add_session(
+            self.spring, start_time=NOW + 2 * DAY,
+            end_time=NOW + 2 * DAY + 2 * HOUR)
+
+    def test_the_meetings_table_is_reachable_at_all(self):
+        """⚠️ It was not, from 2026-09-05 to 2026-09-08.
+
+        L5.1 shipped the table without registering it, so for three days the
+        only thing that could reach a Session was the test suite. That kind of
+        omission has no symptom: a table nobody can open looks exactly like a
+        table nobody needs.
+        """
+        for url in [reverse("admin:events_session_changelist"),
+                    reverse("admin:events_session_add")]:
+            with self.subTest(url=url):
+                self.assertEqual(self.client.get(url).status_code, 200)
+
+    def test_the_register_pages_render(self):
+        for url in [reverse("admin:events_sessionattendance_changelist"),
+                    reverse("admin:events_sessionattendance_add"),
+                    reverse("admin:events_sessionattendance_change",
+                            args=[add_attendance(self.learner, self.week_one).pk])]:
+            with self.subTest(url=url):
+                self.assertEqual(self.client.get(url).status_code, 200)
+
+    def test_the_admin_refuses_a_meeting_from_another_run(self):
+        """The cross-table rule, reaching a person on the field they got wrong.
+
+        Two foreign keys that have to agree about a third row. A ModelForm calls
+        full_clean(), so this is where somebody actually meets the refusal.
+        """
+        elsewhere = another_run(self.spring)
+        response = self.client.post(
+            reverse("admin:events_sessionattendance_add"),
+            {"participation": self.learner.pk, "session": elsewhere.pk,
+             "status": Participation.Status.REGISTERED},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("session", response.context["adminform"].form.errors)
+        self.assertEqual(SessionAttendance.objects.count(), 0)
+
+    def test_the_admin_refuses_hours_on_a_place_people_attend(self):
+        # ⚠️ The rule with no constraint behind it on this table. The admin is
+        #    the one door where somebody can type hours into a register today,
+        #    so this is the check that matters most of the four.
+        response = self.client.post(
+            reverse("admin:events_sessionattendance_add"),
+            {"participation": self.learner.pk, "session": self.week_one.pk,
+             "status": Participation.Status.ATTENDED, "hours": "2"},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("hours", response.context["adminform"].form.errors)
+        self.assertEqual(SessionAttendance.objects.count(), 0)
+
+    def test_who_recorded_the_row_cannot_be_edited_here(self):
+        # Same rule as ParticipationAdmin's, applied to the same fact: this
+        # column says whether the volunteer filled the row in or an admin did.
+        from events.admin import SessionAttendanceAdmin
+
+        self.assertIn("checked_in_method", SessionAttendanceAdmin.readonly_fields)
+
+
+class HoursReceivedTests(TestCase):
+    """D43: the other direction — how long the foundation's time was spent.
+
+    ⭐ The number this whole decision exists for, and the one thing it must
+       never be is added to `hours`. That column is time somebody gave; this is
+       time somebody was given, and a total of the two has no definition.
+
+    ⚠️ Nothing here is about ESL in particular. Six sessions of financial
+       coaching, an eight-week support group and a job-training course all ask
+       the same question; the fixture says "class" only because a fixture has to
+       say something.
+    """
+
+    def setUp(self):
+        self.run = make_event(
+            name="Financial coaching, spring",
+            start_time=NOW + DAY, end_time=NOW + 100 * DAY)
+        self.seat = make_role(self.run, "coaching_seat",
+                              nature=ParticipationRole.Nature.ATTENDING)
+        self.job = make_role(self.run, "coach")
+        # ⚠️ Birth dates, because `requires_guardian_consent` defaults to True
+        #    and a contact with no date on file counts as a minor (B4.5) — so
+        #    without them these fixtures manufacture the exact state the consent
+        #    gate exists to forbid, and every "attended" below is refused. It
+        #    caught them the day the gate reached the register entrances.
+        self.served = Participation.objects.create(
+            contact=make_person("Zhou", birth_date=datetime.date(1980, 5, 5)),
+            event_role=self.seat)
+        self.coach = Participation.objects.create(
+            contact=make_person("Coach", birth_date=datetime.date(1980, 5, 5)),
+            event_role=self.job)
+        self.weeks = [
+            add_session(self.run, start_time=NOW + (2 + 7 * week) * DAY,
+                        end_time=NOW + (2 + 7 * week) * DAY + 2 * HOUR)
+            for week in range(4)
+        ]
+
+    def attend(self, participation, session):
+        row = add_attendance(participation, session,
+                             status=Participation.Status.ATTENDED)
+        return row
+
+    def test_a_meeting_knows_how_long_it_runs(self):
+        # Derived from the two ends the run already stores, never a third
+        # column free to disagree with them.
+        self.assertEqual(self.weeks[0].duration, 2 * HOUR)
+
+    def test_the_hours_column_stays_empty_for_somebody_being_served(self):
+        row = self.attend(self.served, self.weeks[0])
+        self.assertIsNone(row.hours)
+        # And the question is still answerable — that is the whole of D43.
+        self.assertEqual(row.hours_received, 2 * HOUR)
+
+    def test_hours_received_add_up_the_meetings_they_attended(self):
+        self.attend(self.served, self.weeks[0])
+        self.attend(self.served, self.weeks[1])
+        self.assertEqual(hours_received(self.served), Decimal("4.00"))
+
+    def test_a_meeting_they_missed_adds_nothing(self):
+        self.attend(self.served, self.weeks[0])
+        add_attendance(self.served, self.weeks[1],
+                       status=Participation.Status.ABSENT)
+        self.assertEqual(hours_received(self.served), Decimal("2.00"))
+
+    def test_a_meeting_they_missed_has_no_length_of_its_own(self):
+        # ⚠️ None, not 0. "Nothing was delivered here" and "he was not on this
+        #    register" are two facts, and D27 forbids making them look alike.
+        absent = add_attendance(self.served, self.weeks[0],
+                                status=Participation.Status.ABSENT)
+        self.assertIsNone(absent.hours_received)
+
+    def test_meetings_before_they_joined_are_not_missing_hours(self):
+        """Decision 18, in the hours dimension.
+
+        Somebody who joins in week three has no rows for weeks one and two —
+        those meetings did not happen *to him*. So his figure is the two he was
+        actually there for, and nothing anywhere has to subtract anything.
+        """
+        for week in self.weeks[2:]:
+            self.attend(self.served, week)
+        self.assertEqual(self.served.attendances.count(), 2)
+        self.assertEqual(hours_received(self.served), Decimal("4.00"))
+
+    def test_somebody_who_came_to_nothing_receives_nothing(self):
+        add_attendance(self.served, self.weeks[0],
+                       status=Participation.Status.ABSENT)
+        self.assertEqual(hours_received(self.served), Decimal("0.00"))
+
+    def test_hours_given_and_hours_received_are_two_different_numbers(self):
+        """⭐ The invariant, stated as an assertion.
+
+        The coach gave 2.5 hours; nothing was delivered **to** him, so his
+        received figure is not 2 and is not 0 — the question does not arise on
+        his row. The learner beside him received 2. Two directions, two rows,
+        and no total of the pair is a quantity this system has a name for.
+        """
+        given = self.attend(self.coach, self.weeks[0])
+        record_session_hours(given, Decimal("2.5"))
+        given.refresh_from_db()
+        self.attend(self.served, self.weeks[0])
+        self.assertEqual(given.hours, Decimal("2.50"))
+        self.assertIsNone(hours_received(self.coach))
+        self.assertEqual(hours_received(self.served), Decimal("2.00"))
+
+    def test_the_person_helping_receives_nothing_even_though_he_was_there(self):
+        """🔴 The correction that removed the need for a by-contact figure.
+
+        The first draft counted any attended row, on the reasoning that the
+        assistant sat in that room too. But that answers "how long was he in the
+        room", not "how long was the foundation's time spent on him" — and one
+        person holding both a seat and an assistant's place then reported four
+        hours of service delivered for a two-hour evening, which is the figure
+        the 12-hour reportable threshold is read off.
+        """
+        both = make_person("Interpreter", birth_date=datetime.date(1980, 5, 5))
+        as_helper = Participation.objects.create(
+            contact=both, event_role=self.job)
+        as_learner = Participation.objects.create(
+            contact=both, event_role=self.seat)
+        self.attend(as_helper, self.weeks[0])
+        self.attend(as_learner, self.weeks[0])
+        # One evening, one person, two places — and two hours received, not four.
+        self.assertIsNone(hours_received(as_helper))
+        self.assertEqual(hours_received(as_learner), Decimal("2.00"))
+
+    def test_a_helping_row_says_nothing_was_delivered_to_them(self):
+        # The per-row half of the same rule, and None rather than the meeting's
+        # length: `records_hours` and `hours_received` are mirrors, each
+        # answering on its own half and returning None on the other.
+        row = self.attend(self.coach, self.weeks[0])
+        self.assertTrue(row.records_hours)
+        self.assertIsNone(row.hours_received)
+
+    def test_an_event_with_no_meetings_has_no_register_to_read(self):
+        """⚠️ The figure is only answerable where there are meetings.
+
+        A Saturday distribution has no sessions, so "how long was the
+        foundation's time spent on him" is not a question with an answer there —
+        and the caller must not print 0 for it. What separates the two is
+        whether the run has meetings at all, which is why this asserts on that
+        rather than on the sum.
+        """
+        distribution = make_event(
+            ministry=self.run.ministry, name="Saturday distribution")
+        seat = make_role(distribution, "food_seat",
+                         nature=ParticipationRole.Nature.ATTENDING)
+        collected = Participation.objects.create(
+            contact=make_person("Lin"), event_role=seat)
+        self.assertFalse(distribution.sessions.exists())
+        self.assertEqual(collected.attendances.count(), 0)
+        # ⚠️ None, not Decimal("0.00"). "We delivered nothing to him" and "this
+        #    is not a question about a food parcel" must not print the same.
+        self.assertIsNone(hours_received(collected))
+
+
 class AudienceBackfillTests(TestCase):
     """Migration 0019's backfill, which decides what happens on launch day.
 
@@ -4216,6 +5290,270 @@ class PageTestCase(TestCase):
         return user
 
 
+class AudienceGapTests(PageTestCase):
+    """Who can see an event without seeing all of it — requirement 8's other half.
+
+    ⭐ The state is **normal**: one event published once, recruiting inside and
+       outside at the same time. It is also what a mistyped audience looks like,
+       and the two are the same state — so the site's job is not to refuse it
+       but to say who it happened to.
+    """
+
+    def setUp(self):
+        # PageTestCase's cast: two ministries, an admin of each, and an event on
+        # the first with one role already open to everybody.
+        super().setUp()
+        self.event.roles.all().delete()
+
+    def role_open_to(self, code, outsiders=False, all_staff=False, ministries=()):
+        """A role with exactly this audience.
+
+        ⚠️ Through set_audience() rather than by passing fields to make_role():
+           that helper calls inherit_audience(), which fills in an audience that
+           came out empty — so a role meant to be ministry-only would silently
+           come back as wide as its event, and the test would pass by testing
+           nothing.
+        """
+        role = make_role(self.event, code)
+        set_audience(role, Audience.Spec(
+            outsiders=outsiders, all_staff=all_staff,
+            ministries=frozenset(m.pk for m in ministries)))
+        return role
+
+    def gaps(self):
+        return dict(audience_gaps(self.event))
+
+    def test_a_role_as_wide_as_its_event_leaves_no_gap(self):
+        # The ordinary case, and it must print nothing at all: a note on every
+        # event is a note nobody reads.
+        self.role_open_to("lifting", outsiders=True, all_staff=True)
+        self.assertEqual(self.gaps(), {})
+
+    def test_outsiders_are_named_when_a_role_is_staff_only(self):
+        self.role_open_to("counting", all_staff=True)
+        self.assertEqual(self.gaps(), {"people with no current post": ["Counting"]})
+
+    def test_staff_are_named_when_a_role_is_for_outsiders_only(self):
+        self.role_open_to("greeting", outsiders=True)
+        self.assertEqual(self.gaps(), {"everybody on the books": ["Greeting"]})
+
+    def test_a_ministry_role_on_an_all_staff_event_excludes_that_ministry(self):
+        """🔴 The sentence the obvious implementation gets wrong.
+
+        Swapping the arguments of refuse_wider_than_event() looks like the whole
+        job and answers "everybody on the books" here — while Tax Help's own
+        staff can see the role perfectly well. The comparisons are not
+        symmetrical: all-staff sits above every ministry on one side of the
+        containment and is a plain boolean on the other.
+        """
+        self.role_open_to("filing", ministries=[self.tax])
+        # ⚠️ Both groups, because the event is open to both. The one that
+        #    matters here is the second: Tax Help's own staff **can** see this
+        #    role, so a bare "everybody on the books" would be untrue of them.
+        self.assertEqual(self.gaps(), {
+            "people with no current post": ["Filing"],
+            "everybody on the books except staff in Tax Help": ["Filing"],
+        })
+
+    def test_a_narrower_ministry_role_names_only_the_ministries_left_out(self):
+        # Neither side covers all staff, so the difference really is a set.
+        self.event.visible_to_outsiders = False
+        self.event.visible_to_all_staff = False
+        self.event.save()
+        self.event.visible_to_ministries.set([self.pantry, self.tax])
+        self.role_open_to("filing", ministries=[self.tax])
+        self.assertEqual(self.gaps(), {"staff in Food Pantry": ["Filing"]})
+
+    def test_two_roles_shut_out_of_the_same_group_are_one_sentence(self):
+        # Grouped by who, not by role: "outsiders cannot see A or B" is one
+        # fact about one group and reads as one line.
+        self.role_open_to("counting", all_staff=True)
+        self.role_open_to("banking", all_staff=True)
+        self.assertEqual(sorted(self.gaps()["people with no current post"]),
+                         ["Banking", "Counting"])
+
+    def test_the_page_says_it_to_somebody_who_can_read_the_records(self):
+        role = self.role_open_to("counting", all_staff=True)
+        self.login(self.zhang)
+        html = self.client.get(
+            reverse("events:event_detail", args=[self.event.pk])).content.decode()
+        self.assertIn("but not", html)
+        self.assertIn(role.role.name, html)
+
+    def test_a_plain_volunteer_is_not_told_about_roles_they_cannot_see(self):
+        # ⚠️ The half that keeps this from being noise. A person who only ever
+        #    sees the roles open to them cannot act on "there are others", and
+        #    the line would describe a situation they have no part in.
+        self.role_open_to("counting", all_staff=True)
+        self.role_open_to("lifting", outsiders=True, all_staff=True)
+        self.login(self.lisi)
+        html = self.client.get(
+            reverse("events:event_detail", args=[self.event.pk])).content.decode()
+        self.assertNotIn("but not", html)
+
+
+class SessionCheckInTests(PageTestCase):
+    """⭐ The code belongs to one meeting, so "which meeting" is never guessed.
+
+    What it did before: a twelve-week course had one code for all twelve
+    evenings. The window stood open for 111 days; from late April the screen
+    opened on "Check out" for a queue of arrivals; and from week two every scan
+    answered "you already checked in at 10:28 AM" — with no date, so it read as
+    tonight, eleven weeks running. A reassuring sentence about the wrong day.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.spring = make_event(
+            ministry=self.pantry, owner=self.zhang.contact,
+            name="ESL spring term",
+            start_time=NOW - 30 * DAY, end_time=NOW + 60 * DAY)
+        self.job = make_role(self.spring, "esl_assistant")
+        self.signup = Participation.objects.create(
+            contact=self.lisi.contact, event_role=self.job)
+        # ⚠️ Both inside their own four-hour tail, because that is what a screen
+        #    being open means now: an earlier meeting whose window has closed is
+        #    correctly refused, and using one here would be testing the refusal
+        #    rather than the two-meetings case.
+        self.week_one = add_session(
+            self.spring, start_time=NOW - 4 * HOUR, end_time=NOW - 2 * HOUR)
+        self.week_seven = add_session(
+            self.spring, start_time=NOW - HOUR, end_time=NOW + HOUR)
+
+    def scan(self, session, mode=tokens.CHECK_IN):
+        """Walk the real path: mint on the screen, scan, then confirm."""
+        self.login(self.zhang)
+        payload = self.client.get(
+            reverse("events:session_checkin_token", args=[session.pk]),
+            {"mode": mode}).json()
+        token = payload["url"].rstrip("/").rsplit("/", 1)[-1]
+        self.client.logout()
+        self.login(self.lisi)
+        self.client.get(reverse("events:checkin_scan", args=[token]))
+        return self.client.post(reverse("events:checkin_confirm"),
+                                {"participation": self.signup.pk}, follow=True)
+
+    def test_a_scan_writes_the_meetings_row_and_not_the_signup(self):
+        self.scan(self.week_seven)
+        self.signup.refresh_from_db()
+        # 🔴 The signup says "he is on this course" and must stay saying it.
+        #    Decision 19: one signup for the whole term, whatever happens weekly.
+        self.assertIsNone(self.signup.checked_in_at)
+        row = self.signup.attendances.get(session=self.week_seven)
+        self.assertIsNotNone(row.checked_in_at)
+        self.assertEqual(row.status, Participation.Status.ATTENDED)
+        self.assertEqual(row.checked_in_method,
+                         Participation.CheckInMethod.SELF_QR)
+
+    def test_each_meeting_is_checked_into_separately(self):
+        self.scan(self.week_one)
+        self.scan(self.week_seven)
+        self.assertEqual(self.signup.attendances.count(), 2)
+
+    def test_a_second_scan_at_the_same_meeting_says_which_day(self):
+        """⚠️ The sentence that was quietly wrong for eleven weeks.
+
+        A repeat has to carry the date on a run: "you already checked in at
+        10:28" is true of some evening, and without the date the reader takes it
+        for this one.
+        """
+        self.scan(self.week_one)
+        response = self.scan(self.week_one)
+        told = [str(m) for m in response.context["messages"]]
+        self.assertTrue(any("already checked in" in m for m in told), told)
+        self.assertTrue(any("on " in m for m in told), told)
+
+    def test_a_code_for_one_meeting_does_not_work_at_another(self):
+        # The kind and the id both travel inside the signature, so week one's
+        # code cannot be replayed against week seven by editing a URL.
+        token = tokens.issue(self.week_one.pk, tokens.CHECK_IN,
+                             kind=tokens.SESSION)
+        kind, target_id, _ = tokens.verify(token)
+        self.assertEqual((kind, target_id), (tokens.SESSION, self.week_one.pk))
+        self.assertNotEqual(target_id, self.week_seven.pk)
+
+    def test_the_screen_opens_on_check_in_for_the_evening_being_taught(self):
+        """🔴 A term's midpoint is some day in May.
+
+        Reading the event's midpoint meant that from then on every evening's
+        screen opened on "Check out", for a queue of people walking in.
+        """
+        later = add_session(self.spring, start_time=NOW + 40 * DAY,
+                            end_time=NOW + 40 * DAY + 2 * HOUR)
+        self.assertEqual(default_checkin_mode(later, at=NOW + 40 * DAY - HOUR),
+                         tokens.CHECK_IN)
+        # And the event-level answer for the same instant is the wrong one.
+        self.assertEqual(default_checkin_mode(self.spring, at=NOW + 40 * DAY),
+                         tokens.CHECK_OUT)
+
+    def test_the_window_follows_the_meeting_not_the_term(self):
+        # 111 days of standing-open window was what the old rule gave a course.
+        self.assertFalse(tokens.window_is_open(
+            self.week_one, at=self.week_one.end_time + 5 * HOUR))
+        self.assertTrue(tokens.window_is_open(
+            self.week_seven, at=self.week_seven.start_time))
+
+    def test_a_meeting_of_a_draft_run_hands_out_nothing(self):
+        # The published gate is still the event's: a course nobody published
+        # does not become checkin-able one evening at a time.
+        self.spring.status = Event.Status.DRAFT
+        self.spring.save()
+        self.assertFalse(tokens.window_is_open(self.week_seven, at=NOW))
+
+    def test_the_screen_names_the_meeting_not_the_term(self):
+        self.login(self.zhang)
+        html = self.client.get(reverse(
+            "events:session_checkin_display", args=[self.week_seven.pk])
+        ).content.decode()
+        # This evening's own date, and **not** the term's closing one — that is
+        # the line somebody reads while standing in front of the screen.
+        self.assertIn(f"{localtime(self.week_seven.start_time):%-d}", html)
+        self.assertNotIn(
+            f"{localtime(self.spring.end_time):%B %-d, %Y}", html)
+
+    def test_a_meeting_whose_window_has_closed_hands_out_nothing(self):
+        # Four hours after it ends, the honest description of what is happening
+        # is back-filling a register — and that belongs on the attendance page,
+        # where it is recorded as an admin's entry rather than a volunteer scan.
+        old = add_session(self.spring, start_time=NOW - 20 * DAY,
+                          end_time=NOW - 20 * DAY + 2 * HOUR)
+        self.login(self.zhang)
+        response = self.client.get(
+            reverse("events:session_checkin_token", args=[old.pk]),
+            {"mode": "in"})
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("closed", response.json()["error"].lower())
+
+    def test_only_somebody_who_manages_the_event_can_mint_a_code(self):
+        # This check **is** the scheme: without it any signed-in volunteer
+        # fetches a live token from their sofa.
+        self.login(self.lisi)
+        response = self.client.get(
+            reverse("events:session_checkin_token", args=[self.week_seven.pk]),
+            {"mode": "in"})
+        self.assertEqual(response.status_code, 403)
+
+    def test_the_sessions_table_offers_a_screen_per_meeting(self):
+        self.login(self.zhang)
+        html = self.client.get(
+            reverse("events:event_detail", args=[self.spring.pk])).content.decode()
+        for session in (self.week_one, self.week_seven):
+            with self.subTest(session=session.pk):
+                self.assertIn(
+                    reverse("events:session_checkin_display", args=[session.pk]),
+                    html)
+
+    def test_a_single_occasion_still_checks_in_through_its_event(self):
+        """⚠️ The half that must not move — single occasions are the whole
+        system today, and their check-in is untouched."""
+        self.login(self.zhang)
+        payload = self.client.get(
+            reverse("events:checkin_token", args=[self.event.pk]),
+            {"mode": "in"}).json()
+        token = payload["url"].rstrip("/").rsplit("/", 1)[-1]
+        self.assertEqual(tokens.verify(token)[0], tokens.EVENT)
+
+
 class ParticipantPageTests(PageTestCase):
     """P3, tested by hitting URLs — the isolation is in the query, not the page."""
 
@@ -4467,7 +5805,17 @@ class MinistryAdminPageTests(PageTestCase):
         html = self.client.get(
             reverse("events:event_detail", args=[self.event.pk])).content.decode()
         self.assertIn("Visible to", html)
-        self.assertIn("people with no current post", html)
+        # ⚠️ "everyone", not the two phrases spelled out. The fixture ticks both
+        #    boxes, and both boxes together are not two groups — they are
+        #    everybody there is, which is the single word the form itself offers
+        #    and reads back. Until 2026-09-08 this side answered a question
+        #    nobody asked ("which two groups?") for a person who had ticked one
+        #    box called Everyone. See Audience.audience_in_words.
+        # ⚠️ Capital E: it is the label on the tick the person actually
+        #    clicked, and reading it back in a different case would undo half of
+        #    why the two flags collapse into one word at all.
+        self.assertIn("Everyone", html)
+        self.assertNotIn("people with no current post", html)
 
     def test_the_roles_table_says_who_may_sign_up_for_each_one(self):
         # Requirement 8 from the publisher's side: one event recruiting inside
@@ -10253,13 +11601,14 @@ class CheckInTokenTests(SimpleTestCase):
 
     def test_a_fresh_token_gives_back_what_was_signed(self):
         token = tokens.issue(12, tokens.CHECK_IN)
-        self.assertEqual(tokens.verify(token), (12, tokens.CHECK_IN))
+        self.assertEqual(tokens.verify(token), (tokens.EVENT, 12, tokens.CHECK_IN))
 
     def test_it_is_still_valid_one_second_before_the_limit(self):
         at = local_now()
         token = tokens.issue(12, tokens.CHECK_IN, at=at)
         later = at + datetime.timedelta(seconds=tokens.MAX_AGE_SECONDS - 1)
-        self.assertEqual(tokens.verify(token, at=later), (12, tokens.CHECK_IN))
+        self.assertEqual(tokens.verify(token, at=later),
+                         (tokens.EVENT, 12, tokens.CHECK_IN))
 
     def test_it_is_refused_one_second_after_the_limit(self):
         at = local_now()
@@ -10279,7 +11628,8 @@ class CheckInTokenTests(SimpleTestCase):
             token = tokens.issue(12, tokens.CHECK_IN, at=at)
             edge = at + datetime.timedelta(seconds=tokens.MAX_AGE_SECONDS)
             with self.subTest(offset=offset):
-                self.assertEqual(tokens.verify(token, at=edge), (12, tokens.CHECK_IN))
+                self.assertEqual(tokens.verify(token, at=edge),
+                                     (tokens.EVENT, 12, tokens.CHECK_IN))
                 with self.assertRaises(tokens.InvalidCheckInToken):
                     tokens.verify(token, at=edge + datetime.timedelta(seconds=2))
 
@@ -10320,13 +11670,13 @@ class CheckInTokenTests(SimpleTestCase):
         # class of "which one wins" bugs that this shape simply does not have.
         self.assertNotEqual(
             tokens.issue(12, tokens.CHECK_IN), tokens.issue(13, tokens.CHECK_IN))
-        self.assertEqual(tokens.verify(tokens.issue(13, tokens.CHECK_IN))[0], 13)
+        self.assertEqual(tokens.verify(tokens.issue(13, tokens.CHECK_IN))[1], 13)
 
     def test_the_direction_is_signed_too(self):
         # Otherwise a volunteer holding a check-in code could edit the URL into
         # a check-out and write their own hours.
         self.assertEqual(
-            tokens.verify(tokens.issue(12, tokens.CHECK_OUT))[1], tokens.CHECK_OUT)
+            tokens.verify(tokens.issue(12, tokens.CHECK_OUT))[2], tokens.CHECK_OUT)
         self.assertNotEqual(
             tokens.issue(12, tokens.CHECK_IN), tokens.issue(12, tokens.CHECK_OUT))
 
@@ -10345,7 +11695,8 @@ class CheckInTokenTests(SimpleTestCase):
         #    exactly like a live one.
         at = local_now()
         token, expires_at = tokens.issue_with_expiry(12, tokens.CHECK_IN, at=at)
-        self.assertEqual(tokens.verify(token, at=at), (12, tokens.CHECK_IN))
+        self.assertEqual(tokens.verify(token, at=at),
+                         (tokens.EVENT, 12, tokens.CHECK_IN))
         self.assertEqual(
             expires_at, int(at.timestamp()) + tokens.MAX_AGE_SECONDS)
 
@@ -10368,11 +11719,18 @@ class CheckInWindowTests(TestCase):
         self.assertTrue(tokens.window_is_open(
             self.event, at=self.event.start_time + HOUR))
 
-    def test_it_is_shut_more_than_two_hours_before_the_start(self):
-        just_early = self.event.start_time - tokens.WINDOW_BEFORE - datetime.timedelta(minutes=1)
-        just_late = self.event.start_time - tokens.WINDOW_BEFORE + datetime.timedelta(minutes=1)
-        self.assertFalse(tokens.window_is_open(self.event, at=just_early))
-        self.assertTrue(tokens.window_is_open(self.event, at=just_late))
+    def test_a_screen_may_be_opened_as_early_as_somebody_wants(self):
+        """🔴 2026-09-08: the two-hour early limit is gone, by decision.
+
+        Setting a room up the night before is ordinary, and the rule turned that
+        into "the button does nothing yet" — a refusal people work around rather
+        than learn from. Nothing was protected by it either: somebody has to be
+        standing in front of the screen either way.
+        """
+        for early in (HOUR, 6 * HOUR, 30 * DAY):
+            with self.subTest(early=early):
+                self.assertTrue(tokens.window_is_open(
+                    self.event, at=self.event.start_time - early))
 
     def test_it_is_shut_more_than_four_hours_after_the_end(self):
         inside = self.event.end_time + tokens.WINDOW_AFTER - datetime.timedelta(minutes=1)
@@ -10389,15 +11747,18 @@ class CheckInWindowTests(TestCase):
             with self.subTest(status=status):
                 self.assertFalse(tokens.window_is_open(self.event, at=during))
 
-    def test_the_explanation_comes_from_the_same_two_constants(self):
-        # ⚠️ Not from the template. "Opens two hours before" written in markup is
-        #    a second copy of a rule, free to drift from the one enforced above.
-        early = self.event.start_time - tokens.WINDOW_BEFORE - HOUR
+    def test_the_explanation_comes_from_the_same_constant(self):
+        # ⚠️ Not from the template. A number written in markup is a second copy
+        #    of a rule, free to drift from the one enforced above.
         late = self.event.end_time + tokens.WINDOW_AFTER + HOUR
-        self.assertIn("opens", tokens.window_message(self.event, at=early).lower())
         self.assertIn("closed", tokens.window_message(self.event, at=late).lower())
         self.assertIsNone(
             tokens.window_message(self.event, at=self.event.start_time + HOUR))
+        # ⚠️ And no "opens in two hours" case survives: there is nothing left to
+        #    wait for, so a message saying otherwise would describe a rule that
+        #    is not enforced anywhere.
+        self.assertIsNone(tokens.window_message(
+            self.event, at=self.event.start_time - 30 * DAY))
 
 
 class CheckInMethodTests(TestCase):
@@ -10463,7 +11824,8 @@ class CheckInCredentialTests(TestCase):
         credential = issue_credential(7, tokens.CHECK_IN, at=at)
         still_fine = at + CREDENTIAL_MAX_AGE - datetime.timedelta(seconds=1)
         self.assertEqual(
-            read_credential(credential, at=still_fine), (7, tokens.CHECK_IN))
+            read_credential(credential, at=still_fine),
+            (tokens.EVENT, 7, tokens.CHECK_IN))
 
     def test_it_does_not_survive_for_ever(self):
         at = local_now()
@@ -10540,14 +11902,14 @@ class ApplyScanTests(TestCase):
         #    second tap as a failure sends that person off to find an admin over
         #    something that already worked.
         _, changed = apply_scan(
-            self.row.pk, contact=self.person, event_id=self.event.pk,
+            self.row.pk, contact=self.person, target=self.event,
             mode=tokens.CHECK_IN)
         self.assertTrue(changed)
         self.row.refresh_from_db()
         first_time = self.row.checked_in_at
 
         row, changed_again = apply_scan(
-            self.row.pk, contact=self.person, event_id=self.event.pk,
+            self.row.pk, contact=self.person, target=self.event,
             mode=tokens.CHECK_IN)
         self.assertFalse(changed_again)
         self.assertEqual(row.checked_in_at, first_time)
@@ -10556,10 +11918,10 @@ class ApplyScanTests(TestCase):
         # The visible half of the test above. A no-op that still writes would
         # put a meaningless revision into the one table this project relies on
         # to recover a value somebody deleted.
-        apply_scan(self.row.pk, contact=self.person, event_id=self.event.pk,
+        apply_scan(self.row.pk, contact=self.person, target=self.event,
                    mode=tokens.CHECK_IN)
         before = self.row.history.count()
-        apply_scan(self.row.pk, contact=self.person, event_id=self.event.pk,
+        apply_scan(self.row.pk, contact=self.person, target=self.event,
                    mode=tokens.CHECK_IN)
         self.assertEqual(self.row.history.count(), before)
 
@@ -10568,14 +11930,14 @@ class ApplyScanTests(TestCase):
         # event before the primary key is applied at all.
         theirs = sign_up(contact=self.other, event_role=self.role)
         with self.assertRaises(Participation.DoesNotExist):
-            apply_scan(theirs.pk, contact=self.person, event_id=self.event.pk,
+            apply_scan(theirs.pk, contact=self.person, target=self.event,
                        mode=tokens.CHECK_IN)
 
     def test_checking_out_writes_the_hours_and_the_source(self):
         check_in(self.row, at=local_now() - 2 * HOUR,
                  method=Participation.CheckInMethod.SELF_QR)
         row, changed = apply_scan(
-            self.row.pk, contact=self.person, event_id=self.event.pk,
+            self.row.pk, contact=self.person, target=self.event,
             mode=tokens.CHECK_OUT)
         self.assertTrue(changed)
         self.assertEqual(row.hours, Decimal("2.00"))
@@ -10583,7 +11945,7 @@ class ApplyScanTests(TestCase):
 
     def test_checking_out_without_checking_in_does_nothing(self):
         _, changed = apply_scan(
-            self.row.pk, contact=self.person, event_id=self.event.pk,
+            self.row.pk, contact=self.person, target=self.event,
             mode=tokens.CHECK_OUT)
         self.assertFalse(changed)
         self.row.refresh_from_db()
@@ -10826,17 +12188,30 @@ class CheckInDisplayTests(PageTestCase):
         payload = self.client.get(self.token_url, {"mode": "in"}).json()
         self.assertIn(payload["url"], payload["url"])
         token = payload["url"].rstrip("/").rsplit("/", 1)[-1]
-        self.assertEqual(tokens.verify(token), (self.event.pk, tokens.CHECK_IN))
+        self.assertEqual(tokens.verify(token),
+                         (tokens.EVENT, self.event.pk, tokens.CHECK_IN))
         self.assertGreater(payload["expires_at"], local_now().timestamp())
 
-    def test_outside_the_window_it_refuses_and_explains(self):
-        self.event.start_time = local_now() + DAY
-        self.event.end_time = local_now() + DAY + 3 * HOUR
+    def test_after_the_window_it_refuses_and_explains(self):
+        # ⚠️ The **late** end. The early one was removed on 2026-09-08 — a
+        #    screen may now be opened whenever somebody wants one — so the case
+        #    this used to assert (a code refused the day before) is a case that
+        #    no longer exists.
+        self.event.start_time = local_now() - 2 * DAY
+        self.event.end_time = local_now() - 2 * DAY + 3 * HOUR
         self.event.save()
         self.login(self.zhang)
         response = self.client.get(self.token_url, {"mode": "in"})
         self.assertEqual(response.status_code, 409)
-        self.assertIn("opens", response.json()["error"].lower())
+        self.assertIn("closed", response.json()["error"].lower())
+
+    def test_a_screen_opened_the_day_before_hands_out_a_code(self):
+        self.event.start_time = local_now() + DAY
+        self.event.end_time = local_now() + DAY + 3 * HOUR
+        self.event.save()
+        self.login(self.zhang)
+        self.assertEqual(
+            self.client.get(self.token_url, {"mode": "in"}).status_code, 200)
 
     def test_a_draft_event_hands_out_nothing(self):
         self.event.status = Event.Status.DRAFT

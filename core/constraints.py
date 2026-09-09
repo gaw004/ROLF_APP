@@ -69,6 +69,24 @@ CONSTRAINT_FIELD = {
     #    never the box they got wrong — the time is.
     "session_duplicate_start": "start_time",
     "session_end_before_start": "end_time",
+    # events.SessionAttendance
+    #
+    # ⚠️ The three hours/attendance codes land where their twins on
+    #    Participation land, and that is the point: this table copies five of
+    #    that table's rules, so a message about the same rule appears under the
+    #    same box. A register that answered differently from a signup would be
+    #    the table drifting from the one it was copied from, which is the
+    #    failure L5.2 set out to avoid.
+    #
+    # ⚠️ The duplicate lands on "session" rather than "participation": somebody
+    #    is on one person's register adding meetings, or on one meeting's
+    #    register adding people — and in both cases the row they just chose is
+    #    the meeting.
+    "sessionattendance_duplicate": "session",
+    "sessionattendance_hours_negative": "hours",
+    "sessionattendance_hours_without_attendance": "hours",
+    "sessionattendance_checkout_before_checkin": "checked_out_at",
+    "sessionattendance_absent_after_checkin": "status",
     # core.HomePage
     #
     # ⚠️ One constraint covers both halves of the framing, so the message has to

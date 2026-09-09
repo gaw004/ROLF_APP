@@ -63,6 +63,13 @@ urlpatterns = [
     # is gated on can_manage_event; without that check the whole rotating-code
     # scheme is decoration, because any volunteer could fetch a live code.
     path("events/<int:pk>/checkin-qr/", views.checkin_display, name="checkin_display"),
+    # ⚠️ A run's screen is one meeting's, not the term's — see
+    #    views.session_checkin_display for why "which meeting" must not be
+    #    guessed from the clock.
+    path("events/sessions/<int:pk>/checkin-qr/",
+         views.session_checkin_display, name="session_checkin_display"),
+    path("events/sessions/<int:pk>/checkin-qr/token/",
+         views.session_checkin_token, name="session_checkin_token"),
     path(
         "events/<int:pk>/checkin-qr/token/",
         views.checkin_token,

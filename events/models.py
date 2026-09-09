@@ -405,6 +405,80 @@ def roles_left_behind(event, roles):
             yield field, reported[0].params["audience"], role.role.name
 
 
+def audience_beyond(*, event, role):
+    """Who can see this event but not this role, as phrases. Requirement 8.
+
+    ⭐ The reverse of refuse_wider_than_event() above, and the reason it exists
+       is that requirement 8 makes this state **normal**: one event published
+       once, recruiting inside and outside at the same time, each person seeing
+       only the roles that are open to them. That is intended — and it is also
+       what an oversight looks like, because the two are the same state. The
+       only thing that separates them is whether the person publishing meant it,
+       so the site's job is to say who it happened to and let them decide.
+
+    ⚠️ **Not** refuse_wider_than_event() with the arguments swapped, and that is
+       the trap worth writing down because the swap looks obviously right. On an
+       event open to all staff with a role open only to Tax Help, swapping
+       answers "everybody on the books" — while Tax Help's own staff can see the
+       role perfectly well. It would print a sentence that is simply untrue. The
+       comparisons are not symmetrical: `all_staff` sits above every ministry on
+       one side of the containment and is a plain boolean on the other, which is
+       exactly the asymmetry that function's docstring spends a paragraph on.
+
+    ⚠️ Phrases come from org.audience, the same three the refusals use. A fourth
+       spelling of "people with no current post" is how a page and a refusal
+       come to describe the same group differently.
+    """
+    words = []
+    if event.outsiders and not role.outsiders:
+        words.append(Audience.OUTSIDERS_ARE)
+    if event.all_staff and not role.all_staff:
+        # ⚠️ Minus whatever the role does cover. A role open to Tax Help is open
+        #    to those people, so "everybody on the books" would be false of them
+        #    — this is the half the naive swap gets wrong.
+        if role.ministries:
+            covered = list(
+                Ministry.objects.filter(pk__in=role.ministries).order_by("name")
+                .values_list("name", flat=True))
+            words.append(
+                f"{Audience.ALL_STAFF_ARE} except "
+                f"{Audience.ministry_staff_are(covered)}")
+        else:
+            words.append(Audience.ALL_STAFF_ARE)
+    elif not event.all_staff:
+        # Both sides name ministries, so the difference is the ones only the
+        # event names. (When the event covers all staff the branch above has
+        # already said everything there is to say about staff.)
+        beyond = event.ministries - role.ministries
+        if beyond:
+            names = list(
+                Ministry.objects.filter(pk__in=beyond).order_by("name")
+                .values_list("name", flat=True))
+            words.append(Audience.ministry_staff_are(names))
+    return words
+
+
+def roles_narrower_than_event(event, roles):
+    """Yield (role name, audience phrases) for every role not open to everybody
+    who can see the event.
+
+    ⚠️ The same walk as roles_left_behind() above and deliberately beside it:
+       same query hints, same Spec.of(), same phrases. What differs is the
+       direction and what it is for — that one refuses a save, this one reports
+       on one that succeeded.
+
+    ⚠️ Yields rather than returning a sentence, because the two callers word it
+       differently: a message shown once at publish time, and a line that sits
+       on the event page afterwards.
+    """
+    event_spec = Audience.Spec.of(event)
+    for role in roles.select_related("role").prefetch_related(
+            "visible_to_ministries"):
+        words = audience_beyond(event=event_spec, role=Audience.Spec.of(role))
+        if words:
+            yield role.role.name, words
+
+
 def refuse_bad_audience(*, row, spec):
     """Every rule that applies to `row`, for a caller with no form to run them.
 
@@ -1183,9 +1257,11 @@ class ParticipationQuerySet(models.QuerySet):
         """Everyone a change to this event still concerns.
 
         Cancelled signups are out — that person has already said they are not
-        coming, and mailing them about a new time is noise.
+        coming, and mailing them about a new time is noise. ⚠️ So are withdrawn
+        ones, for exactly the same reason: somebody who stopped coming to a
+        course in week six does not need to be told week nine has moved.
         """
-        return self.exclude(status=Participation.Status.CANCELLED)
+        return self.exclude(status__in=NOT_COMING)
 
     def volunteering(self):
         """The rows on the **volunteering** ledger. D38's own half of D36.
@@ -1223,8 +1299,32 @@ class ParticipationQuerySet(models.QuerySet):
            "None hours volunteered" is the failure this line exists to stop.
            Zero is a true answer for somebody who has not started yet; None is
            not an answer at all.
+
+        🔴 **Both columns since 2026-09-08.** Decision 20 put a second hours
+           column on `SessionAttendance`, and on a run `Participation.hours` is
+           `None` by design — so an assistant who gave twenty-four hours across
+           a spring term read **0 hours volunteered** on their own dashboard.
+           The zero defended above is the honest one ("has not started yet");
+           this was a different zero wearing it.
+
+        ⚠️ **Two queries, not one Sum over a join**, and not `distinct=True`
+           either. Summing across the join multiplies each signup's hours by its
+           number of register rows; `distinct=True` then "fixes" that by summing
+           distinct *values*, so two evenings of 2.5 collapse into one. Both are
+           silently wrong in opposite directions, and the second is worse
+           because it looks like the cure. Asked separately, each half sums its
+           own rows.
+
+        ⚠️ Still one direction. This adds two halves of **hours given**; what it
+           must never take in is hours received (D43), which is not a column at
+           all and so cannot arrive here by accident.
         """
-        return self.aggregate(total=models.Sum("hours"))["total"] or Decimal("0")
+        signups = self.aggregate(total=models.Sum("hours"))["total"] or Decimal("0")
+        sessions = (
+            SessionAttendance.objects.filter(participation__in=self)
+            .aggregate(total=models.Sum("hours"))["total"] or Decimal("0")
+        )
+        return signups + sessions
 
     def mine(self, contact):
         """This person's signups, narrowed in the query rather than the template.
@@ -1279,6 +1379,20 @@ class Participation(ConstraintErrorFieldMixin, TimeStampedModel):
         ATTENDED = "attended", "Attended"
         ABSENT = "absent", "No-show"
         CANCELLED = "cancelled", "Cancelled"
+        # 🔴 Not a synonym for cancelled, and the difference is a figure the
+        #    foundation reports. "Pulled out before it started" and "came for
+        #    six weeks and then stopped" are different facts: the second person
+        #    **was served**, and folding him into the first erases that from
+        #    people_served while the register still proves it happened. The
+        #    sector reports the three separately (enrolled / completed /
+        #    withdrew) for the same reason.
+        #
+        # ⚠️ Written by services.cancel(), which picks between the two by asking
+        #    whether anything is on the register — never chosen by hand on a
+        #    form. The person clicking "withdraw" is doing one thing; which of
+        #    the two facts it is depends on what already happened, not on what
+        #    they meant.
+        WITHDREW = "withdrew", "Withdrew partway"
 
     class CheckInMethod(models.TextChoices):
         """Who put the attendance on this row: an admin, or the volunteer.
@@ -1583,6 +1697,24 @@ class Participation(ConstraintErrorFieldMixin, TimeStampedModel):
         return f"{self.contact} — {self.event_role}"
 
 
+#: The two ways of saying "not coming after all". Named because three rules key
+#: on the pair (notifiable, people_served, and the register's own gate), and a
+#: literal list in each is how they come to disagree about one of them.
+#:
+#: ⚠️ Module level rather than on the queryset class, which is defined **above**
+#:    Participation — a class attribute there is evaluated before the enum
+#:    exists. The methods get away with naming it because they resolve at call
+#:    time.
+NOT_COMING = (Participation.Status.CANCELLED, Participation.Status.WITHDREW)
+
+#: What a register row may say. Four of Participation's five: `withdrew` is
+#: about a whole run and cannot be said of one evening. See SessionAttendance.
+PER_MEETING_STATUSES = [
+    (value, label) for value, label in Participation.Status.choices
+    if value != Participation.Status.WITHDREW
+]
+
+
 #: The second half of each served_as option, for when somebody is being *asked*
 #: rather than shown a value: "Volunteering — my own time". Kept here rather
 #: than in the template so the term and its gloss cannot drift apart, and
@@ -1710,6 +1842,22 @@ class Session(ConstraintErrorFieldMixin, TimeStampedModel):
     def __str__(self):
         return f"{self.event.name} · {self.start_time:%Y-%m-%d %H:%M}"
 
+    @property
+    def duration(self):
+        """How long this meeting runs. Derived, never stored — same as Event's.
+
+        ⭐ D43 rests on this property existing. The hours somebody was *given*
+           are the lengths of the meetings they attended added up, and this is
+           where each length comes from: the run already stores the two ends of
+           every meeting, so storing a third number saying how far apart they
+           are would be a second truth free to disagree with them.
+
+        ⚠️ Not to be confused with `Event.duration` on a programme, which is the
+           whole term (111 days for a spring course). That one is the width of
+           the run; this one is the width of one evening of it.
+        """
+        return self.end_time - self.start_time
+
     def clean(self):
         """A meeting falls inside the run it belongs to.
 
@@ -1744,6 +1892,293 @@ class Session(ConstraintErrorFieldMixin, TimeStampedModel):
                 "This run ends on "
                 f"{local_date_of(self.event.end_time):%-d %B %Y}, so a meeting "
                 "cannot run past it."
+            )})
+
+
+class SessionAttendanceQuerySet(models.QuerySet):
+    """Two orders, because the two directions read this table differently.
+
+    ⚠️ There is deliberately no `Meta.ordering`, and it is worth saying why
+       rather than letting the next person add one. Reading down a person
+       (`participation.attendances`) wants teaching order; reading across a
+       meeting (`session.attendances`) wants people. One Meta cannot serve both,
+       and the one that crosses a relation has a second cost: Django appends
+       default ordering fields to the GROUP BY of any `values().annotate()`,
+       which is exactly the query L5.7 is about to write over this table. A
+       silently regrouped aggregate is the shape this project keeps convicting.
+    """
+
+    def in_teaching_order(self):
+        """Week one first — the order a course is read in, same as Session."""
+        return self.order_by("session__start_time", "id")
+
+    def by_person(self):
+        """The register for one meeting, in the order a roster is read."""
+        return self.order_by(
+            "participation__contact__legal_last_name",
+            "participation__contact__legal_first_name",
+            "id",
+        )
+
+    def attended(self):
+        """Rows where they actually turned up.
+
+        The one spelling of "he was there for this one", so the register, the
+        hours received and any future rate all mean the same thing by it.
+        """
+        return self.filter(status=Participation.Status.ATTENDED)
+
+
+class SessionAttendance(ConstraintErrorFieldMixin, TimeStampedModel):
+    """One person at one meeting: were they there, and what did they do.
+
+    Every platform surveyed has this layer under a different name and the same
+    shape. Salesforce PMM calls it `ServiceDelivery` (the signup being
+    `ServiceParticipant`); Apricot calls it an attendance tracker (the signup
+    being an enrolment); ChurchSuite, with "sign up to the sequence" on, rolls
+    attendance into a view over time. ⚠️ Five products, no exceptions: **signing
+    up once is not attending once**, and the two live on two tables.
+
+    ⚠️ It is **not** a row of `Participation`, and that is decision 19 rather
+       than a preference. The columns look alike; the meaning does not.
+       `Participation` says "he signed up for this run" and the report counts it
+       to get how many people signed up; this table says "he came to week seven"
+       and counting it gets sessions attended. Two different numbers — and
+       merging them is the disease this project has now diagnosed three times.
+
+    ⚠️ `served_as` is not copied here: the identity ("was this my own time or my
+       job") is declared once for the whole run and stays on `Participation`.
+       D38 section 5's table asks what somebody's *participation* counts as, and
+       for a course "this participation" is the term, not the evening.
+
+    ⚠️ 🔴 That decision has a consequence L5.2's draft did not: the
+       `CheckConstraint` refusing hours on a place people attend **cannot come
+       with it**. On `Participation` that rule is enforceable only because the
+       row itself stores `served_as=not_applicable`, which moves a cross-table
+       test onto the row. Without that column there is nothing here for a check
+       constraint to look at — the criterion lives two tables away, on
+       `ParticipationRole.nature`. So on this table the rule is `clean()` plus
+       the service layer and nothing more, and D14 asks for the gap to be
+       stated: a bare `create()` writes hours against an ESL seat. There is a
+       test named after that so the sentence stays true rather than aspirational.
+    """
+
+    participation = models.ForeignKey(
+        Participation, on_delete=models.CASCADE, related_name="attendances")
+    # ⚠️ `attendances` on both ends, and that is not the collision L5.2's draft
+    #    was guarding against. `event.sessions` and a would-be
+    #    `participation.sessions` would have been one word for two tables; these
+    #    two are one word for **two directions onto the same table**, which is
+    #    what a reverse accessor is for. The draft's `related_name="+"` would
+    #    have blocked "who came to week seven" — the first query the register
+    #    page asks.
+    session = models.ForeignKey(
+        Session, on_delete=models.CASCADE, related_name="attendances")
+
+    # ⚠️ Participation's enum rather than a second copy of it — but only the
+    #    four values that mean something for **one meeting**. What changes
+    #    between the two tables is the scale, not the question, and D5's line
+    #    about a second truth applies to enums as much as to tables; what does
+    #    not carry over is `withdrew`, which is a statement about a whole run
+    #    ("he stopped coming") and cannot be made about a single evening.
+    #
+    # ⚠️ An explicit subset rather than the whole enum, and the reason is the
+    #    one askable_served_as() is built on: a value with no meaning here would
+    #    otherwise be offered by every form and admin that renders this column,
+    #    by nobody remembering to exclude it. Opting values in is the right
+    #    default for a column somebody reads as evidence.
+    #
+    #    How each of the four reads down here:
+    #      registered — expected at this meeting, which has not happened yet
+    #      attended   — was there
+    #      absent     — was expected and did not come. ⚠️ The row **existing**
+    #                   is what makes this different from decision 18's "the
+    #                   first four weeks are not absences": somebody who joined
+    #                   in week five has no rows for weeks one to four at all.
+    #      cancelled  — told us in advance they could not make this one
+    status = models.CharField(
+        max_length=20, choices=PER_MEETING_STATUSES,
+        default=Participation.Status.REGISTERED,
+    )
+
+    # Decision 20: hours are recorded at the meeting level for a run. Same
+    # column type and the same reason as Participation.hours — Decimal, never
+    # Float, because hours may end up attached to recognition and floats drift
+    # when summed.
+    #
+    # 🔴 This is hours **given** — an assistant's six evenings out of twelve. It
+    #    is not what the people being served received; that number is not stored
+    #    anywhere, it is computed from the lengths of the meetings they attended
+    #    (D43). Anything summing this column is summing donated time, and adding
+    #    the other direction into it produces a figure with no definition.
+    hours = models.DecimalField(max_digits=6, decimal_places=2, null=True, blank=True)
+
+    checked_in_at = models.DateTimeField(null=True, blank=True)
+    checked_out_at = models.DateTimeField(null=True, blank=True)
+    # ⚠️ blank with deliberately no default, in the same words as
+    #    Participation.checked_in_method: empty means "this row predates self
+    #    check-in", which is not the same fact as "an admin recorded it", and a
+    #    default would back-date a claim onto every row nobody checked.
+    checked_in_method = models.CharField(
+        max_length=20, choices=Participation.CheckInMethod.choices, blank=True,
+    )
+
+    # "Who moved this person from absent to attended, and when" is a question
+    # about somebody's record of a course. Session and Participation both keep
+    # one; two adjacent tables differing needs a reason, not a default.
+    history = HistoricalRecords()
+
+    objects = models.Manager.from_queryset(SessionAttendanceQuerySet)()
+
+    class Meta:
+        # ⚠️ No `ordering` — the reason is on SessionAttendanceQuerySet, and it
+        #    is a decision rather than an omission.
+        #
+        # ⚠️ No `indexes` either, same shape as Session's note: the unique
+        #    constraint below builds the composite index on
+        #    (participation, session), and Django indexes each foreign key on
+        #    its own, which is what "who came to this meeting" reads.
+        constraints = [
+            # Two non-nullable columns, so nulls_distinct is not needed.
+            models.UniqueConstraint(
+                fields=["participation", "session"],
+                name="sessionattendance_duplicate",
+                violation_error_message="They are already on the register for "
+                                        "this meeting.",
+                violation_error_code="sessionattendance_duplicate",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(hours__isnull=True) | models.Q(hours__gte=0),
+                name="sessionattendance_hours_not_negative",
+                violation_error_message="Hours cannot be negative.",
+                violation_error_code="sessionattendance_hours_negative",
+            ),
+            models.CheckConstraint(
+                condition=(
+                    models.Q(status="attended")
+                    | models.Q(hours__isnull=True)
+                    | models.Q(hours=0)
+                ),
+                name="sessionattendance_hours_only_when_attended",
+                violation_error_message="Only somebody recorded as having "
+                                        "attended can have hours.",
+                violation_error_code="sessionattendance_hours_without_attendance",
+            ),
+            # ⚠️ The two below are the pair L5.2's draft left out, and leaving
+            #    them out is exactly what its own line warned about: copy the
+            #    rules one at a time, not "much the same", because a table that
+            #    dropped one is looser than the table it copied and nothing says
+            #    so. Participation carries both, and this table has all three
+            #    columns they read.
+            models.CheckConstraint(
+                condition=(
+                    models.Q(checked_out_at__isnull=True)
+                    | models.Q(checked_in_at__isnull=True)
+                    | models.Q(checked_out_at__gte=models.F("checked_in_at"))
+                ),
+                name="sessionattendance_checkout_after_checkin",
+                violation_error_message="Check-out cannot be before check-in.",
+                violation_error_code="sessionattendance_checkout_before_checkin",
+            ),
+            models.CheckConstraint(
+                condition=(
+                    models.Q(checked_in_at__isnull=True) | ~models.Q(status="absent")
+                ),
+                name="sessionattendance_checked_in_is_not_absent",
+                violation_error_message="Somebody who checked in cannot be "
+                                        "marked absent.",
+                violation_error_code="sessionattendance_absent_after_checkin",
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.participation.contact} — {self.session}"
+
+    @property
+    def records_hours(self):
+        """False on a place somebody attends — asked through the signup.
+
+        ⚠️ Delegated rather than re-derived. L4's rule has exactly one spelling
+           (`Participation.records_hours`) and this layer has to ask the same
+           question of the same column, or the two answers are free to drift.
+
+        ⚠️ Reads through participation → event_role → role, so anything
+           rendering this per row wants
+           `select_related("participation__event_role__role")`. Same trap the
+           signup page's version notes, one join deeper.
+        """
+        return self.participation.records_hours
+
+    @property
+    def hours_received(self):
+        """How long the foundation's time was spent on them here — or None.
+
+        D43, and the other direction from `hours`: one is time somebody gave,
+        this is time somebody was given. It is the length of this meeting, which
+        the run already stores. Never a column — the two ends are on the
+        `Session` row, and a third number saying how far apart they are would be
+        free to disagree with them.
+
+        ⚠️ Not "class hours", and the wording is load-bearing. ESL is the first
+           service that ran into this, not its boundary: six sessions of
+           financial coaching, an eight-week support group, a job-training
+           course and a legal clinic all ask the same question. Salesforce PMM
+           names the equivalent column `Quantity` with a configurable unit for
+           exactly this reason — it does not assume you are running a class.
+
+        🔴 None on a **helping** row, not the meeting's length. An assistant is
+           in the room to give, and nothing is being delivered to him; counting
+           his evening here is what made one person holding both a seat and an
+           assistant's place report four hours of service for a two-hour class.
+           The mirror of `records_hours` above: each direction answers on its
+           own half and returns None on the other.
+
+        ⚠️ None rather than 0 for somebody who did not come. "Nothing was
+           delivered here" and "he was not on this register" are two facts, and
+           D27's rule is that they must not look the same.
+        """
+        if not self.records_hours:
+            # An attending row: this is the half the question is about.
+            if self.status != Participation.Status.ATTENDED:
+                return None
+            return self.session.duration
+        return None
+
+    def clean(self):
+        """Two rules, both of which read another table, so neither can be a constraint.
+
+        1. The meeting has to belong to the run the person signed up for.
+           Without it this table stores "he came to week seven of a course he
+           never signed up for" — readable, printable, and wrong. It is the same
+           corner `Participation` sidesteps by having no `event` column of its
+           own (see its docstring): two foreign keys that must agree about a
+           third row. Here neither key can be dropped, so the agreement has to
+           be checked instead.
+        2. A place somebody attends records no hours (L4). The service layer
+           refuses it too; this is the half a ModelForm gets.
+
+        ⚠️ D14, said plainly rather than implied: `SessionAttendance.objects
+           .create(...)` and `bulk_create` walk past both. Neither can become a
+           CheckConstraint — rule 1 compares two other tables, and rule 2's
+           criterion is on `ParticipationRole.nature`, which is two joins away.
+           The programmatic path meant to obey them is
+           `services.add_attendance()`. Two tests are named after the gap.
+        """
+        super().clean()
+        if self.participation_id is None or self.session_id is None:
+            return
+        if self.participation.event_role.event_id != self.session.event_id:
+            raise ValidationError({"session": (
+                f"That meeting belongs to “{self.session.event.name}”, and this "
+                f"signup is for “{self.participation.event_role.event.name}”. "
+                "A register only holds meetings of the run somebody signed up for."
+            )})
+        if self.hours is not None and not self.records_hours:
+            raise ValidationError({"hours": (
+                f"“{self.participation.event_role.role.name}” is a place people "
+                "attend, not a job — the event side records no hours for it. "
+                "How long the foundation's time was spent on them is a "
+                "different number, worked out from the meeting's own two ends."
             )})
 
 

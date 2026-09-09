@@ -125,7 +125,17 @@
       </div>
       <div>
         <dt class="text-xs text-ink-600 dark:text-ink-300">When</dt>
-        <dd>{{ event.start_time }} &ndash; {{ event.end_time }}</dd>
+        {% comment %}
+        🔴 一门课的两列是**学期的两端**，不是一个时段。照单场那样带时分印出来
+           说的是一句假话 —— 「Aug 9, 4:05 p.m. — Nov 7, 3:05 p.m.」读起来像
+           一场开了三个月的活动，而它其实每周二两小时。
+        ⚠️ 第二行是从讲次**推**出来的，不存字段；规律被打破时它自己退让成
+           「N sessions」，不硬凑一句整齐的话。
+        {% endcomment %}
+        <dd>{{ when_headline }}</dd>
+        {% if when_detail %}
+          <dd class="text-xs text-ink-600 dark:text-ink-300">{{ when_detail }}</dd>
+        {% endif %}
       </div>
       {% if event.location %}
         <div>
@@ -150,6 +160,27 @@
         <div>
           <dt class="text-xs text-ink-600 dark:text-ink-300">Visible to</dt>
           <dd>{{ event.audience_in_words|join:", " }}</dd>
+          {% comment %}
+          🔴 「谁看得见这一场，却看不全它」。需求 8 让这个状态成为**常态** ——
+             一次发布同时招内外，每个人只看得见给他的那几行 —— 而它和「勾错了」
+             是同一个状态，分不开。只有发布的人知道是哪一种，而在这一行之前
+             没有任何一页告诉过他这里有事情可知道。
+
+          ⚠️ 只画给看得全表的人（同上面那张表的 Open to 列）。对一个普通报名者
+             这句话没有意义：他本来就只看得见给他的那些，告诉他「还有别的角色
+             你看不见」只是在描述一件他无法处置的事。
+
+          ⚠️ 措辞不是警告。发布时那条提示走 messages.info 也是这个理由 ——
+             对一件大多数时候正确的事用责备的语气，教会的是把它划走。
+          {% endcomment %}
+          {% if sees_every_role %}
+            {% for phrase, roles in audience_gaps %}
+              <dd class="mt-1 text-xs text-ink-600 dark:text-ink-300">
+                {{ phrase }} can see this event, but not
+                {% for name in roles %}“{{ name }}”{% if not forloop.last %}, {% endif %}{% endfor %}.
+              </dd>
+            {% endfor %}
+          {% endif %}
         </div>
       {% endif %}
     </dl>
@@ -236,6 +267,36 @@
       </tbody>
     </table>
   </div>
+
+  {% comment %}
+  讲次表。⚠️ 只画给**看得到这场活动记录**的人（同上面那张角色表的 Open to
+     列）：普通报名者要的是「这门课什么时候上」，那句话已经在页顶的 When
+     那一行上了，而这张表带着签到屏的入口 —— 那是管理动作。
+
+  ⭐ 每一行一个签到屏，而这正是「今天是哪一讲」不需要被猜的原因：老师开的是
+     哪一讲的屏，扫出来就是哪一讲。一天排两讲也不冲突，那是两块屏。
+  {% endcomment %}
+  {% if sees_every_role and sessions %}
+    <h2 class="mb-3 mt-8 text-lg font-semibold">Sessions</h2>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>#</th><th>When</th><th>Attended</th><th></th></tr></thead>
+        <tbody>
+          {% for row in sessions %}
+            <tr>
+              <td>{{ forloop.counter }}</td>
+              <td>{{ row.start_time }} &ndash; {{ row.end_time|time }}</td>
+              <td>{{ row.attendances.count }}</td>
+              <td>
+                <a href="{% url 'events:session_checkin_display' row.pk %}"
+                   class="prose-link">Check-in screen</a>
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% endif %}
 
   {% if mine %}
     <h2 class="mb-3 mt-8 text-lg font-semibold">What you signed up for</h2>

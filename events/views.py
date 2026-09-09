@@ -30,6 +30,7 @@ from django.db.models import Prefetch
 from django.http import Http404, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
+from django.utils.text import get_text_list
 from django_ratelimit.decorators import ratelimit
 
 from core.pagination import page_holding, page_of
@@ -44,7 +45,7 @@ from org.permissions import (
     ministry_ids_administered_by,
 )
 
-from . import schedule
+from . import schedule, tokens
 from .forms import (
     EventForm,
     EventPeriodForm,
@@ -60,6 +61,7 @@ from .models import (
     EventNotification,
     EventRole,
     Participation,
+    Session,
     askable_served_as,
 )
 from .tokens import (
@@ -96,10 +98,11 @@ from .services import (
     notify_event_change,
     record_hours,
     reschedule,
-    scheduled_hours,
+    prefillable_hours,
     resolve_recipients,
     signups_asked_about_serving,
     hours_recorded_against,
+    audience_gaps,
     signups_left_outside,
     set_served_as,
     set_status,
@@ -306,9 +309,13 @@ def _schedule(request, period, contact):
     #    而窗口可以翻到下个月 —— 再叠一道「今天起」只会把它自己的下界抄第二遍。
     # ⚠️ `for_audience()` 和左边那一列同一道门。少了它就是「列表里没有、
     #    日程上画着」—— 而那是同一份筛选画出来的两个答案。
+    # ⚠️ `prefetch_related("sessions")`：日程把一门课画成它的各讲（schedule.
+    #    occurrences），而那要读每一场的 sessions。少了它是一场一次查询，
+    #    在系统里最常打开的这一页上，且它不报错 —— 只是变慢。
     events = period.narrow(
         Event.objects.visible_to_participants()
-        .for_audience(contact).select_related("ministry"))
+        .for_audience(contact).select_related("ministry")
+        .prefetch_related("sessions"))
     events = events.filter(start_time__lt=end, end_time__gte=start).order_by("start_time")
     return {
         "schedule_columns": schedule.columns(events, days),
@@ -400,7 +407,9 @@ def _detail(request, pk):
        取数路径。分叉在这里的名字叫「草稿从侧边栏漏出去了」。
     """
     event = get_object_or_404(
-        Event.objects.select_related("ministry"), pk=pk)
+        Event.objects.select_related("ministry").prefetch_related("sessions"),
+        pk=pk)
+    when_headline, when_detail = schedule.when_line(event)
     contact = _my_contact(request)
     preview = event.status not in Event.VISIBLE_TO_PARTICIPANTS
     # L3 (2026-08-26): not for them is the same kind of answer as not published.
@@ -514,6 +523,17 @@ def _detail(request, pk):
             not roles and not may_view_records and event.roles.exists()),
         # 那句常驻文案的开关：这张表对他是全的，对别人不是。⚠️ 不查库。
         "sees_every_role": may_view_records,
+        # 「谁看得见这一场，却看不全它」。⚠️ 只在看全表的人那里算 —— 对一个
+        #    普通报名者这句话既无意义也无处置，而它要遍历角色的受众。
+        "audience_gaps": audience_gaps(event) if may_view_records else [],
+        # 「什么时候」。⚠️ 一门课的两列是**学期的两端**，照单场那样带时分印出来
+        #    说的是一句假话（读起来像一场开三个月的活动）。两个值：上面一行是
+        #    学期，下面一行是从讲次推出来的节奏。
+        "when_headline": when_headline,
+        "when_detail": when_detail,
+        # 讲次表。⚠️ 只在看得到记录的人那里取 —— 它带着签到屏的入口，而那是
+        #    管理动作；对报名者「这门课什么时候上」已经答在 When 那一行上了。
+        "sessions": (event.sessions.all() if may_view_records else []),
         "mine": mine,
         # ⚠️ The property, not `status in OPEN_FOR_SIGNUP` (2026-08-19). It asks
         #    the clock as well, exactly as the `open_for_signup()` queryset
@@ -1149,10 +1169,38 @@ def event_update(request, pk):
             ))
         else:
             messages.success(request, "Event updated.")
+        _mention_audience_gaps(request, event)
         return redirect("events:event_detail", pk=event.pk)
 
     return render(request, "events/event_form.html",
                   _edit_page_context(event, form=form))
+
+
+def _mention_audience_gaps(request, event):
+    """Say who can see this event without seeing all of its roles.
+
+    Requirement 8 makes this state ordinary — one event, published once,
+    recruiting inside and outside at the same time — so this is **not** a
+    warning and must not read as one. It is also exactly what a mistyped
+    audience looks like, and the two are the same state: only the person
+    publishing knows which it is, and until now nothing told them there was
+    anything to know.
+
+    ⚠️ `messages.info`, not `warning`. The events this fires on are mostly
+       correct, and a scolding tone on a correct action is how people learn to
+       click past a message — which would cost the wrong half.
+
+    ⚠️ Wording, not logic. Which groups and which roles is
+       services.audience_gaps(); this turns the pairs into a sentence, and the
+       fact that it takes a request is why it lives here and not there.
+    """
+    for phrase, roles in audience_gaps(event):
+        named = get_text_list([f"“{name}”" for name in roles], "and")
+        messages.info(request, (
+            f"Note: {phrase} can see this event, but not {named}. "
+            "That is how one event recruits inside and outside at once — "
+            "check it is what you meant."
+        ))
 
 
 def _edit_page_context(event, *, form=None, role_form=None, user=None):
@@ -1198,6 +1246,10 @@ def event_roles(request, pk):
     if form.is_valid():
         form.save()
         messages.success(request, "Role added.")
+        # ⚠️ Here as well as on the event's own form, because a role is the
+        #    other half of the pair: the gap appears when either side moves, and
+        #    this is the side somebody is usually on when it appears.
+        _mention_audience_gaps(request, event)
         # ⭐ The plain-form path is the one that must always work: redirect, so a
         #    refresh cannot post twice. HTMX gets the list back instead — same
         #    write, same message, one fewer full page.
@@ -1429,7 +1481,11 @@ def event_attendance(request, pk):
             return render(request, "events/_attendance_row_swap.html", {
                 "row": participation,
                 "hours_form": HoursForm(),
-                "scheduled_hours": scheduled_hours(event),
+                # ⚠️ The same helper as the full-page render below, not
+                #    scheduled_hours(): the swapped row and the page it lands in
+                #    must agree about what the box starts at, and the HTMX path
+                #    is the one that gets forgotten.
+                "scheduled_hours": prefillable_hours(event),
                 "can_manage": True,
             })
         return redirect("events:event_attendance", pk=event.pk)
@@ -1454,7 +1510,17 @@ def event_attendance(request, pk):
         # What the box starts at for somebody with no hours yet. Computed in
         # services, never here — this is date arithmetic, and there is a grep
         # guard on views doing any (D18).
-        "scheduled_hours": scheduled_hours(event),
+        #
+        # 🔴 None on a run, so the box starts empty. The prefill assumes
+        #    `end − start` is a plausible number of hours for one person, and a
+        #    term running March to June makes that **2664.00** — a figure an
+        #    admin can enter with one click, that is authoritative the moment it
+        #    lands, and that mark_absent() will refuse the row over from then
+        #    on. The accepted cost noted below ("a prefilled number looks
+        #    exactly like a confirmed one") was written before runs existed.
+        #    A run's hours are recorded per meeting anyway (decision 20), so
+        #    there is nothing here for the prefill to have been right about.
+        "scheduled_hours": prefillable_hours(event),
     })
 
 
@@ -1571,13 +1637,14 @@ def checkin_scan(request, token):
        window would check somebody in.
     """
     try:
-        event_id, mode = verify_checkin_token(token)
+        kind, target_id, mode = verify_checkin_token(token)
     except InvalidCheckInToken as error:
         return render(request, "events/checkin_refused.html", {
             "reason": "; ".join(error.messages),
         }, status=400)
 
-    request.session[CHECKIN_CREDENTIAL_KEY] = issue_credential(event_id, mode)
+    request.session[CHECKIN_CREDENTIAL_KEY] = issue_credential(
+        target_id, mode, kind=kind)
     return redirect("events:checkin_confirm")
 
 
@@ -1593,15 +1660,28 @@ def checkin_confirm(request):
     """
     contact = _my_contact(request)
     try:
-        event_id, mode = read_credential(request.session.get(CHECKIN_CREDENTIAL_KEY))
+        kind, target_id, mode = read_credential(
+            request.session.get(CHECKIN_CREDENTIAL_KEY))
     except CredentialExpired as error:
         return render(request, "events/checkin_refused.html", {
             "reason": "; ".join(error.messages),
         }, status=400)
 
-    event = get_object_or_404(
-        Event.objects.visible_to_participants().select_related("ministry"), pk=event_id)
-    targets = scan_targets(contact, event, mode) if contact else None
+    # ⚠️ The published gate is asked of the **event** either way: a meeting of
+    #    an unpublished run must not be a route that manufactures attendance.
+    if kind == tokens.SESSION:
+        session = get_object_or_404(
+            Session.objects.select_related("event__ministry"), pk=target_id)
+        event = get_object_or_404(
+            Event.objects.visible_to_participants(), pk=session.event_id)
+        target = session
+    else:
+        session = None
+        event = get_object_or_404(
+            Event.objects.visible_to_participants().select_related("ministry"),
+            pk=target_id)
+        target = event
+    targets = scan_targets(contact, target, mode) if contact else None
 
     if targets is None or not targets.any_signup:
         return render(request, "events/checkin_refused.html", {
@@ -1649,7 +1729,7 @@ def checkin_confirm(request):
             raise Http404
         try:
             participation, changed = apply_scan(
-                chosen, contact=contact, event_id=event.pk, mode=mode)
+                chosen, contact=contact, target=target, mode=mode)
         except ConsentRequired as error:
             # ⚠️ Shown, not swallowed, and not a 500. The person this refusal
             #    concerns is standing in a hall holding a phone, and the fix is
@@ -1663,11 +1743,13 @@ def checkin_confirm(request):
                 "action_label": "Go to my profile",
             }, status=400)
         del request.session[CHECKIN_CREDENTIAL_KEY]
-        messages.success(request, checkin_result_message(participation, mode, changed))
+        messages.success(request, checkin_result_message(
+            participation, mode, changed, session=session))
         return redirect("events:my_participations")
 
     return render(request, "events/checkin_confirm.html", {
         "event": event,
+        "session": session,
         "mode": mode,
         "checking_in": mode == CHECK_IN,
         "targets": targets,
@@ -1677,47 +1759,74 @@ def checkin_confirm(request):
     })
 
 
-@login_required
-def checkin_display(request, pk):
-    """The page that lives on the iPad. Draws nothing itself — the JS does.
+def _checkin_screen(request, target, token_url):
+    """The iPad page, for an event or for one meeting of a run.
 
     Read-only as far as the database is concerned, so the permission is the
     manage one purely because of what it grants access to: whoever can open this
-    page can mint check-in codes for everybody at the event.
+    page can mint check-in codes for everybody in front of it.
     """
-    event = _managed_event(request, pk)
+    session = target if isinstance(target, Session) else None
     return render(request, "events/checkin_display.html", {
-        "event": event,
+        "event": session.event if session else target,
+        "session": session,
         "can_manage": True,
         # ⚠️ Computed here, once, at page load — never re-derived in the
         #    browser. An iPad that flipped from Check in to Check out on its own
         #    halfway through would turn the queue in front of it into check-outs
         #    with nothing on screen saying so. From here on the admin decides.
-        "default_mode": default_checkin_mode(event),
-        "closed_message": window_message(event),
-        "token_url": reverse("events:checkin_token", args=[event.pk]),
+        "default_mode": default_checkin_mode(target),
+        "closed_message": window_message(target),
+        "token_url": token_url,
     })
 
 
 @login_required
-@ratelimit(key="user", rate="60/m", block=False)
-def checkin_token(request, pk):
-    """A fresh code for the display. JSON, and the one endpoint that must not leak.
+def checkin_display(request, pk):
+    """The screen for a single occasion.
 
-    ⚠️ This permission check **is** the scheme. Without it any signed-in
-       volunteer fetches a live token from their sofa and books themselves in;
-       every rotating-code measure above it becomes decoration. It is the first
-       statement in the function for that reason.
+    ⚠️ A run does not come through here — its screen is one meeting's
+       (`session_checkin_display` below), because a code that named the whole
+       term was the same code for all twelve evenings.
     """
     event = _managed_event(request, pk)
+    return _checkin_screen(
+        request, event, reverse("events:checkin_token", args=[event.pk]))
+
+
+@login_required
+def session_checkin_display(request, pk):
+    """The screen for one meeting of a run. ⭐ Which meeting is not inferred.
+
+    The teacher opens the screen for the evening they are teaching, so the code
+    on it is that evening's — and two meetings on one day are simply two
+    screens. That is why "which meeting is this scan about" is not a question
+    this system has to answer from the clock.
+    """
+    session = get_object_or_404(
+        Session.objects.select_related("event__ministry"), pk=pk)
+    _managed_event(request, session.event_id)
+    return _checkin_screen(
+        request, session,
+        reverse("events:session_checkin_token", args=[session.pk]))
+
+
+def _checkin_token(request, target, kind):
+    """A fresh code for whichever screen asked. One body, two routes.
+
+    ⚠️ The caller has already made the permission check, and that check **is**
+       the scheme: without it any signed-in volunteer fetches a live token from
+       their sofa and books themselves in, and every rotating-code measure
+       becomes decoration.
+    """
     if getattr(request, "limited", False):
         return JsonResponse({"error": "Too many requests."}, status=429)
     mode = request.GET.get("mode")
     if mode not in MODES:
         raise Http404
-    if not window_is_open(event):
-        return JsonResponse({"error": window_message(event)}, status=409)
-    token, expires_at = issue_with_expiry(event.pk, mode)
+    if not window_is_open(target):
+        return JsonResponse({"error": window_message(target)}, status=409)
+    token, expires_at = issue_with_expiry(target.pk, mode, kind=kind)
     return JsonResponse({
         # ⚠️ The whole URL is assembled here and the browser only draws it.
         #    A script that built this address from parts would be a second
@@ -1727,3 +1836,21 @@ def checkin_token(request, pk):
             reverse("events:checkin_scan", args=[token])),
         "expires_at": expires_at,
     })
+
+
+@login_required
+@ratelimit(key="user", rate="60/m", block=False)
+def checkin_token(request, pk):
+    """A code for a single occasion's screen."""
+    event = _managed_event(request, pk)
+    return _checkin_token(request, event, tokens.EVENT)
+
+
+@login_required
+@ratelimit(key="user", rate="60/m", block=False)
+def session_checkin_token(request, pk):
+    """A code for one meeting's screen. ⚠️ The kind travels inside the signature,
+    so a week-one code cannot be replayed against week seven by editing a URL."""
+    session = get_object_or_404(Session.objects.select_related("event"), pk=pk)
+    _managed_event(request, session.event_id)
+    return _checkin_token(request, session, tokens.SESSION)

@@ -17,6 +17,8 @@ from .models import (
     EventRole,
     Participation,
     ParticipationRole,
+    Session,
+    SessionAttendance,
 )
 
 
@@ -180,3 +182,97 @@ class ParticipationAdmin(SimpleHistoryAdmin):
     #    no error. Signing somebody up for a different role is a new signup.
     readonly_fields = ["served_as", "served_as_declared_by", "checked_in_method",
                        "event_role"]
+
+
+@admin.register(Session)
+class SessionAdmin(SimpleHistoryAdmin):
+    """The meetings inside a run — L5.1's table, reachable at last.
+
+    ⚠️ It went in on 2026-09-05 without this, so the table existed and nothing
+       but the tests could reach it. Batch three's file list had promised the
+       registration; the omission is the sort that has no symptom, because a
+       table nobody can open looks exactly like a table nobody needs.
+
+    SimpleHistoryAdmin for the reason the model keeps history at all: moving
+    week seven from Tuesday to Thursday changes a set of people's attendance,
+    so who did it is part of the record.
+    """
+
+    list_display = ["event", "start_time", "end_time", "source"]
+    # ⚠️ RelatedOnlyFieldListFilter, not a bare "event": the default loads every
+    #    row of the related table into the dropdown on every page view, so a
+    #    foundation with four hundred past events gets four hundred options of
+    #    which a handful have meetings. Scoped to what this table actually holds.
+    list_filter = ["source", ("event", admin.RelatedOnlyFieldListFilter)]
+    search_fields = ["event__name"]
+    autocomplete_fields = ["event"]
+    list_select_related = ["event"]
+    date_hierarchy = "start_time"
+    # Teaching order, matching the model's own — presentation, so it belongs
+    # here rather than in a Meta the aggregates would inherit.
+    ordering = ["start_time"]
+
+    def get_readonly_fields(self, request, obj=None):
+        """`event` freezes once anybody is on this meeting's register.
+
+        🔴 The same reasoning that froze `Participation.event_role` on
+           2026-09-08, arriving one table over: re-pointing a meeting at another
+           run changes **which fact its register states**, and does it past
+           every rule that would object. `Session.clean()` only checks the
+           meeting against its run's own dates, so the move passes — and
+           afterwards each attendance row sits in a state its own `full_clean()`
+           rejects ("that meeting belongs to another run"), while
+           hours_received() carries on counting it.
+
+        ⚠️ Conditional rather than always readonly, because a meeting typed
+           against the wrong run and noticed immediately is an ordinary
+           correction — and nothing has been said about it yet.
+        """
+        frozen = list(super().get_readonly_fields(request, obj))
+        if obj is not None and obj.attendances.exists():
+            frozen.append("event")
+        return frozen
+
+
+@admin.register(SessionAttendance)
+class SessionAttendanceAdmin(SimpleHistoryAdmin):
+    """One person at one meeting. SimpleHistoryAdmin for the same reason.
+
+    ⚠️ Two rules on this table are `clean()` rules rather than constraints —
+       the meeting must belong to the run somebody signed up for, and a place
+       people attend records no hours — and a ModelForm calls `full_clean()`,
+       so both of them are live here. This form is currently the only door a
+       person has to those rules; the bulk one arrives with L5.3.
+
+    ⚠️ `hours` stays editable: this table is the paper-register path for a run,
+       the same way Participation.hours is for a single occasion. What is not
+       editable is the column recording **who** filled the row in.
+    """
+
+    list_display = ["participation", "session", "status", "hours"]
+    list_filter = ["status", ("session__event", admin.RelatedOnlyFieldListFilter)]
+    search_fields = [
+        "participation__contact__legal_last_name",
+        "participation__contact__legal_first_name",
+        "session__event__name",
+    ]
+    autocomplete_fields = ["participation", "session"]
+    # 🔴 Four joins, not two, and the two extra ones are not decoration: the
+    #    `participation` column renders `Participation.__str__`, which reads
+    #    `event_role` → `EventRole.__str__`, which reads both `role.name` and
+    #    `event.name`. Measured on 2026-09-08: without them a fifteen-row page
+    #    costs 46 queries and grows with the register. ParticipationAdmin above
+    #    already spells out the same chain one join shallower; this copied the
+    #    table's rules and not its select_related.
+    list_select_related = [
+        "participation__contact",
+        "participation__event_role__event",
+        "participation__event_role__role",
+        "session__event",
+    ]
+    # ⚠️ Same rule as ParticipationAdmin's, applied to the same fact: this
+    #    column says whether the volunteer filled the row in or an admin did,
+    #    and an admin editing it is rewriting a piece of evidence about
+    #    themselves. D28 §4.
+    readonly_fields = ["checked_in_method"]
+    ordering = ["-session__start_time"]

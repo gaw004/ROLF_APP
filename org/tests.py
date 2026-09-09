@@ -873,6 +873,107 @@ class FoundationAdminGroupTests(TestCase):
                       "A production database starts with no ministries and nothing "
                       "else can create one.")
 
+    #: Registered in the admin and deliberately **not** granted to this tier.
+    #: Every entry needs a reason, because the guard below turns "forgot" into a
+    #: failure and this list is the only way to say "meant it".
+    SUPERUSER_ONLY = {
+        # Credentials and identity. Being able to administer a ministry is not
+        # being able to read the account table.
+        "accounts.user": "sign-in accounts, not foundation data",
+        # 🔴 The people themselves. This tier administers *ministries*; reading
+        #    every contact in the foundation is a different power, and D21's
+        #    self-service pages are how a person reaches their own record.
+        "contact.contact": "everybody's personal details — a different power",
+        # Employment records: pay band adjacent, and D32's axes live here.
+        "org.assignment": "employment records",
+        # ⚠️ These two are lookup tables, and their three siblings
+        #    (events.view_participationrole, org.view_position,
+        #    org.view_employmenttype) **are** granted a few lines above under
+        #    "the other lookup tables: read-only for now". Nobody has ever
+        #    written down why these two differ, and the honest reading is that
+        #    they were missed the same way L5.2's two tables were. Parked here
+        #    rather than granted, because widening this tier is the foundation's
+        #    call and not a tidy-up — but parked **visibly**, which is the whole
+        #    point of this list.
+        "contact.language": "⚠️ undecided — see note above",
+        "contact.relationshiptype": "⚠️ undecided — see note above",
+    }
+
+    def test_every_registered_model_is_granted_or_named(self):
+        """🔴 Registering a model in admin.py does **not** make it reachable.
+
+        Django hides a model from the admin index entirely when the account
+        holds no permission on it, so a table can be registered, tested and
+        invisible to every non-superuser at once — and what that looks like is
+        a page that was never built, not a page that refuses.
+
+        This has now happened three times in this file's history: `add_ministry`
+        (the note above), and both of L5.2's tables on 2026-09-08. The first two
+        fixes were to add the missing label; this is the fix that makes the
+        *next* one fail here instead of in front of somebody.
+
+        ⚠️ It walks the admin registry rather than asserting a list of names —
+           the same shape as events.tests' guard on audience-editing admins, and
+           for the same reason: a hardcoded assertion only ever re-detects the
+           incident it was written for. Adding a model to admin.py now forces a
+           decision, and either answer (grant it, or name it below) is one line.
+        """
+        from django.contrib import admin as django_admin
+
+        # ⚠️ Imported here rather than re-derived: core/tests.py holds the one
+        #    definition of "an app in this repository", and a second copy would
+        #    drift the first time a new app lands. Deferred into the method
+        #    because that is how this project's tests reach across apps.
+        from core.tests import OUR_APPS
+
+        granted = {
+            f"{p.content_type.app_label}.{p.codename}"
+            for p in foundation_admin_group().permissions.all()
+        }
+        unreachable = []
+        for model in django_admin.site._registry:
+            meta = model._meta
+            if meta.app_label not in OUR_APPS:
+                continue
+            name = f"{meta.app_label}.{meta.model_name}"
+            if name in self.SUPERUSER_ONLY:
+                continue
+            if f"{meta.app_label}.view_{meta.model_name}" not in granted:
+                unreachable.append(name)
+        self.assertEqual(
+            sorted(unreachable), [],
+            "Registered in the admin but nobody in the foundation tier holds "
+            "view on it, so it is not on their admin index at all — it looks "
+            "exactly like a page that was never built. Either add "
+            "`<app>.view_<model>` to FOUNDATION_ADMIN_PERMISSIONS, or name it "
+            "in SUPERUSER_ONLY with the reason:\n" + "\n".join(sorted(unreachable)))
+
+    def test_the_superuser_only_list_has_no_stale_entries(self):
+        """The other direction, the same as CONSTRAINT_FIELD's stale check.
+
+        A model that leaves the admin, or that later gets granted, must not
+        leave a line behind claiming a decision nobody is making any more.
+        """
+        from django.contrib import admin as django_admin
+
+        registered = {
+            f"{m._meta.app_label}.{m._meta.model_name}"
+            for m in django_admin.site._registry
+        }
+        granted = {
+            f"{p.content_type.app_label}.{p.codename}"
+            for p in foundation_admin_group().permissions.all()
+        }
+        stale = sorted(
+            name for name in self.SUPERUSER_ONLY
+            if name not in registered
+            or f"{name.split('.')[0]}.view_{name.split('.')[1]}" in granted
+        )
+        self.assertEqual(
+            stale, [],
+            f"SUPERUSER_ONLY names something no longer registered, or something "
+            f"that is now granted after all: {stale}")
+
     def test_every_named_permission_resolves(self):
         """🔴 A label that names nothing grants nothing, silently.
 

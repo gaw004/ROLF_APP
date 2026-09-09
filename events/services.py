@@ -29,8 +29,10 @@ from core.timeutils import local_date_of, local_day, local_now
 from org.audience import Audience, on_the_books_exists, on_the_books_q
 from org.models import Assignment
 
-from . import tokens
+from . import schedule, tokens
 from .models import (
+    NOT_COMING,
+    roles_narrower_than_event,
     refuse_bad_audience,
     Event,
     EventNotification,
@@ -38,6 +40,7 @@ from .models import (
     Participation,
     ParticipationRole,
     Session,
+    SessionAttendance,
     Source,
 )
 
@@ -553,9 +556,30 @@ def _mark_attended(participation):
 
     Cross-table again (the age is on Contact, the signup is here), so no
     CheckConstraint can say it and D14 says to record that plainly rather than
-    dress it up. All three routes to attended come through here — check_in(),
-    check_out() and the paper-sheet record_hours() — because a rule with three
-    entrances and one guard is a rule with two ways round it.
+    dress it up. All five routes to attended ask _refuse_without_consent() —
+    check_in(), check_out(), the paper-sheet record_hours(), and since L5.2 the
+    two register entrances — because a rule with five entrances and one guard is
+    a rule with four ways round it.
+    """
+    _refuse_without_consent(participation)
+    participation.status = Participation.Status.ATTENDED
+
+
+def _refuse_without_consent(participation):
+    """A minor with no consent on the signup may not be recorded as present.
+
+    ⚠️ Split out of _mark_attended() on 2026-09-08, because L5.2 added two more
+       entrances that do not go through it: `add_attendance(status=attended)`
+       and `record_session_hours()` write presence onto a **different table**,
+       so they could not reuse the status transition — and without this they
+       reused nothing at all. A twelve-year-old with no consent on file could be
+       marked present for all twelve evenings, with hours, and nothing objected.
+
+    ⚠️ The question is asked of the **signup**, not of the meeting, and that is
+       the point rather than a shortcut: consent is given once for the whole run
+       (`Participation.consent_at`), so asking per meeting would be asking a
+       question the data does not hold. What the register inherits is the run's
+       answer — including the answer "nobody ever gave one".
     """
     if (consent_required_for(participation.contact, participation.event)
             and participation.consent_at is None):
@@ -564,17 +588,31 @@ def _mark_attended(participation):
                                 "it cannot be marked as attended. (An unknown birth "
                                 "date is treated as a minor.)",
         })
-    participation.status = Participation.Status.ATTENDED
 
 
 def cancel(participation):
-    """The volunteer is not coming after all.
+    """They are not coming after all — or not coming **any more**.
 
     A status change, never a delete: "they signed up and pulled out" and "they
     were never here" are different facts, and the notification history points
     at these rows.
+
+    🔴 Which of the two it writes is decided here, from the register, and never
+       offered as a choice. On a run this button can be pressed in week six by
+       somebody who has been to every meeting, and calling that "cancelled"
+       deletes him from `people_served` while the register still proves the
+       foundation taught him twelve hours. The sector reports enrolled /
+       completed / withdrew separately for this exact reason.
+
+    ⚠️ Read off what happened, not off what they meant. The person clicking
+       "withdraw" is doing one thing; whether it is a cancellation or a
+       withdrawal depends on whether anything already happened, which is a
+       question only the data can answer. Offering both on a form would ask
+       somebody to classify their own history.
     """
-    participation.status = Participation.Status.CANCELLED
+    came = participation.attendances.attended().exists()
+    participation.status = (Participation.Status.WITHDREW if came
+                            else Participation.Status.CANCELLED)
     participation.save(update_fields=["status", "updated_at"])
     return participation
 
@@ -587,10 +625,14 @@ def _record_method(participation, method):
        must not rewrite the answer to "I did". That correction is recorded in
        the history table; this field is the origin.
 
-    ⚠️ All three routes to attended call this, for the reason written out on
-       _mark_attended(): a rule with three entrances and one guard is a rule
-       with two ways round it. Here the cost of missing one is quieter — the
+    ⚠️ All four routes to attended call this, for the reason written out on
+       _mark_attended(): a rule with four entrances and one guard is a rule
+       with three ways round it. Here the cost of missing one is quieter — the
        column would simply be empty, which reads as "an old row" and is false.
+
+    ⚠️ Takes anything carrying `checked_in_method`, which since L5.2 means a
+       `SessionAttendance` as well as a `Participation` — the parameter keeps
+       the older name because the rule and its reason are identical on both.
     """
     if not participation.checked_in_method:
         participation.checked_in_method = method
@@ -700,7 +742,7 @@ class CredentialExpired(ValidationError):
     """The proof of presence is gone or too old. Scan again."""
 
 
-def issue_credential(event_id, mode, *, at=None):
+def issue_credential(target_id, mode, *, kind=None, at=None):
     """A plain dict recording that somebody stood in front of the screen.
 
     ⚠️ Returned rather than written, because nothing in this module may know
@@ -709,22 +751,29 @@ def issue_credential(event_id, mode, *, at=None):
        since sessions are serialised as JSON.
     """
     return {
-        "event": event_id,
+        "kind": kind or tokens.EVENT,
+        "target": target_id,
         "mode": mode,
         "at": (at or local_now()).timestamp(),
     }
 
 
 def read_credential(data, *, at=None):
-    """(event_id, mode) from a stored credential, or raise CredentialExpired."""
+    """(kind, target_id, mode) from a stored credential, or raise CredentialExpired.
+
+    ⚠️ `kind` defaults to an event when it is missing, so a credential already
+       sitting in somebody's session when this shipped still resolves rather
+       than throwing them out mid-check-in.
+    """
     try:
-        event_id, mode, issued_at = data["event"], data["mode"], float(data["at"])
-    except (TypeError, KeyError, ValueError) as error:
+        kind = data.get("kind", tokens.EVENT)
+        target_id, mode, issued_at = data["target"], data["mode"], float(data["at"])
+    except (TypeError, KeyError, ValueError, AttributeError) as error:
         raise CredentialExpired(_CREDENTIAL_MESSAGE) from error
     age = (at or local_now()).timestamp() - issued_at
     if age < 0 or age > CREDENTIAL_MAX_AGE.total_seconds():
         raise CredentialExpired(_CREDENTIAL_MESSAGE)
-    return event_id, mode
+    return kind, target_id, mode
 
 
 _CREDENTIAL_MESSAGE = (
@@ -754,8 +803,67 @@ class ScanTargets:
         return bool(self.pending or self.done or self.needs_check_in)
 
 
-def scan_targets(contact, event, mode):
-    """Sort this contact's live signups at `event` into what the scan can do.
+def check_in_session(attendance, *, at=None,
+                     method=Participation.CheckInMethod.ADMIN):
+    """They turned up to this meeting. Records the time and marks them present."""
+    _refuse_without_consent(attendance.participation)
+    attendance.checked_in_at = at or local_now()
+    attendance.status = Participation.Status.ATTENDED
+    _record_method(attendance, method)
+    attendance.full_clean()
+    attendance.save()
+    return attendance
+
+
+def check_out_session(attendance, *, at=None,
+                      method=Participation.CheckInMethod.ADMIN):
+    """They left this meeting, and — on a helping place — that writes the hours.
+
+    ⚠️ Only on a helping place. What somebody **received** is worked out from
+       the meeting's own two ends (D43), so computing anything into `hours` here
+       for a learner would put the other direction into a column the report adds
+       up. The timestamps are still written: they came, they left, both true.
+    """
+    at = at or local_now()
+    attendance.checked_out_at = at
+    if (attendance.records_hours and attendance.checked_in_at
+            and attendance.hours is None):
+        elapsed = at - attendance.checked_in_at
+        attendance.hours = (
+            Decimal(elapsed.total_seconds()) / Decimal(3600)
+        ).quantize(Decimal("0.01"))
+    if attendance.hours is not None:
+        _refuse_without_consent(attendance.participation)
+        _record_method(attendance, method)
+        attendance.status = Participation.Status.ATTENDED
+    attendance.full_clean()
+    attendance.save()
+    return attendance
+
+
+def register_row(participation, session):
+    """This person's row for this meeting, made if it is not there yet.
+
+    ⚠️ Creating on a scan is right and is not a hole in decision 18. That
+       decision says which rows exist encodes who was on the course when — and
+       somebody standing in the room scanning the code **is** on it for this
+       evening. The rows it is careful about are the ones nobody has any
+       evidence for, and this is the evidence.
+    """
+    row = SessionAttendance.objects.filter(
+        participation=participation, session=session).first()
+    return row or add_attendance(participation, session)
+
+
+def scan_targets(contact, target, mode):
+    """Sort this contact's live signups at `target` into what the scan can do.
+
+    ⚠️ `target` is an event **or** one meeting of a run, and the lists hold
+       signups either way — because the question the phone asks is still "which
+       of your places is this about", and on a run a person holds the same
+       several places all term. What changes is where the answer is written:
+       for a meeting it is that meeting's register row, made on the spot if this
+       is the first evidence of them being there (see register_row above).
 
     ⚠️ Cancelled rows are excluded, not listed as "done". Somebody who pulled
        out and then scanned should be told they are not signed up — the row
@@ -767,6 +875,8 @@ def scan_targets(contact, event, mode):
        volunteer's call, not this function's: the other two options both invent
        a number. See D28「五、一个人报了两个工种」.
     """
+    session = target if isinstance(target, Session) else None
+    event = session.event if session else target
     rows = list(
         Participation.objects
         .filter(contact=contact, event_role__event=event)
@@ -774,20 +884,32 @@ def scan_targets(contact, event, mode):
         .select_related("event_role__role", "event_role__event")
         .order_by("event_role__role__name")
     )
+    # On a meeting, the state that decides the three lists is the register row's
+    # — not the signup's, which is about the whole term and never moves.
+    marks = {}
+    if session is not None:
+        marks = {
+            row.participation_id: row
+            for row in SessionAttendance.objects.filter(
+                session=session, participation__in=rows)
+        }
     pending, done, needs_check_in = [], [], []
     for row in rows:
+        state = marks.get(row.pk) if session is not None else row
+        checked_in = state.checked_in_at if state else None
+        checked_out = state.checked_out_at if state else None
         if mode == tokens.CHECK_IN:
-            (done if row.checked_in_at else pending).append(row)
-        elif row.checked_out_at:
+            (done if checked_in else pending).append(row)
+        elif checked_out:
             done.append(row)
-        elif row.checked_in_at:
+        elif checked_in:
             pending.append(row)
         else:
             needs_check_in.append(row)
     return ScanTargets(pending=pending, done=done, needs_check_in=needs_check_in)
 
 
-def apply_scan(participation_pk, *, contact, event_id, mode, at=None):
+def apply_scan(participation_pk, *, contact, target, mode, at=None):
     """Write one scanned check-in or check-out. Atomic, and safe to repeat.
 
     Returns (participation, changed). `changed` is False when the row was
@@ -817,6 +939,8 @@ def apply_scan(participation_pk, *, contact, event_id, mode, at=None):
        event, so a primary key from somebody else's row cannot be posted into
        this function at all.
     """
+    session = target if isinstance(target, Session) else None
+    event_id = session.event_id if session else target.pk
     with transaction.atomic():
         participation = (
             Participation.objects
@@ -827,48 +951,84 @@ def apply_scan(participation_pk, *, contact, event_id, mode, at=None):
             .get(pk=participation_pk)
         )
         method = Participation.CheckInMethod.SELF_QR
+        # ⚠️ On a meeting the row that moves is the register's, not the signup's.
+        #    The signup says "he is on this course" and must not be turned into
+        #    "he came" by one evening's scan — that is decision 19's whole point,
+        #    and reading the wrong one is how a term ended up with a single
+        #    check-in standing for twelve weeks.
+        row = register_row(participation, session) if session else participation
         if mode == tokens.CHECK_IN:
-            if participation.checked_in_at:
+            if row.checked_in_at:
                 return participation, False
-            check_in(participation, at=at, method=method)
+            (check_in_session if session else check_in)(row, at=at, method=method)
         else:
-            if participation.checked_out_at or participation.checked_in_at is None:
+            if row.checked_out_at or row.checked_in_at is None:
                 return participation, False
-            check_out(participation, at=at, method=method)
+            (check_out_session if session else check_out)(row, at=at, method=method)
     return participation, True
 
 
-def default_checkin_mode(event, *, at=None):
+def default_checkin_mode(target, *, at=None):
     """Which way round the iPad should start when the page is opened.
 
-    Before the midpoint of the event, people are arriving; after it, they are
-    leaving. ⚠️ Read **once**, at page load, and never again — the display does
-    not follow this as the afternoon goes on. An iPad that switched itself would
+    Before the midpoint, people are arriving; after it, they are leaving.
+    ⚠️ Read **once**, at page load, and never again — the display does not
+    follow this as the afternoon goes on. An iPad that switched itself would
     turn the queue standing in front of it into check-outs, with nothing on the
     screen having changed to say so.
+
+    ⚠️ The midpoint of the **meeting** on a run, which is the whole reason this
+       function now takes a target rather than an event. A term's midpoint is
+       some day in May: opening the screen for any evening after that started it
+       on "Check out", for a queue of people walking in.
     """
-    midpoint = event.start_time + (event.end_time - event.start_time) / 2
+    midpoint = target.start_time + (target.end_time - target.start_time) / 2
     return tokens.CHECK_IN if (at or local_now()) < midpoint else tokens.CHECK_OUT
 
 
-def checkin_result_message(participation, mode, changed):
+def checkin_result_message(participation, mode, changed, *, session=None):
     """The sentence that lands on My Signups after a scan.
 
     ⚠️ A repeat is phrased as a statement of fact, not as a failure. The most
        common way to arrive here twice is a slow page and an impatient thumb,
        and an error would send that person off to find an admin over something
        that already worked.
+
+    🔴 On a run it reads the **meeting's** row, and a repeat carries the date.
+       Before this, one check-in in week one made every later scan answer "you
+       already checked in at 10:28 AM" — no date, so it read as this evening,
+       for eleven more weeks. A reassuring sentence about the wrong day is worse
+       than a refusal, because nobody goes looking.
     """
+    row = participation
+    if session is not None:
+        row = SessionAttendance.objects.filter(
+            participation=participation, session=session).first() or participation
     if mode == tokens.CHECK_IN:
-        when = timezone.localtime(participation.checked_in_at)
+        when = timezone.localtime(row.checked_in_at)
         if changed:
             return f"Checked in at {when:%-I:%M %p}."
-        return f"You already checked in at {when:%-I:%M %p}."
-    when = timezone.localtime(participation.checked_out_at)
+        return f"You already checked in at {_scan_moment(when, session)}."
+    when = timezone.localtime(row.checked_out_at)
     if not changed:
-        return f"You already checked out at {when:%-I:%M %p}."
-    return (f"Checked out at {when:%-I:%M %p} — "
-            f"{participation.hours} hours recorded.")
+        return f"You already checked out at {_scan_moment(when, session)}."
+    if row.hours is None:
+        # A place somebody attends records no hours (L4/D43) — saying "0 hours
+        # recorded" there would print the wrong direction's zero.
+        return f"Checked out at {when:%-I:%M %p}."
+    return f"Checked out at {when:%-I:%M %p} — {row.hours} hours recorded."
+
+
+def _scan_moment(when, session):
+    """A time, plus the date when it might not be today's.
+
+    ⚠️ Only on a run. A single occasion's repeat scan is minutes after the
+       first, so a date would be noise; a run's can be a week later, and there
+       the bare time is the whole problem.
+    """
+    if session is None:
+        return f"{when:%-I:%M %p}"
+    return f"{when:%-I:%M %p} on {when:%-d %B}"
 
 
 def undo_attendance(participation):
@@ -1003,6 +1163,21 @@ def mark_absent(participation):
             "checked_in_at": "This signup was checked in, so it cannot be marked "
                              "as a no-show.",
         })
+    # 🔴 On a run, "did they come" is not a question this row answers, and the
+    #    two refusals above cannot see that: a term's evidence is all on the
+    #    register, so both columns here are legitimately empty and the row went
+    #    to no-show even for somebody the register shows at every meeting.
+    #    One click, twelve weeks of attendance contradicted, nothing raised.
+    #
+    # ⚠️ Refused rather than derived. "He came to nine of twelve" has no single
+    #    answer at this level, and inventing one (any? most? all?) would put a
+    #    number nobody chose into the place a person looks for a fact.
+    if participation.event_role.event.sessions.exists():
+        raise TurnedUp({
+            "status": "This is a run with its own register, so whether somebody "
+                      "came is recorded meeting by meeting. Mark the absence on "
+                      "the meeting they missed.",
+        })
     participation.status = Participation.Status.ABSENT
     participation.save(update_fields=["status", "updated_at"])
     return participation
@@ -1022,11 +1197,41 @@ def event_summary(event):
     DISTINCT over signups: an event that opened five roles and filled three has
     five, and that is the single acceptance point of D19.
     """
+    # 🔴 Both columns. Hours live on two tables since decision 20
+    #    (`Participation.hours` for one occasion, `SessionAttendance.hours` for
+    #    each meeting of a run), and reading only the first made R6 and R7 print
+    #    **0** for a term with real hours on it — every hour of which is on the
+    #    register by design. L5.7 named the ministry report as the thing to fix
+    #    and did not name this one, while D38 §7 had already said this function
+    #    and that report have to move together.
+    #
+    # ⚠️ The second half arrives as a **subquery**, not a second join. Two Sums
+    #    over two joins multiply each other's rows (each signup times each of
+    #    its register entries), and `distinct=True` does not rescue it — that
+    #    sums distinct *values*, so two evenings of 2.5 hours collapse into one.
+    #    Both are wrong silently, in opposite directions.
+    session_hours = (
+        SessionAttendance.objects
+        .filter(participation__event_role=models.OuterRef("pk"))
+        .values("participation__event_role")
+        .annotate(total=Sum("hours"))
+        .values("total")
+    )
     roles = list(
         event.roles.with_signup_counts()
         .select_related("role")
-        .annotate(hours_total=Sum("participations__hours"))
+        .annotate(
+            signup_hours=Sum("participations__hours"),
+            session_hours=models.Subquery(
+                session_hours, output_field=models.DecimalField()),
+        )
     )
+    for role in roles:
+        halves = [role.signup_hours, role.session_hours]
+        role.hours_total = (
+            sum((half for half in halves if half is not None), Decimal("0"))
+            if any(half is not None for half in halves) else None
+        )
     return {
         "duration": event.duration,                     # R3
         "role_count": len(roles),                       # R4 — from the roles, not the signups
@@ -1407,13 +1612,19 @@ def ministry_report(events):
         "staffable_events": len(staffable),
         "fully_staffed_rate": _percent(fully_staffed, len(staffable)),
         "minors_without_consent": minors_without_consent,
-        "people_served": _people_served(parts),
+        "people_served": _people_served(events, parts),
         **absence,
+        # ⚠️ Beside the event-level rate, never folded into it. They count two
+        #    different things over two different populations — signups at
+        #    occasions, and meetings of runs — and one number over both would be
+        #    a quantity with no definition, the same objection D36 raises about
+        #    the two hour ledgers.
+        **_session_attendance(events),
     }
     return {"figures": figures, "charts": _report_charts(events, parts=parts, helped=helped)}
 
 
-def _people_served(parts):
+def _people_served(events, parts):
     """How many people came to receive something, not counting our own.
 
     ⭐ The figure every grant application asks for, and the first time this
@@ -1437,8 +1648,18 @@ def _people_served(parts):
        served. "How many people" and "how many visits" are different questions
        and the second one is a known gap (participants.md section 9); this
        answers the first, which is the one that was asked.
+
+    🔴 **Service already delivered is not undone by leaving**, and that is what
+       `also_served` is for. `parts` arrives filtered by notifiable(), which
+       drops the two "not coming" statuses — right for a mailing list, wrong
+       here: somebody who came to six evenings of a course and then withdrew was
+       served, and the register says so. Without this line the annual report
+       loses him the moment he presses withdraw, while the attendance record it
+       is drawn from still holds twelve hours of teaching. Same shape as the
+       hours guard on role deletion: two tables, one fact, and only one of them
+       being asked.
     """
-    return (
+    served = (
         parts.attending()
         .annotate(event_day=local_day("event_role__event__start_time"))
         .exclude(on_the_books_exists(
@@ -1447,8 +1668,29 @@ def _people_served(parts):
         ))
         .values("contact_id")
         .distinct()
-        .count()
     )
+    # The people notifiable() dropped who nevertheless have a register behind
+    # them. ⚠️ Asked of `events` and **not** of the events found in `parts`:
+    # `parts` is already filtered by notifiable(), so on a run whose only
+    # learner has withdrawn it is empty — and a list derived from it would be
+    # empty too, which is exactly the person this half exists to find. Same
+    # staff exclusion as above, so the two halves answer on one population.
+    also_served = (
+        Participation.objects
+        .filter(event_role__event__in=events,
+                status__in=NOT_COMING,
+                attendances__status=Participation.Status.ATTENDED)
+        .attending()
+        .annotate(event_day=local_day("event_role__event__start_time"))
+        .exclude(on_the_books_exists(
+            contact_ref=models.OuterRef("contact_id"),
+            day_ref=models.OuterRef("event_day"),
+        ))
+        .values("contact_id")
+        .distinct()
+    )
+    return len(set(served.values_list("contact_id", flat=True))
+               | set(also_served.values_list("contact_id", flat=True)))
 
 
 def _absence(events, parts):
@@ -1473,6 +1715,17 @@ def _absence(events, parts):
        careless — the same reason `fully_staffed` excludes events that opened no
        numbered role.
     """
+    # 🔴 Runs are taken out **explicitly**, and saying so is the whole point.
+    #    They were already absent from this figure, silently: nothing ever moves
+    #    a run's signup off `registered` (its evidence is on the register), so
+    #    every course sat permanently in `still_registered` and never reached
+    #    the denominator — while the caption underneath went on reporting the
+    #    ministry as not having gone through its lists. Their attendance is
+    #    counted below, meeting by meeting, where it can be counted honestly.
+    runs = set(
+        Event.objects.filter(pk__in=with_signups_all(parts), sessions__isnull=False)
+        .values_list("pk", flat=True))
+    parts = parts.exclude(event_role__event_id__in=runs)
     with_signups = set(parts.values_list("event_role__event_id", flat=True))
     still_registered = set(
         parts.filter(status=Participation.Status.REGISTERED)
@@ -1492,6 +1745,44 @@ def _absence(events, parts):
         # no idea how much of the period it speaks for.
         "marked_up_events": len(marked_up),
         "events_with_signups": len(with_signups),
+        # ⚠️ Named so the page can say "and N runs are counted separately"
+        #    rather than leaving them out of both the number and the sentence.
+        "runs_counted_separately": len(runs),
+    }
+
+
+def with_signups_all(parts):
+    """Every event `parts` touches, before any narrowing this module does."""
+    return parts.values("event_role__event_id")
+
+
+def _session_attendance(events):
+    """How often people came to the meetings they were on the register for.
+
+    ⭐ The figure a run can actually answer, and the one the event-level absence
+       rate cannot: a course's signup never says whether anybody came, because
+       that is recorded meeting by meeting (decision 19).
+
+    ⚠️ The denominator is **the rows that exist**, which is decision 18 doing
+       its work: somebody who joined in week five has eight rows, not twelve, so
+       nothing has to subtract the four weeks that never happened to them. A
+       denominator of "meetings × people" would invent four absences for him.
+
+    ⚠️ Rows still at `registered` are left out of both halves, exactly as the
+       event-level figure leaves out events nobody marked up: a meeting that has
+       not happened yet is not an attendance and not an absence, and counting it
+       as either is the dishonesty D27 spends a section on.
+    """
+    rows = SessionAttendance.objects.filter(session__event__in=events)
+    counted = rows.exclude(status=Participation.Status.REGISTERED).aggregate(
+        marked=Count("pk"),
+        attended=Count("pk", filter=Q(status=Participation.Status.ATTENDED)),
+    )
+    return {
+        "session_marked": counted["marked"],
+        "session_attended": counted["attended"],
+        "session_attendance_rate": _percent(
+            counted["attended"], counted["marked"]),
     }
 
 
@@ -1739,6 +2030,23 @@ def reschedule(event, *, start_time, end_time):
     event.start_time = start_time
     event.end_time = end_time
     event.full_clean(exclude=["created_at", "updated_at"])
+    # 🔴 A run's meetings have to survive the move. `Session.clean()` says a
+    #    meeting falls inside its run, and it is checked when the meeting is
+    #    written — never when the run's own two ends move underneath it. Pulling
+    #    a term in behind its own week ten leaves that meeting stored in a state
+    #    its own full_clean() rejects, still holding a register and hours, and
+    #    nothing anywhere says so. Same rule as L5.6's promised "a meeting
+    #    somebody attended is never deleted by the generator", on the manual
+    #    path — and this one is the path a person actually uses.
+    stranded = event.sessions.exclude(
+        start_time__gte=start_time, end_time__lte=end_time)
+    if stranded.exists():
+        first = stranded.order_by("start_time").first()
+        raise ValidationError({"start_time": (
+            f"This run has {stranded.count()} meeting(s) outside those dates — "
+            f"the first is {local_date_of(first.start_time):%-d %B %Y}. Move or "
+            "remove them first, then change the run's dates."
+        )})
     event.save()
     return event
 
@@ -1762,6 +2070,27 @@ def scheduled_hours(event) -> Decimal:
        left after two has one answer here and a different one there.
     """
     return duration_hours(event.end_time - event.start_time)
+
+
+def prefillable_hours(event):
+    """What the hours box starts at on the attendance page, or None.
+
+    ⚠️ Not the same question as `scheduled_hours()` above, which always answers.
+       This one asks whether answering is a good idea, and on a run it is not:
+       the two columns span the whole term, so the prefill would offer
+       **2664.00** for one evening's work — a number one click away from being
+       stored, authoritative once it is, and one that mark_absent() will then
+       refuse the row over.
+
+    ⚠️ Keyed on "does this event have meetings", which is the honest question
+       here even though L5.3 will add a column saying what the event *is*: an
+       event with meetings records its hours per meeting (decision 20), so there
+       is nothing at this level for a prefill to be right about — whatever the
+       event calls itself.
+    """
+    if event.sessions.exists():
+        return None
+    return scheduled_hours(event)
 
 
 # --- Event pictures --------------------------------------------------------
@@ -2002,10 +2331,27 @@ def hours_recorded_against(role):
     Its one reader is role_delete, which refuses when this is non-empty: hours
     are records that have already been reported, and EventRole cascades into
     Participation, so deleting the role deletes them with nothing to say so.
+
+    🔴 **Both columns, since 2026-09-08.** Hours live on two tables now
+       (`Participation.hours` for one occasion, `SessionAttendance.hours` for
+       each meeting of a run — decision 20), and this guard and that second
+       column landed on the same day without being connected. What that cost:
+       on a run, `Participation.hours` is `None` **by design** — every hour is
+       on the register — so this returned "" for an ESL term with six evenings
+       of assistant time on it, the refusal never fired, and deleting the role
+       cascaded two levels and took the whole term's register with it. The one
+       thing this function exists to prevent, arriving by the one path it did
+       not look at.
+
+    ⚠️ Summed together **only here**, and only to answer "is there anything to
+       lose". That is not the total D43 forbids: this is two halves of the same
+       direction (hours given), not the two opposite directions.
     """
+    signups = Participation.objects.filter(event_role=role)
     total = (
-        Participation.objects.filter(event_role=role)
-        .aggregate(total=Sum("hours"))["total"] or 0
+        (signups.aggregate(total=Sum("hours"))["total"] or 0)
+        + (SessionAttendance.objects.filter(participation__event_role=role)
+           .aggregate(total=Sum("hours"))["total"] or 0)
     )
     if not total:
         return ""
@@ -2068,6 +2414,26 @@ def signups_left_outside(event):
     return len(holders - covered)
 
 
+def audience_gaps(event):
+    """Who can see this event without seeing all of it — one line per group.
+
+    Requirement 8's other half. Publishing once to recruit inside and outside at
+    the same time is the feature; the same state also arises from ticking the
+    wrong box, and nothing on either side of the screen could tell the two
+    apart. This is what the page says so the person publishing can.
+
+    Returns a list of (phrase, [role names]) — grouped by **who**, not by role,
+    because "outsiders cannot see Lifting or Driving" is one fact about one
+    group and reads as one sentence. Empty when every role is open to everybody
+    who can see the event, which is the ordinary case and prints nothing.
+    """
+    by_group = {}
+    for role_name, words in roles_narrower_than_event(event, event.roles.all()):
+        for phrase in words:
+            by_group.setdefault(phrase, []).append(role_name)
+    return [(phrase, names) for phrase, names in by_group.items()]
+
+
 def add_session(event, *, start_time, end_time, source=Source.MANUAL):
     """Put one meeting on a run. Returns the new Session.
 
@@ -2087,6 +2453,154 @@ def add_session(event, *, start_time, end_time, source=Source.MANUAL):
     session.full_clean()
     session.save()
     return session
+
+
+#: The register statuses that assert somebody was actually there. Named because
+#: two rules key on it (the consent gate below, and D43's received hours), and a
+#: literal in both is how the two come to disagree about `attended`.
+_PRESENT_STATUSES = frozenset({Participation.Status.ATTENDED})
+
+
+def add_attendance(participation, session,
+                   *, status=Participation.Status.REGISTERED):
+    """Put one person on the register for one meeting. Returns the row.
+
+    The single programmatic way in, for the same reason `add_session()` above is
+    one: `SessionAttendance.clean()` holds two rules that no CheckConstraint can
+    express, and a rule nothing calls is a rule nothing enforces (D14). Both are
+    checked here because `full_clean()` runs:
+
+      · the meeting has to belong to the run this person signed up for;
+      · a place somebody attends records no hours.
+
+    ⚠️ One row, deliberately. The three requirements that create rows in bulk —
+       signing up once covering every meeting, decision 17's "pick which ones",
+       and decision 18's joining in week five — are all the same mechanism
+       (**which rows exist**) and none of them can be written yet: `sign_up()`
+       cannot tell a course from a Saturday distribution until `Event.shape`
+       lands in L5.3. Said here rather than left to be noticed, because a table
+       with no bulk door reads like an unfinished step instead of a deliberate
+       one.
+
+    ⚠️ Until then its callers are tests and the admin's inline. Same footing
+       `add_session()` was on between L5.1 and L5.6.
+    """
+    if status in _PRESENT_STATUSES:
+        _refuse_without_consent(participation)
+    attendance = SessionAttendance(
+        participation=participation, session=session, status=status)
+    attendance.full_clean()
+    attendance.save()
+    return attendance
+
+
+def record_session_hours(attendance, hours,
+                         *, method=Participation.CheckInMethod.ADMIN):
+    """Enter the hours somebody **gave** at one meeting — decision 20.
+
+    The session-level twin of `record_hours()`, and it exists because a run
+    records hours a meeting at a time: an assistant who helped on six of twelve
+    evenings has six numbers, not one.
+
+    ⚠️ Refuses a place people attend, asking the role rather than this row —
+       the same two-vantage-point arrangement `record_hours()` documents. Here
+       the service layer is not merely the wider of the two checks, it is the
+       **only** one: the constraint that backs the rule on `Participation`
+       cannot exist on this table, because the value it tests
+       (`served_as=not_applicable`) is deliberately not copied down. D43 and the
+       model's docstring both say so; a bare `create()` gets past this.
+
+    ⚠️ What somebody **received** is never written here. That number is worked
+       out from the meeting's own two ends (`hours_received()` below), and
+       writing it into this column would put the other direction into a figure
+       the report is about to add up.
+    """
+    if not attendance.records_hours:
+        raise NoHoursHere({"hours": (
+            f"“{attendance.participation.event_role.role.name}” is a place "
+            "people attend, not a job — the event side records no hours for it."
+        )})
+    # ⚠️ Before the write, not after: this function moves the row to attended,
+    #    which is exactly the transition the consent gate exists to hold.
+    _refuse_without_consent(attendance.participation)
+    attendance.hours = hours
+    # Hours imply having been there — the constraint on this table says so, the
+    # same way it does on a signup.
+    #
+    # ⚠️ It does **not** go through `_mark_attended()`, and the difference is
+    #    deliberate: that function refuses a minor with no consent on the row,
+    #    and consent is given once for the whole run when they sign up. Asking
+    #    it again per meeting would refuse week seven for a permission that was
+    #    granted in week one.
+    attendance.status = Participation.Status.ATTENDED
+    # ⚠️ The same helper the three signup-side entrances use, not a copy of it.
+    #    It only touches `.checked_in_method`, so it works unchanged here — and
+    #    a fourth entrance with its own spelling of "first write wins" is a rule
+    #    with a way round it, which is the reason that helper exists at all.
+    _record_method(attendance, method)
+    attendance.full_clean()
+    attendance.save()
+    return attendance
+
+
+def hours_received(participation):
+    """How many hours of service this person was **given**, or None — D43.
+
+    The sum of the lengths of the meetings they actually attended. Known in the
+    sector as **contact hours** (that is the name it is reported under; it is
+    not spelled that way here because `contact` in this codebase is a person, so
+    `contact_hours` reads as "somebody's hours"). Salesforce PMM's equivalent is
+    `ServiceDelivery.Quantity` with a configurable unit.
+
+    ⚠️ Not stored, and that is the decision rather than a shortcut. Every
+       meeting already carries its two ends, so a column holding how far apart
+       they are would be a second truth free to disagree with them. The one
+       thing that must be stored is who turned up, and that is the register.
+
+    ⚠️ **Never added to `hours`.** They point in opposite directions — that
+       column is time given to the foundation, this is time the foundation
+       spent on somebody — and a total of the two has no definition (D43's
+       invariant, D36's applied a fourth time).
+
+    ⚠️ Returns 0 only when there is a register to be nothing on. A run somebody
+       attended none of gives 0; an event with no meetings at all cannot answer
+       the question, and the caller must not print `0` for it — D27's rule that
+       nothing and not-counted must not look the same. `Event.sessions.exists()`
+       is what separates the two.
+
+    🔴 **Only on a place somebody attends**, and this is a correction rather
+       than a narrowing. The first draft was role-neutral, on the reasoning
+       "an assistant sat in that room for two hours as well" — but that answers
+       *how long were they in the room*, which is not what this number is. An
+       assistant is there to give; nothing is being delivered **to** him, and a
+       run where one person holds both a seat and an assistant's place would
+       otherwise report four hours of service delivered for a two-hour evening.
+       That figure is what the 12-hour reportable threshold is read off.
+
+    ⚠️ Which is also why there is no by-contact variant that de-duplicates
+       across signups. Once only the attending side answers, one person holding
+       two places on a run has exactly one that counts, and the double no longer
+       exists to be removed. A helping row returns None — see below.
+
+    ⚠️ Returns **None**, never 0, when the question does not arise: a helping
+       role, or a run with no meetings at all (a Saturday distribution). Zero is
+       an answer — "we delivered nothing to him" — and D27's rule is that it
+       must not be printed where the truth is "this is not a question here".
+    """
+    if not participation.event_role.role.nature == ParticipationRole.Nature.ATTENDING:
+        return None
+    if not participation.event_role.event.sessions.exists():
+        return None
+    total = (
+        SessionAttendance.objects
+        .filter(participation=participation)
+        .attended()
+        .aggregate(spent=Sum(
+            F("session__end_time") - F("session__start_time"),
+            output_field=models.DurationField(),
+        ))["spent"]
+    )
+    return duration_hours(total or datetime.timedelta())
 
 
 # --- P6: telling people the event changed --------------------------------
@@ -2286,6 +2800,18 @@ def confirm_signup(participation, *, backend=None):
     ])
 
 
+def _when_sentence(event):
+    """One line saying when, for a message rather than a page.
+
+    The page shows the term and its rhythm on two lines (schedule.when_line);
+    a message has no second line, so they are joined by a comma. One helper so
+    an email and the page it is about cannot describe the same event
+    differently.
+    """
+    headline, detail = schedule.when_line(event)
+    return f"{headline}, {detail}" if detail else headline
+
+
 def default_message(event, reason):
     """The body offered on the preview page, editable before it goes.
 
@@ -2303,7 +2829,14 @@ def default_message(event, reason):
             EventNotification.Reason.CANCELLED: "This event has been cancelled.",
         }.get(reason, "This event has changed."),
         "",
-        f"Now: {event.start_time:%Y-%m-%d %H:%M} — {event.end_time:%H:%M}",
+        # 🔴 Through schedule.when_line(), not formatted here. On a run the two
+        #    columns are the ends of a term, and the old line printed the term's
+        #    first date beside its closing clock time — "2026-08-29 23:28 —
+        #    23:28", a sentence that is not true of anything. ⚠️ And this one
+        #    **leaves the database**: it is emailed and texted, to guardians
+        #    among others, which is why it is the first of the four places that
+        #    printed it to be fixed.
+        f"Now: {_when_sentence(event)}",
     ]
     if event.location:
         lines.append(f"Where: {event.location}")

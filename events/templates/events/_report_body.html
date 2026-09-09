@@ -120,7 +120,38 @@
       across {{ report.figures.marked_up_events }} of {{ report.figures.events_with_signups }}
       event{{ report.figures.events_with_signups|pluralize }} where every signup was marked up
     </dd>
+    {% comment %}
+    🔴 有讲次的活动被**明说**排除掉，而不是像以前那样静静地不在里面。
+       一门课的报名行永远停在 registered（它的证据在点名册上），于是每一门课
+       都落在「没人处理过」那一堆里 —— 数字没错，而它底下那句话反过来说这个
+       ministry 没认真走名单。同 D27：没有和没算不能长得一样。
+    {% endcomment %}
+    {% if report.figures.runs_counted_separately %}
+      <dd class="text-xs text-ink-600 dark:text-ink-300">
+        {{ report.figures.runs_counted_separately }}
+        run{{ report.figures.runs_counted_separately|pluralize }} counted separately, below
+      </dd>
+    {% endif %}
   </div>
+  {% comment %}
+  按讲次的出勤率。⚠️ 和上面那一格**并排**，永远不合成一个数：两者数的是两批
+     不同的东西（单场的报名 vs 一门课的每一讲），合起来是一个没有定义的量。
+
+  ⚠️ 分母是**存在的那些行**，而这正是决定 18 在干活：第五周才加入的人有八行
+     不是十二行，所以没有任何一处需要去减掉那四周。
+  {% endcomment %}
+  {% if report.figures.session_marked %}
+    <div>
+      <dt class="text-xs text-ink-600 dark:text-ink-300">Came to their sessions</dt>
+      <dd class="text-xl font-semibold">
+        {% if report.figures.session_attendance_rate is None %}—{% else %}{{ report.figures.session_attendance_rate }}%{% endif %}
+      </dd>
+      <dd class="text-xs text-ink-600 dark:text-ink-300">
+        {{ report.figures.session_attended }} of {{ report.figures.session_marked }}
+        session place{{ report.figures.session_marked|pluralize }} marked up
+      </dd>
+    </div>
+  {% endif %}
   {% comment %}
   ⚠️ 这一格**为 0 时也画出来**，而且只有它是红的。整张表别的数字答的是
      「做得怎么样」，这一个答的是「有没有出事」—— 为 0 时藏起来的话，

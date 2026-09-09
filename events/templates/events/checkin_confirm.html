@@ -22,9 +22,20 @@
     {% if checking_in %}Check In{% else %}Check Out{% endif %}
   </h1>
   <p class="mt-1 text-ink-600 dark:text-ink-300">{{ event.name }}</p>
-  <p class="text-sm text-ink-600 dark:text-ink-300">
-    {{ event.start_time }} – {{ event.end_time|time }}
-  </p>
+{% comment %}
+  🔴 一门课的签到屏是**某一讲**的，所以这里写那一讲的时刻，不写学期的两端。
+     写学期的话这一行会是「Aug 9 4:05 p.m. – 3:05 p.m.」—— 一句假话，而且是
+     印在正要签到的人面前的那一句。
+  {% endcomment %}
+  {% if session %}
+    <p class="text-sm text-ink-600 dark:text-ink-300">
+      {{ session.start_time }} &ndash; {{ session.end_time|time }}
+    </p>
+  {% else %}
+    <p class="text-sm text-ink-600 dark:text-ink-300">
+      {{ event.start_time }} &ndash; {{ event.end_time|time }}
+    </p>
+  {% endif %}
 
   {% if targets.pending %}
     <form method="post" class="mt-6">

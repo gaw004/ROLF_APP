@@ -76,39 +76,31 @@
                aria-hidden="true"></video>
       {% else %}
         {% comment %}
-        ⚠️ **`hero_srcset` 带原图**（2026-08-31）。首页这一屏照片就是内容本身，
-           所以上传的那个文件留在梯子最顶一档 —— 屏幕够大就照样拿到每一个像素，
-           一点清晰度都没让。
-           内页背景 2026-09-02 起也用原图（在此之前封顶 2560，而那让同一张照片
-           在内页明显更糊）；两处现在是同一张图，账写在 app.css 的
-           `.hero-backdrop` 那一节。
+        🔴 **一个 `src`，没有 `srcset`（2026-09-09 撤掉）。** 2026-08-31 到
+           2026-09-09 之间这里挂着一把 1280/1920/2560 三档的梯子，原图挂在最顶端。
+           它省的是首页手机访客的流量，而账单是**换一次首页图要 105–191 MB 内存**
+           —— 在一台 512 MB、两个 worker 各常驻 100 MB 的实例上。09-09 那天它把
+           实例打挂了一次。撤掉之后同一件事是 6–75 MB。完整的取舍在
+           revisions.md 六十一。
 
-        ⚠️ **这里能用 `<img srcset>`，是因为首页这一屏永远可见。** 内页那一层
-           浅色模式下是 `display: none`，而 `display:none` 里的 `<img>` 照样会被
-           下载 —— 所以那边只能是 `background-image`，而背景给不了 `srcset`。
-           于是它不挑，直接要原图。两处**取的是同一张图**，机制不同而已，
-           见 `_hero_backdrop.html`。
+        ⚠️ **撤掉它没有让任何一块屏幕少拿一个像素。** 原图当初就是梯子最顶那一档，
+           大屏拿到的一直是、现在也还是上传的那个文件。变的只有手机和笔电：
+           它们从拿一档小的改成拿原图。**这不是压缩，两边都没碰像素。**
 
-        🔴 **`sizes` 不是 `100vw`，理由写在 `HomePage.hero_sizes` 上。**
-           这张图是 `object-cover` 铺满整个视口的，竖屏时真正画出来的宽度
-           远大于视口宽 —— 写 `100vw` 会让手机挑到一档然后拉伸近四倍。
-           别"简化"回 `100vw`。
+        ⚠️ 于是 `sizes` 也跟着走了，而这是对的 —— `sizes` 是用来在候选列表里挑的，
+           没有列表就没有东西可挑。这里以前有一整段警告说「别简化回 `100vw`」，
+           它随梯子一起删掉了：一段和代码打架的理由比没有理由更贵。
 
-        ⚠️ 兜底那张 logo 不带 `srcset`：它是打包进 static 的固定资源，
-           只有一个尺寸，给它加 `sizes` 只会让浏览器对着一个候选做选择题。
+        ⚠️ 内页和 Memories 的深色背景**完全没受影响** —— 它们 2026-09-02 起就直接
+           用原图（`display:none` 里的 `<img>` 照样会下载，所以那边只能是
+           `background-image`，而背景给不了 `srcset`）。见 `_hero_backdrop.html`。
+
+        ⚠️ 没有图时退回基金会 logo，这是首页独有的；内页在同样情况下退回纯深色。
         {% endcomment %}
-        {% comment %}
-        ⚠️ `with`, because `hero_srcset` is a property that walks the rungs
-           and joins a string — written inline it runs twice, once for the `if`
-           and once for the value, on the busiest public URL in the site.
-        {% endcomment %}
-        {% with srcset=page.hero_srcset %}
         <img class="absolute inset-0 h-full w-full object-cover"
              style="object-position: {{ page.hero_focus }}"
              src="{% if hero %}{{ hero.file.url }}{% else %}{% static 'core/img/event-default.webp' %}{% endif %}"
-             {% if srcset %}srcset="{{ srcset }}" sizes="{{ page.hero_sizes }}"{% endif %}
              alt="" fetchpriority="high">
-        {% endwith %}
       {% endif %}
     {% endwith %}
 

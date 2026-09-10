@@ -13,7 +13,7 @@ from django.conf import settings
 from django.db.models import Q
 
 from contact.models import EmergencyContact, RelationshipType
-from core.images import decode_complaint_for, is_new_upload
+from core.images import is_new_upload, too_many_pixels
 from core.limits import LONG_TEXT, PHONE, SEARCH
 from core.timeutils import day_start
 from org.audience import Audience
@@ -521,29 +521,23 @@ class EventForm(EventAudienceFormMixin, forms.ModelForm):
                 f"That image is larger than "
                 f"{settings.EVENT_IMAGE_MAX_UPLOAD_BYTES // (1024 * 1024)} MB. "
                 f"Most phone photos are well under it.")
-        # 🔴 **The check the one above cannot make.** What a decode costs is
-        #    the pixel count times a number that depends on how the file was
-        #    written, and neither factor is the file size. Measured 2026-09-09:
-        #    a 1.48 MB WebP of 8000×6192 needs 762 MB to open and passes the
-        #    byte limit with 8.5 MB to spare. Header read only, nothing decoded
-        #    — see `core.images.decode_complaint_for`.
+        # 🔴 **The check the one above cannot make**, and it has to come before
+        #    `normalise_event_image` for the same reason that one does: what a
+        #    decode costs is the pixel count, not the file size. Measured: a
+        #    0.25 MB PNG holding 81 megapixels is 243 MB once decoded, and it
+        #    passes the byte limit with 9.75 MB to spare. Header read only —
+        #    see `core.images.too_many_pixels`.
         #
-        # ⚠️ The complaint names the **format** as well as the size, because
-        #    "too many pixels" sends somebody off to resize a file that would
-        #    have been fine saved another way. There is also no single pair of
-        #    dimensions to name — 8000×6000 and 12000×4000 are both refused and
-        #    neither is "too wide" — which is why the sentence is built from
-        #    this picture rather than from a constant.
-        #
-        # ⚠️ `EVENT_IMAGE_MAX_EDGE`, because that is what `normalise_event_image`
-        #    is about to draft to and a baseline JPEG's cost is set by it. The
-        #    two disagreeing does not raise; it just prices the upload on an
-        #    arithmetic the decode will not use.
-        from .services import EVENT_IMAGE_MAX_EDGE, normalise_event_image
-
-        complaint = decode_complaint_for(uploaded, EVENT_IMAGE_MAX_EDGE)
-        if complaint:
-            raise forms.ValidationError(f"That image {complaint}")
+        # ⚠️ Worded by megapixels rather than by width × height. There is no
+        #    single pair of dimensions to name — 8000×6000 and 12000×4000 are
+        #    both refused and neither is "too wide".
+        if too_many_pixels(uploaded):
+            raise forms.ValidationError(
+                f"That image is larger than "
+                f"{settings.IMAGE_MAX_PIXELS // 1_000_000} megapixels. Its "
+                f"file size is fine — it is the number of pixels in it. "
+                f"Scaling it down before uploading will fix it.")
+        from .services import normalise_event_image
 
         return normalise_event_image(uploaded)
 

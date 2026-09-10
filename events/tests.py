@@ -11685,46 +11685,25 @@ class EventImageUploadTests(PageTestCase):
         self.assertFalse(form.is_valid())
         self.assertIn("larger than", " ".join(form.errors["image"]))
 
-    @override_settings(IMAGE_DECODE_BUDGET_BYTES=6 * 1024 * 1024)
-    def test_an_upload_too_expensive_to_open_is_refused(self):
-        """🔴 The limit the byte comparison above cannot make.
+    @override_settings(IMAGE_MAX_PIXELS=100_000)
+    def test_an_upload_over_the_pixel_limit_is_refused(self):
+        """🔴 The limit the byte comparison above cannot make (2026-09-01).
 
-        What a decode costs is the pixel count **times a number that depends on
-        how the file was written**, and neither factor is the file size —
-        measured 2026-09-09, a 1.48 MB WebP of 8000×6192 needs 762 MB to open
-        and passes the byte check with 8.5 MB to spare. This replaced a flat
-        megapixel limit, which priced the same twenty megapixels at 78 MB or
-        310 MB depending only on the format and could not tell them apart.
-
-        ⚠️ The complaint has to name the **format** as well as the size:
-           somebody looking at a small file told it is "too big" will resize a
-           picture that would have been fine saved another way.
+        A decode costs width × height × channels and is only loosely tied to
+        the file size — measured, a 9000×9000 PNG of flat colour is 0.25 MB on
+        the wire and 243 MB decoded, so it passes the byte check with 9.75 MB
+        to spare. The complaint has to say *pixels*, because somebody looking
+        at a small file told it is "too big" will not know what to change.
         """
-        form = self.upload(a_photo(size=(1800, 1200), fmt="PNG"))
+        form = self.upload(a_photo(size=(600, 400)))
 
         self.assertFalse(form.is_valid())
         complaint = " ".join(form.errors["image"])
-        self.assertIn("MB of memory to open", complaint)
-        self.assertIn("PNG", complaint)
-        self.assertIn("Saving it as JPEG", complaint)
+        self.assertIn("megapixels", complaint)
+        self.assertIn("file size is fine", complaint)
 
-    @override_settings(IMAGE_DECODE_BUDGET_BYTES=6 * 1024 * 1024)
-    def test_a_jpeg_of_the_same_dimensions_is_not_refused(self):
-        """⚠️ The other half, and the whole reason for pricing by format. These
-        two pictures have identical dimensions; only one of them can be drafted
-        down before a pixel is decoded. A gate that refused both would be the
-        megapixel limit this replaced.
-
-        ⚠️ **1800 wide, and the number is not arbitrary.** `draft_to` can only
-           ask libjpeg for 1/2, 1/4 or 1/8, so a picture has to be at least
-           twice `EVENT_IMAGE_MAX_EDGE` before any reduction happens at all —
-           below that a JPEG costs exactly what a PNG costs and this pair
-           proves nothing.
-        """
-        self.assertTrue(self.upload(a_photo(size=(1800, 1200))).is_valid())
-
-    @override_settings(IMAGE_DECODE_BUDGET_BYTES=6 * 1024 * 1024)
-    def test_an_unaffordable_upload_is_never_re_encoded(self):
+    @override_settings(IMAGE_MAX_PIXELS=100_000)
+    def test_an_oversized_upload_is_never_re_encoded(self):
         """⭐ Refusing after decoding would spend the memory anyway.
 
         `normalise_event_image` is the expensive call; the check has to sit in
@@ -11733,29 +11712,9 @@ class EventImageUploadTests(PageTestCase):
         called = []
         with mock.patch("events.services.normalise_event_image",
                         side_effect=lambda f: called.append(f) or f):
-            self.upload(a_photo(size=(1800, 1200), fmt="PNG")).is_valid()
+            self.upload(a_photo(size=(600, 400))).is_valid()
 
         self.assertEqual(called, [])
-
-    @override_settings(IMAGE_DECODE_BUDGET_BYTES=6 * 1024 * 1024)
-    def test_the_pipeline_refuses_it_too_without_going_through_the_form(self):
-        """🔴 **The floor, because the form is not the only door.**
-
-        A management command or a shell session calls `normalise_event_image`
-        directly, and `draft_to` does nothing at all for the PNG below.
-
-        ⚠️ Verified by removing the check: with the `over_decode_budget` call
-           taken out of `normalise_event_image`, this is the only test in the
-           suite that notices — every form-level test above stays green.
-        """
-        from django.core.exceptions import ValidationError
-
-        from events.services import normalise_event_image
-
-        with self.assertRaises(ValidationError) as refused:
-            normalise_event_image(a_photo(size=(1800, 1200), fmt="PNG"))
-
-        self.assertIn("MB of memory to open", str(refused.exception))
 
     def test_an_event_without_a_picture_is_perfectly_valid(self):
         from events.forms import EventForm

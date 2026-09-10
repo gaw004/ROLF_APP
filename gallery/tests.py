@@ -20,7 +20,6 @@ from unittest import mock
 
 from django.conf import settings
 from django.core.cache import cache
-from django.core.exceptions import ValidationError
 from django.core.files.base import ContentFile
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db import connection
@@ -105,25 +104,20 @@ def a_file_too_big(name=TOO_BIG_NAME):
 
 
 #: The name the over-dimensioned fixture carries.
-TOO_EXPENSIVE_NAME = "poster-export.png"
+TOO_MANY_PIXELS_NAME = "poster-export.png"
 
 
-def a_too_expensive_photo(name=TOO_EXPENSIVE_NAME, size=(1600, 1600)):
-    """A picture that is small on the wire and expensive to open.
+def a_too_many_pixels(name=TOO_MANY_PIXELS_NAME, size=(1400, 1400)):
+    """A picture that is small on the wire and large in pixels.
 
     ⚠️ **A real image, unlike `a_file_too_big`**, because this check has to read
        the header to answer at all — a blob of zeroes would be turned away as
-       unreadable and would prove nothing about the cost of decoding it.
+       unreadable and would prove nothing about the pixel count.
 
-    ⚠️ A **PNG**, and that is now load-bearing rather than incidental: since
-       2026-09-09 the gate prices a decode by format as well as by pixel count,
-       and PNG is one of the two that `draft_to` cannot shrink. A JPEG of these
-       dimensions is drafted down to almost nothing and would sail through.
-
-    ⚠️ Flat colour and modest dimensions, run against an overridden budget. The
-       shape being reproduced is a 1.48 MB WebP of 8000×6192 that needs 762 MB
-       (measured), and building that in every test run would cost seconds and
-       hundreds of megabytes to demonstrate arithmetic that holds at any scale.
+    ⚠️ Flat colour and modest dimensions, run against an overridden 1 MP limit.
+       The shape being reproduced is 9000×9000 at 0.25 MB (measured), and
+       building that in every test run would cost seconds and hundreds of
+       megabytes to demonstrate arithmetic that holds at any scale.
     """
     return SimpleUploadedFile(name, a_flat_png(size), content_type="image/png")
 
@@ -337,7 +331,6 @@ class GalleryImageProcessingTests(TestCase):
             f"square target lets the short edge pin Pillow's scale at 1 and "
             f"the call does nothing at all")
 
-    @override_settings(IMAGE_DECODE_BUDGET_BYTES=400 * 1024 * 1024)
     def test_the_stored_size_does_not_depend_on_the_decode_scale(self):
         """⚠️ The guard on `_stored_size` — a one-pixel difference that would
         otherwise be nobody's fault and nobody's to find.
@@ -355,14 +348,6 @@ class GalleryImageProcessingTests(TestCase):
            particular photograph**. Nobody chasing a layout would look there.
 
         Run with `draft_to` switched off and the sizes have to match.
-
-        ⚠️ **The budget is raised for the duration**, and not to paper over
-           anything: switching `draft_to` off is deliberately running the
-           pipeline in the expensive mode the budget exists to refuse, so at
-           the real 120 MB a 5120×5120 JPEG is turned away here — correctly,
-           and 26 megapixels undrafted really is about 125 MB. What this test
-           is about is two pipelines agreeing on a size, so it is given room to
-           run both.
         """
         from unittest import mock
 
@@ -458,57 +443,13 @@ class GalleryImageProcessingTests(TestCase):
 
         Opening it with Pillow *is* the check — nothing extra keeps it out.
         """
+        from django.core.exceptions import ValidationError
+
         svg = SimpleUploadedFile(
             "logo.svg", b'<svg xmlns="http://www.w3.org/2000/svg"></svg>',
             content_type="image/svg+xml")
         with self.assertRaises(ValidationError):
             normalise_gallery_image(svg)
-
-    @override_settings(IMAGE_DECODE_BUDGET_BYTES=8 * 1024 * 1024)
-    def test_a_photo_too_expensive_to_open_is_refused_here_too(self):
-        """🔴 **The floor, and the form is not the only door.**
-
-        `GalleryPhotoForm.clean_images` checks this first — it has to, because
-        it skips one photo of ten and keeps the batch going, which is a
-        decision only the form can make. But a management command, a bulk
-        import or a shell session reaches this function directly, and
-        `draft_to` does nothing at all for the PNG below.
-
-        ⚠️ Verified by removing the check: with the `over_decode_budget` call
-           taken out of `normalise_gallery_image`, this test is the only thing
-           in the suite that notices. That is the shape of the gap it was
-           written to close — the batch form's own tests all still passed.
-        """
-        with self.assertRaises(ValidationError) as refused:
-            normalise_gallery_image(a_too_expensive_photo(size=(1400, 1400)))
-
-        self.assertIn("MB of memory to open", str(refused.exception))
-
-    @override_settings(IMAGE_DECODE_BUDGET_BYTES=20 * 1024 * 1024)
-    def test_a_jpeg_of_the_same_dimensions_is_not_refused(self):
-        """⚠️ The other half, and the whole point of pricing by format rather
-        than by pixel count: these two pictures have identical dimensions, and
-        only one of them can be drafted down before a pixel is decoded. A gate
-        that refused both would be the megapixel limit this replaced.
-
-        ⚠️ **3200 wide, and the number is not arbitrary.** `draft_to` can only
-           ask libjpeg for 1/2, 1/4 or 1/8, so a picture has to be at least
-           twice `GALLERY_IMAGE_MAX_EDGE` before any reduction happens at all.
-           The first version of this test used 1400×1400, where nothing is
-           drafted and a JPEG costs exactly what a PNG costs — it failed, which
-           is the only reason the gap was noticed rather than written into the
-           model as an assumption.
-        """
-        size = (3200, 2400)
-
-        refused = a_too_expensive_photo(size=size)
-        with self.assertRaises(ValidationError):
-            normalise_gallery_image(refused)
-
-        stored, thumb, _ = normalise_gallery_image(a_photo(size=size))
-
-        self.assertTrue(stored)
-        self.assertTrue(thumb)
 
 
 class GalleryPermissionTests(TestCase):
@@ -1841,7 +1782,7 @@ class ManagePageTests(PageTestCase):
                          "the size check has moved behind normalise_gallery_image")
         self.assertEqual(len(opened), 1)
 
-    def test_a_photo_too_expensive_to_open_is_skipped_and_named(self):
+    def test_a_photo_over_the_pixel_limit_is_skipped_and_named(self):
         """🔴 The gate the byte limit cannot be (2026-09-01).
 
         A decode costs width × height × channels, which is only loosely tied to
@@ -1851,18 +1792,17 @@ class ManagePageTests(PageTestCase):
         the rest of the batch still going up.
         """
         self.login(self.zhang)
-        with override_settings(IMAGE_DECODE_BUDGET_BYTES=8 * 1024 * 1024):
+        with override_settings(IMAGE_MAX_PIXELS=1_000_000):
             response = self.post_photos(
                 self.pantry,
-                files=[a_photo(), a_too_expensive_photo(), a_photo()],
+                files=[a_photo(), a_too_many_pixels(), a_photo()],
                 follow=True)
 
         self.assertEqual(GalleryPhoto.objects.count(), 2)
         self.assertContains(response, "Added 2 to Memories")
-        self.assertContains(response,
-                            f"save them smaller: {TOO_EXPENSIVE_NAME}")
+        self.assertContains(response, f"megapixels: {TOO_MANY_PIXELS_NAME}")
 
-    def test_a_photo_too_expensive_to_open_is_never_decoded(self):
+    def test_a_photo_over_the_pixel_limit_is_never_decoded(self):
         """⭐ The assertion that matters, and the row count would pass without it.
 
         Skipping must not mean "decode it and throw the pixels away" — decoding
@@ -1877,12 +1817,12 @@ class ManagePageTests(PageTestCase):
             opened.append(upload.name)
             return real(upload)
 
-        with override_settings(IMAGE_DECODE_BUDGET_BYTES=8 * 1024 * 1024):
+        with override_settings(IMAGE_MAX_PIXELS=1_000_000):
             with mock.patch("gallery.services.normalise_gallery_image", spy):
                 self.post_photos(
-                    self.pantry, files=[a_too_expensive_photo(), a_photo()])
+                    self.pantry, files=[a_too_many_pixels(), a_photo()])
 
-        self.assertNotIn(TOO_EXPENSIVE_NAME, opened,
+        self.assertNotIn(TOO_MANY_PIXELS_NAME, opened,
                          "the oversized picture was decoded before being "
                          "skipped, which spends the memory the check exists "
                          "to save")

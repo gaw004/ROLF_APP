@@ -3,7 +3,6 @@
 from django import forms
 from django.conf import settings
 
-from core.images import affordable_megapixels
 from org.models import Ministry
 from org.permissions import in_foundation_tier, ministry_ids_administered_by
 
@@ -41,25 +40,10 @@ SKIP_REASONS = {
     # ⚠️ Its own reason rather than folding into `too_big`, because the two are
     #    fixed in different ways and the person reading this has to know which:
     #    a file over the byte limit needs saving at a lower quality, one over
-    #    the memory budget needs smaller dimensions or a different format. A
-    #    photograph can be 1.5 MB and still be refused here, and "over 10 MB"
-    #    would be a lie about a file they can see is not.
-    #
-    # ⚠️ **This is the one complaint in the project that cannot show its
-    #    working**, and the trade is stated rather than hidden. The other two
-    #    upload paths hand back `core.images.decode_complaint`, which names the
-    #    picture's size, its format, what it would cost and how small it would
-    #    have to be. `describe_skipped` groups by reason and lists filenames
-    #    under it, so a per-file measurement has nowhere to go — the phrase has
-    #    to be true of every file in its group. What it must still do is say
-    #    which way to go, which is why "too heavy to open" alone is not enough.
-    #
-    # ⚠️ **It does not name a format to convert to**, and the first version did
-    #    — "save them smaller, or as JPEG". A progressive JPEG is priced on its
-    #    native pixel count and really is skipped, so that phrase told somebody
-    #    to convert a file to the format it already was. One phrase covers every
-    #    file in the group, so it can only carry advice true of all of them.
-    "too_expensive": "too heavy to open — save them smaller",
+    #    the pixel limit needs its dimensions reduced. A photograph can be
+    #    0.25 MB and still be refused here, and "over 10 MB" would be a lie
+    #    about a file they can see is not.
+    "too_many_pixels": "larger than {limit_mp} megapixels",
     "unreadable": "not usable images",
     "repeats": "already on the wall",
     "past_cap": f"past the {MAX_PHOTOS_PER_UPLOAD}-at-once limit",
@@ -77,8 +61,9 @@ def describe_skipped(skipped):
        along: "skipped 2" does not tell you *which* two to go and fix.
     """
     limit_mb = settings.EVENT_IMAGE_MAX_UPLOAD_BYTES // (1024 * 1024)
+    limit_mp = settings.IMAGE_MAX_PIXELS // 1_000_000
     parts = [
-        f"{phrase.format(limit_mb=limit_mb)}: "
+        f"{phrase.format(limit_mb=limit_mb, limit_mp=limit_mp)}: "
         f"{', '.join(skipped[key])}"
         for key, phrase in SKIP_REASONS.items()
         if skipped.get(key)
@@ -165,26 +150,14 @@ class GalleryPhotoForm(forms.Form):
         #    photos should know in advance that the two extra and the huge one
         #    will be left behind; otherwise the first they hear of it is a
         #    number in a green bar they have already clicked past.
-        # ⚠️ The megapixel figure is **WebP's**, not a limit that holds for
-        #    every format — see `core.images.affordable_megapixels`. It is the
-        #    smallest of the three by a wide margin, so a picture inside it is
-        #    inside all of them; quoting JPEG's instead would turn out to be a
-        #    number nobody is actually held to.
-        #
-        # ⚠️ It does **not** say "a JPEG can be any size", which the first
-        #    version did. That holds for an ordinary JPEG and is false for a
-        #    progressive one — those are priced on their full pixel count and
-        #    really are skipped. A promise the software then breaks is worse
-        #    than a limit somebody was told about up front.
         limit_mb = settings.EVENT_IMAGE_MAX_UPLOAD_BYTES // (1024 * 1024)
-        limit_mp = affordable_megapixels("WEBP")
+        limit_mp = settings.IMAGE_MAX_PIXELS // 1_000_000
         self.fields["images"].help_text = (
-            f"Up to {MAX_PHOTOS_PER_UPLOAD} at once, each under {limit_mb} MB. "
-            f"JPEG, PNG and WebP; SVG and PDF do not work. An ordinary photo "
-            f"from a phone or camera is fine; over about {limit_mp} megapixels "
-            f"a picture may be too heavy for the server to open, and PNG and "
-            f"WebP reach that soonest. Anything too big, unreadable or already "
-            f"on the wall is skipped and named — the rest still go up."
+            f"Up to {MAX_PHOTOS_PER_UPLOAD} at once, each under {limit_mb} MB "
+            f"and {limit_mp} megapixels. "
+            f"JPEG, PNG and WebP; SVG and PDF do not work. Anything too big, "
+            f"unreadable or already on the wall is skipped and named — the rest "
+            f"still go up."
         )
 
         if in_foundation_tier(user):
@@ -235,10 +208,9 @@ class GalleryPhotoForm(forms.Form):
            Pillow's own MAX_IMAGE_PIXELS. That correction was paid for once
            already over in events/forms.py; the full note is there.
         """
-        from core.images import decode_complaint_for
+        from core.images import too_many_pixels
 
-        from .services import (GALLERY_IMAGE_MAX_EDGE, digest_of,
-                               normalise_gallery_image, source_digest_of)
+        from .services import digest_of, normalise_gallery_image, source_digest_of
 
         uploads = [f for f in self.cleaned_data.get("images") or [] if f]
         if not uploads:
@@ -261,21 +233,13 @@ class GalleryPhotoForm(forms.Form):
                 skipped["too_big"].append(upload.name)
                 continue
             # 🔴 **The other half of "never decode something enormous", and the
-            #    byte check above cannot make it.** A 1.48 MB WebP can hold
-            #    8000×6192 and need 762 MB to open — measured 2026-09-09 — so a
-            #    file comfortably inside the limit above can still be the one
-            #    that takes the instance down. This reads the header only and
-            #    decodes nothing; the note is over
-            #    `core.images.decode_complaint_for`.
-            #
-            # ⚠️ The sentence it hands back is **thrown away here**, and that is
-            #    the one thing this call site does differently from the other
-            #    two. `describe_skipped` groups by reason and lists names under
-            #    it, so there is no room for a per-file measurement — see the
-            #    note over `SKIP_REASONS` for what that costs and why the phrase
-            #    still has to say how to fix it.
-            if decode_complaint_for(upload, GALLERY_IMAGE_MAX_EDGE):
-                skipped["too_expensive"].append(upload.name)
+            #    byte check above cannot make it.** A 0.25 MB PNG can hold 81
+            #    megapixels — 243 MB once decoded, measured — so a file that is
+            #    comfortably inside the limit above can still be the one that
+            #    takes the instance down. This reads the header only; the note
+            #    is over `core.images.too_many_pixels`.
+            if too_many_pixels(upload):
+                skipped["too_many_pixels"].append(upload.name)
                 continue
             # ⭐ **The same file again is caught here, before it is decoded**
             #    (2026-08-13). This is the cheap check and the common case —

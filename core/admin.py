@@ -6,14 +6,14 @@ copy of it in each would be a copy of a business rule.
 """
 
 from django import forms
+from django.conf import settings
 from django.contrib import admin
 from django.shortcuts import redirect
 from django.template.loader import render_to_string
 from django.urls import reverse
 
-from .images import decode_complaint_for, is_new_upload
+from .images import is_new_upload, too_many_pixels
 from .models import HomePage
-from .palette import PALETTE_SAMPLE_EDGE
 
 
 class InEffectFilter(admin.SimpleListFilter):
@@ -43,33 +43,27 @@ class InEffectFilter(admin.SimpleListFilter):
 
 
 class HomePageForm(forms.ModelForm):
-    """Refuses a picture that costs more to open than the instance can spare.
+    """Refuses a picture with more pixels in it than the instance can decode.
 
     🔴 **The front page is the one upload with no re-encoding step**, so until
        2026-09-01 nothing between the file picker and the bucket ever looked at
-       how large the picture was at all. The byte limit the other two uploads
-       carry does not answer that question: measured 2026-09-09, a 1.48 MB WebP
-       of 8000×6192 needs 762 MB to open on a 512 MB instance. It would not
+       how large the picture was in pixels. The byte limit the other two uploads
+       carry does not answer that question: a 0.25 MB PNG can hold 81
+       megapixels, which is 243 MB decoded on a 512 MB instance. It would not
        have raised — it would have taken the site down while somebody changed
-       the front page, which is exactly what happened at 15:36 that day with a
-       picture a fifth of that size.
+       the front page.
 
-    ⚠️ **The outer of two guards, not the only one.** `HomePage.save()` prices
-       the same picture on its own, which is what covers the shell and any
-       management command. This one exists because a complaint belongs next to
-       the field somebody just used — `save()` has no field to put one next to,
-       and an admin who gets a traceback instead of a sentence has learned
-       nothing about what to do differently.
-
-    ⚠️ `PALETTE_SAMPLE_EDGE` is what this upload is priced against, because
-       since the srcset ladder was removed (2026-09-09) the palette is the
-       **only** thing that ever decodes the front page's picture. If another
-       consumer is ever added, this number and the one in `save()` both have to
-       follow it — and neither of them raises if they do not.
+    ⚠️ **The outer of two guards, not the only one.** `core.renditions.
+       render_ladder` refuses the same picture on its own, which is what covers
+       the shell and `rebuild_hero_renditions`. This one exists because a
+       complaint belongs next to the field somebody just used — `save()` has no
+       field to put one next to, and an admin who gets a traceback instead of a
+       sentence has learned nothing about what to do differently.
 
     ⚠️ Nothing else is validated here and nothing is re-encoded. Stripping the
        camera's metadata happens in `HomePage.save()` instead, because it has to
-       apply to the shell as well as to this screen.
+       apply to the shell and to `rebuild_hero_renditions` as well as to this
+       screen.
     """
 
     class Meta:
@@ -82,9 +76,13 @@ class HomePageForm(forms.ModelForm):
         # in the bucket and has already been through this.
         if not is_new_upload(uploaded):
             return uploaded
-        complaint = decode_complaint_for(uploaded, PALETTE_SAMPLE_EDGE)
-        if complaint:
-            raise forms.ValidationError(f"That picture {complaint}")
+        if too_many_pixels(uploaded):
+            raise forms.ValidationError(
+                f"That picture is larger than "
+                f"{settings.IMAGE_MAX_PIXELS // 1_000_000} megapixels. Its file "
+                f"size is fine — it is the number of pixels in it, and decoding "
+                f"one that large is what the server cannot afford. Scaling it "
+                f"down before uploading will fix it.")
         return uploaded
 
 

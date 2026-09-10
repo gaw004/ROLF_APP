@@ -331,43 +331,29 @@ MEDIA_ROOT = BASE_DIR / 'media'
 # refused by the form rather than streamed to disk first.
 EVENT_IMAGE_MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 
-# 🔴 **The second half of that limit, and it is a memory budget rather than a
-#    pixel count.** What a decode costs is the pixel count **times a number
-#    that depends on how the file was written**, and neither factor can be read
-#    off the file size. This was a flat 50-megapixel limit until 2026-09-09,
-#    and the day it was replaced a 1.48 MB WebP of 8000×6192 was measured going
-#    straight through it and needing **762 MB** to open — on a 512 MB instance
-#    running two workers. The gate was not set too loosely. It was measuring
-#    the wrong thing: at twenty megapixels apiece, the same photograph costs
-#    78 MB as a baseline JPEG, 135 MB progressive, 78 MB as a PNG and 310 MB as
-#    a WebP, and only the first of those gets cheaper when it is drafted.
-#    The whole table, and the model fitted to it, is over
-#    `core.images.DECODE_BYTES_PER_PIXEL`.
+# 🔴 **The second half of that limit, and the half that was missing.** What a
+#    decode costs is the **pixel count, not the file size** — the two are only
+#    loosely related, and for synthetic content they are barely related at all.
+#    Measured 2026-09-01: a 9000×9000 PNG of flat colour is **0.25 MB on the
+#    wire** and 243 MB decoded. It sailed through both existing defences — well
+#    under the 10 MB above, and at 81 MP just under Pillow's own
+#    MAX_IMAGE_PIXELS (89 MP) — on a 512 MB instance running two workers.
 #
-# ⚠️ **120 MB, and the number comes off the instance rather than off any
-#    picture.** Render `starter` is 512 MB; two gunicorn workers sit at about
-#    100 MB apiece warm (revisions.md 五十一, after the shared boto3 session),
-#    which leaves roughly 310 MB. Spending 120 of it on one upload keeps ~190 MB
-#    for everybody else who is on the site at that moment.
+# ⚠️ 50 million, chosen so that a 48 MP phone (8000×6000) lands inside it. 8K
+#    (33 MP), an everyday phone photograph (12 MP) and the current front page
+#    picture (15 MP) all pass with room to spare.
 #
-# ⚠️ What it means in practice, at the three edges the pipelines draft to
-#    (front page 320, Memories 1600, event pictures 900). Every figure below
-#    comes out of `decode_cost` with the constants as they ship, so a reader
-#    can check the list against the code — an earlier version of this note
-#    quoted the raw measurements instead and none of the WebP rows reproduced:
-#      · an 8000×6000 phone photograph as baseline JPEG — 3.6 MB. Passes
-#        everywhere, which is the case the old 50 MP number existed to protect;
-#      · the front page's own picture today, a 2500×1771 WebP — 84 MB. Passes;
-#      · that 8000×6192 WebP — 945 MB. Refused, on all three paths;
-#      · a 7000×7000 PNG of flat colour, 0.15 MB on the wire — 234 MB. Refused.
-#
-# ⚠️ **It bounds one upload, not the instance.** `--workers 2 --threads 4` is
-#    eight slots, so eight simultaneous uploads are still eight times this.
-#    Closing that needs the decodes serialised behind a semaphore; stated here
-#    as a known gap rather than left for somebody to discover.
+# ⚠️ **What this does and does not protect, stated rather than implied:**
+#      · JPEG at any size is already safe — `core.images.draft_to` decodes it
+#        at 1/2, 1/4 or 1/8, so 50 MP arrives as about 3 MP of working set.
+#      · PNG and WebP cannot be drafted, so 50 MP of those is still ~150 MB.
+#        What keeps that rare is the byte limit above: a *photographic* PNG at
+#        50 MP is a 50–150 MB file and never gets this far. Only synthetic,
+#        highly compressible content (a poster, a screenshot, an export) can
+#        pass both gates, and that is a knowing trade rather than an oversight.
 #
 # ⚠️ Checked from the file's header, never by decoding it — see the callers.
-IMAGE_DECODE_BUDGET_BYTES = 120 * 1024 * 1024
+IMAGE_MAX_PIXELS = 50_000_000
 
 
 # --- Where each kind of upload is stored -------------------------------------

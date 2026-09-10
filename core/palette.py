@@ -98,21 +98,6 @@ def ramp_from(rgb):
     return ramp
 
 
-#: The longest edge `dominant_colour` asks the decoder for.
-#:
-#: 🔴 **Named, because a second caller now has to agree with it.** This is the
-#:    only decode the front page's picture goes through since the srcset ladder
-#:    was removed (2026-09-09), so it is the target
-#:    `core.images.decode_complaint_for` has to be given when
-#:    `HomePageForm` prices an upload. The two disagreeing does not raise: the
-#:    gate simply admits pictures on an arithmetic that is not the one the
-#:    decode will use.
-#:
-#: ⚠️ 320 rather than 160 — the reason is in `dominant_colour` below, and it is
-#:    about giving LANCZOS something to resample from rather than about memory.
-PALETTE_SAMPLE_EDGE = 320
-
-
 def dominant_colour(image_file):
     """The most significant colour in a picture, as (r, g, b).
 
@@ -152,31 +137,11 @@ def dominant_colour(image_file):
        still 1.1 MB instead of 72 MB, but it means a genuinely enormous
        photograph (20000px wide, say) would still decode at 2500px. The answer
        to that one is a limit on dimensions, not a smaller number here.
-
-    🔴 **`draft_to` with an aspect-preserving target, not `source.draft` with a
-       square one** (2026-09-09, found in review). The square version is what
-       `core.images.draft_to`'s own docstring warns about: Pillow picks its
-       scale from `min(width // target_width, height // target_height)`, so the
-       **short** edge pins it — and on a wide panorama it pins it at 1 and the
-       call does nothing whatever. Measured on a 6000×250 picture: the
-       aspect-correct target decodes 750×32, the square one decodes the whole
-       6000×250 frame. Sixty-four times the pixels, silently.
-
-       ⚠️ It is not only wasted memory, it broke an asserted invariant: since
-          the srcset ladder went, this is the **only** decode the front page's
-          picture goes through, so `core.images.decode_complaint_for` prices an
-          upload by drafting to `PALETTE_SAMPLE_EDGE` the same way. Two files
-          say in comments that the two are the same arithmetic
-          (`core/admin.py`, and the note over the constant below). They were
-          not. Going through `draft_to` is what makes the claim true rather
-          than merely written down.
     """
     from PIL import Image
 
-    from .images import draft_to, stored_size, upright_size
-
     with Image.open(image_file) as source:
-        draft_to(source, stored_size(upright_size(source), PALETTE_SAMPLE_EDGE))
+        source.draft("RGB", (320, 320))
         image = source.convert("RGB")
         image.thumbnail((160, 160))
         quantised = image.quantize(colors=16, method=Image.MEDIANCUT)

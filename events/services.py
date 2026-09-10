@@ -11,6 +11,7 @@ import uuid
 from dataclasses import dataclass
 from decimal import Decimal
 
+from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.db import transaction
 from django.db import models
@@ -22,8 +23,7 @@ from PIL import Image as PILImage
 from PIL import ImageOps as PILImageOps
 
 from contact.models import Contact, ContactQuerySet
-from core.images import (decode_complaint, draft_to, over_decode_budget,
-                         stored_size, upright_size)
+from core.images import draft_to, over_pixel_budget, stored_size, upright_size
 from core.notifications.base import EMAIL, SMS, Message, get_backend
 from core.timeutils import local_date_of, local_day, local_now
 from org.audience import Audience, on_the_books_exists, on_the_books_q
@@ -2263,23 +2263,18 @@ def normalise_event_image(uploaded):
             #    throughout: both were asked "was this decoded smaller?", and
             #    on both the answer was yes.
             native = upright_size(source)
+            # 🔴 **The floor.** `EventForm.clean_image` refuses an oversized
+            #    upload before it ever gets here, but the form is not the only
+            #    caller — a management command or a shell session reaches this
+            #    directly, and `draft_to` below does nothing at all for PNG and
+            #    WebP. One comparison, against numbers `upright_size` has
+            #    already read out of the header.
+            if over_pixel_budget(native):
+                raise ValidationError(
+                    f"That image is {native[0]} × {native[1]} pixels, past the "
+                    f"{settings.IMAGE_MAX_PIXELS // 1_000_000} megapixel limit.")
             target = stored_size(native, EVENT_IMAGE_MAX_EDGE)
             draft_to(source, target)
-            # 🔴 **The floor, and it sits *after* the draft** (2026-09-09; it
-            #    was a flat pixel limit in front of it before). The cost of a
-            #    decode is the size the decoder has actually been asked for, and
-            #    for a baseline JPEG the line above changes that by up to
-            #    sixteen times — pricing it beforehand would refuse ordinary
-            #    phone photographs. `draft()` decodes nothing, so this is free
-            #    where it now stands. The reasoning is gallery's; the full note
-            #    is over the same call in `normalise_gallery_image`.
-            #
-            # ⚠️ `EventForm.clean_image` refuses an oversized upload before it
-            #    ever gets here, but the form is not the only caller — a
-            #    management command or a shell session reaches this directly.
-            if over_decode_budget(source, native):
-                raise ValidationError(
-                    f"That image {decode_complaint(source, native)}")
             # ⚠️ **`in_place=True`, and the reasoning is gallery's** (2026-08-13)
             #    — the full note lives over the same call in
             #    gallery/services.py::normalise_gallery_image, because that is

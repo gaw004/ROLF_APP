@@ -1,3 +1,154 @@
+## 六十二、2026-09-09：窄屏点活动卡片是一片空白 —— 而那条「窄屏跳整页」的分岔从写下的第一天起就没生效过
+
+> 「网页在窄屏的时候，点 events，event detail 是空白的。do careful search on my
+> code，see what's wrong with it。所有结论/推断都需要有证据，并且确认是什么导致的」
+
+### 一、症状：一块铺满整屏、里面什么都没有的白面板
+
+两张截图：宽屏那张左边列表正常、右边一块空白面板；窄屏那张整个视口就是那块空白
+面板，只有顶上页头条里的「Events」露在外面。
+
+### 二、服务端是清白的，三条路都查过
+
+先排除的：
+
+- `?panel=<pk>` 那条服务端渲染的路（当天上午刚上线）在 470px 的真实窄视口里
+  渲染得好好的 —— 标题、Roles 表、报名区、× 和放大球全在。
+- `/events/17/panel/?from_list=1` 正常返回 2474 字节内容。
+- 构建产物不过期：`static/js/app.js` 里 `eventsShell` 已经带上当天那个默认参数
+  （`eventsShell",(e=!1`），`static/css/app.css` 里当天新加的
+  `filter-toggle` / `filter-card-summary` / `panel-expand` 都在。
+
+于是问题只可能在浏览器里。
+
+### 三、定案：htmx 对链接是「先取消默认行为，后问事件过滤器」
+
+```js
+// node_modules/htmx.org/dist/htmx.js:2528-2532
+if (explicitCancel || shouldCancel(evt, eltToListenOn)) {
+  evt.preventDefault()          // ← 先打
+}
+if (maybeFilterEvent(triggerSpec, elt, evt)) {
+  return                        // ← 后问 click[panelFits()]
+}
+```
+
+而 `shouldCancel()`（同文件 2447-2453）对任何带 href 的 `<a>`（非 `#fragment`）
+一律返回 true。
+
+窄屏上一次点击的实际结果因此是三件事叠在一起：
+
+1. htmx 取消了跳页 —— `href` 不走了；
+2. `panelFits()` 为假，请求不发，`#schedule-detail` 一个字都没换进来；
+3. Alpine 的 `x-on:click="detail = true"` 照常执行，壳拿到 `.is-open`；
+4. app.css 那条 `@media (width < 64rem)` 把左列藏掉、面板变成铺满视口的 fixed。
+
+在浏览器里量的（真数据、仓库已构建的 CSS/JS，把 64rem 那几条媒体查询改成 640rem
+以等价模拟窄屏）：
+
+```
+派发一次真实 click →
+  {panelFits: false, defaultPrevented: true, detail: true, detailPaneChars: 0}
+一拍之后 →
+  {cls: "events-shell is-open", url: "/events/", colDisplay: "none",
+   panelRect: [16, 116, 1406, 602]}
+```
+
+`url` 一动没动，就是「没跳页」的直接证据。
+
+🔴 **`_event_list_results.html` 里那两句注释是假的，而且它们指导了三个星期的
+维护：** 「过滤器为假时 htmx **完全不接管**这次点击，于是浏览器照常跟着 href
+走」、「`x-on:click` 不加条件：窄屏上这一行根本不会执行到（htmx 没接管，页面已经
+跳走了）」。两句都是 2026-08-19 在**没有打开浏览器**的情况下推出来的。
+
+### 四、这条教训比这次的修法更值得记住
+
+> 一个 `<a href>` 上挂了 hx-get 之后，`href` 就**不再是可靠的后备**。
+> 事件过滤器只能挡住请求，挡不住那一下 `preventDefault`。要「有时候让浏览器
+> 自己走」，就不能把 hx-get 挂在链接上。
+
+### 五、修法：用户在五个方案里选了 E —— 删掉双行为
+
+摆出来的方案和各自的代价（完整对照留在对话里）：
+
+| | 白屏没了 | 窄屏点得动 | 断点仍只有一处 |
+|---|---|---|---|
+| A 只给 Alpine 也加条件 | ✅ | ❌ 变成「点了没反应」 | ✅ |
+| B JS 自己把页面跳过去 | ✅ | ✅ | ✅ |
+| C 把 hx-get 从 `<a>` 上搬走 | ✅ | ✅ | ✅ |
+| D 窄屏时摘掉 htmx 属性 | ✅ | ✅ | ✅ |
+| E 取消双行为，任何宽度都开面板 ← 选了这个 | ✅ | ✅ | 不适用 |
+
+我当时推荐的是 B（改动最小）。用户选 E。
+
+E 真正的价值不是少写几行，是**把「这块屏幕多宽」这个问题从 JS 和模板里整个
+删掉**：`panelFits()` 和 `--panel-fits` 一起没了，断点退回成纯粹的版面问题，
+只活在 app.css 里 —— 于是不存在第二处会和它分家。
+
+### 六、E 的两个代价，都在这一批里付掉了
+
+① 窄屏的面板现在是一张铺满整屏的纸，**它需要出路**。
+
+- **后退键**。`openDetail()` 从关着打开时 `pushState`、已经开着再换一场时
+  `replaceState`。两半合起来是一条不变量：**任何时刻最多只有一格「面板开着」的
+  历史记录，而且它指的一定是此刻装在 DOM 里的那一场。** 少了 push 那一半，
+  手机上点开一场活动按后退直接离开 Events 页；少了 replace 那一半，连点五张
+  卡片堆五层（2026-08-19 定的那条），而中间几格指向的都不是面板里那一场。
+- ⚠️ **`panelPushed` 标的是「这一格是我们造的」，不是「有面板开着」。**
+  `?panel=<pk>` 直接进来的那一档是一次**真导航** —— 对它 `history.back()` 会把人
+  送出 Events 页。所以 × 在那一档走 `replaceState` 就地摘参数。两种走法长得
+  一模一样，分不开的话必有一种是坏的。
+- 地址栏因此收进 `eventsShell` 一个所有者，模板上的 `hx-replace-url` 撤掉了三处
+  （列表行、报名徽章、日程卡片）—— 静态属性答不了「此刻开着没有」。
+- 高亮那一段也跟着改：原来委托在 body 上听 `[data-event]` 的点击，现在听
+  `panel-opened`。**后退／前进也会打开面板**，听点击的话前进键把面板开回来时
+  左边那一圈高亮不会跟着回来。
+
+**② 那颗 × 的热区。**
+
+它待在 `.schedule-detail` 的 `zoom: 0.85` 里面，`.panel-close` 那 28px 渲染出来
+只有 **23.8px**。
+
+🔴 **第一版写的是对称的 `inset: -0.75rem`，量出来热区是 33 × 34，不是 44。**
+左 22、下 22（长出去了），右 11、上 12（只剩字形本身）。成因：这颗 × 浮在
+`.schedule-detail` 的左上角**之外**（量到它的 top/right 和那一层一模一样），
+而那一层是 `overflow-y: auto` —— 按规范一轴不是 `visible` 时另一轴的使用值也变成
+裁剪，于是往上、往右的那一圈被整个裁掉。同一层裁剪 2026-08-19 裁掉过卡片的落影。
+
+⚠️ 又一次「计算值全对，`getBoundingClientRect()` 才说实话」：
+`getComputedStyle(x, '::after').inset` 报的是 `-12px`，四边都对。
+
+最后是 `inset: 0 0 -1.5rem -1.5rem`，只往里长：28 + 24 = 52，过 zoom 之后
+**44.2px**，实测 43 × 44。代价如实说：往上／往右没有宽容度，那两边是面板的边。
+
+### 七、守卫
+
+四条新的，动手之前先在改动前的代码上跑过、确认全红：
+
+| 守卫 | 钉什么 |
+|---|---|
+| `SchedulePanelTests.test_a_left_hand_card_opens_the_panel_at_every_width` | 卡片上没有事件过滤器 |
+| `SchedulePanelTests.test_no_click_on_this_page_is_filtered_by_screen_width` | 整页一个过滤器都没有；`panelFits` 在活代码里一个字不剩 |
+| `EventsShellStateTests.test_opening_the_panel_pushes_once_and_switching_replaces` | push / replace 两个分支 |
+| `EventsShellStateTests.test_closing_a_panel_we_pushed_goes_back` | `panelPushed` 那一分 |
+| `EventsShellStateTests.test_the_back_button_closes_the_panel` | popstate 监听在 |
+| `EventsShellStateTests.test_the_panel_close_button_is_big_enough_to_hit` | × 的热区在 |
+
+🔴 **删掉的那条：`test_the_trigger_filter_returns_a_real_boolean`。**
+它遍历页面上所有 `hx-trigger` 的事件过滤器、逐个查是否求值成布尔。改完之后
+全仓库一个过滤器都没有了，它的循环会**空转** —— 一条永远绿的守卫。接替它的是
+`test_no_click_on_this_page_is_filtered_by_screen_width`，方向反过来：谁哪天再加
+一个过滤器，它会红，并把人领回上面那个 `shouldCancel` 的故事。
+
+⚠️ 两条守卫在写的过程中自己先假绿／误报了一次，都记在测试的注释里：
+`panelFits` 那条一开始查的是文件原文，于是抓到了 app.js 和 app.css 里那两块
+**墓碑注释**（「这里曾经有一个 panelFits()，别把它加回来」）—— 它会逼下一个人
+把注释删掉，而那恰好是这条守卫最不该造成的后果；`hx-replace-url` 那条一开始查
+整页，于是抓着筛选表单报警，而那一处一个字都不该动。
+
+⚠️ `core.tests.DocTestReferenceGuardTests.test_every_cited_guard_exists` 当场抓到
+design-system.md 里那条指向已删测试的引用 —— 这就是它存在的意义。
+
 ## 六十一、2026-09-09：换首页图把实例打挂了 —— 而三次修都修在了旁边
 
 > 「我刚刚换 hero picture 的时候 render 报错了，do careful research，

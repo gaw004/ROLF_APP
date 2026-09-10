@@ -585,21 +585,102 @@ Alpine.data("eventsShell", (openWithDetail = false) => ({
     this.$watch("detail", (on) => {
       if (!on) this.$dispatch("panel-closed");
     });
+
+    // 后退／前进：把面板和地址栏对齐（2026-09-09 第二批）。
+    //
+    // 🔴 少了这个监听，`openDetail()` push 出来的那一格按后退时**地址栏变了、
+    //    面板还开着** —— 而那正是 `?panel=` 当天要修的那种「同一页上两条路给出
+    //    两种结果」。
+    //
+    // ⚠️ 判据只读地址栏，不记自己刚才做过什么：popstate 可能来自后退、前进、
+    //    或者用户手改 hash，而这三种里只有「现在的 URL 是什么」是共同的答案。
+    // ⚠️ 必须幂等 —— `closeDetail()` 走 `history.back()` 时这一段会紧跟着再跑
+    //    一次，那时 `detail` 已经是 false 了。
+    window.addEventListener("popstate", () => {
+      const pk = new URLSearchParams(window.location.search).get("panel");
+      this.detail = !!pk;
+      // 左边那圈高亮跟着回来。关掉那个方向由上面的 $watch 管，
+      // 所以这里只说「开」——两个方向都在这里写就是把一件事说两遍。
+      if (pk) this.$dispatch("panel-opened", pk);
+    });
+  },
+
+  // 在面板里打开一场活动（2026-09-09 第二批）。
+  //
+  // 🔴 **模板上那三处 `x-on:click` 全走这里**（列表行、报名徽章、日程卡片），
+  //    因为「地址栏该 push 还是该 replace」只有这里答得出来 —— 见 writePanelUrl。
+  openDetail(pk) {
+    this.writePanelUrl(pk);
+    this.detail = true;
+    this.$dispatch("panel-opened", pk);
+  },
+
+  // 「右边开着这一场」写进地址栏。
+  //
+  // 🔴 **从关着打开 → push；已经开着再换一场 → replace。**
+  //
+  //    push 那一半是给窄屏的：那一档面板铺满整屏（app.css 那条 `position: fixed`），
+  //    而铺满整屏的东西，人唯一会去按的退出键是**后退**。少了它，手机上点开一场
+  //    活动按后退直接离开 Events 页。
+  //
+  //    replace 那一半是 2026-08-19 定下、这次保留的：连点五张卡片不该在后退键上
+  //    堆五层。两半合起来是一条不变量 ——
+  //
+  //      **任何时刻最多只有一格「面板开着」的历史记录，而且它指的一定是此刻
+  //        装在 DOM 里的那一场。**
+  //
+  //    所以后退／前进只可能在「没有面板」和「面板＝已加载的那一场」之间移动，
+  //    不存在「地址栏说 A、面板里是 B」那种状态。
+  //
+  // 🔴 **`panelPushed` 标的是「这一格是我们造的」，不是「有面板开着」。**
+  //    两者不是同一件事：`?panel=<pk>` 直接进来的那一档（从圆球出去、再点整页
+  //    那条「← Events」回来）是一次**真导航**，我们没有 push 过它 —— 对它
+  //    `history.back()` 会把人送出 Events 页。所以 replace 的那一支要把当前这一格
+  //    的标记**原样带过去**，不能顺手点亮。
+  //
+  // ⚠️ 用 `new URL(location.href)` 而不是从零拼：地址栏里可能还有筛选、页码、
+  //    日程窗口 `from`，洗掉 `from` 的表现是点一张卡片、右边的日程自己跳回今天。
+  // ⚠️ 包在 try 里：`history` 在少数嵌入环境里会抛（沙箱 iframe 的 SecurityError），
+  //    而开不成一格历史不该把整页的 JS 带下去 —— 面板照样开，只是后退键退不掉。
+  writePanelUrl(pk) {
+    try {
+      const url = new URL(window.location.href);
+      url.searchParams.set("panel", pk);
+      const here = url.pathname + url.search + url.hash;
+      if (this.detail) {
+        const pushed = !!(history.state && history.state.panelPushed);
+        history.replaceState({ panelPushed: pushed, panel: String(pk) }, "", here);
+      } else {
+        history.pushState({ panelPushed: true, panel: String(pk) }, "", here);
+      }
+    } catch (e) {
+      /* A blocked history API must not take the page down with it. */
+    }
   },
 
   closeDetail() {
+    // ⚠️ 同步翻掉，不等 popstate：`showSchedule()` 靠它立刻生效，
+    //    而 `history.back()` 是异步的 —— 等它的话按下 Schedule 会有一帧
+    //    两块都不显示。下面那个监听是幂等的，重复置 false 没有代价。
     this.detail = false;
     // 🔴 **把 `panel` 从地址栏里拿走**（2026-09-09）。少了这一句，「关掉」就不是
     //    关掉：刷新一下面板自己回来了，而人明明关过它。同一个地址被收藏、被转发
     //    出去也一样 —— 它会一直声称那一块是开着的。
     //
-    // ⚠️ `replaceState` 而不是 `pushState`：关掉一块面板不是一次导航，留一条历史
-    //    记录会让后退键先去撤销这一下、而不是回到进这一页之前。同 htmx 那边
-    //    卡片点击用 `hx-replace-url` 的理由。
+    // 🔴 **两条路，取决于这一格是不是我们 push 出来的**（2026-09-09 第二批）：
+    //    · 是 → `history.back()`。这样「× 关掉」和「后退关掉」走的是同一条路，
+    //      历史里不留下一条走过就没用的记录。少了这一支，push 进去那一格被
+    //      replace 掉之后，后退键会先原地不动一次（同一个 URL 连着两格）。
+    //    · 不是 → 照旧 `replaceState` 就地把参数摘掉。这一档是 `?panel=` 直接
+    //      进来的那次真导航，back 会把人送出 Events 页。
     //
     // ⚠️ 包在 try 里：`history` 在少数嵌入环境里会抛（沙箱 iframe 的
     //    SecurityError），而关不掉一块面板不该把整页的 JS 带下去。
     try {
+      if (history.state && history.state.panelPushed) {
+        history.back();
+        return;
+      }
       const url = new URL(window.location.href);
       if (url.searchParams.has("panel")) {
         url.searchParams.delete("panel");
@@ -1593,7 +1674,8 @@ watchFilterHeight();
 //
 // ⚠️ 不写死一个数、也不在 CSS 里把外壳那套几何（62rem/78rem 两档宽度加负外边距）
 //    再推一遍：那就是把同一份布局算两遍，而分家的表现是某个宽度上球飘在面板外面。
-//    `--panel-fits` 那条注释写的是同一件事。
+//    ⚠️ 同一条道理 2026-08-19 曾经由 `--panel-fits` 那段注释代言，而那个变量
+//       2026-09-09 删了（面板在任何宽度都就地开）—— 道理留着，例子换成这一条。
 //
 // ⚠️ 没有 JS 时退回 CSS 里的默认值（视口右下角 1rem）。球仍然看得见、点得动、
 //    通向同一页 —— 只是不压在面板上。这是知情的降级，不是坏掉。
@@ -1841,31 +1923,21 @@ document.addEventListener("click", (event) => {
 });
 
 // ---------------------------------------------------------------------------
-// 「这块屏幕装得下右面板吗」（2026-08-19）
+// 🔴 **这里曾经有一个 `panelFits()`（2026-08-19 – 2026-09-09）。别把它加回来。**
 //
-// 活动卡片上那个 hx-trigger 的过滤器用它决定：**就地在面板里开**，还是放手
-// 让浏览器跟着 href 跳到整页详情去。宽屏就地开；窄于断点时左边那一列本来就
-// 被整个藏起来（app.css 的 `display: none`），面板会占满屏幕、而里面那份详情
-// 是**不画返回链接**的 —— 于是唯一的出路是一颗几十像素的 ×。那是用一个更差
-// 的东西换掉一个好好的页面，所以窄屏仍然跳整页。
+// 它读 app.css 在 `@media (width >= 64rem)` 里点亮的 `--panel-fits`，供活动卡片
+// 上 `hx-trigger="click[panelFits()]"` 那个事件过滤器分岔：宽屏就地开面板，
+// 窄屏放手让浏览器跟着 href 跳整页。
 //
-// 🔴 **断点只有 app.css 一处。** 在这里写第二个 `matchMedia("(min-width: 64rem)")`
-//    的话，两处迟早会分家，而分家的表现是「某个宽度上点卡片既不开面板、
-//    也不跳页」—— 两边各自都认为对方会处理。所以这里读的是 CSS 自己在那个
-//    媒体查询里点亮的一个变量，样式表说了算。
+// 那套双行为**从第一天起就不成立**，因为 htmx 对带 href 的 `<a>` 是
+// `preventDefault()` 在前、问事件过滤器在后（`htmx.js` 的 `shouldCancel`）。
+// 窄屏上的实际结果是：跳页被打掉、请求没发、面板照开 —— 一块铺满整屏的空白。
+// 全部经过写在 `_event_list_results.html` 那一段注释里。
 //
-// 🔴 **返回真布尔。** htmx 的事件过滤器比的是严格相等：
-//
-//        return eventFilter.call(elt, evt) !== true      // htmx.js
-//
-//    truthy 是不够的。这个坑 2026-08-19 找了三轮才找对，表现是每一次点击都被
-//    静默过滤掉、控制台一声不吭。守卫：
-//    events.tests.SchedulePanelTests.test_the_trigger_filter_returns_a_real_boolean
-window.panelFits = function () {
-  const shell = document.querySelector(".events-shell");
-  if (!shell) return false;
-  return !!getComputedStyle(shell).getPropertyValue("--panel-fits").trim();
-};
+// 现在面板在任何宽度都就地开，于是**这个文件不需要知道屏幕多宽** ——
+// 断点退回成纯粹的版面问题，只活在 app.css 里。
+// 守卫：events.tests.EventsShellStateTests
+//       .test_the_breakpoint_is_declared_once_in_the_stylesheet
 
 // ---------------------------------------------------------------------------
 // 点日程上的一张卡：左边翻到那一场、滚进视口、套一圈高亮（2026-08-18）
@@ -1994,15 +2066,20 @@ function scrollPickedIntoView() {
   });
 }
 
-// 记下点的是谁。⚠️ 用事件委托挂在 body 上，不是给每张卡各挂一个 ——
-//    卡片每次翻页都被整批换掉，逐张挂等于每翻一次页漏一批监听。
-// ⚠️ `[data-event]`，不限于日程上的卡片（2026-08-19）：左边列表那一行也带着它，
-//    而从左边点开的那一场同样要圈住。两处点击是同一件事的两个入口，
-//    「右边正开着的是哪一场」只有一个答案。
-document.body.addEventListener("click", (event) => {
-  const card = event.target.closest("[data-event]");
-  if (!card) return;
-  pickedEvent = card.dataset.event;
+// 记下右边正开着的是谁。
+//
+// 🔴 **听的是 `panel-opened`，不是点击**（2026-09-09 第二批改过来的）。
+//    原来这里委托在 body 上听 `[data-event]` 的点击 —— 那时「打开面板」这件事
+//    只可能由一次点击引起，所以两者等价。现在不等价了：**后退／前进也会打开
+//    面板**（见 eventsShell 的 popstate）。听点击的话，前进键把面板开回来时
+//    左边那一圈高亮不会跟着回来 —— 面板开着，而没有任何一行说自己是它。
+//
+// ⚠️ 事件由 `openDetail()` 和那个 popstate 监听一起发，`event.detail` 是 pk。
+//    和下面那条 `panel-closed` 正好配成一对：开和关是同一件事的两个方向，
+//    所以它们的来源也该是同一个。
+document.body.addEventListener("panel-opened", (event) => {
+  pickedEvent = event.detail;
+  paintPicked();
 });
 
 // 右面板关掉了 —— 高亮跟着没（2026-08-19）。

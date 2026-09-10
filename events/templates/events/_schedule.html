@@ -170,11 +170,17 @@
                ⚠️ 和左边那一列同一条（2026-09-09）：把「右边开着这一场」写进地址栏，
                   否则从圆球出去再回来，面板是关着的。理由写全在
                   `_event_list_results.html` 那一条上。
-                  ⚠️ 这里的 `{% templatetag openblock %} querystring {% templatetag closeblock %}` 会保留日程窗口 `from` ——
-                     在这一侧那正是要的：人是从翻到某一天的日程上点开的。
+
+               🔴 **`hx-replace-url` 2026-09-09 第二批撤掉了**，地址栏改由
+                  `openDetail()` 管：push 还是 replace 取决于面板此刻开着没有，
+                  而静态属性答不了那个问题。这一侧尤其看得出来 —— 从日程点一张
+                  卡片时 `detail` 一定是假（日程那一块正露着），所以走的是 push，
+                  于是后退键回到的是**你翻到的那一天的日程**，而不是离开这一页。
+                  ⚠️ 那边用 `new URL(location.href)` + `searchParams.set`，
+                     日程窗口 `from` 照样保住 —— 在这一侧那正是要的：人是从翻到
+                     某一天的日程上点开的。
                {% endcomment %}
-               hx-replace-url="{% url 'events:event_list' %}{% querystring panel=card.event.pk %}"
-               x-on:click="detail = true"
+               x-on:click="openDetail({{ card.event.pk }})"
                style="top: {{ card.top }}px; height: {{ card.height }}px; --depth: {{ card.depth }}"
                data-schedule-card data-event="{{ card.event.pk }}"
                data-start="{{ card.start_ms }}" data-end="{{ card.end_ms }}">

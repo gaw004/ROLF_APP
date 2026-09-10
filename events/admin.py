@@ -10,6 +10,7 @@ from django.db.models import Count
 from simple_history.admin import SimpleHistoryAdmin
 
 from .forms import AudienceAdminForm, SessionForm
+from .services import hours_recorded_at
 from org.audience import Audience
 
 from .models import (
@@ -249,6 +250,25 @@ class SessionAdmin(SimpleHistoryAdmin):
     # Teaching order, matching the model's own — presentation, so it belongs
     # here rather than in a Meta the aggregates would inherit.
     ordering = ["start_time"]
+
+    def has_delete_permission(self, request, obj=None):
+        """Refuses a meeting that has hours on its register. D18: it asks, it
+        does not work it out — `services.hours_recorded_at()` is the answer.
+
+        🔴 `SessionAttendance` cascades from `session`, so deleting week seven
+           here takes its whole register with it: who came, the hours an
+           assistant gave that evening, and the meetings D43 reads for hours
+           received. That is the same loss `role_delete` refuses one table
+           lower, arriving by a door that guard cannot see — nothing about the
+           role changes, so nothing about the role objects.
+
+        ⚠️ Not one of the four hooks `AdminHasNoLogicGuardTests` refuses, and it
+           holds no rule of its own: the question is asked in services, and this
+           returns its answer.
+        """
+        if obj is not None and hours_recorded_at(obj):
+            return False
+        return super().has_delete_permission(request, obj)
 
     def get_readonly_fields(self, request, obj=None):
         """`event` freezes once anybody is on this meeting's register.

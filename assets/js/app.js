@@ -422,9 +422,26 @@ Alpine.data("wall", () => ({
     //       「字节已经到齐了，再给解码这么多时间，超过就直接换」。
     full.addEventListener("load", () => setTimeout(swap, DECODE_CEILING_MS));
     // ⚠️ `catch` 里补一次：decode 失败但图其实已经到了（老浏览器、某些编码），
-    //    那张图是能画的，没有理由留在缩略图上。真的坏掉时 `complete` 为假，
-    //    于是停在缩略图 —— 一张略糊的对的照片，好过一个碎图标。
-    full.decode().then(swap).catch(() => { if (full.complete) swap(); });
+    //    那张图是能画的，没有理由留在缩略图上。
+    //
+    // 🔴 **判据是两个，不是一个**（2026-09-10 更正）。这两行原来写的是「真的
+    //    坏掉时 `complete` 为假，于是停在缩略图」—— **那句话是错的**，而它
+    //    正好把这个分支变成了它自己要防的那件事。HTML 规范里 `complete` 为真
+    //    的四种情形，第四种是「current request 的 state 是 **broken** 且没有
+    //    pending request」：也就是说**加载失败会让它变成 true**。
+    //
+    //    真 Chrome 实测（喂一个 404 的 URL）：
+    //        坏掉的图   complete=true   naturalWidth=0   → 旧写法**会换**，碎图标
+    //        好图、decode 失败   complete=true   naturalWidth=1  → 两种写法都换 ✔
+    //    第二行是这个修法的分寸：它没有动这个 `catch` 存在的理由，只把「坏了」
+    //    和「解不出来」分开 —— 而它们在 `complete` 这一个数上长得一模一样。
+    //
+    //    图真的坏掉时停在缩略图 —— 一张略糊的对的照片，好过一个碎图标。
+    //    ⚠️ 那种情况下 `load` 根本不会触发，所以上面那条计时器兜不到，
+    //       这个 `catch` 是唯一会跑的路径。
+    full.decode().then(swap).catch(() => {
+      if (full.complete && full.naturalWidth > 0) swap();
+    });
   },
 
   // 预热左右两张，只求进浏览器缓存（不解码、不上屏）。方向键连翻时，

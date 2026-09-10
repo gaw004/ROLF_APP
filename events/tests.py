@@ -2922,11 +2922,39 @@ class SessionScheduleTests(TestCase):
             name="ESL spring term",
             start_time=NOW + DAY, end_time=NOW + 100 * DAY)
         self.first = add_session(
-            self.spring, start_time=NOW + 2 * DAY,
-            end_time=NOW + 2 * DAY + 2 * HOUR)
+            self.spring, start_time=self.morning(2),
+            end_time=self.morning(2) + 2 * HOUR)
         self.second = add_session(
-            self.spring, start_time=NOW + 9 * DAY,
-            end_time=NOW + 9 * DAY + 2 * HOUR)
+            self.spring, start_time=self.morning(9),
+            end_time=self.morning(9) + 2 * HOUR)
+
+    @staticmethod
+    def morning(offset):
+        """10am in the foundation's timezone, `offset` days out.
+
+        🔴 **Not `NOW + offset * DAY`** (fixed 2026-09-10). `NOW` is the real
+           clock, so a two-hour meeting built that way starts at whatever time
+           the suite happens to run — and after 22:00 it crosses midnight. The
+           schedule then clips its card at the day boundary, which is correct
+           behaviour and makes `test_a_meeting_is_drawn_at_its_own_length`
+           assert a height the card only has before ten at night. A test that is
+           green for most of the day and red after ten is worse than a failing
+           one: whoever meets it first goes looking in the code that changed.
+
+        ⚠️ Third instance of this class in the repository — see the roadmap's
+           unplanned records for the report tests (2026-08-31, red on the
+           calendar) and `ff06105` (red across midnight). And the sibling test
+           below **already knew**: it pins its own fixture and writes out why.
+           The lesson reached one method and not the fixture two lines above it,
+           which is exactly how a fixed fault comes back.
+
+        ⚠️ Through `day_start()`, not `.replace(hour=…)`. `local_now()` is UTC,
+           so replacing the hour pins a UTC hour — the sibling's "mid-morning"
+           is really 2am here. D16 says a day boundary is taken in the
+           foundation's timezone, and that is the only spelling that means what
+           it says wherever the server is.
+        """
+        return day_start(local_date_of(NOW + offset * DAY)) + 10 * HOUR
 
     def cards_on(self, offset):
         day = local_date_of(NOW + offset * DAY)
@@ -2948,12 +2976,18 @@ class SessionScheduleTests(TestCase):
     def test_a_single_occasion_is_drawn_exactly_as_before(self):
         # ⚠️ The half that must not move. Single occasions are the whole system
         #    today and have no meetings, so nothing about this reaches them.
-        # ⚠️ Pinned to mid-morning rather than "NOW + 3 days": NOW is the real
-        #    clock, so a run of this test late in the evening puts a three-hour
-        #    event across midnight and the card is legitimately clipped. The
-        #    assertion is about the height a whole segment gets, so the fixture
-        #    has to be a whole segment whatever time the suite runs.
-        start = (NOW + 3 * DAY).replace(hour=9, minute=0, second=0, microsecond=0)
+        # ⚠️ Pinned rather than "NOW + 3 days": NOW is the real clock, so a run
+        #    of this test late in the evening puts a three-hour event across
+        #    midnight and the card is legitimately clipped. The assertion is
+        #    about the height a whole segment gets, so the fixture has to be a
+        #    whole segment whatever time the suite runs.
+        #    ⚠️ Through the shared helper since 2026-09-10. This line used to
+        #       say `.replace(hour=9, …)`, which pins nine in the morning **UTC**
+        #       — two in the morning here — so the comment above it was not
+        #       describing what the code did. It was far enough from midnight to
+        #       work, which is the kind of correct that stops being correct when
+        #       somebody changes the number.
+        start = self.morning(3)
         one_off = make_event(ministry=self.spring.ministry, name="Saturday",
                              start_time=start, end_time=start + 3 * HOUR)
         day = local_date_of(start)
@@ -8672,6 +8706,128 @@ class PeriodReportTests(TestCase):
         event = self.event_at(day_start(datetime.date(2026, 3, 15)))
         event.refresh_from_db()
         self.assertEqual(event.duration, datetime.timedelta(hours=2))
+
+
+class PickYourMeetingsPageTests(PageTestCase):
+    """Decision 17 on the page — the half that was missing until 2026-09-10.
+
+    🔴 The switch (`Event.people_pick_meetings`) shipped with L5.3 and had three
+       readers in the service layer, so the "a switch nobody reads" rule never
+       fired on it. What it did not have was anywhere to **answer** it: ticking
+       it on the publish form produced a course somebody could sign up to and
+       land on the register of nothing, with no error and nowhere to choose.
+       A reader is not the same thing as a way to honour what the switch offers.
+    """
+
+    def setUp(self):
+        super().setUp()
+        # Half the term behind us: the question must offer only what is left.
+        self.run = make_run(
+            ministry=self.pantry, owner=self.zhang.contact,
+            name="ESL spring term",
+            start_time=NOW - 30 * DAY, end_time=NOW + 60 * DAY,
+            people_pick_meetings=True)
+        self.seat = make_role(self.run, "esl_seat", needed_count=20,
+                              nature=ParticipationRole.Nature.ATTENDING)
+        self.weeks = [
+            add_session(self.run,
+                        start_time=NOW + (week * 7 - 21) * DAY,
+                        end_time=NOW + (week * 7 - 21) * DAY + 2 * HOUR)
+            for week in range(8)
+        ]
+        self.gone, self.ahead = self.weeks[:3], self.weeks[3:]
+
+    def url(self):
+        return reverse("events:event_signup", args=[self.run.pk])
+
+    def form_for(self, event=None):
+        return SignUpForm(event=event or self.run, contact=self.lisi.contact)
+
+    def test_a_run_people_pick_from_asks_which_meetings(self):
+        self.assertTrue(self.form_for().ask_sessions)
+        self.login(self.lisi)
+        self.assertContains(self.client.get(self.url()), "Which meetings")
+
+    def test_an_ordinary_run_does_not_ask(self):
+        """And the field is **gone**, not merely blank.
+
+        A hidden input posts its name back, and a signup for a course everybody
+        attends in full must not carry a set of chosen meetings at all — the
+        same reasoning `served_as` is deleted under.
+        """
+        self.run.people_pick_meetings = False
+        self.run.save()
+        form = self.form_for()
+        self.assertFalse(form.ask_sessions)
+        self.assertNotIn("sessions", form.fields)
+
+    def test_a_one_off_occasion_does_not_ask(self):
+        self.assertFalse(self.form_for(event=self.event).ask_sessions)
+
+    def test_the_question_lists_only_meetings_they_can_still_reach(self):
+        # ⚠️ Same predicate `open_register()` uses, deliberately: a page that
+        #    offered a meeting the service then refuses to enrol them in would
+        #    be asking a question with an unusable answer.
+        offered = set(self.form_for().fields["sessions"].queryset)
+        self.assertEqual(offered, set(self.ahead))
+
+    def test_a_meeting_from_another_run_is_not_offered(self):
+        elsewhere = another_run(self.run)
+        self.assertNotIn(elsewhere, self.form_for().fields["sessions"].queryset)
+
+    def test_each_meeting_is_labelled_by_when_it_meets(self):
+        """The label names the date, not the course.
+
+        `Session.__str__` leads with the event name, which is right in the admin
+        and wrong here: twelve boxes on one course's own page would repeat that
+        course's name twelve times and push the date — the only thing being
+        chosen between — to the end of every line.
+        """
+        field = self.form_for().fields["sessions"]
+        label = field.label_from_instance(self.ahead[0])
+        self.assertNotIn(self.run.name, label)
+        self.assertIn(f"{localtime(self.ahead[0].start_time):%-d %b}", label)
+
+    def test_choosing_none_is_refused_rather_than_silently_empty(self):
+        """🔴 Signing up for a course and attending none of it is not a signup.
+
+        Both halves of this round's mistake meet here: the version that enrolled
+        somebody in every meeting that happened to exist, and the version that
+        enrolled them in none. Neither told anybody.
+        """
+        form = SignUpForm({"event_role": self.seat.pk},
+                          event=self.run, contact=self.lisi.contact)
+        self.assertFalse(form.is_valid())
+        self.assertIn("sessions", form.errors)
+
+    def test_the_meetings_they_chose_are_the_rows_that_exist(self):
+        chosen = self.ahead[:2]
+        self.login(self.lisi)
+        response = self.client.post(self.url(), {
+            "event_role": self.seat.pk,
+            "sessions": [one.pk for one in chosen],
+        })
+        self.assertRedirects(
+            response, reverse("events:event_detail", args=[self.run.pk]))
+        signup = Participation.objects.get(
+            contact=self.lisi.contact, event_role=self.seat)
+        self.assertEqual(
+            list(signup.attendances.in_teaching_order()
+                 .values_list("session_id", flat=True)),
+            [one.pk for one in chosen])
+
+    def test_the_panel_and_the_full_page_ask_the_same_question(self):
+        """One template, so this holds by construction — and it is pinned
+        because the two paths are exactly where a second, quieter version of a
+        form has grown before."""
+        self.login(self.lisi)
+        full = self.client.get(self.url()).content.decode()
+        panel = self.client.get(
+            self.url(), headers={"HX-Request": "true"}).content.decode()
+        for page in (full, panel):
+            self.assertIn("Which meetings", page)
+        self.assertEqual(full.count('name="sessions"'),
+                         panel.count('name="sessions"'))
 
 
 class SeedDemoTests(TestCase):

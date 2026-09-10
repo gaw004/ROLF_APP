@@ -16,11 +16,13 @@ from contact.models import EmergencyContact, RelationshipType
 from core.images import decode_complaint_for, is_new_upload
 from core.limits import LONG_TEXT, PHONE, SEARCH
 from core.timeutils import day_start
+from django.utils.timezone import localtime
 from org.audience import Audience
 from org.forms import AudienceFormMixin
 from org.models import Ministry
 from org.permissions import ministry_ids_administered_by
 
+from . import schedule
 from .models import (
     NARROWING_MESSAGE,
     NATURE_EXPLANATIONS,
@@ -55,6 +57,35 @@ class RoleChoiceField(forms.ModelChoiceField):
     def label_from_instance(self, obj):
         label = super().label_from_instance(obj)
         return f"{label} — full" if obj.is_full else label
+
+
+class MeetingChoiceField(forms.ModelMultipleChoiceField):
+    """The meetings tick-list, labelled by when each one meets.
+
+    ⚠️ A label override and nothing else — same shape and same reason as
+       `RoleChoiceField` above. `Session.__str__` is "{event} · {date} {time}",
+       which is right in the admin (where a meeting is loose in a table of every
+       run's meetings) and wrong here: on one course's own signup page it prints
+       that course's name twelve times and pushes the date — the only part being
+       chosen between — to the end of each line.
+
+    🔴 These boxes are where somebody **first** sees the individual dates, and
+       for a participant they are the only place. The detail page deliberately
+       withholds the meetings table from anybody who cannot read the event's
+       records (`events.views._detail`): that table carries the check-in screen
+       entrances, which are an administrative action, and "when is this course"
+       is answered for a participant by the summary on the When line. So a label that reads
+       badly here is not untidy, it is somebody ticking boxes blind.
+    """
+
+    def label_from_instance(self, obj):
+        # ⚠️ Through `schedule.clock()`, not a format string of its own. "7pm"
+        #    rather than "07:00 PM" is a decision that page already made, and a
+        #    second spelling of a time-of-day is how two screens come to
+        #    disagree about what the same meeting says.
+        start = localtime(obj.start_time)
+        return (f"{start:%a %-d %b} · "
+                f"{schedule.clock(start)}–{schedule.clock(localtime(obj.end_time))}")
 
 
 class SignUpForm(forms.Form):
@@ -135,6 +166,26 @@ class SignUpForm(forms.Form):
         help_text="Only asked about roles where you are giving your time.",
     )
 
+    # Decision 17, and drawn only on a run published as one people choose
+    # between — see `ask_sessions` in __init__.
+    #
+    # ⚠️ Tick-boxes, not a multi-select list: the same reason the audience group
+    #    on EventForm is drawn that way. Every option has to be visible at once,
+    #    because what is being compared is dates against a calendar somebody
+    #    holds in their head.
+    #
+    # ⚠️ `required=False` here and enforced in `clean_sessions()` instead. The
+    #    field only exists on some runs, so a class-level `required=True` would
+    #    be a rule about a field that is usually deleted; and the message wanted
+    #    is about **this** decision, not "This field is required."
+    sessions = MeetingChoiceField(
+        queryset=Session.objects.none(), required=False,
+        widget=forms.CheckboxSelectMultiple,
+        label="Which meetings will you come to?",
+        help_text="Tick the ones you can make. You can only pick from the "
+                  "meetings that have not happened yet.",
+    )
+
     CONSENT_FIELDS = [
         "consent_given_by", "consent_relationship", "consent_method",
         "consent_email", "consent_phone",
@@ -162,6 +213,30 @@ class SignUpForm(forms.Form):
             event.roles.with_signup_counts().for_audience(contact)
             .select_related("role").order_by("role__name")
         )
+        # Decision 17. The publisher decides whether this question exists at
+        # all; until it was drawn, ticking that box on the publish form produced
+        # a course somebody could sign up to and end up on the register of
+        # nothing — no error, and nowhere to choose.
+        #
+        # ⚠️ The options come from `_meetings_still_to_come()`, the same
+        #    predicate `open_register()` uses to decide which rows to make. Asked
+        #    twice with two spellings, the page would offer a meeting the service
+        #    then refuses to enrol them in — and the two would drift apart on the
+        #    day somebody edits either one.
+        from .services import _meetings_still_to_come
+
+        self.ask_sessions = (event.shape == Event.Shape.PROGRAM
+                             and event.people_pick_meetings)
+        if not self.ask_sessions:
+            # ⚠️ Deleted rather than hidden, for the reason spelled out on
+            #    `served_as` below: a hidden field posts its value back, and a
+            #    signup for an ordinary run must not carry this name at all.
+            #    `sign_up()` refuses it regardless; this is so the page is
+            #    honest, not so the data is safe.
+            del self.fields["sessions"]
+        else:
+            self.fields["sessions"].queryset = _meetings_still_to_come(event)
+
         # Asked through services, so the form and the two service-layer gates
         # cannot answer it differently — an event that waives the rule must
         # waive it on the page too, or the boxes are drawn and then ignored.
@@ -231,6 +306,30 @@ class SignUpForm(forms.Form):
         else:
             for name in [*self.CONSENT_FIELDS, "use_emergency_contact"]:
                 self.fields[name].widget = forms.HiddenInput()
+
+    def clean_sessions(self):
+        """At least one, on a run that asks the question at all.
+
+        🔴 Not `required=True` on the field, and not silence either. Signing up
+           for a course and ticking nothing puts somebody on the register of
+           **no meetings** — the signup exists, the course looks joined, and
+           there is nothing to attend. That is a state this round has already
+           shipped once by accident (a run people pick from used to enrol them
+           in every meeting that happened to exist; it now enrols them in none),
+           and both halves of it are the same mistake: a signup that means
+           nothing, arrived at without anybody being told.
+
+        ⚠️ The sentence names the decision rather than the field, because "This
+           field is required" answers a question about a form, and the person is
+           asking a question about a course.
+        """
+        chosen = self.cleaned_data.get("sessions")
+        if self.ask_sessions and not chosen:
+            raise forms.ValidationError(
+                "Tick at least one meeting — signing up without choosing any "
+                "would put you on the register for none of them."
+            )
+        return chosen
 
     def consent(self):
         """The consent kwargs for sign_up(), or None for an adult.

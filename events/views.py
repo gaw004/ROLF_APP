@@ -881,6 +881,11 @@ def event_signup(request, pk):
                 #    the question does not apply to — and the service re-checks
                 #    that regardless of what arrives here.
                 served_as=form.cleaned_data.get("served_as") or None,
+                # Decision 17. `.get()` for the same reason as `served_as`
+                # above: the field is deleted outright on a run that does not
+                # ask, so None here means "all of them" and `sign_up()` refuses
+                # a set that arrived on a run nobody may choose on.
+                sessions=form.cleaned_data.get("sessions") or None,
             )
         except (ConsentRequired, ValidationError) as error:
             form.add_error(None, error)

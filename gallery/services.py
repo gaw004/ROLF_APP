@@ -30,13 +30,13 @@ from dataclasses import dataclass
 from random import Random
 
 from django.core.cache import cache
-from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.core.files.base import ContentFile
 from PIL import Image as PILImage
 from PIL import ImageOps as PILImageOps
 
-from core.images import draft_to, over_pixel_budget, stored_size, upright_size
+from core.images import (decode_complaint, draft_to, over_decode_budget,
+                         stored_size, upright_size)
 from core.timeutils import local_today
 
 from .models import GalleryPhoto
@@ -234,23 +234,26 @@ def normalise_gallery_image(uploaded):
             #    stored is sized from this, never from the decoded size — see
             #    `core.images.stored_size`.
             native = upright_size(source)
-            # 🔴 **The floor.** `GalleryPhotoForm.clean_images` checks this
-            #    before calling — and it has to, because it skips one photo of
-            #    ten and keeps the batch going, which is a decision only the
-            #    form can make. But the form is not the only way in: a
-            #    management command, a bulk import or a shell session reaches
-            #    this function directly, and `draft_to` below is a no-op for
-            #    PNG and WebP, so nothing else would stand between an enormous
-            #    upload and a full decode. One comparison, on numbers already
-            #    read from the header.
-            if over_pixel_budget(native):
-                raise ValidationError(
-                    f"That photo is {native[0]} × {native[1]} pixels, past the "
-                    f"{settings.IMAGE_MAX_PIXELS // 1_000_000} megapixel limit.")
             # The memory fix. Full note over `core.images.draft_to`; the short
             # version is that a 49 MP photograph is 146 MB of pixels thrown away
             # in the next breath, and this asks libjpeg not to produce them.
             draft_to(source, stored_size(native, GALLERY_IMAGE_MAX_EDGE))
+            # 🔴 **The floor, and it sits *after* the draft rather than before
+            #    it** (2026-09-09; it was a flat pixel limit before, and it was
+            #    in front). What a decode costs is the size the decoder has
+            #    actually been told to produce, and for a baseline JPEG the line
+            #    above changes that by a factor of sixteen — pricing it up here
+            #    would refuse ordinary phone photographs. `draft()` decodes
+            #    nothing, so asking afterwards is free.
+            #
+            # ⚠️ `GalleryPhotoForm.clean_images` checks this before calling —
+            #    and it has to, because it skips one photo of ten and keeps the
+            #    batch going, which is a decision only the form can make. But
+            #    the form is not the only way in: a management command, a bulk
+            #    import or a shell session reaches this function directly.
+            if over_decode_budget(source, native):
+                raise ValidationError(
+                    f"That photo {decode_complaint(source, native)}")
             # ⚠️ **`in_place=True`** (2026-08-13, after ten photographs killed
             #    the instance). Without it `exif_transpose` hands back a
             #    *second* full-size picture — `image.copy()` when there is no

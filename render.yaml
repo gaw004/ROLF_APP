@@ -129,15 +129,48 @@ services:
     #       migrate 只改库，所以没关系，但别往这里加任何写文件的步骤。
     preDeployCommand: "python manage.py migrate --noinput"
 
-    # ⚠️ workers × threads = 8，这是这个实例能同时占用的最大数据库连接数
+    # 🔴 **--workers 1，从 2 改下来（2026-09-09）。这一行是那天的主要修复。**
+    #
+    #    当天 15:36 实例被杀重启，日志把整件事写全了：15:34:19 和 15:34:52 两次
+    #    换首页图都成功，第三次(约 15:35:45)的 POST **在日志里一行都没有** ——
+    #    访问日志是响应完成后才写的，所以没有那一行就是它没活到那一刻。90 秒内
+    #    三次换图。⚠️ 这和上线第一天(2026-08-13，revisions.md 三十五)用户报的
+    #    那句话一字不差：「过快、过多、频繁换 homepage picture 会导致 502」。
+    #
+    #    探针给了地板：崩溃前 2.5 分钟 `anon=234.5MB total=255.6MB pct=50%`，
+    #    空地只剩 256MB；而重启后冷读数是 `anon=84.1MB`。**同一个进程集合，
+    #    跑满一天之后 anon 涨了 150MB 并停在那里**（五十一那个棘轮修掉了大头，
+    #    476.8MB → 255.6MB，但平台期仍是 50%，剩下那 150MB 没有解释，是另一件
+    #    要单独查的事）。一次换图实测要 75–190MB，三次连着做没挤进去。
+    #
+    #    ⚠️ **省下的是地板，不是峰值**，而地板才是那天的短板：一个 worker 的
+    #       平台期约在 130MB 量级，空地回到 360MB 上下。
+    #
+    #    ⚠️ **Render 每次部署都在说这件事**：日志里那行
+    #       `Setting WEB_CONCURRENCY=1 by default, based on available CPUs in
+    #       the instance`。这台机器的 CPU 本来就只够一个 worker；写死 --workers 2
+    #       是用命令行盖掉了它的判断（命令行优先级高于环境变量），买到的不是
+    #       并行，只是双份内存。
+    #
+    #    ⚠️ 代价写清楚，它是真的：
+    #       · 并发从 8 降到 4（workers × threads）。超过 4 个请求就排队；
+    #       · **少了一个故障域**。一个 worker 崩掉时，以前还有另一个顶着，现在
+    #         是整站空窗几秒（gunicorn 会把它拉起来）；
+    #       · **GIL 只剩一个**。R4–R8 那份报表是全站最慢的请求，它渲染时会挡住
+    #         同一个 worker 里另外三个线程。⚠️ 图片这条路不受影响：Pillow 的
+    #         C 代码在解码和编码时会放开 GIL。
+    #    真流量顶到 4 个并发的那天，答案是升 standard，不是把这个数改回 2 ——
+    #    改回 2 会把地板一起带回来。
+    #
+    # ⚠️ workers × threads = 4，这是这个实例能同时占用的最大数据库连接数
     #    （CONN_MAX_AGE 没设，Django 每个请求开一条、用完就还）。D28 留的那个
-    #    「核对 gunicorn 对 Render Postgres 连接上限的算式」就是这条：8 条，
+    #    「核对 gunicorn 对 Render Postgres 连接上限的算式」就是这条：4 条，
     #    加上两个 cron 各自的一条，任何档位都绰绰有余。
-    # ⚠️ 另一头是内存，starter 是 512MB：两个 worker 各驮一份 Django + boto3，
-    #    静息约 150MB 一个，余量够但不宽裕。**最可能顶破它的是 Pillow** ——
-    #    缩图时整张图在内存里展开，而上传上限是 10MB（EVENT_IMAGE_MAX_UPLOAD_
-    #    BYTES）。真顶破了的表现是间歇 502 加实例重启，不是报错；那时候是升
-    #    standard，不是调小这两个数字。
+    # ⚠️ 另一头是内存，starter 是 512MB。**最可能顶破它的是 Pillow** —— 解码时
+    #    整张图在内存里展开，而那和文件大小几乎无关：一张 1.48MB 的 WebP 要
+    #    762MB 才打得开。挡住它的是 IMAGE_DECODE_BUDGET_BYTES（120MB，见
+    #    config/settings/base.py），不是上传字节数上限。真顶破了的表现是间歇
+    #    502 加实例重启，不是报错。
     # ⚠️ --timeout 60 而不是默认的 30：R4–R8 那份能打印的完整版报表是全站最慢的
     #    请求，30 秒会在数据攒起来之后的某一天开始把它掐掉。
     # ⚠️ 两条 log 都打到标准流，Render 才抓得到 —— C3.8 的 LOGGING 兜底靠这个。
@@ -159,7 +192,7 @@ services:
       gunicorn config.wsgi:application
       --bind 0.0.0.0:$PORT
       --worker-class gthread
-      --workers 2
+      --workers 1
       --threads 4
       --timeout 60
       --access-logfile -

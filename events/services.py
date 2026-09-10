@@ -2081,10 +2081,16 @@ def set_status(event, status):
        it off clears the weeks ahead, and putting it back on cannot restore who
        had chosen what — the choices were those rows. Everybody keeps their
        signup and their history; nobody is on the register for anything future
-       until somebody puts them there. Acceptable today because
-       `people_pick_meetings` has no interface until L5.8, so no such choice
-       exists yet to be lost; revisit on the day that page is built, when the
-       answer is probably to keep the rows and mark them rather than delete.
+       until they choose again.
+
+       ⚠️ That last clause changed on 2026-09-10. This note used to end "until
+          somebody puts them there", and rested on `people_pick_meetings` having
+          no interface — so there were no choices to lose. The signup page asks
+          the question now, which turns the gap from "unrecoverable" into "they
+          pick again": worse for them than it looks on paper (nobody is told the
+          run is back), better than it was (there is somewhere to answer). The
+          proper fix is still to mark those rows rather than delete them, and it
+          is still not this step.
 
     ⚠️ Nobody's signup status is touched, and that is the load-bearing half.
        `cancel()` decides between *cancelled* and *withdrew* by asking whether

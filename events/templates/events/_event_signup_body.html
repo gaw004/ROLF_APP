@@ -122,6 +122,25 @@
       {% endif %}
 
       {% comment %}
+      决定 17：这门课让报名者自己挑上哪几讲时才画。判据是 `form.ask_sessions`，
+      和上面那一格同一个写法 —— 不问 `{% if form.sessions %}`，因为不适用的时候
+      那个字段是被**删掉**的，不是空的。
+
+      ⭐ 这几个复选框是一个报名者**唯一一次**看到每一讲的具体日期：详情页那张
+         讲次表只画给看得到记录的人（它带着签到屏入口，那是管理动作），报名者
+         在那一页读到的是 When 那一行的摘要。所以标签由 `MeetingChoiceField`
+         专门写过 —— 默认的 `Session.__str__` 会把课名重复十二遍。
+
+      ⚠️ 这层 wrapper 上的 mt-4 同下面那条注释：`.field + .field` 是相邻兄弟
+         选择器，套一层 div 就断了。
+      {% endcomment %}
+      {% if form.ask_sessions %}
+        <div class="mt-4">
+          {% include "core/components/field.html" with field=form.sessions %}
+        </div>
+      {% endif %}
+
+      {% comment %}
       ⚠️ 这层 wrapper 上要自己写 mt-4：app.css 里字段间距靠 `.field + .field`
          这个**相邻兄弟**选择器，而套一层 div 就把相邻关系打断了 ——
          表现是这一格和上面那格贴在一起，别处都正常。

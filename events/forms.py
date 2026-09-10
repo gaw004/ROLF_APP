@@ -1125,16 +1125,45 @@ class SessionForm(forms.ModelForm):
     ⚠️ Not a signal, either. There is not one anywhere in this codebase, and the
        reason to keep it that way is the reason signals are tempting here: the
        work would happen with nothing at the call site saying so.
+
+    🔴 **The admin never passes `commit=True`**, which is why the work below is
+       arranged the way it is rather than sitting under an `if commit:`.
+       `ModelAdmin.save_form()` is hard-coded to `form.save(commit=False)`; the
+       instance is saved by `save_model()` afterwards, and `save_related()` then
+       calls `save_m2m()`. So a register top-up written the obvious way runs on
+       every path **except the only one that exists today**, and its symptom is
+       precisely what this class was added to prevent — week thirteen scheduled,
+       and an empty register on the night. Caught by review, not by the tests;
+       `test_a_meeting_added_in_the_admin_opens_the_register` now holds it.
+
+    ⚠️ `EventRoleForm.save()` above sidesteps this by doing its extra work
+       *before* `super().save()`, unconditionally. That is not available here:
+       the register cannot be opened until the meeting has a primary key.
     """
 
     class Meta:
         model = Session
         fields = ["event", "start_time", "end_time", "source"]
 
+    def _open_registers(self):
+        """Put everybody already signed up onto this meeting's register."""
+        from .services import open_registers_for
+
+        open_registers_for(self.instance.event, sessions=[self.instance])
+
     def save(self, commit=True):
         session = super().save(commit=commit)
         if commit:
-            from .services import open_registers_for
+            self._open_registers()
+            return session
+        # Deferred to `save_m2m()`, the one hook the admin is guaranteed to call
+        # after it has saved the instance itself. Wrapping rather than replacing:
+        # whatever Django put there still has to run.
+        saving_related = self.save_m2m
 
-            open_registers_for(session.event, sessions=[session])
+        def save_m2m():
+            saving_related()
+            self._open_registers()
+
+        self.save_m2m = save_m2m
         return session

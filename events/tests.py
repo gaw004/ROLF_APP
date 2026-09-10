@@ -3421,6 +3421,20 @@ class ProgramSignUpTests(TestCase):
         signup = self.join(sessions=[self.ahead[0], elsewhere])
         self.assertEqual(self.register_of(signup), [self.ahead[0].pk])
 
+    def test_signing_up_without_choosing_enrols_in_nothing(self):
+        """On a run people pick from, not choosing is not "all of them".
+
+        ⚠️ Falling through to every meeting would hand back an arbitrary
+           snapshot — whatever was scheduled the moment they signed up, and
+           nothing added afterwards, because `open_registers_for()` deliberately
+           leaves such a run alone. Nobody chose that set; it is just when they
+           happened to click.
+        """
+        self.spring.people_pick_meetings = True
+        self.spring.save()
+        signup = self.join()
+        self.assertEqual(self.register_of(signup), [])
+
     def test_picking_meetings_is_refused_when_the_run_does_not_allow_it(self):
         """A request that cannot be honoured must not look as though it was.
 
@@ -3672,6 +3686,58 @@ class SessionsThroughTheAdminTests(TestCase):
                             args=[add_attendance(self.learner, self.week_one).pk])]:
             with self.subTest(url=url):
                 self.assertEqual(self.client.get(url).status_code, 200)
+
+    def test_a_meeting_added_in_the_admin_opens_the_register(self):
+        """🔴 The whole reason `SessionForm` exists, and it was not happening.
+
+        `ModelAdmin.save_form()` is hard-coded to `form.save(commit=False)` and
+        saves the instance itself afterwards, so a `save()` override that does
+        its extra work under `if commit:` never runs on this path at all. The
+        symptom is the one this step was written to prevent: an admin schedules
+        week thirteen, and the register for it is simply empty on the night with
+        nothing raising anywhere.
+        """
+        signup = Participation.objects.create(
+            contact=make_person("Zhou", birth_date=datetime.date(1980, 5, 5)),
+            event_role=self.seat)
+        response = self.client.post(
+            reverse("admin:events_session_add"),
+            {"event": self.spring.pk,
+             "start_time_0": "2026-12-01", "start_time_1": "19:00:00",
+             "end_time_0": "2026-12-01", "end_time_1": "21:00:00",
+             "source": Source.MANUAL},
+        )
+        self.assertEqual(response.status_code, 302, "the add form was refused")
+        week = Session.objects.get(start_time__year=2026, start_time__month=12)
+        self.assertTrue(
+            signup.attendances.filter(session=week).exists(),
+            "the meeting went in but nobody was put on its register")
+
+    def test_the_admin_refuses_to_delete_a_meeting_holding_hours(self):
+        """🔴 Deleting week seven would cascade its whole register away.
+
+        The same loss `role_delete` refuses one table lower, by a door that
+        guard cannot see: nothing about the role changes, so nothing about the
+        role objects. Attendance, the hours an assistant gave that evening, and
+        the meeting D43 reads for hours received all go together, silently.
+        """
+        job = make_role(self.spring, "esl_assistant")
+        helper = Participation.objects.create(
+            contact=make_person("Helper", birth_date=datetime.date(1980, 5, 5)),
+            event_role=job)
+        record_session_hours(
+            add_attendance(helper, self.week_one), Decimal("2.00"))
+        url = reverse("admin:events_session_delete", args=[self.week_one.pk])
+        self.assertEqual(self.client.get(url).status_code, 403)
+        self.assertTrue(Session.objects.filter(pk=self.week_one.pk).exists())
+
+    def test_the_admin_still_deletes_a_meeting_with_nothing_on_it(self):
+        # ⚠️ The other half. A guard that refuses everything is a table nobody
+        #    can tidy, and a meeting scheduled by mistake has to be removable.
+        spare = add_session(self.spring, start_time=NOW + 40 * DAY,
+                            end_time=NOW + 40 * DAY + 2 * HOUR)
+        url = reverse("admin:events_session_delete", args=[spare.pk])
+        self.assertEqual(self.client.get(url).status_code, 200)
 
     def test_the_admin_refuses_a_meeting_from_another_run(self):
         """The cross-table rule, reaching a person on the field they got wrong.

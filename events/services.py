@@ -2109,7 +2109,13 @@ def set_status(event, status):
     event.full_clean(exclude=["created_at", "updated_at"])
     event.save()
     called_off = Event.Status.CANCELLED
-    if was != called_off and status == called_off:
+    if (was != called_off and status == called_off
+            and event.shape == Event.Shape.PROGRAM):
+        # ⚠️ The shape test mirrors the one `open_registers_for()` already makes
+        #    on the branch below. Without it every cancelled one-off occasion —
+        #    which is nearly all of them — walks its whole signup list running a
+        #    SELECT and a DELETE per person to find the nothing that a run
+        #    without meetings always holds.
         for participation in _signed_up_to(event):
             close_future_register(participation)
     elif was == called_off and status != called_off:
@@ -2461,6 +2467,33 @@ def hours_recorded_against(role):
     return f"{text} hour" + ("" if total == 1 else "s")
 
 
+def hours_recorded_at(session):
+    """Total hours on this meeting's register, as a phrase, or "" when none.
+
+    The meeting-level twin of `hours_recorded_against()` above, and it exists
+    for the reason that one's own docstring gives about its 2026-09-08 bug: the
+    guard was blind to one path, and the loss arrived by exactly that path.
+    Here is the next one along. `SessionAttendance` cascades from `session`, so
+    deleting week seven takes its whole register — attendance, hours given, and
+    the meetings D43 reads to work out hours received — and the hours guard on
+    `EventRole` never sees it, because nothing about the role changed.
+
+    ⚠️ One column, not two. A register row keeps its hours on itself; there is
+       no `Participation.hours` half to add in, because a run leaves that column
+       empty by design (decision 20). The sum in the other function is across
+       two tables for one role; this is one table for one evening.
+
+    ⚠️ Same phrase-not-number shape as its twin, so both refusals read the same
+       way, and both are falsy when there is nothing to lose.
+    """
+    total = (SessionAttendance.objects.filter(session=session)
+             .aggregate(total=Sum("hours"))["total"] or 0)
+    if not total:
+        return ""
+    text = f"{total:.2f}".rstrip("0").rstrip(".")
+    return f"{text} hour" + ("" if total == 1 else "s")
+
+
 def signups_left_outside(event):
     """How many people hold a signup this event's audience no longer covers.
 
@@ -2642,6 +2675,14 @@ def open_register(participation, *, sessions=None, now=None):
         return []
     if participation.status not in _ON_THE_REGISTER:
         return []
+    # 🔴 On a run people choose between, signing up **without** choosing enrols
+    #    them in nothing. Falling through to every meeting would hand back an
+    #    arbitrary set — whatever happened to be scheduled at the moment they
+    #    clicked, and nothing added later, because `open_registers_for()`
+    #    deliberately leaves such a run alone. Nobody chose that; it is a
+    #    timestamp wearing the shape of a decision.
+    if sessions is None and event.people_pick_meetings:
+        return []
     now = now or local_now()
     # ⚠️ Given rows are filtered in memory rather than fed back into a query.
     #    `open_registers_for()` hands the same list down for every person on the
@@ -2705,12 +2746,23 @@ def open_registers_for(event, *, sessions=None, now=None):
 def close_future_register(participation, *, now=None):
     """Take this person off the meetings that have not happened yet.
 
-    ⭐ **The only place a register row is ever deleted**, and it is written once
+    ⭐ **The only place code deletes a register row**, and it is written once
        for the same reason L5.6's `_drop_generated_after()` is: this project has
        already paid for a delete with more than one spelling — deleting a role
        took a whole term's register with it, because the protection read
        `Participation.hours` while a course keeps its hours on the register.
        `RegisterDeleteGuardTests` holds the line.
+
+    🔴 **"The only place" is a claim about code, not about the database**, and
+       the difference is a real hole rather than pedantry. `SessionAttendance`
+       cascades from both its foreign keys, so deleting a `Session` in the admin
+       takes that meeting's whole register with it — attendance, hours given,
+       and the meetings D43 reads for hours received — with no function body
+       anywhere for the guard to see. Same loss the 2026-09-08 fix to
+       `hours_recorded_against()` was written for, arriving one table higher up.
+       Recorded here rather than left implied: the admin is today the only door
+       onto that table, and until `SessionAdmin` refuses the way `role_delete`
+       does, this sentence is the only thing standing in front of it.
 
     🔴 **What already happened is never touched.** Six meetings taught are six
        meetings taught, and the rows carry the attendance, the hours given and

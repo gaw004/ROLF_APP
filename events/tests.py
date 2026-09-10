@@ -9735,7 +9735,10 @@ class SignupBadgeLinkTests(PageTestCase):
             r'<a href="/events/%d/signup/"[^>]*>' % self.event.pk, html, re.S)
         self.assertIsNotNone(link, "「Open for signup」没有变成链接")
         self.assertIn('hx-target="#schedule-detail"', link.group(0))
-        self.assertIn("click[panelFits()]", link.group(0))
+        # ⚠️ 2026-09-09 第二批：这里曾经还查一个 `click[panelFits()]` 过滤器
+        #    （宽屏就地开、窄屏跳整页报名）。那套双行为删了 —— 理由写在
+        #    `SchedulePanelTests.test_a_left_hand_card_opens_the_panel_at_every_width`。
+        self.assertNotIn("hx-trigger", link.group(0))
 
     def test_only_the_open_status_is_a_link(self):
         """⚠️ 一个点了会 404 的标签读起来是「站坏了」，不是「这场报不了」——
@@ -13841,7 +13844,8 @@ class SchedulePanelTests(PageTestCase):
         ⚠️ 这条测试**曾经写着一个错误的理由**（2026-08-19）：说是因为「响应
            替换掉了发起它的元素，htmx 那次 swap 就落不到面板上」。那是我在
            没有浏览器时对「右边空白」的猜测，而真正的成因是别的
-           （见 `test_the_trigger_filter_returns_a_real_boolean`）。
+           （见 `test_a_left_hand_card_opens_the_panel_at_every_width`
+            那段注释里的 `shouldCancel`）。
            读 htmx 源码之后也没有找到支持那条机制的地方：目标是在发请求前
            就解析好的，out-of-band 换掉别处不影响它。
            留下这条测试是因为「少送 40KB」本身站得住，**不是**因为那个机制。
@@ -13852,46 +13856,6 @@ class SchedulePanelTests(PageTestCase):
         self.assertIn("Kitchen shift", html)
         self.assertNotIn("hx-swap-oob", html)
         self.assertNotIn('id="event-results"', html)
-
-    def test_the_trigger_filter_returns_a_real_boolean(self):
-        """🔴 htmx 的事件过滤器比的是**严格相等**：
-
-            return eventFilter.call(elt, evt) !== true      // htmx.js
-
-        所以 `[document.querySelector(...)]` 是**不行的** —— 它返回一个元素，
-        truthy 但 `!== true`，于是每一次点击都被过滤掉、请求根本不发。
-        而 `x-on:click` 照常把面板翻开，表现是「点了左边，右边那张卡是空的」，
-        **控制台一声不吭**：htmx 认为这是一次正常的「不该触发」。
-
-        ⚠️ 这个坑找了三轮才找对，前两轮的猜测都写进过代码注释。所以钉的是
-           「过滤器必须求值成布尔」这件事本身，而不是某一处写法。
-        """
-        self.make("Kitchen shift")
-        self.login(self.lisi)
-        html = self.client.get(reverse("events:event_list")).content.decode()
-        js = (Path(settings.BASE_DIR) / "assets" / "js" / "app.js").read_text()
-        for expression in re.findall(r'hx-trigger="[^"]*\[([^\]]+)\]"', html):
-            expression = expression.strip()
-            if re.fullmatch(r"!!?.*", expression):
-                continue
-            # ⚠️ 另一种合法写法：调用一个**具名判定函数**（2026-08-19 起
-            #    `panelFits()` 走这条）。这时布尔化的责任挪进了那个函数，
-            #    所以这里跟进去查它自己收没收口 —— 少了这一跟，守卫就退化成
-            #    「只要写成函数调用就放行」，而那正好是它要防的东西。
-            call = re.fullmatch(r"(\w+)\(\)", expression)
-            self.assertIsNotNone(
-                call,
-                f"`{expression}` 求值出来不是布尔 —— htmx 会静默地"
-                f"把每一次事件都过滤掉")
-            name = call.group(1)
-            body = re.search(
-                r"window\.%s = function \(\) \{(.*?)\n\};" % name, js, re.S)
-            self.assertIsNotNone(
-                body, f"过滤器调用了 `{name}()`，但 app.js 里找不到它")
-            self.assertIn(
-                "return !!", body.group(1),
-                f"`{name}()` 没有把返回值收成布尔 —— htmx 比的是严格相等，"
-                f"truthy 是不够的")
 
     def test_the_left_hand_link_asks_for_that_shorter_answer(self):
         # ⚠️ 视图那半边和模板这半边是一对：链接不带 `from_list`，服务端就会
@@ -14014,19 +13978,21 @@ class SchedulePanelTests(PageTestCase):
         self.assertIn('id="schedule-detail"', html)
         self.assertRegex(html, r'x-show="!detail"')
 
-    def test_a_left_hand_card_opens_the_panel_wherever_the_panel_fits(self):
-        """🔴 一份标记，两种行为 —— 靠 `hx-trigger` 上的事件过滤器，不是两套标记。
+    def test_a_left_hand_card_opens_the_panel_at_every_width(self):
+        """🔴 一份标记，**一种**行为（2026-09-09 第二批）。
 
-        ⚠️ **条件 2026-08-19 换了**：原来是「日程开着吗」，现在是「这块屏幕装得下
-           面板吗」。也就是说日程**关着**时点卡片同样在右边就地开，壳自己撑开 ——
-           活动详情不再是从这一页点出去的一个目的地。这条守卫跟着换，是因为它
-           钉的是当天被有意改掉的那条规则本身。
+        ⚠️ **这条守卫的方向反过来了。** 2026-08-19 起它钉的是「装得下面板吗」
+           那个事件过滤器 —— 宽屏就地开、窄屏跳整页。那套双行为**当天就是坏
+           的，而且坏了三个星期没人看出来**：htmx 对任何带 href 的 `<a>` 是
+           `preventDefault()` 在前、问事件过滤器在后（`htmx.js:2528-2532` 的
+           `shouldCancel`）。于是窄屏上跳页被打掉、请求因过滤器为假而没发、
+           `x-on:click` 照常把面板翻开 —— 一块铺满整屏的**空白**面板，
+           而控制台一声不吭。
 
-        过滤器为假（窄屏）时 htmx **完全不接管**这次点击，于是浏览器照常跟着
-        `href` 走，跳到整页详情。⭐ 没有 JS 时也是这条路（D24）。
-
-        ⚠️ 窄屏仍然跳整页不是妥协：那一档左边这一列被整个藏起来，而面板里那份
-           详情不画返回链接，于是唯一的出路是一颗几十像素的 ×。
+        所以现在没有过滤器了：面板在任何宽度都就地开。`href` 一个字没动，
+        它仍然是没有 JS 时的那条真路（D24）。窄屏那一档的出路由三样东西给：
+        补到 44px 的那颗 ×、后退键（见 `EventsShellStateTests` 那三条），
+        以及页头条里那一格 Events。
         """
         self.make("Kitchen shift")
         self.login(self.lisi)
@@ -14036,12 +14002,51 @@ class SchedulePanelTests(PageTestCase):
         opened = link.group(0)
         self.assertRegex(opened, r'hx-get="/events/\d+/panel/')
         self.assertIn('hx-target="#schedule-detail"', opened)
-        self.assertIn("click[panelFits()]", opened,
-                      "少了这个过滤器，窄屏上点卡片会开出一个占满屏幕、"
-                      "只能靠一颗 × 退出的面板")
+        self.assertNotIn(
+            "hx-trigger", opened,
+            "又给这次点击加了一个事件过滤器 —— htmx 会先把跳页打掉再看它，"
+            "于是过滤器为假的那一档是「既不开面板、也不跳页」")
         self.assertNotIn(
             "events-shell.is-open", opened,
             "又回到「日程开着才在面板里开」了 —— 日程关着时点卡片必须也在右边开")
+
+    def test_no_click_on_this_page_is_filtered_by_screen_width(self):
+        """🔴 这一条是上面那条的另一半，钉的是**整页**。
+
+        ⚠️ 它取代了原来的 `test_the_trigger_filter_returns_a_real_boolean`
+           （「过滤器必须求值成真布尔」）。那条守卫钉的是一件从今以后**不存在**
+           的事 —— 全站已经没有 `hx-trigger` 事件过滤器了，它的循环会空转，
+           于是变成一条永远绿的守卫。这一条反过来：谁哪天再加一个，它会红，
+           并把人领回上面那段注释里那个 `shouldCancel` 的故事。
+
+        ⚠️ `panelFits` 这个名字在**活着的代码**里也必须一个字都不剩 ——
+           留一个死掉的判定函数，下一个人会以为它还在管事。
+
+        🔴 **查之前先把注释剥掉。** app.js 和 app.css 里各留着一块墓碑注释
+           （「这里曾经有一个 panelFits()，别把它加回来」），而墓碑上必须写着
+           死者的名字才有用。不剥的话这条守卫抓到的正是那两块墓碑 —— 它会逼
+           下一个人把注释删掉，而那恰好是这条守卫最不该造成的后果。
+           同 `test_the_breakpoint_is_declared_once_in_the_stylesheet` 那一条。
+           ⚠️ 模板那一侧不必剥：Django 的注释块本来就不渲染，所以查渲染出来的
+              HTML 等于已经剥过了。
+        """
+        self.make("Kitchen shift")
+        self.login(self.lisi)
+        html = self.client.get(reverse("events:event_list")).content.decode()
+        self.assertEqual(
+            re.findall(r'hx-trigger="[^"]*\[[^\]]*\]"', html), [],
+            "这一页又出现了事件过滤器 —— 先读 `shouldCancel`，"
+            "它在你的过滤器之前就把跳页打掉了")
+        self.assertNotIn("panelFits", html,
+                         "模板里还在调 panelFits —— 它已经不存在了")
+        root = Path(settings.BASE_DIR)
+        for parts, strip in ((("assets", "js", "app.js"), r"//.*"),
+                             (("assets", "app.css"), r"/\*.*?\*/")):
+            code = re.sub(strip, "", root.joinpath(*parts).read_text(),
+                          flags=re.S)
+            self.assertNotIn(
+                "panelFits", code,
+                f"{parts[-1]} 里还留着活的 panelFits —— 它已经不管事了")
 
     def test_both_ways_in_reach_the_same_endpoint(self):
         """⚠️ 从日程点、从列表点，是**同一场活动**的两个入口。两边打不同的端点，
@@ -14381,9 +14386,33 @@ class PanelStateInTheUrlTests(PageTestCase):
         ).content.decode()
         self.assertIn(f"/events/?q=Saturday&amp;panel={self.event.pk}", html)
 
-    def test_the_row_link_writes_it_into_the_address_bar(self):
+    def test_the_row_link_hands_the_address_bar_to_alpine(self):
+        """🔴 **地址栏那一格 2026-09-09 第二批从 `hx-replace-url` 搬进了
+           `openDetail()`。**
+
+        搬的理由不是整齐：push 还是 replace 取决于**面板此刻开着没有**（从关着
+        打开要 push，这样后退键＝关掉面板；已经开着再换一场要 replace，这样连点
+        五张卡片不堆五层）—— 而 `hx-replace-url` 是一个静态属性，答不了那个问题。
+
+        ⚠️ 所以这条守卫查的是「**开面板的那三条链接**没有再自己写一份」，写进
+           地址栏这件事本身由 `EventsShellStateTests` 那三条钉着。两处都写的话，
+           一次点击会改两次地址栏，而后一次赢 —— push 那一半就没了。
+
+        ⚠️ 查的是那三条链接，**不是整页**：这一页上还有两处 `hx-replace-url`
+           跟面板无关，而且都该留着 —— 筛选表单那个 `="true"`（实时筛选不该
+           堆历史），和日程翻页箭头那个 `="/events/?from=…"`（翻到哪一天）。
+           第一版写成查整页，于是它抓着筛选表单报警，而那一处一个字都不该动。
+        """
         html = self.page().content.decode()
-        self.assertIn(f'hx-replace-url="/events/?panel={self.event.pk}"', html)
+        openers = re.findall(
+            r'<a [^>]*hx-target="#schedule-detail"[^>]*>', html, re.S)
+        self.assertTrue(openers, "开面板的链接一条都没有了")
+        for link in openers:
+            self.assertNotIn(
+                "hx-replace-url", link,
+                "开面板的链接又自己写了一份地址栏 —— 它会盖掉 openDetail() 的 push")
+            self.assertIn("openDetail(", link)
+        self.assertIn(f'x-on:click="openDetail({self.event.pk})"', html)
 
     def test_panel_is_carried_but_is_not_one_of_the_form_fields(self):
         """⚠️ `FILTER_PARAMS` 是这张表单的**字段名**；`panel` 不是一个框。
@@ -14727,15 +14756,19 @@ class EventsShellStateTests(TestCase):
            这条是「窄屏别在面板里开」，说的是同一件事的两面。
         """
         css = re.sub(r"/\*.*?\*/", "", self.source("assets", "app.css"), flags=re.S)
-        self.assertIn("--panel-fits: 1", css)
+        # 🔴 **两条断点必须还是同一个数**（版面那两面：窄屏没有左列、
+        #    窄屏面板铺满）。2026-09-09 第二批之前这里查的是第三处
+        #    —— `--panel-fits`，也就是 JS 那一处的来源。那个变量删了：
+        #    面板在任何宽度都就地开，JS 因此**根本不需要**知道断点，
+        #    于是「只有一处」这条规矩现在是靠「JS 里一处都没有」守的。
         self.assertIsNotNone(
-            re.search(
-                r"@media \(width >= 64rem\) \{\s*\.events-shell \{\s*"
-                r"--panel-fits: 1;", css),
-            "--panel-fits 不在 64rem 那个媒体查询里了")
+            re.search(r"@media \(width >= 64rem\)", css),
+            "并排那一档的断点没了")
+        self.assertIsNotNone(
+            re.search(r"@media \(width < 64rem\)", css),
+            "窄屏那一档的断点没了 —— 它和上面那条必须是同一个数")
 
         js = self.source("assets", "js", "app.js")
-        self.assertIn("--panel-fits", js)
         # ⚠️ 先剥掉注释再查 —— 上面那条禁忌本身就写在 app.js 的注释里（连同
         #    那串它禁止的写法），不剥的话这条守卫抓到的是那句话，而不是代码。
         #    和 `test_the_day_columns_are_written_out…` 踩的是同一个坑。
@@ -14743,6 +14776,94 @@ class EventsShellStateTests(TestCase):
         self.assertNotRegex(
             code, r"matchMedia\([\"']\(min-width",
             "断点又在 JS 里抄了一份 —— 它只能由样式表说了算")
+
+    # --- 地址栏那一格（2026-09-09 第二批）---------------------------------
+    #
+    # 面板在任何宽度都就地开之后，窄屏上它是**铺满整屏**的一张纸。而铺满整屏的
+    # 东西，人唯一会去按的退出键是**后退**。于是「面板开着」这件事必须在历史里
+    # 真的占一格 —— 三条守卫钉的是那一格怎么来、怎么走、以及它指的是不是 DOM
+    # 里那一场。
+
+    def shell_method(self, name):
+        """`eventsShell` 上某个方法的函数体，注释已剥掉。
+
+        ⚠️ 剥注释是因为下面几条查的字眼（`pushState` / `history.back()`）
+           在同一段注释里正好都写着 —— 不剥的话守卫抓到的是那句话，而不是代码。
+           和 `test_the_day_columns_are_written_out…` 踩的是同一个坑。
+        """
+        js = self.source("assets", "js", "app.js")
+        body = re.search(r"\n  %s\(([^)]*)\) \{(.*?)\n  \},\n" % name, js, re.S)
+        self.assertIsNotNone(body, f"eventsShell 上没有 {name}()")
+        return re.sub(r"//.*", "", body.group(2))
+
+    def test_opening_the_panel_pushes_once_and_switching_replaces(self):
+        """🔴 「面板开着」在历史里**只占一格**，而那一格一定指着此刻装在 DOM
+           里的那一场。
+
+        · 从关着打开 → `pushState`。少了它，手机上点开一场活动之后按后退键
+          直接离开 Events 页 —— 而这一档面板是铺满整屏的，后退正是人唯一会去
+          按的东西。
+        · 已经开着再换一场 → `replaceState`。少了它，连点五张卡片就在后退键上
+          堆五层，而中间那几格指向的都不是面板里那一场（地址栏说 A、面板里是
+          B）。2026-08-19 定的「不许堆层」在这里仍然成立。
+
+        ⚠️ 判据是 `this.detail`（面板此刻开着没有），不是屏幕多宽 —— 这一批
+           的整个意思就是把「屏幕多宽」从 JS 里删掉。
+        """
+        body = self.shell_method("writePanelUrl")
+        self.assertIn("pushState", body)
+        self.assertIn("replaceState", body)
+        self.assertRegex(
+            body, r"if \(this\.detail\)",
+            "push 还是 replace 不再由「面板开着没有」决定 —— 两个分支缺哪一个，"
+            "坏的都是后退键")
+
+    def test_closing_a_panel_we_pushed_goes_back(self):
+        """🔴 分的是「**我们** push 出来的那一格」，不是「有没有面板开着」。
+
+        `?panel=<pk>` 直接进来的那一档（从圆球出去、再点整页那条「← Events」
+        回来）是一次真导航，不是我们造的历史记录 —— 对它 `history.back()`
+        会把人送出 Events 页。所以标记写在 `history.state` 上，只有 push 的
+        那一支才点亮。
+
+        ⚠️ 少了这一分，两种走法里必有一种是坏的，而它们长得一模一样。
+        """
+        write = self.shell_method("writePanelUrl")
+        self.assertIn("panelPushed: true", write,
+                      "push 出来的那一格没有留下标记，closeDetail() 无从分辨")
+        close = self.shell_method("closeDetail")
+        self.assertIn("panelPushed", close)
+        self.assertIn("history.back()", close)
+        # ⚠️ 另一支仍然要在：没有标记的那一格只能就地把参数摘掉。
+        self.assertIn("replaceState", close)
+
+    def test_the_back_button_closes_the_panel(self):
+        """后退／前进之后，面板和地址栏必须对齐。
+
+        少了这个监听，push 进去的那一格按后退时地址栏变了、面板还开着 ——
+        而那正是 `?panel=` 当初要修的那种「两条路给出两种结果」。
+        """
+        js = re.sub(r"//.*", "", self.source("assets", "js", "app.js"))
+        self.assertRegex(
+            js, r'addEventListener\("popstate"',
+            "没有 popstate 监听 —— 后退键改得动地址栏，改不动面板")
+
+    def test_the_panel_close_button_is_big_enough_to_hit(self):
+        """🔴 窄屏上这颗 × 是面板的主要出口，而它待在 `zoom: 0.85` 里面。
+
+        `.panel-close` 那 1.75rem＝28px 渲染出来只有约 23.8px，远低于 44px 的
+        触控下限。热区靠一圈透明的 `::after` 补回来 —— 同 `.panel-expand::after`
+        和 `.btn-hit`，屏幕上什么都不多画。
+
+        ⚠️ 补在 `.schedule-detail-close`（位置那条）而不是 `.panel-close`
+           （长相那条）：日程那一块的 × 不在 zoom 里，两颗要的数不一样，而
+           2026-08-28 把这两条拆开就是为了这个。
+        """
+        css = re.sub(r"/\*.*?\*/", "", self.source("assets", "app.css"),
+                     flags=re.S)
+        self.assertRegex(
+            css, r"\.schedule-detail-close::after \{[^}]*inset:",
+            "那颗 × 没有热区 —— 窄屏上它是唯一的出口，而它只有约 24px")
 
 
 class ScheduleOpeningViewTests(SimpleTestCase):

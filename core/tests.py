@@ -1053,7 +1053,7 @@ class DeletesInServicesAreEnumeratedGuardTests(TestCase):
 
     def test_every_delete_in_the_service_layer_is_named(self):
         offenders = [
-            f"{where}  {name}()"
+            where
             for where, name, code in our_functions()
             if where.startswith(self.WHERE)
             and name not in self.ALLOWED
@@ -1295,6 +1295,15 @@ class RolesAreNarrowedGuardTests(TestCase):
         # left out roles would answer "how many did we open" with a number that
         # depends on who asked.
         "event_summary",
+        # L5.8a. The rule's own page, and the same answer as `_edit_page_context`
+        # one line up — it is the list the publisher adds and deletes rows in,
+        # behind `_managed_series()`. There is also a second reason that only
+        # applies here: these rows are a **recipe**, not an offer. Nobody signs
+        # up to an `EventSeriesRole`; it is the template each occasion's real
+        # roles are stamped from, and those get narrowed per viewer where they
+        # are actually shown. Narrowing the recipe would hide from a publisher
+        # the job they just wrote down.
+        "_series_page_context",
     }
 
     def test_a_page_that_lists_roles_asks_who_is_looking(self):

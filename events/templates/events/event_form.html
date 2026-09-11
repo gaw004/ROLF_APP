@@ -38,9 +38,86 @@
      被它包住的那几个勾变灰点不动。没有 Alpine 时它们照常能点，冗余组合由服务端
      拒绝并说清楚 —— 少的只是一次往返，不是功能。
   {% endcomment %}
-  <form method="post" enctype="multipart/form-data" class="card mt-6"
+  <form id="when-form" method="post" enctype="multipart/form-data" class="card mt-6"
         x-data="audienceTicks">
     {% csrf_token %}
+    {% if not event %}
+      {% comment %}
+      🔴 **这颗看不见的按钮是为了让回车键还能发布。** 别删。
+
+      HTML 的「隐式提交」（在文本框里按回车）用的是表单里**文档顺序上第一颗**
+      提交按钮，而下面那颗「Switch」在文档顺序上排在真正的提交按钮前面 ——
+      于是 2026-09-10 走查实测：填满一张合法的表单、在名称框里按回车，
+      **活动没有被发布**，页面只是原地换了一次档。没有报错，看起来像回车没反应。
+
+      ⚠️ 藏起来**不解决**这件事：Chrome 找默认按钮时跳过的是 `disabled`，
+         不是看不见的。所以这里放一颗真正的、剪到 1px 的主提交按钮，让它成为
+         文档顺序上的第一颗 —— 回车走它，而不是走换档。
+
+      ⚠️ `tabindex="-1"` + `aria-hidden`：它不该出现在 Tab 顺序里，也不该被读屏
+         念成第二颗按钮。下面那颗可见的才是给人按的。
+      ⚠️ 文案和下面那颗一致，因为它按下去做的是同一件事。
+      {% endcomment %}
+      <button type="submit" class="sr-only" tabindex="-1" aria-hidden="true">Create and open roles</button>
+      {% comment %}
+      ⚠️ 三档单选和「什么时候」那一块从通用渲染里**摘出来单独画**，因为它们之间
+         有一层关系（选哪一档决定下面问什么），而 `form_fields.html` 是逐个字段
+         平铺的，表达不了这一层。别的字段照常走它。
+
+      ⚠️ 只在「发布」这一页。改一场已经存在的活动时没有这一档可选 —— 活动变不成
+         规则 —— 所以那一页上 `publish_as` 根本不在表单里，时间也照常平铺。
+         表单那边同一个判断写在 `PublishFormMixin.drawn_separately`：两处必须
+         一致，多画一遍是静默的（后一个空输入框覆盖前一个），少画一遍是字段
+         直接消失。`NoFieldIsDrawnTwiceTests` 盯着这件事。
+      {% endcomment %}
+      {% comment %}
+      ⚠️ hx- 挂在外面这一层 div 上，不是挂在每个 radio 上：change 事件会冒泡，
+         一份属性管三个档，而挂在输入框上要写三遍（其中一遍迟早会漏）。
+
+      ⚠️ `hx-include="closest form"` 在这里**不是**为了带上填了一半的内容 ——
+         换的只有 `#when-block` 那一段 DOM，别的输入框原地没动。它带的是
+         `publish_as` 自己：视图要知道换成哪一档。
+      {% endcomment %}
+      <div hx-post="{% url 'events:publish_when' %}"
+           hx-trigger="change"
+           hx-include="closest form"
+           hx-target="#when-block" hx-swap="outerHTML">
+        {% comment %}
+        ⚠️ `plain_options`：这三档**不画成卡片**，和下面「谁看得见」那一组长一样
+           （2026-09-10 定）。三张大卡片把一个在这一页上只是「先说清楚你要发什么」
+           的问题撑成了整屏最重的一块，而它下面紧跟着的「什么时候」才是要填的东西。
+        {% endcomment %}
+        {% include "core/components/field.html" with field=form.publish_as plain_options=True %}
+      </div>
+      {% comment %}
+      ⚠️ **没有 JavaScript 也要能换档**（D24）。这个按钮是服务端整页重渲那条路；
+         脚本接管之后把它藏起来 —— 同 `focus_picker.html` 那句「脚本接管之后把
+         它降级成读数」。
+
+      ⚠️ `formnovalidate`：换档的时候表单本来就是半填的，浏览器不该在这里拦人。
+         服务端同样不判 —— 见 `event_create` 里的 `switching`。
+
+      ⚠️ 它是 POST，不是 GET。GET 会把这个人填了一半的活动（说明、地点）
+         摊进查询串和服务器日志 —— `publish_when` 的 docstring 里写的就是
+         这条理由，这里是同一条。
+      {% endcomment %}
+      <div class="mt-4 flex items-center gap-3" data-when-switch>
+        {% comment %}
+        ⚠️ 走 `button.html`，不手写 class（2026-09-11 评审抓到）。`.btn` 和
+           `.btn-ghost` 在 app.css 里**没有独立规则** —— 按钮的圆角、内边距、
+           配色全在那个组件的 base 串里。手写这两个 class 拿到的是一个没有边框、
+           没有内边距的光秃秃的词，而这颗键正好是关掉 JS 之后**唯一**能换档的
+           控件，也就是最不该难看的那一颗。
+           组件上的 `novalidate` 参数就是为这颗键加的。
+        {% endcomment %}
+        {% include "core/components/button.html" with label="Switch" variant="ghost" name="switch_shape" value="1" novalidate=True %}
+        <span class="text-sm text-ink-600 dark:text-ink-300">
+          Changing this keeps what you have typed. The picture is the one thing
+          you will need to choose again.
+        </span>
+      </div>
+      {% include "events/_publish_when.html" %}
+    {% endif %}
     {% include "core/components/form_fields.html" %}
     <div class="mt-6 flex flex-wrap gap-2">
       {% if event %}

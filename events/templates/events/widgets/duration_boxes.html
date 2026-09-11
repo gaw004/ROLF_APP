@@ -1,0 +1,30 @@
+{% comment %}
+「开多久」的三个格子：时 : 分 : 秒。见 `forms.DurationBoxes`。
+
+🔴 **循环变量必须叫 `widget`**，不能叫别的。Django 的部件模板读的是上下文里那个
+   叫 `widget` 的东西，所以这里要把它**遮住** —— 这正是 Django 自己的
+   `multiwidget.html` 那么写的原因。
+
+   叫 `part` 的那一版不报错，只是三格全部渲染成**外层**那个部件：
+   三个一模一样的 `<input name="duration" id="id_duration">`，`type` 还是空的。
+   `NoFieldIsDrawnTwiceTests` 当场抓到（同一个 id 出现三次）。
+
+⚠️ 冒号是 `aria-hidden`：读屏靠每一格自己的 `aria-label`（Hours / Minutes /
+   Seconds）分辨，而一个念出来的「冒号」只是噪音。
+
+⚠️ 每格下面那行小字同理 —— 它和 `aria-label` 说的是同一件事，两个都念就是
+   念两遍。
+{% endcomment %}
+<div class="duration-boxes">
+  {% for widget in widget.subwidgets %}
+    {% if not forloop.first %}
+      <span class="duration-colon" aria-hidden="true">:</span>
+    {% endif %}
+    <span class="duration-part">
+      {% include widget.template_name %}
+      <span class="duration-unit" aria-hidden="true">
+        {% if forloop.first %}hours{% elif forloop.counter == 2 %}min{% else %}sec{% endif %}
+      </span>
+    </span>
+  {% endfor %}
+</div>

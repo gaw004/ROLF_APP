@@ -11,6 +11,11 @@
   value
   confirm  给了就带二次确认。⚠️ 破坏性动作必须给
   full     真值时占满一行（窄屏上的表单按钮）
+  novalidate  真值时落 `formnovalidate`：这一颗提交时不让浏览器校验整张表单。
+           给那些「换个档 / 翻一页」的提交键用 —— 表单那时本来就是半填的。
+  hx_post / hx_target / hx_swap / hx_include / hx_vals
+           HTMX 那一组，直通。⚠️ `hx_target` 必填（理由见 _button_tag.html）；
+           `hx_swap` 不给默认 outerHTML。
   opens    Alpine 的状态名。给了就把这个链接变成「开弹窗」，没 JS 时照旧跳 href。
            ⚠️ 必须同时给 href，见 _button_tag.html 里的理由
   shows    Alpine 里一个方法的调用（**带括号**），比如 `showSchedule()`。给了就把

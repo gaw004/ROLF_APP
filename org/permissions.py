@@ -110,6 +110,22 @@ def can_publish_event(user, ministry) -> bool:
     return administers(user, ministry)
 
 
+def can_manage_series(user, series) -> bool:
+    """Edit a repeat rule, open jobs on it, generate and stop its occasions.
+
+    The same question `can_manage_event()` asks, of the row one level up: a
+    series belongs to a ministry, and running that ministry is what entitles
+    somebody to schedule its evenings.
+
+    ⚠️ Not the `view_eventseries` grant in FOUNDATION_ADMIN_PERMISSIONS. That
+       one is the **admin's** door and is deliberately read-only (D20: building
+       a batch is an act on one ministry's events, so it belongs to the
+       ministry tier). This is that tier's door, and L5.4's note beside those
+       two lines predicted it.
+    """
+    return administers(user, series.ministry)
+
+
 def can_manage_event(user, event) -> bool:
     """Edit it, open roles on it, check people in, notify the people signed up.
 
@@ -345,8 +361,19 @@ FOUNDATION_ADMIN_PERMISSIONS = [
     #
     # ⚠️ View only, deliberately. Building a batch is an act on **one ministry's**
     #    events, so by D20's test it belongs to the ministry tier rather than to
-    #    a foundation-wide grant; its door is the series pages in L5.8, and until
-    #    those exist the only writer is a superuser. Same footing as Session.
+    #    a foundation-wide grant.
+    #
+    # ⚠️ Its door **is now built** (L5.8a, 2026-09-10): `/events/series/<pk>/`,
+    #    gated on `can_manage_series()`. So the sentence that stood here until
+    #    that day — "until those exist the only writer is a superuser" — is no
+    #    longer true, and the line below is no longer the reason a ministry
+    #    admin cannot build one. It is view-only here because the writing
+    #    happens on the site rather than in the admin, which is the opposite
+    #    reason and reads the same from a distance.
+    #
+    # ⚠️ Two things are still superuser-only and this is the honest list:
+    #    undoing a batch, and editing a rule from the admin's own form. A
+    #    ministry admin's way back is "Stop from today" on the series page.
     #
     # 🔴 And they are here at all because registering a model in admin.py is not
     #    what makes it reachable: Django hides a model from the admin index

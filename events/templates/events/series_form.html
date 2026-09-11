@@ -1,0 +1,99 @@
+{% extends "core/base.html" %}
+{% block title %}Edit “{{ series.name }}”{% endblock %}
+{% block main_width %}max-w-2xl{% endblock %}
+
+{% block content %}
+  {% comment %}
+  一条规则的页面。和 `event_form.html` 是同一个形状（决定 33）：上半是那张表单，
+  下半是工种面板 —— 因为发布者答的是同一个问题，不该因为选了第三档就遇到一套
+  不一样的东西。
+
+  多出来的只有一块：这条规则会造出哪几天，和那个「生成」按钮。因为一条规则
+  和一场活动不一样 —— **它自己不是人们报名的那个东西**。
+  {% endcomment %}
+  <h1 class="text-2xl font-semibold">Edit “{{ series.name }}”</h1>
+
+  {% if series.ended_on %}
+    <div class="card mt-4 border border-info-fg/30 bg-info-bg dark:border-info-fg-dark/30 dark:bg-info-bg-dark">
+      <p class="text-sm text-info-fg dark:text-info-fg-dark">
+        This series was stopped on {{ series.ended_on|date:"j M Y" }}. Nothing new
+        is generated from that date on; everything that already happened stays.
+      </p>
+    </div>
+  {% endif %}
+
+  <form id="when-form" method="post" enctype="multipart/form-data" class="card mt-6"
+        x-data="audienceTicks">
+    {% csrf_token %}
+    {% comment %}
+    ⚠️ 「多久一次」那一块在这一页上**也是手画的**，和发布页共用同一份模板 ——
+       它几个控件之间有关系（按周还是按月决定下面问什么），平铺表达不了。
+       表单那边对应的是 `EventSeriesForm.WHEN_BLOCK_ON_EDIT = True`：
+       两处必须一致，多画一遍是静默的，少画一遍是字段直接消失。
+    {% endcomment %}
+    {% include "events/_recurrence_picker.html" %}
+    <div class="mt-5">
+      {% include "core/components/field.html" with field=form.starts_on %}
+      {% include "core/components/field.html" with field=form.start_time %}
+      {% include "core/components/field.html" with field=form.duration %}
+    </div>
+    {% include "core/components/form_fields.html" %}
+    <div class="mt-6">
+      {% include "core/components/button.html" with label="Save changes" variant="primary" %}
+    </div>
+  </form>
+
+  {% comment %}
+  ⚠️ 一张**独立**的表单，不是上面那张的一部分。改配方和「生成」是两件事，
+     混成一张的话保存一处笔误就会顺手造出十二场活动。
+  {% endcomment %}
+  <div class="card mt-6">
+    <h2 class="text-lg font-semibold">The occasions this rule makes</h2>
+
+    {% comment %}
+    ⭐ 「已排到哪」是滚动生成的另一半（L5.9，2026-09-11）。一条没有结束的规则
+       一次只排一年 —— 没有这行字，一条排完了的规则会安安静静地停在那里：
+       `/events/` 上不再出现新的场次，而这一页看起来一切正常。
+
+    ⚠️ 「快排完了」用的是同一颗「Generate the occasions」按钮，**不是新按钮**。
+       决定 34 已经让它是幂等的「对齐配方」，滚动只是让它多一个可对齐的区间。
+       加第二颗按钮就是给同一件事两个入口。
+    {% endcomment %}
+    {% if booked_through %}
+      <p class="mt-1 text-sm {% if running_low %}text-warning-fg dark:text-warning-fg-dark{% else %}text-ink-600 dark:text-ink-300{% endif %}">
+        Booked through {{ booked_through|date:"j M Y" }}.
+        {% if running_low %}
+          That is not far off — press Generate again to book another year.
+        {% endif %}
+      </p>
+    {% endif %}
+    {% include "events/_series_dates.html" %}
+
+    {% if occasions %}
+      <p class="mt-4 text-sm text-ink-600 dark:text-ink-300">
+        {{ occasions|length }} already built.
+        <a class="underline" href="{% url 'events:event_list' %}?q={{ series.name|urlencode }}">See them in the list</a>.
+      </p>
+    {% endif %}
+
+    <div class="mt-6 flex flex-wrap gap-2">
+      <form method="post" action="{% url 'events:series_generate' series.pk %}">
+        {% csrf_token %}
+        {% comment %}
+        ⚠️ 按第二次不会重建 —— 它补缺的场次，也把后加的工种补到还没开始的那些
+           场次上（决定 34）。所以这个按钮**按几次都安全**，这是它敢只有一个的原因。
+        {% endcomment %}
+        {% include "core/components/button.html" with label="Generate the occasions" variant="primary" %}
+      </form>
+      {% if occasions %}
+        <form method="post" action="{% url 'events:series_stop' series.pk %}">
+          {% csrf_token %}
+          {% include "core/components/button.html" with label="Stop from today" variant="danger" confirm="Stop this series? Occasions still to come are withdrawn; everything that has already happened stays exactly as it is." %}
+        </form>
+      {% endif %}
+    </div>
+  </div>
+
+  <h2 class="mb-4 mt-10 text-lg font-semibold">Roles on this rule</h2>
+  {% include "events/_series_roles_panel.html" %}
+{% endblock %}

@@ -1,0 +1,73 @@
+{% comment %}
+这条规则会落在哪几天。发布页和系列页共用一份。
+
+⭐ 它存在是为了让「一次生成」安全：按下去之前就看得见那些晚上，
+   把周二打成周四是**当场**看出来的，不是十二个志愿者发现的。
+
+⚠️ 日期是服务端算的（`services.series_moments()`，和生成器走同一个展开器），
+   月历也是服务端摆的（`schedule.month_page()`）—— 所以这一页画的和按钮会造的
+   是同一批。让浏览器自己按日期串画月历就会有第二个答案，而不一致只在按下去
+   之后才显出来。
+
+⚠️ 2026-09-11 这一块换过两次，两次都是同一个方向：**别让人自己去数**。
+   先是把一行「15 Sep · 17 Sep · 22 Sep」换成月历（一列竖着的高亮，
+   「每周二」不用写就看出来了）；再是把那一行文字**整个去掉** ——
+   月历已经把它说完了，而五十二个日期排成四行只是噪音。
+{% endcomment %}
+<div id="series-dates" class="mt-4">
+  {% if complaint %}
+    {% comment %}
+    ⚠️ 规则本身的那句拒绝，原样搬过来 —— 和保存时看到的是同一句。
+       这里重写一遍就是第二份措辞，而两份措辞迟早说不一样的话。
+    {% endcomment %}
+    <p class="text-sm text-danger-fg dark:text-danger-fg-dark">{{ complaint }}</p>
+  {% elif moments %}
+    {% comment %}
+    ⚠️ 两种说法，因为这是两件事（L5.9）：一条有结束的规则**一共**这么多场；
+       一条没有结束的规则不是「共 52 场」—— 它只是这一年排了 52 场，而说成
+       前者会让人以为排完就没了，然后没有人回来按第二次。
+    {% endcomment %}
+    <p class="text-sm font-medium">
+      {% if rule_ends %}
+        This makes {{ moments|length }} occasion{{ moments|length|pluralize }},
+        {{ moments.0|date:"j M Y" }} to {{ moments|last|date:"j M Y" }}.
+      {% else %}
+        {{ moments|length }} occasion{{ moments|length|pluralize }} over the next
+        year, {{ moments.0|date:"j M Y" }} to {{ moments|last|date:"j M Y" }} —
+        it repeats until you stop it.
+      {% endif %}
+    </p>
+
+    <div class="month-grids mt-3">
+      {% for grid in months.grids %}{% include "events/_month_grid.html" %}{% endfor %}
+    </div>
+
+    {% if months.pages > 1 %}
+      {% comment %}
+      ⚠️ 翻页，不是「展开全部」（2026-09-11 改）：一条一年周更的规则横跨十三个
+         月，一次铺开十三张不是预览。照 `/events/` 那一页翻页的样子来。
+
+      ⚠️ `type="button"`。发布页上这一块**在表单里面**，而 `<button>` 默认是
+         submit —— 少写这一个属性，翻一页就等于提交一次发布表单。
+
+      ⚠️ 没有 JavaScript 时这两个键不动，看到的是头六个月。这不违反 D24：
+         那一条要求有服务端路径的是**写操作**，而这里是读。真要翻页的那条路
+         需要把一份还没保存的规则放进查询串，而 `publish_when` 的 docstring
+         里写着为什么不能那么做。
+      {% endcomment %}
+      <div class="month-pager mt-3">
+        {% url 'events:series_preview' as preview_url %}
+        {% include "core/components/button.html" with label="← Earlier" variant="ghost" type="button" hx_post=preview_url hx_target="#series-dates" hx_include="#when-form" hx_vals=months.earlier_vals disabled=months.at_the_start %}
+        <span class="text-sm text-ink-600 dark:text-ink-300">
+          Month{{ months.total|pluralize }}
+          {{ months.first_shown }}–{{ months.last_shown }} of {{ months.total }}
+        </span>
+        {% include "core/components/button.html" with label="Later →" variant="ghost" type="button" hx_post=preview_url hx_target="#series-dates" hx_include="#when-form" hx_vals=months.later_vals disabled=months.at_the_end %}
+      </div>
+    {% endif %}
+  {% else %}
+    <p class="text-sm text-ink-600 dark:text-ink-300">
+      Fill in the boxes above and the dates they land on appear here.
+    </p>
+  {% endif %}
+</div>

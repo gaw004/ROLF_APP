@@ -1,0 +1,52 @@
+{% comment %}
+一张小月历。参数：grid —— 一个 `schedule.MonthGrid`。
+
+⚠️ 抽成片段是因为它要画两处（默认铺开的那几张、和「展开看全部」里的其余几张），
+   而同一张表格写两遍就是等着其中一遍被改漏。
+
+⚠️ 只读：没有一格可以点。改日子要回上面那个选择器 —— 一个看起来能点的日历
+   会让人以为可以在这里单独挑掉某一天，而那件事这一页做不到。
+{% endcomment %}
+<table class="month-grid">
+  <caption>{{ grid.label }}</caption>
+  <thead>
+    <tr>
+      {% comment %}
+      ⚠️ 周一起头，和 `recurrence.WEEKDAYS`、`schedule.month_grids()` 同序。
+         三处不一致的表现是高亮整体错开一列，而每个数字本身都对。
+      {% endcomment %}
+      <th scope="col"><span aria-hidden="true">M</span><span class="sr-only">Monday</span></th>
+      <th scope="col"><span aria-hidden="true">T</span><span class="sr-only">Tuesday</span></th>
+      <th scope="col"><span aria-hidden="true">W</span><span class="sr-only">Wednesday</span></th>
+      <th scope="col"><span aria-hidden="true">T</span><span class="sr-only">Thursday</span></th>
+      <th scope="col"><span aria-hidden="true">F</span><span class="sr-only">Friday</span></th>
+      <th scope="col"><span aria-hidden="true">S</span><span class="sr-only">Saturday</span></th>
+      <th scope="col"><span aria-hidden="true">S</span><span class="sr-only">Sunday</span></th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for week in grid.weeks %}
+      <tr>
+        {% for cell in week %}
+          {% if not cell.in_month %}
+            {% comment %}
+            ⚠️ 邻月那几天画成空格而不是淡数字：这一格里唯一要回答的问题是
+               「这个月哪几天有」，而一个淡淡的「31」照样会被数进去。
+            {% endcomment %}
+            <td class="day-out"></td>
+          {% elif cell.marked %}
+            {% comment %}
+            ⚠️ 圆圈画在里面这个 `<span>` 上，不画在 `<td>` 上。`<td>` 的宽高是
+               表格算出来的（一位数和两位数、有没有 caption 都会影响它），在它
+               身上加 `border-radius: 999px` 得到的是**椭圆**，而且同一张表里
+               有的圆有的扁。span 是固定尺寸的，所以每一个都是正圆。
+            {% endcomment %}
+            <td><span class="day-on">{{ cell.day.day }}<span class="sr-only"> — occasion</span></span></td>
+          {% else %}
+            <td>{{ cell.day.day }}</td>
+          {% endif %}
+        {% endfor %}
+      </tr>
+    {% endfor %}
+  </tbody>
+</table>

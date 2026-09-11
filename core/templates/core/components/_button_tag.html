@@ -69,6 +69,21 @@ button.html 挑好变体之后落地的那一层。分成两个文件是为了�
                         {% if expanded %}x-bind:aria-expanded="{{ expanded }}"{% endif %}
                         {% if controls %}aria-controls="{{ controls }}"{% endif %}{% endif %}
           {% if name %}name="{{ name }}" value="{{ value }}"{% endif %}
+          {% comment %}
+          ⚠️ `hx_post` 那一组是 2026-09-11 加的，为的是日期预览那两颗翻页键。
+             在这之前它们是模板里手抄的一串 `class="btn btn-ghost"` —— 而
+             `.btn` 在样式表里**一条规则都没有**（外观全在上面那个 base 串里），
+             所以那两颗键渲染出来是没有边框、没有内边距的裸文字。
+             这正是 button.html 的 `prints` 那一段记着的同一个坑。
+
+          ⚠️ 和上面 `<a>` 那一支的 `hx_get` 不同，这里不硬写 `hx-swap` ——
+             翻页换的是整块 `outerHTML`，而那一支换的是 `innerHTML`。
+          {% endcomment %}
+          {% if hx_post %}hx-post="{{ hx_post }}" hx-target="{{ hx_target }}"
+                          hx-swap="{{ hx_swap|default:'outerHTML' }}"
+                          {% if hx_include %}hx-include="{{ hx_include }}"{% endif %}
+                          {% if hx_vals %}hx-vals='{{ hx_vals }}'{% endif %}{% endif %}
+          {% if novalidate %}formnovalidate{% endif %}
           {% if prints %}x-on:click="window.print()"{% endif %}
           {% if confirm %}x-on:click="if (!window.confirm('{{ confirm|escapejs }}')) $event.preventDefault()"{% endif %}>{{ label }}</button>
 {% endif %}

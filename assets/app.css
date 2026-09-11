@@ -4703,3 +4703,417 @@ html.filters-collapsed .filter-toggle,
 /* ⚠️ danger 不做玻璃。它是破坏性动作的按钮，而半透明会让它的红色**取决于背后
  *    是什么** —— 一个警示色不能是可变的。同 `:not(.border)` 把警示框排除在外的
  *    那条理由。 */
+
+/* ---------------------------------------------------------------------------
+ * 重复规则选择器（L5.8c，2026-09-11）
+ *
+ * 🔴 **底下始终是原生控件。** 转轮是一个真的 `<select>`、星期条是七个真的
+ *    `<input type="checkbox">`。这里做的全是外观，脚本做的是把转轮升级成
+ *    带惯性的滚筒 —— 两者都掉了，这一块仍然能选、能提交（D24）。
+ */
+@layer components {
+
+  /* --- 按周 / 按月 两档的显隐 ---------------------------------------------
+   *
+   * ⚠️ 用 `:has()` 按单选的选中状态切，**不用 JS**：换档是这一块最频繁的动作，
+   *    而让它依赖脚本就等于让「选错了档改不回来」成为一种可能。
+   *
+   * ⚠️ `:has()` 万一不支持，两档会同时显示 —— 难看，但两档的值照常提交，
+   *    服务端只读被选中那一档的（`EventSeriesForm.clean()` 里的 `mode`）。
+   *    降级成啰嗦，不是坏掉。
+   */
+  .recurrence:has([name="repeat_mode"][value="weekly"]:checked) [data-mode="monthly"],
+  .recurrence:has([name="repeat_mode"][value="weekly"]:checked) [data-unit="monthly"],
+  .recurrence:has([name="repeat_mode"][value="monthly"]:checked) [data-mode="weekly"],
+  .recurrence:has([name="repeat_mode"][value="monthly"]:checked) [data-unit="weekly"] {
+    display: none;
+  }
+
+  /* --- 星期条 / 第几个 ---------------------------------------------------- */
+  .day-strip {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+  }
+
+  /* ⚠️ `<label>` 只负责定位，看得见的那颗药丸是它里面的 `<span>`。
+   *    这样选中态可以写成 `input:checked + span` —— 一条**相邻兄弟**选择器，
+   *    不需要 `:has()`。选中与否是这一块唯一不能降级的东西：看不出哪几天被选中，
+   *    这个控件就没有意义了。 */
+  .day-toggle {
+    position: relative;
+    display: inline-flex;
+  }
+
+  .day-toggle input {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    margin: 0;
+    opacity: 0;
+    cursor: pointer;
+  }
+
+  .day-toggle input + span {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 2.75rem;
+    height: 2.75rem;
+    padding: 0 0.5rem;
+    border-radius: 999px;
+    border: 1px solid var(--color-ink-200);
+    background-color: var(--color-white);
+    color: var(--color-ink-700);
+    font-size: 0.875rem;
+    line-height: 1;
+    user-select: none;
+    transition: background-color 0.15s, color 0.15s, border-color 0.15s,
+                transform 0.1s;
+  }
+
+  .day-toggle-wide input + span {
+    min-width: auto;
+    padding: 0 0.9rem;
+  }
+
+  .day-toggle input:checked + span {
+    background-color: var(--color-brand-600);
+    border-color: transparent;
+    color: var(--color-white);
+  }
+
+  .day-toggle input:active + span {
+    transform: scale(0.94);
+  }
+
+  /* ⚠️ 焦点圈画在药丸上而不是那个透明 input 上 —— input 被铺平成整块且不可见，
+   *    浏览器默认的焦点圈会画在一个看不见的矩形上，键盘用户于是完全看不出
+   *    自己停在哪一天。 */
+  .day-toggle input:focus-visible + span {
+    outline: 2px solid var(--color-brand-600);
+    outline-offset: 2px;
+  }
+
+  .dark .day-toggle input + span {
+    border-color: var(--color-ink-700);
+    background-color: var(--color-ink-900);
+    color: var(--color-ink-200);
+  }
+
+  .dark .day-toggle input:checked + span {
+    background-color: var(--color-brand-500);
+    border-color: transparent;
+    color: var(--color-ink-950);
+  }
+
+  /* --- 什么时候停 ---------------------------------------------------------- */
+  .ends-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+
+  .ends-row .ends-input input {
+    width: 10rem;
+    margin-top: 0;
+  }
+
+  /* ⚠️ 数字框窄一点：它装的是「6」，而 10rem 会让那个 6 和后面的
+   *    「occasions」隔出一片空白，读起来不像一句话。日期框仍旧要那么宽 ——
+   *    mm/dd/yyyy 加上那个日历图标本来就占那么多。 */
+  .ends-row .ends-input-count input {
+    width: 4.5rem;
+    /* ⚠️ 居中。左对齐的数字会贴着前面那个「After」，后面和「occasions」之间
+     *    留一段空白 —— 三个词读起来不像一句话，而像中间掉了一个字。 */
+    text-align: center;
+  }
+
+  /* ⚠️ 纯装饰：把没选中那一行的输入框调暗，让「现在听哪一个」一眼看得出。
+   *    `:has()` 不支持时两行一样亮 —— 值仍然只有被选中那一档算数，
+   *    因为决定权在服务端的 `ends_kind`，不在这条样式。 */
+  .ends-row:has(input[type="radio"]:not(:checked)) .ends-input {
+    opacity: 0.45;
+  }
+
+  /* ⚠️ 「不结束」那一档的说明只在选中它时出现。它讲的是那一档独有的代价
+   *    （一年一续），挂在别的档下面会读成「所有规则都要续」。
+   *    `:has()` 不支持时它一直显示 —— 多一句提示，不是坏掉。 */
+  .recurrence [data-never-note] {
+    display: none;
+  }
+
+  .recurrence:has([name="ends_kind"][value="never"]:checked) [data-never-note] {
+    display: block;
+  }
+
+  /* --- 转轮 ---------------------------------------------------------------
+   *
+   * ⭐ 没有脚本时这里什么都不做：`.wheel` 里就是一个普通 `<select>`，
+   *    照常可点、可键盘、读屏念得出。下面这些只在脚本挂上
+   *    `data-wheel-ready` 之后才生效。
+   */
+  .wheel {
+    position: relative;
+  }
+
+  /* ⚠️ 升级之后 `<select>` **留在原地**，只是移出视觉之外 —— 它仍然是这个值
+   *    唯一的持有者，滚筒只是往它身上写。挪走或删掉它就会多出第二份状态，
+   *    而两份状态迟早不一致（表现是屏幕显示 2、提交上去 1）。
+   *    ⚠️ 不用 `display:none`：那样它就不在无障碍树里了，而它是这一格
+   *    唯一能被读屏和键盘操作的东西。 */
+  .wheel[data-wheel-ready] select {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+
+  .wheel-drum {
+    --wheel-item: 2.25rem;
+    position: relative;
+    width: 4.25rem;
+    /* ⚠️ 露三格,不是苹果闹钟那样的五格:这个轮子一共只有四个选项,
+     *    五个坑会让一半的轮子永远是空的。 */
+    height: calc(var(--wheel-item) * 3);
+    overflow-y: scroll;
+    overscroll-behavior: contain;
+    scroll-snap-type: y mandatory;
+    scrollbar-width: none;
+    /* ⚠️ 上下渐隐,滚筒看起来是**卷过去**的而不是一个裁掉的方块 —— 苹果那个
+     *    轮子的立体感有一半来自这层遮罩,另一半来自下面的 rotateX。 */
+    mask-image: linear-gradient(to bottom,
+                transparent 0%, #000 28%, #000 72%, transparent 100%);
+    perspective: 640px;
+    perspective-origin: center center;
+    touch-action: pan-y;
+  }
+
+  .wheel-drum::-webkit-scrollbar {
+    display: none;
+  }
+
+  /* ⚠️ 焦点圈画在滚筒上，因为升级之后**它**才是那个控件（`role="spinbutton"`，
+   *    可 Tab、认上下键）。在这之前 Tab 会停在那个被剪成 1px 的 `<select>` 上 ——
+   *    键盘用户看到焦点凭空消失一格，而那一格还能改值。 */
+  .wheel-drum:focus-visible {
+    outline: 2px solid var(--color-brand-600);
+    outline-offset: 2px;
+    border-radius: 0.5rem;
+  }
+
+  .wheel-item {
+    height: var(--wheel-item);
+    display: grid;
+    place-items: center;
+    scroll-snap-align: center;
+    scroll-snap-stop: always;
+    font-size: 1rem;
+    font-variant-numeric: tabular-nums;
+    color: var(--color-ink-400);
+  }
+
+  /* 🔴 **转的是这一层,不是上面那个格子。** 格子是滚动吸附的目标,而 CSS 按
+   *    **变换之后**的盒子算吸附点 —— 把 rotateX 加在格子上会把吸附点一起转走,
+   *    轮子于是停在两格中间再也回不到整格（实测停在 90.5px)。
+   *    这一条是这个控件唯一一个「看起来只是写法」的地方,别合并回去。
+   *
+   * ⚠️ 每一格的角度由脚本按它离中心的距离实时算,不是一条 CSS 动画:
+   *    角度跟的是**滚动位置**,不是时间。 */
+  .wheel-face {
+    display: block;
+    transform-style: preserve-3d;
+    will-change: transform, opacity;
+  }
+
+  .wheel-item[data-current] {
+    color: var(--color-ink-900);
+    font-weight: 600;
+  }
+
+  .dark .wheel-item {
+    color: var(--color-ink-500);
+  }
+
+  .dark .wheel-item[data-current] {
+    color: var(--color-ink-50);
+  }
+
+  /* 中间那条高亮带 —— 苹果闹钟上那两条细线之间的那一格。 */
+  .wheel-band {
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: 50%;
+    height: 2.25rem;
+    transform: translateY(-50%);
+    border-radius: 0.5rem;
+    background-color: var(--color-ink-100);
+    pointer-events: none;
+  }
+
+  .dark .wheel-band {
+    background-color: rgb(255 255 255 / 0.08);
+  }
+
+  /* ⚠️ 有人明说不要动效时,滚筒仍然滚、仍然吸附 —— 去掉的只有那层立体旋转。
+   *    吸附是**功能**（不吸附就停在两格中间,值是多少说不清）,不是效果。 */
+  @media (prefers-reduced-motion: reduce) {
+    .wheel-face {
+      transform: none !important;
+    }
+  }
+}
+
+/* ---------------------------------------------------------------------------
+ * 规则预览的小月历（L5.8d，2026-09-11）
+ *
+ * ⚠️ 它是**只读**的：没有一格可以点。这一块回答的是「按下生成会造出哪几天」，
+ *    改日子要回上面那个选择器 —— 一个看起来能点的日历会让人以为可以在这里
+ *    单独挑掉某一天，而那件事这一页做不到。
+ */
+@layer components {
+  .month-grids {
+    display: flex;
+    flex-wrap: wrap;
+    /* ⚠️ 居中（2026-09-11）。六张月历在一张 max-w-2xl 的卡片上是两行各三张，
+     *    左对齐会在右边留一大条空白，看起来像少画了一张。 */
+    justify-content: center;
+    gap: 1.25rem;
+  }
+
+  .month-pager {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: center;
+    gap: 0.75rem;
+  }
+
+  /* ⚠️ 停用的翻页键要看得出是停用的，而不是「点了没反应」。 */
+  .month-pager button[disabled] {
+    opacity: 0.4;
+    pointer-events: none;
+  }
+
+  .month-grid {
+    border-collapse: collapse;
+    font-variant-numeric: tabular-nums;
+    /* ⚠️ 表格默认会把宽度摊开。固定下来，几张月历才对得齐成一排。 */
+    table-layout: fixed;
+  }
+
+  .month-grid caption {
+    caption-side: top;
+    text-align: left;
+    padding-bottom: 0.25rem;
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: var(--color-ink-800);
+    white-space: nowrap;
+  }
+
+  .dark .month-grid caption {
+    color: var(--color-ink-100);
+  }
+
+  .month-grid th {
+    width: 1.5rem;
+    padding-bottom: 0.125rem;
+    font-size: 0.625rem;
+    font-weight: 500;
+    color: var(--color-ink-500);
+  }
+
+  .month-grid td {
+    width: 1.5rem;
+    height: 1.5rem;
+    text-align: center;
+    font-size: 0.6875rem;
+    color: var(--color-ink-600);
+  }
+
+  .dark .month-grid td {
+    color: var(--color-ink-400);
+  }
+
+  /* 这条规则会落在的那些天。
+   *
+   * ⚠️ 圆圈是这个 `<span>`，不是它外面的 `<td>`。格子的宽高由表格算，
+   *    一位数和两位数、月份名多长都会影响它 —— 在格子上加
+   *    `border-radius: 999px` 得到的是椭圆，而且同一张表里有的圆有的扁
+   *    （2026-09-11 用户报的正是这件事）。这里写死宽高，每一个都是正圆。 */
+  .month-grid .day-on {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 1.5rem;
+    height: 1.5rem;
+    border-radius: 999px;
+    background-color: var(--color-brand-600);
+    color: var(--color-white);
+    font-weight: 600;
+  }
+
+  .dark .month-grid .day-on {
+    background-color: var(--color-brand-500);
+    color: var(--color-ink-950);
+  }
+
+  /* ⚠️ 格子本身不再带内边距，否则那个固定尺寸的圆会被挤得离格线忽远忽近。 */
+  .month-grid td {
+    padding: 0;
+  }
+}
+
+/* ---------------------------------------------------------------------------
+ * 「开多久」的三个格子（L5.8e，2026-09-11）
+ *
+ * ⚠️ 它换掉的是一个写「2:00:00」的文本框，而那一格有一个不报错的陷阱：
+ *    `DurationField` 把光秃秃的 `2` 读成**两秒**。三个格子让那个歧义不存在。
+ */
+@layer components {
+  .duration-boxes {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.5rem;
+  }
+
+  /* ⚠️ 宽度写死在**这一层**，不是写在 input 上，而这不是风格选择：
+   *    `.field input:not([type=checkbox]):not([type=radio])` 那条是
+   *    `width: 100%`，而它的特指度比 `.field .duration-boxes input` 高一档 ——
+   *    写在 input 上会被它压掉。而且这一列的宽度本来就该由列自己定：
+   *    第一版没写，三格就被底下那行单位字撑成了不一样宽（hours 比 min 长），
+   *    看起来像第一格特别重要。 */
+  .duration-part {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    width: 4.5rem;
+  }
+
+  /* ⚠️ 居中：数字靠左会让三格看起来不对齐，而它们本来就是一个整体。 */
+  .field .duration-boxes input {
+    margin-top: 0;
+    text-align: center;
+  }
+
+  .duration-colon {
+    /* 冒号要和输入框的文字对齐，不是和整列对齐 —— 下面那行单位字把
+     * `.duration-part` 撑高了，所以这里按输入框的高度自己顶上去。 */
+    padding-top: 0.6rem;
+    color: var(--color-ink-500);
+  }
+
+  .duration-unit {
+    margin-top: 0.125rem;
+    font-size: 0.625rem;
+    line-height: 1;
+    color: var(--color-ink-500);
+  }
+}

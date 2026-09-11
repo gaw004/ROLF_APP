@@ -23,6 +23,18 @@ from org.models import Ministry
 from org.permissions import ministry_ids_administered_by
 
 from . import schedule
+# ⚠️ The picker below asks `recurrence` to build and read the rule string
+#    rather than spelling RRULE here: that module owns the syntax, and a
+#    second speller of it is how the preview and the save start disagreeing.
+from .recurrence import (
+    MAX_INTERVAL,
+    MONTHLY,
+    ORDINALS,
+    WEEKDAYS,
+    WEEKLY,
+    compose,
+    decompose,
+)
 from .models import (
     NARROWING_MESSAGE,
     PARENT_NOUN,
@@ -31,6 +43,8 @@ from .models import (
     SERVED_AS_EXPLANATIONS,
     Event,
     EventRole,
+    EventSeries,
+    EventSeriesRole,
     Participation,
     ParticipationRole,
     Session,
@@ -581,68 +595,75 @@ class AudienceAdminForm(EventAudienceFormMixin, forms.ModelForm):
         return cleaned
 
 
-class EventForm(EventAudienceFormMixin, forms.ModelForm):
-    """P2: publish an event. The ministry dropdown lists only the ones they run.
+#: What a publisher is asked about the thing itself, whichever of the three
+#: shapes they picked. ⚠️ The list lives here rather than being typed into two
+#: `Meta.fields`, because ten field names written twice is ten chances for the
+#: two screens to drift — and this repository's answer to "two forms ask the
+#: same questions" has been a mixin since `AudienceFormMixin` (which serves
+#: five tables the same way).
+SHARED_PUBLISH_FIELDS = (
+    "name", "ministry", "location", "status", "requires_guardian_consent",
+    # L3. Right after the lifecycle fields and before the prose, because
+    # "who is this for" is a publishing decision rather than a detail.
+    *Audience.AUDIENCE_FIELDS,
+    "description", "image",
+)
 
-    ⚠️ The dropdown is there to stop a slip, not to stop an attack — a POST can
-       name any id. The view checks can_publish_event() on the submitted value
-       as well; two different jobs, both needed.
+#: The three answers to "what are you publishing". ⚠️ Two of them are values of
+#: `Event.Shape`; the third is not a value of anything, because recurring
+#: events are a **generator** rather than a state an event can be in — see
+#: `Event.Shape`'s docstring. It is offered here anyway because decision 21 is
+#: about the publisher's question, and to them there are three answers.
+PUBLISH_AS_SERIES = "series"
+
+
+class PublishFormMixin(EventAudienceFormMixin):
+    """Everything a publish form asks that does not depend on which shape it is.
+
+    ⭐ Extracted 2026-09-10 so `EventForm` and `EventSeriesForm` can be the same
+       screen. They differ in **one block** — when the thing happens — and agree
+       on the other ten fields, on the picture pipeline, on which ministries the
+       dropdown may offer, and on how the audience starts out.
+
+    ⚠️ `EventForm`'s behaviour is unchanged by the extraction: every line below
+       was moved out of it, not rewritten. That is worth stating because a mixin
+       that quietly changes the form it was lifted from is the expensive kind.
     """
 
-    class Meta:
-        model = Event
-        fields = [
-            # L5.3. Before the two times deliberately: it changes what they
-            # *mean*. On a course they are the two ends of a term, not one
-            # sitting, and somebody who fills the dates in first has already
-            # answered a different question.
-            #
-            # ⚠️ Two options here, three in the requirement. The third —
-            #    recurring events, a weekly occasion each signed up for
-            #    separately — is a generator (L5.4) rather than a value.
-            #
-            # 🔴 **The generator now exists, and this field still does not offer
-            #    it** (2026-09-10). This comment used to say it "joins this
-            #    field when the generator exists", and nobody came back. So
-            #    requirement 4's second half — the publisher *choosing* between
-            #    the three — is not delivered on any page a publisher can open;
-            #    a series is superuser-only, through the admin. A requirements
-            #    review found it by reading this line and then checking the
-            #    field's actual choices.
-            #
-            # ⚠️ It is not a one-line addition, which is why it is a written-down
-            #    gap (participants.md §9) rather than a quick fix: the third
-            #    option needs a repeat rule and a duration on this form, a
-            #    different save path (it creates an `EventSeries`, not an
-            #    `Event`), and somewhere to send the publisher afterwards. That
-            #    is the series pages, L5.8.
-            "name", "ministry", "shape", "people_pick_meetings",
-            "start_time", "end_time",
-            "location", "status", "requires_guardian_consent",
-            # L3. Right after the lifecycle fields and before the prose, because
-            # "who is this for" is a publishing decision rather than a detail.
-            *Audience.AUDIENCE_FIELDS,
-            "description", "image",
-        ]
-        widgets = {
-            # Radios, not a dropdown: two options that mean genuinely different
-            # things have to be readable side by side, the same reasoning the
-            # audience tick-boxes below are written down with. A closed select
-            # shows one of them and hides the choice.
-            "shape": forms.RadioSelect,
-            "start_time": forms.DateTimeInput(attrs={"type": "datetime-local"}),
-            "end_time": forms.DateTimeInput(attrs={"type": "datetime-local"}),
-            # Tick-boxes, not a multi-select list: every option has to be
-            # visible at once for the containment between them to be readable.
-            "visible_to_ministries": forms.CheckboxSelectMultiple,
-            # `accept` is a semantic attribute, not styling — it tells the file
-            # picker what to offer, the same exception type="date" gets under
-            # phase-c.md's placement rules. It is a convenience and never a
-            # check: clean_image() below is the check.
-            "image": forms.ClearableFileInput(attrs={"accept": "image/*"}),
-        }
+    #: The fields that answer "when does this happen" — the **only** block the
+    #: three-way radio swaps (decision 32). Each shape names its own, because
+    #: they are not the same question: an event happens at two moments, a rule
+    #: happens every so often for a length.
+    WHEN_FIELDS = ()
 
-    TIME_FIELDS = ("start_time", "end_time")
+    #: Does the "when" block still get hand-drawn once the thing exists?
+    #: ⚠️ False here and True only on `EventSeriesForm` — see its own note.
+    WHEN_BLOCK_ON_EDIT = False
+
+    @property
+    def drawn_separately(self):
+        """The fields the publish page lays out itself; see `form_fields.html`.
+
+        ⭐ Only when adding. The publish page draws the radio and the "when"
+           block as one unit because choosing a shape decides what the block
+           asks — a relationship a flat list of fields cannot express. The two
+           edit pages (`event_update`, `series_detail`) have no radio and no
+           block: there is nothing to choose, the shape is already settled, so
+           they render every field flat and this must be empty for them.
+
+        ⚠️ Both halves of that are load-bearing, in opposite directions. Name a
+           field here that the page does not draw and it **vanishes** from the
+           page. Fail to name one it does draw and it is rendered **twice**,
+           which is the quiet one: the second, empty copy wins on submit.
+           `NoFieldIsDrawnTwiceTests` pins both, on all three pages.
+        """
+        if self.instance.pk is None:
+            return ("publish_as", *self.WHEN_FIELDS)
+        # ⚠️ On an edit page the radio is gone, but the "when" block may still
+        #    need hand-drawing: `EventSeriesForm`'s picker is a block whose
+        #    boxes depend on each other, and it is the same block on both
+        #    pages. `EventForm`'s two moments are flat fields, so it says no.
+        return tuple(self.WHEN_FIELDS) if self.WHEN_BLOCK_ON_EDIT else ()
 
     def clean_image(self):
         """Re-encode the upload, or refuse it.
@@ -656,6 +677,10 @@ class EventForm(EventAudienceFormMixin, forms.ModelForm):
            所以真正挡住解压炸弹的是 **Pillow 自己的 `MAX_IMAGE_PIXELS`**，不是
            下面这个比较。这里这一条管的是**存储和带宽**：一张 40 MB 的原图能被
            解码，但不该被接收。两件事，别再把它们写成一件。
+
+        ⚠️ On the mixin since 2026-09-10, because the series upload is shown by
+           every occasion it makes — so an unstripped phone photo here publishes
+           somebody's home GPS on N pages instead of one.
         """
         uploaded = self.cleaned_data.get("image")
         # An unchanged field hands back the stored FieldFile, which has already
@@ -713,6 +738,14 @@ class EventForm(EventAudienceFormMixin, forms.ModelForm):
         #    had deliberately narrowed.
         if self.instance.pk is None:
             self.initial.setdefault("visible_to_ministries", list(administered))
+        else:
+            # ⚠️ The radio is a question about what to **create**, so it has no
+            #    answer on an edit page: an event cannot become a repeat rule,
+            #    and a rule cannot become one evening. Left in place it would
+            #    render a live-looking three-way choice that silently does
+            #    nothing — and on `EventForm` it would sit next to `shape`
+            #    asking nearly the same question with a different answer.
+            self.fields.pop("publish_as", None)
 
     def clean(self):
         cleaned = super().clean()
@@ -723,6 +756,119 @@ class EventForm(EventAudienceFormMixin, forms.ModelForm):
         if audience is not None:
             self.refuse_narrowing_below_the_roles(audience)
         return cleaned
+
+
+class EventForm(PublishFormMixin, forms.ModelForm):
+    """P2: publish an event. The ministry dropdown lists only the ones they run.
+
+    ⚠️ The dropdown is there to stop a slip, not to stop an attack — a POST can
+       name any id. The view checks can_publish_event() on the submitted value
+       as well; two different jobs, both needed.
+    """
+
+    class Meta:
+        model = Event
+        fields = [
+            # L5.3. Before the two times deliberately: it changes what they
+            # *mean*. On a course they are the two ends of a term, not one
+            # sitting, and somebody who fills the dates in first has already
+            # answered a different question.
+            #
+            # ⚠️ Two options here, three in the requirement. The third —
+            #    recurring events, a weekly occasion each signed up for
+            #    separately — is a generator (L5.4) rather than a value.
+            #
+            # ⭐ **The third option is offered by `publish_as` below**, not by
+            #    this column — because it is not a value this column could
+            #    hold. Picking it builds an `EventSeries`, and the view
+            #    constructs `EventSeriesForm` from the same POST instead of
+            #    this one. Requirement 4's second half, delivered 2026-09-10;
+            #    decision 32 for why the radio stays on this one screen.
+            # ⚠️ Composed, not retyped: `SHARED_PUBLISH_FIELDS` is the ten
+            #    questions both shapes ask, and only the "when" block below is
+            #    this form's own. Order is preserved by hand because `shape`
+            #    has to come before the two times — see above.
+            "name", "ministry", "shape", "people_pick_meetings",
+            "start_time", "end_time",
+            *(f for f in SHARED_PUBLISH_FIELDS if f not in {"name", "ministry"}),
+        ]
+        widgets = {
+            # Radios, not a dropdown: two options that mean genuinely different
+            # things have to be readable side by side, the same reasoning the
+            # audience tick-boxes below are written down with. A closed select
+            # shows one of them and hides the choice.
+            "shape": forms.RadioSelect,
+            "start_time": forms.DateTimeInput(attrs={"type": "datetime-local"}),
+            "end_time": forms.DateTimeInput(attrs={"type": "datetime-local"}),
+            # Tick-boxes, not a multi-select list: every option has to be
+            # visible at once for the containment between them to be readable.
+            "visible_to_ministries": forms.CheckboxSelectMultiple,
+            # `accept` is a semantic attribute, not styling — it tells the file
+            # picker what to offer, the same exception type="date" gets under
+            # phase-c.md's placement rules. It is a convenience and never a
+            # check: clean_image() below is the check.
+            "image": forms.ClearableFileInput(attrs={"accept": "image/*"}),
+        }
+
+    TIME_FIELDS = ("start_time", "end_time")
+
+    #: An event happens between two moments; `people_pick_meetings` rides along
+    #: because it only means anything once "a course" is the chosen shape.
+    WHEN_FIELDS = ("start_time", "end_time", "people_pick_meetings")
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        if self.instance.pk is None:
+            # ⭐ On the publish page `publish_as` **is** this column — the view
+            #    writes the chosen answer onto `shape` (see `event_create`).
+            #    Asking twice would put two radios on one screen that disagree,
+            #    and the lower one would win.
+            #
+            # ⚠️ Removed rather than hidden. A hidden `shape` would be a second
+            #    answer travelling with the POST, and whichever of the two the
+            #    view read last would be the one that counted.
+            self.fields.pop("shape", None)
+
+        # ⭐ 「人自己挑来哪几讲」只有**一期课**答得上（2026-09-11）。
+        #    一场活动只有一个时刻，没有「哪几讲」可挑 —— 那一格摆在那儿是在问
+        #    一个不存在的问题，而勾上它对单场活动什么都不做。
+        #
+        # ⚠️ 判据两种来源，因为这张表单服务两页：发布页上形状还没定，答案在
+        #    `publish_as`（换档时 `publish_when` 会重建这张表单，所以它跟着变）；
+        #    编辑页上形状已经是列了，答案在 `instance.shape`。
+        #
+        # ⚠️ 拿掉而不是藏起来。藏起来的话它照样随 POST 提交，于是一个「一场」
+        #    活动可以带着一个为真的 `people_pick_meetings` 存进库里 —— 一个
+        #    永远不会有人读、但确实在那儿的值。
+        if self._shape_now() != Event.Shape.PROGRAM:
+            self.fields.pop("people_pick_meetings", None)
+
+    def _shape_now(self):
+        """这张表单此刻在编辑哪一种形状。"""
+        if self.instance.pk is not None:
+            return self.instance.shape
+        return (self.data.get("publish_as") if self.is_bound
+                else self.initial.get("publish_as"))
+
+    #: ⭐ Decision 21's three-way radio, and **not** a column on either model.
+    #:    Two of its answers are `Event.Shape` values; the third builds an
+    #:    `EventSeries`, which is a generator rather than a state an event can
+    #:    be in (see `Event.Shape`). So it is the page's own control: the view
+    #:    reads it to decide which ModelForm to construct, and neither form
+    #:    stores it.
+    #:
+    #: ⚠️ Declared on both forms so its value survives a failed submission —
+    #:    a publisher who mistyped a rule must come back to the page with
+    #:    "every week" still selected, not silently returned to "one occasion".
+    publish_as = forms.ChoiceField(
+        required=False, widget=forms.RadioSelect,
+        choices=[
+            (Event.Shape.SINGLE, Event.Shape.SINGLE.label),
+            (Event.Shape.PROGRAM, Event.Shape.PROGRAM.label),
+            (PUBLISH_AS_SERIES, "Every week — each one signed up for separately"),
+        ],
+        label="What kind of event is this",
+    )
 
     def time_changed(self):
         """Did this submission actually move the event?
@@ -772,6 +918,401 @@ NO_AUDIENCE = object()
 FILTER_PARAMS = ("q", "ministry", "nature", "start", "end")
 
 
+#: 决定「什么时候」的那几格 —— 日期预览只看它们的错误。
+#:
+#: ⚠️ 一份名单，`EventSeriesForm` 和 `views.series_preview` 共用。分成两份的
+#:    后果是静默的：预览那边漏掉一格，那一格填错时页面既不报错也不出日期，
+#:    只会一直显示「填好上面几格」——对着一个已经填好的表单说。
+WHEN_ANSWERS = (
+    "repeat_mode", "repeat_every", "repeat_weekdays", "repeat_ordinals",
+    "repeat_weekday", "ends_kind", "ends_after", "ends_on",
+    "rule", "starts_on", "start_time", "duration",
+)
+
+
+class DurationBoxes(forms.MultiWidget):
+    """「开多久」拆成三格：时 : 分 : 秒（2026-09-11）。
+
+    🔴 **它换掉的那一格有一个不报错的陷阱，而模型里早就写着。**
+       `DurationField` 把一个光秃秃的数字读成**秒**，所以有人想写「两小时」
+       敲了个 `2`，得到的是五十二个**两秒**的活动，而且一句话都没有
+       （`EventSeries.clean()` 里那条 🔴 注释记着这件事，它只挡得住零和负数）。
+       三个格子让那个歧义不存在：2 填在「时」那一格里就是两小时。
+
+    ⚠️ 底下仍然是那个 `DurationField`，不是新列、不是新字段类型 ——
+       `value_from_datadict()` 把三格拼回 `"H:MM:SS"`，交给它自己去解析。
+       所以校验、约束、admin 那一侧一个字都没动。
+
+    ⚠️ 三个原生 `<input type="number">`，没有 JavaScript 照样能填（D24）。
+    """
+
+    template_name = "events/widgets/duration_boxes.html"
+
+    def __init__(self, attrs=None):
+        # ⚠️ `min="0"`：负的时长由数据库约束挡着，但让浏览器先拦一道，
+        #    省掉一次往返。上限只给分和秒 —— 小时没有合理的上限可写。
+        common = {"min": "0", "inputmode": "numeric", "class": "duration-box"}
+        super().__init__([
+            forms.NumberInput(attrs={**common, "aria-label": "Hours"}),
+            forms.NumberInput(attrs={**common, "max": "59", "aria-label": "Minutes"}),
+            forms.NumberInput(attrs={**common, "max": "59", "aria-label": "Seconds"}),
+        ], attrs)
+
+    def use_required_attribute(self, initial):
+        """浏览器不要挨个格子要求填。
+
+        🔴 `required` 会被 `MultiWidget` 发到**每一个**子部件上，于是「两小时」
+           必须写成 `2` `0` `0` —— 分和秒留空，浏览器就拦下来，而那两格留空
+           正是这个控件想让人能做的事。
+
+        ⚠️ 这不是把校验关掉：三格全空时 `value_from_datadict()` 交回空串，
+           `DurationField` 照常说「这一格是必填的」。挪掉的只有浏览器那一道。
+        """
+        return False
+
+    def decompress(self, value):
+        """一个 `timedelta`（或者上一趟提交的那个字符串）拆成三格。
+
+        ⚠️ 字符串那一支不是多余的：校验失败重渲那一趟，Django 递进来的是
+           `value_from_datadict()` 交出去的东西，也就是 `"2:00:00"`。
+           少了它，一次填错会把人已经填对的时长也清空。
+        """
+        if not value:
+            return [None, None, None]
+        if isinstance(value, str):
+            parts = value.split(":")
+            return [*(part or None for part in parts[:3]),
+                    *[None] * (3 - len(parts[:3]))]
+        total = int(value.total_seconds())
+        return [total // 3600, total % 3600 // 60, total % 60]
+
+    def value_from_datadict(self, data, files, name):
+        hours, minutes, seconds = super().value_from_datadict(data, files, name)
+        if not any(str(part or "").strip() for part in (hours, minutes, seconds)):
+            return ""
+        try:
+            return (f"{int(hours or 0)}:{int(minutes or 0):02d}"
+                    f":{int(seconds or 0):02d}")
+        except ValueError:
+            # ⚠️ 拼不出来就把原样交回去，让 `DurationField` 自己说那句拒绝 ——
+            #    在这里另写一句，就是同一个错误有两种说法。
+            return ":".join(str(part or "") for part in (hours, minutes, seconds))
+
+
+class EventSeriesForm(PublishFormMixin, forms.ModelForm):
+    """Publish a repeat rule — the third of the three shapes. L5.8a.
+
+    ⭐ The same screen as `EventForm` and deliberately so (decision 32): a
+       publisher answers one question — "what am I putting on?" — and there are
+       three answers. Ten of the eleven things this asks are identical to the
+       other two shapes and come from `PublishFormMixin`; only the block below
+       differs, because only *when* differs.
+
+    ⚠️ The two forms are never both constructed for one request. The view reads
+       `publish_as` and builds one of them from the same POST, so `start_time`
+       meaning a `datetime` on one and a `time` on the other cannot collide —
+       said out loud because it reads like a trap.
+
+    ⚠️ No `end_time`, and that is the whole shape of the difference: a rule does
+       not happen at a moment, it happens repeatedly for a length. `duration` is
+       how long each occasion lasts; `Event.end_time` is worked out from it when
+       an occasion is generated (in absolute time — see
+       `services.generate_occasions`).
+    """
+
+    # ⚠️ The same field object as `EventForm`'s, taken rather than retyped:
+    #    the three choices and their wording are one list, and a publisher who
+    #    submits a bad rule comes back to a page where "every week" is still
+    #    the selected option.
+    publish_as = EventForm.base_fields["publish_as"]
+
+    #: ⚠️ `start_time` is on both lists and is **not** the same field: a moment
+    #:    on `EventForm`, a time of day here. Harmless because the two forms are
+    #:    never both built for one request — written down because it reads like
+    #:    a trap.
+    WHEN_FIELDS = (
+        "repeat_mode", "repeat_every", "repeat_weekdays",
+        "repeat_ordinals", "repeat_weekday",
+        "ends_kind", "ends_after", "ends_on",
+        "use_advanced", "rule",
+        "starts_on", "start_time", "duration",
+    )
+
+    #: ⭐ True, unlike `EventForm`'s. The picker below is a **block** — which
+    #:    boxes to ask depends on the mode — so it has to be hand-drawn on the
+    #:    rule's own page as well as on the publish page. `EventForm`'s two
+    #:    moments are flat fields and stay flat when editing.
+    WHEN_BLOCK_ON_EDIT = True
+
+    # --- the picker (2026-09-11) -------------------------------------------
+    #
+    # 🔴 **None of these is a column.** They are nine controls over the one
+    #    `rule` string: `__init__` takes it apart for them, `clean()` puts it
+    #    back together. Storing them would give "what does this rule say" two
+    #    answers, and D14's whole point is that it may have one.
+    #
+    # ⚠️ Every one of them is an ordinary field with an ordinary widget, so the
+    #    whole picker works with the scripts off (D24): the wheel is a real
+    #    `<select>` and the day strip is seven real tick-boxes. The polish is
+    #    added on top by JS and takes nothing away when it is missing.
+
+    # ⚠️ `required=False` 贯穿这几格，而它们**都有安全的默认**（`clean()` 里的
+    #    `or WEEKLY` / `or 1` / `or "count"`）。理由不是宽松，是那个「高级」框：
+    #    勾了它就是不用选择器，而一个必填的 `ends_kind` 会让一条手写规则
+    #    被「This field is required」挡下来 —— 指着一格那个人根本没看的控件。
+    #    2026-09-11 走查实测到的。
+    repeat_mode = forms.ChoiceField(
+        choices=[(WEEKLY, "By week"), (MONTHLY, "By month")], required=False,
+        initial=WEEKLY, widget=forms.RadioSelect, label="How often")
+    repeat_every = forms.TypedChoiceField(
+        choices=[(n, str(n)) for n in range(1, MAX_INTERVAL + 1)], required=False,
+        coerce=int, initial=1, label="Every")
+    repeat_weekdays = forms.MultipleChoiceField(
+        choices=WEEKDAYS, required=False, widget=forms.CheckboxSelectMultiple,
+        label="On these days")
+    # ⚠️ Several, on purpose: "the first and third Saturday of the month" is a
+    #    common way for a charity to run something, and a single-choice
+    #    "which one" could not say it (2026-09-11).
+    repeat_ordinals = forms.MultipleChoiceField(
+        choices=ORDINALS, required=False, widget=forms.CheckboxSelectMultiple,
+        label="Which ones")
+    repeat_weekday = forms.ChoiceField(
+        choices=WEEKDAYS, required=False, initial="SA", label="Day")
+
+    #: ⚠️ 第三档 2026-09-11（L5.9）加的。在那之前「不结束」根本存不下来 ——
+    #:    `EventSeries.clean()` 有一条「This rule never stops」的拒绝，
+    #:    因为生成会把整条规则一次铺完。现在生成按一年的窗口滚，所以
+    #:    「一直到我停掉它」是一个可以表达的、正常的安排。
+    ends_kind = forms.ChoiceField(
+        choices=[("count", "After a number of occasions"),
+                 ("on", "On a date"),
+                 ("never", "Never — until I stop it")], required=False,
+        initial="count", widget=forms.RadioSelect, label="When it stops")
+    ends_after = forms.IntegerField(
+        required=False, min_value=1, initial=12, label="occasions")
+    ends_on = forms.DateField(
+        required=False, widget=forms.DateInput(attrs={"type": "date"}),
+        label="until")
+
+    #: The escape hatch. ⚠️ A tick rather than a third mode on the radio above,
+    #: because it answers a different question — not "what shape is this
+    #: rule" but "ignore the picker, I have written one myself". One boolean,
+    #: one winner, no guessing which control the save listened to.
+    use_advanced = forms.BooleanField(
+        required=False, label="Write the rule myself instead")
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # ⚠️ Not required **on the form**, though the column is. The picker is
+        #    what normally fills it, and `clean()` below is where it gets
+        #    filled — so leaving this required would refuse every ordinary
+        #    save with "This field is required" pointing at a box the
+        #    publisher was never meant to type in.
+        self.fields["rule"].required = False
+        # ⭐ The one thing a repeat rule cannot do, said where somebody is
+        #    about to run into it (2026-09-11). Picking several days makes it
+        #    look as though each of them could be arranged separately, and the
+        #    day this bites is the day a volunteer turns up at 19:00 to a
+        #    Thursday that started at 10:00.
+        #
+        # ⚠️ On the form rather than on the model's `help_text`, so it appears
+        #    on the two publisher pages without a migration for a sentence.
+        #    The admin does not show it, and that is the right audience: this
+        #    is advice about the picker, and the admin has no picker.
+        self.fields["start_time"].help_text = (
+            "Every occasion starts at this time, and runs for the same length. "
+            "Tuesdays at 19:00 and Thursdays at 10:00 is two rules, not one."
+        )
+        # ⚠️ 模型上那句说明写的是「written hours:minutes:seconds — 2:00:00 for
+        #    two hours」，而它描述的是一格**已经不存在**的输入框。三个格子之后
+        #    那句话不再需要，留着它比没有更糟 —— 页面上找不到它说的那个东西。
+        self.fields["duration"].help_text = ""
+        self._fill_the_picker_from(self.initial.get("rule") or self.instance.rule)
+
+    def _fill_the_picker_from(self, rule):
+        """Set the picker's controls from an existing rule string.
+
+        ⚠️ Only when this form is **unbound**. On a bound form the controls
+           carry what the person just submitted, and overwriting them with the
+           stored rule would throw their edit away in front of them.
+
+        ⚠️ A rule the picker cannot draw (`FREQ=DAILY`, `BYMONTHDAY=15`) is not
+           an error and is never rewritten: the advanced box is ticked and the
+           string is shown exactly as it is. See `recurrence.decompose`.
+        """
+        if self.is_bound or not rule:
+            return
+        answers = decompose(rule)
+        if answers is None:
+            self.initial.setdefault("use_advanced", True)
+            return
+        self.initial.setdefault("repeat_mode", answers["mode"])
+        self.initial.setdefault("repeat_every", answers["every"])
+        self.initial.setdefault("repeat_weekdays", answers["weekdays"])
+        self.initial.setdefault("repeat_ordinals", answers["ordinals"])
+        if answers["weekday"]:
+            self.initial.setdefault("repeat_weekday", answers["weekday"])
+        if answers["until"]:
+            self.initial.setdefault("ends_kind", "on")
+            self.initial.setdefault("ends_on", answers["until"])
+        elif answers["count"]:
+            self.initial.setdefault("ends_kind", "count")
+            self.initial.setdefault("ends_after", answers["count"])
+        else:
+            # 两个都没有 = 不结束。⚠️ 少了这一支，一条自己刚建的无限规则
+            #    再打开会显示成「共 None 场」。
+            self.initial.setdefault("ends_kind", "never")
+
+    def clean(self):
+        """Build `rule` out of the picker, unless they asked to write it.
+
+        ⭐ The composed string goes into `cleaned_data["rule"]` and nowhere
+           else. `_post_clean()` copies it onto the instance and
+           `EventSeries.clean()` judges it exactly as it judges a hand-typed
+           one — so the picker cannot produce a rule the rest of the system
+           would not accept, and the sentence a publisher sees is the same
+           sentence either way.
+        """
+        cleaned = super().clean()
+        if cleaned.get("use_advanced"):
+            # ⚠️ Their string, untouched. The only thing to check is that they
+            #    put something there — everything else is `EventSeries.clean()`.
+            if not cleaned.get("rule"):
+                self.add_error("rule", "Write the rule, or untick the box above.")
+            return cleaned
+
+        # 🔴 **Only the picker's own answers decide whether to build the rule.**
+        #    The first version asked `if not self.errors`, which reads as
+        #    caution and is wrong: `series_preview` runs this form while
+        #    somebody is still typing, so `ministry` and `name` are routinely
+        #    empty — and an error on either of those silently stopped the rule
+        #    from being composed at all. The preview then showed "fill in the
+        #    boxes above" to somebody who had just filled them in, with no
+        #    complaint to act on. Found in the browser, 2026-09-11.
+        picker_is_answered = True
+
+        mode = cleaned.get("repeat_mode") or WEEKLY
+        if mode == WEEKLY and not cleaned.get("repeat_weekdays"):
+            # ⚠️ Refused rather than defaulted to the first date's weekday.
+            #    `FREQ=WEEKLY` with no `BYDAY` is a legal rule meaning exactly
+            #    that, so the quiet version would build a real batch out of a
+            #    question nobody answered.
+            self.add_error("repeat_weekdays", "Pick at least one day.")
+            picker_is_answered = False
+        if mode == MONTHLY and not cleaned.get("repeat_ordinals"):
+            self.add_error("repeat_ordinals",
+                           "Pick at least one — first, second, and so on.")
+            picker_is_answered = False
+
+        ends = cleaned.get("ends_kind") or "count"
+        count = cleaned.get("ends_after") if ends == "count" else None
+        until = cleaned.get("ends_on") if ends == "on" else None
+        # ⚠️ `"never"` 两个都不给，于是 `compose()` 既不写 COUNT 也不写 UNTIL ——
+        #    一条不结束的规则。它不需要校验任何东西，所以这里没有它的分支。
+        if ends == "count" and not count:
+            self.add_error("ends_after", "Say how many occasions to make.")
+            picker_is_answered = False
+        if ends == "on" and not until:
+            self.add_error("ends_on", "Pick the date it stops on.")
+            picker_is_answered = False
+
+        if picker_is_answered:
+            cleaned["rule"] = self._rule_for(compose(
+                mode=mode, every=cleaned.get("repeat_every") or 1,
+                weekdays=cleaned.get("repeat_weekdays") or [],
+                ordinals=cleaned.get("repeat_ordinals") or [],
+                weekday=cleaned.get("repeat_weekday"),
+                count=count, until=until))
+        return cleaned
+
+    def _rule_for(self, composed):
+        """The composed rule — or the stored one, when they mean the same thing.
+
+        🔴 **Without this, opening a series and saving anything at all can lock
+           the publisher out of it.** `compose()` writes one canonical spelling,
+           and several perfectly legal stored rules do not survive the round
+           trip:
+
+               FREQ=WEEKLY;INTERVAL=1;BYDAY=TU;COUNT=12  → INTERVAL=1 dropped
+               freq=weekly;byday=tu;count=12             → upper-cased
+               …;UNTIL=20261231T000000Z                  → converted to local
+
+           All three mean exactly what they meant before. But `rule` is one of
+           `GENERATION_FIELDS`, so `_refuse_rewriting_the_rule()` sees it change
+           and refuses — and it refuses the **whole save**. Fixing a typo in the
+           description would come back as "this rule has already produced
+           occasions", pointing at a box the publisher never touched.
+
+        ⚠️ Compared through `decompose()` rather than as strings, because the
+           question is "do these two say the same thing", not "are they typed
+           the same way". That is also why the `UNTIL=…Z` case is caught: both
+           sides decompose to the same date.
+
+        ⚠️ A stored rule the picker cannot read (`None`) falls through to the
+           composed one — there is nothing to preserve, and the publisher is
+           by definition using the picker rather than that rule.
+        """
+        stored = self.instance.rule
+        if stored and self._mean_the_same(stored, composed):
+            return stored
+        return composed
+
+    @staticmethod
+    def _mean_the_same(stored, composed):
+        """两条规则说的是不是同一件事 —— 日子的**顺序**不算数。
+
+        🔴 **顺序这一维是 2026-09-11 代码评审补上的，而漏掉它就等于这层保护
+           不存在。** `decompose()` 把 `BYDAY` 按它在字符串里出现的顺序交回一个
+           **列表**，而页面上那组勾永远按 Mo…Su 的顺序回传。于是一条存成
+           `BYDAY=TH,TU` 的规则，重拼出来是 `BYDAY=TU,TH` —— 两个列表不等，
+           这个函数判它「变了」，`_refuse_rewriting_the_rule()` 于是拒掉**整次
+           保存**。实测两条都中：`BYDAY=TH,TU` 和 `BYDAY=3SA,1SA`。
+
+           而那正是上面那段 🔴 描述的锁死本身：改个说明，回来告诉你
+           「这条规则已经生成过场次了」，指着一个你根本没碰的框。
+
+        ⚠️ 只有 `weekdays` 和 `ordinals` 按集合比。别的字段（间隔、星期几、
+           结束方式）顺序没有意义可言，把它们也放宽只会让这个函数少认出
+           一种真正的改动。
+        """
+        first, second = decompose(stored), decompose(composed)
+        if first is None or second is None:
+            return False
+        unordered = {"weekdays", "ordinals"}
+        return all(
+            set(value) == set(second[key]) if key in unordered
+            else value == second[key]
+            for key, value in first.items())
+
+    class Meta:
+        model = EventSeries
+        fields = [
+            "name", "ministry",
+            # The "when" block. ⚠️ Before the rest for the reason `shape` sits
+            # before the two times on the other form: it is the question this
+            # shape exists to ask, and somebody who scrolls past it to fill in a
+            # location has not yet said what they are publishing.
+            "rule", "starts_on", "start_time", "duration",
+            *(f for f in SHARED_PUBLISH_FIELDS if f not in {"name", "ministry"}),
+        ]
+        widgets = {
+            # ⚠️ One line, not a textarea. `EventSeries.rule` is a `TextField`
+            #    (it is capped at SHORT_TEXT, and the column type is not this
+            #    form's business), and a ModelForm turns that into a box eight
+            #    rows tall — on a page whose whole point is the four small
+            #    questions under it, that box is the largest thing on screen
+            #    and it holds a forty-character string that never wraps.
+            "rule": forms.TextInput(),
+            "starts_on": forms.DateInput(attrs={"type": "date"}),
+            "start_time": forms.TimeInput(attrs={"type": "time"}),
+            "duration": DurationBoxes,
+            # Tick-boxes for the same reason `EventForm` gives: every option has
+            # to be visible at once for the containment between them to read.
+            "visible_to_ministries": forms.CheckboxSelectMultiple,
+            "image": forms.ClearableFileInput(attrs={"accept": "image/*"}),
+        }
+
+
 class EventSeriesAdminForm(AudienceAdminForm):
     """The series' admin form: the audience rules, plus the picture pipeline.
 
@@ -786,11 +1327,13 @@ class EventSeriesAdminForm(AudienceAdminForm):
        here is unstripped on every occasion the rule makes — the same
        multiplication the containment rule gets its urgency from.
 
-    ⚠️ It reuses `EventForm.clean_image` rather than restating it: one pipeline,
-       two doors. The alternative is two places that both nearly strip EXIF.
+    ⚠️ It reuses `PublishFormMixin.clean_image` rather than restating it: one
+       pipeline, every door. The alternative is places that each nearly strip
+       EXIF. ⚠️ Since L5.8a the site has its own `EventSeriesForm`, which gets
+       the pipeline by inheriting the mixin; this one is the admin's.
     """
 
-    clean_image = EventForm.clean_image
+    clean_image = PublishFormMixin.clean_image
 
 
 class EventPeriodForm(forms.Form):
@@ -1035,8 +1578,22 @@ class EventPeriodForm(forms.Form):
         return events
 
 
-class EventRoleForm(EventAudienceFormMixin, forms.ModelForm):
-    """Open one job on an event and say how many people it wants.
+class RoleFormBase(EventAudienceFormMixin, forms.ModelForm):
+    """Open one job and say how many people it wants — on an event or on a rule.
+
+    ⭐ One body, two doors. `EventRoleForm` opens a job on an occasion;
+       `EventSeriesRoleForm` opens one on a recipe, which then appears on every
+       occasion the recipe makes. The questions are identical — which job, how
+       many, who may sign up, any notes, and the escape hatch for a job nobody
+       has entered before — so the answers are written once.
+
+    ⚠️ The only thing that differs is which row the new one hangs on, and
+       **the model already declares that**: `AUDIENCE_PARENT` is `"event"` on
+       one and `"series"` on the other. This is the third place that attribute
+       is read (after `refuse_bad_audience()` and `submitted_event()`), so it
+       is a mechanism this codebase already has rather than one invented here.
+
+    Open one job on an event and say how many people it wants.
 
     2026-08-04: it can also **add to the vocabulary**. A ministry admin is not
     staff, so the admin site is shut to them, and a job nobody had entered
@@ -1090,9 +1647,14 @@ class EventRoleForm(EventAudienceFormMixin, forms.ModelForm):
         ]
         widgets = {"visible_to_ministries": forms.CheckboxSelectMultiple}
 
-    def __init__(self, *args, event, **kwargs):
+    def __init__(self, *args, parent, **kwargs):
         super().__init__(*args, **kwargs)
-        self.instance.event = event
+        # ⚠️ Set by the name the model declares, not by a literal. An event's
+        #    roles hang on `event` and a recipe's on `series`; writing either
+        #    one here would make this base serve exactly one of its two
+        #    subclasses, which is the shape `submitted_event()` had to be
+        #    corrected out of on 2026-09-10.
+        setattr(self.instance, self._meta.model.AUDIENCE_PARENT, parent)
         self.fields["role"].queryset = ParticipationRole.objects.filter(is_active=True)
         # ⚠️ The definition goes on **this** field too, not only on the "kind"
         #    picker beside it (2026-09-08). That one is on the path for somebody
@@ -1125,7 +1687,7 @@ class EventRoleForm(EventAudienceFormMixin, forms.ModelForm):
         # ⚠️ Only when adding. On an edit the stored answer is the answer;
         #    re-inheriting would silently widen a role somebody had narrowed.
         if self.instance.pk is None:
-            inherited = Audience.Spec.of(event)
+            inherited = Audience.Spec.of(parent)
             self.initial.setdefault("visible_to_outsiders", inherited.outsiders)
             self.initial.setdefault("visible_to_all_staff", inherited.all_staff)
             self.initial.setdefault(
@@ -1153,8 +1715,8 @@ class EventRoleForm(EventAudienceFormMixin, forms.ModelForm):
 
         🔴 Same trap as ProfileForm's names and EmergencyContactForm's
            duplicate, found in the same audit (2026-08-19).
-           `eventrole_unique_per_event` spans (event, role); `event` is set on
-           the instance above rather than rendered; and Django skips any
+           `eventrole_unique_per_event` spans (event, role); the parent is set
+           on the instance above rather than rendered; and Django skips any
            constraint mentioning a field it excluded from validation. So
            opening the same role twice on one event validated cleanly and
            raised IntegrityError at the INSERT — a 500 on the Edit & Roles
@@ -1166,7 +1728,10 @@ class EventRoleForm(EventAudienceFormMixin, forms.ModelForm):
            (it is a normalised-name comparison). This is about one row twice.
         """
         exclude = super()._get_validation_exclusions()
-        exclude.discard("event")
+        # ⚠️ By the declared name, so this works for both subclasses: the
+        #    uniqueness constraint spans (event, role) on one table and
+        #    (series, role) on the other.
+        exclude.discard(self._meta.model.AUDIENCE_PARENT)
         return exclude
 
     def clean(self):
@@ -1230,6 +1795,29 @@ class EventRoleForm(EventAudienceFormMixin, forms.ModelForm):
                 new_name, nature=self.cleaned_data["new_role_nature"])
         return super().save(commit=commit)
 
+
+
+class EventRoleForm(RoleFormBase):
+    """One job on one occasion. The door every event page has had since B10."""
+
+    class Meta(RoleFormBase.Meta):
+        model = EventRole
+
+
+class EventSeriesRoleForm(RoleFormBase):
+    """One job on a repeat rule, which every occasion it makes will then open.
+
+    ⚠️ Identical to its sibling except for the table, which is the point —
+       a publisher answering "who do I need on the door" should not meet two
+       different forms depending on which of the three shapes they picked.
+
+    ⚠️ Its audience starts as wide as the **series**, by the same decision 15
+       the event side follows: if you can see the thing, you can sign up for a
+       job in it, until somebody narrows one on purpose.
+    """
+
+    class Meta(RoleFormBase.Meta):
+        model = EventSeriesRole
 
 class HoursForm(forms.Form):
     """Entering hours by hand, for somebody added from a paper sign-in sheet."""

@@ -7,6 +7,7 @@ could not, because it is「空缺编制」moved to a different table (goal.md D1
 
 import base64
 import contextlib
+import dataclasses
 import datetime
 import io
 import json
@@ -15,9 +16,12 @@ import re
 import tempfile
 from unittest import mock
 from decimal import Decimal
+from html import unescape
 from importlib import import_module
 from pathlib import Path
 
+from dateutil.relativedelta import relativedelta
+from django import forms as django_forms
 from django.apps import apps as django_apps
 from django.conf import settings
 
@@ -60,12 +64,15 @@ from .management.commands import seed_demo
 from .management.commands.seed_demo import demo_login
 
 from . import schedule, tokens
+from .schedule import PREVIEW_MONTHS, month_grids, month_page
 from .forms import (
     FILTER_PARAMS,
     AudienceAdminForm,
     EventForm,
     EventPeriodForm,
     EventRoleForm,
+    DurationBoxes,
+    EventSeriesForm,
     SignUpForm,
 )
 from .views import EVENTS_PER_PAGE, LIST_STATE
@@ -84,7 +91,18 @@ from .models import (
     Source,
     refuse_wider_than_event,
 )
-from .recurrence import MAX_OCCASIONS, has_an_ending, occasions
+from .recurrence import (
+    BATCH_CEILING,
+    HORIZON_MONTHS,
+    ORDINALS,
+    WEEKDAYS,
+    WEEKLY,
+    compose,
+    decompose,
+    has_an_ending,
+    horizon_for,
+    occasions,
+)
 from .services import (
     UNDO_WINDOW,
     AlreadyUndone,
@@ -132,11 +150,15 @@ from .services import (
     resolve_recipients,
     scan_targets,
     scheduled_hours,
+    generated_through,
+    has_more_to_build,
+    is_running_low,
     series_with_images_to_purge,
     purge_series_image,
     set_served_as,
     sign_up,
     generate_occasions,
+    series_moments,
     split_series,
     stop_series_today,
     undo_attendance,
@@ -3919,7 +3941,7 @@ class RecurrenceTests(SimpleTestCase):
         found = occasions("FREQ=WEEKLY;BYDAY=TU",
                           starts_on=datetime.date(2026, 3, 3),
                           start_time=datetime.time(19, 0))
-        self.assertEqual(len(found), MAX_OCCASIONS + 1,
+        self.assertEqual(len(found), BATCH_CEILING + 1,
                          "it should stop one past the limit, so the caller can "
                          "tell 'exactly the limit' from 'far more than it'")
 
@@ -3993,25 +4015,42 @@ class EventSeriesTests(TestCase):
         template.save()
         return inherit_audience(template, series)
 
-    def test_a_rule_with_no_ending_is_refused_by_the_model(self):
+    def test_a_rule_with_no_ending_is_allowed_and_books_one_year(self):
+        """🔴 Inverted on 2026-09-11 (L5.9). This used to be refused with "This
+           rule never stops. Say when it ends."
+
+        What made that refusal right was that generation laid the **whole** rule
+        out in one press, so "no ending" meant "generate for ever". Generation
+        is windowed now — one press books a year — so an endless rule is an
+        ordinary thing to want, and `stop_series_today()` is how it ends.
+        """
         series = EventSeries(
             name="Forever", ministry=self.ministry, owner=self.owner,
-            rule="FREQ=WEEKLY;BYDAY=TU", starts_on=local_today(),
+            rule="FREQ=WEEKLY;BYDAY=TU",
+            starts_on=a_weekday(TUESDAY,
+                                near=local_today() + datetime.timedelta(days=7)),
             start_time=datetime.time(19, 0), duration=datetime.timedelta(hours=2))
-        with self.assertRaises(ValidationError) as refused:
-            series.full_clean()
-        self.assertIn("rule", refused.exception.error_dict)
+        series.full_clean()
+        series.save()
+        set_audience(series, Audience.Spec(
+            outsiders=True, all_staff=True, ministries=frozenset()))
 
-    def test_a_rule_that_would_run_past_a_year_is_refused(self):
-        # ⚠️ A separate failure from the one above, with a separate sentence:
-        #    COUNT=500 is perfectly finite and perfectly legal, and one press of
-        #    it is five hundred events with five hundred sets of roles.
-        with self.assertRaises(ValidationError) as refused:
-            self.make_series(rule="FREQ=WEEKLY;BYDAY=TU;COUNT=500")
-        self.assertIn(str(MAX_OCCASIONS),
-                      str(refused.exception.error_dict["rule"][0]),
-                      "the refusal has to name the number it is refusing "
-                      "against, or there is nothing to act on")
+        booked = series_moments(series)
+        self.assertTrue(booked)
+        self.assertLessEqual(local_date_of(booked[-1]),
+                             horizon_for(series.starts_on, local_today()))
+
+    def test_a_long_rule_is_windowed_rather_than_refused(self):
+        """⚠️ 2026-09-11 (L5.9) inverted this. `COUNT=500` used to be refused —
+           and so was every perfectly ordinary weekly rule past 52, such as an
+           eighteen-month run at 78. Generation is windowed now: the rule is
+           saved as written and one press builds the first year of it."""
+        series = self.make_series(rule="FREQ=WEEKLY;BYDAY=TU;COUNT=500")
+        self.assertEqual(series.rule, "FREQ=WEEKLY;BYDAY=TU;COUNT=500")
+        booked = series_moments(series)
+        self.assertLessEqual(
+            local_date_of(booked[-1]),
+            horizon_for(series.starts_on, local_today()))
 
     def test_a_rule_nobody_could_parse_says_so_in_its_own_words(self):
         with self.assertRaises(ValidationError) as refused:
@@ -4481,6 +4520,8 @@ class SeriesThroughTheAdminTests(TestCase):
             "rule": self.series.rule,
             "starts_on": self.series.starts_on.isoformat(),
             "start_time": "19:00:00",
+            # ⚠️ 单值，不是三格。admin 走的是 `EventSeriesAdminForm`，它没有
+            #    `DurationBoxes` —— 那个部件是发布者那两张页面的事（L5.8e）。
             "duration": "1:30:00",
             "location": "", "description": "",
             "status": Event.Status.OPEN,
@@ -4914,12 +4955,22 @@ class SeriesReviewFindingsTests(TestCase):
     def test_a_refusal_from_the_generator_reaches_the_admin_as_a_message(self):
         """Not as a 500 — and the batch is rolled back either way.
 
-        A series that reached the database without `full_clean()` can hold an
-        empty audience or a role wider than itself; both are refused deep inside
-        the service, and uncaught that is a crash on an admin page over a
-        silently rolled-back write.
+        A series that reached the database without `full_clean()` can hold a
+        rule that is unreadable, endless, or far too long — all refused deep
+        inside the service, and uncaught that is a crash on an admin page over
+        a silently rolled-back write.
         """
-        bare = self.build(roles=False)
+        # ⚠️ An over-long rule, since 2026-09-10. This used to use a role-less
+        #    series, and that stopped being a refusal when decision 34 gave the
+        #    state a way back (see `RoleTopUpTests`). What is under test here is
+        #    not that particular rule but the **path**: a refusal raised deep
+        #    inside the service has to arrive as a sentence, so the case only
+        #    needed a live refusal, not that one.
+        bare = self.build(roles=True)
+        EventSeries.objects.filter(pk=bare.pk).update(
+            # ⚠️ 密度，不是长度（2026-09-11，L5.9）。一条很长的周规则现在
+            #    完全正常 —— 它只是排一年。挡得住的是密到一年都装不下的。
+            rule="FREQ=HOURLY;COUNT=9000")
         user = get_user_model().objects.create_superuser(
             email="root@example.invalid", password="a-good-long-password")
         self.client.force_login(user)
@@ -4933,7 +4984,7 @@ class SeriesReviewFindingsTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(bare.occasions.count(), 0)
         self.assertTrue(
-            any("nobody could sign up" in str(m)
+            any(str(BATCH_CEILING) in str(m)
                 for m in response.context["messages"]),
             "the refusal did not reach the person who pressed the button")
 
@@ -4945,13 +4996,18 @@ class SeriesReviewFindingsTests(TestCase):
         and a message reading "53 occasion(s) generated" — a number that is not
         what the rule says and not what anybody asked for.
         """
-        long_run = self.build(rule="FREQ=WEEKLY;BYDAY=TU;COUNT=100",
-                              starts_on=a_weekday(
+        # ⚠️ 2026-09-11 (L5.9): what the generator refuses is **density**, not
+        #    length. `COUNT=100` is now an ordinary rule that books its first
+        #    year; an hourly one is what cannot be built at all.
+        too_dense = self.build(rule="FREQ=HOURLY;COUNT=9000",
+                               starts_on=a_weekday(
                            TUESDAY, near=local_today() + datetime.timedelta(days=7)))
         with self.assertRaises(ValidationError) as refused:
-            generate_occasions(long_run)
-        self.assertIn(str(MAX_OCCASIONS), str(refused.exception.messages[0]))
-        self.assertEqual(long_run.occasions.count(), 0, "nothing was written")
+            generate_occasions(too_dense)
+        said = str(refused.exception.messages[0])
+        self.assertIn(str(BATCH_CEILING), said)
+        self.assertIn("more often", said)
+        self.assertEqual(too_dense.occasions.count(), 0, "nothing was written")
 
     # --- 8: a flag that silently does nothing ------------------------------
 
@@ -5084,18 +5140,30 @@ class SeriesSecondReviewTests(TestCase):
 
     # --- a batch nobody could sign up for ----------------------------------
 
-    def test_a_series_with_no_roles_is_refused(self):
-        """The failure `EventSeriesAdmin`'s own docstring names, unchecked.
+    def test_a_series_with_no_roles_generates_and_can_be_repaired(self):
+        """⚠️ This used to be a refusal, and the refusal was right at the time.
 
-        "Twelve events with nothing open on them, and no error" is the reason
-        generation is an action rather than a save hook — and the action did not
-        test for it either, so the same state was two clicks away.
+        A batch nobody could sign up for was a dead end, because Generate only
+        ever added missing *occasions* — adding the job afterwards reached none
+        of the ones already built. Decision 34 removed the dead end, so the
+        refusal now costs a publisher a step and buys nothing (decision 36).
+
+        ⭐ Both halves in one test, because the first half is only defensible
+           given the second: it generates, **and** the way back is one press.
         """
         series = self.build(roles=False)
-        with self.assertRaises(ValidationError) as refused:
-            generate_occasions(series)
-        self.assertIn("nobody could sign up", str(refused.exception.messages[0]))
-        self.assertEqual(series.occasions.count(), 0)
+        made = generate_occasions(series)
+        self.assertEqual(len(made), 4)
+        self.assertEqual([o.roles.count() for o in made], [0, 0, 0, 0])
+
+        role, _ = ParticipationRole.objects.get_or_create(
+            code="welcome", defaults={"name": "Welcome"})
+        inherit_audience(
+            EventSeriesRole.objects.create(series=series, role=role), series)
+        self.assertEqual(generate_occasions(series), [],
+                         "it should top up, not build the batch again")
+        self.assertEqual(
+            [o.roles.count() for o in series.occasions.all()], [1, 1, 1, 1])
 
     # --- an unreadable rule is a sentence, not a 500 ------------------------
 
@@ -5132,21 +5200,36 @@ class SeriesSecondReviewTests(TestCase):
 
     # --- the cap, at its edges ---------------------------------------------
 
-    def test_a_rule_at_exactly_the_cap_is_allowed(self):
-        """⚠️ The boundary the constant's own comment describes as the case it
-           means to **allow** — "about a year of a weekly series" — and no test
-           came within forty-eight of it. A `>=` slip would have refused the
-           thing the number was chosen to permit, with nothing noticing.
-        """
-        series = self.build(rule=f"FREQ=WEEKLY;BYDAY=TU;COUNT={MAX_OCCASIONS}")
-        series.full_clean()
-        self.assertEqual(len(generate_occasions(series)), MAX_OCCASIONS)
+    def test_a_year_of_weekly_goes_through_in_one_press(self):
+        """⚠️ The ordinary case, at the size the old cap was set to.
 
-    def test_a_rule_one_past_the_cap_is_refused(self):
+        ⚠️ 52, and it was 51 until 2026-09-11: the window used to run from
+           **today**, so fifty-two Tuesdays starting a week from now ended about
+           a week past it and the last one waited for the next press. Measuring
+           from the series' own first date (`horizon_for`) took that surprise
+           away — `COUNT=52` now means fifty-two. That change was made for a
+           different reason (a course starting next autumn produced nothing at
+           all); this is the second thing it fixed.
+        """
+        series = self.build(rule="FREQ=WEEKLY;BYDAY=TU;COUNT=52")
+        series.full_clean()
+        made = generate_occasions(series)
+        self.assertEqual(len(made), 52)
+        self.assertLessEqual(local_date_of(made[-1].start_time),
+                             horizon_for(series.starts_on, local_today()))
+
+    def test_a_rule_denser_than_a_year_can_hold_is_refused_in_its_own_words(self):
+        """🔴 What is left to refuse after L5.9: density, not length.
+
+        ⚠️ The sentence has to say **too often**, not "too long". "Build it in
+           shorter runs" — the old advice — is useless for an hourly rule: it
+           is that dense however short you make it.
+        """
         with self.assertRaises(ValidationError) as refused:
-            self.build(rule=f"FREQ=WEEKLY;BYDAY=TU;COUNT={MAX_OCCASIONS + 1}"
-                       ).full_clean()
-        self.assertIn("rule", refused.exception.error_dict)
+            self.build(rule="FREQ=HOURLY;COUNT=9000").full_clean()
+        said = str(refused.exception.error_dict["rule"][0])
+        self.assertIn("more often", said)
+        self.assertIn(str(BATCH_CEILING), said)
 
     # --- the only sanctioned way to change a rule ---------------------------
 
@@ -5593,7 +5676,6 @@ class SeriesThirdReviewTests(TestCase):
         #    different next actions. They used to collapse onto two.
         cases = {
             "every tuesday": "does not look like a repeat rule",
-            "FREQ=WEEKLY;BYDAY=TU": "never stops",
             "FREQ=WEEKLY;BYDAY=TU;COUNT=0": "COUNT=0",
             "DTSTART:20260922T090000\\nRRULE:FREQ=WEEKLY;COUNT=2": "DTSTART",
         }
@@ -5797,6 +5879,206 @@ class SeriesThirdReviewTests(TestCase):
 
         self.assertFalse(EventSeries.objects.filter(pk=series.pk).exists())
         self.assertFalse(storage.exists(stored), "the file was orphaned")
+
+
+class RoleTopUpTests(TestCase):
+    """Pressing Generate makes the batch match the recipe. Decisions 34–36.
+
+    ⭐ The question this answers is the ordinary one: "we have run this twice
+       and realised we need somebody on the door." Before decision 34 adding
+       that job reached only occasions that did not exist yet — which, on a
+       batch already built, is nothing at all.
+    """
+
+    def setUp(self):
+        self.ministry = Ministry.objects.create(code="prayer", name="Prayer")
+        self.owner = make_person("Owner")
+        self.wide = Audience.Spec(
+            outsiders=True, all_staff=True, ministries=frozenset())
+
+    def build(self, *, rule="FREQ=WEEKLY;BYDAY=TU;COUNT=4", starts_on=None,
+              roles=("welcome",)):
+        series = EventSeries.objects.create(
+            name="Tuesday evening meeting", ministry=self.ministry,
+            owner=self.owner, rule=rule,
+            starts_on=starts_on or a_weekday(
+                TUESDAY, near=local_today() + datetime.timedelta(days=7)),
+            start_time=datetime.time(19, 0),
+            duration=datetime.timedelta(hours=2), status=Event.Status.OPEN)
+        set_audience(series, self.wide)
+        for code in roles:
+            self.add_template(series, code)
+        return series
+
+    def add_template(self, series, code, **fields):
+        role, _ = ParticipationRole.objects.get_or_create(
+            code=code, defaults={"name": code.title()})
+        template = EventSeriesRole.objects.create(
+            series=series, role=role, **fields)
+        return inherit_audience(template, series)
+
+    def codes_on(self, occasion):
+        return sorted(occasion.roles.values_list("role__code", flat=True))
+
+    # --- decision 34 -------------------------------------------------------
+
+    def test_a_job_added_later_reaches_the_occasions_already_made(self):
+        series = self.build()
+        generate_occasions(series)
+        self.add_template(series, "door")
+
+        self.assertEqual(generate_occasions(series), [],
+                         "it topped up; it must not have built the batch again")
+        for occasion in series.occasions.all():
+            self.assertEqual(self.codes_on(occasion), ["door", "welcome"])
+
+    def test_topping_up_leaves_the_jobs_already_there_alone(self):
+        # ⚠️ Including their numbers. A top-up that rewrote `needed_count`
+        #    would quietly undo a per-evening adjustment somebody made.
+        series = self.build()
+        occasion = generate_occasions(series)[0]
+        existing = occasion.roles.get()
+        existing.needed_count = 7
+        existing.save(update_fields=["needed_count", "updated_at"])
+
+        self.add_template(series, "door")
+        generate_occasions(series)
+
+        existing.refresh_from_db()
+        self.assertEqual(existing.needed_count, 7)
+
+    def test_signing_up_does_not_stop_a_later_job_from_being_added(self):
+        """🔴 The first draft skipped any occasion with a signup, and that was
+           a borrowed rule applied where it does not hold.
+
+        `_collectable_occasions()` leaves a taken occasion alone because
+        withdrawing it **takes something away**. Opening a job takes nothing:
+        the people signed up hold rows pointing at a different role, untouched.
+        And an evening that already has volunteers on it is the one most likely
+        to want a door steward.
+        """
+        series = self.build()
+        taken = generate_occasions(series)[0]
+        volunteer = make_person("V", birth_date=datetime.date(1980, 1, 1))
+        sign_up(contact=volunteer, event_role=taken.roles.get(role__code="welcome"))
+
+        self.add_template(series, "door")
+        generate_occasions(series)
+
+        self.assertEqual(self.codes_on(taken), ["door", "welcome"])
+        self.assertTrue(
+            Participation.objects.filter(contact=volunteer).exists(),
+            "their signup must be untouched")
+
+    def test_an_evening_that_has_happened_gets_no_new_job(self):
+        """⚠️ The clock is the reason to skip, and this is why.
+
+        Opening a job on an evening that is over writes down a shortfall that
+        never existed: neither `EventRole.objects.understaffed()` nor the
+        report's role-gap filters by date, so it would report for ever that
+        last Tuesday wanted a steward and nobody came. Nobody was ever asked.
+        """
+        series = self.build(starts_on=a_weekday(
+            TUESDAY, near=local_today() - datetime.timedelta(days=21)))
+        generate_occasions(series)
+        self.add_template(series, "door")
+        generate_occasions(series)
+
+        past = [o for o in series.occasions.all() if o.start_time <= NOW]
+        ahead = [o for o in series.occasions.all() if o.start_time > NOW]
+        self.assertTrue(past and ahead, "the fixture has to straddle today")
+        for occasion in past:
+            self.assertEqual(self.codes_on(occasion), ["welcome"])
+        for occasion in ahead:
+            self.assertEqual(self.codes_on(occasion), ["door", "welcome"])
+
+    # --- decision 35 -------------------------------------------------------
+
+    def test_a_job_somebody_deleted_by_hand_is_not_put_back(self):
+        """⭐ Answered from the history table — no column, no migration.
+
+        `EventRole` has kept history since it was written, and simple-history
+        records a deletion. So "this evening deliberately does not want this
+        job" was already a question the database could answer.
+        """
+        series = self.build(roles=("welcome", "door"))
+        first, second, *_ = generate_occasions(series)
+        first.roles.get(role__code="door").delete()
+
+        generate_occasions(series)
+
+        self.assertEqual(self.codes_on(first), ["welcome"],
+                         "a deletion is a decision, and it was overruled")
+        self.assertEqual(self.codes_on(second), ["door", "welcome"])
+
+    def test_a_job_never_opened_there_is_not_mistaken_for_a_deleted_one(self):
+        # ⚠️ The other direction of the same lookup. A false positive here
+        #    silently stops a legitimate top-up, and nothing would report it.
+        series = self.build()
+        occasion = generate_occasions(series)[0]
+        self.add_template(series, "door")
+        generate_occasions(series)
+        self.assertIn("door", self.codes_on(occasion))
+
+    def test_undoing_and_rebuilding_does_not_read_as_a_deletion(self):
+        """⚠️ The edge the history lookup could plausibly have got wrong.
+
+        Stopping or undoing deletes whole `Event` rows and their roles cascade
+        — which writes deletion history. But that history hangs on **that**
+        event, and regenerating builds a new row with a new primary key, so it
+        matches nothing. Verified rather than assumed.
+        """
+        series = self.build()
+        generate_occasions(series)
+        stop_series_today(series)
+        EventSeries.objects.filter(pk=series.pk).update(ended_on=None)
+        series.refresh_from_db()
+
+        rebuilt = generate_occasions(series)
+
+        self.assertTrue(rebuilt)
+        for occasion in rebuilt:
+            self.assertEqual(self.codes_on(occasion), ["welcome"])
+
+    # --- what it must never do ---------------------------------------------
+
+    def test_removing_a_template_does_not_close_the_job_anywhere(self):
+        """⚠️ Top-up only ever adds.
+
+        Closing a job takes its signups with it — `EventRole` cascades into
+        `Participation` — which is the loss the delete guards exist for.
+        Removing a job from one evening stays something a person does on that
+        evening's own page.
+        """
+        series = self.build(roles=("welcome", "door"))
+        generate_occasions(series)
+        series.roles.get(role__code="door").delete()
+
+        generate_occasions(series)
+
+        for occasion in series.occasions.all():
+            self.assertIn("door", self.codes_on(occasion))
+
+    def test_a_narrowed_occasion_does_not_stop_the_rest_being_topped_up(self):
+        """⚠️ Skipped, not raised — one hand-edited evening must not abort the
+           whole press.
+
+        Somebody may narrow a single occasion's audience by hand; a template
+        wider than it cannot be opened there without breaking L2×L3. That
+        occasion keeps what its publisher gave it, and the others are served.
+        """
+        series = self.build()
+        first, second, *_ = generate_occasions(series)
+        set_audience(first.roles.get(), Audience.Spec(
+            outsiders=False, all_staff=True, ministries=frozenset()))
+        set_audience(first, Audience.Spec(
+            outsiders=False, all_staff=True, ministries=frozenset()))
+        self.add_template(series, "door")
+
+        generate_occasions(series)
+
+        self.assertEqual(self.codes_on(first), ["welcome"])
+        self.assertEqual(self.codes_on(second), ["door", "welcome"])
 
 
 class HoursReceivedTests(TestCase):
@@ -6182,7 +6464,7 @@ class AudienceContainmentTests(TestCase):
                 ParticipationRole.Nature.HELPING).pk,
             "needed_count": 2,
             **payload,
-        }, event=event or self.event)
+        }, parent=event or self.event)
 
     # --- the role's own rule, which L2.1 only gave the event ---------------
 
@@ -6577,7 +6859,7 @@ class AudienceContainmentTests(TestCase):
         wide = make_event(ministry=self.pantry, name="Wide",
                           visible_to_outsiders=True, visible_to_all_staff=True)
         wide.visible_to_ministries.set([self.pantry])
-        form = EventRoleForm(event=wide)
+        form = EventRoleForm(parent=wide)
         self.assertTrue(form.initial["visible_to_outsiders"])
         self.assertTrue(form.initial["visible_to_all_staff"])
         # ⚠️ Primary keys, not instances — that is what a ModelMultipleChoice
@@ -6644,7 +6926,7 @@ class AudienceContainmentTests(TestCase):
             event=self.event, role=ParticipationRole.seed_catch_all(
                 ParticipationRole.Nature.HELPING))
         role.visible_to_ministries.set([self.pantry, retired])
-        offered = list(EventRoleForm(instance=role, event=self.event)
+        offered = list(EventRoleForm(instance=role, parent=self.event)
                        .fields["visible_to_ministries"].queryset)
         self.assertIn(retired, offered)
         # ⚠️ Offered, not re-ticked — the form only makes the stored value
@@ -6657,7 +6939,7 @@ class AudienceContainmentTests(TestCase):
         # everything that was not already ticked into it.
         Ministry.objects.create(
             code="retired_help", name="Retired Help", is_active=False)
-        offered = {m.code for m in EventRoleForm(event=self.event)
+        offered = {m.code for m in EventRoleForm(parent=self.event)
                    .fields["visible_to_ministries"].queryset}
         self.assertNotIn("retired_help", offered)
 
@@ -6669,7 +6951,7 @@ class AudienceContainmentTests(TestCase):
             event=wide, role=ParticipationRole.seed_catch_all(
                 ParticipationRole.Nature.HELPING),
             visible_to_all_staff=True)
-        form = EventRoleForm(instance=narrow, event=wide)
+        form = EventRoleForm(instance=narrow, parent=wide)
         self.assertFalse(form.initial.get("visible_to_outsiders"))
 
     # --- decision 15 again, for callers that have no form -----------------
@@ -7614,7 +7896,7 @@ class AudienceShapeTests(TestCase):
         under "notes", three fields below the pair it explains.
         """
         for form in (EventForm(user=self.zhang),
-                     EventRoleForm(event=make_event(ministry=self.pantry))):
+                     EventRoleForm(parent=make_event(ministry=self.pantry))):
             with self.subTest(form=type(form).__name__):
                 names = list(form.fields)
                 self.assertEqual(
@@ -17315,3 +17597,1492 @@ class ScheduleLooksLikeCardsGuardTests(SimpleTestCase):
         js = self.source("assets", "js", "app.js")
         self.assertIn("let pickedEvent = null;", js)
         self.assertIn("row.dataset.event", js)
+
+
+class NoFieldIsDrawnTwiceTests(PageTestCase):
+    """No input appears twice on any of the three publish/edit pages. L5.8a.
+
+    🔴 The failure this exists for is **silent**. `form_fields.html` lays every
+       field out flat, and the publish page draws the radio and the "when" block
+       itself (decision 32) — so a field the form forgets to name in
+       `drawn_separately` is rendered twice, and the browser sends the *second*
+       one. Somebody fills in a start time at the top of the page and publishes
+       an event with no start time, and nothing anywhere raises.
+
+    ⚠️ The opposite mistake is pinned too, by the counts below: name a field
+       there that the page does not draw and it disappears from the page
+       entirely. Both directions are one-line edits away from each other, which
+       is why neither is left to a reading of the template.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.login(self.zhang)
+        self.series = EventSeries.objects.create(
+            name="Tuesday meeting", ministry=self.pantry,
+            owner=self.zhang.contact, rule="FREQ=WEEKLY;BYDAY=TU;COUNT=4",
+            starts_on=a_weekday(
+                TUESDAY, near=local_today() + datetime.timedelta(days=7)),
+            start_time=datetime.time(19, 0),
+            duration=datetime.timedelta(hours=2))
+        set_audience(self.series, Audience.Spec(
+            outsiders=True, all_staff=True, ministries=frozenset()))
+
+    def main_form(self, response):
+        """Just the publish/recipe form. These pages carry others.
+
+        ⚠️ Scoped rather than page-wide because the event edit page also
+           renders the roles panel, whose form asks its own audience questions
+           under the same names — two forms, not one asked twice.
+        """
+        blocks = re.findall(r"<form\b.*?</form>",
+                            response.content.decode(), re.S)
+        mine = [b for b in blocks if 'name="ministry"' in b]
+        self.assertEqual(len(mine), 1, "expected one form asking for a ministry")
+        return mine[0]
+
+    def control_ids(self, html):
+        """Every control's id, duplicates kept.
+
+        ⚠️ Ids rather than names, and that is the whole trick. A radio group
+           **is** several inputs sharing one name — `publish_as` legitimately
+           appears three times — so counting names cannot tell a group from a
+           field drawn twice. Django numbers the ids within a group
+           (`id_publish_as_0`, `_1`, `_2`), so a repeated id means the same
+           control was rendered twice and nothing else does.
+        """
+        return re.findall(
+            r'<(?:input|select|textarea)\b[^>]*\bid="([^"]+)"', html)
+
+    def assert_each_asked_once(self, response, *, must_include):
+        html = self.main_form(response)
+        ids = self.control_ids(html)
+        twice = sorted({i for i in ids if ids.count(i) > 1})
+        self.assertEqual(twice, [], f"drawn twice: {twice}")
+        # ⚠️ Against the extracted list rather than `assertIn(..., html)`:
+        #    the raw form is thousands of characters and a failure that prints
+        #    all of it is a failure nobody reads.
+        asked = re.findall(
+            r'<(?:input|select|textarea)\b[^>]*\bname="([^"]+)"', html)
+        for name in must_include:
+            self.assertIn(name, asked, f"{name} is not on the page at all")
+
+    def inputs_on(self, response):
+        """Every named control on the whole page — for asking what is absent."""
+        return re.findall(r'<(?:input|select|textarea)\b[^>]*\bname="([^"]+)"',
+                          response.content.decode())
+
+    def test_the_publish_page_asks_each_question_once(self):
+        response = self.client.get(reverse("events:event_create"))
+        self.assert_each_asked_once(
+            response, must_include=["publish_as", "name", "start_time",
+                                    "end_time", "description"])
+
+    def test_the_publish_page_as_a_series_asks_each_question_once(self):
+        response = self.client.get(
+            reverse("events:event_create"), {"publish_as": "series"})
+        self.assert_each_asked_once(
+            # ⚠️ `duration_0`，不是 `duration`：「开多久」2026-09-11 拆成了
+            #    时/分/秒三格（`forms.DurationBoxes`）。
+            response, must_include=["publish_as", "name", "rule", "starts_on",
+                                    "start_time", "duration_0", "description"])
+
+    def test_the_event_edit_page_asks_each_question_once(self):
+        response = self.client.get(
+            reverse("events:event_update", args=[self.event.pk]))
+        self.assert_each_asked_once(
+            response, must_include=["name", "shape", "start_time", "end_time"])
+
+    def test_the_series_page_asks_each_question_once(self):
+        response = self.client.get(
+            reverse("events:series_detail", args=[self.series.pk]))
+        self.assert_each_asked_once(
+            response, must_include=["name", "rule", "starts_on", "duration_0"])
+
+    def test_pressing_return_in_a_text_box_publishes_rather_than_switches(self):
+        """🔴 Found in the browser, 2026-09-10, and invisible to every other test.
+
+        A form's **default button** — the one the browser uses when somebody
+        presses Return in a text box — is the first submit button in document
+        order, and the no-JS "Switch" sits above the real one. Measured before
+        the fix: a completely valid publish form plus Return did nothing at all.
+        The page re-rendered as a shape switch, no event was created, and
+        nothing said so. Being hidden does not exempt it; Chrome skips
+        `disabled` buttons when picking the default, not invisible ones.
+
+        ⚠️ So the assertion is about **order**, not about the click handler:
+           the first submit button in the form must not be the switch.
+        """
+        html = self.main_form(self.client.get(reverse("events:event_create")))
+        submits = re.findall(
+            r'<button[^>]*\btype="submit"[^>]*>', html)
+        self.assertTrue(submits, "the publish form has no submit button at all")
+        self.assertNotIn("switch_shape", submits[0],
+                         "the switch is the default button — Return will not publish")
+
+    def test_the_shape_radio_is_not_offered_on_an_edit_page(self):
+        """An event cannot become a repeat rule, so the question has no answer.
+
+        ⚠️ Both pages, because they get it from the same mixin and a change to
+           one is a change to both. On the event page there is a second reason:
+           `publish_as` and `shape` would sit near each other asking nearly the
+           same thing, and only one of them would be listened to.
+        """
+        for url in (reverse("events:event_update", args=[self.event.pk]),
+                    reverse("events:series_detail", args=[self.series.pk])):
+            with self.subTest(url=url):
+                names = self.inputs_on(self.client.get(url))
+                self.assertNotIn("publish_as", names)
+                self.assertNotIn("switch_shape", names)
+
+
+class PublishAsSeriesTests(PageTestCase):
+    """The third answer on the publish page. L5.8a, decision 32.
+
+    ⭐ Requirement 4's second half — the foundation asked that an admin be able
+       to **choose** whether a repeating thing shows up as one entry or as one
+       per week. The generator behind it has been there since L5.4; until this
+       step nobody but a superuser could reach it, so the choice existed in the
+       code and not in the building.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.login(self.zhang)
+        self.first_tuesday = a_weekday(
+            TUESDAY, near=local_today() + datetime.timedelta(days=7))
+
+    def payload(self, **overrides):
+        """A publish POST as the picker sends it.
+
+        ⚠️ There is no `rule` here on purpose (2026-09-11). The publisher no
+           longer types one — `EventSeriesForm.clean()` builds it out of these
+           answers, and a test that posted a rule string would be exercising
+           a path the page no longer has.
+        """
+        return {
+            "publish_as": "series",
+            "name": "Tuesday prayer", "ministry": self.pantry.pk,
+            "repeat_mode": "weekly", "repeat_every": "1",
+            "repeat_weekdays": ["TU"],
+            "ends_kind": "count", "ends_after": "4",
+            "starts_on": self.first_tuesday.isoformat(),
+            "start_time": "19:00", "duration_0": "2", "duration_1": "0", "duration_2": "0",
+            "status": Event.Status.OPEN, "visible_to_outsiders": True,
+            **overrides,
+        }
+
+    # --- the radio ---------------------------------------------------------
+
+    def test_the_publish_page_offers_all_three_shapes(self):
+        response = self.client.get(reverse("events:event_create"))
+        offered = [value for value, _ in
+                   response.context["form"].fields["publish_as"].choices]
+        self.assertEqual(
+            offered, [Event.Shape.SINGLE, Event.Shape.PROGRAM, "series"])
+
+    def test_choosing_every_week_swaps_only_the_when_block(self):
+        """⭐ Decision 32's whole point: the other ten questions are the same
+           DOM, never re-rendered, so nothing typed into them can be lost."""
+        block = self.client.post(reverse("events:publish_when"),
+                                 {"publish_as": "series"}).content.decode()
+        self.assertIn('id="when-block"', block)
+        self.assertIn('name="rule"', block)
+        # The rest of the page is not in the response at all — if it were, the
+        # swap would be putting a second copy of every other field on the page.
+        for elsewhere in ('name="name"', 'name="description"',
+                          'name="visible_to_outsiders"'):
+            self.assertNotIn(elsewhere, block)
+
+    def test_which_meetings_is_asked_only_of_a_course(self):
+        """⚠️ 一场活动只有一个时刻，没有「哪几讲」可挑（2026-09-11 用户提出）。
+
+        ⚠️ 断言「不出现」而不是「藏起来」：藏起来的那一版照样随 POST 提交，
+           于是一个单场活动可以带着一个为真的 `people_pick_meetings` 存进库 ——
+           一个永远不会有人读、但确实在那儿的值。
+        """
+        asked = 'name="people_pick_meetings"'
+        for shape, expected in [(Event.Shape.SINGLE, False),
+                                (Event.Shape.PROGRAM, True),
+                                ("series", False)]:
+            with self.subTest(shape=shape):
+                page = self.client.get(
+                    reverse("events:event_create"), {"publish_as": shape})
+                self.assertEqual(asked in page.content.decode(), expected)
+                # 换档换进来的那一块也要一致 —— 它是同一张表单的另一条渲染路径。
+                block = self.client.post(
+                    reverse("events:publish_when"), {"publish_as": shape})
+                self.assertEqual(asked in block.content.decode(), expected)
+
+    def test_switching_back_asks_an_events_two_moments_again(self):
+        block = self.client.post(reverse("events:publish_when"),
+                                 {"publish_as": Event.Shape.SINGLE}).content.decode()
+        self.assertIn('name="start_time"', block)
+        self.assertIn('name="end_time"', block)
+        self.assertNotIn('name="rule"', block)
+
+    # --- D24: the same move with the scripts off ---------------------------
+
+    def test_switching_shape_works_without_javascript(self):
+        """The no-JS path is a plain submit, and it keeps what was typed.
+
+        🔴 It must **not** validate. Somebody who has filled in a name and then
+           changes their mind about the shape has done nothing wrong, and a page
+           that answers by turning red everywhere teaches them to fear the
+           radio. `event_create` skips `is_valid()` on this branch and rebuilds
+           the form unbound, from what they typed.
+        """
+        response = self.client.post(reverse("events:event_create"), {
+            "switch_shape": "1", "publish_as": "series",
+            "name": "Half typed", "description": "Also half typed",
+        })
+        self.assertEqual(response.status_code, 200)
+        form = response.context["form"]
+        self.assertIs(type(form), EventSeriesForm)
+        self.assertFalse(form.is_bound, "a bound form would validate on render")
+        self.assertEqual(form.initial["name"], "Half typed")
+        self.assertEqual(form.initial["description"], "Also half typed")
+        self.assertNotIn("This field is required", response.content.decode())
+        self.assertFalse(Event.objects.filter(name="Half typed").exists())
+        self.assertFalse(EventSeries.objects.filter(name="Half typed").exists())
+
+    def test_switching_shape_keeps_every_ministry_that_was_ticked(self):
+        """⚠️ The reason `_typed_so_far()` cannot be `request.POST.dict()`.
+
+        That version keeps the last value of a repeated key, so three ticked
+        ministries come back as one — a quietly narrowed audience, which is the
+        failure mode this whole area is most careful about.
+        """
+        response = self.client.post(reverse("events:event_create"), {
+            "switch_shape": "1", "publish_as": "series", "name": "Ticked",
+            "visible_to_ministries": [str(self.pantry.pk), str(self.tax.pk)],
+        })
+        self.assertEqual(
+            sorted(response.context["form"].initial["visible_to_ministries"]),
+            sorted([str(self.pantry.pk), str(self.tax.pk)]))
+
+    # --- the dates, before the button --------------------------------------
+
+    def test_the_preview_lists_the_days_the_rule_falls_on(self):
+        response = self.client.post(
+            reverse("events:series_preview"), self.payload())
+        self.assertEqual(len(response.context["moments"]), 4)
+        self.assertEqual(local_date_of(response.context["moments"][0]),
+                         self.first_tuesday)
+
+    def test_the_preview_refuses_a_bad_rule_in_the_words_saving_would_use(self):
+        """🔴 One rule, one sentence. The preview re-implements nothing: it
+           builds an unsaved `EventSeries` and lets `full_clean()` judge it, so
+           what this page says and what the save says cannot drift apart."""
+        bad = self.payload(use_advanced=True, rule="every tuesday please")
+        previewed = self.client.post(reverse("events:series_preview"), bad)
+        self.assertEqual(previewed.context["moments"], [])
+        complaint = previewed.context["complaint"]
+        self.assertTrue(complaint)
+
+        saved = self.client.post(reverse("events:event_create"), bad)
+        self.assertEqual(saved.context["form"].errors["rule"][0], complaint)
+
+    def test_the_preview_saves_nothing(self):
+        self.client.post(reverse("events:series_preview"), self.payload())
+        self.assertFalse(EventSeries.objects.exists())
+        self.assertFalse(Event.objects.filter(name="Tuesday prayer").exists())
+
+    # --- publishing one ----------------------------------------------------
+
+    def test_a_ministry_admin_can_build_a_series_and_lands_on_its_page(self):
+        response = self.client.post(
+            reverse("events:event_create"), self.payload())
+        series = EventSeries.objects.get(name="Tuesday prayer")
+        self.assertRedirects(
+            response, reverse("events:series_detail", args=[series.pk]))
+        self.assertEqual(series.ministry, self.pantry)
+        self.assertEqual(series.owner, self.zhang.contact)
+        # ⚠️ Nothing is generated by publishing. The rule is a recipe; pressing
+        #    Generate is a separate, deliberate act — see decision 34.
+        self.assertEqual(series.occasions.count(), 0)
+
+    def test_publishing_a_series_keeps_the_audience_that_was_ticked(self):
+        """⚠️ `save_m2m()`, the omission that cost an afternoon on `event_create`.
+
+        `visible_to_ministries` is the one part of an audience that lives in a
+        many-to-many, so without it a series ticked for one ministry and nothing
+        else stores an audience of nobody — and every occasion it goes on to
+        build inherits that.
+        """
+        self.client.post(reverse("events:event_create"), self.payload(
+            visible_to_outsiders="", visible_to_ministries=[self.pantry.pk]))
+        series = EventSeries.objects.get(name="Tuesday prayer")
+        self.assertEqual(list(series.visible_to_ministries.all()), [self.pantry])
+
+    def test_another_ministrys_admin_cannot_publish_into_this_one(self):
+        self.login(self.other_admin)
+        response = self.client.post(
+            reverse("events:event_create"), self.payload())
+        self.assertIn(response.status_code, (403, 200))
+        self.assertFalse(EventSeries.objects.filter(name="Tuesday prayer").exists())
+
+    def test_a_plain_volunteer_cannot_reach_the_publish_page_at_all(self):
+        self.login(self.lisi)
+        self.assertEqual(
+            self.client.get(reverse("events:event_create")).status_code, 403)
+        self.assertEqual(self.client.post(
+            reverse("events:series_preview"), self.payload()).status_code, 403)
+        self.assertEqual(self.client.post(
+            reverse("events:publish_when"),
+            {"publish_as": "series"}).status_code, 403)
+
+
+class SeriesPagesTests(PageTestCase):
+    """The rule's own page: change the recipe, open the jobs, press Generate.
+
+    ⭐ Deliberately the same shape as `event_form.html` (decision 33). A
+       publisher answered one question — "what am I putting on?" — and picking
+       the third answer should not drop them into a differently-shaped part of
+       the site. The one thing this page has that an event's has not is the list
+       of days the rule falls on, because a rule is not itself the thing people
+       sign up to.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.login(self.zhang)
+        self.series = EventSeries.objects.create(
+            name="Tuesday prayer", ministry=self.pantry,
+            owner=self.zhang.contact, rule="FREQ=WEEKLY;BYDAY=TU;COUNT=4",
+            starts_on=a_weekday(
+                TUESDAY, near=local_today() + datetime.timedelta(days=7)),
+            start_time=datetime.time(19, 0),
+            duration=datetime.timedelta(hours=2), status=Event.Status.OPEN)
+        set_audience(self.series, Audience.Spec(
+            outsiders=True, all_staff=True, ministries=frozenset()))
+        self.welcome, _ = ParticipationRole.objects.get_or_create(
+            code="welcome", defaults={"name": "Welcome"})
+
+    def url(self, name):
+        return reverse(f"events:{name}", args=[self.series.pk])
+
+    # --- getting in --------------------------------------------------------
+
+    def test_the_page_shows_the_days_the_rule_falls_on(self):
+        response = self.client.get(self.url("series_detail"))
+        self.assertEqual(len(response.context["moments"]), 4)
+
+    def test_another_ministrys_admin_cannot_open_it(self):
+        self.login(self.other_admin)
+        for name in ("series_detail", "series_roles", "series_generate",
+                     "series_stop"):
+            with self.subTest(name=name):
+                self.assertEqual(
+                    self.client.post(self.url(name)).status_code, 403)
+
+    # --- the recipe --------------------------------------------------------
+
+    def test_the_recipe_can_be_changed_from_this_page(self):
+        response = self.client.post(self.url("series_detail"), {
+            "name": "Tuesday prayer", "ministry": self.pantry.pk,
+            "repeat_mode": "weekly", "repeat_every": "1",
+            "repeat_weekdays": ["TU"],
+            "ends_kind": "count", "ends_after": "6",
+            "starts_on": self.series.starts_on.isoformat(),
+            "start_time": "19:30", "duration_0": "2", "duration_1": "0", "duration_2": "0",
+            "status": Event.Status.OPEN, "visible_to_outsiders": True,
+        })
+        self.assertEqual(response.status_code, 302)
+        self.series.refresh_from_db()
+        self.assertEqual(self.series.start_time, datetime.time(19, 30))
+        self.assertEqual(len(series_moments(self.series)), 6)
+
+    # --- the jobs, exactly as an event's ------------------------------------
+
+    def test_jobs_are_opened_on_this_page_the_way_an_events_are(self):
+        """⭐ Including the redirect. D24: the plain-form path is the one that
+           must always work, and it redirects so a refresh cannot post twice."""
+        response = self.client.post(self.url("series_roles"), {
+            "role": self.welcome.pk, "needed_count": 3,
+            "visible_to_outsiders": True,
+        })
+        self.assertRedirects(response, self.url("series_detail"))
+        template = self.series.roles.get()
+        self.assertEqual(template.role, self.welcome)
+        self.assertEqual(template.needed_count, 3)
+
+    def test_opening_a_job_over_htmx_gives_the_panel_back(self):
+        response = self.client.post(self.url("series_roles"), {
+            "role": self.welcome.pk, "needed_count": 3,
+            "visible_to_outsiders": True,
+        }, headers={"hx-request": "true"})
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('id="roles-panel"', response.content.decode())
+        self.assertTrue(self.series.roles.exists())
+
+    def test_a_job_can_be_taken_off_the_recipe_again(self):
+        template = EventSeriesRole.objects.create(
+            series=self.series, role=self.welcome, needed_count=3)
+        inherit_audience(template, self.series)
+        response = self.client.post(
+            reverse("events:series_role_delete", args=[template.pk]))
+        self.assertRedirects(response, self.url("series_detail"))
+        self.assertFalse(self.series.roles.exists())
+
+    def test_taking_a_job_off_the_recipe_leaves_the_occasions_alone(self):
+        """⚠️ On purpose, and the confirmation says so. `EventRole` cascades
+           into `Participation`, so closing the job everywhere would withdraw
+           people who had already signed up for it."""
+        template = self.add_template("welcome")
+        self.client.post(self.url("series_generate"))
+        self.client.post(
+            reverse("events:series_role_delete", args=[template.pk]))
+        for occasion in self.series.occasions.all():
+            self.assertEqual(
+                list(occasion.roles.values_list("role__code", flat=True)),
+                ["welcome"])
+
+    # --- the button --------------------------------------------------------
+
+    def add_template(self, code):
+        role, _ = ParticipationRole.objects.get_or_create(
+            code=code, defaults={"name": code.title()})
+        template = EventSeriesRole.objects.create(series=self.series, role=role)
+        return inherit_audience(template, self.series)
+
+    def test_generating_from_this_page_builds_the_occasions(self):
+        self.add_template("welcome")
+        response = self.client.post(self.url("series_generate"))
+        self.assertRedirects(response, self.url("series_detail"))
+        self.assertEqual(self.series.occasions.count(), 4)
+        for occasion in self.series.occasions.all():
+            self.assertEqual(occasion.source, Source.GENERATED)
+            self.assertEqual(
+                list(occasion.roles.values_list("role__code", flat=True)),
+                ["welcome"])
+
+    def test_pressing_it_twice_does_not_build_a_second_batch(self):
+        """⚠️ What makes one button safe to have (decision 34). It tops the
+           batch up to match the recipe; it does not run the recipe again."""
+        self.add_template("welcome")
+        self.client.post(self.url("series_generate"))
+        self.client.post(self.url("series_generate"))
+        self.assertEqual(self.series.occasions.count(), 4)
+
+    def test_a_job_added_after_the_batch_reaches_it_on_the_next_press(self):
+        self.add_template("welcome")
+        self.client.post(self.url("series_generate"))
+        self.add_template("door")
+        self.client.post(self.url("series_generate"))
+        for occasion in self.series.occasions.all():
+            self.assertEqual(
+                sorted(occasion.roles.values_list("role__code", flat=True)),
+                ["door", "welcome"])
+
+    def test_generating_with_no_jobs_at_all_is_allowed(self):
+        """Decision 36, both halves: it goes through, **and** there is a way on.
+
+        The earlier refusal existed because a batch with no jobs was a dead end
+        — nobody could sign up and nothing could fix it. Decision 34 is what
+        removed the dead end, so the refusal went with it.
+        """
+        response = self.client.post(self.url("series_generate"))
+        self.assertRedirects(response, self.url("series_detail"))
+        self.assertEqual(self.series.occasions.count(), 4)
+
+        self.add_template("welcome")
+        self.client.post(self.url("series_generate"))
+        for occasion in self.series.occasions.all():
+            self.assertEqual(
+                list(occasion.roles.values_list("role__code", flat=True)),
+                ["welcome"])
+
+    # --- the way back ------------------------------------------------------
+
+    def test_stopping_withdraws_what_is_still_to_come(self):
+        self.add_template("welcome")
+        self.client.post(self.url("series_generate"))
+        self.client.post(self.url("series_stop"))
+
+        self.series.refresh_from_db()
+        self.assertEqual(self.series.ended_on, local_today())
+        self.assertEqual(self.series.occasions.count(), 0)
+
+    def test_stopping_leaves_what_has_already_happened(self):
+        """⭐ The half that makes this the honest way out rather than a delete.
+
+        An evening that has already happened is somebody's attendance record and
+        somebody's hours. Stopping a series is a statement about the future.
+        """
+        self.add_template("welcome")
+        self.client.post(self.url("series_generate"))
+        happened = self.series.occasions.order_by("start_time").first()
+        Event.objects.filter(pk=happened.pk).update(
+            start_time=local_now() - datetime.timedelta(days=1),
+            end_time=local_now() - datetime.timedelta(hours=22))
+
+        self.client.post(self.url("series_stop"))
+        self.assertEqual([o.pk for o in self.series.occasions.all()],
+                         [happened.pk])
+
+
+class RecurrenceRuleWordingTests(SimpleTestCase):
+    """`compose()` and `decompose()` are each other's inverse. L5.8c.
+
+    ⭐ The pair is the whole of the picker's correctness. Everything the
+       publisher touches is a control over one RRULE string: `decompose()` takes
+       a stored rule apart to fill the controls, `compose()` puts it back. If
+       they disagree anywhere, opening a series and pressing Save **changes its
+       rule without anybody asking** — silently, on a batch people have already
+       signed up for.
+    """
+
+    ROUND_TRIP = [
+        "FREQ=WEEKLY;BYDAY=TU;COUNT=12",
+        "FREQ=WEEKLY;BYDAY=TU,TH;COUNT=8",
+        "FREQ=WEEKLY;INTERVAL=2;BYDAY=SA;COUNT=6",
+        "FREQ=WEEKLY;INTERVAL=4;BYDAY=MO,WE,FR;UNTIL=20261231T235959",
+        "FREQ=MONTHLY;BYDAY=3SA;COUNT=6",
+        "FREQ=MONTHLY;BYDAY=1SA,3SA;COUNT=8",
+        "FREQ=MONTHLY;INTERVAL=2;BYDAY=-1SU;COUNT=4",
+        # ⚠️ 没有结束的规则 2026-09-11（L5.9）起是合法的，而且画得出来 ——
+        #    它在这张表里而不在下面那张，正是这次改动的形状。
+        "FREQ=WEEKLY;BYDAY=TU",
+        "FREQ=MONTHLY;INTERVAL=3;BYDAY=2FR",
+    ]
+
+    #: Perfectly good rules this picker cannot draw. ⚠️ Not errors — the right
+    #: answer for every one of them is the advanced box, unchanged.
+    BEYOND_THE_PICKER = [
+        "FREQ=DAILY;COUNT=5",                    # 不是这个选择器的两档
+        "FREQ=MONTHLY;BYMONTHDAY=15;COUNT=6",    # 按日期，不是按第几个星期几
+        "FREQ=WEEKLY;BYDAY=1TU;COUNT=6",         # 每周那一档不带「第几个」
+        "FREQ=MONTHLY;BYDAY=1SA,3SU;COUNT=6",    # 两个不同的星期几
+        "FREQ=WEEKLY;INTERVAL=9;BYDAY=TU;COUNT=6",   # 转轮只到 4
+        "every tuesday",                         # 根本不是规则
+    ]
+
+    def test_taking_a_rule_apart_and_putting_it_back_changes_nothing(self):
+        for rule in self.ROUND_TRIP:
+            with self.subTest(rule=rule):
+                answers = decompose(rule)
+                self.assertIsNotNone(answers, "the picker should draw this one")
+                self.assertEqual(compose(**answers), rule)
+
+    def test_a_rule_the_picker_cannot_draw_is_handed_back_untouched(self):
+        """⚠️ `None` means "not mine to draw", **not** "wrong"."""
+        for rule in self.BEYOND_THE_PICKER:
+            with self.subTest(rule=rule):
+                self.assertIsNone(decompose(rule))
+
+    def test_the_interval_is_left_out_when_it_is_one(self):
+        """⚠️ Every rule in the database was written before the picker existed
+           and none of them says `INTERVAL=1`. Writing it would make an
+           untouched series look edited to anything comparing the strings."""
+        self.assertEqual(
+            compose(mode=WEEKLY, every=1, weekdays=["TU"], count=4),
+            "FREQ=WEEKLY;BYDAY=TU;COUNT=4")
+
+    def test_stopping_on_a_date_keeps_that_date(self):
+        """🔴 `T235959`, not `T000000`.
+
+        Somebody who says "until 31 December" means the 31st counts. Ending at
+        midnight **that morning** drops an occasion held that evening — one
+        fewer than asked for, no error, and only a person counting dates would
+        ever notice.
+        """
+        rule = compose(mode=WEEKLY, every=1, weekdays=["TH"],
+                       until=datetime.date(2026, 12, 31))
+        self.assertIn("UNTIL=20261231T235959", rule)
+        landed = occasions(rule, starts_on=datetime.date(2026, 12, 31),
+                           start_time=datetime.time(19, 0))
+        self.assertEqual([local_date_of(m) for m in landed],
+                         [datetime.date(2026, 12, 31)])
+
+
+class RecurrencePickerTests(PageTestCase):
+    """The publisher picks the rule instead of typing it. L5.8c, 2026-09-11.
+
+    ⭐ What this replaced was a box you had to type `FREQ=WEEKLY;BYDAY=TU;
+       COUNT=12` into. Nobody outside this repository knows that language, and
+       a ministry admin should not have to.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.login(self.zhang)
+        self.next_tuesday = a_weekday(
+            TUESDAY, near=local_today() + datetime.timedelta(days=7))
+
+    def payload(self, **overrides):
+        return {
+            "publish_as": "series",
+            "name": "Picked", "ministry": self.pantry.pk,
+            "repeat_mode": "weekly", "repeat_every": "1",
+            "repeat_weekdays": ["TU"],
+            "ends_kind": "count", "ends_after": "4",
+            "starts_on": self.next_tuesday.isoformat(),
+            "start_time": "19:00", "duration_0": "2", "duration_1": "0", "duration_2": "0",
+            "status": Event.Status.OPEN, "visible_to_outsiders": True,
+            **overrides,
+        }
+
+    def published(self):
+        return EventSeries.objects.get(name="Picked")
+
+    # --- what the picker builds --------------------------------------------
+
+    def test_picking_days_builds_the_rule(self):
+        self.client.post(reverse("events:event_create"), self.payload())
+        self.assertEqual(self.published().rule, "FREQ=WEEKLY;BYDAY=TU;COUNT=4")
+
+    def test_twice_a_week_is_one_rule_not_two(self):
+        """⭐ The question that started this (2026-09-11): does a thing running
+           on Tuesdays *and* Thursdays need two series? It does not — a rule
+           takes as many days as you tick."""
+        self.client.post(reverse("events:event_create"),
+                         self.payload(repeat_weekdays=["TU", "TH"],
+                                      ends_after="8"))
+        series = self.published()
+        self.assertEqual(series.rule, "FREQ=WEEKLY;BYDAY=TU,TH;COUNT=8")
+        self.assertEqual(len(series_moments(series)), 8)
+        self.assertEqual(
+            {m.weekday() for m in series_moments(series)}, {TUESDAY, THURSDAY})
+        self.assertEqual(EventSeries.objects.count(), 1)
+
+    def test_every_other_week_is_the_wheel_not_a_second_rule(self):
+        self.client.post(reverse("events:event_create"),
+                         self.payload(repeat_every="2"))
+        self.assertEqual(self.published().rule,
+                         "FREQ=WEEKLY;INTERVAL=2;BYDAY=TU;COUNT=4")
+
+    def test_the_first_and_third_saturday_of_the_month(self):
+        """⭐ Several "which ones" at once, which is why that control is
+           multi-select: a charity running something on the first and third
+           Saturday is one rule, not two."""
+        # ⚠️ Anchored on a Saturday the rule actually falls on. `clean()`
+        #    refuses a first date the rule does not land on — the behaviour
+        #    chosen on 2026-09-11 over silently moving the date for them.
+        saturday = a_weekday(5, near=local_today() + datetime.timedelta(days=1))
+        while (saturday.day - 1) // 7 + 1 not in (1, 3):
+            saturday += datetime.timedelta(days=7)
+
+        response = self.client.post(reverse("events:event_create"), self.payload(
+            repeat_mode="monthly", repeat_ordinals=["1", "3"],
+            repeat_weekday="SA", starts_on=saturday.isoformat(),
+            repeat_weekdays=[], ends_after="6"))
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(self.published().rule,
+                         "FREQ=MONTHLY;BYDAY=1SA,3SA;COUNT=6")
+
+    def test_stopping_on_a_date_rather_than_a_count(self):
+        self.client.post(reverse("events:event_create"), self.payload(
+            ends_kind="on", ends_after="",
+            ends_on=(self.next_tuesday + datetime.timedelta(days=21)).isoformat()))
+        self.assertIn("UNTIL=", self.published().rule)
+        self.assertNotIn("COUNT=", self.published().rule)
+
+    # --- refusals -----------------------------------------------------------
+
+    def test_no_days_ticked_is_refused_rather_than_guessed(self):
+        """🔴 `FREQ=WEEKLY` with no `BYDAY` is a **legal** rule meaning "the
+           weekday the first date falls on". So the quiet version of this would
+           not fail — it would build a real batch out of a question nobody
+           answered."""
+        response = self.client.post(reverse("events:event_create"),
+                                    self.payload(repeat_weekdays=[]))
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("repeat_weekdays", response.context["form"].errors)
+        self.assertFalse(EventSeries.objects.exists())
+
+    def test_no_ordinals_ticked_is_refused(self):
+        response = self.client.post(reverse("events:event_create"), self.payload(
+            repeat_mode="monthly", repeat_weekdays=[], repeat_ordinals=[]))
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("repeat_ordinals", response.context["form"].errors)
+
+    # --- the escape hatch ---------------------------------------------------
+
+    def test_the_advanced_box_is_taken_word_for_word(self):
+        monthly = "FREQ=MONTHLY;BYMONTHDAY=15;COUNT=4"
+        self.client.post(reverse("events:event_create"), self.payload(
+            use_advanced=True, rule=monthly,
+            starts_on=self._fifteenth().isoformat()))
+        self.assertEqual(self.published().rule, monthly)
+
+    def _fifteenth(self):
+        today = local_today()
+        month, year = (today.month, today.year) if today.day < 15 else (
+            (today.month % 12) + 1, today.year + (today.month == 12))
+        return datetime.date(year, month, 15)
+
+    def test_a_rule_the_picker_cannot_draw_reopens_the_advanced_box(self):
+        """⚠️ Opened and shown **exactly as it is** — never quietly rewritten
+           into something the picker can draw."""
+        series = EventSeries.objects.create(
+            name="By the date", ministry=self.pantry, owner=self.zhang.contact,
+            rule="FREQ=MONTHLY;BYMONTHDAY=15;COUNT=4",
+            starts_on=self._fifteenth(), start_time=datetime.time(19, 0),
+            duration=datetime.timedelta(hours=2))
+        set_audience(series, Audience.Spec(
+            outsiders=True, all_staff=True, ministries=frozenset()))
+        form = EventSeriesForm(instance=series, user=self.zhang)
+        self.assertTrue(form.initial.get("use_advanced"))
+        self.assertEqual(form["rule"].value(), "FREQ=MONTHLY;BYMONTHDAY=15;COUNT=4")
+
+    def test_an_ordinary_rule_comes_back_into_the_controls(self):
+        series = EventSeries.objects.create(
+            name="Readable", ministry=self.pantry, owner=self.zhang.contact,
+            rule="FREQ=WEEKLY;INTERVAL=2;BYDAY=TU,TH;COUNT=6",
+            starts_on=self.next_tuesday, start_time=datetime.time(19, 0),
+            duration=datetime.timedelta(hours=2))
+        set_audience(series, Audience.Spec(
+            outsiders=True, all_staff=True, ministries=frozenset()))
+        form = EventSeriesForm(instance=series, user=self.zhang)
+        self.assertFalse(form.initial.get("use_advanced"))
+        self.assertEqual(form.initial["repeat_mode"], "weekly")
+        self.assertEqual(form.initial["repeat_every"], 2)
+        self.assertEqual(form.initial["repeat_weekdays"], ["TU", "TH"])
+        self.assertEqual(form.initial["ends_after"], 6)
+
+    # --- the preview --------------------------------------------------------
+
+    def test_the_dates_appear_while_the_rest_of_the_form_is_still_empty(self):
+        """🔴 The regression this test exists for, found in the browser.
+
+        `clean()` first built the rule only when the form had **no** errors at
+        all — and the preview fires mid-typing, when `ministry` and `name`
+        routinely are empty. So the page answered a filled-in picker with
+        "fill in the boxes above" and no complaint to act on.
+        """
+        half_filled = self.payload(repeat_weekdays=["TU", "TH"], ends_after="6")
+        del half_filled["ministry"]
+        del half_filled["name"]
+        response = self.client.post(reverse("events:series_preview"), half_filled)
+        self.assertEqual(len(response.context["moments"]), 6)
+        self.assertIsNone(response.context["complaint"])
+
+    def test_the_preview_says_what_the_picker_is_missing(self):
+        response = self.client.post(reverse("events:series_preview"),
+                                    self.payload(repeat_weekdays=[]))
+        self.assertEqual(response.context["moments"], [])
+        self.assertIn("at least one day", response.context["complaint"])
+
+    # --- what the page is made of ------------------------------------------
+
+    def test_the_picker_is_ordinary_controls_so_it_works_without_javascript(self):
+        """D24. The wheel is a real `<select>` and the day strip is seven real
+        tick-boxes; the scripts only make them look like an iOS picker."""
+        html = self.client.get(
+            reverse("events:event_create"), {"publish_as": "series"}
+        ).content.decode()
+        self.assertIn('<select name="repeat_every"', html)
+        for code, _ in WEEKDAYS:
+            self.assertIn(f'name="repeat_weekdays" value="{code}"', html)
+        for value, _ in ORDINALS:
+            self.assertIn(f'name="repeat_ordinals" value="{value}"', html)
+
+    def test_the_page_warns_that_different_times_need_a_second_rule(self):
+        """⚠️ Asked for on 2026-09-11. Ticking several days looks as though each
+           could be arranged separately, and the day that bites is the day a
+           volunteer arrives at 19:00 for a Thursday that began at 10:00."""
+        html = self.client.get(
+            reverse("events:event_create"), {"publish_as": "series"}
+        ).content.decode()
+        self.assertIn("is two rules, not one", html)
+
+
+class RulePreviewCalendarTests(TestCase):
+    """The dates a rule falls on, drawn as small month calendars. L5.8d.
+
+    ⭐ The list was correct before this and still hard to use: "15 Sep · 17 Sep ·
+       22 Sep · 24 Sep" asks the reader to rebuild a calendar in their head
+       before they can see that it means "every Tuesday and Thursday" — which is
+       the one thing this block exists to let them check.
+    """
+
+    def grid_for(self, days):
+        return month_grids(days)
+
+    def page_of(self, days, page=0):
+        return month_page(days, page=page)
+
+    def marked_in(self, grid):
+        return [cell.day.day
+                for week in grid.weeks for cell in week if cell.marked]
+
+    def test_a_month_is_laid_out_as_weeks_of_seven(self):
+        grids = self.grid_for([datetime.date(2026, 9, 15)])
+        self.assertEqual(len(grids), 1)
+        for week in grids[0].weeks:
+            self.assertEqual(len(week), 7)
+
+    def test_the_week_starts_on_monday(self):
+        """⚠️ Same order as `recurrence.WEEKDAYS` and the day strip. Three
+           places, and a disagreement shows up as every highlight sitting one
+           column off — while each date printed in it is still correct."""
+        grids = self.grid_for([datetime.date(2026, 9, 1)])
+        first_cell = grids[0].weeks[0][0]
+        self.assertEqual(first_cell.day.weekday(), 0)
+
+    def test_only_the_rules_own_days_are_marked(self):
+        days = [datetime.date(2026, 9, 15), datetime.date(2026, 9, 17),
+                datetime.date(2026, 9, 22)]
+        grids = self.grid_for(days)
+        self.assertEqual(self.marked_in(grids[0]), [15, 17, 22])
+
+    def test_days_from_the_next_month_are_not_part_of_this_one(self):
+        """⚠️ Every month's grid carries a few days of its neighbours. They are
+           flagged so the template can leave them blank — a faint "31" in the
+           September grid still gets counted by somebody reading it."""
+        grids = self.grid_for([datetime.date(2026, 9, 15)])
+        spill = [cell for week in grids[0].weeks
+                 for cell in week if not cell.in_month]
+        self.assertTrue(spill)
+        self.assertTrue(all(cell.day.month != 9 for cell in spill))
+
+    def test_each_month_touched_gets_its_own_grid(self):
+        grids = self.grid_for(
+            [datetime.date(2026, 9, 29), datetime.date(2026, 10, 1)])
+        self.assertEqual([g.label for g in grids],
+                         ["September 2026", "October 2026"])
+
+    def test_a_long_rule_is_paged_rather_than_laid_out_at_once(self):
+        """🔴 `BATCH_CEILING` is 52, and "the third Saturday of every month"
+           spreads 52 of them over **four years**. Fifty-two calendars laid out
+           at once is not a preview.
+
+        ⚠️ Folded, **not dropped**. This block answers "what will Generate
+           build", and half an answer sends somebody back to counting the line
+           of dates underneath.
+        """
+        monthly = [datetime.date(2026 + (month // 12), (month % 12) + 1, 15)
+                   for month in range(24)]
+        first = self.page_of(monthly)
+        self.assertEqual(len(first.grids), PREVIEW_MONTHS)
+        self.assertEqual(first.total, 24)
+        self.assertEqual(first.pages, 4)
+        self.assertFalse(first.has_earlier)
+        self.assertTrue(first.has_later)
+
+        last = self.page_of(monthly, page=3)
+        self.assertEqual(last.first_shown, 19)
+        self.assertEqual(last.last_shown, 24)
+        self.assertTrue(last.has_earlier)
+        self.assertFalse(last.has_later)
+
+    def test_a_page_past_the_end_lands_on_the_last_one(self):
+        """⚠️ Clamped, not refused. The number comes from this page's own
+           buttons, so out of range means the rule got shorter under somebody
+           who was on month 9 — and the last page beats an error about a
+           number they never typed."""
+        monthly = [datetime.date(2026, month, 15) for month in range(1, 13)]
+        self.assertEqual(self.page_of(monthly, page=99).page, 1)
+        self.assertEqual(self.page_of(monthly, page=-5).page, 0)
+
+    def test_a_term_fits_on_one_page(self):
+        """⚠️ The ordinary case, and the reason the fold is set where it is:
+           twelve weekly occasions touch four months, so nothing is hidden."""
+        weekly = [datetime.date(2026, 9, 15) + datetime.timedelta(weeks=n)
+                  for n in range(12)]
+        only = self.page_of(weekly)
+        self.assertEqual(len(only.grids), 4)
+        self.assertEqual(only.pages, 1)
+        self.assertFalse(only.has_later)
+
+    def test_no_dates_draws_no_calendar(self):
+        self.assertEqual(self.grid_for([]), [])
+        self.assertEqual(self.page_of([]).grids, [])
+
+
+class RulePreviewPageTests(PageTestCase):
+    """The calendar as the publisher actually receives it. L5.8d."""
+
+    def setUp(self):
+        super().setUp()
+        self.login(self.zhang)
+
+    def test_the_preview_draws_the_days_the_rule_lands_on(self):
+        tuesday = a_weekday(TUESDAY, near=local_today() + datetime.timedelta(days=7))
+        response = self.client.post(reverse("events:series_preview"), {
+            "repeat_mode": "weekly", "repeat_every": "1",
+            "repeat_weekdays": ["TU", "TH"],
+            "ends_kind": "count", "ends_after": "6",
+            "starts_on": tuesday.isoformat(),
+            "start_time": "19:00", "duration_0": "2", "duration_1": "0", "duration_2": "0",
+        })
+        self.assertTrue(response.context["months"].grids)
+        drawn = [cell.day for grid in response.context["months"].grids
+                 for week in grid.weeks for cell in week if cell.marked]
+        self.assertEqual(drawn,
+                         [local_date_of(m) for m in response.context["moments"]])
+        self.assertIn("month-grid", response.content.decode())
+
+    def test_the_summary_says_how_many_and_between_which_dates(self):
+        """⚠️ The line of every date used to sit under the calendar as well.
+           It was taken out on 2026-09-11: the calendar already says it, and
+           fifty-two dates wrapped over four lines is noise. This sentence is
+           what is left, and it carries the count and the two ends."""
+        tuesday = a_weekday(TUESDAY, near=local_today() + datetime.timedelta(days=7))
+        response = self.client.post(reverse("events:series_preview"), {
+            "repeat_mode": "weekly", "repeat_every": "1",
+            "repeat_weekdays": ["TU"], "ends_kind": "count", "ends_after": "3",
+            "starts_on": tuesday.isoformat(),
+            "start_time": "19:00", "duration_0": "2", "duration_1": "0", "duration_2": "0",
+        })
+        html = response.content.decode()
+        self.assertIn("This makes 3 occasions", html)
+        last = tuesday + datetime.timedelta(weeks=2)
+        self.assertIn(formats.date_format(last, "j M Y"), html)
+
+    def test_the_pager_appears_only_when_there_is_a_second_page(self):
+        tuesday = a_weekday(TUESDAY, near=local_today() + datetime.timedelta(days=7))
+        short = self.client.post(reverse("events:series_preview"), {
+            "repeat_mode": "weekly", "repeat_every": "1",
+            "repeat_weekdays": ["TU"], "ends_kind": "count", "ends_after": "4",
+            "starts_on": tuesday.isoformat(),
+            "start_time": "19:00", "duration_0": "2", "duration_1": "0", "duration_2": "0",
+        })
+        self.assertEqual(short.context["months"].pages, 1)
+        self.assertNotIn("month-pager", short.content.decode())
+
+        long_run = self.client.post(reverse("events:series_preview"), {
+            "repeat_mode": "weekly", "repeat_every": "1",
+            "repeat_weekdays": ["TU"], "ends_kind": "count", "ends_after": "52",
+            "starts_on": tuesday.isoformat(),
+            "start_time": "19:00", "duration_0": "2", "duration_1": "0", "duration_2": "0",
+        })
+        self.assertGreater(long_run.context["months"].pages, 1)
+        self.assertIn("month-pager", long_run.content.decode())
+
+    def test_turning_to_the_next_page_shows_the_later_months(self):
+        tuesday = a_weekday(TUESDAY, near=local_today() + datetime.timedelta(days=7))
+        payload = {
+            "repeat_mode": "weekly", "repeat_every": "1",
+            "repeat_weekdays": ["TU"], "ends_kind": "count", "ends_after": "52",
+            "starts_on": tuesday.isoformat(),
+            "start_time": "19:00", "duration_0": "2", "duration_1": "0", "duration_2": "0",
+        }
+        first = self.client.post(reverse("events:series_preview"), payload)
+        second = self.client.post(
+            reverse("events:series_preview"), {**payload, "month_page": "1"})
+
+        self.assertEqual(second.context["months"].page, 1)
+        self.assertNotEqual(
+            [g.label for g in first.context["months"].grids],
+            [g.label for g in second.context["months"].grids])
+        # ⚠️ 两页加起来必须是全部，一个月都不许掉 —— 翻页是为了少看，不是为了少给。
+        self.assertEqual(second.context["months"].first_shown,
+                         first.context["months"].last_shown + 1)
+
+    def test_a_thousand_year_rule_shows_the_first_year_and_no_more(self):
+        """🔴 The question asked on 2026-09-11: what if "when it stops" is a
+           thousand years out?
+
+        It used to be refused outright. Since L5.9 it is an ordinary rule —
+        generation is windowed, so the page draws the year it would book and
+        says nothing about the other nine hundred and ninety-nine.
+
+        ⚠️ Nothing is ever enumerated beyond that either: `occasions()` slices
+           a generator, so the length of the rule costs nothing to ignore.
+        """
+        tuesday = a_weekday(TUESDAY, near=local_today() + datetime.timedelta(days=7))
+        response = self.client.post(reverse("events:series_preview"), {
+            "repeat_mode": "weekly", "repeat_every": "1",
+            "repeat_weekdays": ["TU"], "ends_kind": "on",
+            "ends_on": datetime.date(3026, 1, 1).isoformat(),
+            "starts_on": tuesday.isoformat(),
+            "start_time": "19:00", "duration_0": "2", "duration_1": "0", "duration_2": "0",
+        })
+        self.assertIsNone(response.context["complaint"])
+        self.assertTrue(response.context["months"].grids)
+        self.assertLessEqual(
+            local_date_of(response.context["moments"][-1]),
+            horizon_for(tuesday, local_today()))
+
+
+class RollingGenerationTests(TestCase):
+    """一次排一年，明年再按一次。L5.9，2026-09-11。
+
+    ⭐ 在这之前，一条规则必须自带结束，而且超过 52 场**拒绝保存** —— 于是一个
+       每周一次跑一年半的安排（78 场）被拒，给的建议是「分成几段短的」，
+       也就是让人替系统干体力活。现在规则照写，生成按一年的窗口滚。
+    """
+
+    def setUp(self):
+        self.ministry = Ministry.objects.create(code="prayer", name="Prayer")
+        self.owner = make_person("Owner")
+        self.wide = Audience.Spec(
+            outsiders=True, all_staff=True, ministries=frozenset())
+
+    def build(self, rule="FREQ=WEEKLY;BYDAY=TU", **fields):
+        series = EventSeries.objects.create(
+            name="Tuesday evening", ministry=self.ministry, owner=self.owner,
+            rule=rule,
+            starts_on=fields.pop("starts_on", a_weekday(
+                TUESDAY, near=local_today() + datetime.timedelta(days=7))),
+            start_time=datetime.time(19, 0),
+            duration=datetime.timedelta(hours=2),
+            status=Event.Status.OPEN, **fields)
+        set_audience(series, self.wide)
+        return series
+
+    # --- 窗口 ---------------------------------------------------------------
+
+    def test_one_press_reaches_a_year_ahead_and_no_further(self):
+        series = self.build()
+        made = generate_occasions(series)
+        self.assertTrue(made)
+        self.assertLessEqual(local_date_of(made[-1].start_time),
+                             horizon_for(series.starts_on, local_today()))
+        # ⚠️ 而且真的排满了那一年，不是排了三场就停 —— 「窗口」两头都要钉，
+        #    只钉上界的话，一个一场都不排的 bug 照样绿。
+        self.assertGreater(
+            local_date_of(made[-1].start_time),
+            local_today() + relativedelta(months=HORIZON_MONTHS - 1))
+
+    def test_pressing_it_again_the_same_day_changes_nothing(self):
+        series = self.build()
+        first = generate_occasions(series)
+        self.assertEqual(generate_occasions(series), [])
+        self.assertEqual(series.occasions.count(), len(first))
+
+    def test_pressing_it_again_next_year_extends_the_run(self):
+        """🔴 滚动生成的核心：一条没有结束的规则靠**再按一次**接上。
+
+        ⚠️ 用 `freeze_service_clock()` 而不是自己 patch：它同时拨 `local_now`
+           和 `local_today`，而这一步两个都要准 —— 窗口按 `local_today` 算，
+           「这一场开始了没」按 `local_now` 算。只冻一个就是在测那个 bug。
+        """
+        series = self.build()
+        first = generate_occasions(series)
+        booked_to = local_date_of(first[-1].start_time)
+
+        ten_months_on = local_now() + relativedelta(months=10)
+        with freeze_service_clock(ten_months_on):
+            later = generate_occasions(series)
+
+        self.assertTrue(later, "再按一次应该往前接，而不是什么都不做")
+        # 老的一场都没动 —— 主键全在。
+        self.assertEqual(
+            set(series.occasions.values_list("pk", flat=True))
+            & {occasion.pk for occasion in first},
+            {occasion.pk for occasion in first})
+        # 新的接在老的后面。
+        self.assertGreater(local_date_of(later[0].start_time), booked_to)
+
+    def test_a_rule_that_ends_inside_the_window_is_untouched_by_any_of_this(self):
+        """⚠️ 回归：绝大多数系列是这一种，它们的行为一个字都不该变。"""
+        series = self.build(rule="FREQ=WEEKLY;BYDAY=TU;COUNT=12")
+        made = generate_occasions(series)
+        self.assertEqual(len(made), 12)
+        self.assertEqual(generate_occasions(series), [])
+
+    def test_stopping_is_how_an_endless_rule_ends(self):
+        """⭐ 撤掉「必须有结束」之后，这是唯一的出口 —— 而它本来就在。"""
+        series = self.build()
+        generate_occasions(series)
+        self.assertTrue(series.occasions.exists())
+
+        stop_series_today(series)
+        series.refresh_from_db()
+        self.assertEqual(series.ended_on, local_today())
+        self.assertEqual(series.occasions.count(), 0)
+        # 停掉之后再按也不会长回来。
+        self.assertEqual(generate_occasions(series), [])
+
+    # --- 已排到哪 -----------------------------------------------------------
+
+    def test_generated_through_is_none_before_anything_is_built(self):
+        self.assertIsNone(generated_through(self.build()))
+
+    def test_generated_through_is_the_last_occasion_not_the_last_press(self):
+        """⚠️ 读的是最后一场，不是 `generated_at`。混用的表现是页面上写着
+           「已排到今天」—— 而今天正是有人按按钮的那天。"""
+        series = self.build()
+        made = generate_occasions(series)
+        series.refresh_from_db()
+        self.assertEqual(generated_through(series), local_date_of(made[-1].start_time))
+        self.assertNotEqual(generated_through(series),
+                            local_date_of(series.generated_at))
+
+    # --- 🔴 图片：无限规则跑干了不该被误伤 ------------------------------------
+
+    def with_a_picture(self, series):
+        series.image.save("poster.jpg", ContentFile(b"not really a jpeg"),
+                          save=True)
+        return series
+
+    def test_a_live_rule_that_ran_dry_keeps_its_picture(self):
+        """🔴 滚动生成带来的唯一一个「不改就会坏」的连带。
+
+        判据原来是「这条系列没有一场在未来了」，而在滚动生成之前那等于「它完了」。
+        现在不等于：一条还活着的无限规则，只要有人忘了回来按「生成」、最后一场
+        过去，就符合那个判据 —— 图片被删，然后下次按生成，新造的那一批全部指向
+        一个不存在的文件。
+        """
+        series = self.with_a_picture(self.build())
+        generate_occasions(series)
+        series.refresh_from_db()
+
+        # 把时钟拨到排完以后：一场都不在未来了，但规则还产得出东西。
+        after_it_all = local_now() + relativedelta(months=HORIZON_MONTHS + 1)
+        with freeze_service_clock(after_it_all):
+            self.assertNotIn(series, series_with_images_to_purge())
+
+    def test_a_rule_that_really_is_finished_still_loses_its_picture(self):
+        """⚠️ 同一条的另一半：这不是把清理关掉。一条 `COUNT=4` 跑完的系列
+           确实产不出新的了，它的图照常该收。"""
+        series = self.with_a_picture(
+            self.build(rule="FREQ=WEEKLY;BYDAY=TU;COUNT=4"))
+        generate_occasions(series)
+        series.refresh_from_db()
+
+        after_it_all = local_now() + relativedelta(months=3)
+        with freeze_service_clock(after_it_all):
+            self.assertIn(series, series_with_images_to_purge())
+
+
+class EndlessRuleThroughThePagesTests(PageTestCase):
+    """「不结束」这一档，从选择器到系列页。L5.9，2026-09-11。"""
+
+    def setUp(self):
+        super().setUp()
+        self.login(self.zhang)
+        self.next_tuesday = a_weekday(
+            TUESDAY, near=local_today() + datetime.timedelta(days=7))
+
+    def payload(self, **overrides):
+        return {
+            "publish_as": "series",
+            "name": "Forever Tuesdays", "ministry": self.pantry.pk,
+            "repeat_mode": "weekly", "repeat_every": "1",
+            "repeat_weekdays": ["TU"],
+            "ends_kind": "never",
+            "starts_on": self.next_tuesday.isoformat(),
+            "start_time": "19:00", "duration_0": "2", "duration_1": "0", "duration_2": "0",
+            "status": Event.Status.OPEN, "visible_to_outsiders": True,
+            **overrides,
+        }
+
+    def test_the_picker_offers_never_and_builds_a_rule_with_no_ending(self):
+        html = self.client.get(
+            reverse("events:event_create"), {"publish_as": "series"}
+        ).content.decode()
+        self.assertIn('name="ends_kind" value="never"', html)
+
+        self.client.post(reverse("events:event_create"), self.payload())
+        series = EventSeries.objects.get(name="Forever Tuesdays")
+        self.assertEqual(series.rule, "FREQ=WEEKLY;BYDAY=TU")
+        self.assertNotIn("COUNT", series.rule)
+        self.assertNotIn("UNTIL", series.rule)
+
+    def test_an_endless_rule_comes_back_into_the_picker_as_never(self):
+        """⚠️ Without this it comes back ticked into the advanced box — a rule
+           the picker built, handed back as one it cannot draw."""
+        self.client.post(reverse("events:event_create"), self.payload())
+        series = EventSeries.objects.get(name="Forever Tuesdays")
+
+        form = EventSeriesForm(instance=series, user=self.zhang)
+        self.assertFalse(form.initial.get("use_advanced"))
+        self.assertEqual(form.initial["ends_kind"], "never")
+        self.assertEqual(form.initial["repeat_weekdays"], ["TU"])
+
+    def test_the_page_says_the_endless_rule_needs_pressing_again(self):
+        """⭐ 「不结束」那一档必须说清楚它的代价：它不会自己一直排下去。"""
+        html = self.client.get(
+            reverse("events:event_create"), {"publish_as": "series"}
+        ).content.decode()
+        self.assertIn("booked a year at a time", html)
+
+    def test_the_series_page_says_how_far_it_is_booked(self):
+        self.client.post(reverse("events:event_create"), self.payload())
+        series = EventSeries.objects.get(name="Forever Tuesdays")
+        page = reverse("events:series_detail", args=[series.pk])
+
+        # 还没生成 —— 没有可说的。
+        self.assertIsNone(self.client.get(page).context["booked_through"])
+
+        self.client.post(reverse("events:series_generate", args=[series.pk]))
+        response = self.client.get(page)
+        self.assertEqual(response.context["booked_through"],
+                         generated_through(series))
+        self.assertIn("Booked through", response.content.decode())
+        # 刚排完一年，离排空还远。
+        self.assertFalse(response.context["running_low"])
+
+    def test_a_finished_rule_is_not_told_to_press_generate_again(self):
+        """🔴 2026-09-11 代码评审抓到：这行提醒曾经是一句谎话。
+
+        一条 `COUNT=2` 全部生成完的系列，在最后一场前六周开始显示
+        「快排完了 —— 再按一次生成」，而按下去一场都不会多，那句话也永远
+        不会消失。判据少了后半句：「再按一次真的还能排出东西吗」。
+        """
+        series = EventSeries.objects.create(
+            name="Just the two", ministry=self.pantry, owner=self.zhang.contact,
+            rule="FREQ=WEEKLY;BYDAY=TU;COUNT=2", starts_on=self.next_tuesday,
+            start_time=datetime.time(19, 0),
+            duration=datetime.timedelta(hours=2), status=Event.Status.OPEN)
+        set_audience(series, Audience.Spec(
+            outsiders=True, all_staff=True, ministries=frozenset()))
+        generate_occasions(series)
+
+        self.assertFalse(has_more_to_build(series), "它已经排完了")
+        self.assertFalse(is_running_low(series))
+        page = self.client.get(reverse("events:series_detail", args=[series.pk]))
+        self.assertNotIn("press Generate again", page.content.decode())
+
+    def test_a_stopped_rule_is_not_told_to_press_generate_again(self):
+        """⚠️ 同一条的另一种到头方式：「即日停止」过的系列也产不出东西了。"""
+        series = EventSeries.objects.create(
+            name="Stopped", ministry=self.pantry, owner=self.zhang.contact,
+            rule="FREQ=WEEKLY;BYDAY=TU", starts_on=self.next_tuesday,
+            start_time=datetime.time(19, 0),
+            duration=datetime.timedelta(hours=2), status=Event.Status.OPEN)
+        set_audience(series, Audience.Spec(
+            outsiders=True, all_staff=True, ministries=frozenset()))
+        generate_occasions(series)
+        stop_series_today(series)
+        series.refresh_from_db()
+
+        self.assertFalse(has_more_to_build(series))
+        self.assertFalse(is_running_low(series))
+
+    def test_it_says_so_when_an_endless_run_is_nearly_out(self):
+        """⚠️ 2026-09-11 重写。原来这一条用的是一条 `COUNT=2` **跑完了**的规则，
+           也就是说它钉的正是评审抓到的那个 bug —— 一条产不出东西的规则被劝去
+           按生成。真正的「快排完了」只发生在一条**还能排**的规则上。
+
+        ⚠️ 所以这里把钟往前拨到快排到头的时候：窗口跟着往前滑，于是既满足
+           「最后一场近了」，也满足「再按一次真的还有东西可排」。
+        """
+        series = EventSeries.objects.create(
+            name="Forever", ministry=self.pantry, owner=self.zhang.contact,
+            rule="FREQ=WEEKLY;BYDAY=TU", starts_on=self.next_tuesday,
+            start_time=datetime.time(19, 0),
+            duration=datetime.timedelta(hours=2), status=Event.Status.OPEN)
+        set_audience(series, Audience.Spec(
+            outsiders=True, all_staff=True, ministries=frozenset()))
+        generate_occasions(series)
+
+        # 刚排完一年，离排空还远 —— 现在不该说话。
+        self.assertFalse(is_running_low(series))
+
+        nearly_out = local_now() + relativedelta(months=HORIZON_MONTHS) \
+            - datetime.timedelta(weeks=3)
+        with freeze_service_clock(nearly_out):
+            self.assertTrue(has_more_to_build(series))
+            self.assertTrue(is_running_low(series))
+            page = self.client.get(
+                reverse("events:series_detail", args=[series.pk]))
+            self.assertTrue(page.context["running_low"])
+            self.assertIn("press Generate again", page.content.decode())
+
+
+class DurationBoxesTests(SimpleTestCase):
+    """「开多久」的三个格子。L5.8e，2026-09-11。
+
+    🔴 它换掉的那一格有一个**不报错**的陷阱，而模型里早就写着：`DurationField`
+       把光秃秃的数字读成**秒**，所以想写「两小时」敲了个 `2` 的人，得到的是
+       五十二个两秒的活动，一句话都没有。三个格子让那个歧义不存在。
+    """
+
+    def setUp(self):
+        self.widget = DurationBoxes()
+
+    def submitted(self, hours="", minutes="", seconds=""):
+        return self.widget.value_from_datadict(
+            {"d_0": hours, "d_1": minutes, "d_2": seconds}, {}, "d")
+
+    def test_a_two_in_the_hours_box_is_two_hours(self):
+        """🔴 整个控件存在的理由，一条断言。旧的那一格里，`2` 是**两秒**。"""
+        self.assertEqual(django_forms.DurationField().clean(self.submitted(hours="2")),
+                         datetime.timedelta(hours=2))
+
+    def test_the_three_boxes_make_one_length(self):
+        self.assertEqual(
+            django_forms.DurationField().clean(self.submitted("1", "30", "15")),
+            datetime.timedelta(hours=1, minutes=30, seconds=15))
+
+    def test_the_boxes_that_are_left_empty_count_as_nothing(self):
+        """⚠️ 分和秒留空是**正常填法**（「就两小时」），不是漏填。
+           这也是 `use_required_attribute()` 交回 False 的原因。"""
+        self.assertEqual(django_forms.DurationField().clean(self.submitted(hours="2")),
+                         datetime.timedelta(hours=2))
+        self.assertFalse(self.widget.use_required_attribute(None))
+
+    def test_all_three_empty_is_empty_rather_than_zero(self):
+        """⚠️ 空，不是 `0:00:00`。零长度的活动由约束拒绝，而一个没填的格子
+           应该说「必填」—— 把它读成零会把一个漏填变成一个被约束拒绝的值，
+           两句不同的话。"""
+        self.assertEqual(self.submitted(), "")
+
+    def test_a_stored_length_comes_back_into_the_three_boxes(self):
+        self.assertEqual(
+            self.widget.decompress(datetime.timedelta(hours=2, minutes=5)),
+            [2, 5, 0])
+        self.assertEqual(self.widget.decompress(None), [None, None, None])
+
+    def test_what_was_typed_survives_a_failed_submission(self):
+        """⚠️ 校验失败重渲那一趟，Django 递进来的是上一趟拼出去的字符串。
+           少了这一支，一次填错会把人已经填对的时长也清空。"""
+        self.assertEqual(self.widget.decompress("1:30:00"), ["1", "30", "00"])
+
+    def test_nonsense_is_handed_to_the_field_to_refuse(self):
+        """⚠️ 在这里另写一句拒绝，就是同一个错误有两种说法。"""
+        with self.assertRaises(ValidationError):
+            django_forms.DurationField().clean(self.submitted(hours="lots"))
+
+
+class MonthPagerTests(PageTestCase):
+    """那两颗翻页键真的翻得动。2026-09-11 代码评审抓到。
+
+    🔴 **它们曾经一页都翻不动，而页面看起来完全正常。** 模板问的是
+       `months.earlier_vals` / `months.at_the_start`，而 `MonthPage` 那时给的是
+       `earlier_page` / `has_earlier` —— 四个名字一个都对不上。Django 取不到
+       属性时交回空串、不报错，于是 `{% if hx_vals %}` 为假，按钮身上一个
+       `hx-vals` 都没有：两颗键提交的都不带 `month_page`，
+       `_month_page_asked_for()` 永远读到 0，两颗键都把第一页再渲染一遍。
+       第七个月往后永远到不了。
+
+    ⚠️ 当时的测试为什么没抓到：它们自己手写 `month_page: "1"` 去 POST，
+       **从来没有渲染过那两颗按钮**。所以这里断言的是渲染出来的 HTML，
+       不是视图收到参数之后的行为。
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.login(self.zhang)
+
+    def preview(self, page=None):
+        payload = {
+            "repeat_mode": "weekly", "repeat_every": "1",
+            "repeat_weekdays": ["TU"], "ends_kind": "count", "ends_after": "52",
+            "starts_on": a_weekday(
+                TUESDAY, near=local_today() + datetime.timedelta(days=7)
+            ).isoformat(),
+            "start_time": "19:00",
+            "duration_0": "2", "duration_1": "0", "duration_2": "0",
+        }
+        if page is not None:
+            payload["month_page"] = str(page)
+        return self.client.post(reverse("events:series_preview"), payload)
+
+    def pages_asked_for(self, response):
+        """两颗键各自要提交的 `month_page`，从渲染出来的 HTML 里读。
+
+        ⚠️ `&quot;` 是 Django 的自动转义 —— HTML 解析器读属性时会解回 `"`，
+           htmx 拿到的是合法 JSON。所以这里比对的是解码之后的。
+        """
+        found = re.findall(r"hx-vals='([^']*)'", response.content.decode())
+        return [json.loads(unescape(v))["month_page"] for v in found]
+
+    def test_the_buttons_carry_the_page_they_would_turn_to(self):
+        self.assertEqual(self.pages_asked_for(self.preview()), [-1, 1])
+        self.assertEqual(self.pages_asked_for(self.preview(page=1)), [0, 2])
+
+    def test_turning_the_page_actually_moves_the_months(self):
+        first = self.preview()
+        self.assertEqual(first.context["months"].first_shown, 1)
+
+        # 照着第一页那颗「Later」自己说的页码去翻 —— 不是测试自己编一个。
+        later = self.pages_asked_for(first)[1]
+        second = self.preview(page=later)
+        self.assertEqual(second.context["months"].first_shown,
+                         first.context["months"].last_shown + 1)
+
+    def test_the_first_page_cannot_go_earlier_and_the_last_cannot_go_later(self):
+        first = self.preview()
+        self.assertTrue(first.context["months"].at_the_start)
+        self.assertFalse(first.context["months"].at_the_end)
+
+        last_page = first.context["months"].pages - 1
+        last = self.preview(page=last_page)
+        self.assertFalse(last.context["months"].at_the_start)
+        self.assertTrue(last.context["months"].at_the_end)
+
+    def test_every_month_is_reachable_by_turning_pages(self):
+        """⚠️ 一页都不许漏。翻页是为了**少看**，不是为了少给。"""
+        seen, page = [], 0
+        while True:
+            months = self.preview(page=page).context["months"]
+            seen.extend(grid.label for grid in months.grids)
+            if months.at_the_end:
+                break
+            page += 1
+        self.assertEqual(len(seen), months.total)
+        self.assertEqual(len(set(seen)), months.total, "有月份被翻了两遍")
+
+
+class MonthPageMatchesItsTemplateGuardTests(SimpleTestCase):
+    """Lint-as-test：模板问 `months.` 要的每一个名字，`MonthPage` 都得有。
+
+    🔴 **这一类失败是静默的，而这就是这条守卫存在的全部理由。** Django 的模板
+       取不到属性时交回空串，不抛任何东西 —— 所以一个拼错的、或者重构之后改了
+       名的属性，表现不是报错，是那一块**安静地什么都不做**。翻页键那次就是
+       这样：四个名字全对不上，页面照常渲染，只是永远停在第一页。
+
+    ⚠️ 它比「写一条断言盯住那四个名字」值钱的地方在于：下一个人往模板里加
+       `months.something_new` 的时候，这条会当场红，而不必有人记得回来补测试。
+    """
+
+    TEMPLATE = "events/templates/events/_series_dates.html"
+
+    def test_the_template_asks_for_nothing_the_page_does_not_have(self):
+        asked = set(re.findall(
+            r"months\.([a-z_]+)", Path(self.TEMPLATE).read_text()))
+        self.assertTrue(asked, "模板里一个 months.* 都没有，这条守卫失去了对象")
+        # ⚠️ dataclass 的字段**不在类上**（没有默认值的那些只存在于实例），
+        #    所以光用 `hasattr(MonthPage, …)` 会把 `grids`、`total` 这些正常
+        #    字段全判成缺失。两边都要问：字段表 + 类上的属性。
+        known = ({field.name for field in dataclasses.fields(schedule.MonthPage)}
+                 | set(dir(schedule.MonthPage)))
+        missing = sorted(name for name in asked if name not in known)
+        self.assertEqual(
+            missing, [],
+            "模板问了 `MonthPage` 没有的东西。Django 会把它解析成空串而不报错 —— "
+            "表现是那一块安静地什么都不做：\n" + "\n".join(missing))
+
+
+class TopUpDoesNotScaleItsQueriesTests(TestCase):
+    """补角色那一趟的查询数不跟着场次数涨。2026-09-11 代码评审抓到。
+
+    ⚠️ `generate_occasions()` 特地 `prefetch_related("roles")` 过，但
+       `_top_up_roles()` 原来读的是 `.values_list("role_id")` —— 那个每次都另起
+       一个查询，**绕开了那份缓存**。于是 prefetch 白取一遍，还照样一场一条查询。
+
+    ⚠️ 这里比的是**增量**而不是一个写死的数字：写死的那种一改别处就红，
+       而要防住的是「跟着场次数线性涨」这件事本身。
+    """
+
+    def setUp(self):
+        self.ministry = Ministry.objects.create(code="prayer", name="Prayer")
+        self.owner = make_person("Owner")
+        self.wide = Audience.Spec(
+            outsiders=True, all_staff=True, ministries=frozenset())
+
+    def series_of(self, count):
+        series = EventSeries.objects.create(
+            name=f"Run of {count}", ministry=self.ministry, owner=self.owner,
+            rule=f"FREQ=WEEKLY;BYDAY=TU;COUNT={count}",
+            starts_on=a_weekday(
+                TUESDAY, near=local_today() + datetime.timedelta(days=7)),
+            start_time=datetime.time(19, 0),
+            duration=datetime.timedelta(hours=2), status=Event.Status.OPEN)
+        set_audience(series, self.wide)
+        role, _ = ParticipationRole.objects.get_or_create(
+            code="welcome", defaults={"name": "Welcome"})
+        inherit_audience(
+            EventSeriesRole.objects.create(series=series, role=role), series)
+        generate_occasions(series)
+        return series
+
+    def queries_for_a_second_press(self, count):
+        series = self.series_of(count)
+        with CaptureQueriesContext(connection) as caught:
+            generate_occasions(series)
+        return len(caught)
+
+    def test_a_longer_run_does_not_cost_a_query_per_occasion(self):
+        four = self.queries_for_a_second_press(4)
+        sixteen = self.queries_for_a_second_press(16)
+        self.assertLess(
+            sixteen - four, 12,
+            f"多 12 场多花了 {sixteen - four} 条查询 —— 说明那份 "
+            f"prefetch 又被绕开了（4 场 {four} 条，16 场 {sixteen} 条）")

@@ -22,7 +22,10 @@ Events 页右边那块面板画的东西。摆放全是算术 —— 落在哪�
    跳到第二列去，不报错，只是画错一天。
 """
 
+import calendar
 import datetime
+import json
+import math
 import zlib
 from dataclasses import dataclass
 
@@ -630,3 +633,184 @@ def hours():
         {"label": clock(datetime.time(hour=hour)), "top": hour * PX_PER_HOUR}
         for hour in range(24)
     ]
+
+
+# --- 规则预览的小月历（2026-09-11，L5.8d）------------------------------------
+#
+# ⭐ 一条规则会落在哪几天，原来是一行用「·」隔开的日期。那一行**正确但不好读**：
+#    「15 Sep · 17 Sep · 22 Sep · 24 Sep」要人自己在脑子里排成日历，才看得出
+#    它其实是「每周二和周四」。用户原话：「只用文字有点不方便」。
+#
+# ⚠️ 摆在服务端，和日期本身同一个来源（`services.series_moments()`）。让浏览器
+#    自己按日期串画日历会出现第二个答案，而这一页存在的全部理由就是「按下去
+#    之前先看见」—— 那个答案必须和生成器的那个是同一个。
+#
+# ⚠️ 周一起头，和 `recurrence.WEEKDAYS` 同序。两处不一致的表现是日历上高亮的
+#    格子整体错开一列，而每一个日期数字本身都是对的。
+
+#: 一页画几个月，多的翻页（2026-09-11 定，照日程那一页的样子）。
+#:
+#: ⚠️ 需要翻页是因为规则可以很长：`MAX_OCCASIONS` 是 52，而「每月第三个
+#:    周六」的 52 场横跨**四年多**。五十二张小月历一上来就铺开不是预览，
+#:    是另一个页面。
+#:
+#: ⚠️ 但多出来的那些**不是丢掉**，是翻得到 —— 这一块要回答的是「按下去会
+#:    造出哪几天」，而一个答不全的答案没有用。
+PREVIEW_MONTHS = 6
+
+
+@dataclass(frozen=True)
+class DayCell:
+    """月历上的一格。"""
+
+    day: datetime.date
+    #: 属于这个月吗？⚠️ 月历的第一行和最后一行总会带上邻月的几天，
+    #: 它们要画得淡一点，否则「9 月 1 日」旁边那个「31」看起来也是 9 月的。
+    in_month: bool
+    #: 这条规则会落在这一天吗？
+    marked: bool
+
+
+@dataclass(frozen=True)
+class MonthGrid:
+    """一张小月历。"""
+
+    label: str
+    weeks: list
+
+
+@dataclass(frozen=True)
+class MonthPage:
+    """一页小月历，外加「这是第几页、一共几页」。
+
+    ⚠️ 这一页的算术在**这个模块**，不在视图里：`events/views.py` 开头第三条写着
+       「这里不做算术」，而这个模块开头写着「摆放全是算术，所以它在这里」。
+       两句话指的是同一条边界的两侧。
+    """
+
+    grids: list
+    page: int
+    pages: int
+    first_shown: int
+    last_shown: int
+    total: int
+
+    @property
+    def has_earlier(self):
+        return self.page > 0
+
+    @property
+    def has_later(self):
+        return self.page < self.pages - 1
+
+    @property
+    def earlier_page(self):
+        return self.page - 1
+
+    @property
+    def later_page(self):
+        return self.page + 1
+
+    # --- 下面四个是给模板上那两颗翻页键用的 -------------------------------
+    #
+    # 🔴 **名字必须和 `_series_dates.html` 里写的一模一样，而对不上是静默的。**
+    #    Django 取不到一个属性时交回空串，不报错 —— 所以模板问 `earlier_vals`
+    #    而这里只有 `earlier_page` 的那一版，渲染出来的按钮身上**一个
+    #    `hx-vals` 都没有**：两颗键都提交不带 `month_page`，于是
+    #    `_month_page_asked_for()` 永远读到 0，两颗键都把第一页再渲染一遍。
+    #    页面看起来完全正常，只是第七个月以后永远翻不到。
+    #    实测于 2026-09-11：`hx-vals` 在整段 HTML 里出现 0 次。
+    #
+    # ⚠️ 用 `has_earlier` / `has_later` 派生，不另立一套判断：一个「还有没有
+    #    上一页」的问题不该有两个答案。
+    # ⚠️ `MonthPageMatchesItsTemplateGuardTests` 盯着这份名单。
+
+    @property
+    def at_the_start(self):
+        return not self.has_earlier
+
+    @property
+    def at_the_end(self):
+        return not self.has_later
+
+    @property
+    def earlier_vals(self):
+        return self._page_vals(self.earlier_page)
+
+    @property
+    def later_vals(self):
+        return self._page_vals(self.later_page)
+
+    def _page_vals(self, page):
+        """那一颗键要提交的 `hx-vals`。
+
+        ⚠️ 交回 JSON 字符串而不是 dict：组件那边是
+           `hx-vals='{{ hx_vals }}'`，而一个 dict 渲染出来是 Python 的
+           单引号字面量，htmx 解析不了。
+
+        ⚠️ 自动转义把 `"` 变成 `&quot;` 不是问题：HTML 解析器读属性时会把它
+           解回来，htmx 拿到的是合法 JSON。
+        """
+        return json.dumps({"month_page": page})
+
+
+def month_grids(days):
+    """把一串日期摆成小月历，按月份先后交回**全部**。
+
+    ⚠️ 这里不分页。切成第几页是**页面**的事（`views._dates_context`），而这个
+       模块回答的是「这些日期摆成日历是什么样」—— 一个月一张，一张不少。
+       两件事分开，是因为翻页的那个数字会变，而这一串不会。
+
+    `days` 是当地日期（不是 datetime）—— 调用方先用 `local_date_of()` 转好，
+    理由和这个模块里别处一样：用 UTC 取日期会让傍晚的活动整个跳到第二天去，
+    不报错，只是高亮错一格。
+    """
+    marked = set(days)
+    if not marked:
+        return []
+
+    months = sorted({(day.year, day.month) for day in marked})
+
+    grids = []
+    for year, month in months:
+        weeks = [
+            # ⚠️ 邻月那几天**不算这个月的**，哪怕规则确实落在那一天：
+            #    10 月那张月历的第一行带着 9 月 29 日，而 9 月那张最后一行带着
+            #    10 月 1 日 —— 不加 `day.month == month` 的话，同一天会在两张
+            #    月历上各高亮一次。模板把邻月画成空格，所以屏幕上看不出来，
+            #    但数出来的天数会多。测试是这么抓到的。
+            [DayCell(day=day, in_month=day.month == month,
+                     marked=day in marked and day.month == month)
+             for day in week]
+            for week in calendar.Calendar(firstweekday=0).monthdatescalendar(
+                year, month)
+        ]
+        grids.append(MonthGrid(
+            label=datetime.date(year, month, 1).strftime("%B %Y"), weeks=weeks))
+    return grids
+
+
+def month_page(days, page=0, per_page=PREVIEW_MONTHS):
+    """一页小月历。
+
+    ⚠️ `page` 是**夹住**的，不是拒绝的。它从页面自己的翻页键来，所以一个越界的
+       值意味着「有人停在第 9 页时规则被改短了」—— 把最后一页给他，比为一个他
+       从来没输入过的数字报错要好。
+
+    ⚠️ 不走 `core.pagination.page_of()`，理由是那个模块开头第一句：它存在是为了
+       **排序**在页与页之间不会变，做法是给 queryset 重新排序。这里是一串已经按
+       月份排好、而且不可能并列的月历 —— 它没有什么要防的，而且它也收不下一个
+       普通列表。
+    """
+    grids = month_grids(days)
+    pages = max(1, math.ceil(len(grids) / per_page))
+    page = max(0, min(page, pages - 1))
+    start = page * per_page
+    return MonthPage(
+        grids=grids[start:start + per_page],
+        page=page,
+        pages=pages,
+        first_shown=start + 1,
+        last_shown=min(start + per_page, len(grids)),
+        total=len(grids),
+    )

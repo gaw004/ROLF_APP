@@ -51,7 +51,7 @@ from org.models import Ministry
 # ⚠️ One direction only: recurrence.py is a pure module that imports nothing
 #    from this app, which is what lets a model validate a rule without the
 #    generator and the ORM having to know about each other.
-from .recurrence import (MAX_OCCASIONS, has_an_ending,
+from .recurrence import (BATCH_CEILING, horizon_for,
                          looks_like_a_rule, occasions)
 
 
@@ -2842,13 +2842,12 @@ class EventSeries(Audience, ConstraintErrorFieldMixin, TimeStampedModel):
                 "the calendar format — FREQ=WEEKLY;BYDAY=TU;COUNT=12 means "
                 "every Tuesday, twelve times."
             )})
-        if not has_an_ending(self.rule):
-            raise ValidationError({"rule": (
-                "This rule never stops. Say when it ends — add UNTIL= a date, "
-                "or COUNT= a number of occasions. A series with no end would "
-                "have to be generated forever, and every occasion of it is a "
-                "real event somebody has to look after."
-            )})
+        # ⚠️ **没有结束的规则是合法的**（2026-09-11，L5.9）。这里原来有一条
+        #    「This rule never stops. Say when it ends」的拒绝，撤掉了：
+        #    生成不再一次把整条规则铺完，而是按一年的窗口滚
+        #    （`services.HORIZON_MONTHS`），所以「永远」不再意味着「一次造出
+        #    无穷多行」。结束一条无限规则的正路是「即日停止」——
+        #    `services.stop_series_today()`，它本来就是系列的出口。
         if self.starts_on is None or self.start_time is None:
             return
         try:
@@ -2920,19 +2919,34 @@ class EventSeries(Audience, ConstraintErrorFieldMixin, TimeStampedModel):
                 f"{self.starts_on:%A}s are not one of the days it repeats on. "
                 "Change one or the other so they agree."
             )})
-        if len(found) > MAX_OCCASIONS:
+        # 🔴 **密度，不是长度**（2026-09-11，L5.9 改）。这里原来问的是「整条规则
+        #    一共多少场」，超过 52 就拒 —— 而那条拒绝挡住的是真实排法：每周一次
+        #    跑一年半是 78 场。现在长度不再是问题，因为生成是**滚动**的：一次只
+        #    排一年，明年再按一次。
+        #
+        #    剩下要挡的是另一件事：一条密到「连一年都装不下」的规则，
+        #    一次点击就是几千行。高级框里一条 `FREQ=HOURLY` 是一年 8760 场。
+        #
+        # ⚠️ 所以判据是**窗口之内**有多少场，不是 `found` 有多少 —— `found` 对
+        #    一条没有结束的规则会一直取到 `limit`（十四年的周二），拿它来判会
+        #    把每一条无限规则都拒掉。
+        #
+        # ⚠️ 从 `found` 里筛而不是再展开一次：`found` 已经取到 `BATCH_CEILING + 1`
+        #    场，而一条密到会被拒的规则，这么多场根本铺不满一年 —— 筛完仍然
+        #    超标。稀疏的规则筛完就剩窗口内那几场。两种情况都答得对。
+        window_ends = horizon_for(self.starts_on, local_today())
+        within_the_window = [moment for moment in found
+                             if local_date_of(moment) <= window_ends]
+        if len(within_the_window) > BATCH_CEILING:
             raise ValidationError({"rule": (
-                f"That is more than {MAX_OCCASIONS} occasions. Every one of "
-                "them is a real event with its own signups, so build it in "
-                "shorter runs and make the next one when it comes round."
-                # ⚠️ The sentence used to add "which is about a year of a
-                #    weekly series" — a claim about *duration* attached to a cap
-                #    counted in *occasions*, and the two come apart the moment
-                #    the rule is not weekly: 90 days of daily morning prayer was
-                #    refused by a message about a year of Tuesdays, while a
-                #    monthly rule sails through to 2030. The cap is right (the
-                #    risk is rows per click); the arithmetic in the wording was
-                #    not.
+                f"That repeats more often than this can build — it would make "
+                f"more than {BATCH_CEILING} occasions in a single year, and "
+                "every one of them is a real event with its own signups. "
+                "Check the rule: this is usually a unit that slipped, such as "
+                "hourly where daily was meant."
+                # ⚠️ 措辞说的是**太密**，不是太长。原来那句是「more than 52
+                #    occasions … build it in shorter runs」，而「分成几段短的」
+                #    对一条每小时的规则是完全没用的建议 —— 它再短也是这个密度。
             )})
 
     #: The columns the generator reads to decide **when** its occasions fall.

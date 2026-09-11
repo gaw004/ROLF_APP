@@ -32,7 +32,7 @@ from org.audience import Audience, on_the_books_exists, on_the_books_q
 from org.models import Assignment
 
 from . import schedule, tokens
-from .recurrence import MAX_OCCASIONS, occasions
+from .recurrence import BATCH_CEILING, horizon_for, occasions
 from .models import (
     NOT_COMING,
     roles_narrower_than_event,
@@ -2393,9 +2393,41 @@ def series_with_images_to_purge(now=None):
     """
     ahead = Event.objects.filter(
         series=models.OuterRef("pk"), end_time__gte=now or local_now())
-    return (EventSeries.objects.exclude(image="")
-            .exclude(generated_at__isnull=True)
-            .exclude(models.Exists(ahead)))
+    ran_out = (EventSeries.objects.exclude(image="")
+               .exclude(generated_at__isnull=True)
+               .exclude(models.Exists(ahead)))
+    # 🔴 **「没有一场在未来」不再等于「这条系列完了」**（2026-09-11，L5.9）。
+    #    在滚动生成之前，每条规则都自带结束，所以两句话是同一句。现在一条
+    #    没有结束的规则只排一年 —— 有人忘了回来按「生成」，最后一场过去，
+    #    它就符合上面那个查询，而它**还活着**。
+    #
+    #    代价很具体：图片被删掉，然后下次按生成，新造的那一批全部指向一个
+    #    已经不存在的文件。这正是 `Event.poster` 那一节警告过的碎图标，
+    #    只是触发路径换了一条。
+    #
+    # ⚠️ 所以再问一句：这条规则还产得出东西吗？产得出就留着它的图。
+    #    一条 `COUNT=12` 跑完的系列照常被清理 —— 它的规则确实产不出新的了。
+    #    这不是把清理关掉，是把「还活着」和「真的完了」分开。
+    #
+    # ⚠️ 在 Python 里筛，不在查询里：「这条规则还产得出东西吗」要展开一次
+    #    RRULE，而那是 `_occasion_moments()` 的事，不是数据库的。这个查询
+    #    一天跑一次、结果集是「有图且已生成过」的那几行，代价可以忽略。
+    moment = now or local_now()
+    finished = [series.pk for series in ran_out
+                if not _still_to_come(series, moment)]
+    return ran_out.filter(pk__in=finished)
+
+
+def _still_to_come(series, moment):
+    """这条规则在窗口之内还有没有没排过的场次？
+
+    ⚠️ 读不懂的规则算作「没有」—— 一条坏掉的规则产不出任何东西，而让一个
+       无法解析的字符串永久保住一个文件，是把两种不同的失败绑在一起。
+    """
+    try:
+        return any(m > moment for m in _occasion_moments(series))
+    except ValidationError:
+        return False
 
 
 def purge_series_image(series):
@@ -3255,9 +3287,18 @@ def _occasion_moments(series):
        today too, so without this an undone batch grew back the moment anybody
        pressed Generate — the button being right there on the same screen.
     """
+    # 🔴 **一次只排到一年后**（2026-09-11，L5.9）。这一行是整条滚动生成的落点：
+    #    `generate_occasions()` 和 `series_moments()`（日期预览）都从这个函数
+    #    拿日期，所以改这一处，两边一定一致 —— 而两边不一致正是这一块最贵的
+    #    失败：页面说会造 12 场，按下去造了 53 场。
+    #
+    # ⚠️ 于是一条没有结束的规则不再是「要生成到永远」。明年再按一次，窗口往前
+    #    滑，接着排。页面上那行「已排到 X」是这件事的另一半 —— 没有它，
+    #    一条排完了的无限规则会安安静静地停在那里。
     try:
         moments = occasions(
-            series.rule, starts_on=series.starts_on, start_time=series.start_time)
+            series.rule, starts_on=series.starts_on, start_time=series.start_time,
+            not_after=horizon_for(series.starts_on, local_today()))
     except (ValueError, TypeError) as unreadable:
         # ⚠️ A `ValidationError`, not the raw `ValueError` dateutil throws, and
         #    the reason is the caller: the admin action catches ValidationError
@@ -3282,23 +3323,238 @@ def _occasion_moments(series):
     #    quietly cut to 53 here, with the admin told "53 occasion(s) generated"
     #    and no mention of the 47 the rule asked for. D14's shape: the rule is
     #    enforced where the write happens, not only where a person types.
-    if len(moments) > MAX_OCCASIONS:
+    if len(moments) > BATCH_CEILING:
         raise ValidationError(
-            f"This rule asks for more than {MAX_OCCASIONS} occasions. Nothing "
-            "was generated — shorten the rule first, so that what gets built "
-            "is what it says."
-            # ⚠️ The "about a year of a weekly series" clause was dropped from
-            #    `clean()`'s twin with a written reason (a claim about duration
-            #    attached to a cap counted in occasions: 90 days of daily
-            #    prayer was refused by a sentence about Tuesdays). It survived
-            #    here, on the path that refuses a row that arrived without a
-            #    form — which is to say on the path where somebody has least
-            #    context to notice it is wrong.
+            f"That repeats more often than this can build — more than "
+            f"{BATCH_CEILING} occasions in a single year. Nothing was "
+            "generated. Check the rule: this is usually a unit that slipped, "
+            "such as hourly where daily was meant."
+            # ⚠️ Word for word the sentence `EventSeries.clean()` uses, and
+            #    deliberately: this is the same rule enforced on the path a row
+            #    takes when it did **not** come through a form (an import, a
+            #    script, `objects.create` in a fixture). Two different
+            #    sentences for one rule would make the same mistake read as two.
+            #
+            # ⚠️ What it refuses changed on 2026-09-11 (L5.9): it used to be
+            #    "this rule is longer than 52 occasions", which is no longer a
+            #    problem — generation is windowed now. What is left is density:
+            #    a rule too tight to fit a year.
         )
     stop = series.ended_on
     if stop is None:
         return moments
     return [moment for moment in moments if local_date_of(moment) < stop]
+
+
+def _open_role_from(template, occasion):
+    """Copy one role template onto one occasion. Returns the new row."""
+    role = EventRole(
+        event=occasion,
+        role=template.role,
+        needed_count=template.needed_count,
+        stop_at_needed_count=template.stop_at_needed_count,
+        notes=template.notes,
+    )
+    role.full_clean()
+    role.save()
+    return set_audience(role, Audience.Spec.of(template))
+
+
+def _was_removed_by_hand(occasion, template):
+    """Did somebody open this job on this evening and then take it off again?
+
+    ⭐ **Asked of the history table, and that is why decision 35 costs nothing.**
+       `EventRole` has kept history since it was written — the reason on the
+       model is that `needed_count` is a promise published to volunteers — and
+       simple-history records a deletion as a row with `history_type="-"`. So
+       "this occasion deliberately does not want this job" is a question the
+       database could already answer; it did not need a column, a migration or
+       a new concept to remember it.
+
+    ⚠️ Measured before relying on it: deleting a role leaves `[('-',…),('+',…)]`
+       for that (event, role) pair, and a job that was never opened there
+       matches nothing. Both directions checked, because a false positive here
+       silently stops a legitimate top-up and a false negative silently undoes
+       somebody's decision.
+
+    ⚠️ It cannot be confused by the generator's own withdrawals. Stopping or
+       undoing a series deletes whole `Event` rows and their roles cascade —
+       but that history hangs on **that** event, and regenerating builds a new
+       row with a new primary key, which matches nothing here.
+    """
+    return EventRole.history.filter(
+        event_id=occasion.pk, role_id=template.role_id, history_type="-"
+    ).exists()
+
+
+def _top_up_roles(occasion, templates, *, now):
+    """Give this occasion any job the recipe has and it has never had.
+
+    ⭐ Decision 34: pressing Generate makes the batch **match the recipe**, not
+       merely fill in missing evenings. Adding a job two weeks in is an ordinary
+       thing to want — "we have realised we need somebody on the door" — and
+       before this it reached only occasions that did not exist yet, which is to
+       say nothing at all on a batch already built.
+
+    Three rules, and each is a different question:
+
+      · the occasion already has it        → leave it, it is there;
+      · it had it and somebody removed it  → **leave it alone**. Decision 35:
+        a deletion is a decision, and putting it back would overrule somebody
+        who pressed a button on purpose;
+      · otherwise                          → open it.
+
+    🔴 **Signups are not a reason to skip, and the first draft said they were.**
+       That rule was borrowed from `_collectable_occasions()` — "a thing people
+       are standing in is not ours to rearrange" — and the borrowing was wrong
+       because the actions are not alike. Withdrawing an occasion **takes
+       something away**; opening a job on it takes nothing from anybody. The
+       people signed up hold rows pointing at a different `EventRole`, which is
+       untouched. And the evenings that already have volunteers on them are
+       precisely the ones most likely to want a door steward.
+
+    ⚠️ **What is a reason is the clock.** An occasion that has already started
+       is skipped, because opening a job on an evening that has happened writes
+       down a shortfall that never existed: `EventRole.objects.understaffed()`
+       and the report's `_role_gap()` neither of them filter by date, so a job
+       opened on last Tuesday reports for ever that last Tuesday wanted a
+       steward and nobody came. Nobody was ever asked.
+
+       ⚠️ The cut is `start_time`, the same one `_drop_generated_after()` makes
+          and for the same reason — "has it started", not "is it over". See
+          that function for why this codebase's usual `end_time` rule does not
+          apply to either of them.
+
+    ⚠️ It **never deletes**. A template removed from the recipe does not close
+       that job on occasions already built, and that is deliberate: closing a
+       job takes signups with it (`EventRole` cascades into `Participation`),
+       which is exactly the loss the delete guards exist for. Removing a job
+       from an evening stays a thing a person does on that evening's own page.
+    """
+    if occasion.start_time <= now:
+        return []
+    # ⚠️ `.all()` 而不是 `.values_list()`,而这一行是有代价的:
+    #    `generate_occasions()` 那边特地 `prefetch_related("roles")` 过,
+    #    但 `.values_list()` 每次都另起一个查询、**绕开那份缓存** —— 于是
+    #    一条 52 场的系列多发 52 条查询,而那份 prefetch 白取了一遍。
+    #    2026-09-11 代码评审抓到。
+    standing = {role.role_id for role in occasion.roles.all()}
+    opened = []
+    for template in templates:
+        if template.role_id in standing:
+            continue
+        if _was_removed_by_hand(occasion, template):
+            continue
+        try:
+            # 🔴 **A savepoint, not a bare try.** `_open_role_from()` saves the
+            #    row and *then* sets its audience, so catching without rolling
+            #    back left the role standing with no audience at all —
+            #    (False, False, none), a job nobody on earth can sign up for,
+            #    on a published event. That is precisely the state
+            #    `refuse_empty_audience()` exists to prevent, reached through
+            #    the error handling written to be careful. Measured, not
+            #    reasoned: the test for the narrowing case found a `door` role
+            #    where it had asserted there would be none.
+            #
+            # ⚠️ It also keeps the outer transaction usable. Catching a
+            #    database error inside `atomic()` without a savepoint leaves
+            #    the whole transaction broken, and every later query in this
+            #    press would fail with something that names none of this.
+            with transaction.atomic():
+                opened.append(_open_role_from(template, occasion))
+        except ValidationError:
+            # ⚠️ Skipped, not raised, and the case is real: somebody may have
+            #    narrowed **one** occasion's audience by hand, and a template
+            #    wider than it cannot be opened there without breaking L2×L3.
+            #    Raising would abort the whole press — one hand-edited evening
+            #    would stop every other occasion being topped up — so this
+            #    occasion keeps the audience its publisher gave it and the rest
+            #    of the batch is served.
+            continue
+    return opened
+
+
+def series_moments(series):
+    """The moments this rule falls on, for a page that wants to show them.
+
+    ⭐ The same expander the generator walks, so the list a publisher reads
+       before pressing the button is the set of evenings the button will build.
+       A page that worked them out for itself would be free to disagree, and
+       the disagreement would only surface after the press.
+
+    ⚠️ Returns `[]` rather than raising when the rule is unusable. Its callers
+       are pages: one is a preview of something still being typed, and half a
+       rule is the ordinary state there, not an error to report twice — the
+       form is what says what is wrong with it.
+    """
+    if not (series.rule and series.starts_on and series.start_time):
+        return []
+    try:
+        return _occasion_moments(series)
+    except ValidationError:
+        return []
+
+
+def generated_through(series):
+    """这条系列已经排到哪一天（当地日期），没排过就是 None。
+
+    ⭐ 滚动生成之后，这是页面上最要紧的一个读数。一条没有结束的规则**不会自己
+       一直排下去** —— 它一次排一年。没有这句话，一条排完了的规则会安安静静地
+       停在那里：`/events/` 上不再出现新的场次，而系列页看起来一切正常。
+
+    ⚠️ 读的是最后一场的 `start_time`，**不是** `series.generated_at`。后者是
+       「上一次有人按按钮」，前者才是「排到哪天」—— 两个都存在，而混用的表现是
+       页面上写着「已排到今天」。
+    """
+    last = series.occasions.order_by("-start_time").values_list(
+        "start_time", flat=True).first()
+    return local_date_of(last) if last else None
+
+
+#: 最后一场在这么久之内，就该提醒「快排完了」（2026-09-11，L5.9）。
+#:
+#: ⚠️ 判据是**最后一场还有多远**，不是还剩几场：五场一周一次是五周，
+#:    五场一天一次是五天，而要提醒的是「快没了」，不是「剩几行」。
+#:
+#: ⚠️ 六周只有一句常识，没有别的依据 —— 和 `HORIZON_MONTHS`、`BATCH_CEILING`
+#:    一样。试点跑一轮之后回来看它。
+RUNNING_LOW = datetime.timedelta(weeks=6)
+
+
+def has_more_to_build(series):
+    """这条规则还有没有**没建过**的场次？
+
+    ⚠️ 问的不是「还有没有未来的场次」—— 一条 `COUNT=12` 全部生成完的系列，
+       未来当然还有十一场，但它们都已经在库里了，按「生成」一个都不会多。
+       两个问题差一个词，而答错的表现是页面一直劝人按一颗按不出东西的按钮。
+
+    ⚠️ `_occasion_moments()` 已经把 `ended_on` 算进去了，所以一条「即日停止」
+       过的系列在这里自然答 False —— 不需要另写一条判断。
+    """
+    standing = set(series.occasions.values_list("start_time", flat=True))
+    try:
+        return any(moment not in standing
+                   for moment in _occasion_moments(series))
+    except ValidationError:
+        # 读不懂的规则产不出东西。它有它自己的那句拒绝，不在这里说。
+        return False
+
+
+def is_running_low(series):
+    """排到头的那天近了，**而且**再按一次真的还能排出东西吗？
+
+    🔴 **后半句是 2026-09-11 代码评审补的，而漏掉它会让这行提醒变成谎话。**
+       原来只问前半句，于是：一条 `COUNT=12` 全部生成完的系列，在它最后一场
+       前六周开始显示「快排完了 —— 再按一次生成」，而按下去一场都不会多，
+       那句话也永远不会消失。「即日停止」过的系列同样中招。
+
+    ⚠️ 「没排过」不算快没了 —— 那是「还没开始」，是另一件事，页面上也不该
+       用同一句话说它。
+    """
+    booked_to = generated_through(series)
+    return bool(booked_to
+                and booked_to <= local_today() + RUNNING_LOW
+                and has_more_to_build(series))
 
 
 @transaction.atomic
@@ -3364,27 +3620,33 @@ def generate_occasions(series, *, generated_by=None):
     #    caller that reaches the ORM without coming through here — and this is
     #    what keeps the ordinary double-click from meeting it as a 500.
     series = EventSeries.objects.select_for_update().get(pk=series.pk)
+    # ⚠️ One reading of the clock for the whole press, so a batch spanning the
+    #    moment an occasion starts cannot top up one of its evenings and skip
+    #    the next on a difference of milliseconds.
+    now = local_now()
     audience = Audience.Spec.of(series)
     templates = list(series.roles.prefetch_related("visible_to_ministries"))
-    if not templates:
-        # 🔴 The exact failure `EventSeriesAdmin`'s docstring cites as the reason
-        #    generation is an action rather than a save hook — "twelve events
-        #    with nothing open on them, and no error" — and the action did not
-        #    check for it either. A batch with no roles is a batch nobody can
-        #    sign up for, and on the page it is indistinguishable from one
-        #    somebody has not finished.
-        raise ValidationError(
-            "This series opens no roles, so every occasion it made would be one "
-            "nobody could sign up for. Add at least one role first — what it is "
-            "asking people to come and do."
-        )
+    # ⚠️ **A series with no roles is allowed to generate** (decision 36), and it
+    #    was refused until 2026-09-10. The refusal was right at the time: a
+    #    batch nobody could sign up for was a dead end, because Generate only
+    #    ever added missing *occasions* and never touched the roles on ones
+    #    already built — so adding the job afterwards reached none of them.
+    #
+    #    Decision 34 removed the dead end. `_top_up_roles()` below opens a job
+    #    on every occasion that has never had it, so the way back is now one
+    #    press: add the role template, press Generate again. With a retreat in
+    #    place, refusing costs a publisher a step and buys nothing.
     # ⚠️ Read before anything is written, and nothing is deleted before it —
-    #    the two halves of the bug above.
-    standing = set(series.occasions.values_list("start_time", flat=True))
+    #    the two halves of the bug above. A map rather than a set since
+    #    decision 34: an occasion that is already standing is not skipped any
+    #    more, it is handed to `_top_up_roles()`.
+    standing = {occasion.start_time: occasion
+                for occasion in series.occasions.prefetch_related("roles")}
 
     made = []
     for moment in _occasion_moments(series):
         if moment in standing:
+            _top_up_roles(standing[moment], templates, now=now)
             continue
         # ⚠️ Everything the rule says, and `shape` stated flatly rather than
         #    left to the column default: this option produces N events that are
@@ -3416,16 +3678,7 @@ def generate_occasions(series, *, generated_by=None):
         occasion.save()
         set_audience(occasion, audience)
         for template in templates:
-            role = EventRole(
-                event=occasion,
-                role=template.role,
-                needed_count=template.needed_count,
-                stop_at_needed_count=template.stop_at_needed_count,
-                notes=template.notes,
-            )
-            role.full_clean()
-            role.save()
-            set_audience(role, Audience.Spec.of(template))
+            _open_role_from(template, occasion)
         made.append(occasion)
     if made:
         # ⚠️ Only when something was actually built. Pressing Generate on a

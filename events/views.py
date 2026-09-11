@@ -433,7 +433,14 @@ def _visible_events(period, contact):
         #    不加这个注解的话那是**每行一次查询** —— 一页二十行，在全站被打得
         #    最多的一页上。判据本身没有在这里重写，见 `with_capacity()`。
         .with_capacity()
-        .select_related("ministry")
+        # ⚠️ `series` as well as `ministry` (L5.4). Every row renders
+        #    `Event.poster`, which falls back to the series' picture when the
+        #    occasion has none of its own — so without this it is **one query
+        #    per generated row**, on the busiest page in the system. Measured:
+        #    four occasions cost four extra queries on `events_eventseries`;
+        #    a weekly rule makes fifty-two. Same reason `with_capacity()` above
+        #    exists, one column further out.
+        .select_related("ministry", "series")
         .order_by("start_time")
     )
 

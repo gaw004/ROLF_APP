@@ -51,7 +51,8 @@ from org.models import Ministry
 # ⚠️ One direction only: recurrence.py is a pure module that imports nothing
 #    from this app, which is what lets a model validate a rule without the
 #    generator and the ORM having to know about each other.
-from .recurrence import MAX_OCCASIONS, has_an_ending, occasions
+from .recurrence import (MAX_OCCASIONS, has_an_ending,
+                         looks_like_a_rule, occasions)
 
 
 class ParticipationRole(ImmutableCodeMixin, ConstraintErrorFieldMixin, models.Model):
@@ -861,13 +862,24 @@ class Event(Audience, ConstraintErrorFieldMixin, TimeStampedModel):
     class Shape(models.TextChoices):
         """Is this one occasion, or a course people sign up to once? L5.3.
 
-        ⚠️ **Two values here, three options on the publish form.** The third —
+        ⚠️ **Two values here, and two on the publish form — not three.** The
+           third —
            recurring events, a weekly occasion each signed up for separately —
            produces N independent events that are every one of them `single`.
            It is something you *do* when creating (L5.4's generator), not
            something an event *is*, and giving it a value here would be the
            fourth cell of decision 16's table: an event you click in week three
            and find you have signed up for all twelve.
+
+           🔴 **And it is not on the publish form yet.** Decision 21 asks for a
+              three-way radio there; L5.4 built the generator and the admin
+              door, and never went back to `EventForm`. So the foundation's own
+              sentence — "可以让 admin **选**…", a choice offered to a
+              publisher — is not offered to any publisher today: building a
+              series is superuser-only, through the admin. Written down as a
+              gap in participants.md §9 with L5.8 as its restart condition,
+              because this docstring claimed the opposite for a day and a
+              requirements review caught it.
 
         ⚠️ Why a column at all, rather than asking `sessions.exists()`. Two
            reasons, and they answer **classification**, which is a different
@@ -1080,6 +1092,31 @@ class Event(Audience, ConstraintErrorFieldMixin, TimeStampedModel):
                 violation_error_message="The end time cannot be before the start time.",
                 violation_error_code="event_end_before_start",
             ),
+            # 🔴 **A double-click on Generate built the whole batch twice.**
+            #    `generate_occasions()` reads which moments already stand and
+            #    then writes; under READ COMMITTED two presses in flight at once
+            #    each read an empty set and each insert, so a 52-occasion rule
+            #    came out as 104 events — two per evening, no error, and two
+            #    green messages both saying 52. Measured.
+            #
+            #    The press is slow enough to invite the second click: 52
+            #    occasions with two roles each is ~2500 queries, seconds on a
+            #    real instance. The lock in `generate_occasions()` serialises
+            #    the ordinary case; this is what makes the guarantee true rather
+            #    than likely, because a lock only holds for code that takes it.
+            #
+            # ⚠️ **Partial** — `series__isnull=False`. Two hand-made events at
+            #    the same moment are a perfectly ordinary thing for a foundation
+            #    to run (two food distributions on one Saturday morning), and
+            #    this must not start refusing them.
+            models.UniqueConstraint(
+                fields=["series", "start_time"],
+                condition=models.Q(series__isnull=False),
+                name="event_one_occasion_per_series_moment",
+                violation_error_message=(
+                    "This series already has an occasion at that moment."),
+                violation_error_code="event_series_moment_taken",
+            ),
         ]
         indexes = [
             models.Index(fields=["start_time"]),                 # R1
@@ -1138,6 +1175,48 @@ class Event(Audience, ConstraintErrorFieldMixin, TimeStampedModel):
                 "People have already signed up for this event, and what their "
                 "signups cover was decided by what it says now."
             )})
+
+    @property
+    def poster(self):
+        """The picture this event shows: its own, else the series' one. L5.4.
+
+        ⭐ **One upload, every occasion** — and no copies. A rule that makes 52
+           evenings makes them from one template, and a picture is part of that
+           template, so the file lives on the series and every occasion points
+           at it. Changing it changes all of them, which is what somebody who
+           uploaded one picture for one weekly meeting expects.
+
+        ⚠️ Why not copy the bytes onto each occasion (the obvious answer): it
+           is 52 files to change when the poster changes, and nothing would
+           carry the change — the same "the template edit never reached the
+           occasions" complaint this feature already has to write down for
+           name and place. Sharing is the only shape where that complaint
+           cannot arise, because there is no stale copy to have.
+
+        🔴 And why not simply store the same **path** on all 52 rows, which
+           looks equivalent: `purge_event_image()` deletes the *file*. The
+           morning after the first evening ended, the other 51 would be
+           pointing at nothing — and that function's own docstring says a row
+           pointing at a deleted file is worse than a row with no picture,
+           because the page renders a broken image rather than the default.
+           See `services.series_with_images_to_purge()` for what replaces it:
+           the series' picture goes when its **last** occasion is over, which
+           is the same sentence the single-event rule has always said, applied
+           to the thing that actually owns the file.
+
+        ⚠️ An occasion may still carry its own picture, and it wins — "this
+           week we have a guest" is a real thing to want, and it costs nothing
+           to allow. That one is purged on the ordinary single-event schedule,
+           because it belongs to that evening alone.
+
+        ⚠️ Read this, never `.image`, on anything that might be generated —
+           `PosterIsAskedGuardTests` holds the line. A template reading
+           `event.image` directly shows the default logo on every generated
+           occasion, which looks exactly like a series nobody gave a picture to.
+        """
+        if self.image:
+            return self.image
+        return self.series.image if self.series_id and self.series.image else None
 
     @property
     def duration(self):
@@ -2436,8 +2515,8 @@ class EventSeriesQuerySet(AudienceQuerySetMixin, models.QuerySet):
 class EventSeries(Audience, ConstraintErrorFieldMixin, TimeStampedModel):
     """One rule and one template, producing N **separate** events. L5.4.
 
-    The third of the three shapes on the publish form, and the one the other two
-    could not hold: a Tuesday-evening prayer meeting where **coming this week is
+    The third of the three shapes the foundation asked for, and the one the
+    other two could not hold: a Tuesday-evening prayer meeting where **coming this week is
     this week's decision**. Twelve of them are twelve events, each with its own
     signups, its own audience and its own line in the list.
 
@@ -2468,14 +2547,15 @@ class EventSeries(Audience, ConstraintErrorFieldMixin, TimeStampedModel):
        [D40](../docs/planning/decisions/D40-undo-a-pattern-batch.md)'s
        `PatternBatch` needs no second table on this side.
 
-    🔴 **No image column, and it is a written-down gap** (2026-09-10). An event
-       picture is a file, and `services.purge_event_image()` deletes that file
-       once the event is over — so twelve occasions sharing one path would go to
-       broken thumbnails the morning after the first one ended, and nothing
-       would raise. Copying the bytes twelve times is the alternative, and it is
-       twelve times the storage for a picture that is deleted a month later by
-       design. Restart condition: the series pages in L5.8, where the answer is
-       most likely "copy the file per occasion".
+    ⭐ **The picture lives here and every occasion reads it** (`Event.poster`).
+       This was a written-down gap for about an hour — the reasoning being that
+       `purge_event_image()` deletes the file once an event is over, so twelve
+       occasions sharing a path would break the morning after the first one
+       ended. That reasoning was right about sharing a **path** and wrong about
+       the conclusion: the fix is to own the file here, and to move the purge
+       question to "is the **last** occasion over" — the same sentence single
+       events have always had, asked of the row that owns the file. See
+       `services.series_with_images_to_purge()`.
     """
 
     AUDIENCE_ON = "series"
@@ -2522,13 +2602,58 @@ class EventSeries(Audience, ConstraintErrorFieldMixin, TimeStampedModel):
     #    hour out — and nothing raises, because the calendar still says Tuesday.
     #    See events/recurrence.py for where the two are put back together.
     start_time = models.TimeField(verbose_name="Starts at")
+    #: Shorter than this and it is almost certainly a mistyped duration rather
+    #: than a very short meeting. See `clean()`.
+    SHORTEST_SENSIBLE = datetime.timedelta(minutes=5)
+
     duration = models.DurationField(
         verbose_name="Runs for",
-        help_text="How long each occasion lasts, e.g. 2:00:00 for two hours.",
+        help_text="How long each occasion lasts, written hours:minutes:seconds "
+                  "— 2:00:00 for two hours.",
     )
 
-    location = models.CharField(max_length=200, blank=True)
-    description = models.TextField(blank=True, max_length=LONG_TEXT)
+    # ⚠️ These, the name and the audience are a **starting point**: they are
+    #    copied onto each occasion as it is made, and occasions already made
+    #    keep what they were made with. Changing them here therefore reaches
+    #    only what has not been generated yet, which is not what a publisher
+    #    expects — measured: rename and move a series, press Generate, and the
+    #    evening somebody had signed up for still carries the old name and the
+    #    old place beside three carrying the new ones.
+    #
+    #    🔴 The audience is the sharp one. Narrowing the series to staff-only
+    #       does **not** narrow the occasions already published, so a publisher
+    #       can believe they have closed something that is still visible to
+    #       outsiders. Said in the help text rather than left to be found.
+    #
+    #    ⚠️ A written-down gap (participants.md §9) rather than fixed here: the
+    #       real answer is the "this one / this and following / all of them"
+    #       question every calendar asks, and that needs a page to ask it on.
+    # ⭐ **Uploaded once, shown on every occasion** — shared, not copied. See
+    #    `Event.poster` for why sharing rather than copying, and why sharing a
+    #    path without this column would have been the worst of the three.
+    #
+    # ⚠️ Unlike the three fields below it, this one is **not** copied at
+    #    generation: the occasions read it live, so changing it here changes
+    #    what all of them show, including the ones already made. That is the
+    #    behaviour somebody expects of a picture and not of a name, which is
+    #    why they are treated differently and why both are said out loud.
+    #
+    # ⚠️ Purged when the **last** occasion is over, not the first — the same
+    #    rule single events have always had, asked of the row that owns the
+    #    file. `services.series_with_images_to_purge()`.
+    image = models.ImageField(
+        upload_to=Event.IMAGE_DIR, blank=True,
+        verbose_name="Picture",
+        help_text="Shown on every occasion this makes. Change it here and they "
+                  "all change; an occasion with its own picture keeps that one.")
+    location = models.CharField(
+        max_length=200, blank=True,
+        help_text="Copied onto each occasion as it is made. Changing it later "
+                  "does not move occasions that already exist.")
+    description = models.TextField(
+        blank=True, max_length=LONG_TEXT,
+        help_text="Copied onto each occasion as it is made. Changing it later "
+                  "does not reach occasions that already exist.")
     # Decision 30 (2026-09-10): the occasions are born with whatever this says.
     #
     # ⚠️ Default draft, and the two defaults fail in opposite directions — the
@@ -2536,8 +2661,19 @@ class EventSeries(Audience, ConstraintErrorFieldMixin, TimeStampedModel):
     #    a rule that publishes straight through is twelve wrong events sent to
     #    every outside volunteer at once; a typo in a rule that lands as drafts
     #    is a list somebody scrolls and fixes.
+    #: The two states decision 30 reasoned about, and only those. ⚠️ The field
+    #: was given `Event.Status.choices` — all five — so `Full`, `Wrapped up` and
+    #: `Cancelled` came along unexamined, and none is a coherent thing to be at
+    #: birth: the admin could stamp four events a month away as "wrapped up",
+    #: ten seconds after creating them, with nothing refusing it. A decision's
+    #: implementation must not be wider than its reasoning.
+    BIRTH_STATUSES = [
+        (Event.Status.DRAFT, "Drafts — nobody sees them until you publish"),
+        (Event.Status.OPEN, Event.Status.OPEN.label),
+    ]
+
     status = models.CharField(
-        max_length=20, choices=Event.Status.choices, default=Event.Status.DRAFT,
+        max_length=20, choices=BIRTH_STATUSES, default=Event.Status.DRAFT,
         verbose_name="Publish the occasions as",
     )
     requires_guardian_consent = models.BooleanField(
@@ -2560,6 +2696,23 @@ class EventSeries(Audience, ConstraintErrorFieldMixin, TimeStampedModel):
                   "generated from this date onwards; the ones that already "
                   "happened stay.",
     )
+    # 🔴 **When the batch was built, which is not when this row was created.**
+    #    The undo window was measured from `created_at`, and decision 30
+    #    guarantees the two differ: a series is born `draft` so that somebody
+    #    can build it, look at it, and publish it — a workflow meant to take
+    #    days. Measured: a series drafted a month ago and generated thirty
+    #    seconds ago was refused with "This batch was built more than 7 days
+    #    ago", on the one screen whose stated purpose is not saying false
+    #    things.
+    #
+    # ⚠️ Two columns rather than a `PatternBatch` table, and D40 §2's test is
+    #    what says so: a series **is** one batch, so the batch's three
+    #    properties (who, when, undone) all fit on it. What did not fit is the
+    #    assumption that the row's own birthday is one of them.
+    generated_at = models.DateTimeField(null=True, blank=True)
+    generated_by = models.ForeignKey(
+        Contact, null=True, blank=True, on_delete=models.PROTECT,
+        related_name="event_series_generated")
     undone_at = models.DateTimeField(null=True, blank=True)
     undone_by = models.ForeignKey(
         Contact, null=True, blank=True, on_delete=models.PROTECT,
@@ -2632,8 +2785,63 @@ class EventSeries(Audience, ConstraintErrorFieldMixin, TimeStampedModel):
            database check can do.
         """
         super().clean()
+        # ⚠️ **First.** The freeze asks whether this row may change at all;
+        #    everything below asks whether the new values agree with each other.
+        #    Asked the other way round, somebody editing a frozen rule was told
+        #    that their new weekday disagrees with the start date — a complaint
+        #    about the merits of a change that was never going to be accepted,
+        #    landing on a field they had not touched.
+        self._refuse_rewriting_the_rule()
+        if (self.duration is not None
+                and datetime.timedelta() < self.duration < self.SHORTEST_SENSIBLE):
+            # 🔴 `DurationField` reads a bare number as **seconds**, so an admin
+            #    typing `2` for "two hours" got fifty-two two-second events and
+            #    no error at all — the CheckConstraint only catches zero and
+            #    below. The number they meant is three orders of magnitude away
+            #    from the one they got, and nothing on the page would have said
+            #    so until somebody opened an event.
+            raise ValidationError({"duration": (
+                f"That comes to {self.duration}. Write it as "
+                "hours:minutes:seconds — 2:00:00 for two hours, 0:30:00 for "
+                "half an hour."
+            )})
         if not self.rule:
             return
+        # 🔴 **Readable first, then finite** — and the order was the other way
+        #    round, which made the commonest wrong input get the wrong
+        #    diagnosis. `has_an_ending()` is a substring test, so plain English
+        #    ("every tuesday") contains no `COUNT=` and was told "This rule
+        #    never stops. Say when it ends" — advice about a rule that is fine
+        #    apart from its ending, given to somebody whose input is not a rule
+        #    at all. They add an ending in English and get the same sentence.
+        #
+        #    ⚠️ `recurrence.has_an_ending()`'s own docstring spells out this
+        #       exact hazard in the opposite direction ("把后者说成前者会让人
+        #       反复去检查语法") and this code did the mirror image of it.
+        if "DTSTART" in self.rule.upper():
+            # 🔴 An inline `DTSTART:` **beats** the one the expander passes, so
+            #    a pasted calendar block silently overrode both boxes above:
+            #    the page said "First one on 22 Sep, starts at 19:00" and the
+            #    rule produced four evenings at 09:00. The date half is now
+            #    caught by the check further down; the **time** half was not,
+            #    and would not have been — nothing compares it.
+            #
+            # ⚠️ This is what makes `recurrence.py`'s "an RRULE **without**
+            #    DTSTART" true rather than aspirational, and it is the other
+            #    half of the paste that `UNTIL=…Z` fixes: both are what happens
+            #    when somebody copies a real export out of a real calendar.
+            raise ValidationError({"rule": (
+                "Take the DTSTART line out and keep only the FREQ=… part. When "
+                "it starts is the two boxes above this one, so the rule can be "
+                "read on its own — and a DTSTART here would quietly win over "
+                "what they say."
+            )})
+        if not looks_like_a_rule(self.rule):
+            raise ValidationError({"rule": (
+                "That does not look like a repeat rule. It has to be typed in "
+                "the calendar format — FREQ=WEEKLY;BYDAY=TU;COUNT=12 means "
+                "every Tuesday, twelve times."
+            )})
         if not has_an_ending(self.rule):
             raise ValidationError({"rule": (
                 "This rule never stops. Say when it ends — add UNTIL= a date, "
@@ -2657,18 +2865,75 @@ class EventSeries(Audience, ConstraintErrorFieldMixin, TimeStampedModel):
                 "It looks like FREQ=WEEKLY;BYDAY=TU;COUNT=12."
             )}) from None
         if not found:
+            # ⚠️ Two causes, two sentences. `COUNT=0` is finite, parses, and
+            #    means "none" — sending that person off to check their start
+            #    date against their weekdays is advice about a problem they do
+            #    not have.
+            if "COUNT=0" in self.rule.upper().replace(" ", ""):
+                raise ValidationError({"rule": (
+                    "COUNT=0 means no occasions at all. Set it to how many "
+                    "times this should run."
+                )})
             raise ValidationError({"rule": (
                 "That rule produces no occasions at all. Check the first date "
                 "against the days it repeats on."
             )})
+        if self.pk is None or not self.occasions.exists():
+            behind = [m for m in found if local_date_of(m) < local_today()]
+            if behind:
+                # 🔴 **Occasions in the past are made and cannot be taken back.**
+                #    A rule anchored twelve weeks ago generates nine evenings
+                #    that already happened — published, with roles, counted by
+                #    the ministry report as meetings that ran with nobody there
+                #    — and `_collectable_occasions()` refuses to touch anything
+                #    that has started, by design. So undo cannot reach them and
+                #    the only way out is deleting nine rows by hand. Measured.
+                #
+                # ⚠️ Refused at the door rather than skipped by the generator,
+                #    and that is the choice worth writing down: skipping is
+                #    tempting and worse, because "why are there only three"
+                #    would then have no answer anywhere on the page.
+                #
+                # ⚠️ Only while the series has no occasions. Afterwards the
+                #    whole point is that the early ones are in the past, and
+                #    this would refuse every later save of a healthy series.
+                raise ValidationError({"starts_on": (
+                    f"This rule falls on {len(behind)} date(s) that have "
+                    f"already gone, the first on "
+                    f"{local_date_of(found[0]):%-d %B %Y}. Generating would "
+                    "create real events for evenings that have already "
+                    "happened, and they cannot be undone afterwards — set the "
+                    "first date to the next one you actually want."
+                )})
+        first = local_date_of(found[0])
+        if first != self.starts_on:
+            # 🔴 The label says "First one on" and the help text says "The date
+            #    of the first occasion". Nothing checked it, so a Wednesday
+            #    typed against a Tuesday rule was accepted and the first evening
+            #    quietly landed six days later — and the undo confirmation
+            #    screen, whose entire job is telling the truth about a batch,
+            #    printed "first on 17 Sept" for a batch whose first occasion is
+            #    the 22nd.
+            raise ValidationError({"starts_on": (
+                f"This rule's first occasion is "
+                f"{first:%-d %B %Y}, not {self.starts_on:%-d %B %Y} — "
+                f"{self.starts_on:%A}s are not one of the days it repeats on. "
+                "Change one or the other so they agree."
+            )})
         if len(found) > MAX_OCCASIONS:
             raise ValidationError({"rule": (
-                f"That is more than {MAX_OCCASIONS} occasions, which is about a "
-                "year of a weekly series. Shorten it — a series that runs "
-                "longer than that is better re-made when it comes round again, "
-                "and every occasion here is a real event with its own signups."
+                f"That is more than {MAX_OCCASIONS} occasions. Every one of "
+                "them is a real event with its own signups, so build it in "
+                "shorter runs and make the next one when it comes round."
+                # ⚠️ The sentence used to add "which is about a year of a
+                #    weekly series" — a claim about *duration* attached to a cap
+                #    counted in *occasions*, and the two come apart the moment
+                #    the rule is not weekly: 90 days of daily morning prayer was
+                #    refused by a message about a year of Tuesdays, while a
+                #    monthly rule sails through to 2030. The cap is right (the
+                #    risk is rows per click); the arithmetic in the wording was
+                #    not.
             )})
-        self._refuse_rewriting_the_rule()
 
     #: The columns the generator reads to decide **when** its occasions fall.
     #: Frozen together, because they answer one question between them.
@@ -2707,10 +2972,10 @@ class EventSeries(Audience, ConstraintErrorFieldMixin, TimeStampedModel):
            description, the audience, the status of occasions still to come. What
            is frozen is only what decides **when** — see GENERATION_FIELDS.
 
-        ⚠️ **A written-down gap**: `split_series()` has no door of its own until
-           the series pages (L5.8), so today changing a rule is "stop this one,
-           build the next" through the two doors that do exist — which is what
-           split does, by hand. Restart condition is that page.
+    ⚠️ `split_series()` **has** a door — `EventSeriesAdmin.change_the_rule`,
+       added once this refusal was found to be pointing at a control that did
+       not exist. It stops this series and hands back an editable copy with no
+       occasions yet, so every generation column on the copy is free.
         """
         if self.pk is None or not self.occasions.exists():
             return

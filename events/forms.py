@@ -599,9 +599,23 @@ class EventForm(EventAudienceFormMixin, forms.ModelForm):
             #
             # ⚠️ Two options here, three in the requirement. The third —
             #    recurring events, a weekly occasion each signed up for
-            #    separately — is a generator (L5.4) rather than a value, and it
-            #    joins this field when the generator exists. Offering it now
-            #    would be a radio button that saves nothing.
+            #    separately — is a generator (L5.4) rather than a value.
+            #
+            # 🔴 **The generator now exists, and this field still does not offer
+            #    it** (2026-09-10). This comment used to say it "joins this
+            #    field when the generator exists", and nobody came back. So
+            #    requirement 4's second half — the publisher *choosing* between
+            #    the three — is not delivered on any page a publisher can open;
+            #    a series is superuser-only, through the admin. A requirements
+            #    review found it by reading this line and then checking the
+            #    field's actual choices.
+            #
+            # ⚠️ It is not a one-line addition, which is why it is a written-down
+            #    gap (participants.md §9) rather than a quick fix: the third
+            #    option needs a repeat rule and a duration on this form, a
+            #    different save path (it creates an `EventSeries`, not an
+            #    `Event`), and somewhere to send the publisher afterwards. That
+            #    is the series pages, L5.8.
             "name", "ministry", "shape", "people_pick_meetings",
             "start_time", "end_time",
             "location", "status", "requires_guardian_consent",
@@ -756,6 +770,27 @@ NO_AUDIENCE = object()
 #:    surviving a click into an event and back.
 #:    守卫：events.tests.RoleKindFilterTests.test_the_filter_names_are_declared_once
 FILTER_PARAMS = ("q", "ministry", "nature", "start", "end")
+
+
+class EventSeriesAdminForm(AudienceAdminForm):
+    """The series' admin form: the audience rules, plus the picture pipeline.
+
+    🔴 **Without `clean_image` a series picture skips the re-encode**, and the
+       thing that matters about that re-encode is not the size. `Event.image`'s
+       own comment says it: a phone photo carries GPS coordinates, and a
+       picture taken at somebody's home would publish where they live to every
+       signed-in user. `normalise_event_image()` strips EXIF; the series is the
+       one upload this feature added, and it went round the back.
+
+    ⚠️ Its occasions show this file (`Event.poster`), so an unstripped upload
+       here is unstripped on every occasion the rule makes — the same
+       multiplication the containment rule gets its urgency from.
+
+    ⚠️ It reuses `EventForm.clean_image` rather than restating it: one pipeline,
+       two doors. The alternative is two places that both nearly strip EXIF.
+    """
+
+    clean_image = EventForm.clean_image
 
 
 class EventPeriodForm(forms.Form):

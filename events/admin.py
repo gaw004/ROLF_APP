@@ -11,10 +11,12 @@ from django.db.models import Count
 from django.template.response import TemplateResponse
 from simple_history.admin import SimpleHistoryAdmin
 
-from .forms import AudienceAdminForm, SessionForm
+from .forms import AudienceAdminForm, EventSeriesAdminForm, SessionForm
 from .services import (
     generate_occasions,
-    hours_recorded_at,
+    register_kept_at,
+    split_series,
+    stop_series_today,
     undo_preview,
     undo_series,
 )
@@ -30,6 +32,17 @@ from .models import (
     Session,
     SessionAttendance,
 )
+
+
+def _admin_contact(request):
+    """The Contact behind the logged-in admin, or None.
+
+    ⚠️ None is a normal answer rather than a failure: a superuser matches no
+       real person by design (D12), which is why `undone_by` is nullable. Named
+       once because three actions ask it, and `views._my_contact()` is the same
+       question on the other side of the D18 line — this file may not import it.
+    """
+    return getattr(request.user, "contact", None)
 
 
 @admin.register(ParticipationRole)
@@ -109,13 +122,21 @@ class EventAdmin(SimpleHistoryAdmin):
     form = AudienceAdminForm
     list_display = [
         "name", "ministry", "shape", "status", "start_time", "end_time",
-        "duration",
+        "duration", "series",
     ]
-    list_filter = ["status", ShapeFilter, "ministry", "visible_to_outsiders"]
+    # ⚠️ `series` in both, because a rule can put 52 rows on this page carrying
+    #    the same name, the same ministry and the same shape — and this is the
+    #    changelist staff actually live on. Without the column they are 52
+    #    indistinguishable lines; without the filter there is no way to pick out
+    #    the ones a rule made. `RelatedOnlyFieldListFilter` for the reason
+    #    SessionAdmin states: the plain version loads every row of the related
+    #    table into the dropdown on every page view.
+    list_filter = ["status", ShapeFilter, "ministry", "visible_to_outsiders",
+                   ("series", admin.RelatedOnlyFieldListFilter)]
     search_fields = ["name", "location"]
     date_hierarchy = "start_time"
     autocomplete_fields = ["ministry", "owner"]
-    list_select_related = ["ministry"]
+    list_select_related = ["ministry", "series"]
     inlines = [EventRoleInline]
     # 🔴 L5.4's two columns are shown and never typed, and `source` in
     #    particular is not a preference — it is what decides whether a rule may
@@ -274,8 +295,15 @@ class SessionAdmin(SimpleHistoryAdmin):
     ordering = ["start_time"]
 
     def has_delete_permission(self, request, obj=None):
-        """Refuses a meeting that has hours on its register. D18: it asks, it
-        does not work it out — `services.hours_recorded_at()` is the answer.
+        """Refuses a meeting that has anybody on its register. D18: it asks, it
+        does not work it out — `services.register_kept_at()` is the answer.
+
+        🔴 **It asked about *hours* until 2026-09-10, and that made it blind to
+           half this table.** A place somebody attends records no hours by
+           design (decision 20), so a meeting with a full class register —
+           twelve students, all marked present — reported nothing to lose and
+           the delete button was enabled. The guard asked the volunteering
+           question on a table built to hold both halves.
 
         🔴 `SessionAttendance` cascades from `session`, so deleting week seven
            here takes its whole register with it: who came, the hours an
@@ -288,7 +316,7 @@ class SessionAdmin(SimpleHistoryAdmin):
            holds no rule of its own: the question is asked in services, and this
            returns its answer.
         """
-        if obj is not None and hours_recorded_at(obj):
+        if obj is not None and register_kept_at(obj):
             return False
         return super().has_delete_permission(request, obj)
 
@@ -429,7 +457,10 @@ class EventSeriesAdmin(SimpleHistoryAdmin):
        the sentence above was trying to describe.
     """
 
-    form = AudienceAdminForm
+    # ⚠️ Not the plain `AudienceAdminForm`: this one adds the picture pipeline
+    #    (`normalise_event_image` — resize, WebP, **strip EXIF**), which the
+    #    series upload went round the back of. A phone photo carries GPS.
+    form = EventSeriesAdminForm
     list_display = ["name", "ministry", "rule", "starts_on", "start_time",
                     "status", "ended_on", "undone_at"]
     list_filter = ["status", "ministry"]
@@ -437,8 +468,16 @@ class EventSeriesAdmin(SimpleHistoryAdmin):
     autocomplete_fields = ["ministry", "owner"]
     list_select_related = ["ministry"]
     inlines = [EventSeriesRoleInline]
-    readonly_fields = ["undone_at", "undone_by"]
-    actions = ["generate_occasions", "undo_batch"]
+    # ⚠️ `ended_on` is readonly, and that is a correctness fix rather than
+    #    tidiness. Typing a date into it stops **future generation** and
+    #    withdraws nothing, so an admin who set it believed they had called the
+    #    series off while four published evenings stood on the calendar, still
+    #    signable. The action below is the only thing that does both, so it is
+    #    the only way in. (`undone_at` / `undone_by` are readonly for the
+    #    ordinary reason: they record what a service did.)
+    readonly_fields = ["ended_on", "generated_at", "generated_by",
+                       "undone_at", "undone_by"]
+    actions = ["generate_occasions", "stop_today", "change_the_rule", "undo_batch"]
 
     def get_list_display(self, request):
         """Counts the occasions once for the page, not once per row.
@@ -465,7 +504,8 @@ class EventSeriesAdmin(SimpleHistoryAdmin):
     def generate_occasions(self, request, queryset):
         for series in queryset:
             try:
-                made = generate_occasions(series)
+                made = generate_occasions(
+                    series, generated_by=_admin_contact(request))
             except ValidationError as refused:
                 # ⚠️ Reported, not raised — the same handling `undo_batch` below
                 #    has. A series that reached the database without
@@ -485,6 +525,70 @@ class EventSeriesAdmin(SimpleHistoryAdmin):
                 f"They are {series.get_status_display().lower()} — nothing was "
                 "removed from occasions people had already signed up for.")
 
+    @admin.action(description="Stop this series from today",
+                  permissions=["change"])
+    def stop_today(self, request, queryset):
+        """🔴 The door `stop_series_today()` did not have.
+
+        Without it the only way to stop a series was to type a date into
+        `ended_on` — which stops *generation* and withdraws *nothing*. An admin
+        did that, saw the form save, and left four published evenings standing
+        on the public calendar, open for signup. Two of the feature's own
+        refusal messages ("Stop the series instead") pointed at this control
+        while it did not exist.
+        """
+        for series in queryset:
+            try:
+                dropped = stop_series_today(series)
+            except ValidationError as refused:
+                self.message_user(
+                    request, f"“{series.name}”: {'; '.join(refused.messages)}",
+                    level=messages.WARNING)
+            else:
+                self.message_user(
+                    request,
+                    f"“{series.name}”: stopped as of today. "
+                    f"{dropped} occasion(s) still to come were withdrawn; "
+                    "everything that already happened was left alone.")
+
+    @admin.action(description="Change the rule from today on",
+                  permissions=["change"])
+    def change_the_rule(self, request, queryset):
+        """Stop this series and open an editable copy of it. 06-roadmap L5.6.
+
+        ⭐ The shape is Google's calendar split, and it is what makes the rule
+           freeze survivable: the successor has **no occasions yet**, so
+           `_refuse_rewriting_the_rule()` does not apply to it and every
+           generation column is editable. Change what you meant to change on the
+           copy, then press Generate.
+
+        ⚠️ Before this, the freeze's own refusal said "stop this series instead,
+           and build the next one" and neither half had a control — so the only
+           sanctioned way to change a rule was unreachable, and `split_series()`
+           had no caller outside the tests.
+
+        ⚠️ It deliberately does **not** ask what the new rule is. A form here
+           would be a second place that knows how to edit a series, and the
+           change page is already that place — this hands them the copy and gets
+           out of the way.
+        """
+        for series in queryset:
+            try:
+                successor, withdrawn = split_series(
+                    series, changed_by=_admin_contact(request))
+            except ValidationError as refused:
+                self.message_user(
+                    request, f"“{series.name}”: {'; '.join(refused.messages)}",
+                    level=messages.WARNING)
+            else:
+                self.message_user(
+                    request,
+                    f"“{series.name}”: stopped as of today — "
+                    f"{withdrawn} occasion(s) still to come were withdrawn, "
+                    "and what already happened stays. A copy is ready to edit "
+                    f"(#{successor.pk}): change when it repeats there, then "
+                    "generate its occasions.")
+
     @admin.action(description="Undo this batch", permissions=["change"])
     def undo_batch(self, request, queryset):
         """Two passes: show what would happen, then do it. D40 section 1.
@@ -503,11 +607,16 @@ class EventSeriesAdmin(SimpleHistoryAdmin):
                     #    no Contact by design (D12), and `undone_by` is nullable
                     #    for that reason. Today the superuser is the only account
                     #    that can reach this page at all — see the class docstring.
-                    dropped = undo_series(
-                        series, undone_by=getattr(request.user, "contact", None))
+                    dropped = undo_series(series, undone_by=_admin_contact(request))
                 except ValidationError as refused:
-                    self.message_user(request, "; ".join(refused.messages),
-                                      level=messages.WARNING)
+                    # ⚠️ Named, like the sibling action above. Undo a
+                    #    multi-select where one batch is already undone and a
+                    #    bare "This batch has already been undone" leaves the
+                    #    reader with no way to tell which.
+                    self.message_user(
+                        request,
+                        f"“{series.name}”: {'; '.join(refused.messages)}",
+                        level=messages.WARNING)
                 else:
                     self.message_user(
                         request, f"“{series.name}”: {dropped} occasion(s) withdrawn.")

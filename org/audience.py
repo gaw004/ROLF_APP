@@ -471,7 +471,11 @@ AUDIENCE_HEADING = {
     #    can see — what people meet is the twelve events it produced. A heading
     #    reading "who can see this series" would be describing a row that never
     #    appears on any page (06-roadmap L5.4).
-    "series": "Who can see every occasion this makes",
+    # ⚠️ "will make", not "makes". The audience is copied onto each occasion as
+    #    it is generated, so narrowing this does not narrow occasions that
+    #    already exist — a publisher reading "can see every occasion this makes"
+    #    would reasonably believe it did. participants.md §9 carries the gap.
+    "series": "Who can see the occasions this will make",
     "series_role": "Who may sign up for this role, on every occasion",
 }
 

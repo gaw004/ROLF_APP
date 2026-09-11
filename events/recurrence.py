@@ -30,6 +30,7 @@ timezone-aware 的 datetime。
 
 import datetime
 import itertools
+import re
 
 from dateutil.rrule import rrulestr
 from django.utils import timezone
@@ -71,6 +72,63 @@ def has_an_ending(rule):
     return any(word in rule.upper() for word in ENDING_KEYWORDS)
 
 
+#: `UNTIL=20261231T000000Z` — RFC 5545's own spelling, and what every calendar
+#: exports. ⚠️ Case-insensitive and tolerant of the date-only form.
+_UNTIL_IN_UTC = re.compile(r"(UNTIL=)(\d{8}(?:T\d{6})?)Z", re.IGNORECASE)
+
+
+def _until_in_local_time(rule):
+    """Rewrite a `UNTIL=…Z` into the wall-clock time this module works in.
+
+    🔴 **The single most likely thing a real person will paste, and it was
+       refused.** RFC 5545 requires `UNTIL` in UTC whenever `DTSTART` is zoned,
+       so `FREQ=WEEKLY;BYDAY=TU;UNTIL=20261231T000000Z` is what Google
+       Calendar and Outlook emit. Our `dtstart` is naive on purpose (the whole
+       wall-clock argument above), and dateutil refuses the mismatch with
+       *"RRULE UNTIL values must be specified in UTC when DTSTART is
+       timezone-aware"* — which reached the admin as advice to put `UNTIL` in
+       UTC, **which they had already done**. A loop with no exit, on the
+       commonest input there is.
+
+    ⚠️ Converted, not stripped. Dropping the `Z` and keeping the digits would
+       move the cut-off by up to a day: an end of `20261231T000000Z` is
+       31 December 16:00 in California, so a rule "until the 31st" would keep
+       or lose the 31st depending on which reading you took. Converting says
+       what the calendar that wrote it meant.
+
+    ⚠️ Date-only `UNTIL=20261231` and the already-local form are left exactly
+       as they are — there is nothing to convert and no reason to touch them.
+    """
+    def to_local(match):
+        prefix, stamp = match.group(1), match.group(2)
+        shape = "%Y%m%dT%H%M%S" if "T" in stamp else "%Y%m%d"
+        moment = datetime.datetime.strptime(stamp, shape).replace(
+            tzinfo=datetime.timezone.utc)
+        return prefix + timezone.localtime(moment).strftime(shape)
+
+    return _UNTIL_IN_UTC.sub(to_local, rule)
+
+
+def looks_like_a_rule(rule):
+    """Is this an RRULE at all, or is it a sentence somebody typed?
+
+    ⭐ Asked **before** `has_an_ending()`, and the order is the whole point.
+       That one is a substring test, so "every tuesday" contains no `COUNT=`
+       and came back as "This rule never stops. Say when it ends" — advice for
+       a rule that is fine except for its ending, handed to somebody whose
+       input is not a rule at all. They add an ending in English and get the
+       identical sentence. The docstring above spells out this hazard in the
+       opposite direction; this is the mirror image of it.
+
+    ⚠️ Deliberately shallow — `FREQ=` and nothing else. It is a triage question
+       ("did they type the calendar format?"), not a validation: `rrulestr()`
+       is what judges whether the rule is correct, and it says so far better
+       than a regex here could. Anything stricter would start refusing rules
+       dateutil accepts, which is the wrong side to be wrong on.
+    """
+    return "FREQ=" in (rule or "").upper().replace(" ", "")
+
+
 def occasions(rule, *, starts_on, start_time, limit=MAX_OCCASIONS + 1):
     """把 `rule` 展开成一串 aware datetime。不碰数据库，不问现在几点。
 
@@ -85,13 +143,24 @@ def occasions(rule, *, starts_on, start_time, limit=MAX_OCCASIONS + 1):
        `list()` 会在这里挂住，而挂住的表现是一个永远转圈的页面。`clean()` 拒绝
        它是**第二道**门；这一道保证第一道门有机会开口。
 
-    ⚠️ 夏令时那一天两种奇怪的当地时刻都不会抛：`make_aware()` 在 zoneinfo 上
-       靠 `fold` 消歧，春天那个不存在的小时会落在偏移换过之后的那一侧。
-       活动一般不排在凌晨两点，所以这里选「照常落一场」而不是「跳过它」——
-       跳过的话日历上会凭空少一周，而没有任何一处说得出为什么。
+    ⚠️ 夏令时那一天两种奇怪的当地时刻都**不会抛**，而结论对、原来写的机制不对
+       （2026-09-10 更正）。原文说 `make_aware()`「靠 `fold` 消歧」——
+       Django 5 的 `make_aware()` 就是一句 `value.replace(tzinfo=…)`，
+       **从不读 `fold`**。实测：春天那个不存在的 02:30 会得到一个读起来是
+       `02:30-06:00` 的值，`timezone.localtime()` 原样返回它（`astimezone`
+       在 tzinfo 相同时直接短路），而它从 Postgres 回来是 03:30。
+
+       ⚠️ 所以「不抛、照常落一场」成立，「怎么落的」原来写错了。活动一般不排在
+       凌晨两点，这里仍然选「照常落一场」而不是「跳过它」—— 跳过的话日历上会
+       凭空少一周，而没有任何一处说得出为什么。
+
+    ⚠️ 这里只决定**开始**的墙钟时刻。一场活动开多久是绝对时间，
+       所以结束时刻在 `services.generate_occasions()` 里按 UTC 相加 ——
+       两者在一年里有两个早上不一样，而那一格属于那边不属于这里。
     """
     start = datetime.datetime.combine(starts_on, start_time)
     # ⚠️ naive 进、naive 出。整条规则在墙钟上跑完，最后一步才落地到时区 ——
-    #    见模块顶上那条 🔴。
-    moments = itertools.islice(rrulestr(rule, dtstart=start), limit)
+    #    见模块顶上那条 🔴。⚠️ `UNTIL=…Z` 先换算成当地时间，见上面那个函数。
+    moments = itertools.islice(
+        rrulestr(_until_in_local_time(rule), dtstart=start), limit)
     return [timezone.make_aware(moment) for moment in moments]

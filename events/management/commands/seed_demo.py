@@ -58,6 +58,13 @@ from events.services import (
 from org.models import Assignment, EmploymentType, Ministry, MinistryRole, Position
 from org.permissions import foundation_admin_group
 
+
+def _last_tuesday_before(day):
+    """The Tuesday on or before `day`. ⚠️ Backwards, not forwards, so the seed's
+    first occasion stays in the past however the command's run day falls."""
+    return day - datetime.timedelta((day.weekday() - 1) % 7)
+
+
 HOUR = datetime.timedelta(hours=1)
 DAY = datetime.timedelta(days=1)
 PASSWORD = "demo-password-not-a-secret"
@@ -813,10 +820,15 @@ class Command(BaseCommand):
                 "ministry": self.pantry,
                 "owner": self.pantry_admin.contact,
                 "rule": "FREQ=WEEKLY;BYDAY=TU;COUNT=8",
-                # ⚠️ Two weeks back, so the batch straddles today: some
-                #    occasions have happened and some have not, which is the
-                #    only state in which undo is worth looking at.
-                "starts_on": local_date_of(now - 14 * DAY),
+                # ⚠️ Two weeks back **and on a Tuesday**, so the batch
+                #    straddles today (the only state in which undo is worth
+                #    looking at) and "First one on" is a day the rule actually
+                #    repeats on — `EventSeries.clean()` refuses otherwise, and
+                #    `local_date_of(now - 14 * DAY)` is a Tuesday one week in
+                #    seven. ⚠️ Still no date in the get_or_create **key**; this
+                #    is a default, which is the distinction this file's line 423
+                #    note is about.
+                "starts_on": _last_tuesday_before(local_date_of(now - 14 * DAY)),
                 "start_time": datetime.time(19, 0),
                 "duration": datetime.timedelta(hours=1, minutes=30),
                 "location": "Chapel",

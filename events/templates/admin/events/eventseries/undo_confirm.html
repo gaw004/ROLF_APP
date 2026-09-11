@@ -22,22 +22,31 @@ Admin only: what undoing a batch would actually do, before it does it. D40 §1.
       <h2>{{ series.name }}</h2>
       <p>
         {{ series.rule }} · first on {{ series.starts_on }} at {{ series.start_time }}<br>
-        Built {{ series.created_at }} by {{ series.owner }}
+        {# ⚠️ `generated_at`, not `created_at`. The window is judged on when the #}
+        {# batch was built, and a series is born a draft days earlier — so       #}
+        {# printing the row's birthday here put one date above a button that     #}
+        {# had judged another. This screen's whole job is not doing that.        #}
+        Built {{ series.generated_at }} by {{ series.generated_by|default:series.owner }}
       </p>
 
-      {% if preview.within_window %}
-        <p><strong>{{ preview.going }} occasion{{ preview.going|pluralize }} will be
-          removed.</strong></p>
-      {% else %}
+      {% if not preview.within_window %}
         {# 🔴 Said before the button, not after it. This screen said "N will be #}
         {# removed" for a batch the confirm then refused outright — a promise   #}
         {# the confirmation breaks, which is the one thing it exists not to do. #}
+        {#                                                                      #}
+        {# ⚠️ And it wraps EVERYTHING below, not just the count. The first fix  #}
+        {# guarded only the "N will be removed" line, so an out-of-window batch #}
+        {# with no survivors still went on to say "the database comes out as    #}
+        {# though it had never been built" — the same broken promise, one       #}
+        {# paragraph further down, under a comment claiming it was fixed.       #}
         <p><strong>Undo is closed on this batch.</strong> It was built more than
           a week ago, so the question it answers — "I have just built this
-          wrong" — is not the one being asked any more. Stop the series instead,
-          or change the rule: both keep what has already happened, which is what
-          undo would have had to do anyway.</p>
-      {% endif %}
+          wrong" — is not the one being asked any more. Use <em>Stop this series
+          from today</em> instead: it keeps every occasion that has already
+          happened and withdraws the ones still to come.</p>
+      {% else %}
+      <p><strong>{{ preview.going }} occasion{{ preview.going|pluralize }} will be
+        removed.</strong></p>
 
       {% if preview.staying %}
         {# The paragraph this screen exists for. Grouped by reason, because #}
@@ -57,6 +66,7 @@ Admin only: what undoing a batch would actually do, before it does it. D40 §1.
           the series and every occasion of it go — the database comes out as
           though it had never been built.</p>
       {% endif %}
+      {% endif %}
     </div>
   {% endfor %}
 
@@ -68,9 +78,10 @@ Admin only: what undoing a batch would actually do, before it does it. D40 §1.
     <input type="hidden" name="action" value="undo_batch">
     <input type="hidden" name="confirmed" value="yes">
     {# ⚠️ No redo, and D40 §7 says so rather than leaving it to be asked for: #}
-    {# rebuilding is what the create screen is for, and what already happened #}
-    {# is never re-generated because the generator only makes what has not    #}
-    {# started yet.                                                            #}
+    {# rebuilding is what the create screen is for. ⚠️ It does NOT follow that #}
+    {# what already happened is safe from a rebuild — the generator fills any  #}
+    {# moment with no occasion standing on it, past ones included, which is    #}
+    {# why a rule anchored in the past is refused at the door instead.         #}
     {# The button is only offered where it does something. #}
     {% if offerable %}<input type="submit" value="Yes, undo">{% endif %}
     <a href="." class="button cancel-link">No, take me back</a>

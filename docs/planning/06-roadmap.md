@@ -2927,7 +2927,7 @@ admin（本轮唯一的门，所以是唯一测得到的门）：`SeriesThroughT
 | `dashboard/services.py` | 三 | L5.7 漏列的读者之一：`/me/` 的工时卡只读一列，一个整学期的助教在自己主页上看到 0 |
 | `events/admin.py` | 三 | ⚠️ 原计划整张表都没列它。L5.2 挂了 `Session` / `SessionAttendance` 两张表，L5.3 加 `ShapeFilter`（两个谓词今天唯一的读者）和 `SessionAdmin.form` |
 | `events/management/commands/seed_demo.py` | 三 | ⚠️ 同样没列。批一有整整一步（L1.5）在做演示数据，批三一步都没有 —— 而 L5.3 是「一门课报一次」第一次能在浏览器里走通的时刻 |
-| `events/admin.py` | 一二三 | ⚠️ L5.4 加 `EventSeriesAdmin` + `EventSeriesRoleInline` + 两个 action（生成 / 撤销），撤销那个渲染一张确认页 `templates/admin/events/eventseries/undo_confirm.html`。🔴 生成是 **action 不是保存的副作用**，两条理由见 L5.6。⚠️ `EventAdmin` 另加 `readonly_fields = ["series", "source"]` —— 那一列决定一条规则能不能把这一行收回去，不是一个偏好，见计划外记录第 2 条。`ParticipationRoleAdmin` 加 `nature`；`EventAdmin` 和 `EventRoleAdmin` 各加三个可见性字段；`Session` / `SessionAttendance` / `EventSeries` 注册。⚠️ `Session` 那一笔 L5.1 落地时漏了，L5.2 一起补 —— 在那之前那张表只有测试碰得到 |
+| `events/admin.py` | 一二三 | ⚠️ L5.4 加 `EventSeriesAdmin` + `EventSeriesRoleInline` + 两个 action（生成 / 撤销），撤销那个渲染一张确认页 `templates/admin/events/eventseries/undo_confirm.html`。🔴 生成是 **action 不是保存的副作用**，两条理由见 L5.6。⚠️ 两个 action 都要 `permissions=["change"]` —— 少了这一行，`org/permissions.py` 里那个只给 `view_` 的授权**一点都不成立**（审查第 1 条）。`EventAdmin` 另加 `readonly_fields = ["series", "source"]` —— 那一列决定一条规则能不能把这一行收回去，不是一个偏好，见计划外记录第 2 条。`ParticipationRoleAdmin` 加 `nature`；`EventAdmin` 和 `EventRoleAdmin` 各加三个可见性字段；`Session` / `SessionAttendance` / `EventSeries` 注册。⚠️ `Session` 那一笔 L5.1 落地时漏了，L5.2 一起补 —— 在那之前那张表只有测试碰得到 |
 | `events/recurrence.py` | 三 | 新文件，纯函数。⚠️ 对外是 `occasions()` 和 `has_an_ending()`，**不叫 `occurrences()`** —— 那个名字 `events/schedule.py` 已经占了，意思完全不同（走查 6） |
 | `org/audience.py` | 三 | ⚠️ 原计划整张表都没列它。`Audience` 加 `AUDIENCE_PARENT` / `AUDIENCE_CHILDREN` 两个类属性，`AUDIENCE_HEADING` / `EMPTY_AUDIENCE_MESSAGE` 各加两条 —— 含容不变量原来**只有把父表叫 `event` 的表够得着**（走查 3） |
 | `notices/models.py` | 三 | ⚠️ 同上：`Notice` 声明那两个属性各为 `None`。抽象类给第二个的默认值是 `"roles"`（五张表里三张的形状），而这张表正是当年为「猜而不是声明」付过账的那一张 |
@@ -3691,3 +3691,44 @@ L5.2 八处），那类靠对着仓库现状走查就能挑出来。这一次两
 而第 4 条把这句话又推进一步：**新功能的测试也只盯着新功能里我刚碰过的那一份实现**。
 第 5 条再推一步：**它一个字都读不出来**。那句话对每一条测试都是「一个非空的错误」，
 只有把页面打开的人才看得见它说的是一个不存在的东西 —— 浏览器验收买到的就是这个。
+
+## L5.4–L5.6 · 一轮代码审查跑出八条，八条全部复现（2026-09-10，同日）
+
+上面那五条是实施时撞上的。这八条是**交付之后**一轮专门的代码审查跑出来的 ——
+而那次交付是绿的：2030 条测试、`ruff`、`makemigrations --check`、八条守卫、
+外加一遍浏览器走查。八条逐条复现过，没有一条是误报。
+
+> ⚠️ **复现的时候自己先错了一次，值得记下来。** 第 4 条第一次跑「没复现」，
+> 因为那条一次性脚本用 `start_time__date=` 筛当天 —— 那是 **UTC 的那一天**，
+> 正是 `TimeSourceGuardTests` 存在的全部理由。改成 `local_date_of()` 之后当场
+> 复现。**一个「没复现」和一个「复现了」一样需要被审视**，而这次的教训是：
+> 验证别人报的问题时，最先该怀疑的是自己那段验证代码。
+
+| # | 是什么 | 为什么绿着的测试看不见它 |
+|---|---|---|
+| 1 🔴 | **两个 action 都没写 `permissions=`，于是只有 `view_` 的 foundation admin 能生成、能整批撤销。** 实测：一个只持 `view_eventseries` 的账号建出 4 场活动、撤掉整批 | Django 的 `_filter_actions_by_permissions()` 放行任何**没有** `allowed_permissions` 的 action，而 changelist 对任何打得开这一页的人都渲染那个下拉。🔴 而唯一声称这里锁着的东西**是我自己写的那段 docstring** —— 一句承诺了锁的注释比一扇没锁的门更糟，它让下一个人不再去看 |
+| 2 | **「即日停止」之后再点一次生成，今晚那场回来了。** 停止按的是**时刻**（「开始了没有」），而重算的过滤按的是**日期**（「在停止那天或之前」）。一年里正好有一天两者不一致 —— 就是有人按下停止的那一天 | 那条测试（`test_a_stopped_series_does_not_grow_new_occasions`）**在大多数日子是绿的**，只在周二 19:00 之前会红。它不是漏了，是**按日期漂移的** |
+| 3 | 同一个边界，撤销那一侧：撤过的批次（因为有人报名而留了下来）离「被重新生成回来」只差一次点击，而那个按钮就在同一屏上 | 同上。撤销的部分分支也把 `ended_on` 写成今天 |
+| 4 | **原地改时间会把一场聚会变成两个活动。** 19:00 改 20:00 再生成：没人报名的那几场被收走重建在 20:00，**有人报名的那场不许删、留在 19:00**，于是同一晚上出现两个活动，志愿者占着其中一个 | 🔴 L5.6 正文早就写了「不做原地改规则重算」，`split_series()` 就是那条路 —— **而没有任何东西挡着另一条路**。又一次「决定写下来了，没有人兑现」，本轮第二次 |
+| 5 | 撤销确认屏对一个八天前的批次照样印「将删除 N 场」，按下去一场都不删 | `undo_preview()` 只算那三个删除条件，`undo_series()` 另外还判七天窗口。**这一屏存在的全部理由就是不说假话** |
+| 6 | 生成 action 没有接 `ValidationError`，于是一个受众为空的系列会把 admin 打成 500，而服务层的 `atomic` 已经把写回滚掉了 —— 人看到的是崩溃，不知道写没写进去 | 旁边的 `undo_batch` **接了**。同一个文件里两个 action，一个对一个错，和 2026-09-08 那次「两扇门，一扇忘了上锁」同形 |
+| 7 | `COUNT=100` 的规则静静生成 53 场，并且告诉你「53 occasion(s) generated」 | 上限只在 `clean()` 里判，而 `objects.create` / 导入 / seed 都不走它。D14 的老问题：规则只写在人打字的那道门上 |
+| 8 | `EventSeriesRoleInline.show_change_link = True` 什么都不做（`EventSeriesRole` 没注册进 admin） | Django 静默地不渲染它。一个**看起来像被谁弄坏了的链接**，而它从来就不存在 |
+
+### 八条的共同点，而这一条比八条本身值钱
+
+每一条都长在**两块各自正确的东西中间**。
+
+- 权限那一行是对的，action 没去要它；
+- 停止是对的，生成器不认它；
+- `split_series()` 是对的，没有任何东西把人送过去；
+- 那句拒绝是对的，屏幕没等它。
+
+一块一块地测，八条一条都测不出来 —— 这正是它们活过 2030 条绿测试和一遍浏览器
+走查的原因。⚠️ 本轮已经记过一次「新功能的测试只盯着新功能」，又记过一次
+「只盯着我刚碰过的那一份实现」。这八条是第三层：**测试盯着的是零件，而这些
+问题住在接缝上。**
+
+⚠️ 处置：八条全部修掉，各配一条测试，集中在 `SeriesReviewFindingsTests` ——
+**不打散到那四个类里**，因为它们的共同点是「怎么被发现的」，而下一个人在判断
+该信哪些测试的时候，应该能一次看见这一整张单子。

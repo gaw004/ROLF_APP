@@ -6,6 +6,7 @@ could not, because it is「空缺编制」moved to a different table (goal.md D1
 """
 
 import base64
+import contextlib
 import datetime
 import io
 import json
@@ -143,6 +144,24 @@ from .services import (
 NOW = local_now()
 HOUR = datetime.timedelta(hours=1)
 DAY = datetime.timedelta(days=1)
+
+
+@contextlib.contextmanager
+def freeze_service_clock(moment):
+    """Hold `events.services`'s idea of now and today at `moment`.
+
+    ⚠️ Both, and they have to agree. The stop boundary is exactly where an
+       instant ("has it started") meets a date ("is it on or after the stop
+       day"), so a test that froze one and let the other run would be testing
+       the bug rather than the fix — and only on some days.
+
+    ⚠️ Patched where they are **used**, not where they are defined:
+       `events.services` imported the names, so patching core.timeutils would
+       leave the module-level references pointing at the real clock.
+    """
+    with mock.patch("events.services.local_now", return_value=moment), \
+         mock.patch("events.services.local_today", return_value=moment.date()):
+        yield
 
 
 def make_person(last_name, **kwargs):
@@ -4534,6 +4553,311 @@ class SeriesThroughTheAdminTests(TestCase):
         #    says nothing about *which* evening is still standing next month.
         #    D40's own mock-up names dates for this reason.
         self.assertIn(f"{local_date_of(taken.start_time):%-d %b}", body)
+
+
+class SeriesReviewFindingsTests(TestCase):
+    """The eight things a review found on 2026-09-10, one test each.
+
+    ⭐ Together they are one lesson rather than eight: **every one of them lives
+       between two pieces that were each right on their own.** The permission
+       grant was right and the action did not ask for it; the stop was right and
+       the generator did not honour it; `split_series()` was right and nothing
+       sent anybody to it; the refusal was right and the screen did not wait for
+       it. A test per piece finds none of these — which is why they survived a
+       green 2030-test run and a browser pass.
+
+    ⚠️ Kept as a class of their own rather than filed into the four above,
+       because what they have in common is how they were found, and a future
+       reader deciding which tests to trust should be able to see that whole
+       list at once.
+    """
+
+    def setUp(self):
+        self.ministry = Ministry.objects.create(code="prayer", name="Prayer")
+        self.owner = make_person("Owner")
+        self.wide = Audience.Spec(
+            outsiders=True, all_staff=True, ministries=frozenset())
+
+    def build(self, *, rule="FREQ=WEEKLY;BYDAY=TU;COUNT=8", starts_on=None,
+              roles=True):
+        series = EventSeries.objects.create(
+            name="Tuesday evening meeting", ministry=self.ministry,
+            owner=self.owner, rule=rule,
+            starts_on=starts_on or (local_today() - datetime.timedelta(days=21)),
+            start_time=datetime.time(19, 0),
+            duration=datetime.timedelta(hours=2), status=Event.Status.OPEN)
+        set_audience(series, self.wide)
+        if roles:
+            role, _ = ParticipationRole.objects.get_or_create(
+                code="welcome", defaults={"name": "Welcome"})
+            inherit_audience(
+                EventSeriesRole.objects.create(series=series, role=role), series)
+        return series
+
+    # --- 1: the grant only holds because the actions ask for it -------------
+
+    def test_the_two_actions_are_gated_on_more_than_view(self):
+        """🔴 A view-only foundation admin could generate and undo batches.
+
+        Django's `_filter_actions_by_permissions()` allows any action whose
+        callable carries no `allowed_permissions`, and the changelist renders
+        the action form for anybody who can open the page. So the `view_` grant
+        in org/permissions.py — which is deliberate, D20's tier — bought
+        nothing, and the only thing claiming otherwise was a docstring.
+
+        ⚠️ Asserted on the attribute rather than by driving the page, because
+           this is a property of every action on this admin including ones
+           somebody adds later: the loop is what makes it a rule.
+        """
+        from events.admin import EventSeriesAdmin
+
+        for name in EventSeriesAdmin.actions:
+            with self.subTest(action=name):
+                action = getattr(EventSeriesAdmin, name)
+                self.assertEqual(
+                    list(getattr(action, "allowed_permissions", ())), ["change"],
+                    f"{name} is offered to anybody who can open the changelist "
+                    "— which is every foundation admin, on a view-only grant.")
+
+    def test_a_view_only_admin_is_not_offered_them(self):
+        # The same fact from the other end, through the page. ⚠️ Both, because
+        # the attribute could be right while `ModelAdmin.get_actions` is
+        # overridden to ignore it, and the loop above would not notice.
+        user = get_user_model().objects.create_user(
+            email="view.only@example.invalid", password="a-good-long-password")
+        user.is_staff = True
+        user.save()
+        user.groups.add(foundation_admin_group())
+        self.client.force_login(user)
+
+        series = self.build()
+        response = self.client.get(reverse("admin:events_eventseries_changelist"))
+        self.assertEqual(response.status_code, 200, "they may still read it")
+        # ⚠️ `None`, not an empty dropdown: Django leaves the action form off
+        #    the page entirely when nothing is available, which is the outcome
+        #    wanted — no control at all rather than one that refuses.
+        self.assertIsNone(response.context["action_form"],
+                          "a view-only account is being offered a write")
+
+        self.client.post(reverse("admin:events_eventseries_changelist"), {
+            "action": "generate_occasions",
+            helpers.ACTION_CHECKBOX_NAME: [str(series.pk)],
+        })
+        self.assertEqual(series.occasions.count(), 0,
+                         "a view-only account generated a batch")
+
+    # --- 2 and 3: the stop boundary ----------------------------------------
+
+    def morning_of(self, occasion):
+        """10am on the day of `occasion`, so its 19:00 is still ahead."""
+        return localtime(occasion.start_time).replace(hour=10, minute=0)
+
+    def test_stopping_a_series_is_not_undone_by_generating_again(self):
+        """🔴 Stop dropped tonight; Generate put it straight back.
+
+        The drop asks an instant ("has it started"), and the regeneration filter
+        asked a date ("is it on or before the stop day"). For one day of the
+        year — the day somebody stops the series — those two disagree, and the
+        evening just withdrawn was inside the set the generator was free to
+        re-make. Both buttons are on the same screen.
+        """
+        series = self.build()
+        generate_occasions(series)
+        tonight = series.occasions.filter(
+            start_time__gt=NOW).order_by("start_time").first()
+        self.assertIsNotNone(tonight, "the fixture must straddle today")
+
+        with freeze_service_clock(self.morning_of(tonight)):
+            stop_series_today(series)
+            self.assertFalse(
+                Event.objects.filter(pk=tonight.pk).exists(),
+                "stopping did not withdraw the evening still to come")
+            self.assertEqual(generate_occasions(series), [],
+                             "generating after a stop rebuilt what it withdrew")
+
+    def test_what_already_happened_that_day_survives_the_stop(self):
+        # ⚠️ The other direction of the same strictness, and the one that would
+        #    make it too blunt if it were wrong: a meeting that ran this morning
+        #    is not re-made, but it is not removed either.
+        series = self.build()
+        generate_occasions(series)
+        past = series.occasions.filter(
+            start_time__lt=NOW).order_by("start_time").last()
+        evening = series.occasions.filter(
+            start_time__gt=NOW).order_by("start_time").first()
+
+        with freeze_service_clock(self.morning_of(evening)):
+            stop_series_today(series)
+
+        self.assertTrue(Event.objects.filter(pk=past.pk).exists())
+
+    def test_an_undone_batch_does_not_grow_back(self):
+        """Same boundary, reached by undo — and undo leaves the button there.
+
+        Undo's partial branch sets `ended_on` to today as well, so a batch that
+        survived an undo (because somebody had signed up for one of its
+        occasions) was one press of Generate away from rebuilding the evenings
+        the admin had just taken back.
+        """
+        series = self.build()
+        generate_occasions(series)
+        evening = series.occasions.filter(
+            start_time__gt=NOW).order_by("start_time").first()
+        later = series.occasions.filter(
+            start_time__gt=evening.start_time).order_by("start_time").last()
+        sign_up(contact=make_person("V", birth_date=datetime.date(1980, 1, 1)),
+                event_role=later.roles.get())
+
+        with freeze_service_clock(self.morning_of(evening)):
+            undo_series(series, undone_by=self.owner)
+            series.refresh_from_db()
+            self.assertIsNotNone(series.undone_at, "the fixture must survive undo")
+            self.assertEqual(generate_occasions(series), [],
+                             "an undone batch grew back")
+
+    # --- 4: the rule is not rewritten in place ------------------------------
+
+    def test_a_rule_that_has_produced_occasions_is_frozen(self):
+        """🔴 Moving the time in place left one meeting as two events.
+
+        The evenings nobody had taken were withdrawn and re-made at the new
+        time; the evening with a volunteer on it could not be dropped, so it
+        stayed at the old one — and a second event appeared beside it on the
+        same night. 06-roadmap L5.6 had already decided this ("不做原地改规则
+        重算"); `split_series()` was that path, and nothing stood in front of
+        the other one.
+        """
+        series = self.build(rule="FREQ=WEEKLY;BYDAY=TU;COUNT=4",
+                            starts_on=local_today() + datetime.timedelta(days=7))
+        generate_occasions(series)
+
+        for field, value in [("start_time", datetime.time(20, 0)),
+                             ("rule", "FREQ=WEEKLY;BYDAY=TH;COUNT=4"),
+                             ("duration", datetime.timedelta(hours=3)),
+                             ("starts_on", local_today() + datetime.timedelta(days=14))]:
+            with self.subTest(field=field):
+                fresh = EventSeries.objects.get(pk=series.pk)
+                setattr(fresh, field, value)
+                with self.assertRaises(ValidationError) as refused:
+                    fresh.full_clean()
+                self.assertIn(field, refused.exception.error_dict)
+
+    def test_everything_that_is_not_about_when_stays_editable(self):
+        # ⚠️ The other half. A freeze that catches the name, the place or the
+        #    audience is a series nobody can correct, and this one is meant to
+        #    be narrow — see GENERATION_FIELDS.
+        series = self.build(starts_on=local_today() + datetime.timedelta(days=7))
+        generate_occasions(series)
+        series.name = "Tuesday evening prayer"
+        series.location = "Chapel"
+        series.status = Event.Status.FULL
+        series.full_clean()
+        series.save()
+        self.assertEqual(EventSeries.objects.get(pk=series.pk).location, "Chapel")
+
+    def test_a_series_with_no_occasions_yet_can_still_change_its_mind(self):
+        # Deciding the rule and then looking at it is the ordinary order, and
+        # the minutes before Generate are exactly when somebody spots a typo.
+        series = self.build(starts_on=local_today() + datetime.timedelta(days=7))
+        series.rule = "FREQ=WEEKLY;BYDAY=TH;COUNT=4"
+        series.full_clean()
+        series.save()
+        self.assertEqual(EventSeries.objects.get(pk=series.pk).rule,
+                         "FREQ=WEEKLY;BYDAY=TH;COUNT=4")
+
+    def test_the_named_way_to_change_a_rule_still_works(self):
+        # ⚠️ A freeze with no door beside it is a dead end, and `split_series()`
+        #    is the door the roadmap named. It stops the old series and starts a
+        #    new one, so it must not be caught by the freeze it exists to serve.
+        series = self.build()
+        generate_occasions(series)
+        successor = split_series(series, changed_by=self.owner,
+                                 rule="FREQ=WEEKLY;BYDAY=TH;COUNT=4")
+        self.assertEqual(successor.rule, "FREQ=WEEKLY;BYDAY=TH;COUNT=4")
+
+    # --- 5: the screen waits for the same refusal the button makes ----------
+
+    def test_the_confirmation_screen_does_not_promise_what_undo_will_refuse(self):
+        series = self.build(starts_on=local_today() + datetime.timedelta(days=7))
+        generate_occasions(series)
+        EventSeries.objects.filter(pk=series.pk).update(
+            created_at=NOW - UNDO_WINDOW - DAY)
+        series.refresh_from_db()
+
+        self.assertFalse(undo_preview(series).within_window)
+
+        user = get_user_model().objects.create_superuser(
+            email="root@example.invalid", password="a-good-long-password")
+        self.client.force_login(user)
+        response = self.client.post(
+            reverse("admin:events_eventseries_changelist"), {
+                "action": "undo_batch",
+                helpers.ACTION_CHECKBOX_NAME: [str(series.pk)],
+            })
+        body = response.content.decode()
+        self.assertIn("Undo is closed on this batch", body)
+        self.assertNotIn("Yes, undo", body,
+                         "the button is offered for something it will refuse")
+
+    # --- 6 and 7: the generator's two ways of being unheard -----------------
+
+    def test_a_refusal_from_the_generator_reaches_the_admin_as_a_message(self):
+        """Not as a 500 — and the batch is rolled back either way.
+
+        A series that reached the database without `full_clean()` can hold an
+        empty audience or a role wider than itself; both are refused deep inside
+        the service, and uncaught that is a crash on an admin page over a
+        silently rolled-back write.
+        """
+        bare = EventSeries.objects.create(
+            name="Nobody can see this", ministry=self.ministry, owner=self.owner,
+            rule="FREQ=WEEKLY;BYDAY=TU;COUNT=2",
+            starts_on=local_today() + datetime.timedelta(days=7),
+            start_time=datetime.time(19, 0),
+            duration=datetime.timedelta(hours=2))
+        user = get_user_model().objects.create_superuser(
+            email="root@example.invalid", password="a-good-long-password")
+        self.client.force_login(user)
+
+        response = self.client.post(
+            reverse("admin:events_eventseries_changelist"), {
+                "action": "generate_occasions",
+                helpers.ACTION_CHECKBOX_NAME: [str(bare.pk)],
+            }, follow=True)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(bare.occasions.count(), 0)
+        self.assertTrue(
+            any("Say who this is for" in str(m) for m in response.context["messages"]),
+            "the refusal did not reach the person who pressed the button")
+
+    def test_a_rule_too_long_is_refused_rather_than_quietly_cut(self):
+        """The generator says so, not only the form.
+
+        `EventSeries.clean()` refuses an over-long rule where somebody types it.
+        A row that arrived another way was cut to the limit here with no error
+        and a message reading "53 occasion(s) generated" — a number that is not
+        what the rule says and not what anybody asked for.
+        """
+        long_run = self.build(rule="FREQ=WEEKLY;BYDAY=TU;COUNT=100",
+                              starts_on=local_today() + datetime.timedelta(days=7))
+        with self.assertRaises(ValidationError) as refused:
+            generate_occasions(long_run)
+        self.assertIn(str(MAX_OCCASIONS), str(refused.exception.messages[0]))
+        self.assertEqual(long_run.occasions.count(), 0, "nothing was written")
+
+    # --- 8: a flag that silently does nothing ------------------------------
+
+    def test_the_template_role_inline_does_not_claim_a_page_that_is_not_there(self):
+        # `show_change_link` renders only for a registered model, and
+        # EventSeriesRole is not one. Left on, it is a setting that reads as a
+        # link somebody broke rather than one that was never there.
+        from django.contrib import admin as django_admin
+
+        from events.admin import EventSeriesRoleInline
+
+        self.assertFalse(EventSeriesRoleInline.show_change_link)
+        self.assertNotIn(EventSeriesRole, django_admin.site._registry)
 
 
 class HoursReceivedTests(TestCase):

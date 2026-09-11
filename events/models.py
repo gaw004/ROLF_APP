@@ -2556,8 +2556,9 @@ class EventSeries(Audience, ConstraintErrorFieldMixin, TimeStampedModel):
     ended_on = models.DateField(
         null=True, blank=True,
         verbose_name="Stopped on",
-        help_text="Set when the series was stopped early. Occasions after this "
-                  "date are not generated.",
+        help_text="Set when the series was stopped early. No more occasions are "
+                  "generated from this date onwards; the ones that already "
+                  "happened stay.",
     )
     undone_at = models.DateTimeField(null=True, blank=True)
     undone_by = models.ForeignKey(
@@ -2667,6 +2668,67 @@ class EventSeries(Audience, ConstraintErrorFieldMixin, TimeStampedModel):
                 "longer than that is better re-made when it comes round again, "
                 "and every occasion here is a real event with its own signups."
             )})
+        self._refuse_rewriting_the_rule()
+
+    #: The columns the generator reads to decide **when** its occasions fall.
+    #: Frozen together, because they answer one question between them.
+    GENERATION_FIELDS = ("rule", "starts_on", "start_time", "duration")
+
+    def _refuse_rewriting_the_rule(self):
+        """Once a rule has produced occasions, it is not edited in place. L5.6.
+
+        🔴 **The decision was already written down and nothing enforced it.**
+           06-roadmap L5.6: "改规则只动未来 = 老系列 `ended_on = today` + 新建一个
+           系列（Google 的 split）。不做原地改规则重算：原地改会让「这一场当初是
+           按哪条规则生成的」没有答案." `services.split_series()` is that path,
+           and it has existed since the day this landed — with nothing standing
+           in front of the other one.
+
+        What the other one does, measured: move `start_time` from 19:00 to 20:00
+        on a batch somebody has signed up for, press Generate. The evenings
+        nobody had taken are withdrawn and re-made at 20:00; the evening with a
+        volunteer on it **survives at 19:00**, because it may not be dropped —
+        and a second event appears at 20:00 on the same night. One meeting, two
+        events, a volunteer holding a place on one of them, and both standing on
+        the list page. Nothing raises.
+
+        ⚠️ Not fixable by matching occasions per day instead of per instant: the
+           duplicate is the symptom, and the disease is that half the batch
+           would then be generated under one rule and half under another, with
+           the row itself claiming the new one. That is the exact sentence the
+           roadmap refuses to give up.
+
+        ⚠️ A hint layer, not a rule — the D14 caveat this file carries in four
+           other places. `EventSeries.objects.update(rule=…)` walks past it, and
+           no CheckConstraint can express it: the test is whether another table
+           has rows pointing here.
+
+        ⚠️ Everything else stays editable, deliberately: the name, the place, the
+           description, the audience, the status of occasions still to come. What
+           is frozen is only what decides **when** — see GENERATION_FIELDS.
+
+        ⚠️ **A written-down gap**: `split_series()` has no door of its own until
+           the series pages (L5.8), so today changing a rule is "stop this one,
+           build the next" through the two doors that do exist — which is what
+           split does, by hand. Restart condition is that page.
+        """
+        if self.pk is None or not self.occasions.exists():
+            return
+        was = (type(self).objects.filter(pk=self.pk)
+               .values(*self.GENERATION_FIELDS).first())
+        if was is None:
+            return
+        changed = [name for name in self.GENERATION_FIELDS
+                   if was[name] != getattr(self, name)]
+        if not changed:
+            return
+        raise ValidationError({changed[0]: (
+            "This rule has already produced occasions, and people may have "
+            "signed up for them. Changing when they fall would leave the ones "
+            "somebody has taken standing at the old time with new ones beside "
+            "them. Stop this series instead, and build the next one — what has "
+            "already happened stays either way."
+        )})
 
     @property
     def is_undone(self):

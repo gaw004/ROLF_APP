@@ -30,7 +30,7 @@ from org.audience import Audience, on_the_books_exists, on_the_books_q
 from org.models import Assignment
 
 from . import schedule, tokens
-from .recurrence import occasions
+from .recurrence import MAX_OCCASIONS, occasions
 from .models import (
     NOT_COMING,
     roles_narrower_than_event,
@@ -3056,13 +3056,50 @@ def _occasion_moments(series, *, upto=None):
        the series stopping early is a separate fact about this series. Folding
        it into the rule string would rewrite history: "why did it stop in May"
        would have no answer left.
+
+    🔴 **Strictly before `ended_on`, and the strictness is the whole fix.** The
+       first draft compared `<=`, which read naturally and was wrong for exactly
+       one day — the day somebody stops the series. Stopping drops what has not
+       **started** (an instant), and this kept everything falling on that
+       **date**, so the evening that had just been withdrawn was inside the set
+       the generator was free to re-make. Pressing Generate after Stop put it
+       straight back. Measured on a Tuesday morning: five withdrawn, one
+       returned.
+
+       ⚠️ The occasions **earlier** that day are not lost by the strictness, and
+          that is the thing to check before reading this as too blunt: they
+          already exist, `_drop_generated_after()` never touches them (it only
+          drops what has not started), and `standing` below skips them. What
+          this excludes is only the re-making of rows that are gone on purpose.
+
+       ⚠️ So "stopped on D" means **no more occasions from D onwards**, which is
+          what `ended_on`'s help text now says. It used to say "after this date",
+          a sentence this code did not implement and a person would have had no
+          way to test.
+
+    ⚠️ The same boundary settles undo: its partial branch sets `ended_on` to
+       today too, so without this an undone batch grew back the moment anybody
+       pressed Generate — the button being right there on the same screen.
     """
     moments = occasions(
         series.rule, starts_on=series.starts_on, start_time=series.start_time)
+    # ⚠️ The expander stops one past the limit so its callers can tell "exactly
+    #    the limit" from "far more than it" — and this is the caller that has to
+    #    say so out loud. `EventSeries.clean()` refuses an over-long rule at the
+    #    form, but a row that reached the database another way (an import, a
+    #    script, `objects.create` in a fixture) would otherwise have been
+    #    quietly cut to 53 here, with the admin told "53 occasion(s) generated"
+    #    and no mention of the 47 the rule asked for. D14's shape: the rule is
+    #    enforced where the write happens, not only where a person types.
+    if len(moments) > MAX_OCCASIONS:
+        raise ValidationError(
+            f"This rule asks for more than {MAX_OCCASIONS} occasions, which is "
+            "about a year of a weekly series. Nothing was generated — shorten "
+            "the rule first, so that what gets built is what it says.")
     stop = upto if upto is not None else series.ended_on
     if stop is None:
         return moments
-    return [moment for moment in moments if local_date_of(moment) <= stop]
+    return [moment for moment in moments if local_date_of(moment) < stop]
 
 
 @transaction.atomic
@@ -3226,6 +3263,13 @@ class UndoPreview:
     going: int
     staying: list          # [(reason, [dates, as written])]
     series_survives: bool
+    #: 🔴 False when the batch is older than `UNDO_WINDOW`, in which case
+    #:    `going` is what *would* go and nothing will. Without this the screen
+    #:    said "N occasions will be removed" over a button that then removed
+    #:    none and printed a warning — a confirmation screen making a promise
+    #:    the confirmation refuses, which is the one thing this screen exists
+    #:    not to do.
+    within_window: bool = True
 
     @property
     def total_staying(self):
@@ -3260,6 +3304,10 @@ def undo_preview(series, *, now=None):
     return UndoPreview(
         going=going,
         staying=list(staying.items()),
+        # ⚠️ Read from the same comparison `undo_series()` refuses on, not a
+        #    second spelling of it — the screen and the button disagreeing about
+        #    the window is the same fault as them disagreeing about the rows.
+        within_window=series.created_at >= now - UNDO_WINDOW,
         # ⚠️ The series row itself survives exactly when something is left
         #    pointing at it — and that is not a policy this function applies,
         #    it is what `Event.series` being PROTECT makes true. Said here so

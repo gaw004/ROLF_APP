@@ -374,7 +374,12 @@ class EventSeriesRoleInline(admin.TabularInline):
     fields = ["role", "needed_count", "stop_at_needed_count", "notes",
               *Audience.AUDIENCE_FIELDS]
     autocomplete_fields = ["role"]
-    show_change_link = True
+    # ⚠️ No `show_change_link`, unlike `EventRoleInline` above — and the
+    #    difference is not an oversight. Django only renders that link when the
+    #    inline's model is registered in the admin (`has_registered_model`), and
+    #    this one is not: everything about a template role is on this row.
+    #    Setting it would have been a flag that silently does nothing, which is
+    #    indistinguishable from a link somebody broke.
 
 
 @admin.register(EventSeries)
@@ -400,10 +405,28 @@ class EventSeriesAdmin(SimpleHistoryAdmin):
        `services.undo_preview()`, so the numbers under the button and the rows
        the button removes come from one place.
 
-    ⚠️ Until the Programmes pages land (L5.8) this is the only door onto the
-       table, and it is open to superusers only — `FOUNDATION_ADMIN_PERMISSIONS`
-       grants `view_` and no more, on the same footing and for the same reason
-       as L5.2's two tables. See org/permissions.py.
+    🔴 **Both actions declare `permissions=["change"]`, and without that line
+       the grant in org/permissions.py does not hold.** An earlier draft of this
+       docstring claimed the page was "open to superusers only" because
+       `FOUNDATION_ADMIN_PERMISSIONS` grants `view_` and no more. That is not
+       how Django gates actions: `_filter_actions_by_permissions()` allows any
+       action whose callable carries no `allowed_permissions`, and the
+       changelist renders the action form for anybody who can open the page. So
+       a view-only foundation admin saw both actions and could press them —
+       measured: four events created and a whole batch withdrawn by an account
+       holding `view_eventseries` alone.
+
+       ⚠️ Written out because the docstring was **the only thing** asserting the
+          lock, and a comment promising one is worse than an open door: it stops
+          the next person looking. Same failure this repository records against
+          `set_audience()`'s module note, which claimed a gate the services did
+          not have.
+
+    ⚠️ `change`, not a permission of its own, and it lands where D20 puts it:
+       building a batch is an act on **one ministry's** events, so it belongs to
+       the ministry tier. Until the series pages (L5.8) hand that tier a door,
+       the only account with `change_eventseries` is a superuser — which is what
+       the sentence above was trying to describe.
     """
 
     form = AudienceAdminForm
@@ -437,17 +460,32 @@ class EventSeriesAdmin(SimpleHistoryAdmin):
 
         return [*super().get_list_display(request), occasions_made]
 
-    @admin.action(description="Generate the occasions this rule calls for")
+    @admin.action(description="Generate the occasions this rule calls for",
+                  permissions=["change"])
     def generate_occasions(self, request, queryset):
         for series in queryset:
-            made = generate_occasions(series)
+            try:
+                made = generate_occasions(series)
+            except ValidationError as refused:
+                # ⚠️ Reported, not raised — the same handling `undo_batch` below
+                #    has. A series that reached the database without
+                #    `full_clean()` (an import, a script, the seed) can hold an
+                #    empty audience or a template role wider than itself, and
+                #    both are refused deep inside the service. Uncaught that is
+                #    a 500 on an admin page, with the batch silently rolled back
+                #    by the service's own `atomic` — the admin sees a crash and
+                #    has no idea whether anything was written.
+                self.message_user(
+                    request, f"“{series.name}”: {'; '.join(refused.messages)}",
+                    level=messages.WARNING)
+                continue
             self.message_user(
                 request,
                 f"“{series.name}”: {len(made)} occasion(s) generated. "
                 f"They are {series.get_status_display().lower()} — nothing was "
                 "removed from occasions people had already signed up for.")
 
-    @admin.action(description="Undo this batch")
+    @admin.action(description="Undo this batch", permissions=["change"])
     def undo_batch(self, request, queryset):
         """Two passes: show what would happen, then do it. D40 section 1.
 
@@ -474,10 +512,14 @@ class EventSeriesAdmin(SimpleHistoryAdmin):
                     self.message_user(
                         request, f"“{series.name}”: {dropped} occasion(s) withdrawn.")
             return None
+        batches = [(series, undo_preview(series)) for series in queryset]
         return TemplateResponse(request, "admin/events/eventseries/undo_confirm.html", {
             **self.admin_site.each_context(request),
             "title": "Undo these batches",
-            "batches": [(series, undo_preview(series)) for series in queryset],
+            "batches": batches,
+            # ⚠️ Any, not all: a mixed selection still has something to do, and
+            #    the screen says per batch which ones are closed.
+            "offerable": any(preview.within_window for _, preview in batches),
             "queryset": queryset,
             "action_checkbox_name": admin.helpers.ACTION_CHECKBOX_NAME,
         })

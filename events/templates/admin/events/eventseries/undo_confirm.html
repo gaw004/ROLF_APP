@@ -25,8 +25,19 @@ Admin only: what undoing a batch would actually do, before it does it. D40 §1.
         Built {{ series.created_at }} by {{ series.owner }}
       </p>
 
-      <p><strong>{{ preview.going }} occasion{{ preview.going|pluralize }} will be
-        removed.</strong></p>
+      {% if preview.within_window %}
+        <p><strong>{{ preview.going }} occasion{{ preview.going|pluralize }} will be
+          removed.</strong></p>
+      {% else %}
+        {# 🔴 Said before the button, not after it. This screen said "N will be #}
+        {# removed" for a batch the confirm then refused outright — a promise   #}
+        {# the confirmation breaks, which is the one thing it exists not to do. #}
+        <p><strong>Undo is closed on this batch.</strong> It was built more than
+          a week ago, so the question it answers — "I have just built this
+          wrong" — is not the one being asked any more. Stop the series instead,
+          or change the rule: both keep what has already happened, which is what
+          undo would have had to do anyway.</p>
+      {% endif %}
 
       {% if preview.staying %}
         {# The paragraph this screen exists for. Grouped by reason, because #}
@@ -60,7 +71,8 @@ Admin only: what undoing a batch would actually do, before it does it. D40 §1.
     {# rebuilding is what the create screen is for, and what already happened #}
     {# is never re-generated because the generator only makes what has not    #}
     {# started yet.                                                            #}
-    <input type="submit" value="Yes, undo">
+    {# The button is only offered where it does something. #}
+    {% if offerable %}<input type="submit" value="Yes, undo">{% endif %}
     <a href="." class="button cancel-link">No, take me back</a>
   </form>
 {% endblock %}

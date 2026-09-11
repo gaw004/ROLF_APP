@@ -799,6 +799,63 @@ class RegisterDeleteGuardTests(TestCase):
         )
 
 
+class GeneratedEventDeleteGuardTests(TestCase):
+    """Lint-as-test: an occasion a rule made is withdrawn in one function, only.
+
+    ⭐ The sibling `RegisterDeleteGuardTests` above names — one level up, on the
+       events themselves rather than on the register inside them. D40's ⭐ writes
+       the rule out in full: the conditions under which a generated row may be
+       taken back appear **once**, and undo is not a second deleter but a third
+       caller of the one that exists.
+
+    🔴 The obvious alternative is what D40 refuses by name: add "and undo's
+       delete is fine too" to a guard's allow-list. D36's cost 4 had just warned
+       that an allow-list is where a guard is quietly widened until it protects
+       nothing — so the rule was made structural instead. Extracted into one
+       function, this guard needs no exceptions at all: it watches for the
+       **conditions**, not for a list of files that may delete.
+
+    ⚠️ What is on the other side of a missed one is not a tidy row count. An
+       `Event` cascades two levels into `Participation`, so an occasion dropped
+       with somebody on it takes their signup, their attendance and the hours
+       they gave with it. That is the same loss the register guard was written
+       for, arriving one table higher — and the register guard exists because
+       this project has already shipped it once.
+
+    ⚠️ A function-body scan, so a docstring discussing generated rows and a
+       delete in the same paragraph does not trip it (`our_functions()` strips
+       prose — the lesson the roadmap records about a guard a comment could
+       satisfy). The signal is deliberately broader than the exact queryset:
+       any function that mentions the `generated` source and deletes is doing
+       this, however it is spelled.
+    """
+
+    #: Both have to be present in one function body for it to count.
+    TOUCHES = "Source.GENERATED"
+    DELETES = ".delete("
+
+    #: The one place, and its reason is in its own docstring.
+    ALLOWED = {"_drop_generated_after"}
+
+    def test_generated_occasions_are_dropped_in_one_place(self):
+        offenders = [
+            where
+            for where, name, code in our_functions()
+            if name not in self.ALLOWED
+            and self.TOUCHES in code
+            and self.DELETES in code
+        ]
+        self.assertEqual(
+            offenders,
+            [],
+            "An occasion a rule made is withdrawn by "
+            "events.services._drop_generated_after() and nowhere else. It "
+            "checks three things first — a rule made it, it has not started, "
+            "and nobody signed up — and a second spelling is a second answer "
+            "to what may be taken back:\n" + "\n".join(offenders),
+        )
+
+
 class LocalDayInSqlGuardTests(TestCase):
     """Lint-as-test: a day taken in SQL is taken in the foundation's timezone.
 

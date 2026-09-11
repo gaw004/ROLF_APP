@@ -5,17 +5,26 @@ with_signup_counts(), the shortfall from understaffed(). The test is whether
 deleting this file would lose any business logic — it must not.
 """
 
-from django.contrib import admin
+from django.contrib import admin, messages
+from django.core.exceptions import ValidationError
 from django.db.models import Count
+from django.template.response import TemplateResponse
 from simple_history.admin import SimpleHistoryAdmin
 
 from .forms import AudienceAdminForm, SessionForm
-from .services import hours_recorded_at
+from .services import (
+    generate_occasions,
+    hours_recorded_at,
+    undo_preview,
+    undo_series,
+)
 from org.audience import Audience
 
 from .models import (
     Event,
     EventRole,
+    EventSeries,
+    EventSeriesRole,
     Participation,
     ParticipationRole,
     Session,
@@ -108,6 +117,19 @@ class EventAdmin(SimpleHistoryAdmin):
     autocomplete_fields = ["ministry", "owner"]
     list_select_related = ["ministry"]
     inlines = [EventRoleInline]
+    # 🔴 L5.4's two columns are shown and never typed, and `source` in
+    #    particular is not a preference — it is what decides whether a rule may
+    #    take this row back. An admin who set a hand-made event to `generated`
+    #    would have it silently withdrawn by the next regeneration, taking any
+    #    signups on it; one who moved an event to another series would hand that
+    #    series a row it never made. Both go through
+    #    `services.generate_occasions()` or not at all.
+    #
+    # ⚠️ It is also what stops the add form demanding them. `source` has a
+    #    default but is not `blank`, so a ModelForm renders it required — which
+    #    broke the ordinary admin create the moment the column landed, and a
+    #    test caught it rather than a person.
+    readonly_fields = ["series", "source"]
 
     def get_list_display(self, request):
         """Appends role and signup counts, counted by the database once per page.
@@ -334,3 +356,128 @@ class SessionAttendanceAdmin(SimpleHistoryAdmin):
     #    themselves. D28 §4.
     readonly_fields = ["checked_in_method"]
     ordering = ["-session__start_time"]
+
+
+class EventSeriesRoleInline(admin.TabularInline):
+    """The jobs the rule opens on every occasion it makes. L5.4.
+
+    ⚠️ `AudienceAdminForm` for the same reason `EventRoleInline` above carries
+       it: without a form the admin runs **no** audience checks at all, and here
+       what would go unchecked is the containment rule against the series — a
+       template role open wider than its series produces twelve real breaches of
+       the L2×L3 invariant in one press, silently.
+    """
+
+    model = EventSeriesRole
+    form = AudienceAdminForm
+    extra = 0
+    fields = ["role", "needed_count", "stop_at_needed_count", "notes",
+              *Audience.AUDIENCE_FIELDS]
+    autocomplete_fields = ["role"]
+    show_change_link = True
+
+
+@admin.register(EventSeries)
+class EventSeriesAdmin(SimpleHistoryAdmin):
+    """A repeat rule and the batch of events it made. L5.4–L5.6.
+
+    🔴 **Generating is an action, never a side effect of saving**, and there are
+       two independent reasons — either one alone would settle it:
+
+         · `ModelAdmin.save_related()` calls `form.save_m2m()` **before** it
+           saves the inlines, so anything hooked onto a save runs while the
+           series still has no roles and, on an add, no audience. It would
+           cheerfully generate twelve events with nothing open on them;
+         · `save_related` is one of the four hooks `AdminHasNoLogicGuardTests`
+           refuses outright (D18).
+
+       Which lands on the shape D40 wanted anyway: a batch is something somebody
+       presses, looks at, and can undo — not something that happens to them
+       while they were editing a description.
+
+    ⚠️ Both actions are one line each into `events.services`. This file works
+       nothing out; the arithmetic on the confirmation screen is
+       `services.undo_preview()`, so the numbers under the button and the rows
+       the button removes come from one place.
+
+    ⚠️ Until the Programmes pages land (L5.8) this is the only door onto the
+       table, and it is open to superusers only — `FOUNDATION_ADMIN_PERMISSIONS`
+       grants `view_` and no more, on the same footing and for the same reason
+       as L5.2's two tables. See org/permissions.py.
+    """
+
+    form = AudienceAdminForm
+    list_display = ["name", "ministry", "rule", "starts_on", "start_time",
+                    "status", "ended_on", "undone_at"]
+    list_filter = ["status", "ministry"]
+    search_fields = ["name", "rule"]
+    autocomplete_fields = ["ministry", "owner"]
+    list_select_related = ["ministry"]
+    inlines = [EventSeriesRoleInline]
+    readonly_fields = ["undone_at", "undone_by"]
+    actions = ["generate_occasions", "undo_batch"]
+
+    def get_list_display(self, request):
+        """Counts the occasions once for the page, not once per row.
+
+        The same arrangement `EventAdmin.get_list_display` uses and for the same
+        reason: a method in `list_display` runs per row, which is the N+1 the
+        Contact changelist had to be rescued from. Built here rather than by
+        overriding `get_queryset`, which the layering guard forbids.
+        """
+        if not hasattr(request, "_series_counts"):
+            request._series_counts = dict(
+                EventSeries.objects.annotate(made=Count("occasions"))
+                .values_list("pk", "made"))
+        counts = request._series_counts
+
+        @admin.display(description="Occasions")
+        def occasions_made(obj):
+            return counts.get(obj.pk, 0)
+
+        return [*super().get_list_display(request), occasions_made]
+
+    @admin.action(description="Generate the occasions this rule calls for")
+    def generate_occasions(self, request, queryset):
+        for series in queryset:
+            made = generate_occasions(series)
+            self.message_user(
+                request,
+                f"“{series.name}”: {len(made)} occasion(s) generated. "
+                f"They are {series.get_status_display().lower()} — nothing was "
+                "removed from occasions people had already signed up for.")
+
+    @admin.action(description="Undo this batch")
+    def undo_batch(self, request, queryset):
+        """Two passes: show what would happen, then do it. D40 section 1.
+
+        ⚠️ The confirmation screen is not politeness. Undo does **not** put the
+           database back — three weeks on, some occasions have happened and some
+           have people on them, and neither is ours to take back. Somebody told
+           only "386 will be removed" believes it came out clean and meets the
+           survivors next month, by which time they no longer remember undoing
+           anything.
+        """
+        if request.POST.get("confirmed"):
+            for series in queryset:
+                try:
+                    # ⚠️ None is a normal answer, not a failure: a superuser has
+                    #    no Contact by design (D12), and `undone_by` is nullable
+                    #    for that reason. Today the superuser is the only account
+                    #    that can reach this page at all — see the class docstring.
+                    dropped = undo_series(
+                        series, undone_by=getattr(request.user, "contact", None))
+                except ValidationError as refused:
+                    self.message_user(request, "; ".join(refused.messages),
+                                      level=messages.WARNING)
+                else:
+                    self.message_user(
+                        request, f"“{series.name}”: {dropped} occasion(s) withdrawn.")
+            return None
+        return TemplateResponse(request, "admin/events/eventseries/undo_confirm.html", {
+            **self.admin_site.each_context(request),
+            "title": "Undo these batches",
+            "batches": [(series, undo_preview(series)) for series in queryset],
+            "queryset": queryset,
+            "action_checkbox_name": admin.helpers.ACTION_CHECKBOX_NAME,
+        })

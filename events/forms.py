@@ -25,6 +25,7 @@ from org.permissions import ministry_ids_administered_by
 from . import schedule
 from .models import (
     NARROWING_MESSAGE,
+    PARENT_NOUN,
     NATURE_EXPLANATIONS,
     NATURE_INVITATIONS,
     SERVED_AS_EXPLANATIONS,
@@ -413,7 +414,16 @@ class EventAudienceFormMixin(AudienceFormMixin):
         """
         if getattr(self.instance, "pk", None) is None:
             return
-        roles = getattr(self.instance, "roles", None)
+        # ⚠️ Asked for by name rather than assumed, the same correction
+        #    `submitted_event()` below records (2026-09-10). It happens to be
+        #    `roles` on all three tables that have children, so this one was
+        #    never wrong — but "right by coincidence" is not a property worth
+        #    keeping when the declaration is right there. A table whose children
+        #    are called anything else would have had this half silently skipped.
+        children = self.instance.AUDIENCE_CHILDREN
+        if children is None:
+            return
+        roles = getattr(self.instance, children, None)
         if roles is None:
             return
         # ⚠️ Keyed by the tick **and** the people, not by the tick alone. The
@@ -426,8 +436,9 @@ class EventAudienceFormMixin(AudienceFormMixin):
         #    Three roles blocked by the same ministry are one sentence naming it
         #    once; per-role parentheses would print "(Tax Help)" three times,
         #    which reads as three problems rather than one.
+        noun = PARENT_NOUN.get(self.instance.AUDIENCE_ON, "event")
         blocked = {}
-        for field, audience, name in roles_left_behind(event, roles):
+        for field, audience, name in roles_left_behind(event, roles, parent=noun):
             blocked.setdefault((field, audience), []).append(name)
         for (field, audience), names in blocked.items():
             self.add_error(field, ValidationError(
@@ -438,6 +449,10 @@ class EventAudienceFormMixin(AudienceFormMixin):
                 params={
                     "roles": ", ".join(f"“{name}”" for name in names),
                     "audience": audience,
+                    # ⚠️ "event" or "series", from the row itself. The sentence
+                    #    used to say "event" flat, which is a false noun on the
+                    #    series page — see models.TOO_WIDE_STEM.
+                    "parent": noun,
                     # One blocked role is the commonest case by a distance, and
                     # "Narrow those roles first" for a single one reads as
                     # though something has been missed.
@@ -446,7 +461,7 @@ class EventAudienceFormMixin(AudienceFormMixin):
             ))
 
     def submitted_event(self):
-        """The event this role is being attached to, wherever it is coming from.
+        """The row this one may not be wider than, wherever it is coming from.
 
         Three doors put it in three places and only one of them is the
         instance, which is why this is a method rather than an attribute read:
@@ -457,14 +472,30 @@ class EventAudienceFormMixin(AudienceFormMixin):
         · an inline under the Event add page has it in `cleaned_data` too, put
           there by Django's InlineForeignKeyField — as the **unsaved** parent.
 
-        ⚠️ Returns None on a form editing an event rather than a role, which is
+        ⚠️ Returns None on a form editing a parent rather than a child, which is
            how EventForm inherits this pair and does nothing with it.
+
+        🔴 **The attribute is asked for, never assumed** (2026-09-10). This read
+           `"event"` as a literal in both places, so the check was reachable
+           only by a table that calls its parent `event`. `EventSeriesRole`
+           calls it `series`, and the failure was silent in the worst available
+           direction: the admin inline saved a template role open to outsiders
+           on a staff-only series, returned 302, and every occasion that rule
+           went on to make carried the breach. Found by a test written for this
+           page — the same hole the service side had, and the service side was
+           fixed first, which is exactly how a second copy of one rule comes to
+           be half-mended.
         """
-        event = self.cleaned_data.get("event") if hasattr(self, "cleaned_data") else None
+        parent = self.instance.AUDIENCE_PARENT
+        if parent is None:
+            return None
+        submitted = (self.cleaned_data.get(parent)
+                     if hasattr(self, "cleaned_data") else None)
         # ⚠️ getattr, because Django raises RelatedObjectDoesNotExist here on an
         #    unset FK — and that is an AttributeError, so this reads as absent
         #    rather than as an error. The 🔴 below is what that cost.
-        return event if event is not None else getattr(self.instance, "event", None)
+        return submitted if submitted is not None else getattr(
+            self.instance, parent, None)
 
     def refuse_wider_than_its_event(self, role):
         """L2×L3, asked from the **role's** side. The other half of the pair above.
@@ -510,7 +541,9 @@ class EventAudienceFormMixin(AudienceFormMixin):
                 return
             spec = Audience.Spec.of(event)
         try:
-            refuse_wider_than_event(event=spec, role=role)
+            refuse_wider_than_event(
+                event=spec, role=role,
+                parent=PARENT_NOUN.get(event.AUDIENCE_ON, "event"))
         except ValidationError as error:
             # ⚠️ `None`, so Django distributes the error by the keys the rule
             #    put in it. Naming a field here would override what the rule

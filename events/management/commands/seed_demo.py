@@ -30,18 +30,21 @@ from django.db import transaction
 
 from accounts.services import mark_email_verified, register_account
 from contact.models import Contact, EmergencyContact, RelationshipType
-from core.timeutils import local_now, local_today
+from core.timeutils import local_date_of, local_now, local_today
 from org.audience import Audience
 
 from events.models import (
     Event,
     EventRole,
+    EventSeries,
+    EventSeriesRole,
     Participation,
     ParticipationRole,
 )
 from events.services import (
     add_attendance,
     add_session,
+    generate_occasions,
     check_in,
     check_out,
     mark_absent,
@@ -782,7 +785,59 @@ class Command(BaseCommand):
                 record_session_hours(
                     add_attendance(assistant, meeting), Decimal("2.00"))
 
+        self.recurring_series(now)
         self.filler_events(now)
+
+    def recurring_series(self, now):
+        """The third shape, beside the other two. L5.4.
+
+        ⭐ It is here so the demo holds **all three** on one screen: a one-off
+           Saturday distribution, a course signed up to once, and this — a
+           weekly evening each signed up for on its own. Read from the events
+           list the third is invisible as a shape (its occasions are ordinary
+           one-off events, which is the point), so without a seeded one nobody
+           browsing the demo would meet it at all.
+
+        ⚠️ Matched on the name alone, no date anywhere near the key — the rule
+           this file states in full a few hundred lines above, having once
+           produced four copies of one person's post.
+
+        ⚠️ `COUNT`, not `UNTIL`, so re-seeding on any day builds the same number
+           of occasions. An `UNTIL` fixed to a literal date would generate fewer
+           of them every week until one day it generated none, and a demo that
+           quietly empties is worse than one that is wrong on the first day.
+        """
+        series, made = EventSeries.objects.get_or_create(
+            name="Tuesday evening prayer",
+            defaults={
+                "ministry": self.pantry,
+                "owner": self.pantry_admin.contact,
+                "rule": "FREQ=WEEKLY;BYDAY=TU;COUNT=8",
+                # ⚠️ Two weeks back, so the batch straddles today: some
+                #    occasions have happened and some have not, which is the
+                #    only state in which undo is worth looking at.
+                "starts_on": local_date_of(now - 14 * DAY),
+                "start_time": datetime.time(19, 0),
+                "duration": datetime.timedelta(hours=1, minutes=30),
+                "location": "Chapel",
+                "status": Event.Status.OPEN,
+                "visible_to_outsiders": True,
+                "visible_to_all_staff": True,
+            },
+        )
+        if not made:
+            return
+        self.series_role(series, self.general, needed_count=None)
+        generate_occasions(series)
+        # Somebody on **one** evening, which is the whole difference from the
+        # course above: this signup covers this Tuesday and no other.
+        # ⚠️ `order_by` spelled out: `Event.Meta.ordering` is newest-first, so a
+        #    bare `.first()` here picks the **last** evening of the batch, which
+        #    is not what "the next one" means to anybody reading the demo.
+        one_evening = series.occasions.filter(
+            start_time__gt=now).order_by("start_time").first()
+        if one_evening:
+            self.joins(self.adult, one_evening.roles.get())
 
     #: Enough events that the two public lists actually scroll (2026-08-05).
     #:
@@ -953,6 +1008,21 @@ class Command(BaseCommand):
         #    reason: the seed should walk the doors the site walks. A demo built
         #    by writing rows directly is one that cannot show a rule failing.
         return inherit_audience(event_role, event)
+
+    def series_role(self, series, participation_role, needed_count, **fields):
+        """The same job, opened on a rule instead of on one event. L5.4.
+
+        ⚠️ Beside `role()` above and word for word the same about the audience,
+           because the rule it is obeying is the same one — decision 15's
+           inheritance, and the L2×L3 invariant underneath it. Here it matters
+           more, not less: an audience wrong on a template is wrong on every
+           occasion the rule makes.
+        """
+        template, _ = EventSeriesRole.objects.get_or_create(
+            series=series, role=participation_role,
+            defaults={"needed_count": needed_count, **fields},
+        )
+        return inherit_audience(template, series)
 
     def joins(self, who, event_role):
         """Sign somebody up the way the site does — through services.sign_up().

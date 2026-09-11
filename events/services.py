@@ -25,11 +25,12 @@ from contact.models import Contact, ContactQuerySet
 from core.images import (decode_complaint, draft_to, over_decode_budget,
                          stored_size, upright_size)
 from core.notifications.base import EMAIL, SMS, Message, get_backend
-from core.timeutils import local_date_of, local_day, local_now
+from core.timeutils import local_date_of, local_day, local_now, local_today
 from org.audience import Audience, on_the_books_exists, on_the_books_q
 from org.models import Assignment
 
 from . import schedule, tokens
+from .recurrence import occasions
 from .models import (
     NOT_COMING,
     roles_narrower_than_event,
@@ -37,6 +38,8 @@ from .models import (
     Event,
     EventNotification,
     EventRole,
+    EventSeries,
+    EventSeriesRole,
     Participation,
     ParticipationRole,
     Session,
@@ -2968,6 +2971,360 @@ def hours_received(participation):
         ))["spent"]
     )
     return duration_hours(total or datetime.timedelta())
+
+
+# --- L5.6: recurring events — generating, changing, undoing ----------------
+# One rule and one template produce N separate events (06-roadmap L5.4). The
+# three functions people press are `generate_occasions`, `stop_series_today` and
+# `undo_series`; all three collect what they are allowed to collect through the
+# one delete below, and none of them can express any other kind.
+
+
+#: How long after building a batch it may still be undone. D40 section 5, and
+#: the number is copied rather than re-derived because the judgement is the
+#: same one: "I have just built this wrong" is answered by undo, and "we have
+#: changed our minds" is answered by changing the rule or stopping the series —
+#: two questions, and a window is what keeps them structurally apart instead of
+#: relying on every admin having a sense of proportion.
+#:
+#: ⚠️ Same caveat D40 puts on its own seven: it has no basis but common sense.
+#:    Look at it again after the pilot. ⚠️ And nothing is locked outside the
+#:    window — the rule can still be changed, stopped, or its occasions deleted
+#:    one at a time.
+UNDO_WINDOW = datetime.timedelta(days=7)
+
+
+def _drop_generated_after(series, after):
+    """Withdraw the occasions a rule made and nobody has touched. Returns a count.
+
+    ⭐ **These three conditions appear nowhere else in the repository**, and
+       that is the whole design rather than a tidiness preference — D40's ⭐
+       says it in full. Three callers: recomputing the future, stopping a series
+       today, and undoing a batch. Written out at each of them, "undo" would be
+       a second deleter free to grow a fourth reading of what may be deleted;
+       written here it is a third **caller**, and the guard
+       (`GeneratedEventDeleteGuardTests`) watches for the conditions rather than
+       policing a list of files that may delete.
+
+    The three:
+
+      · `source = generated` — a rule made it, so a rule may unmake it. The
+        make-up session somebody added by hand is theirs, not ours;
+      · it has not started — see below;
+      · **nobody has signed up.** This one is not in D40, because a shift has no
+        signups. An `Event` cascades two levels into `Participation`, so an
+        occasion dropped with somebody on it takes their signup, their
+        attendance and their hours with it. That is the exact loss the register
+        guard one level down was written for, and it is silent.
+
+    🔴 **The cut is `start_time`, not `end_time`**, and this is a deliberate
+       exception to the rule this codebase merged its way to on 2026-08-18 —
+       so it is written down rather than left to look like a slip. That rule
+       answers *"is it over"* and reads `end_time` everywhere (`is_over`,
+       `open_for_signup()`, `from_today()`, `_meetings_still_to_come()`). This
+       asks a different question: *"has it started"*. An occasion under way is
+       an occasion with people standing in a room, and withdrawing it from
+       underneath them is the thing "never touch what already happened" is
+       about. Two questions, two columns — the same shape L5.3 settled for
+       `shape` versus "does it have meetings".
+
+    ⚠️ Returns how many rows went, not the queryset: every caller is reporting
+       a number to a person, and a lazy queryset evaluated after the delete
+       reports zero.
+    """
+    doomed = series.occasions.filter(
+        start_time__gt=after,
+        source=Source.GENERATED,
+    ).exclude(
+        models.Exists(Participation.objects.filter(
+            event_role__event=models.OuterRef("pk")))
+    )
+    # ⚠️ Counted before the delete rather than read off its return value:
+    #    `.delete()` reports every cascaded row too (roles, notifications), so
+    #    its number answers "how many rows" where every caller is asking "how
+    #    many occasions".
+    going = doomed.count()
+    doomed.delete()
+    return going
+
+
+def _occasion_moments(series, *, upto=None):
+    """When this series' occasions fall, honouring an early stop.
+
+    ⚠️ `ended_on` is applied **here** rather than inside the expander, because
+       it is not part of the rule — the rule still says what it always said, and
+       the series stopping early is a separate fact about this series. Folding
+       it into the rule string would rewrite history: "why did it stop in May"
+       would have no answer left.
+    """
+    moments = occasions(
+        series.rule, starts_on=series.starts_on, start_time=series.start_time)
+    stop = upto if upto is not None else series.ended_on
+    if stop is None:
+        return moments
+    return [moment for moment in moments if local_date_of(moment) <= stop]
+
+
+@transaction.atomic
+def generate_occasions(series, *, now=None):
+    """Make the events this rule calls for. Returns the ones it created.
+
+    ⭐ Safe to run again, and that is what makes "change the rule" work at all:
+       it first withdraws what it is allowed to withdraw, then writes what the
+       rule now says, skipping any moment that already has an occasion standing
+       on it. So an occasion somebody signed up for, and one somebody moved by
+       hand, survive a regeneration — and the rule does not produce a duplicate
+       beside them.
+
+    ⚠️ **Not `bulk_create`, and D40 section 2 chose the opposite for shifts.**
+       Both reasons are specific to this side: `Event` carries history — an
+       audience is a promise published to the outside world — and `bulk_create`
+       fires no signals, so a whole batch would leave the history table empty.
+       The audience itself is a many-to-many, which `bulk_create` cannot write
+       at all. Over on D33 a `Shift` has no history and the generator runs the
+       whole rota every week, where the silence is the point.
+
+    ⚠️ Every row goes through `full_clean()` and `set_audience()` rather than
+       straight to `save()`. `set_audience()`'s own docstring has named "batch
+       three's generator" as the caller it exists for since 2026-08-27; this is
+       that sentence coming true. Without it a template pair could put a role in
+       front of people who cannot see the event it hangs on — the L2×L3
+       invariant, which has no database constraint behind it.
+    """
+    now = now or local_now()
+    _drop_generated_after(series, after=now)
+    audience = Audience.Spec.of(series)
+    templates = list(series.roles.prefetch_related("visible_to_ministries"))
+    standing = set(series.occasions.values_list("start_time", flat=True))
+
+    made = []
+    for moment in _occasion_moments(series):
+        if moment in standing:
+            continue
+        # ⚠️ Everything the rule says, and `shape` stated flatly rather than
+        #    left to the column default: this option produces N events that are
+        #    every one of them a one-off, which is the sentence Event.Shape's
+        #    docstring spends a paragraph on. A default is not a statement.
+        occasion = Event(
+            name=series.name,
+            ministry=series.ministry,
+            owner=series.owner,
+            start_time=moment,
+            end_time=moment + series.duration,
+            location=series.location,
+            description=series.description,
+            status=series.status,
+            requires_guardian_consent=series.requires_guardian_consent,
+            shape=Event.Shape.SINGLE,
+            series=series,
+            source=Source.GENERATED,
+        )
+        occasion.full_clean()
+        occasion.save()
+        set_audience(occasion, audience)
+        for template in templates:
+            role = EventRole(
+                event=occasion,
+                role=template.role,
+                needed_count=template.needed_count,
+                stop_at_needed_count=template.stop_at_needed_count,
+                notes=template.notes,
+            )
+            role.full_clean()
+            role.save()
+            set_audience(role, Audience.Spec.of(template))
+        made.append(occasion)
+    return made
+
+
+@transaction.atomic
+def stop_series_today(series, *, now=None):
+    """Stop it from today: keep what has happened, withdraw what has not.
+
+    ⚠️ `ended_on` rather than deleting the series, and the reason is the one
+       this project applies everywhere else: an ending is a date. The rule is
+       also the only answer to "why were there only six of these" — the same
+       argument L5.3 makes for keeping a called-off course's remaining
+       `Session` rows.
+    """
+    now = now or local_now()
+    series.ended_on = local_today()
+    series.full_clean()
+    series.save(update_fields=["ended_on", "updated_at"])
+    return _drop_generated_after(series, after=now)
+
+
+@transaction.atomic
+def split_series(series, *, changed_by, **fields):
+    """Change the rule from today on: stop this series, start a new one.
+
+    ⭐ **Not an in-place edit**, which is the tempting shape and the wrong one.
+       Rewriting `rule` on the existing row leaves "which rule was this occasion
+       generated under" with no answer — and that question is asked every time
+       somebody looks at a term that changed halfway. Google's calendar splits a
+       recurring event for the same reason.
+
+    ⚠️ The new series starts **today**, not on the old one's `starts_on`: what
+       is being changed is the future, and generating it from the original start
+       would try to re-make occasions that already happened (and be refused by
+       the standing-occasion check above, silently doing nothing).
+    """
+    stop_at = local_today()
+    successor = EventSeries(
+        name=fields.get("name", series.name),
+        ministry=series.ministry,
+        owner=changed_by,
+        rule=fields.get("rule", series.rule),
+        starts_on=fields.get("starts_on", stop_at),
+        start_time=fields.get("start_time", series.start_time),
+        duration=fields.get("duration", series.duration),
+        location=fields.get("location", series.location),
+        description=fields.get("description", series.description),
+        status=fields.get("status", series.status),
+        requires_guardian_consent=fields.get(
+            "requires_guardian_consent", series.requires_guardian_consent),
+    )
+    successor.full_clean()
+    successor.save()
+    set_audience(successor, Audience.Spec.of(series))
+    for template in series.roles.prefetch_related("visible_to_ministries"):
+        carried = EventSeriesRole(
+            series=successor,
+            role=template.role,
+            needed_count=template.needed_count,
+            stop_at_needed_count=template.stop_at_needed_count,
+            notes=template.notes,
+        )
+        carried.full_clean()
+        carried.save()
+        set_audience(carried, Audience.Spec.of(template))
+    stop_series_today(series)
+    return successor
+
+
+@dataclass(frozen=True)
+class UndoPreview:
+    """What undoing this batch would actually do. D40 section 1's screen.
+
+    🔴 **`staying` is the half that must not be left out.** Somebody who undoes
+       a three-week-old batch and is told only "386 will be removed" believes
+       the database is clean, and then meets two of these on a week view next
+       month — by which time they no longer remember undoing anything. D40 says
+       it outright: the cost of omitting it is not that a person knows one thing
+       less.
+
+    ⚠️ `staying` is grouped **by reason**, in words, because "4 occasions will
+       remain" without saying why reads as a bug rather than as a rule.
+
+    ⚠️ And each one is named by its **date**, not by `event.name`. Every
+       occasion a rule makes carries the series' own name, so a list of names
+       is the same word four times over — which tells the reader nothing about
+       which four evenings are still standing next month. D40's own mock-up
+       names dates for exactly this reason ("8/18、8/25 的例会").
+    """
+
+    going: int
+    staying: list          # [(reason, [dates, as written])]
+    series_survives: bool
+
+    @property
+    def total_staying(self):
+        return sum(len(days) for _, days in self.staying)
+
+
+def undo_preview(series, *, now=None):
+    """The real arithmetic behind the confirmation screen. Reads nothing else.
+
+    ⚠️ Computed rather than estimated, and computed **from the same three
+       conditions** `_drop_generated_after()` deletes on — a preview built from
+       its own filter is a preview free to disagree with the button under it.
+    """
+    now = now or local_now()
+    staying = {}
+    going = 0
+    signed_up = Participation.objects.filter(
+        event_role__event=models.OuterRef("pk"))
+    for occasion in series.occasions.annotate(
+            taken=models.Exists(signed_up)).order_by("start_time"):
+        if occasion.source != Source.GENERATED:
+            reason = "added by hand"
+        elif occasion.start_time <= now:
+            reason = "already started or over"
+        elif occasion.taken:
+            reason = "somebody has signed up"
+        else:
+            going += 1
+            continue
+        staying.setdefault(reason, []).append(
+            f"{local_date_of(occasion.start_time):%-d %b}")
+    return UndoPreview(
+        going=going,
+        staying=list(staying.items()),
+        # ⚠️ The series row itself survives exactly when something is left
+        #    pointing at it — and that is not a policy this function applies,
+        #    it is what `Event.series` being PROTECT makes true. Said here so
+        #    the screen can say it; enforced by the database either way.
+        series_survives=bool(staying),
+    )
+
+
+class AlreadyUndone(ValidationError):
+    """This batch has been undone before. D40 section 6, cost 3.
+
+    ⚠️ Not an error to the person who pressed the button — two admins undoing
+       the same batch is an ordinary race, and the second one gets the outcome
+       they wanted. It is raised rather than returned so that no caller can walk
+       past it into a second `undone_by`, which would overwrite who really did
+       it.
+    """
+
+
+class UndoWindowClosed(ValidationError):
+    """Too old to undo. See UNDO_WINDOW for what the window is separating."""
+
+
+@transaction.atomic
+def undo_series(series, *, undone_by, now=None):
+    """Withdraw the batch: D40's three steps, in order. Returns the count dropped.
+
+    ⚠️ **Undo is not "back to how it was"**, and the confirmation screen has to
+       say so — `undo_preview()` is what says it. Time has moved since the batch
+       was built: some occasions have happened, some have people on them, and
+       neither is ours to take back.
+
+    ⚠️ The `undone_at` read comes first and is a plain refusal rather than a
+       silent success, D40 cost 3. Two admins pressing this on the same batch is
+       an ordinary race; letting the second through would overwrite `undone_by`
+       with somebody who undid nothing.
+    """
+    now = now or local_now()
+    if series.undone_at is not None:
+        raise AlreadyUndone(
+            "This batch has already been undone. Nothing more was removed.")
+    if series.created_at < now - UNDO_WINDOW:
+        raise UndoWindowClosed(
+            f"This batch was built more than {UNDO_WINDOW.days} days ago, so "
+            "undo is closed on it. Change the rule or stop the series instead "
+            "— both keep what has already happened, which is what undo would "
+            "have had to do anyway."
+        )
+    dropped = _drop_generated_after(series, after=now)
+    series.undone_at = now
+    series.undone_by = undone_by
+    if series.occasions.exists():
+        # Step ②'s other branch: occasions are left, so the rule is kept and
+        # stopped instead of deleted. ⚠️ `Event.series` is PROTECT, so this is
+        # not a choice this function is making on the database's behalf —
+        # deleting here would raise. See that field's own note.
+        series.ended_on = local_today()
+    series.full_clean()
+    series.save(update_fields=["undone_at", "undone_by", "ended_on", "updated_at"])
+    if not series.occasions.exists():
+        # 95% of undos: pressed straight after building, nothing generated has
+        # been touched, and the database comes out looking as though it never
+        # happened. D40 section 1 — this is the case the feature exists for.
+        series.delete()
+    return dropped
 
 
 # --- P6: telling people the event changed --------------------------------

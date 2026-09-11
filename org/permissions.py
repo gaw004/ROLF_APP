@@ -338,6 +338,24 @@ FOUNDATION_ADMIN_PERMISSIONS = [
     #    a superuser — the same footing event creation is on.
     "events.view_session",
     "events.view_sessionattendance",
+    # L5.4's two, on the same footing and for the same reason as the pair above.
+    # A repeat rule and the roles it opens are part of "what did this ministry
+    # run", which is what R1–R3 are read off — and a batch of twelve events with
+    # no visible rule behind them is twelve events nobody can explain.
+    #
+    # ⚠️ View only, deliberately. Building a batch is an act on **one ministry's**
+    #    events, so by D20's test it belongs to the ministry tier rather than to
+    #    a foundation-wide grant; its door is the series pages in L5.8, and until
+    #    those exist the only writer is a superuser. Same footing as Session.
+    #
+    # 🔴 And they are here at all because registering a model in admin.py is not
+    #    what makes it reachable: Django hides a model from the admin index
+    #    entirely when you hold no permission on it, so a registered-but-ungranted
+    #    table is invisible to every account except a superuser and looks exactly
+    #    like a page nobody built. That is how add_ministry went missing, and how
+    #    L5.2 lost two days on 2026-09-08.
+    "events.view_eventseries",
+    "events.view_eventseriesrole",
     # Ministries themselves. A production database comes up with none, and
     # nothing else in the interface can create one — so without these the
     # foundation cannot get started at all. Django hides a model from the admin

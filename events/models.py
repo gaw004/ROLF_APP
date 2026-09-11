@@ -12,6 +12,7 @@ people in it. The analogy is exact, and this is the second time in this project
 that one had to be split out of the other.
 """
 
+import datetime
 from decimal import Decimal
 
 from django.conf import settings
@@ -46,6 +47,11 @@ from org.audience import (
     refuse_redundant_audience,
 )
 from org.models import Ministry
+
+# ⚠️ One direction only: recurrence.py is a pure module that imports nothing
+#    from this app, which is what lets a model validate a rule without the
+#    generator and the ORM having to know about each other.
+from .recurrence import MAX_OCCASIONS, has_an_ending, occasions
 
 
 class ParticipationRole(ImmutableCodeMixin, ConstraintErrorFieldMixin, models.Model):
@@ -267,11 +273,26 @@ NATURE_INVITATIONS = {
 #: The sentence all three containment refusals share. The phrase that fills
 #: `%(audience)s` is the half both doors need — the role page prints this whole
 #: sentence, the event page composes its own around the phrase.
-TOO_WIDE_STEM = ("This event is not open to %(audience)s, so a role inside it "
-                 "cannot be either.")
+#:
+#: ⚠️ `%(parent)s` is the noun for whatever the role hangs on, and it is a
+#:    parameter rather than the word "event" because there is now a second pair
+#:    (`EventSeries` × `EventSeriesRole`, L5.4). `EventAudienceFormMixin`'s
+#:    docstring predicted this exactly — "there is no third table that sentence
+#:    is true of" — and it was right: the first browser pass on the series page
+#:    read "This **event** is not open to…" on a page with no event on it.
+#:    One word, and a reader who has to work out that it means the series.
+TOO_WIDE_STEM = ("This %(parent)s is not open to %(audience)s, so a role "
+                 "inside it cannot be either.")
+
+#: What to call the row a role hangs on, per table. Keyed by AUDIENCE_ON beside
+#: org.audience's AUDIENCE_HEADING and EMPTY_AUDIENCE_MESSAGE, and for the same
+#: reason those two are: a fifth audience-bearing table adds one entry and is
+#: finished. ⚠️ Keyed on the **parent's** side, not the role's.
+PARENT_NOUN = {"event": "event", "series": "series"}
 
 
-def _refuse_too_wide(field, audience, *, stem=TOO_WIDE_STEM, extra=""):
+def _refuse_too_wide(field, audience, *, parent="event", stem=TOO_WIDE_STEM,
+                     extra=""):
     """Raise one containment refusal: keyed to a tick, carrying its phrase.
 
     ⚠️ One constructor rather than three near-identical `raise` statements, and
@@ -283,10 +304,10 @@ def _refuse_too_wide(field, audience, *, stem=TOO_WIDE_STEM, extra=""):
        Here it is an argument, so it cannot be left out.
     """
     raise ValidationError({field: ValidationError(
-        stem + extra, params={"audience": audience})})
+        stem + extra, params={"audience": audience, "parent": parent})})
 
 
-def refuse_wider_than_event(*, event, role):
+def refuse_wider_than_event(*, event, role, parent="event"):
     """A role may not be open to anybody the event itself is closed to.
 
     Requirement 7 read from the other side: seeing an event and being able to
@@ -345,10 +366,11 @@ def refuse_wider_than_event(*, event, role):
        people this is about", used by whichever page is asking.
     """
     if role.outsiders and not event.outsiders:
-        _refuse_too_wide("visible_to_outsiders", Audience.OUTSIDERS_ARE)
+        _refuse_too_wide("visible_to_outsiders", Audience.OUTSIDERS_ARE,
+                         parent=parent)
     if role.all_staff and not event.all_staff:
         _refuse_too_wide(
-            "visible_to_all_staff", Audience.ALL_STAFF_ARE,
+            "visible_to_all_staff", Audience.ALL_STAFF_ARE, parent=parent,
             extra=" (Ticking every ministry is not the same thing — a ministry "
                   "added later would be covered by one and not the other.)")
     # A ministry-specific role is fine if the event covers all staff, and
@@ -385,19 +407,19 @@ def refuse_wider_than_event(*, event, role):
             #    department cannot see an event. All three now come from
             #    org.audience so the refusal and the page cannot drift.
             _refuse_too_wide("visible_to_ministries",
-                             Audience.ministry_staff_are(names),
-                             stem="This event is not open to %(audience)s, so a "
-                                  "role inside it cannot be.")
+                             Audience.ministry_staff_are(names), parent=parent,
+                             stem="This %(parent)s is not open to %(audience)s, "
+                                  "so a role inside it cannot be.")
 
 
 #: What the **event** side says when narrowing would strand a role. The role
 #: side prints refuse_wider_than_event()'s own sentence instead — see
 #: roles_left_behind() for why the two cannot be one message.
-NARROWING_MESSAGE = ("Narrowing this event would leave %(roles)s open to "
+NARROWING_MESSAGE = ("Narrowing this %(parent)s would leave %(roles)s open to "
                      "%(audience)s, who could no longer see it.")
 
 
-def roles_left_behind(event, roles):
+def roles_left_behind(event, roles, parent="event"):
     """Yield (field, audience phrase, role name) for every role this narrowing strands.
 
     ⭐ The one walk over an event's roles, for the two callers that ask the
@@ -421,7 +443,8 @@ def roles_left_behind(event, roles):
     for role in roles.select_related("role").prefetch_related(
             "visible_to_ministries"):
         try:
-            refuse_wider_than_event(event=event, role=Audience.Spec.of(role))
+            refuse_wider_than_event(event=event, role=Audience.Spec.of(role),
+                                    parent=parent)
         except ValidationError as blocked:
             # ⚠️ One entry, always: refuse_wider_than_event() raises on the
             #    first comparison that fails, which its docstring says outright.
@@ -513,20 +536,30 @@ def refuse_bad_audience(*, row, spec):
        of the others. The module note above listed `services` as a place they
        were enforced, and it was not; this is that sentence becoming true.
 
-    Which rules apply depends on which side `row` is:
+    Which rules apply depends on **what the row has underneath and above it**,
+    which every audience-bearing table declares for itself:
 
-    | row       | rules |
-    |-----------|-------|
-    | Event     | not empty · not redundant · no role left wider than it |
-    | EventRole | not empty · not redundant · not wider than its event   |
-    | anything else | not empty · not redundant                         |
+    | row             | PARENT   | CHILDREN | on top of not-empty and not-redundant |
+    |-----------------|----------|----------|---------------------------------------|
+    | Event           | —        | `roles`  | no role of its own is left wider than it |
+    | EventRole       | `event`  | —        | not wider than its event               |
+    | EventSeries     | —        | `roles`  | as Event, on the template              |
+    | EventSeriesRole | `series` | —        | as EventRole, on the template          |
+    | Notice          | —        | —        | nothing else — the two above are all of them |
 
-    ⚠️ That third row is written as an explicit branch below, not as the `else`
-       it used to be (2026-08-31). The old shape assumed anything that was not a
-       role was an event, so the first table with an audience and no children —
-       Notice — fell into the event branch and died on `row.roles` with an
-       AttributeError. A table declares its side in `AUDIENCE_ON`; this reads
-       what it declared instead of guessing from what it is not.
+    ⚠️ Notice's row is an explicit branch below, not the `else` it used to be
+       (2026-08-31). The old shape assumed anything that was not a role was an
+       event, so the first table with an audience and no children fell into the
+       event branch and died on `row.roles` with an AttributeError.
+
+    ⚠️ And the two columns above replaced `AUDIENCE_ON == "role"` plus a
+       hard-coded `row.event` (2026-09-10, batch three). That spelling made the
+       containment rule reachable only by a table that called its parent
+       `event` — and `EventSeriesRole`, which is the same pair one level up,
+       calls it `series`. The failure would have been silent in the worst
+       direction available: a template pair with no containment check at all,
+       generating twelve events with roles open to people who cannot see them.
+       See `org.audience.Audience.AUDIENCE_PARENT`.
 
     ⚠️ Raises on the **first** failure, with the error keyed to the tick it is
        about (refuse_wider_than_event's shape). A caller reaching the database
@@ -550,24 +583,29 @@ def refuse_bad_audience(*, row, spec):
         outsiders=spec.outsiders, all_staff=spec.all_staff,
         ministries=spec.ministries, on=row.AUDIENCE_ON)
     refuse_redundant_audience(all_staff=spec.all_staff, ministries=spec.ministries)
-    if row.AUDIENCE_ON == "role":
-        # ⚠️ The event's **saved** audience, which is right here and would be
+    if row.AUDIENCE_PARENT:
+        # ⚠️ The parent's **saved** audience, which is right here and would be
         #    wrong on the other branch — a role is always added to an event
         #    that already exists, so what is in the database is what the event
         #    is. See AudienceFormMixin.refuse_wider_than_its_event.
-        refuse_wider_than_event(event=Audience.Spec.of(row.event), role=spec)
+        above = getattr(row, row.AUDIENCE_PARENT)
+        refuse_wider_than_event(
+            event=Audience.Spec.of(above), role=spec,
+            parent=PARENT_NOUN.get(above.AUDIENCE_ON, "event"))
         return
-    if row.AUDIENCE_ON != "event":
+    if not row.AUDIENCE_CHILDREN:
         # A table with no parent to be wider than and no children to leave
         # behind — the two rules above are all of them. See the table in the
-        # docstring, and Notice.AUDIENCE_ON.
+        # docstring, and Notice.AUDIENCE_CHILDREN.
         return
     if row.pk is None:
         # Nothing to be wider than it yet, and `roles.all()` raises outright on
         # an unsaved instance — the same check EventForm makes, for the same
         # reason.
         return
-    for field, audience, name in roles_left_behind(spec, row.roles):
+    noun = PARENT_NOUN.get(row.AUDIENCE_ON, "event")
+    for field, audience, name in roles_left_behind(
+            spec, getattr(row, row.AUDIENCE_CHILDREN), parent=noun):
         # ⚠️ Re-raised naming the role, because from this side the rule's own
         #    sentence answers the wrong question. "This event is not open to
         #    people with no current post" is true and useless to somebody
@@ -576,8 +614,33 @@ def refuse_bad_audience(*, row, spec):
         #    handed Specs and never sees a name.
         raise ValidationError({field: ValidationError(
             NARROWING_MESSAGE,
-            params={"roles": f"“{name}”", "audience": audience},
+            params={"roles": f"“{name}”", "audience": audience, "parent": noun},
         )})
+
+
+class Source(models.TextChoices):
+    """Where a row came from: a person typed it, or a rule produced it.
+
+    ⚠️ **One definition, three columns.** `Session.source`, `Event.source` and
+       — when D2a lands — `Shift.source`. Written out here rather than inside
+       any one model because they are not "alike", they are the same question,
+       and this project has deleted a second copy of one truth three times.
+
+    Its only reader is `services._drop_generated_after()`, and the distinction
+    it has to make is this: rows a rule produced may be dropped and produced
+    again when the rule changes, and rows a person added by hand may not.
+    Without the column, re-scheduling a course either dares not delete
+    anything, or deletes the make-up class somebody added on purpose.
+
+    ⚠️ It sits **above** `Event` rather than beside the tables that use it, and
+       that is not a preference: a `choices=`/`default=` in a class body is
+       evaluated as the class is built, so an enum defined further down the file
+       is a NameError at import. `NOT_COMING` a few hundred lines below carries
+       the same note for the same reason — it was moved once already.
+    """
+
+    MANUAL = "manual", "Added by hand"
+    GENERATED = "generated", "Produced by a rule"
 
 
 class EventQuerySet(AudienceQuerySetMixin, models.QuerySet):
@@ -946,6 +1009,32 @@ class Event(Audience, ConstraintErrorFieldMixin, TimeStampedModel):
                   "for a group somebody joins for a few weeks of a term.",
     )
 
+    # L5.4. The rule this occasion came out of, and whether a rule made it at
+    # all. Both empty/`manual` on an event somebody published by hand, which is
+    # every event in the database before this column existed.
+    #
+    # 🔴 **PROTECT, not SET_NULL**, and D40 section 3 changed its mind about
+    #    exactly this once already — on `Shift.generated_from`, the same shape
+    #    one table over. `SET_NULL` means "delete the series, keep the occasions
+    #    but let them forget where they came from", and a generated, still-in-
+    #    the-future event with no series is an **orphan**: every generator
+    #    filters by `series=`, so nothing will ever collect it again. It stands
+    #    on the list page until somebody deletes it by hand, one row at a time.
+    #
+    #    ⚠️ PROTECT refuses no legitimate deletion. Undo drops what it may drop
+    #       first, and a series with nothing left deletes cleanly; one with
+    #       occasions left takes `ended_on` instead and is meant to survive.
+    #       Both paths are D40 step ②. **PROTECT only ever stops a bug.**
+    series = models.ForeignKey(
+        "EventSeries", null=True, blank=True, on_delete=models.PROTECT,
+        related_name="occasions")
+    # ⚠️ The enum is `Source`, declared once further down this file and shared
+    #    with `Session.source` — the two are not "alike", they are the same
+    #    question. Its only reader is `services._drop_generated_after()`: rows a
+    #    rule made may be dropped and made again, rows a person added may not.
+    source = models.CharField(
+        max_length=20, choices=Source.choices, default=Source.MANUAL)
+
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.DRAFT)
     # Capped. Every volunteer-facing list renders this, so an unbounded column
     # is one pasted document away from a page that will not load on a phone.
@@ -1282,6 +1371,11 @@ class EventRole(Audience, ConstraintErrorFieldMixin, TimeStampedModel):
     """
 
     AUDIENCE_ON = "role"
+    # The event above it; nothing below. `refuse_bad_audience()` reads these to
+    # decide that this row goes through refuse_wider_than_event() rather than
+    # through the walk over children — see its table.
+    AUDIENCE_PARENT = "event"
+    AUDIENCE_CHILDREN = None
     # ⚠️ Its event's day, which is the same clock the event's own visibility is
     #    judged on — deliberately. Two clocks would mean "visible today but not
     #    signable on the day", and nobody could explain that to the person it
@@ -1901,26 +1995,6 @@ def askable_served_as():
     ]
 
 
-class Source(models.TextChoices):
-    """Where a row came from: a person typed it, or a rule produced it.
-
-    ⚠️ **One definition, two tables.** `Session.source` uses it now; `Event.source`
-       joins it at L5.4, when the recurring-events generator lands. Written here
-       rather than inside either model because the two columns are not "alike",
-       they are the same question — and this project has deleted a second copy
-       of one truth three times already.
-
-    Its only reader is L5.6's `_drop_generated_after()`, and the distinction it
-    has to make is this: rows a rule produced may be dropped and produced again
-    when the rule changes, and rows a person added by hand may not. Without the
-    column, re-scheduling a course either dares not delete anything, or deletes
-    the make-up class somebody added on purpose.
-    """
-
-    MANUAL = "manual", "Added by hand"
-    GENERATED = "generated", "Produced by a rule"
-
-
 class Session(ConstraintErrorFieldMixin, TimeStampedModel):
     """One meeting inside a run of something. ⚠️ It is not an `Event`.
 
@@ -2344,6 +2418,347 @@ class SessionAttendance(ConstraintErrorFieldMixin, TimeStampedModel):
                 "How long the foundation's time was spent on them is a "
                 "different number, worked out from the meeting's own two ends."
             )})
+
+
+class EventSeriesQuerySet(AudienceQuerySetMixin, models.QuerySet):
+    def live(self):
+        """The batches that have not been undone. D40 section 2.
+
+        ⚠️ Asked of this column and never inferred from "does it still have any
+           occasions left". Undo **keeps** the ones people signed up for and the
+           ones already past, so "undone" and "half undone" look identical from
+           that side — the derived-state-as-authoritative-state disease D40
+           records this project having judged four times.
+        """
+        return self.filter(undone_at__isnull=True)
+
+
+class EventSeries(Audience, ConstraintErrorFieldMixin, TimeStampedModel):
+    """One rule and one template, producing N **separate** events. L5.4.
+
+    The third of the three shapes on the publish form, and the one the other two
+    could not hold: a Tuesday-evening prayer meeting where **coming this week is
+    this week's decision**. Twelve of them are twelve events, each with its own
+    signups, its own audience and its own line in the list.
+
+    ⚠️ It is **not** a Programme, and the two words are near-synonyms in
+       English, so it is written down flat:
+
+         · `EventSeries` → N `Event` rows, each signed up for separately;
+         · a programme   → one `Event` + N `Session` rows, signed up for once.
+
+       Which one is a three-way radio at publish time, and the choice cannot be
+       swapped afterwards — that would be a data migration, not a setting.
+
+    ⚠️ **The carrier ruling in deferred.md is void, and this table is why.**
+       `Event.parent` was assessed against D15's three tests and passed, the
+       second of them being "the relationship carries no attributes of its own".
+       A generation rule **is** an attribute — a rule, a start, a duration, an
+       audience and a whole table of role templates — and D15 watches this exact
+       cell, saying outright that a broken test means the relation is promoted
+       to a table. The test was not wrong; the thing being tested changed
+       (see deferred.md's own line: what was imagined was "morning / afternoon"
+       grouping, and what was asked for was "generate twelve of these").
+
+    ⚠️ Why not "the first occasion doubles as the template" — Google Calendar's
+       and CiviCRM's shape. It makes one row both the series and one occasion,
+       so deleting it and editing it each have two readings, and third-party
+       integrations trip over precisely that. A table of its own also settles
+       batch identity for free: one series **is** one bulk action, so
+       [D40](../docs/planning/decisions/D40-undo-a-pattern-batch.md)'s
+       `PatternBatch` needs no second table on this side.
+
+    🔴 **No image column, and it is a written-down gap** (2026-09-10). An event
+       picture is a file, and `services.purge_event_image()` deletes that file
+       once the event is over — so twelve occasions sharing one path would go to
+       broken thumbnails the morning after the first one ended, and nothing
+       would raise. Copying the bytes twelve times is the alternative, and it is
+       twelve times the storage for a picture that is deleted a month later by
+       design. Restart condition: the series pages in L5.8, where the answer is
+       most likely "copy the file per occasion".
+    """
+
+    AUDIENCE_ON = "series"
+    # The template pair, one level up from Event × EventRole. ⚠️ These two are
+    # what make the containment invariant reach this table at all — see
+    # refuse_bad_audience()'s table, and Audience.AUDIENCE_PARENT for what the
+    # string comparison they replaced could not say.
+    AUDIENCE_PARENT = None
+    AUDIENCE_CHILDREN = "roles"
+    # ⭐ None: a template has no occasion of its own to be judged on. Its
+    #    occasions do — and each generated `Event` carries its own start, so it
+    #    is judged on its own day like any other event. Same answer Notice
+    #    reaches by a different road (Audience.AUDIENCE_DAY).
+    AUDIENCE_DAY = None
+
+    name = models.CharField(max_length=200)
+    ministry = models.ForeignKey(
+        Ministry, on_delete=models.PROTECT, related_name="event_series")
+    owner = models.ForeignKey(
+        Contact, on_delete=models.PROTECT, related_name="event_series_owned")
+
+    # An RFC 5545 RRULE **without** DTSTART — the two below carry that, so the
+    # rule stays a thing you can read on its own. Validated in clean(); expanded
+    # by events/recurrence.py, which is the only module that parses it.
+    #
+    # ⚠️ Capped like every other typed-in text column. TextField's max_length is
+    #    a form-level cap rather than a database one (see core/limits.py), which
+    #    is all that is wanted: a rule is typed, and a paste of a whole calendar
+    #    export should get a sentence under the box rather than a 500.
+    rule = models.TextField(
+        max_length=SHORT_TEXT,
+        verbose_name="How often",
+        help_text="A repeat rule, e.g. FREQ=WEEKLY;BYDAY=TU;COUNT=12. It has "
+                  "to say when it stops — UNTIL= a date, or COUNT= a number.",
+    )
+    starts_on = models.DateField(
+        verbose_name="First one on",
+        help_text="The date of the first occasion. Later ones follow the rule.",
+    )
+    # 🔴 A **wall-clock** time and a length, not two instants, and the reason is
+    #    the one D33 section 2 gives for Shift: "every Tuesday at 19:00" is
+    #    19:00 on both sides of a daylight-saving change. Stored as two aware
+    #    datetimes and stepped forward by seven days, half the term lands an
+    #    hour out — and nothing raises, because the calendar still says Tuesday.
+    #    See events/recurrence.py for where the two are put back together.
+    start_time = models.TimeField(verbose_name="Starts at")
+    duration = models.DurationField(
+        verbose_name="Runs for",
+        help_text="How long each occasion lasts, e.g. 2:00:00 for two hours.",
+    )
+
+    location = models.CharField(max_length=200, blank=True)
+    description = models.TextField(blank=True, max_length=LONG_TEXT)
+    # Decision 30 (2026-09-10): the occasions are born with whatever this says.
+    #
+    # ⚠️ Default draft, and the two defaults fail in opposite directions — the
+    #    same argument written out on Event.requires_guardian_consent. A typo in
+    #    a rule that publishes straight through is twelve wrong events sent to
+    #    every outside volunteer at once; a typo in a rule that lands as drafts
+    #    is a list somebody scrolls and fixes.
+    status = models.CharField(
+        max_length=20, choices=Event.Status.choices, default=Event.Status.DRAFT,
+        verbose_name="Publish the occasions as",
+    )
+    requires_guardian_consent = models.BooleanField(
+        default=True,
+        verbose_name="Minors need a guardian's consent",
+        help_text="Applies to every occasion this makes. Untick only when "
+                  "under-18s may sign up on their own, like an adult.",
+    )
+
+    # "Stop it from today." D40 step ②: a batch whose occasions cannot all be
+    # withdrawn keeps its rule and gets an end date instead of being deleted.
+    #
+    # ⚠️ A date rather than a flag, for the reason this project applies
+    #    everywhere else: an ending is a date, not a deletion, and "when did we
+    #    stop running this" is the question somebody asks in March.
+    ended_on = models.DateField(
+        null=True, blank=True,
+        verbose_name="Stopped on",
+        help_text="Set when the series was stopped early. Occasions after this "
+                  "date are not generated.",
+    )
+    undone_at = models.DateTimeField(null=True, blank=True)
+    undone_by = models.ForeignKey(
+        Contact, null=True, blank=True, on_delete=models.PROTECT,
+        related_name="event_series_undone")
+
+    # ⚠️ m2m_fields for the same reason Event's and EventRole's carry it: who
+    #    something was published to is half the record, and simple-history does
+    #    not track a ManyToMany unless it is named. Here it decides the audience
+    #    of every occasion the rule produced, so the half that would go missing
+    #    is the half that answers "why could these twelve be seen by outsiders".
+    history = HistoricalRecords(m2m_fields=["visible_to_ministries"])
+
+    objects = models.Manager.from_queryset(EventSeriesQuerySet)()
+
+    class Meta:
+        ordering = ["-starts_on", "name"]
+        verbose_name_plural = "event series"
+        # 🔴 **There is deliberately no `ended_on >= starts_on` check**, and the
+        #    draft of this table had one. A test caught it on the first run:
+        #    build a batch for next month, have one person sign up, undo it the
+        #    same afternoon — the survivor keeps the series alive, `ended_on`
+        #    goes to today, and the constraint refused an entirely ordinary act.
+        #
+        #    ⚠️ The mistake was reading these two columns as a tenure, the shape
+        #       `Assignment` and `MinistryRole` have, where the two ends really
+        #       do bracket one thing. They do not here: `starts_on` is where the
+        #       rule is anchored, and `ended_on` says **stop generating after
+        #       this date**. A cut-off earlier than the anchor is a real and
+        #       sayable state — "we stopped it before any of it happened" — and
+        #       it is what undoing a future batch means.
+        #
+        #    ⚠️ Written down rather than silently dropped, because "the two
+        #       dates must be in order" is the first thing anybody reading this
+        #       table will reach for, exactly as this draft did.
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(duration__gt=datetime.timedelta()),
+                name="eventseries_duration_is_positive",
+                violation_error_message=(
+                    "Say how long each occasion runs — it has to be more "
+                    "than nothing."),
+                violation_error_code="eventseries_duration_not_positive",
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.name} · {self.rule}"
+
+    def clean(self):
+        """The rule parses, it stops on its own, and it stops soon enough.
+
+        Three refusals rather than one, because they send the reader to three
+        different places: a rule that will not parse is a typo in the syntax, a
+        rule with no ending is a decision nobody made, and a rule with five
+        thousand occasions is a number somebody meant to be twelve.
+
+        ⚠️ **"It must say when it stops" is the price of not materialising on a
+           rolling window**, and it is a deliberate disagreement with
+           [D33 section 3](../docs/planning/decisions/D33-work-schedule.md),
+           which gave shifts a rolling window plus a weekly cron. The test is
+           whether the thing has a natural end: a course has twelve meetings, a
+           standing post's rota has none. A rolling window here would ask the
+           foundation to maintain a never-ending mechanism for something that
+           ends by nature; a forced end date there would make every post's dates
+           be retyped once a year. Both sides say this; see D33's own note.
+
+        ⚠️ A hint layer, not a rule — the D14 caveat this file carries in three
+           other places. `EventSeries.objects.create(...)` walks past it, and no
+           CheckConstraint can replace it: parsing an RRULE is not something a
+           database check can do.
+        """
+        super().clean()
+        if not self.rule:
+            return
+        if not has_an_ending(self.rule):
+            raise ValidationError({"rule": (
+                "This rule never stops. Say when it ends — add UNTIL= a date, "
+                "or COUNT= a number of occasions. A series with no end would "
+                "have to be generated forever, and every occasion of it is a "
+                "real event somebody has to look after."
+            )})
+        if self.starts_on is None or self.start_time is None:
+            return
+        try:
+            found = occasions(
+                self.rule, starts_on=self.starts_on, start_time=self.start_time)
+        except (ValueError, TypeError) as unreadable:
+            # ⚠️ dateutil raises both, and which one depends on how the string
+            #    is malformed. Caught together because the reader's next move is
+            #    the same either way, and the original text is handed on: it
+            #    names the part it choked on, which is more than this sentence
+            #    can work out.
+            raise ValidationError({"rule": (
+                f"That is not a repeat rule this understands ({unreadable}). "
+                "It looks like FREQ=WEEKLY;BYDAY=TU;COUNT=12."
+            )}) from None
+        if not found:
+            raise ValidationError({"rule": (
+                "That rule produces no occasions at all. Check the first date "
+                "against the days it repeats on."
+            )})
+        if len(found) > MAX_OCCASIONS:
+            raise ValidationError({"rule": (
+                f"That is more than {MAX_OCCASIONS} occasions, which is about a "
+                "year of a weekly series. Shorten it — a series that runs "
+                "longer than that is better re-made when it comes round again, "
+                "and every occasion here is a real event with its own signups."
+            )})
+
+    @property
+    def is_undone(self):
+        """Has this batch been withdrawn? D40's list greys these out."""
+        return self.undone_at is not None
+
+
+class EventSeriesRoleQuerySet(AudienceQuerySetMixin, models.QuerySet):
+    """Nothing of its own — the mixin is the whole point of it existing.
+
+    ⚠️ **Not** `EventRoleQuerySet`, though this table copies that one column for
+       column. Every predicate over there counts signups and asks about room,
+       and a template has neither: `with_signup_counts()` would join through an
+       `event` this table does not have. Sharing it would be one import that
+       reads as reuse and fails at the first call.
+
+    ⚠️ And not "no queryset at all": `AudienceIsWiredUpTests` refuses a table
+       that carries an audience and cannot be narrowed by one, because that
+       failure is silent — the rows simply go out to everybody. Nobody browses
+       a template today, and the guard is right not to take that on trust.
+    """
+
+
+class EventSeriesRole(Audience, ConstraintErrorFieldMixin, TimeStampedModel):
+    """A job the rule opens on **every** occasion it produces. L5.4.
+
+    The template for `EventRole`, column for column, and generation turns one of
+    these into one real role on each generated event.
+
+    ⚠️ Its audience is the one thing here that is not merely copied forward: it
+       has to be no wider than the series' own, or the twelve events it produces
+       are twelve breaches of the L2×L3 invariant at once. That check happens
+       **here**, at publish time, and not at generation time — see
+       `refuse_bad_audience()`, which reaches this table through
+       `AUDIENCE_PARENT`. Left to generation it would fail halfway through a
+       batch, with some occasions already written.
+    """
+
+    AUDIENCE_ON = "series_role"
+    AUDIENCE_PARENT = "series"
+    AUDIENCE_CHILDREN = None
+    # None for the same reason the series' own is: a template has no day. The
+    # generated roles are judged on their event's day, exactly as EventRole says.
+    AUDIENCE_DAY = None
+
+    series = models.ForeignKey(
+        EventSeries, on_delete=models.CASCADE, related_name="roles")
+    role = models.ForeignKey(
+        ParticipationRole, on_delete=models.PROTECT, related_name="+")
+    needed_count = models.PositiveIntegerField(
+        null=True, blank=True,
+        help_text="How many people this job wants, on each occasion. Leave "
+                  "empty for no limit.",
+    )
+    stop_at_needed_count = models.BooleanField(
+        default=True,
+        verbose_name="Stop signups at this number",
+        help_text="Untick if more people than that are welcome — the number "
+                  "then says what you are aiming for, and nobody is refused.",
+    )
+    notes = models.TextField(blank=True, max_length=SHORT_TEXT)
+
+    # ⚠️ Present for the reason EventRole's is: `needed_count` is a promise
+    #    published to volunteers, and here it is that promise made on every
+    #    occasion at once. Its absence would leave the template as the one row
+    #    in this pair whose changes nothing recorded.
+    history = HistoricalRecords(m2m_fields=["visible_to_ministries"])
+
+    objects = models.Manager.from_queryset(EventSeriesRoleQuerySet)()
+
+    class Meta:
+        ordering = ["series", "role__name"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["series", "role"],
+                name="eventseriesrole_unique_per_series",
+                violation_error_message=(
+                    "This series already opens that role on every occasion."),
+                violation_error_code="eventseriesrole_duplicate",
+            ),
+            models.CheckConstraint(
+                condition=(models.Q(needed_count__isnull=True)
+                           | models.Q(needed_count__gt=0)),
+                name="eventseriesrole_needed_count_is_positive",
+                violation_error_message="Leave the number empty for no limit; "
+                                        "otherwise it has to be at least 1.",
+                violation_error_code="eventseriesrole_needed_count_not_positive",
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.role.name} @ {self.series.name}"
 
 
 class EventNotification(ConstraintErrorFieldMixin, TimeStampedModel):

@@ -1,0 +1,66 @@
+{% extends "admin/base_site.html" %}
+{% comment %}
+Admin only: what undoing a batch would actually do, before it does it. D40 §1.
+
+🔴 **The half that must not be dropped is what stays behind.** Undo is not "back
+   to how it was": time has moved since the batch was built, and an occasion
+   that already happened, or that somebody has signed up for, is not ours to
+   take back. Told only "386 will be removed", somebody believes the database
+   came out clean — and meets the survivors on a week view next month, by which
+   point they no longer remember undoing anything. D40 says outright that the
+   cost of leaving this out is not that a person knows one thing less.
+
+⚠️ Every number here comes from `services.undo_preview()`, which filters on the
+   same three conditions `_drop_generated_after()` deletes on. A screen that
+   counted for itself would be free to disagree with the button underneath it.
+{% endcomment %}
+{% block content %}
+  <h1>Undo {{ batches|length }} batch{{ batches|length|pluralize:"es" }}?</h1>
+
+  {% for series, preview in batches %}
+    <div class="module aligned">
+      <h2>{{ series.name }}</h2>
+      <p>
+        {{ series.rule }} · first on {{ series.starts_on }} at {{ series.start_time }}<br>
+        Built {{ series.created_at }} by {{ series.owner }}
+      </p>
+
+      <p><strong>{{ preview.going }} occasion{{ preview.going|pluralize }} will be
+        removed.</strong></p>
+
+      {% if preview.staying %}
+        {# The paragraph this screen exists for. Grouped by reason, because #}
+        {# "4 will remain" without saying why reads as a bug, not a rule.    #}
+        <p>⚠️ {{ preview.total_staying }} occasion{{ preview.total_staying|pluralize }}
+          will be kept, so the series itself is <strong>not deleted</strong> — it
+          is stopped as of today instead:</p>
+        <ul>
+          {% for reason, days in preview.staying %}
+            {# Dates, not names: every occasion a rule makes carries the #}
+            {# series' own name, so names would be one word repeated.    #}
+            <li>{{ days|length }} {{ reason }} — {{ days|join:", " }}</li>
+          {% endfor %}
+        </ul>
+      {% else %}
+        <p>Nothing has happened to this batch yet and nobody has signed up, so
+          the series and every occasion of it go — the database comes out as
+          though it had never been built.</p>
+      {% endif %}
+    </div>
+  {% endfor %}
+
+  <form method="post">
+    {% csrf_token %}
+    {% for obj in queryset %}
+      <input type="hidden" name="{{ action_checkbox_name }}" value="{{ obj.pk }}">
+    {% endfor %}
+    <input type="hidden" name="action" value="undo_batch">
+    <input type="hidden" name="confirmed" value="yes">
+    {# ⚠️ No redo, and D40 §7 says so rather than leaving it to be asked for: #}
+    {# rebuilding is what the create screen is for, and what already happened #}
+    {# is never re-generated because the generator only makes what has not    #}
+    {# started yet.                                                            #}
+    <input type="submit" value="Yes, undo">
+    <a href="." class="button cancel-link">No, take me back</a>
+  </form>
+{% endblock %}

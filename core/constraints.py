@@ -55,6 +55,16 @@ CONSTRAINT_FIELD = {
     # events.EventRole
     "eventrole_duplicate": "role",
     "eventrole_needed_count_not_positive": "needed_count",
+    # events.EventSeries / events.EventSeriesRole
+    #
+    # ⚠️ The role pair's two codes land where EventRole's twins land, and that
+    #    is the point: this table copies that one column for column, so a
+    #    message about the same rule appears under the same box. A template that
+    #    answered differently from the roles it produces would be the copy
+    #    drifting from its original.
+    "eventseries_duration_not_positive": "duration",
+    "eventseriesrole_duplicate": "role",
+    "eventseriesrole_needed_count_not_positive": "needed_count",
     # events.Participation
     "participation_duplicate": "contact",
     "participation_hours_negative": "hours",

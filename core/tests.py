@@ -1044,8 +1044,11 @@ class DeletesInServicesAreEnumeratedGuardTests(TestCase):
         "close_future_register",
         # An occasion a rule made: generated, not started, nobody signed up.
         "_drop_generated_after",
-        # The series row itself, once undo has left nothing behind.
-        "undo_series",
+        # The series row itself, once stopping has left nothing behind.
+        # ⚠️ 2026-09-11：原来这里是 `undo_series`。撤销和即日停止合并成了
+        #    一颗键，删行的人跟着换了名字 —— 而这条守卫当场红了，这正是它
+        #    存在的理由：删东西的人换了，这份名单必须有人重新签一次字。
+        "stop_series",
         # Picture files, once the thing that owns them is over.
         "purge_event_image",
         "purge_series_image",
@@ -2290,6 +2293,51 @@ class TemplateCommentsAreClosedGuardTests(TestCase):
             "`{#` must close on the same line — Django's lexer is not DOTALL, "
             "so these blocks render as visible text. Use {% comment %} for "
             "anything longer than one line:\n" + "\n".join(offenders))
+
+
+class TemplateDivsAreBalancedGuardTests(TestCase):
+    """Every `<div>` a template opens, that same template closes.
+
+    🔴 **A dropped `</div>` cannot fail.** The browser closes it for you, at
+       the wrong place: everything after the missing tag gets adopted by
+       whichever box was still open. Found 2026-09-11 in `series_form.html`,
+       which opened five and closed four — "Roles on this rule" and the whole
+       roles panel were rendering **inside** the occasions card's
+       `flex flex-wrap gap-2` button row, laid out as flex items beside
+       "Generate the occasions". Nothing raised. 2211 tests stayed green,
+       because every one of them asserts on context or on a string in the
+       body, and both survive the page being reassembled around them.
+
+    ⚠️ Source, not rendered output — same reasoning as the guard above: a
+       template no test renders would otherwise slip through, and the one that
+       broke was rendered by four tests.
+
+    ⚠️ A template that deliberately opens a box for its parent to close (or
+       closes one its parent opened) would go red here, and that is the trade
+       this guard makes: today nothing in the project does it, and a fragment
+       whose tags only balance when included from the right parent is worse
+       than the imbalance this catches. If one ever has to exist, it needs a
+       name here and a reason, not a silently forgiving regex.
+    """
+
+    def test_no_template_leaves_a_div_open(self):
+        offenders = []
+        for relative, source in project_template_files():
+            # ⚠️ 用现成的 `_blank_out_comments()`，不要自己再拼一遍那两个正则 ——
+            #    `INLINE_TEMPLATE_COMMENT` 上面那段 🔴 注释说的就是它必须和
+            #    Django 的 lexer 保持一致，而第三份拼法就是第三个会漂的地方。
+            masked = _blank_out_comments(source)
+            opened = len(re.findall(r"<div\b", masked))
+            closed = len(re.findall(r"</div\s*>", masked))
+            if opened != closed:
+                offenders.append(
+                    f"{relative}: {opened} <div> opened, {closed} closed")
+        self.assertEqual(
+            offenders, [],
+            "A template that does not close its own <div>s hands the rest of "
+            "the page to whichever box was still open — the browser fixes it "
+            "silently and lays the content out in the wrong place:\n"
+            + "\n".join(offenders))
 
 
 class InterfaceLanguageGuardTests(TestCase):

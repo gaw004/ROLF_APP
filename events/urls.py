@@ -58,6 +58,9 @@ urlpatterns = [
     path("events/series/<int:pk>/roles/", views.series_roles, name="series_roles"),
     path("events/series/<int:pk>/generate/",
          views.series_generate, name="series_generate"),
+    # ⚠️ 两趟（GET 看确认屏、POST 执行），所以它是一条路由而不是系列页上的一个
+    #    POST：那一屏要说清楚会发生什么，而一屏是要有地址的。
+    #    ⚠️ 这里原来还有一条 `/undo/`，2026-09-11（L5.8g）合并掉了。
     path("events/series/<int:pk>/stop/", views.series_stop, name="series_stop"),
     # C0.2.2 — the only way to move an event, and the only way to mark one
     # completed. Its absence is what left services.reschedule() unreachable.

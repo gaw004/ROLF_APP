@@ -2500,16 +2500,17 @@ class SessionAttendance(ConstraintErrorFieldMixin, TimeStampedModel):
 
 
 class EventSeriesQuerySet(AudienceQuerySetMixin, models.QuerySet):
-    def live(self):
-        """The batches that have not been undone. D40 section 2.
+    """只为 `for_audience()` 而存在 —— 它自己一个方法都没有。
 
-        ⚠️ Asked of this column and never inferred from "does it still have any
-           occasions left". Undo **keeps** the ones people signed up for and the
-           ones already past, so "undone" and "half undone" look identical from
-           that side — the derived-state-as-authoritative-state disease D40
-           records this project having judged four times.
-        """
-        return self.filter(undone_at__isnull=True)
+    ⚠️ 空着是对的，别删：受众那条查询是 `AudienceQuerySetMixin` 给的，而每一张
+       带受众的表都要它。
+
+    ⚠️ 这里原来有一个 `live()`（「没有被撤销过的那几批」），2026-09-11 随
+       `undone_at` 一起删掉了。它的 docstring 论证过「撤过」和「撤了一半」长得
+       一样、所以不能靠派生状态推 —— 那条论证**在合并之后不成立了**：撤销和
+       即日停止合成了一颗键，于是没有「撤了一半」这个状态，剩下的只有「停了」，
+       而 `ended_on` 就是它。见 06-roadmap L5.8g。
+    """
 
 
 class EventSeries(Audience, ConstraintErrorFieldMixin, TimeStampedModel):
@@ -2713,10 +2714,6 @@ class EventSeries(Audience, ConstraintErrorFieldMixin, TimeStampedModel):
     generated_by = models.ForeignKey(
         Contact, null=True, blank=True, on_delete=models.PROTECT,
         related_name="event_series_generated")
-    undone_at = models.DateTimeField(null=True, blank=True)
-    undone_by = models.ForeignKey(
-        Contact, null=True, blank=True, on_delete=models.PROTECT,
-        related_name="event_series_undone")
 
     # ⚠️ m2m_fields for the same reason Event's and EventRole's carry it: who
     #    something was published to is half the record, and simple-history does
@@ -2847,7 +2844,7 @@ class EventSeries(Audience, ConstraintErrorFieldMixin, TimeStampedModel):
         #    生成不再一次把整条规则铺完，而是按一年的窗口滚
         #    （`services.HORIZON_MONTHS`），所以「永远」不再意味着「一次造出
         #    无穷多行」。结束一条无限规则的正路是「即日停止」——
-        #    `services.stop_series_today()`，它本来就是系列的出口。
+        #    `services.stop_series()`，它本来就是系列的出口。
         if self.starts_on is None or self.start_time is None:
             return
         try:
@@ -3001,18 +2998,26 @@ class EventSeries(Audience, ConstraintErrorFieldMixin, TimeStampedModel):
                    if was[name] != getattr(self, name)]
         if not changed:
             return
-        raise ValidationError({changed[0]: (
+        # ⚠️ `code=` 是 2026-09-11（L5.8f）加的，而它不是装饰：发布者那一侧现在
+        #    要**认出这一条**拒绝 —— 认出来才能把「你是不是想新起一条系列」那一屏
+        #    端到人面前，而不是让他对着一句「这条规则已经生成过场次了」发呆。
+        #
+        # ⚠️ 靠比对上面那句话的文字也能认，但那是脆的：谁改一个字，那一屏就
+        #    静默地再也不出现。code 是 Django 自己为这件事准备的东西，而这个
+        #    仓库给数据库约束用的也是它（`core/constraints.py` 的
+        #    `violation_error_code`）—— 同一个机制，不另发明。
+        #
+        # 🔴 **这条拒绝本身一个字都没有放松。** 它仍然是所有不走表单的写入者
+        #    （导入、脚本、fixture）的最后一道门；变的只是「有一条路径认得出
+        #    它」。
+        raise ValidationError({changed[0]: ValidationError(
             "This rule has already produced occasions, and people may have "
             "signed up for them. Changing when they fall would leave the ones "
             "somebody has taken standing at the old time with new ones beside "
             "them. Stop this series instead, and build the next one — what has "
-            "already happened stays either way."
+            "already happened stays either way.",
+            code="rule_is_frozen",
         )})
-
-    @property
-    def is_undone(self):
-        """Has this batch been withdrawn? D40's list greys these out."""
-        return self.undone_at is not None
 
 
 class EventSeriesRoleQuerySet(AudienceQuerySetMixin, models.QuerySet):

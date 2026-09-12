@@ -71,7 +71,6 @@ class Migration(migrations.Migration):
                 ('requires_guardian_consent', models.BooleanField(default=True, help_text='Applies to every occasion this makes. Untick only when under-18s may sign up on their own, like an adult.', verbose_name="Minors need a guardian's consent")),
                 ('ended_on', models.DateField(blank=True, help_text='Set when the series was stopped early. No more occasions are generated from this date onwards; the ones that already happened stay.', null=True, verbose_name='Stopped on')),
                 ('generated_at', models.DateTimeField(blank=True, null=True)),
-                ('undone_at', models.DateTimeField(blank=True, null=True)),
                 ('history_id', models.AutoField(primary_key=True, serialize=False)),
                 ('history_date', models.DateTimeField(db_index=True)),
                 ('history_change_reason', models.CharField(max_length=100, null=True)),
@@ -161,11 +160,9 @@ class Migration(migrations.Migration):
                 ('requires_guardian_consent', models.BooleanField(default=True, help_text='Applies to every occasion this makes. Untick only when under-18s may sign up on their own, like an adult.', verbose_name="Minors need a guardian's consent")),
                 ('ended_on', models.DateField(blank=True, help_text='Set when the series was stopped early. No more occasions are generated from this date onwards; the ones that already happened stay.', null=True, verbose_name='Stopped on')),
                 ('generated_at', models.DateTimeField(blank=True, null=True)),
-                ('undone_at', models.DateTimeField(blank=True, null=True)),
                 ('generated_by', models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.PROTECT, related_name='event_series_generated', to='contact.contact')),
                 ('ministry', models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, related_name='event_series', to='org.ministry')),
                 ('owner', models.ForeignKey(on_delete=django.db.models.deletion.PROTECT, related_name='event_series_owned', to='contact.contact')),
-                ('undone_by', models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.PROTECT, related_name='event_series_undone', to='contact.contact')),
                 ('visible_to_ministries', models.ManyToManyField(blank=True, limit_choices_to={'is_active': True}, related_name='%(class)s_audience', to='org.ministry', verbose_name="Only these ministries' staff")),
             ],
             options={
@@ -221,11 +218,6 @@ class Migration(migrations.Migration):
         migrations.AddField(
             model_name='historicaleventseries',
             name='owner',
-            field=models.ForeignKey(blank=True, db_constraint=False, null=True, on_delete=django.db.models.deletion.DO_NOTHING, related_name='+', to='contact.contact'),
-        ),
-        migrations.AddField(
-            model_name='historicaleventseries',
-            name='undone_by',
             field=models.ForeignKey(blank=True, db_constraint=False, null=True, on_delete=django.db.models.deletion.DO_NOTHING, related_name='+', to='contact.contact'),
         ),
         migrations.AddField(

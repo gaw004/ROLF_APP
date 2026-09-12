@@ -1,0 +1,71 @@
+{% extends "admin/base_site.html" %}
+{% comment %}
+Admin only: what stopping these series would actually do, before it does it.
+D40 §1，2026-09-11（L5.8g）起「撤销」和「即日停止」是同一件事。
+
+🔴 **The half that must not be dropped is what stays behind.** Stopping is not "back
+   to how it was": time has moved since the batch was built, and an occasion
+   that already happened, or that somebody has signed up for, is not ours to
+   take back. Told only "386 will be removed", somebody believes the database
+   came out clean — and meets the survivors on a week view next month, by which
+   point they no longer remember undoing anything. D40 says outright that the
+   cost of leaving this out is not that a person knows one thing less.
+
+⚠️ Every number here comes from `services.withdrawal_preview()`, which filters on the
+   same three conditions `_drop_generated_after()` deletes on. A screen that
+   counted for itself would be free to disagree with the button underneath it.
+{% endcomment %}
+{% block content %}
+  <h1>Stop {{ batches|length }} series?</h1>
+
+  {# ⚠️ 循环变量叫 `taken`，和下面 body 里用的名字一致。 #}
+  {# 2026-09-11 这里出过两次同一个错：body 改成了 `taken.`，而循环变量 #}
+  {# 还是 `preview` —— Django 取不到就当空，于是「N 个场次会被移除」    #}
+  {# 渲染成「 个场次会被移除」，数字整个不见，而且不报错。             #}
+  {# 同一天在站点那一侧也犯了一次。                                    #}
+  {% for series, taken in batches %}
+    <div class="module aligned">
+      <h2>{{ series.name }}</h2>
+      <p>
+        {{ series.rule }} · first on {{ series.starts_on }} at {{ series.start_time }}<br>
+        {# ⚠️ `generated_at`, not `created_at`. The window is judged on when the #}
+        {# batch was built, and a series is born a draft days earlier — so       #}
+        {# printing the row's birthday here put one date above a button that     #}
+        {# had judged another. This screen's whole job is not doing that.        #}
+        Built {{ series.generated_at }} by {{ series.generated_by|default:series.owner }}
+      </p>
+
+
+      {# ⭐ **两份片段，和站点那一屏共用。** 这里原来是它自己的一套说法 —— #}
+      {# 而 D40 第九节写着「站点和 admin 两处共用」，那句话当时是假的：改一句 #}
+      {# `_withdrawal_summary.html` 只到得了站点，admin 这一页静静地不跟。    #}
+      {# 这个功能已经为「两份拷贝」付过两次账了（同一天两次）。              #}
+      {# ⚠️ 片段带的是站点那套 Tailwind class，admin 没有它们 —— 于是这里渲染 #}
+      {#    成朴素的 p / ul。数字和说法对得上，比排版重要。                   #}
+      {% include "events/_withdrawal_summary.html" with taken=taken %}
+      {% include "events/_stop_outcome.html" with taken=taken %}
+    </div>
+  {% endfor %}
+
+  <form method="post">
+    {% csrf_token %}
+    {# ⚠️ 和上面数数那一趟读同一份 `batches` —— 「选中了哪些」在这一页上只该 #}
+    {# 有一种拼法，否则屏上念的那几条和确认之后真的动的那几条可以不一样。 #}
+    {% for series, taken in batches %}
+      <input type="hidden" name="{{ action_checkbox_name }}" value="{{ series.pk }}">
+    {% endfor %}
+    <input type="hidden" name="action" value="stop_series">
+    <input type="hidden" name="confirmed" value="yes">
+    {# ⚠️ No redo, and D40 §7 says so rather than leaving it to be asked for: #}
+    {# rebuilding is what the create screen is for. ⚠️ It does NOT follow that #}
+    {# what already happened is safe from a rebuild — the generator fills any  #}
+    {# moment with no occasion standing on it, past ones included, which is    #}
+    {# why a rule anchored in the past is refused at the door instead.         #}
+    {# 🔴 这里原来是 `{% if offerable %}`，而 **`offerable` 从来没有被传进来过** #}
+    {# —— 于是那颗提交键在这一页上根本不渲染，整个确认屏是个死胡同：看得见    #}
+    {# 数字，按不下去。2026-09-11 合并两个 action 时发现。                     #}
+    {# 窗口那一档没了之后也不再需要它：这个 action 对选中的每一条都做得了事。 #}
+    <input type="submit" value="Yes, stop them">
+    <a href="." class="button cancel-link">No, take me back</a>
+  </form>
+{% endblock %}

@@ -2389,7 +2389,7 @@ def series_with_images_to_purge(now=None):
           abandoned for ever does keep its file — that is the cost, it is one
           small file per abandoned draft, and it is a much better trade than
           deleting a picture the moment somebody uploads it. The undone case is
-          already handled: `undo_series()` purges before deleting the row.
+          already handled: `stop_series()` purges before deleting the row.
     """
     ahead = Event.objects.filter(
         series=models.OuterRef("pk"), end_time__gte=now or local_now())
@@ -3113,50 +3113,9 @@ def hours_received(participation):
 
 # --- L5.6: recurring events — generating, changing, undoing ----------------
 # One rule and one template produce N separate events (06-roadmap L5.4). The
-# three functions people press are `generate_occasions`, `stop_series_today` and
-# `undo_series`; all three collect what they are allowed to collect through the
+# two functions people press are `generate_occasions` and `stop_series`; both
+# collect what they are allowed to collect through the
 # one delete below, and none of them can express any other kind.
-
-
-#: How long after building a batch it may still be undone. D40 section 5, and
-#: the number is copied rather than re-derived because the judgement is the
-#: same one: "I have just built this wrong" is answered by undo, and "we have
-#: changed our minds" is answered by changing the rule or stopping the series —
-#: two questions, and a window is what keeps them structurally apart instead of
-#: relying on every admin having a sense of proportion.
-#:
-#: ⚠️ Same caveat D40 puts on its own seven: it has no basis but common sense.
-#:    Look at it again after the pilot. ⚠️ And nothing is locked outside the
-#:    window — the rule can still be changed, stopped, or its occasions deleted
-#:    one at a time.
-UNDO_WINDOW = datetime.timedelta(days=7)
-
-
-def _within_undo_window(series, now):
-    """Is this batch still young enough to take back? One spelling, two readers.
-
-    🔴 Measured from **when the batch was built**, not from when the series row
-       was created. Those differ by design: decision 30 makes a series `draft`
-       at birth precisely so somebody can build it, look at it with a colleague
-       and publish it later — days later. Read off `created_at`, undo refused a
-       batch thirty seconds old and told the admin it was more than a week
-       old, which is both useless and false.
-
-    ⚠️ A series that has **never generated** is inside the window, not outside
-       it — and the first draft of this had it the other way round, reasoning
-       that no batch means nothing to take back. A test written for it showed
-       the reasoning backwards: a rule built and never used is D40 §1's 95%
-       case, "I have just built this wrong", and undo deletes the row and
-       leaves the database as though it had never existed. That is the
-       cleanest undo there is, and refusing it would leave the mistake with no
-       remedy at all. Nothing was built, so nothing has aged.
-
-    ⚠️ One function because the screen and the button both ask, and the whole
-       point of that screen is that it cannot disagree with the button.
-    """
-    if series.generated_at is None:
-        return True
-    return series.generated_at >= now - UNDO_WINDOW
 
 
 def _collectable_occasions(series, after):
@@ -3164,7 +3123,7 @@ def _collectable_occasions(series, after):
 
     ⭐ A queryset rather than a delete, and that is what makes "one place" true
        rather than merely asserted. `_drop_generated_after()` deletes what this
-       returns; `undo_preview()` counts it and describes the complement. Before
+       returns; `withdrawal_preview()` counts it and describes the complement. Before
        this split the preview re-derived all three in Python — negated and
        reordered — 289 lines below a docstring promising they appeared nowhere
        else, and neither the guard nor the tests could see it:
@@ -3190,7 +3149,7 @@ def _collectable_occasions(series, after):
     ⚠️ "Signed up" means any `Participation` row at all, including a cancelled
        or withdrawn one. Deliberately: those rows carry a person's history with
        this occasion, and `Event` cascades two levels into them. It does mean
-       `undo_preview()` says "somebody has signed up" about an evening nobody
+       `withdrawal_preview()` says "somebody has signed up" about an evening nobody
        is now coming to, which is a wording debt rather than a wrong decision.
     """
     return series.occasions.filter(
@@ -3540,8 +3499,12 @@ def has_more_to_build(series):
         return False
 
 
-def is_running_low(series):
+def is_running_low(series, *, booked_to=None):
     """排到头的那天近了，**而且**再按一次真的还能排出东西吗？
+
+    ⚠️ `booked_to` 是给已经问过 `generated_through()` 的调用方的 —— 系列页两样
+       都要，而不传它就是同一句 `ORDER BY start_time DESC LIMIT 1` 每次渲染跑
+       两遍。不传照常自己去问。
 
     🔴 **后半句是 2026-09-11 代码评审补的，而漏掉它会让这行提醒变成谎话。**
        原来只问前半句，于是：一条 `COUNT=12` 全部生成完的系列，在它最后一场
@@ -3551,7 +3514,7 @@ def is_running_low(series):
     ⚠️ 「没排过」不算快没了 —— 那是「还没开始」，是另一件事，页面上也不该
        用同一句话说它。
     """
-    booked_to = generated_through(series)
+    booked_to = generated_through(series) if booked_to is None else booked_to
     return bool(booked_to
                 and booked_to <= local_today() + RUNNING_LOW
                 and has_more_to_build(series))
@@ -3692,14 +3655,55 @@ def generate_occasions(series, *, generated_by=None):
 
 
 @transaction.atomic
-def stop_series_today(series):
-    """Stop it from today: keep what has happened, withdraw what has not.
+def stop_series(series):
+    """停掉这一条：收回没人认领的未来场次；要是什么都没剩下，连这一行也收走。
 
-    ⚠️ `ended_on` rather than deleting the series, and the reason is the one
-       this project applies everywhere else: an ending is a date. The rule is
-       also the only answer to "why were there only six of these" — the same
-       argument L5.3 makes for keeping a called-off course's remaining
-       `Session` rows.
+    ⭐ **一个动作，两种结局，而分支不是一个选项** —— 2026-09-11（L5.8g）把
+       「即日停止」和「整批撤销」合成了这一个。理由不是省一颗按钮，是
+       **这个分支本来就是自动的**：撤销那个服务当初写的就是
+       `if series.occasions.exists(): ended_on = today`，
+       `if not ...exists(): delete()`。两颗键之间那道选择题，系统反正会自己
+       重答一遍。
+
+    ⚠️ 两种结局答的是两个问题：**剩下东西 = 「它存在过，到此为止」**
+       （`ended_on` 是「为什么只有六场」的唯一答案，所以那一行必须留着）；
+       **什么都没剩 = 「它本来就不该存在」**（一行空系列解释不了任何事）。
+
+    🔴 **收场次那一句一个字没动**：`_drop_generated_after()`，也就是 D40 那条
+       ⭐ 不变量（撤销和生成器共用同一句删除）。合并之后它的调用方从两个变成
+       一个，那条不变量因此**更强**，不是更弱。
+
+    ⚠️ **不记「是谁」。** 这里原来有 `undone_at` / `undone_by` 两列，一起删了：
+       `EventSeries` 带 `history` 而且 `HistoryRequestMiddleware` 装着，
+       影子表连改前改后都有。D40 当初要那两列是因为班次那边走 `bulk_create`、
+       simple-history 一个字不记 —— 而 D40 §8 自己写着这条在活动这一侧是
+       反过来的。
+
+    ⚠️ **没有时间窗口。** 撤销那一侧原来只对七天内的批次开放，理由是分开
+       「我建错了」和「我们改主意了」。而「有没有人报名」是对同一件事的**直接
+       测量**，窗口只是它的代理指标 —— 有了直接测量就不需要代理了。
+       ⚠️ 班次那边没有报名行，所以 D40 第五节在**那里**仍然成立。
+
+    交回收走了几场。⚠️ 这一行还在不在，调用方自己去数据库问 —— 那是权威答案，
+    而不是这里的一个交代。
+    """
+    dropped = _stop_from_today(series)
+    if not series.occasions.exists():
+        # ⚠️ 先清图再删行：`purge_series_image()` 要读 `series.image`，
+        #    而行删掉之后那个 FieldFile 就没有依托了。
+        purge_series_image(series)
+        series.delete()
+    return dropped
+
+
+def _stop_from_today(series):
+    """写上 `ended_on`、收回未来那些 —— **不碰这一行的存亡**。
+
+    ⚠️ 抽出来是给 `split_series()` 用的，而那里**必须留下那一行**：改规则的
+       结果是「这一条停掉、那一条接上」，旧的那一行就是新那条的来历，而确认屏
+       上也是这么写的。用会删行的 `stop_series()` 的话，一条没人报名的系列改个
+       规则，旧行会凭空消失 —— 从外面看就成了「就地改了规则」，而那正是整个
+       split 存在要避免的事。
     """
     now = local_now()
     series.ended_on = local_today()
@@ -3714,6 +3718,34 @@ SPLITTABLE_FIELDS = frozenset({
     "name", "rule", "starts_on", "start_time", "duration", "location",
     "description", "status", "requires_guardian_consent",
 })
+
+
+def resumes_on_after_split(series, *, rule=None, start_time=None):
+    """改规则之后，新系列的第一场落在哪天。
+
+    🔴 **The next day the rule actually falls on, not simply today.** The
+       successor's `starts_on` is its "First one on", and `EventSeries.clean()`
+       refuses one whose weekday the rule does not repeat on — so handing it
+       today refused every split on six days out of seven, which is to say the
+       only sanctioned way to change a rule worked on Tuesdays. Found by a test
+       written for something else entirely (the picture), which is the third
+       time in this feature that the check for one thing has caught a different
+       thing.
+
+    ⚠️ Asked of the rule rather than computed from the weekday, because the rule
+       is the only thing that knows: `BYSETPOS`, `INTERVAL` and monthly rules
+       all have answers no weekday arithmetic here would get right.
+
+    ⚠️ 从**今天**往后找第一场，不是从旧系列的 `starts_on`：新的这条是从今天
+       接着走的。`limit=1` 让一条没有结束的规则也停得下来。
+
+    ⚠️ 一条从今天起再也落不到任何一天的规则（比如 `UNTIL` 已经过去），交回今天
+       本身 —— 那条新系列会是空的，而那是真话，不是错误。
+    """
+    stop_at = local_today()
+    ahead = occasions(rule or series.rule, starts_on=stop_at,
+                      start_time=start_time or series.start_time, limit=1)
+    return local_date_of(ahead[0]) if ahead else stop_at
 
 
 @transaction.atomic
@@ -3745,23 +3777,24 @@ def split_series(series, *, changed_by, **fields):
         raise TypeError(
             f"split_series() got unexpected field(s): {', '.join(unknown)}. "
             f"It carries over or replaces: {', '.join(sorted(SPLITTABLE_FIELDS))}.")
-    stop_at = local_today()
-    # 🔴 **The next day the rule actually falls on, not simply today.** The
-    #    successor's `starts_on` is its "First one on", and `EventSeries.clean()`
-    #    refuses one whose weekday the rule does not repeat on — so handing it
-    #    today refused every split on six days out of seven, which is to say
-    #    the only sanctioned way to change a rule worked on Tuesdays. Found by
-    #    a test written for something else entirely (the picture), which is the
-    #    third time in this feature that the check for one thing has caught a
-    #    different thing.
+    # 🔴 **从库里重新取一行，不信调用方手里那个对象。** 调用方多半递进来的是一张
+    #    表单的 `instance`，而表单在 `_post_clean()` 里已经把人填的新值写进了那个
+    #    内存对象 —— 下面 `_stop_from_today()` 的 `full_clean()` 于是拿着一个
+    #    「规则和库里不一样」的对象**再撞一次冻结**，整件事无声地什么都没做
+    #    （实测：系列数不变、`ended_on` 仍是 None、页面退回原处）。
     #
-    # ⚠️ Asked of the rule rather than computed from the weekday, because the
-    #    rule is the only thing that knows: `BYSETPOS`, `INTERVAL` and monthly
-    #    rules all have answers no weekday arithmetic here would get right.
-    rule = fields.get("rule", series.rule)
-    start_time = fields.get("start_time", series.start_time)
-    ahead = occasions(rule, starts_on=stop_at, start_time=start_time, limit=1)
-    resumes_on = local_date_of(ahead[0]) if ahead else stop_at
+    # ⚠️ 新值一格都不靠这个对象 —— 它们全在 `**fields` 里，那是这个函数的签名
+    #    说的话。所以这里要的恰恰是**没被碰过**的那一行，而让它自己去取，比在
+    #    每个调用方那里写一句「别把脏对象递进来」可靠：那种约定只在写下它的那
+    #    一处成立，下一个调用方踩上去的时候身边一个字都没有。
+    series = type(series).objects.get(pk=series.pk)
+    # ⚠️ 抽成函数是因为**确认屏要先说这个数**（L5.8f）：人按保存、看见
+    #    「新系列从 9 月 17 日开始」、然后才决定确不确认。屏上那个数和这里真的
+    #    用的那个必须是同一个 —— 各算一遍就是两个答案，而它们隔着一次点击。
+    resumes_on = resumes_on_after_split(
+        series,
+        rule=fields.get("rule"),
+        start_time=fields.get("start_time"))
     successor = EventSeries(
         name=fields.get("name", series.name),
         ministry=series.ministry,
@@ -3772,9 +3805,9 @@ def split_series(series, *, changed_by, **fields):
         #    alone, the one sanctioned way to change a rule failed with "This
         #    field cannot be null" for every caller that exists.
         owner=changed_by or series.owner,
-        rule=rule,
+        rule=fields.get("rule", series.rule),
         starts_on=fields.get("starts_on", resumes_on),
-        start_time=start_time,
+        start_time=fields.get("start_time", series.start_time),
         duration=fields.get("duration", series.duration),
         location=fields.get("location", series.location),
         description=fields.get("description", series.description),
@@ -3822,54 +3855,16 @@ def split_series(series, *, changed_by, **fields):
     #    future occasions, and its admin action was the only destructive one in
     #    the set that reported no number — "a copy is ready to edit" while four
     #    published evenings had just gone. Its two siblings both say how many.
-    withdrawn = stop_series_today(series)
+    withdrawn = _stop_from_today(series)
     return successor, withdrawn
 
 
-@dataclass(frozen=True)
-class UndoPreview:
-    """What undoing this batch would actually do. D40 section 1's screen.
+def withdrawal_preview(series):
+    """这条系列现在按下去会收走什么、留下什么、为什么。三张确认屏共用。
 
-    🔴 **`staying` is the half that must not be left out.** Somebody who undoes
-       a three-week-old batch and is told only "386 will be removed" believes
-       the database is clean, and then meets two of these on a week view next
-       month — by which time they no longer remember undoing anything. D40 says
-       it outright: the cost of omitting it is not that a person knows one thing
-       less.
-
-    ⚠️ `staying` is grouped **by reason**, in words, because "4 occasions will
-       remain" without saying why reads as a bug rather than as a rule.
-
-    ⚠️ And each one is named by its **date**, not by `event.name`. Every
-       occasion a rule makes carries the series' own name, so a list of names
-       is the same word four times over — which tells the reader nothing about
-       which four evenings are still standing next month. D40's own mock-up
-       names dates for exactly this reason ("8/18、8/25 的例会").
-    """
-
-    going: int
-    staying: list          # [(reason, [dates, as written])]
-    # ⚠️ Read by the confirmation screen through `staying` rather than as a
-    #    field of its own — `{% if preview.staying %}` says the same thing and
-    #    is the thing the template already branches on. Kept because
-    #    `undo_series()`'s two branches turn on exactly this question and a
-    #    reader comparing the two wants the same name in both places.
-    series_survives: bool
-    #: 🔴 False when the batch is older than `UNDO_WINDOW`, in which case
-    #:    `going` is what *would* go and nothing will. Without this the screen
-    #:    said "N occasions will be removed" over a button that then removed
-    #:    none and printed a warning — a confirmation screen making a promise
-    #:    the confirmation refuses, which is the one thing this screen exists
-    #:    not to do.
-    within_window: bool = True
-
-    @property
-    def total_staying(self):
-        return sum(len(days) for _, days in self.staying)
-
-
-def undo_preview(series):
-    """The real arithmetic behind the confirmation screen. Reads nothing else.
+    ⚠️ Computed rather than estimated, and computed **from the same three
+       conditions** `_drop_generated_after()` deletes on — a preview built from
+       its own filter is a preview free to disagree with the button under it.
 
     ⚠️ Computed rather than estimated, and computed **from the same three
        conditions** `_drop_generated_after()` deletes on — a preview built from
@@ -3885,8 +3880,12 @@ def undo_preview(series):
     staying = {}
     signed_up = Participation.objects.filter(
         event_role__event=models.OuterRef("pk"))
-    for occasion in series.occasions.annotate(
-            taken=models.Exists(signed_up)).order_by("start_time"):
+    # ⚠️ `only()`：底下只读这三格加上那个注解，而不写它就是把每一场的整行
+    #    （说明、图片、受众那几列）拉过来数一个数 —— admin 一次可以选二十条。
+    for occasion in (series.occasions
+                     .only("pk", "source", "start_time")
+                     .annotate(taken=models.Exists(signed_up))
+                     .order_by("start_time")):
         if occasion.pk in going_pks:
             continue
         # ⚠️ Worked out only for the rows the rule already refused to take, and
@@ -3908,89 +3907,39 @@ def undo_preview(series):
             reason = "kept"
         staying.setdefault(reason, []).append(
             f"{local_date_of(occasion.start_time):%-d %b}")
-    return UndoPreview(
-        going=len(going_pks),
-        staying=list(staying.items()),
-        # ⚠️ Read from the same comparison `undo_series()` refuses on, not a
-        #    second spelling of it — the screen and the button disagreeing about
-        #    the window is the same fault as them disagreeing about the rows.
-        within_window=_within_undo_window(series, now),
-        # ⚠️ The series row itself survives exactly when something is left
-        #    pointing at it — and that is not a policy this function applies,
-        #    it is what `Event.series` being PROTECT makes true. Said here so
-        #    the screen can say it; enforced by the database either way.
-        series_survives=bool(staying),
-    )
+    return Withdrawal(going=len(going_pks), staying=list(staying.items()))
 
 
-class AlreadyUndone(ValidationError):
-    """This batch has been undone before. D40 section 6, cost 3.
+@dataclass(frozen=True)
+class Withdrawal:
+    """`_drop_generated_after()` 会拿走什么、留下什么、以及为什么。
 
-    ⚠️ Not an error to the person who pressed the button — two admins undoing
-       the same batch is an ordinary race, and the second one gets the outcome
-       they wanted. It is raised rather than returned so that no caller can walk
-       past it into a second `undone_by`, which would overwrite who really did
-       it.
+    ⭐ **两张确认屏问的是同一个问题**（2026-09-11，L5.8f）：撤销那一屏，和
+       「改规则会新起一条系列」那一屏 —— 后者底下的 `split_series()` 收未来场次
+       用的也是同一句删除。各算一遍就是两个答案，而它们会并排出现在同一个功能里。
+
+    `staying` 是 `[(理由, [日期, 写好的])]`。⚠️ 理由是**给人看的**，而哪几行留下
+    是规则说了算 —— 见 `withdrawal_preview()` 里那段 🔴。
     """
 
+    going: int
+    staying: list
 
-class UndoWindowClosed(ValidationError):
-    """Too old to undo. See UNDO_WINDOW for what the window is separating."""
+    @property
+    def total_staying(self):
+        return sum(len(days) for _, days in self.staying)
 
+    @property
+    def series_survives(self):
+        """按下去之后，系列那一行还在不在？
 
-@transaction.atomic
-def undo_series(series, *, undone_by):
-    """Withdraw the batch: D40's three steps, in order. Returns the count dropped.
+        ⚠️ 这**不是**这里定的政策，是 `Event.series` 那个 PROTECT 让它成真的：
+           还有场次指着它，行就删不掉。写在这里只是为了让确认屏说得出来。
 
-    ⚠️ **Undo is not "back to how it was"**, and the confirmation screen has to
-       say so — `undo_preview()` is what says it. Time has moved since the batch
-       was built: some occasions have happened, some have people on them, and
-       neither is ours to take back.
-
-    ⚠️ The `undone_at` read comes first and is a plain refusal rather than a
-       silent success, D40 cost 3. Two admins pressing this on the same batch is
-       an ordinary race; letting the second through would overwrite `undone_by`
-       with somebody who undid nothing.
-    """
-    now = local_now()
-    if series.undone_at is not None:
-        raise AlreadyUndone(
-            "This batch has already been undone. Nothing more was removed.")
-    if not _within_undo_window(series, now):
-        raise UndoWindowClosed(
-            f"This batch was built more than {UNDO_WINDOW.days} days ago, so "
-            "undo is closed on it. Change the rule or stop the series instead "
-            "— both keep what has already happened, which is what undo would "
-            "have had to do anyway."
-        )
-    dropped = _drop_generated_after(series, after=now)
-    series.undone_at = now
-    series.undone_by = undone_by
-    if series.occasions.exists():
-        # Step ②'s other branch: occasions are left, so the rule is kept and
-        # stopped instead of deleted. ⚠️ `Event.series` is PROTECT, so this is
-        # not a choice this function is making on the database's behalf —
-        # deleting here would raise. See that field's own note.
-        series.ended_on = local_today()
-    series.full_clean()
-    series.save(update_fields=["undone_at", "undone_by", "ended_on", "updated_at"])
-    if not series.occasions.exists():
-        # ⚠️ The picture first. `series_with_images_to_purge()` looks for rows
-        #    in `EventSeries`, so deleting the row while it still holds a file
-        #    leaves that file on disk with nothing that will ever collect it.
-        purge_series_image(series)
-        # 95% of undos: pressed straight after building, nothing generated has
-        # been touched, and the database comes out looking as though it never
-        # happened. D40 section 1 — this is the case the feature exists for.
-        series.delete()
-    return dropped
-
-
-# --- P6: telling people the event changed --------------------------------
-# Who to tell and at what address is business logic and stays here. Putting a
-# message on the wire is an adapter (core/notifications). The dividing question
-# is D18's, aimed at a different target: change notification provider — does
-# this code have to move? If yes, it does not belong in the adapter.
+        ⚠️ 原来这一格在 `UndoPreview` 上，而那个类 2026-09-11 整个删掉了 ——
+           撤销和即日停止合并之后只剩一颗键，一颗键只该有一种预览。
+        """
+        return bool(self.staying)
 
 
 @dataclass(frozen=True)

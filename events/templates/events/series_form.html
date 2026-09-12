@@ -69,9 +69,9 @@
     {% endif %}
     {% include "events/_series_dates.html" %}
 
-    {% if occasions %}
+    {% if occasions_built %}
       <p class="mt-4 text-sm text-ink-600 dark:text-ink-300">
-        {{ occasions|length }} already built.
+        {{ occasions_built }} already built.
         <a class="underline" href="{% url 'events:event_list' %}?q={{ series.name|urlencode }}">See them in the list</a>.
       </p>
     {% endif %}
@@ -85,14 +85,27 @@
         {% endcomment %}
         {% include "core/components/button.html" with label="Generate the occasions" variant="primary" %}
       </form>
-      {% if occasions %}
-        <form method="post" action="{% url 'events:series_stop' series.pk %}">
-          {% csrf_token %}
-          {% include "core/components/button.html" with label="Stop from today" variant="danger" confirm="Stop this series? Occasions still to come are withdrawn; everything that has already happened stays exactly as it is." %}
-        </form>
+      {% comment %}
+      停掉这一条 —— **一颗键，两种结局**（2026-09-11，L5.8g）。
+
+      ⚠️ 这里原来是两颗：「撤销这一批」和「即日停止」。合并的理由不是省一颗键，
+         是那个分支**本来就是自动的** —— `services.stop_series()` 按「有没有
+         东西剩下」自己决定要不要连行一起收走。让人在两个系统反正会自己重答的
+         选项之间选，是最难辩护的一种界面。
+
+      ⚠️ 链到一张确认屏，而不是 POST 直接做：它会说清楚这一下的**结局**
+         （整条删掉，还是只是停了）。破坏性动作要先说会发生什么。
+
+      ⚠️ 已经停过的系列不显示它 —— 对一条 `ended_on` 已经落地的系列说
+         「停掉它」是一句没有意义的话。
+      {% endcomment %}
+      {% if not series.ended_on %}
+        {% url 'events:series_stop' series.pk as stop_url %}
+        {% include "core/components/button.html" with label="Stop this series" href=stop_url variant="danger" %}
       {% endif %}
-    </div>
-  </div>
+    </div>{# ⚠️ 按钮那一排 #}
+  </div>{# ⚠️ 「这条规则造出哪几天」那张卡。少了这一个，下面的工种面板会被 #}
+        {# 浏览器塞进上面那排按钮里当 flex item —— 页面照常渲染，没人报错。 #}
 
   <h2 class="mb-4 mt-10 text-lg font-semibold">Roles on this rule</h2>
   {% include "events/_series_roles_panel.html" %}

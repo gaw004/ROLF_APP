@@ -6,6 +6,7 @@ deleting this file would lose any business logic — it must not.
 """
 
 from django.contrib import admin, messages
+from django.contrib.admin import helpers
 from django.core.exceptions import ValidationError
 from django.db.models import Count
 from django.template.response import TemplateResponse
@@ -16,9 +17,8 @@ from .services import (
     generate_occasions,
     register_kept_at,
     split_series,
-    stop_series_today,
-    undo_preview,
-    undo_series,
+    stop_series,
+    withdrawal_preview,
 )
 from org.audience import Audience
 
@@ -38,9 +38,10 @@ def _admin_contact(request):
     """The Contact behind the logged-in admin, or None.
 
     ⚠️ None is a normal answer rather than a failure: a superuser matches no
-       real person by design (D12), which is why `undone_by` is nullable. Named
-       once because three actions ask it, and `views._my_contact()` is the same
-       question on the other side of the D18 line — this file may not import it.
+       real person by design (D12) — that is why every `*_by` column on
+       these tables is nullable. Named once because the actions ask it, and
+       `views._my_contact()` is the same question on the other side of the D18
+       line — this file may not import it.
     """
     return getattr(request.user, "contact", None)
 
@@ -430,7 +431,7 @@ class EventSeriesAdmin(SimpleHistoryAdmin):
 
     ⚠️ Both actions are one line each into `events.services`. This file works
        nothing out; the arithmetic on the confirmation screen is
-       `services.undo_preview()`, so the numbers under the button and the rows
+       `services.withdrawal_preview()`, so the numbers under the button and the rows
        the button removes come from one place.
 
     🔴 **Both actions declare `permissions=["change"]`, and without that line
@@ -462,7 +463,7 @@ class EventSeriesAdmin(SimpleHistoryAdmin):
     #    series upload went round the back of. A phone photo carries GPS.
     form = EventSeriesAdminForm
     list_display = ["name", "ministry", "rule", "starts_on", "start_time",
-                    "status", "ended_on", "undone_at"]
+                    "status", "ended_on"]
     list_filter = ["status", "ministry"]
     search_fields = ["name", "rule"]
     autocomplete_fields = ["ministry", "owner"]
@@ -473,11 +474,9 @@ class EventSeriesAdmin(SimpleHistoryAdmin):
     #    withdraws nothing, so an admin who set it believed they had called the
     #    series off while four published evenings stood on the calendar, still
     #    signable. The action below is the only thing that does both, so it is
-    #    the only way in. (`undone_at` / `undone_by` are readonly for the
-    #    ordinary reason: they record what a service did.)
-    readonly_fields = ["ended_on", "generated_at", "generated_by",
-                       "undone_at", "undone_by"]
-    actions = ["generate_occasions", "stop_today", "change_the_rule", "undo_batch"]
+    #    the only way in.
+    readonly_fields = ["ended_on", "generated_at", "generated_by"]
+    actions = ["generate_occasions", "stop_series", "change_the_rule"]
 
     def get_list_display(self, request):
         """Counts the occasions once for the page, not once per row.
@@ -507,7 +506,7 @@ class EventSeriesAdmin(SimpleHistoryAdmin):
                 made = generate_occasions(
                     series, generated_by=_admin_contact(request))
             except ValidationError as refused:
-                # ⚠️ Reported, not raised — the same handling `undo_batch` below
+                # ⚠️ Reported, not raised — the same handling `stop_series` below
                 #    has. A series that reached the database without
                 #    `full_clean()` (an import, a script, the seed) can hold an
                 #    empty audience or a template role wider than itself, and
@@ -525,31 +524,57 @@ class EventSeriesAdmin(SimpleHistoryAdmin):
                 f"They are {series.get_status_display().lower()} — nothing was "
                 "removed from occasions people had already signed up for.")
 
-    @admin.action(description="Stop this series from today",
-                  permissions=["change"])
-    def stop_today(self, request, queryset):
-        """🔴 The door `stop_series_today()` did not have.
+    @admin.action(description="Stop this series", permissions=["change"])
+    def stop_series(self, request, queryset):
+        """停掉这一条，两趟：先看会发生什么，再做。
 
-        Without it the only way to stop a series was to type a date into
-        `ended_on` — which stops *generation* and withdraws *nothing*. An admin
-        did that, saw the form save, and left four published evenings standing
-        on the public calendar, open for signup. Two of the feature's own
-        refusal messages ("Stop the series instead") pointed at this control
-        while it did not exist.
+        🔴 **The door the stopping service did not have.** Without it the only
+           way to stop a series was to type a date into `ended_on` — which stops
+           *generation* and withdraws *nothing*. An admin did that, saw the form
+           save, and left four published evenings standing on the public
+           calendar, open for signup.
+
+        🔴 **两趟是 2026-09-11（L5.8g）加的，而它不是礼貌，是必须**：合并之后
+           这个 action **会删掉整行系列**（什么都没剩下的时候）。一个不问就
+           删行的批量动作，是这个仓库刚为 `AdminActionsDeclarePermissionsGuardTests`
+           付过账的那一类邻居。确认屏用的就是原来「撤销」那一张。
+
+        ⚠️ 它吸收了原来那个「Undo this batch」。撤销和即日停止合并成了一件事 ——
+           理由见 `services.stop_series()`：那个分支本来就是自动的。
         """
-        for series in queryset:
-            try:
-                dropped = stop_series_today(series)
-            except ValidationError as refused:
-                self.message_user(
-                    request, f"“{series.name}”: {'; '.join(refused.messages)}",
-                    level=messages.WARNING)
-            else:
-                self.message_user(
-                    request,
-                    f"“{series.name}”: stopped as of today. "
-                    f"{dropped} occasion(s) still to come were withdrawn; "
-                    "everything that already happened was left alone.")
+        if request.POST.get("confirmed"):
+            for series in queryset:
+                name = series.name
+                try:
+                    dropped = stop_series(series)
+                except ValidationError as refused:
+                    # ⚠️ 点名。批量选了好几条时，一句不带名字的拒绝让人没法
+                    #    知道是哪一条出了问题。
+                    self.message_user(
+                        request, f"“{name}”: {'; '.join(refused.messages)}",
+                        level=messages.WARNING)
+                else:
+                    # ⚠️ `name` 是**删之前**取的：这一行可能已经不在了。
+                    self.message_user(
+                        request,
+                        f"“{name}”: {dropped} occasion(s) withdrawn.")
+            return None
+
+        return TemplateResponse(
+            request, "admin/events/eventseries/stop_confirm.html", {
+            **self.admin_site.each_context(request),
+            "title": "Stop these series",
+            # ⚠️ `select_related`：每一行都要印「谁建的」（`generated_by`，没有
+            #    就退到 `owner`），而不带它就是每选一条多两次 Contact 查询。
+            "batches": [(series, withdrawal_preview(series))
+                        for series in queryset.select_related(
+                            "generated_by", "owner")],
+            # ⚠️ 隐藏域也从 `batches` 里走，所以这一页只有**一份**「选中了哪些」。
+            #    原来这里还递一个 `queryset`（同一批行的第二种拼法）和一个
+            #    `media`（这张屏 extends `admin/base_site.html`，那里根本没有
+            #    `{{ media }}` 这一格，从来没渲染过）。
+            "action_checkbox_name": helpers.ACTION_CHECKBOX_NAME,
+            })
 
     @admin.action(description="Change the rule from today on",
                   permissions=["change"])
@@ -588,47 +613,3 @@ class EventSeriesAdmin(SimpleHistoryAdmin):
                     "and what already happened stays. A copy is ready to edit "
                     f"(#{successor.pk}): change when it repeats there, then "
                     "generate its occasions.")
-
-    @admin.action(description="Undo this batch", permissions=["change"])
-    def undo_batch(self, request, queryset):
-        """Two passes: show what would happen, then do it. D40 section 1.
-
-        ⚠️ The confirmation screen is not politeness. Undo does **not** put the
-           database back — three weeks on, some occasions have happened and some
-           have people on them, and neither is ours to take back. Somebody told
-           only "386 will be removed" believes it came out clean and meets the
-           survivors next month, by which time they no longer remember undoing
-           anything.
-        """
-        if request.POST.get("confirmed"):
-            for series in queryset:
-                try:
-                    # ⚠️ None is a normal answer, not a failure: a superuser has
-                    #    no Contact by design (D12), and `undone_by` is nullable
-                    #    for that reason. Today the superuser is the only account
-                    #    that can reach this page at all — see the class docstring.
-                    dropped = undo_series(series, undone_by=_admin_contact(request))
-                except ValidationError as refused:
-                    # ⚠️ Named, like the sibling action above. Undo a
-                    #    multi-select where one batch is already undone and a
-                    #    bare "This batch has already been undone" leaves the
-                    #    reader with no way to tell which.
-                    self.message_user(
-                        request,
-                        f"“{series.name}”: {'; '.join(refused.messages)}",
-                        level=messages.WARNING)
-                else:
-                    self.message_user(
-                        request, f"“{series.name}”: {dropped} occasion(s) withdrawn.")
-            return None
-        batches = [(series, undo_preview(series)) for series in queryset]
-        return TemplateResponse(request, "admin/events/eventseries/undo_confirm.html", {
-            **self.admin_site.each_context(request),
-            "title": "Undo these batches",
-            "batches": batches,
-            # ⚠️ Any, not all: a mixed selection still has something to do, and
-            #    the screen says per batch which ones are closed.
-            "offerable": any(preview.within_window for _, preview in batches),
-            "queryset": queryset,
-            "action_checkbox_name": admin.helpers.ACTION_CHECKBOX_NAME,
-        })

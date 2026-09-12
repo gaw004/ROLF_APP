@@ -88,11 +88,15 @@ from .tokens import (
     window_message,
 )
 from .services import (
+    SPLITTABLE_FIELDS,
     generated_through,
     is_running_low,
+    resumes_on_after_split,
+    split_series,
+    withdrawal_preview,
     generate_occasions,
     series_moments,
-    stop_series_today,
+    stop_series,
     CHECKIN_CREDENTIAL_KEY,
     ConsentRequired,
     NoHoursHere,
@@ -1481,18 +1485,40 @@ def _series_page_context(series, *, form=None, role_form=None, user=None):
         #    `/events/` 上不再出现新的场次，而这一页看起来一切正常。
         "booked_through": booked_to,
         # ⚠️ 判据在 `services.is_running_low()`，不在这里：这个文件第三条
-        #    规矩是视图不做算术。
-        "running_low": is_running_low(series),
+        #    规矩是视图不做算术。⚠️ `booked_to` 递进去 —— 它自己也要问
+        #    「排到哪天」，而上面刚问过，不递就是同一句查询每渲染跑两遍。
+        "running_low": is_running_low(series, booked_to=booked_to),
+        # ⚠️ **这里不算 `withdrawal_preview()`。** 它曾经在这一格上，注释写着
+        #    「确认屏的依据」—— 而确认屏是另外三个视图，它们各自显式传自己那
+        #    一份。这一页的模板一个字都没读过它，所以它是白算的：它
+        #    要走一遍这条系列的**每一场**（一次 `values_list` 加一次带
+        #    `Exists` 注解的遍历），而一条排满一年的滚动系列于是每渲染一次
+        #    这一页就付一次，三个视图都付。
         "form": form if form is not None else EventSeriesForm(
             instance=series, user=user),
         "role_form": role_form if role_form is not None else EventSeriesRoleForm(
             parent=series),
-        "roles": series.roles.select_related("role"),
+        # ⚠️ `prefetch_related`：工种面板每一行都印 `role.audience_in_words`，
+        #    而那句话要读受众那个多对多。实测（一条系列，渲染那一块）：
+        #
+        #        四个按牧区开放的工种   5 条查询 → 2 条
+        #        工种都是「所有人」     1 条查询 → 2 条
+        #
+        #    也就是说它**在最常见的那一档上多花一条**，换掉的是另一档上没有上限
+        #    的 N 条。这笔账值得，而且是 `Audience.Spec.of()` 的 docstring 自己
+        #    要的：它写明「这样写，调用方预取就有用；写成 values_list 就静默
+        #    没用」。⚠️ 受众是「所有人」时那句话会短路，于是这条 N+1 在本地
+        #    看不出来。
+        "roles": (series.roles.select_related("role")
+                  .prefetch_related("visible_to_ministries")),
         # ⚠️ The dates the rule falls on, computed rather than stored — the
         #    same expander the generator uses, so the page cannot promise a
         #    different set of evenings from the one the button would build.
         **_dates_context(series_moments(series), rule=series.rule),
-        "occasions": series.occasions.order_by("start_time"),
+        # ⚠️ 一个数，不是一整套行。模板只问「有没有」和「有几个」，而这一格
+        #    原来是把每一场的整行（说明、图片、受众那几列）都拉过来 —— 一条排满
+        #    一年的系列是五十二行，三个视图每渲染一次各付一遍。
+        "occasions_built": series.occasions.count(),
     }
 
 
@@ -1520,8 +1546,102 @@ def series_detail(request, pk):
         messages.success(request, "Series saved.")
         return redirect("events:series_detail", pk=series.pk)
 
+    # ⭐ 改规则那条路（L5.8f）。表单没过，而**唯一**挡住它的是冻结 ——
+    #    那不是「填错了」，那是「你想改的东西已经生成过场次了」，而这件事
+    #    是有正当做法的：停掉这一条、用你刚填的值新起一条（`split_series`）。
+    #
+    # ⚠️ 在这之前，这条路的尽头是一句「Stop this series instead, and build the
+    #    next one」，而**没有任何控件做得了这件事** —— 一句指着不存在的控件的话，
+    #    正是这个仓库反复付账的那一种。
+    if request.method == "POST" and _only_the_freeze_refused(form):
+        if not can_publish_event(request.user, form.cleaned_data["ministry"]):
+            raise PermissionDenied(SCOPED_DENIAL)
+        # 🔴 **人填的值全部从 `form.instance` 上取，一格都不从 `cleaned_data`。**
+        #    冻结那条错误挂在 `GENERATION_FIELDS` 里**第一个变了的**字段上，而
+        #    Django 的 `add_error()` 会把出错字段从 `cleaned_data` 里**删掉** ——
+        #    于是不在的那一格，恰恰是人刚改的那一格。实测过三次，每次页面都照常
+        #    说成功：改规则 → 新系列带**旧**规则；只改 20:00 → 新系列 19:00；
+        #    只改 2:30 → 新系列 2:00。
+        #
+        # ⚠️ `form.instance` 上放着的正是人填的东西：`_post_clean()` 先
+        #    `construct_instance()` 把清洗过的值写进这个内存对象，**之后**才
+        #    `instance.full_clean()` 撞上冻结。而这条路的前提是
+        #    `_only_the_freeze_refused()` —— 除了冻结没有别的错误，所以这些值
+        #    都是过了字段级清洗的。
+        #
+        # ⚠️ 这样取比逐格补**更准**，不只是更短：`rule` 上那个值是 `clean()` 经
+        #    `_rule_for()` 写下的（「意思没变就留住原来的拼法」），而另起一次
+        #    `compose()` 会把一条根本没动过的规则重拼成另一种拼法交给新系列。
+        #
+        # 🔴 **`starts_on` 不传。** 它一旦传过去就会盖掉 `split_series()` 算好的
+        #    `resumes_on` —— 而表单上那个「第一场」说的是**旧**系列什么时候
+        #    开始的，不是新的。实测：把每周二改成每周四之后仍然把那个周二传过去，
+        #    新系列被自己的 `clean()` 拒掉（「周二不在它重复的日子里」），而那句
+        #    拒绝是 500 冒出来的。
+        carried = {name: getattr(form.instance, name)
+                   for name in SPLITTABLE_FIELDS if name != "starts_on"}
+        if request.POST.get("confirm_new_series"):
+            # ⚠️ 那句话要说**旧**名字。`series` 就是 `form.instance`，而人填的新
+            #    名字已经写进它了 —— 同一次保存里顺手改了名的话，用它说「旧系列
+            #    停了」会让新旧两条对不上号。
+            #
+            # ⚠️ 只读这一格，不取整行：`split_series()` 自己会去取它要的那一行
+            #    （见它开头那段），所以这里没有第二个「干净副本」要维护。
+            stopped_name = (EventSeries.objects
+                            .values_list("name", flat=True).get(pk=series.pk))
+            try:
+                successor, withdrawn = split_series(
+                    series, changed_by=_my_contact(request), **carried)
+            except ValidationError as refused:
+                # ⚠️ 拒绝要落回人眼前，不是 500。`split_series()` 里那几次
+                #    `full_clean()` 都可能开口，而这一屏是它唯一的读者。
+                messages.error(request, " ".join(refused.messages))
+                return redirect("events:series_detail", pk=series.pk)
+            messages.success(request, (
+                f"“{stopped_name}” was stopped today and a new series started "
+                f"from your new rule — {_occasions_worded(withdrawn)} still to "
+                "come were withdrawn. Nothing is generated yet: press Generate "
+                "when the rule looks right."))
+            return redirect("events:series_detail", pk=successor.pk)
+        return render(request, "events/series_rule_change_confirm.html", {
+            "series": series,
+            # ⚠️ 和停止那一屏读同一个函数 —— 两处各算一遍就是两个答案，
+            #    而底下收场次用的是同一句删除。
+            "taken": withdrawal_preview(series),
+            # ⚠️ 原始 POST 逐条交给模板，让它原样回传 —— 多值字段（星期条、
+            #    受众那组勾）按表单字段回传会被压成一个列表字面量。
+            #    ⚠️ csrf 去掉：确认那张表单自己会发一个新的。
+            "submitted": [
+                (name, value) for name, values in request.POST.lists()
+                for value in values if name != "csrfmiddlewaretoken"],
+            # ⚠️ 读的是上面那份 `carried`，和确认之后真的交给 `split_series()`
+            #    的是**同一批值** —— 屏上写的那一天和真的会发生的那一天隔着一次
+            #    点击，各算一遍就是两个答案。
+            "resumes_on": resumes_on_after_split(
+                series, rule=carried["rule"], start_time=carried["start_time"]),
+        })
+
     return render(request, "events/series_form.html",
                   _series_page_context(series, form=form, user=request.user))
+
+
+def _only_the_freeze_refused(form):
+    """这次保存被挡住的**唯一**原因，是那条「规则已经生成过场次」吗？
+
+    🔴 **靠 code，不靠比对那句话的文字。** 文字比对是脆的：谁改一个字，
+       「你是不是想新起一条系列」那一屏就静默地再也不出现，而人重新对着一句
+       读不懂的拒绝发呆。`rule_is_frozen` 是 `EventSeries.clean()` 挂上去的，
+       和这个仓库给数据库约束用的 `violation_error_code` 是同一个机制。
+
+    ⚠️ 「唯一」两个字是认真的：规则本身写错了（拼写、没有结束、密度太高）要走
+       普通那条路，把错误显示在框底下。把两者混成一屏，人会以为自己那条写错的
+       规则「确认一下」就能用。
+    """
+    faults = form.errors.as_data()
+    if not faults:
+        return False
+    return all(error.code == "rule_is_frozen"
+               for errors in faults.values() for error in errors)
 
 
 @login_required
@@ -1646,21 +1766,41 @@ def _generated_sentence(series, made):
 
 @login_required
 def series_stop(request, pk):
-    """Stop it from today: keep what has happened, withdraw what has not.
+    """停掉这一条。两趟：先看会发生什么，再做。
 
-    ⭐ The way back. A publisher who builds a batch wrongly must have one, and
-       this is it — `undo_series()` is tidier within seven days but lives in
-       the admin, which a ministry admin cannot reach at all.
+    ⭐ **一颗键,两种结局** —— 2026-09-11（L5.8g）把「即日停止」和「整批撤销」
+       合成了这一个。理由不是省一颗按钮：那个分支**本来就是自动的**
+       （见 `services.stop_series()`），而让人在两个系统反正会自己决定的选项
+       之间选，是最难辩护的一种界面。
+
+    ⚠️ 实测过按错的代价是**不对称**的：误按撤销结果完全一样，而误按停止要再按
+       一次撤销才能补救 —— 那条补救路径需要的恰恰是「分得清这两者」的知识。
+
+    ⚠️ GET 出确认屏、POST 才做。确认屏说的是**结局**（「系列会被整个删掉」还是
+       「系列留着」），而不是机制 —— 人关心的是前者。
     """
     series = _managed_series(request, pk)
     if request.method != "POST":
-        return redirect("events:series_detail", pk=series.pk)
-    withdrawn = stop_series_today(series)
-    messages.success(
-        request,
-        f"Stopped as of today. {_occasions_worded(withdrawn)} still to come were "
-        "withdrawn; everything that has already happened was left alone.")
-    return redirect("events:series_detail", pk=series.pk)
+        return render(request, "events/series_stop_confirm.html", {
+            "series": series,
+            "taken": withdrawal_preview(series),
+        })
+
+    dropped = stop_series(series)
+
+    # 🔴 **这一行可能已经不在了**，而那正是这个动作 95% 的用法（建错了、还没
+    #    人碰过）。往一个刚被删掉的 pk 上重定向是一个 404 —— 落在管理列表上，
+    #    并且那句话要说清楚它是整条没了还是只收了未来。
+    if EventSeries.objects.filter(pk=pk).exists():
+        messages.success(request, (
+            f"Stopped as of today — {_occasions_worded(dropped)} still to come "
+            "were withdrawn. What had already happened, and anything somebody "
+            "had signed up for, stays."))
+        return redirect("events:series_detail", pk=pk)
+    messages.success(request, (
+        f"Stopped — the series and {_occasions_worded(dropped)} it had made are "
+        "gone. Nothing had happened on it yet."))
+    return redirect("events:event_manage_list")
 
 
 @login_required

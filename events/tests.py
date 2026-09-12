@@ -26,6 +26,7 @@ from django.apps import apps as django_apps
 from django.conf import settings
 
 from django.contrib.auth import get_user_model
+from django.contrib.messages import get_messages
 from django.contrib.auth.models import Permission
 from django.core.management import call_command
 from django.core.management.base import CommandError
@@ -104,10 +105,7 @@ from .recurrence import (
     occasions,
 )
 from .services import (
-    UNDO_WINDOW,
-    AlreadyUndone,
     NoHoursHere,
-    UndoWindowClosed,
     add_attendance,
     check_in_session,
     add_session,
@@ -160,10 +158,9 @@ from .services import (
     generate_occasions,
     series_moments,
     split_series,
-    stop_series_today,
+    stop_series,
+    withdrawal_preview,
     undo_attendance,
-    undo_preview,
-    undo_series,
 )
 
 NOW = local_now()
@@ -4022,7 +4019,7 @@ class EventSeriesTests(TestCase):
         What made that refusal right was that generation laid the **whole** rule
         out in one press, so "no ending" meant "generate for ever". Generation
         is windowed now — one press books a year — so an endless rule is an
-        ordinary thing to want, and `stop_series_today()` is how it ends.
+        ordinary thing to want, and `stop_series()` is how it ends.
         """
         series = EventSeries(
             name="Forever", ministry=self.ministry, owner=self.owner,
@@ -4283,7 +4280,7 @@ class SeriesChangesTests(TestCase):
 
     def test_stopping_a_series_today_keeps_what_already_happened(self):
         kept = set(self.past().values_list("pk", flat=True))
-        dropped = stop_series_today(self.series)
+        dropped = stop_series(self.series)
         self.series.refresh_from_db()
 
         self.assertGreater(dropped, 0)
@@ -4295,16 +4292,19 @@ class SeriesChangesTests(TestCase):
         # ⚠️ `ended_on` is applied when the moments are worked out, not folded
         #    into the rule — the rule still says what it always said, and "why
         #    did it stop in May" keeps an answer.
-        stop_series_today(self.series)
+        stop_series(self.series)
         self.assertEqual(generate_occasions(self.series), [])
 
 
-class UndoSeriesTests(TestCase):
-    """D40, applied to a batch of events rather than a batch of shifts.
+class StoppingASeriesTests(TestCase):
+    """停掉一条系列 —— 一个动作，两种结局。D40 应用在活动上。
 
-    ⚠️ Undo is **not** "back to how it was", and every test here is a way of
-       saying so. What it is: stop the rule, take back what has not happened and
-       nobody has claimed, and say plainly what is left.
+    ⚠️ 2026-09-11（L5.8g）把「整批撤销」和「即日停止」合并成了这一个，本类
+       原来叫 `UndoSeriesTests`。两者收未来那些场次用的本来就是**同一句删除**，
+       而剩下的差别（要不要连系列那一行一起收走）**代码里一直是自动判的**。
+
+    ⚠️ 停掉**不是**「回到从前」，这里每一条都是在说这句话。它是：停掉规则、
+       收回还没发生且没人认领的那些、把剩下的说清楚。
     """
 
     def setUp(self):
@@ -4328,148 +4328,90 @@ class UndoSeriesTests(TestCase):
         generate_occasions(series)
         return series
 
-    def test_undoing_right_after_creating_leaves_nothing_behind(self):
-        """⭐ 95% of undos, and the reason the feature is worth having.
-
-        Nothing has happened and nobody has signed up, so the rule itself goes
-        too and the database comes out looking as though the batch was never
-        built. D40 §1.
-        """
+    def test_stopping_right_after_creating_leaves_nothing_behind(self):
+        """⭐ D40 §1 说这是 95% 的用法：刚建完就发现建错了。"""
         series = self.build()
-        dropped = undo_series(series, undone_by=self.owner)
+        pk = series.pk
+
+        dropped = stop_series(series)
 
         self.assertEqual(dropped, 4)
-        self.assertEqual(EventSeries.objects.count(), 0)
-        self.assertEqual(Event.objects.count(), 0)
+        self.assertFalse(EventSeries.objects.filter(pk=pk).exists())
+        self.assertFalse(Event.objects.filter(series_id=pk).exists())
 
-    def test_undoing_a_batch_says_what_it_will_leave_behind(self):
-        """🔴 The half whose absence is not "one thing less known".
+    def test_an_old_clean_batch_is_taken_back_just_the_same(self):
+        """🔴 七天窗口 2026-09-11 取消了，而这一条钉住它真的没了。
 
-        Told only "3 will be removed", somebody believes it came out clean —
-        and meets the survivor on a week view next month, by which time they no
-        longer remember undoing anything.
-        """
-        series = self.build()
-        taken = series.occasions.order_by("start_time").last()
-        volunteer = make_person("Volunteer", birth_date=datetime.date(1980, 1, 1))
-        sign_up(contact=volunteer, event_role=taken.roles.get())
-
-        preview = undo_preview(series)
-
-        self.assertEqual(preview.going, 3)
-        self.assertEqual(preview.total_staying, 1)
-        self.assertEqual([reason for reason, _ in preview.staying],
-                         ["somebody has signed up"])
-        self.assertTrue(preview.series_survives)
-
-    def test_the_preview_and_the_button_agree(self):
-        # ⚠️ Both read the same three conditions. A screen that counted for
-        #    itself would be free to disagree with the button under it, and the
-        #    disagreement would only show up after the press.
-        series = self.build()
-        volunteer = make_person("Volunteer", birth_date=datetime.date(1980, 1, 1))
-        sign_up(contact=volunteer,
-                event_role=series.occasions.first().roles.get())
-
-        expected = undo_preview(series).going
-        self.assertEqual(undo_series(series, undone_by=self.owner), expected)
-
-    def test_a_batch_with_survivors_is_stopped_rather_than_deleted(self):
-        series = self.build()
-        taken = series.occasions.first()
-        sign_up(contact=make_person("V", birth_date=datetime.date(1980, 1, 1)),
-                event_role=taken.roles.get())
-
-        undo_series(series, undone_by=self.owner)
-        series.refresh_from_db()
-
-        self.assertIsNotNone(series.undone_at)
-        self.assertEqual(series.ended_on, local_today())
-        self.assertTrue(Event.objects.filter(pk=taken.pk).exists())
-
-    def test_undoing_twice_says_it_is_already_undone(self):
-        """D40 §6 cost 3: two admins pressing the same button is an ordinary race.
-
-        ⚠️ Refused rather than silently succeeding, because a second pass would
-           overwrite `undone_by` with somebody who undid nothing.
-        """
-        series = self.build()
-        sign_up(contact=make_person("V", birth_date=datetime.date(1980, 1, 1)),
-                event_role=series.occasions.first().roles.get())
-        undo_series(series, undone_by=self.owner)
-
-        with self.assertRaises(AlreadyUndone):
-            undo_series(series, undone_by=self.owner)
-
-    def test_the_window_runs_from_the_build_not_from_the_draft(self):
-        """🔴 Drafted a month ago, generated thirty seconds ago, undo refused.
-
-        Decision 30 makes a series `draft` at birth precisely so somebody can
-        build it, look at it with a colleague, and publish it days later. The
-        window read `created_at`, so that ordinary workflow produced "This
-        batch was built more than 7 days ago" about a batch that was seconds
-        old — false, on the screen whose whole purpose is not saying false
-        things.
+        窗口当初是为了分开「我建错了」和「我们改主意了」，而**「有没有人报名」
+        是对同一件事的直接测量** —— 有了直接测量就不需要代理指标了。
+        ⚠️ 班次那边没有报名行，所以 D40 第五节在**那里**仍然成立。
         """
         series = self.build()
         EventSeries.objects.filter(pk=series.pk).update(
-            created_at=NOW - UNDO_WINDOW - 30 * DAY)
+            generated_at=local_now() - datetime.timedelta(days=100))
         series.refresh_from_db()
-        generate_occasions(series)
+        pk = series.pk
+
+        stop_series(series)
+
+        self.assertFalse(EventSeries.objects.filter(pk=pk).exists())
+
+    def test_a_batch_with_survivors_is_stopped_rather_than_deleted(self):
+        """⚠️ 另一半：有东西剩下，这一行就必须留着 —— 它是「为什么只有六场」
+           的唯一答案。"""
+        series = self.build()
+        taken = series.occasions.order_by("start_time").first()
+        volunteer = make_person("V", birth_date=datetime.date(1980, 1, 1))
+        sign_up(contact=volunteer, event_role=taken.roles.first())
+
+        stop_series(series)
         series.refresh_from_db()
 
-        self.assertTrue(undo_preview(series).within_window)
-        self.assertEqual(undo_series(series, undone_by=self.owner), 4)
+        self.assertTrue(EventSeries.objects.filter(pk=series.pk).exists())
+        self.assertEqual(series.ended_on, local_today())
+        self.assertEqual(list(series.occasions.all()), [taken])
 
-    def test_a_series_built_and_never_used_can_still_be_taken_back(self):
-        """⚠️ The first draft of the window refused this, reasoning that no
-           batch means nothing to undo. Backwards: a rule built and never used
-           is D40 §1's 95% case — "I have just built this wrong" — and undo
-           deletes the row and leaves nothing behind. Refusing it would leave
-           the tidiest mistake in the system with no remedy at all.
-        """
+    def test_the_screen_and_the_button_agree(self):
+        """🔴 确认屏数的必须是按钮拿走的那一批 —— 两处各算一遍就是两个答案。"""
+        series = self.build()
+        taken = series.occasions.order_by("start_time").first()
+        volunteer = make_person("V", birth_date=datetime.date(1980, 1, 1))
+        sign_up(contact=volunteer, event_role=taken.roles.first())
+
+        foretold = withdrawal_preview(series)
+        self.assertEqual(stop_series(series), foretold.going)
+
+    def test_stopping_twice_is_harmless(self):
+        """⚠️ 合并之后不再有「已经撤过了」那句拒绝：第二次按下去没有东西可收，
+           而那不是错误。"""
+        series = self.build()
+        taken = series.occasions.order_by("start_time").first()
+        volunteer = make_person("V", birth_date=datetime.date(1980, 1, 1))
+        sign_up(contact=volunteer, event_role=taken.roles.first())
+
+        stop_series(series)
+        series.refresh_from_db()
+        self.assertEqual(stop_series(series), 0)
+        series.refresh_from_db()
+        self.assertEqual(series.ended_on, local_today())
+        self.assertEqual(list(series.occasions.all()), [taken])
+
+    def test_a_series_built_and_never_generated_is_taken_back_whole(self):
+        """⚠️ `build()` 自己会生成，所以这一条要自己造一条没按过生成的。
+           一场都没有的系列同样是「什么都没剩下」—— 整行收走。"""
         never_used = EventSeries.objects.create(
-            name="Built by mistake", ministry=self.ministry, owner=self.owner,
+            name="Never pressed", ministry=self.ministry, owner=self.owner,
             rule="FREQ=WEEKLY;BYDAY=TU;COUNT=4",
             starts_on=a_weekday(
                 TUESDAY, near=local_today() + datetime.timedelta(days=7)),
             start_time=datetime.time(19, 0),
-            duration=datetime.timedelta(hours=2))
+            duration=datetime.timedelta(hours=2), status=Event.Status.OPEN)
         set_audience(never_used, Audience.Spec(
             outsiders=True, all_staff=True, ministries=frozenset()))
+        pk = never_used.pk
 
-        self.assertEqual(undo_series(never_used, undone_by=self.owner), 0)
-        self.assertFalse(EventSeries.objects.filter(pk=never_used.pk).exists())
-
-    def test_undone_is_a_column_and_not_a_deduction(self):
-        # ⚠️ D40's own note: step ② keeps rules that still have occasions, so
-        #    "undone" and "half undone" look identical from the occasion count.
-        #    Reading it off derived state is the disease this project has judged
-        #    four times.
-        series = self.build()
-        sign_up(contact=make_person("V", birth_date=datetime.date(1980, 1, 1)),
-                event_role=series.occasions.first().roles.get())
-        undo_series(series, undone_by=self.owner)
-
-        self.assertFalse(EventSeries.objects.live().exists())
-        self.assertTrue(EventSeries.objects.filter(pk=series.pk).exists())
-
-    def test_undoing_outside_the_window_is_refused(self):
-        """D40 §5. Two questions, kept structurally apart.
-
-        "I have just built this wrong" is answered by undo. "We have changed our
-        minds" is answered by changing the rule or stopping the series — and
-        both of those keep what has already happened, which is what undo would
-        have had to do anyway.
-        """
-        series = self.build()
-        EventSeries.objects.filter(pk=series.pk).update(
-            generated_at=NOW - UNDO_WINDOW - DAY)
-        series.refresh_from_db()
-
-        with self.assertRaises(UndoWindowClosed):
-            undo_series(series, undone_by=self.owner)
-        self.assertEqual(series.occasions.count(), 4)
+        self.assertEqual(stop_series(never_used), 0)
+        self.assertFalse(EventSeries.objects.filter(pk=pk).exists())
 
 
 class SeriesThroughTheAdminTests(TestCase):
@@ -4650,20 +4592,20 @@ class SeriesThroughTheAdminTests(TestCase):
         for occasion in self.series.occasions.all():
             self.assertEqual(occasion.roles.count(), 1)
 
-    def test_the_undo_action_asks_before_it_does_anything(self):
+    def test_the_stop_action_asks_before_it_does_anything(self):
         generate_occasions(self.series)
         response = self.client.post(self.changelist(), {
-            "action": "undo_batch",
+            "action": "stop_series",
             helpers.ACTION_CHECKBOX_NAME: [str(self.series.pk)],
         })
         self.assertEqual(response.status_code, 200)
         self.assertEqual(self.series.occasions.count(), 4,
                          "the first press must not remove anything")
 
-    def test_confirming_the_undo_removes_the_batch(self):
+    def test_confirming_removes_the_batch(self):
         generate_occasions(self.series)
         self.client.post(self.changelist(), {
-            "action": "undo_batch", "confirmed": "yes",
+            "action": "stop_series", "confirmed": "yes",
             helpers.ACTION_CHECKBOX_NAME: [str(self.series.pk)],
         })
         self.assertEqual(EventSeries.objects.count(), 0)
@@ -4676,13 +4618,16 @@ class SeriesThroughTheAdminTests(TestCase):
                 event_role=taken.roles.get())
 
         response = self.client.post(self.changelist(), {
-            "action": "undo_batch",
+            "action": "stop_series",
             helpers.ACTION_CHECKBOX_NAME: [str(self.series.pk)],
         })
 
         body = response.content.decode()
         self.assertIn("somebody has signed up", body)
-        self.assertIn("not deleted", body)
+        # ⚠️ 这句话 2026-09-11 换了主语：admin 原来自己写的是「the series itself
+        #    is **not deleted**」，现在和站点那一屏共用 `_stop_outcome.html`，
+        #    说的是「stays too」。同一件事，一份说法。
+        self.assertIn("the series itself stays too", body)
         # ⚠️ By date, never by name. Every occasion a rule makes carries the
         #    series' own name, so a list of names is one word repeated — which
         #    says nothing about *which* evening is still standing next month.
@@ -4804,7 +4749,7 @@ class SeriesReviewFindingsTests(TestCase):
         self.assertIsNotNone(tonight, "the fixture must straddle today")
 
         with freeze_service_clock(self.morning_of(tonight)):
-            stop_series_today(series)
+            stop_series(series)
             self.assertFalse(
                 Event.objects.filter(pk=tonight.pk).exists(),
                 "stopping did not withdraw the evening still to come")
@@ -4823,17 +4768,20 @@ class SeriesReviewFindingsTests(TestCase):
             start_time__gt=NOW).order_by("start_time").first()
 
         with freeze_service_clock(self.morning_of(evening)):
-            stop_series_today(series)
+            stop_series(series)
 
         self.assertTrue(Event.objects.filter(pk=past.pk).exists())
 
-    def test_an_undone_batch_does_not_grow_back(self):
-        """Same boundary, reached by undo — and undo leaves the button there.
+    def test_a_stopped_batch_does_not_grow_back(self):
+        """Same boundary, reached by the Stop button — and it leaves Generate there.
 
-        Undo's partial branch sets `ended_on` to today as well, so a batch that
-        survived an undo (because somebody had signed up for one of its
-        occasions) was one press of Generate away from rebuilding the evenings
-        the admin had just taken back.
+        Stopping a batch that has a survivor (somebody signed up) sets
+        `ended_on` to today, so it was one press of Generate away from
+        rebuilding the evenings that had just been taken back.
+
+        ⚠️ 2026-09-11（L5.8g）：这一条原来走的是 `undo_series()`。撤销和即日
+           停止合并之后只剩一个动作，而它**有幸存者时的那一支**就是这一条钉的
+           东西 —— 判据没变，名字变了。
         """
         series = self.build()
         generate_occasions(series)
@@ -4845,9 +4793,9 @@ class SeriesReviewFindingsTests(TestCase):
                 event_role=later.roles.get())
 
         with freeze_service_clock(self.morning_of(evening)):
-            undo_series(series, undone_by=self.owner)
+            stop_series(series)
             series.refresh_from_db()
-            self.assertIsNotNone(series.undone_at, "the fixture must survive undo")
+            self.assertIsNotNone(series.ended_on, "the fixture must survive")
             self.assertEqual(generate_occasions(series), [],
                              "an undone batch grew back")
 
@@ -4924,31 +4872,81 @@ class SeriesReviewFindingsTests(TestCase):
 
     # --- 5: the screen waits for the same refusal the button makes ----------
 
-    def test_the_confirmation_screen_does_not_promise_what_undo_will_refuse(self):
+    def a_superuser(self):
+        """一个 root，建一次。⚠️ 同一条测试可能按两趟（先问、再确认）。"""
+        if not hasattr(self, "_root"):
+            self._root = get_user_model().objects.create_superuser(
+                email="root@example.invalid", password="a-good-long-password")
+        return self._root
+
+    def stop_through_the_admin(self, series, **extra):
+        """选中这一条、按 `Stop this series`，交回那一趟的响应。
+
+        ⚠️ 抽出来是因为这一段在本类里写了**三遍**（三个手工去重的 root 邮箱），
+           而它们钉的是同一条路的三件事：键在不在、字印没印、问不问。
+        """
+        self.client.force_login(self.a_superuser())
+        return self.client.post(
+            reverse("admin:events_eventseries_changelist"), {
+                "action": "stop_series",
+                helpers.ACTION_CHECKBOX_NAME: [str(series.pk)],
+                **extra,
+            })
+
+    def test_the_admin_confirmation_screen_offers_a_button_that_works(self):
+        """🔴 这一页的提交键曾经**根本不渲染** —— 看得见数字，按不下去。
+
+        原来那行是 `{% if offerable %}`，而 `offerable` 从来没有被传进上下文过，
+        于是整个确认屏是个死胡同。2026-09-11 合并两个 action 时发现。
+
+        ⚠️ 这一条原来钉的是「窗口关了就不要提供那颗键」。窗口那天一起取消了
+           （L5.8g：「有没有人报名」是对同一件事的直接测量，窗口只是代理），
+           所以现在钉的是它的另一半：**这颗键必须在，而且按得下去**。
+        """
         series = self.build(starts_on=a_weekday(
             TUESDAY, near=local_today() + datetime.timedelta(days=7)))
         generate_occasions(series)
-        # ⚠️ `generated_at`, not `created_at` — the window is about when the
-        #    **batch** was built. Ageing the row instead used to close the
-        #    window on a batch built seconds ago.
-        EventSeries.objects.filter(pk=series.pk).update(
-            generated_at=NOW - UNDO_WINDOW - DAY)
-        series.refresh_from_db()
 
-        self.assertFalse(undo_preview(series).within_window)
+        body = self.stop_through_the_admin(series).content.decode()
+        self.assertIn("Yes, stop them", body, "确认屏上没有能按的键")
+        # ⚠️ 那颗键得**带着这一条**回来。隐藏域 2026-09-12 从另一份 queryset 改成
+        #    和上面数数那一趟共用 `batches` —— 屏上念的那几条和确认之后真的动的
+        #    那几条从此是同一份，而拼错循环变量的表现是这里空着、按下去什么都
+        #    没选中，不报错。
+        self.assertIn(
+            f'name="{helpers.ACTION_CHECKBOX_NAME}" value="{series.pk}"', body,
+            "确认那张表单没带上选中的系列")
+        self.assertTrue(EventSeries.objects.filter(pk=series.pk).exists(),
+                        "只是问一句，还没动手")
 
-        user = get_user_model().objects.create_superuser(
-            email="root@example.invalid", password="a-good-long-password")
-        self.client.force_login(user)
-        response = self.client.post(
-            reverse("admin:events_eventseries_changelist"), {
-                "action": "undo_batch",
-                helpers.ACTION_CHECKBOX_NAME: [str(series.pk)],
-            })
-        body = response.content.decode()
-        self.assertIn("Undo is closed on this batch", body)
-        self.assertNotIn("Yes, undo", body,
-                         "the button is offered for something it will refuse")
+    def test_the_admin_screen_prints_the_same_words_the_site_one_does(self):
+        """⭐ 两张停止屏共用那两份片段 —— 而这一条是它唯一的证人。
+
+        admin 这一页原来自己写了一套说法。D40 第九节却写着「站点和 admin 两处
+        共用」，于是改一句 `_withdrawal_summary.html` 只到得了站点，这一页静静地
+        不跟 —— 正是那份片段被抽出来要防的分岔。
+
+        🔴 断言的是**印在页上的字**，不是 context：这个功能今天为「传进去的变量
+           名对不上」付过两次账，而钉 context 的断言对那一种失败是瞎的。
+        """
+        series = self.build(starts_on=a_weekday(
+            TUESDAY, near=local_today() + datetime.timedelta(days=7)))
+        generate_occasions(series)
+        body = self.stop_through_the_admin(series).content.decode()
+        self.assertIn(f"{series.occasions.count()} occasions still to come", body)
+        self.assertIn("the series itself will be deleted", body)
+
+    def test_the_admin_asks_before_it_deletes_a_series(self):
+        """⚠️ 合并之后这个 action **会删掉整行**，所以它必须先问。
+           一个不问就删行的批量动作，是这个仓库刚付过账的那一类。"""
+        series = self.build(starts_on=a_weekday(
+            TUESDAY, near=local_today() + datetime.timedelta(days=7)))
+        generate_occasions(series)
+        self.stop_through_the_admin(series)
+        self.assertTrue(EventSeries.objects.filter(pk=series.pk).exists())
+
+        self.stop_through_the_admin(series, confirmed="yes")
+        self.assertFalse(EventSeries.objects.filter(pk=series.pk).exists())
 
     # --- 6 and 7: the generator's two ways of being unheard -----------------
 
@@ -5764,7 +5762,7 @@ class SeriesThirdReviewTests(TestCase):
         buffer.close()
 
     def test_stopping_a_series_is_reachable_and_says_what_it_withdrew(self):
-        """⚠️ `stop_today` and `ended_on`'s readonly had **no test at all** —
+        """⚠️ `stop_series` and `ended_on`'s readonly had **no test at all** —
            delete either and the suite stayed green, while the round that added
            them names both as the fix for "the only way to stop a series was to
            type a date that withdrew nothing".
@@ -5775,18 +5773,19 @@ class SeriesThirdReviewTests(TestCase):
             email="root@example.invalid", password="a-good-long-password")
         self.client.force_login(user)
 
+        # ⚠️ 两趟：2026-09-11（L5.8g）起这个 action 会删掉整行，所以它先问一句。
         response = self.client.post(
             reverse("admin:events_eventseries_changelist"), {
-                "action": "stop_today",
+                "action": "stop_series", "confirmed": "yes",
                 helpers.ACTION_CHECKBOX_NAME: [str(series.pk)],
             }, follow=True)
 
-        series.refresh_from_db()
-        self.assertEqual(series.ended_on, local_today())
-        self.assertEqual(series.occasions.count(), 0,
-                         "it set the date and withdrew nothing")
+        # ⚠️ 这一批没人报名，所以整行都收走了 —— 而那正是合并之后的另一半。
+        #    这一条要钉的是「它真的收了东西」，不是「那一行还在」。
+        self.assertFalse(EventSeries.objects.filter(pk=series.pk).exists())
+        self.assertFalse(Event.objects.filter(series_id=series.pk).exists())
         self.assertTrue(
-            any("4 occasion(s) still to come were withdrawn" in str(m)
+            any("4 occasion(s) withdrawn" in str(m)
                 for m in response.context["messages"]))
 
     def test_the_stop_date_cannot_be_typed_in(self):
@@ -5807,36 +5806,6 @@ class SeriesThirdReviewTests(TestCase):
         page = self.client.get(
             reverse("admin:events_eventseries_change", args=[series.pk]))
         self.assertNotIn('name="ended_on"', page.content.decode())
-
-    def test_a_closed_window_screen_promises_nothing_at_all(self):
-        """⚠️ The `within_window` guard wrapped only the count line at first.
-
-        A closed-window batch with no survivors still printed "the database
-        comes out as though it had never been built" one paragraph further
-        down — the same broken promise, under a comment claiming it was fixed.
-        The shipped test asserted only that the closed line was present and the
-        button absent, so it passed straight over it.
-        """
-        series = self.build()
-        generate_occasions(series)
-        EventSeries.objects.filter(pk=series.pk).update(
-            generated_at=NOW - UNDO_WINDOW - DAY)
-        user = get_user_model().objects.create_superuser(
-            email="root@example.invalid", password="a-good-long-password")
-        self.client.force_login(user)
-
-        body = self.client.post(
-            reverse("admin:events_eventseries_changelist"), {
-                "action": "undo_batch",
-                helpers.ACTION_CHECKBOX_NAME: [str(series.pk)],
-            }).content.decode()
-
-        self.assertIn("Undo is closed on this batch", body)
-        # ⚠️ The literal is split across lines in the template, so a naive
-        #    assertion on the whole sentence can never match — which is how a
-        #    reviewer nearly reported this as already fixed.
-        self.assertNotIn("never been built", body)
-        self.assertNotIn("will be removed", body)
 
     def test_the_list_page_does_not_ask_once_per_occasion(self):
         """`Event.poster` falls back to the series, so the list must join it.
@@ -5862,7 +5831,7 @@ class SeriesThirdReviewTests(TestCase):
             f"{len(asked)} queries for {series.occasions.count()} occasions — "
             "the list is asking once per row")
 
-    def test_undoing_a_whole_batch_takes_its_picture_with_it(self):
+    def test_taking_a_whole_batch_back_takes_its_picture_with_it(self):
         # ⚠️ `series_with_images_to_purge()` queries `EventSeries`, so deleting
         #    the row while it still holds a file leaves that file on disk with
         #    nothing that will ever look for it again.
@@ -5875,7 +5844,7 @@ class SeriesThirdReviewTests(TestCase):
         generate_occasions(series)
         stored, storage = series.image.name, series.image.storage
 
-        undo_series(series, undone_by=self.owner)
+        stop_series(series)
 
         self.assertFalse(EventSeries.objects.filter(pk=series.pk).exists())
         self.assertFalse(storage.exists(stored), "the file was orphaned")
@@ -6020,7 +5989,7 @@ class RoleTopUpTests(TestCase):
         generate_occasions(series)
         self.assertIn("door", self.codes_on(occasion))
 
-    def test_undoing_and_rebuilding_does_not_read_as_a_deletion(self):
+    def test_stopping_and_rebuilding_does_not_read_as_a_deletion(self):
         """⚠️ The edge the history lookup could plausibly have got wrong.
 
         Stopping or undoing deletes whole `Event` rows and their roles cascade
@@ -6030,7 +5999,12 @@ class RoleTopUpTests(TestCase):
         """
         series = self.build()
         generate_occasions(series)
-        stop_series_today(series)
+        # ⚠️ 先让一个人报名，这一行才留得下来 —— 干净的一批按下去会连行一起
+        #    收走（L5.8g），而这一条要看的是**重建之后**角色认不认得出来。
+        taken = series.occasions.order_by("start_time").first()
+        sign_up(contact=make_person("V", birth_date=datetime.date(1980, 1, 1)),
+                event_role=taken.roles.first())
+        stop_series(series)
         EventSeries.objects.filter(pk=series.pk).update(ended_on=None)
         series.refresh_from_db()
 
@@ -18096,13 +18070,19 @@ class SeriesPagesTests(PageTestCase):
     # --- the way back ------------------------------------------------------
 
     def test_stopping_withdraws_what_is_still_to_come(self):
+        """⚠️ 这一批没人报名，所以 2026-09-11（L5.8g）之后**整行一起收走** ——
+           而那正是合并之后的 95%。「行还在、只是停了」那一半由
+           `StoppingFromThePageTests` 钉。
+
+        ⚠️ POST 才做：这条路由现在 GET 出确认屏。
+        """
         self.add_template("welcome")
         self.client.post(self.url("series_generate"))
+        pk = self.series.pk
         self.client.post(self.url("series_stop"))
 
-        self.series.refresh_from_db()
-        self.assertEqual(self.series.ended_on, local_today())
-        self.assertEqual(self.series.occasions.count(), 0)
+        self.assertFalse(EventSeries.objects.filter(pk=pk).exists())
+        self.assertFalse(Event.objects.filter(series_id=pk).exists())
 
     def test_stopping_leaves_what_has_already_happened(self):
         """⭐ The half that makes this the honest way out rather than a delete.
@@ -18675,17 +18655,39 @@ class RollingGenerationTests(TestCase):
         self.assertEqual(generate_occasions(series), [])
 
     def test_stopping_is_how_an_endless_rule_ends(self):
-        """⭐ 撤掉「必须有结束」之后，这是唯一的出口 —— 而它本来就在。"""
-        series = self.build()
-        generate_occasions(series)
-        self.assertTrue(series.occasions.exists())
+        """⭐ 撤掉「必须有结束」之后，这是唯一的出口 —— 而它本来就在。
 
-        stop_series_today(series)
+        ⚠️ 这里给它一个报了名的晚上，因为要看的是**停掉之后这条规则不再长**。
+           一条干干净净的无限规则按下去会连行一起收走（2026-09-11 合并之后的
+           另一半），那时就没有「它还长不长」这个问题了。
+        """
+        series = self.build()
+        # ⚠️ 这个类的 `build()` 不带工种，而没有工种就没有人报得上名。
+        role, _ = ParticipationRole.objects.get_or_create(
+            code="welcome", defaults={"name": "Welcome"})
+        inherit_audience(
+            EventSeriesRole.objects.create(series=series, role=role), series)
+        generate_occasions(series)
+        taken = series.occasions.order_by("start_time").first()
+        volunteer = make_person("V", birth_date=datetime.date(1980, 1, 1))
+        sign_up(contact=volunteer, event_role=taken.roles.first())
+
+        stop_series(series)
         series.refresh_from_db()
         self.assertEqual(series.ended_on, local_today())
-        self.assertEqual(series.occasions.count(), 0)
+        self.assertEqual(list(series.occasions.all()), [taken])
         # 停掉之后再按也不会长回来。
         self.assertEqual(generate_occasions(series), [])
+
+    def test_a_clean_endless_rule_is_taken_back_whole(self):
+        """⚠️ 同一颗键的另一半：没人报名就连这一行一起收走。"""
+        series = self.build()
+        generate_occasions(series)
+        pk = series.pk
+
+        stop_series(series)
+
+        self.assertFalse(EventSeries.objects.filter(pk=pk).exists())
 
     # --- 已排到哪 -----------------------------------------------------------
 
@@ -18837,8 +18839,17 @@ class EndlessRuleThroughThePagesTests(PageTestCase):
             duration=datetime.timedelta(hours=2), status=Event.Status.OPEN)
         set_audience(series, Audience.Spec(
             outsiders=True, all_staff=True, ministries=frozenset()))
+        # ⚠️ 一个报了名的晚上，这一行才留得下来 —— 一条干净的规则按停止会连行
+        #    一起收走（L5.8g），而这一条要看的是**停掉之后那一行说什么**。
+        role, _ = ParticipationRole.objects.get_or_create(
+            code="welcome", defaults={"name": "Welcome"})
+        inherit_audience(
+            EventSeriesRole.objects.create(series=series, role=role), series)
         generate_occasions(series)
-        stop_series_today(series)
+        sign_up(contact=make_person("V", birth_date=datetime.date(1980, 1, 1)),
+                event_role=series.occasions.order_by("start_time")
+                .first().roles.first())
+        stop_series(series)
         series.refresh_from_db()
 
         self.assertFalse(has_more_to_build(series))
@@ -19086,3 +19097,346 @@ class TopUpDoesNotScaleItsQueriesTests(TestCase):
             sixteen - four, 12,
             f"多 12 场多花了 {sixteen - four} 条查询 —— 说明那份 "
             f"prefetch 又被绕开了（4 场 {four} 条，16 场 {sixteen} 条）")
+
+
+class ChangingTheRuleTests(PageTestCase):
+    """改规则 = 就地改、保存时拦一屏确认、确认才动。L5.8f，2026-09-11。
+
+    ⭐ 在这之前这条路的尽头是一句 "Stop this series instead, and build the next
+       one" —— 而**没有任何控件做得了这件事**。一句指着不存在的控件的话，正是
+       这个仓库反复付账的那一种。
+
+    ⚠️ 底下是 `services.split_series()`（06-roadmap L5.6 早就写下的那条路）：
+       停掉这一条、用新规则起一条。就地改是做不到的 —— 已经有人报名的那几场会
+       留在旧时间上，旁边冒出新的。
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.login(self.zhang)
+        self.tuesday = a_weekday(
+            TUESDAY, near=local_today() + datetime.timedelta(days=7))
+        self.series = EventSeries.objects.create(
+            name="Tuesday prayer", ministry=self.pantry, owner=self.zhang.contact,
+            rule="FREQ=WEEKLY;BYDAY=TU;COUNT=6", starts_on=self.tuesday,
+            start_time=datetime.time(19, 0),
+            duration=datetime.timedelta(hours=2), status=Event.Status.OPEN)
+        set_audience(self.series, Audience.Spec(
+            outsiders=True, all_staff=True, ministries=frozenset()))
+        role, _ = ParticipationRole.objects.get_or_create(
+            code="welcome", defaults={"name": "Welcome"})
+        inherit_audience(
+            EventSeriesRole.objects.create(series=self.series, role=role,
+                                           needed_count=3), self.series)
+        generate_occasions(self.series)
+
+    def url(self):
+        return reverse("events:series_detail", args=[self.series.pk])
+
+    def payload(self, **overrides):
+        """系列页那张表单，默认原样回填（也就是「什么都没改」）。"""
+        return {
+            "name": self.series.name, "ministry": self.pantry.pk,
+            "repeat_mode": "weekly", "repeat_every": "1",
+            "repeat_weekdays": ["TU"],
+            "ends_kind": "count", "ends_after": "6",
+            "starts_on": self.series.starts_on.isoformat(),
+            "start_time": "19:00",
+            "duration_0": "2", "duration_1": "0", "duration_2": "0",
+            # ⚠️ 受众要和 setUp 里建的那一份一致。少勾一个就是把系列收窄到它
+            #    自己的角色之下 —— 那会被 `refuse_narrowing_below_the_roles()`
+            #    拒掉，而那条错误和冻结无关，会让确认屏根本不出现。
+            "status": Event.Status.OPEN,
+            "visible_to_outsiders": True, "visible_to_all_staff": True,
+            **overrides,
+        }
+
+    def to_thursdays(self, **extra):
+        return self.payload(repeat_weekdays=["TH"], ends_after="12", **extra)
+
+    # --- 先问，再动 ---------------------------------------------------------
+
+    def test_changing_the_rule_asks_before_it_does_anything(self):
+        before = EventSeries.objects.count()
+        response = self.client.post(self.url(), self.to_thursdays())
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTemplateUsed(response, "events/series_rule_change_confirm.html")
+        self.assertEqual(EventSeries.objects.count(), before, "还没确认就动了")
+        self.series.refresh_from_db()
+        self.assertIsNone(self.series.ended_on)
+
+    def test_the_confirm_screen_says_what_goes_and_when_the_new_one_starts(self):
+        response = self.client.post(self.url(), self.to_thursdays())
+        self.assertEqual(response.context["taken"].going, 6)
+        # ⚠️ 新系列的第一场按**新**规则算 —— 周四，不是周二。
+        self.assertEqual(response.context["resumes_on"].weekday(), THURSDAY)
+
+    # --- 确认之后 -----------------------------------------------------------
+
+    def confirm(self, **extra):
+        return self.client.post(
+            self.url(), self.to_thursdays(confirm_new_series="1", **extra))
+
+    def successor(self):
+        return EventSeries.objects.exclude(pk=self.series.pk).get()
+
+    def confirm_same_rule(self, **extra):
+        """规则原样、只改别的生成字段 —— 冻结照样挡，确认屏照样出。"""
+        return self.client.post(
+            self.url(), self.payload(confirm_new_series="1", **extra))
+
+
+    def test_confirming_starts_a_new_series_with_the_rule_i_typed(self):
+        """🔴 人填的新规则要真的用在新系列上。
+
+        ⚠️ 这一条钉的是一个**静默**的失败：新系列照样建出来、页面照样说成功，
+           只是它带的是**旧**规则 —— 而人刚在上一屏读过新规则。
+        """
+        self.confirm()
+        self.assertEqual(self.successor().rule, "FREQ=WEEKLY;BYDAY=TH;COUNT=12")
+        self.assertEqual(self.successor().starts_on.weekday(), THURSDAY)
+
+    def test_the_old_series_is_stopped_today_and_keeps_what_happened(self):
+        self.confirm()
+        self.series.refresh_from_db()
+        self.assertEqual(self.series.ended_on, local_today())
+
+    def test_changing_only_the_time_carries_the_new_time(self):
+        """🔴 只改了开始时间（规则一个字没动）—— 新系列必须是新时间。
+
+        ⚠️ 这一条和下面两条一起钉的是 `add_error()` 那个坑：冻结那条错误挂在
+           `GENERATION_FIELDS` 里**第一个变了的**字段上，而 Django 会把出错字段
+           从 `cleaned_data` 里删掉 —— 不在的那一格恰恰是人刚改的那一格。只改
+           时间的时候变的是 `start_time`，`split_series()` 于是回退到旧值，新系列
+           静静地带着 **19:00** 建出来，而页面照常说成功。
+
+        ⚠️ 现在视图一格都不读 `cleaned_data`，整份从 `form.instance` 上取
+           （`_post_clean()` 先写进去、后撞冻结），所以这三条钉的是同一句话。
+        """
+        self.confirm_same_rule(start_time="20:00")
+        successor = self.successor()
+        self.assertEqual(successor.start_time, datetime.time(20, 0))
+
+    def test_changing_only_the_length_carries_the_new_length(self):
+        """⚠️ 同一个坑的另一个出口 —— `duration`。"""
+        self.confirm_same_rule(duration_0="2", duration_1="30", duration_2="0")
+        self.assertEqual(self.successor().duration,
+                         datetime.timedelta(hours=2, minutes=30))
+
+    def test_everything_else_i_typed_comes_across_too(self):
+        """⚠️ 带过去的不只是「什么时候」那四格。
+
+        `SPLITTABLE_FIELDS` 里还有名字、地点、说明这些 —— 人在同一次保存里改的
+        是一整张表单，而挡住它的只有冻结。视图整份从 `form.instance` 上取，所以
+        这一条和上面两条是同一句话的两头：少取一格就是**静默**丢一格。
+        """
+        self.confirm(name="Thursday prayer", location="Hall B",
+                     description="Bring a friend")
+        successor = self.successor()
+        self.assertEqual(successor.name, "Thursday prayer")
+        self.assertEqual(successor.location, "Hall B")
+        self.assertEqual(successor.description, "Bring a friend")
+
+    def test_the_message_names_the_series_that_was_stopped(self):
+        """⚠️ 那句话说的是「旧的停了」，所以名字要是**旧**的。
+
+        `series` 就是 `form.instance`，而表单在 `_post_clean()` 里已经把人填的
+        新名字写进了这个内存对象 —— 同一次保存里改了名，那句话就会用新名字
+        说旧系列停了，而新旧两条此刻名字不一样。
+        """
+        response = self.confirm(name="Thursday prayer")
+        said = " ".join(
+            str(m) for m in get_messages(response.wsgi_request))
+        self.assertIn("Tuesday prayer", said)
+        self.assertNotIn("Thursday prayer", said)
+
+    def test_the_jobs_and_the_audience_come_across(self):
+        self.confirm()
+        successor = self.successor()
+        self.assertEqual(
+            list(successor.roles.values_list("role__code", flat=True)), ["welcome"])
+        self.assertEqual(successor.roles.get().needed_count, 3)
+        self.assertTrue(successor.visible_to_outsiders)
+
+    def test_it_does_not_generate_anything_on_its_own(self):
+        """⚠️ 生成永远是一个明确的动作（决定 33 / 34）。一次确认不该顺手造出
+           十二场活动 —— 何况人多半还想在新页上再看一眼规则。"""
+        self.confirm()
+        self.assertEqual(self.successor().occasions.count(), 0)
+
+    def test_it_lands_on_the_new_series(self):
+        response = self.confirm()
+        self.assertRedirects(response, reverse(
+            "events:series_detail", args=[self.successor().pk]))
+
+    # --- 分得开的两件事 -----------------------------------------------------
+
+    def test_a_rule_that_is_simply_wrong_gets_the_ordinary_errors(self):
+        """🔴 `rule_is_frozen` 那个 code 存在的全部理由。
+
+        「规则写错了」和「规则被冻结了」必须分得开：把两者混成一屏，人会以为
+        自己那条写错的规则「确认一下」就能用。
+        """
+        response = self.client.post(self.url(), self.payload(repeat_weekdays=[]))
+        self.assertEqual(response.status_code, 200)
+        self.assertTemplateUsed(response, "events/series_form.html")
+        self.assertIn("repeat_weekdays", response.context["form"].errors)
+
+    def test_editing_only_the_description_still_saves_in_place(self):
+        """⚠️ 回归：没碰生成字段就不该看见确认屏。`_rule_for()` 那条保护
+           （拼回来的规则和存着的意思一样就用存着的）仍然管用。"""
+        response = self.client.post(
+            self.url(), self.payload(description="Bring a friend"))
+        self.assertRedirects(response, self.url())
+        self.series.refresh_from_db()
+        self.assertEqual(self.series.description, "Bring a friend")
+        self.assertIsNone(self.series.ended_on)
+        self.assertEqual(EventSeries.objects.count(), 1)
+
+    def test_another_ministrys_admin_cannot(self):
+        self.login(self.other_admin)
+        self.assertEqual(self.client.post(self.url(), self.to_thursdays()
+                                          ).status_code, 403)
+
+
+class StoppingFromThePageTests(PageTestCase):
+    """发布者那一侧的「Stop this series」。L5.8g，2026-09-11。
+
+    ⭐ **一颗键，两种结局。** 本类原来叫 `UndoingABatchTests`，测的是一条
+       `/undo/` 路由 —— 而撤销和即日停止 2026-09-11 合并之后只剩一个动作：
+       没人报名就连系列那一行一起收走，有人报名就只是停掉。
+
+    ⚠️ 合并的理由不是省一颗键：那个分支**代码里一直是自动判的**。实测过按错
+       的代价还是不对称的 —— 误按撤销零代价，误按停止要再按一次才补得回来。
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.login(self.zhang)
+        self.tuesday = a_weekday(
+            TUESDAY, near=local_today() + datetime.timedelta(days=7))
+
+    def a_series(self, rule="FREQ=WEEKLY;BYDAY=TU;COUNT=4"):
+        series = EventSeries.objects.create(
+            name="Tuesday prayer", ministry=self.pantry, owner=self.zhang.contact,
+            rule=rule, starts_on=self.tuesday, start_time=datetime.time(19, 0),
+            duration=datetime.timedelta(hours=2), status=Event.Status.OPEN)
+        set_audience(series, Audience.Spec(
+            outsiders=True, all_staff=True, ministries=frozenset()))
+        role, _ = ParticipationRole.objects.get_or_create(
+            code="welcome", defaults={"name": "Welcome"})
+        inherit_audience(
+            EventSeriesRole.objects.create(series=series, role=role), series)
+        generate_occasions(series)
+        return series
+
+    def url(self, series):
+        return reverse("events:series_stop", args=[series.pk])
+
+    def sign_somebody_up(self, occasion):
+        volunteer = make_person("V", birth_date=datetime.date(1980, 1, 1))
+        sign_up(contact=volunteer, event_role=occasion.roles.first())
+
+    # --- 先看，再做 ---------------------------------------------------------
+
+    def test_the_confirm_screen_counts_what_goes(self):
+        series = self.a_series()
+        response = self.client.get(self.url(series))
+        self.assertTemplateUsed(response, "events/series_stop_confirm.html")
+        self.assertEqual(response.context["taken"].going, 4)
+        self.assertEqual(series.occasions.count(), 4, "GET 不许动东西")
+
+    def test_the_screen_prints_the_number_it_counted(self):
+        """🔴 数字要真的**印在页上**，不只是躺在 context 里。
+
+        这一类 bug 2026-09-11 一天之内出了两次（站点一次、admin 一次）：共用
+        片段要一个叫 `taken` 的变量，而传进去的叫 `preview` —— Django 取不到
+        就当空，句子渲染成「occasion still to come withdrawn」，数字整个不见，
+        而且不报错。钉 context 的断言对这种失败是瞎的。
+        """
+        series = self.a_series()
+        self.assertIn("4 occasions still to come",
+                      self.client.get(self.url(series)).content.decode())
+
+    def test_the_screen_says_the_series_itself_will_go(self):
+        """⭐ D40 说这是 95% 的用法：刚建完就发现建错了。"""
+        series = self.a_series()
+        response = self.client.get(self.url(series))
+        self.assertFalse(response.context["taken"].series_survives)
+        self.assertIn("the series itself will be deleted",
+                      response.content.decode())
+
+    # --- 那 95% ------------------------------------------------------------
+
+    def test_a_clean_batch_is_taken_back_row_and_all(self):
+        series = self.a_series()
+        response = self.client.post(self.url(series))
+
+        self.assertFalse(EventSeries.objects.filter(pk=series.pk).exists())
+        self.assertFalse(Event.objects.filter(series_id=series.pk).exists())
+        # 🔴 那一行没了，所以**不能**重定向回它自己的页面 —— 那是 404。
+        self.assertRedirects(response, reverse("events:event_manage_list"))
+
+    # --- 有人报名的那一半 ---------------------------------------------------
+
+    def test_a_batch_somebody_signed_up_for_is_only_stopped(self):
+        series = self.a_series()
+        self.sign_somebody_up(series.occasions.order_by("start_time").first())
+
+        response = self.client.post(self.url(series))
+        series.refresh_from_db()
+
+        self.assertTrue(EventSeries.objects.filter(pk=series.pk).exists())
+        self.assertEqual(series.ended_on, local_today())
+        self.assertEqual(series.occasions.count(), 1, "报了名的那一场留下了")
+        self.assertRedirects(
+            response, reverse("events:series_detail", args=[series.pk]))
+
+    def test_the_screen_says_so_when_the_series_will_stay(self):
+        series = self.a_series()
+        self.sign_somebody_up(series.occasions.order_by("start_time").first())
+        page = self.client.get(self.url(series)).content.decode()
+        self.assertIn("the series itself stays too", page)
+        self.assertIn("somebody has signed up", page)
+
+    # --- 窗口没了 -----------------------------------------------------------
+
+    def test_an_old_batch_can_still_be_taken_back(self):
+        """🔴 七天窗口 2026-09-11 取消了 —— 第 100 天和第 1 天一样。
+
+        窗口当初分的是「我建错了」和「我们改主意了」，而**「有没有人报名」是对
+        同一件事的直接测量**。有了直接测量就不需要代理指标了。
+        """
+        series = self.a_series()
+        EventSeries.objects.filter(pk=series.pk).update(
+            generated_at=local_now() - datetime.timedelta(days=100))
+
+        self.client.post(self.url(series))
+        self.assertFalse(EventSeries.objects.filter(pk=series.pk).exists())
+
+    # --- 页面上那颗键 --------------------------------------------------------
+
+    def test_there_is_one_button_and_it_links_here(self):
+        series = self.a_series()
+        page = self.client.get(
+            reverse("events:series_detail", args=[series.pk])).content.decode()
+        self.assertIn(self.url(series), page)
+        self.assertNotIn("Undo this batch", page, "合并之前这里是两颗")
+
+    def test_an_already_stopped_series_does_not_offer_it(self):
+        """⚠️ 对一条 `ended_on` 已经落地的系列说「停掉它」是一句没有意义的话。"""
+        series = self.a_series()
+        self.sign_somebody_up(series.occasions.order_by("start_time").first())
+        self.client.post(self.url(series))
+
+        page = self.client.get(
+            reverse("events:series_detail", args=[series.pk])).content.decode()
+        self.assertNotIn(self.url(series), page)
+
+    def test_another_ministrys_admin_cannot(self):
+        series = self.a_series()
+        self.login(self.other_admin)
+        self.assertEqual(self.client.get(self.url(series)).status_code, 403)
+        self.assertEqual(self.client.post(self.url(series)).status_code, 403)
+        self.assertTrue(EventSeries.objects.filter(pk=series.pk).exists())

@@ -371,9 +371,17 @@ FOUNDATION_ADMIN_PERMISSIONS = [
     #    happens on the site rather than in the admin, which is the opposite
     #    reason and reads the same from a distance.
     #
-    # ⚠️ Two things are still superuser-only and this is the honest list:
-    #    undoing a batch, and editing a rule from the admin's own form. A
-    #    ministry admin's way back is "Stop from today" on the series page.
+    # ⚠️ 2026-09-11（L5.8f）之前这里写着「撤销一批和改规则仍然只有超级用户
+    #    做得了」。**那句话过期了** —— 两者现在都在系列页上：撤销走
+    #    `/events/series/<pk>/stop/`（一张确认屏 + 一次 POST），改规则就在那张
+    #    表单上改、保存时拦一屏确认（底下是 `services.split_series()`）。
+    #    两条都按 `can_manage_series()` 收给 ministry admin。
+    #
+    # ⚠️ 2026-09-11（L5.8g）「撤销」和「即日停止」合并成了一颗键，所以上面写的
+    #    是 `/stop/` 而不是 `/undo/` —— 后者不存在了。
+    #
+    # ⚠️ admin 上那三个 action 一个没删：它们仍是超级用户的路，而且能一次处理
+    #    多条系列（站点那一侧一次只管一条）。两套门，两拨读者。
     #
     # 🔴 And they are here at all because registering a model in admin.py is not
     #    what makes it reachable: Django hides a model from the admin index

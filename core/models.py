@@ -495,7 +495,7 @@ class HomePage(models.Model):
         """`current()`, fetched at most once per request.
 
         ⚠️ The front page asked for this row **twice** on every hit until
-           2026-08-13: once in `core.views.home` for the verse and the picture,
+           2026-08-13: once in `dashboard.views.front` for the verse and the picture,
            and once in the `site_appearance` context processor, which runs on
            every page in the site including this one. Two identical SELECTs on
            the busiest public URL there is, and neither call site could see the

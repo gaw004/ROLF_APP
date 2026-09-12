@@ -293,8 +293,8 @@
    *
    * ⚠️ 跟着 `.dark` 走，不跟着 `prefers-color-scheme` 走 —— 主题是用户可以手动
    *    覆盖的（见文件开头 `@custom-variant dark`），而 `color-scheme` 必须和
-   *    页面**实际**呈现的那一套一致，不是和系统偏好一致。首页不加 `.dark`，
-   *    所以它拿到的是 light，这是对的：那一页是照片加白字，不跟随深色模式。
+   *    页面**实际**呈现的那一套一致，不是和系统偏好一致。未登录的首页不加
+   *    `.dark`，所以它拿到的是 light，这是对的：那一页是照片加白字。
    */
   html {
     color-scheme: light;
@@ -2671,13 +2671,14 @@
    *    它们的轮廓不是装饰：那条线在说「这一行和周围的页面不一样」。 */
   /* --- 仪表盘卡片上那个彩色小图标（2026-09-02）---------------------------
    *
-   * ⚠️ 颜色是**认卡用的**，不是装饰。一屏五张卡，人靠颜色定位而不是读标题 ——
-   *    所以同一张卡的色档全站固定，换页面也不许变（tone 写在 me.html 里）。
+   * ⚠️ 颜色是**认卡用的**，不是装饰。人在一屏卡片里靠颜色定位而不是读标题 ——
+   *    所以同一张卡的色档全站固定，换页面也不许变（`tone` 写在 `_deck.html`
+   *    的各个 include 上；2026-09-11 之前是已经删掉的 `me.html`）。
    *
-   * ⚠️ 一个 emoji 装在一个圆角方块里，不引图标库：这一页要五个图标，
-   *    为五个图标引一个字体文件是每一个访客都在付的账。
+   * ⚠️ 一个 emoji 装在一个圆角方块里，不引图标库：为这几个图标引一个字体文件
+   *    是每一个访客都在付的账。
    *
-   * ⚠️ 深色下底色降到 /15 而不是换一组色值 —— 五档各写一份深色色值，
+   * ⚠️ 深色下底色降到 /15 而不是换一组色值 —— 每一档各写一份深色色值，
    *    就是五个将来会各自漂移的地方。 */
   .dash-icon {
     display: inline-flex;
@@ -2693,15 +2694,11 @@
 
   .dash-icon-sky     { background-color: color-mix(in srgb, #0ea5e9 18%, transparent); }
   .dash-icon-violet  { background-color: color-mix(in srgb, #8b5cf6 18%, transparent); }
-  .dash-icon-amber   { background-color: color-mix(in srgb, #f59e0b 22%, transparent); }
   .dash-icon-rose    { background-color: color-mix(in srgb, #f43f5e 18%, transparent); }
-  .dash-icon-emerald { background-color: color-mix(in srgb, #10b981 18%, transparent); }
 
   .dark .dash-icon-sky     { background-color: color-mix(in srgb, #0ea5e9 15%, transparent); }
   .dark .dash-icon-violet  { background-color: color-mix(in srgb, #8b5cf6 15%, transparent); }
-  .dark .dash-icon-amber   { background-color: color-mix(in srgb, #f59e0b 15%, transparent); }
   .dark .dash-icon-rose    { background-color: color-mix(in srgb, #f43f5e 15%, transparent); }
-  .dark .dash-icon-emerald { background-color: color-mix(in srgb, #10b981 15%, transparent); }
 
   .card {
     /* 圆角 0.75rem（2026-08-06 从 0.5rem 加大）。 */
@@ -2748,7 +2745,7 @@
     color: var(--color-brand-300);
   }
 
-  /* 卡底那条出口（2026-09-08）。首页五张卡的 `View all …`，外加 Coming up 空态里
+  /* 卡底那条出口（2026-09-08）。仪表盘各卡的 `View all …`，外加 Coming up 空态里
    * 那条 `Find something to join →`。
    *
    * 🔴 **它不是 `prose-link`，而且这两条不许合并。** 上面那一个是**正文里的链接**，
@@ -3165,10 +3162,13 @@
 
   /* --- 首页那一层（2026-08-06）--------------------------------------------
    *
-   * ⚠️ 首页**不跟随深色模式**（满屏照片 + 白字，`<html>` 上永远没有 `.dark`），
-   *    所以上面那条 `.dark .feather` 在首页上一次都不会命中 —— 而首页的背景
-   *    恰恰是压暗过的照片，正是最需要那层散影的地方。这个修饰类就是为这一件事
-   *    存在的：它说的是**背后是什么**（一张暗照片），不是**主题是什么**。
+   * ⚠️ 这个修饰类说的是**背后是什么**（一张压暗的照片），不是**主题是什么**，
+   *    而那正是它非有不可的理由：**浅色模式**下的首页，背景照样是那张暗照片，
+   *    而上面那条 `.dark .feather` 一次都不会命中 —— 1px 的硬边影子压在暗照片上
+   *    根本看不出来。
+   *    ⚠️ 登录之后首页跟随深色模式（2026-09-11，D44），那时两条规则同时命中，
+   *       而它们给的是同一层影子，所以谁赢都一样。未登录那条路径上
+   *       `<html>` 仍然永远没有 `.dark`。
    *
    * ⚠️ z-index 15，不是 20。首页的层次和内页不一样：经文在 `z-10`、顶栏在
    *    `z-20`、菜单在 `z-40`/`z-50`，而且外面那个 `relative` 容器没有 z-index，
@@ -3862,8 +3862,10 @@
     color: var(--color-brand-700);
   }
 
-  /* ⚠️ 深色配色只有内页需要。首页不跟随深色模式（满屏照片 + 白字），
-   * 少了这一段的话深色模式下内页顶上会横着一条刺眼的白带。 */
+  /* ⚠️ 这一条只对实心的那种 bar 生效，也就是内页。首页那条不传 `solid`，
+   * 所以它命不中 —— 登录之后首页也跟着深色模式走（D44），而它顶上那条 bar
+   * 仍然是「平时透明、白字」那一种。少了这一段，深色模式下内页顶上会横着
+   * 一条刺眼的白带。 */
   .dark .home-bar.is-solid {
     background-color: var(--color-ink-900);
   }
@@ -5116,4 +5118,472 @@ html.filters-collapsed .filter-toggle,
     line-height: 1;
     color: var(--color-ink-500);
   }
+}
+
+/* ===========================================================================
+ * 首页往下滚就是仪表盘（D44，2026-09-11）
+ *
+ * 版面是一页三段：hero 满屏 → 问候那一屏 → 卡片区。⚠️ 中间**没有过渡**，
+ * 交界是一条硬边 —— 临时的、知情的，理由见下面 `.home-paper` 那一段。
+ *
+ * ⚠️ 只有 `/` 一个使用者。`/me/` 是一条跳过去的 302、不再自己渲染一份（D44
+ *    「一页只能有一个地址」），所以这里不再有「压在照片上 / 不压」两种形态 ——
+ *    2026-09-12 那个 `on_photo` 开关连同它的第二条路一起删了。
+ * ======================================================================== */
+@layer components {
+  /* 仪表盘那一整块的底色。
+   * ⚠️ 深色下是 `transparent`：那时透上来的是同一张压暗的照片（同内页），
+   *    整页上下因此是一整片，没有「照片到这里结束了」这回事。 */
+  :root {
+    --deck-ground: var(--color-ink-50);
+  }
+
+  .dark {
+    --deck-ground: transparent;
+  }
+
+  /* hero 那一屏。⚠️ `dvh` 在后面，`vh` 在前面当兜底 —— 手机上地址栏收起时
+   * `vh` 会多出一截，而不支持 `dvh` 的浏览器至少还有个能用的高度。 */
+  .home-screen {
+    height: 100vh;
+    height: 100dvh;
+  }
+
+  /* --- 问候那一段 ---------------------------------------------------------
+   *
+   * 🔴 **这一整块坐在页面底色上，不压在照片上**（2026-09-11 当天改口）。
+   *    第一版把问候语和 Needs you 压在 hero 照片上，而要的顺序正好相反：
+   *    照片先结束，这一页才开始说话 —— 所以这里用的是正常的正文配色，
+   *    不是白字加投影。
+   *
+   * 🔴 **底色自己铺满，盖住底下那张 fixed 的照片**，浅色下因此是一条硬边。
+   *    深色下不铺（`transparent`）：那边照片本来就是整页的背景（同内页）。
+   *    D25 那条通则在这里的样子是：深色的正文只压在我们自己的底色上，
+   *    绝不压在一张不可知的照片上。 */
+  .deck {
+    background-color: var(--deck-ground);
+    min-height: 100vh;
+  }
+
+  /* 🔴 **版心一处，而这一条是修出来的不是设计出来的。** 原先问候区、通栏、卡片
+   *    网格各写一份同样的 `max-width + padding-inline`，看起来「三处一致」，
+   *    实际上对不齐：通栏的**边框**画在它自己的外沿（整个 72rem），
+   *    而卡片在网格那一层的内边距**里面**（缩进 1rem）—— 通栏因此比下面的卡片
+   *    左右各宽出 16px。走查时一眼就看出来了，而三处各自看都「没问题」。
+   *
+   * ⚠️ 版心只写在这一层。这一段不继承 `base.html`（那边的 `<main>` 自带版心），
+   *    两层套在一起就是左右各两倍内边距。 */
+  .deck .deck-inner {
+    margin-inline: auto;
+    max-width: 72rem;
+    padding-inline: 1rem;
+  }
+
+  /* ⚠️ 下边距是 **0**，不是漏写的：问候那一段和通栏之间的距离由通栏自己声明
+   *    （下面 `.deck .band` 的 `margin-block`）。两边各写一半的话，改的人要把
+   *    两个数加起来才知道那道缝有多宽 —— 而这一页上下三道缝要求是同一个数。 */
+  .deck .deck-head {
+    padding-block: 2.5rem 0;
+  }
+
+  /* 🔴 **这一块故意不切（2026-09-12 撤掉了 `overflow: clip`）。**
+   *
+   *    2026-09-11 它是切住的，理由是「卡片会从经文前面飞过去」。而那条理由建立在
+   *    「动画自己播一遍」的前提上；改成滚动驱动之后前提没了：现在**散在天上**
+   *    才是要看的那一幕，切住等于把它整段藏起来。用户的原话是「我怎么没有看到
+   *    所有 element 被 throw up into the sky 的感觉」—— 一半就是被这一层切掉的。
+   *
+   * ⚠️ 于是卡片确实会飘到交界、甚至 hero 的下沿上方。可接受，因为：经文那一层是
+   *    `pointer-events: none`，顶栏在 `z-20`（卡片没有 z-index，够不着它），
+   *    而块在天上时是**半透明到不透明渐入**的，不会突然盖住什么。
+   * ⚠️ 真要切回去的话，`clip` 不许换成 `hidden`：后者会让这一块变成滚动容器，
+   *    键盘 Tab 到下面的卡片时浏览器会去滚**它**而不是页面。 */
+
+  .deck-date {
+    font-size: 0.6875rem;
+    font-weight: 500;
+    letter-spacing: 0.22em;
+    text-transform: uppercase;
+    color: var(--color-ink-500);
+  }
+
+  .deck-head-row {
+    display: flex;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: 1.5rem;
+    margin-top: 0.75rem;
+  }
+
+  /* ⚠️ 字号用 clamp 而不是断点：它后面跟着一个人的名字，而名字有多长事先不知道，
+   *    断点只照顾得到「典型长度」。
+   *
+   * ⚠️ 2026-09-11 调过一次：上限从 3.25rem 收到 2.5rem、字重从 300 提到 500。
+   *    第一版那个又大又细的写法在实机上「像一张海报的标题」，而这一行是**跟人
+   *    打招呼**，不是标题 —— 小一点、实一点才读得出是在对着他说话。 */
+  .deck-greeting {
+    font-size: clamp(1.5rem, 0.95rem + 2.2vw, 2.5rem);
+    font-weight: 500;
+    line-height: 1.15;
+    letter-spacing: -0.01em;
+  }
+
+  .deck-posts {
+    margin-top: 0.5rem;
+    font-size: 0.875rem;
+    color: var(--color-ink-600);
+  }
+
+  .deck-hours {
+    flex-shrink: 0;
+    text-align: right;
+  }
+
+  /* ⚠️ 字号**跟着问候语走**，不是各挑各的。2026-09-11 把问候语收小之后，这一个
+   *    还留在原来那一档，于是一个「0」比一句话还大 —— 两边本来是一对，
+   *    改了一个就必须改另一个。字重仍然比问候语轻：它是一个数，不是一句话。 */
+  .deck-hours-figure {
+    display: block;
+    font-size: clamp(1.5rem, 0.95rem + 2.2vw, 2.5rem);
+    font-weight: 400;
+    line-height: 1;
+    font-variant-numeric: tabular-nums;
+    color: var(--color-brand-700);
+  }
+
+  .deck-hours-label {
+    display: block;
+    margin-top: 0.35rem;
+    font-size: 0.625rem;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--color-ink-600);
+  }
+
+  /* 累计那一行「特别小」，而它不是装饰：本年度会在一月一号清零，
+   * 这一行是接住那件事的那句话（D44 第六节）。 */
+  .deck-hours-total {
+    display: block;
+    margin-top: 0.15rem;
+    font-size: 0.6875rem;
+    font-variant-numeric: tabular-nums;
+    color: var(--color-ink-500);
+  }
+
+  /* --- 深色下的这一段 ------------------------------------------------------
+   * ⚠️ 浅色那一档直接用上面各自的默认值（正文 ink-900、次要 ink-600）——
+   *    它们已经在对比度表里，不在这里重挑一套。
+   * ⚠️ 深色下底是那张压暗的照片，所以取的是内页深色**已经在用**的那一对
+   *    （ink-50 正文 / ink-300 次要），同样不重挑。 */
+  .dark .deck-greeting {
+    color: var(--color-ink-50);
+  }
+
+  .dark .deck-date,
+  .dark .deck-posts,
+  .dark .deck-hours-label {
+    color: var(--color-ink-300);
+  }
+
+  .dark .deck-hours-total {
+    color: var(--color-ink-400);
+  }
+
+  .dark .deck-hours-figure {
+    color: var(--color-brand-300);
+  }
+
+  /* --- Needs you 通栏 ------------------------------------------------------ */
+  .band {
+    border: 1px solid var(--color-ink-200);
+    border-radius: 1rem;
+    padding: 1.25rem;
+    background-color: rgb(255 255 255 / 0.72);
+  }
+
+  /* 🔴 **通栏上下各 2rem，而这一条是量出来才对齐的（2026-09-12 两次修）。**
+   *
+   *    第一次补的是**下面**：通栏下沿和卡片网格上沿一度在同一个 y 上（差 0px），
+   *    两块圆角严丝合缝地贴着，读起来像同一块东西被一条线分开的。它是那次
+   *    「清掉样式表里的陈旧副本」删过头的 —— 记录写着清掉了「两份卡片区留白」，
+   *    而两份该留一份。
+   *    ⚠️ 留下的痕迹是模板上那个 `.deck-ground`：一个**没有任何规则挂着**的包裹层。
+   *       一个只剩名字的 class，通常就是一条被删掉的规则站过的地方。
+   *
+   *    第二次改的是**上面**：补完下面之后，上面 48px（问候那段的 2rem 下边距
+   *    再加通栏自己的 1rem）比下面 32px 宽了一半，判定是「很空」。
+   *    🔴 这两道缝夹着的是**同一块东西**，方向也相同 —— 不一样宽就读成通栏
+   *       偏向下面那一组。所以它们是同一个数，用 `margin-block` 一次写完，
+   *       物理上不可能再各改一边。
+   *
+   * ⚠️ 2rem，不是网格自己的 `gap-6`（1.5rem）：通栏不是网格里的又一行。
+   *    它横过整幅、是这一屏唯一要人动手的地方，和上下两边都要读成**一道分段**，
+   *    而不是「再隔一格」。
+   *
+   * ⚠️ 两道缝都归通栏自己管：问候那一段的下边距因此是 0，卡片区一个字没写。
+   *    一个元素和邻居的距离由它自己声明，下一个人改的时候只有一个数要找。 */
+  .deck .band {
+    margin-block: 2rem;
+  }
+
+  /* --- 深色下这一屏的材质：通栏和卡片是**同一条规则** ----------------------
+   *
+   * 🔴 **一条规则两个使用者，而这不是省事，是唯一拦得住漂移的写法**（2026-09-12）。
+   *    在此之前通栏自己写了一套（blur 14 / saturate 1.10 / 蓝黑 55% / 一圈白边），
+   *    而它正下方的三张卡走的是内页那套 `.dark.has-hero .card`
+   *    （blur 3 / saturate 1.35 / 纯黑 40% / 方向性高光 / 亮边环 / 暗晕）——
+   *    **同一屏上两种材料**，各自看都说得通。
+   *    ⚠️ 这个项目 2026-08-06 修过一次一模一样的漂移，`.hero-backdrop` 那一节
+   *       还留着那次的注释：「材质要和卡片**同一套**……在代码里两条规则各自看
+   *       都没问题」。守卫拦不住它，只有「同一条规则」拦得住。
+   *
+   * 🔴 **方向是卡片跟通栏，不是通栏跟卡片**（用户 2026-09-12 定，看过对照图）。
+   *    换了一张 60px 硬边方格的测试背景量过：同一块位置，通栏这套保留的细节
+   *    是 9.1，卡片那套是 24.0 —— 通栏把背后的照片抹得更开。要的是那一档。
+   *    ⚠️ 别拿通栏和它正下方的卡片直接比糊的程度：照片上盖着两层压暗
+   *       （`_hero_scrim.html`），越往下越暗，卡片本来就落在更暗的一段上。
+   *       第一次就是这么量的，量出来「几乎一样」，那个结论是假的。
+   *
+   * ⚠️ **只改深色，浅色一个像素不动**（同一次对话定的）。浅色下卡片是
+   *    「纯白 + 两层投影」、通栏是「72% 白 + 一圈细边」，那是另一个问题。
+   *
+   * ⚠️ 选择器要够重：`.dark.has-hero .card:not(.border)` 是 0-4-0，所以卡片这半边
+   *    写成 0-5-0（多一个 `.deck`）。**靠源码顺序压不住它** —— 顺序是会被
+   *    下一个人重排的，特异性不会。同 `.schedule-panel.card` 那一条的理由。
+   *
+   * ⚠️ 圆角和内边距**没有跟**（卡片 0.75rem/1rem，通栏 1rem/1.25rem）：
+   *    那是几何不是材质，而改内边距会让卡片里的内容区变窄。
+   *
+   * 🔴 `:not(.border)` 必须留着：带 `border` 工具类的卡片（预览里那个警示框）
+   *    是有意要自己的边的，内页那条规则排除它，这里排除同一个。
+   */
+  .dark .band,
+  .dark.has-hero .deck .card:not(.border) {
+    border-color: rgb(255 255 255 / 0.14);
+    background-color: rgb(9 16 28 / 0.55);
+    backdrop-filter: blur(14px) saturate(1.1);
+    /* ⚠️ 下面三条是**把内页那套卸掉**，不是新加的样式。少任何一条，卡片就是
+     *    「通栏的底色 + 卡片的高光」，比原来两种材料还杂。 */
+    background-image: none;          /* 方向性高光 */
+    --card-elevation: 0 0 #0000;     /* 卡片外围那圈暗晕 */
+  }
+
+  /* 亮边环（`::after`）也一起卸掉 —— 通栏没有它。
+   * ⚠️ `content: none` 而不是 `display: none`：伪元素根本不生成，比生成了再藏起来
+   *    少一个合成层，而这一层在每张卡上都有一个。 */
+  .dark.has-hero .deck .card:not(.border)::after {
+    content: none;
+  }
+
+  .band-head {
+    display: flex;
+    align-items: center;
+    gap: 0.65rem;
+    font-size: 0.8125rem;
+    font-weight: 600;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+  }
+
+  /* ⚠️ 一个圆点，不是警告三角，也不是任何一个 emoji（D42 那条 2026-09-03 的
+   *    评审意见）：这一块说的是「有事在等你」，而 ⚠️ 的意思是「出错了」。
+   *    圆点不说任何一句话，正合适。 */
+  .band-dot {
+    display: inline-block;
+    width: 0.55rem;
+    height: 0.55rem;
+    border-radius: 9999px;
+    background-color: var(--color-brand-600);
+    box-shadow: 0 0 0 4px rgb(37 99 235 / 0.18);
+  }
+
+  .band-count {
+    margin-left: auto;
+    font-size: 0.6875rem;
+    font-weight: 400;
+    letter-spacing: 0.16em;
+    color: var(--color-ink-500);
+  }
+
+  /* 🔴 **一行，而这是这一块的不变量。** 三格内容加一格出口 —— 数量由
+   *    `dashboard.services.BAND_ITEMS` 管死。第一版取四条，于是出口被挤到第二行
+   *    独自占一格、后面一整条空白，用户的判定是「真的很难看」。
+   *
+   * ⚠️ 窄屏当然要换行，那是另一回事：那时它从「一条横幅」变成「一列卡片」，
+   *    整块的意思没变。所以断点以下用 auto-fit，以上钉死四列。 */
+  .band-tiles {
+    display: grid;
+    gap: 0.75rem;
+    margin-top: 1rem;
+    grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
+  }
+
+  @media (min-width: 64rem) {
+    .band-tiles {
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+    }
+  }
+
+  .band-tile {
+    display: block;
+    border: 1px solid var(--color-ink-200);
+    border-radius: 0.75rem;
+    padding: 0.85rem 1rem;
+    transition: border-color 200ms ease, background-color 200ms ease;
+  }
+
+  a.band-tile:hover {
+    border-color: var(--color-brand-500);
+    background-color: rgb(255 255 255 / 0.55);
+  }
+
+  .band-when {
+    display: block;
+    font-size: 0.6875rem;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--color-ink-500);
+  }
+
+  .band-what {
+    display: block;
+    margin-top: 0.35rem;
+    font-size: 1rem;
+  }
+
+  .band-note {
+    display: block;
+    margin-top: 0.35rem;
+    font-size: 0.8125rem;
+    color: var(--color-brand-700);
+  }
+
+  /* ⚠️ 出口那一格不画边框：它和左边三格不是同一种东西（那三格是「有件事在等你」，
+   *    这一格是「从这里出去」）。画成一样的框，它就是一张内容特别少的卡片 ——
+   *    而那正是它看起来空的原因。 */
+  .band-tile--exits {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    gap: 0.5rem;
+  }
+
+  /* 🔴 **两种模式各写一遍，因为深色那条要压过 `.dark .band-tile`。**
+   *    只写 `.band-tile--exits`（0-1-0）的话，下面那条 `.dark .band-tile`（0-2-0）
+   *    后来居上 —— 于是「出口那一格不画边框」这句话**只在浅色模式下成立**，
+   *    而它上面那段注释读起来像个保证。深色下那一格照旧画着框，
+   *    也就是照旧看起来像一张内容特别少的卡片。
+   * ⚠️ 删掉的还有一条 `a.band-tile--exits:hover` —— 那一格是 `<div>`，
+   *    选择器永远匹配不上；而它要「重置」的那个 hover 背景本来就只画在 `<a>` 上。 */
+  .band-tile--exits,
+  .dark .band-tile--exits {
+    border-color: transparent;
+  }
+
+  /* ⚠️ hover / focus 的下划线**必须有**，理由和 `.card-exit` 那条一字不差：
+   *    这是一条没有边框、没有底色的链接，键盘走到它身上时如果什么都不变，
+   *    读屏之外的键盘用户就不知道自己走到哪了。这一块和真正的 `.card-exit`
+   *    只隔一屏，缺了这一档它就是那两条里更弱的一个。 */
+  .band-exit {
+    font-size: 0.75rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    text-decoration: none;
+    color: var(--color-brand-700);
+  }
+
+  .band-empty {
+    margin-top: 0.75rem;
+    font-size: 0.875rem;
+    color: var(--color-ink-600);
+  }
+
+  .dark .band-when,
+  .dark .band-count,
+  .dark .band-empty {
+    color: var(--color-ink-300);
+  }
+
+  .dark .band-what {
+    color: var(--color-ink-50);
+  }
+
+  .band-exit:hover,
+  .band-exit:focus-visible {
+    text-decoration: underline;
+    text-underline-offset: 2px;
+  }
+
+  .dark .band-note,
+  .dark .band-exit {
+    color: var(--color-brand-300);
+  }
+
+  .dark .band-tile {
+    border-color: rgb(255 255 255 / 0.14);
+  }
+
+  .dark a.band-tile:hover {
+    border-color: rgb(255 255 255 / 0.4);
+    background-color: rgb(255 255 255 / 0.06);
+  }
+
+  /* --- 照片：整页的画布 -----------------------------------------------------
+   *
+   * ⚠️ **过渡（照片底边化开那一套）2026-09-12 一并移除**，理由同上：它做了四版
+   *    都还没到位，改在模拟器里定。现在照片就是固定铺满的一张，仪表盘那一块
+   *    自己铺底色盖住它 —— 交界处因此是一条硬边，而那是**临时的、知情的**。
+   *
+   * 🔴 下一版要解决的那件事记在这里，免得再走一遍弯路：用户要的不是
+   *    「照片淡出、露出纸」（那样照片的颜色**没了**），而是
+   *    「**照片自己的底色向外渗出去、越来越淡**」。
+   */
+  .home-canvas {
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+  }
+
+  .canvas-photo {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+
+  /* ⚠️ 照片和仪表盘之间**现在没有过渡**（2026-09-12 把渗色条整套删了 ——
+   *    用户的判定是「真的很丑」）。交界处是一条硬边，临时的、知情的；
+   *    下一版在模拟器里试 SVG `feTurbulence` 位移，也就是让那条边像墨在纸上
+   *    走出毛边，而不是再拿一条带子去盖。 */
+  /* ⚠️ 深色下这两块都不铺底 —— 而那句话**只说一遍**，说在 `--deck-ground` 上
+   *    （`.dark` 把它设成 transparent）。这里曾经还各跟一条
+   *    `.dark .deck` / `.dark .home-paper { background-color: transparent }`，
+   *    它们算出来和变量一模一样，却让同一个决定有了三个编辑点 ——
+   *    把 `.dark` 那个变量改成别的值会**悄悄不生效**。 */
+  .home-paper { background-color: var(--deck-ground); }
+
+  /* --- 入场动画的旧址：这一格从此是空的（2026-09-12 撤销，D44 第四节）--------
+   *
+   * 这里先后有过五版：逐帧刚体物理、一次性缓动、三维翻转、滚动驱动的关键帧，
+   * 最后一版是在模拟器里把参数调准之后一次性实现的「被抛到空中、随滚动落回」。
+   * 整套删了，判定是一句话：**「要一模一样，而且不要任何动画」**。
+   *
+   * 🔴 撤的不是某一版做得不够好，是这件事本身。「一模一样」指的是那两张截图 ——
+   *    hero 就是原来那一屏，仪表盘就是原来那一页，连在一起之后两半都一个像素不动。
+   *    而入场动画做的正好相反：它让下半页在读者滚到之前处在别的位置上。
+   *    所以这一格空着不是「等下一版」，是结论。
+   *
+   * ⚠️ 模板上那几个 `.drop` 标记这一次**一起删了**。上一轮撤销时它们留过一次，
+   *    理由是「哪几块参与入场没有变」—— 留下的是一个没有任何样式挂着的 class，
+   *    读的人得翻遍这个文件才敢确认它真的什么都不做。
+   *
+   * ⚠️ 守卫 `core.tests.TheEntranceStaysGoneGuardTests` 盯着 `--sky-*`、
+   *    `drop-in`、那根时间线和 `.drop` 这四样 —— 它们是这套入场特有的词汇。
+   *    它先剥注释再扫，所以这段话自己是合法的：记着五版是怎么没的，
+   *    比藏着这些名字有用。
+   *
+   * ⚠️ 页面上**其余的动效一个都没动**：经文淡入、飘着的羽毛、顶栏淡入淡出、
+   *    侧边菜单逐条入场都还在。撤掉的只有「hero 和仪表盘之间那一下」。
+   */
 }

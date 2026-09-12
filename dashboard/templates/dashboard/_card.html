@@ -19,7 +19,16 @@
   body         内容模板的路径
   href         出口链接，通向一个**已经存在**的页面。不给就不画出口
   href_label   出口的字，形如 `View all notices`（模板自己补 ` →`）
-  tone         图标底色的一档：sky / violet / amber / rose / emerald
+  tone         图标底色的一档：sky / violet / rose
+               ⚠️ 就这三档，**没有第四个**。这里曾经写着五档，而 amber / emerald
+                  那两张卡（Needs you、Volunteer hours）2026-09-11 搬走之后，
+                  app.css 里那四条规则一条都没人用了，2026-09-12 一起删了。
+                  能选的值比画得出来的多，下一个人选 emerald 会得到一个
+                  从来没存在过的颜色 —— 而且不报错。
+{% endcomment %}
+{% comment %}
+⚠️ 这张卡上**没有入场动画**（2026-09-12 撤销）。这里曾经挂着 `.drop`，
+   和仪表盘另外几块一起随滚动落位；整套删掉的理由记在 `_deck.html` 顶上。
 {% endcomment %}
 <section class="card flex flex-col">
   <h2 class="mb-3 flex items-center gap-2 text-sm font-semibold">

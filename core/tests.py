@@ -412,6 +412,31 @@ class TimeSourceGuardTests(TestCase):
     #    scan itself. Spelling it out here is what made the first run of this
     #    very guard go red on its own comment.
     AWARE_NOW_DATE = r"(local_now\(\)|\bNOW\b)[^\n]*\.date\(\)"
+    # The fifth spelling, and it is the fourth one wearing a different name:
+    # an aware instant that arrived as a **parameter**. The pattern above hunts
+    # the two ways of spelling the call and the constant, and misses the one
+    # thing services do constantly — take `now` as an argument so the whole page
+    # agrees on one instant (D42 第五节), and then ask that argument for its day.
+    #
+    # 🔴 Found 2026-09-11 in shipped code, by the feature that put a date line
+    #    next to the calendar: after 5pm Pacific the sidebar circled **tomorrow**,
+    #    and on the last evening of a month the whole grid turned the page to the
+    #    next one. It had been there since the dashboard shipped, with every
+    #    guard green — because nothing else on that page said what day it was.
+    #
+    # ⚠️ Written escaped, like its four siblings, so this file can still scan
+    #    itself without matching its own source.
+    AWARE_ARGUMENT_DATE = r"\bnow\b[^\n]*\.date\(\)"
+    # The sixth spelling, and the first that is not about the **day**: the hour.
+    # D44's greeting picks morning / afternoon / evening off the clock, and an
+    # aware instant asked for its own hour answers in UTC — 10am in California
+    # reports 17, so every volunteer is wished a good evening over breakfast.
+    #
+    # ⚠️ It is worth a pattern of its own rather than a test alone for the
+    #    reason the whole class exists: like the four before it, it is wrong for
+    #    only part of each day, so it ships green and goes red later on a run
+    #    that changed nothing.
+    AWARE_HOUR = r"(local_now\(\)|\bNOW\b|\bnow\b)[^\n]*\.hour\b"
 
     def test_nobody_computes_today_outside_core_timeutils(self):
         # ruff's DTZ catches the first pattern but not the others: those are
@@ -437,13 +462,31 @@ class TimeSourceGuardTests(TestCase):
         )
 
     def test_nobody_takes_the_day_off_an_aware_now(self):
-        hits = offending_lines(self.AWARE_NOW_DATE, skip=["core/timeutils.py"])
+        hits = offending_lines(
+            f"{self.AWARE_NOW_DATE}|{self.AWARE_ARGUMENT_DATE}",
+            skip=["core/timeutils.py"])
         self.assertEqual(
             hits,
             [],
             "That is the UTC day, and it is only wrong for part of each day — "
             "use core.timeutils.local_today(), or do the arithmetic on a date "
             "rather than on an instant:\n" + "\n".join(hits),
+        )
+
+
+    def test_nobody_takes_the_hour_off_an_aware_instant(self):
+        """The same trap one field over: the clock instead of the calendar.
+
+        ⚠️ `core.timeutils.local_hour_of()` is the one spelling, and the greeting
+           on the dashboard is its only caller so far. The guard is here because
+           the next caller will be written by somebody reading the greeting.
+        """
+        hits = offending_lines(self.AWARE_HOUR, skip=["core/timeutils.py"])
+        self.assertEqual(
+            hits,
+            [],
+            "That is the UTC hour — at 10am Pacific it reads 17. Use "
+            "core.timeutils.local_hour_of():\n" + "\n".join(hits),
         )
 
 
@@ -465,6 +508,215 @@ class LayeringGuardTests(TestCase):
         )
         self.assertEqual(
             hits, [], "Business logic must not import admin:\n" + "\n".join(hits))
+
+
+class TheRootDoesNotImportItsOwnDownstreamGuardTests(TestCase):
+    """Lint-as-test: `core` never imports `dashboard` (D17, and now D44).
+
+    D17 fixes one direction — `core → contact → accounts → org → events`, and
+    nothing imports backwards. `dashboard` sits past the end of that chain
+    because it reads events, notices and org all at once, which is why D42
+    opened a whole app rather than putting the page in `core`.
+
+    🔴 D44 then moved the **front page** into `dashboard` for the same reason,
+       and that is what makes this worth a guard rather than a sentence. The
+       cheap-looking repair, the next time somebody wants dashboard data on a
+       core page, is one import at the top of `core/views.py` — it works, every
+       test stays green, and the dependency graph quietly grows a cycle. The
+       other tempting spelling is `{% load dashboard_tags %}` in a core
+       template: same dependency, invisible to a grep, and it fails at render
+       time on the most public page in the site. Neither is caught by anything
+       else here.
+
+    ⚠️ Scoped to `core/` alone. Every other app is allowed to import
+       `dashboard` in principle; it is the **root** that may not, because it is
+       the one everybody else already imports.
+    """
+
+    def test_core_does_not_import_the_aggregator(self):
+        hits = []
+        for path, source in project_python_files():
+            if path.parts[0] != "core" or path.name == "tests.py":
+                continue
+            for number, line in enumerate(source.split("\n"), 1):
+                if re.search(r"^\s*(from|import)\s+dashboard\b", line):
+                    hits.append(f"{path}:{number}: {line.strip()}")
+        self.assertEqual(
+            hits,
+            [],
+            "core is the root of the dependency chain (D17): it may not import "
+            "dashboard, which reads events/notices/org. If a core page needs "
+            "that data, move the view to dashboard the way D44 moved `/`:\n"
+            + "\n".join(hits),
+        )
+
+    def test_no_core_template_loads_a_dashboard_tag_library(self):
+        """⚠️ The same dependency wearing a template tag, which no import-level
+           guard would ever see. D44 第二节 weighed this spelling and refused
+           it: `{% load %}` imports the module all the same, a grep for "who
+           depends on dashboard" misses it, and when it fails it takes down the
+           one page strangers are sent to.
+        """
+        root = Path(settings.BASE_DIR) / "core" / "templates"
+        hits = [
+            str(path.relative_to(settings.BASE_DIR))
+            for path in sorted(root.rglob("*.html"))
+            if re.search(r"\{%\s*load\s+[^%]*dashboard", path.read_text())
+        ]
+        self.assertEqual(
+            hits,
+            [],
+            "a core template loads a dashboard tag library — that is the "
+            "dependency the guard above forbids, hidden from grep:\n"
+            + "\n".join(hits),
+        )
+
+
+class TheEntranceStaysGoneGuardTests(TestCase):
+    """Lint-as-test: 从 hero 滚进仪表盘的那一段**不许有入场动画**。
+
+    ⚠️ **这个类 2026-09-12 换了钉的东西。** 它原来叫
+       `TheEntranceStaysOutOfJavaScriptGuardTests`，钉的是「入场的动画归 CSS，
+       JS 只许量一次」—— 那是在「有一个入场动画」的前提下分工。当天用户把前提
+       撤了：
+
+       > 要一模一样，而且不要任何动画。
+
+       「一模一样」指的是那两张截图 —— hero 就是原来那一屏，仪表盘就是原来那一页，
+       连在一起之后两半都一个像素不动。入场动画做的正好相反：它让下半页在读者
+       滚到之前处在别的位置上。所以撤的不是某一版做得不够好，是这件事本身。
+
+    🔴 **为什么这件事值一条守卫。** 这个入场被推翻过五版（逐帧刚体物理、一次性
+       缓动、三维翻转、滚动驱动、模拟器调参之后的那一版），每一版都是「先实现、
+       再看、再推翻」。它下一次回来最可能的样子不是有人决定加回去，而是有人
+       顺手「让它动一下更高级」—— 而那时这一条会红，红在 D44 第四节上。
+
+    ⚠️ 两条都先**剥掉注释**再扫。记着这五版是怎么没的，比藏着这些名字有用；
+       一条连自己的墓志铭都不许写的守卫，会被下一个想解释原因的人删掉。
+    """
+
+    #: 这套入场特有的词汇：自定义属性、关键帧名、那根滚动时间线，以及模板上
+    #: 那个「这一块参与入场」的标记。它们在这个项目里没有第二种用途。
+    ENTRANCE_WORDS = ("--sky-", "drop-in", "animation-timeline", "view-timeline")
+
+    def test_the_stylesheet_and_the_script_carry_no_entrance(self):
+        """🔴 CSS 和 JS 两边一起钉。
+
+        最后一版是**两份文件合起来**才成立的：关键帧和时间线在 app.css，
+        每块在空中的起点在 app.js（CSS 读不到自己的版面位置）。只钉一边的话，
+        剩下那一边看起来是一段无害的死代码 —— 而它是一半的实现。
+        """
+        offenders = []
+        css = (Path(settings.BASE_DIR) / "assets" / "app.css").read_text()
+        css = re.sub(r"/\*.*?\*/", "", css, flags=re.S)
+        js = (Path(settings.BASE_DIR) / "assets" / "js" / "app.js").read_text()
+        js = "\n".join(line for line in js.split("\n")
+                       if not line.lstrip().startswith("//"))
+        for name, source in (("assets/app.css", css), ("assets/js/app.js", js)):
+            offenders += [f"{name}  {word}" for word in self.ENTRANCE_WORDS
+                          if word in source]
+        self.assertEqual(
+            offenders,
+            [],
+            "从 hero 滚进仪表盘的那一段又长出入场动画了：\n"
+            + "\n".join(offenders)
+            + "\n要的是那两张截图一模一样地连在一起，见 D44 第四节。",
+        )
+
+    def test_the_deck_section_declares_no_animation_at_all(self):
+        """🔴 **上一条钉的是那五版用过的词，这一条钉的是那件事本身。**
+
+        `--sky-*` / `drop-in` / 那根时间线都是**已经死掉的那几版**的名字。
+        第六版只要起个新名字（`@keyframes deck-rise`）就能一条不碰地全绿通过 ——
+        而它照样是「读者滚到之前，这些块不在自己的位置上」。
+
+        所以这一条改问那个性质：**首页那一节里，一条 `animation` / `@keyframes`
+        都不许有。** 它认的不是名字，是声明。
+
+        ⚠️ 只扫首页那一节（`.home-*` / `.deck*` / `.band*` 那一整段），不扫整份
+           样式表：别处有正当的滚动驱动效果（活动列表那一套），一条全局禁令
+           会在第一个需要它的人手里被删掉 —— 而被删掉的守卫等于没有。
+
+        ⚠️ `transition` **不在禁列**：通栏那格 hover 换个边框色是状态反馈，
+           不是入场。禁的是「不用碰它它自己会动」，也就是 `animation`。
+        """
+        css = (Path(settings.BASE_DIR) / "assets" / "app.css").read_text()
+        start = css.index("首页往下滚就是仪表盘")
+        section = re.sub(r"/\*.*?\*/", "", css[start:], flags=re.S)
+        hits = sorted(set(re.findall(r"\banimation[a-z-]*\s*:|@keyframes\s+[\w-]+",
+                                     section)))
+        self.assertEqual(
+            hits, [],
+            "首页那一节里出现了 animation 声明：" + ", ".join(hits)
+            + "\n入场动画被推翻过五次，最后一次否掉的是**有这个动画**本身，"
+            "不是某一版的参数。见 D44 第四节。")
+
+    def test_no_block_is_marked_as_falling_in(self):
+        """⚠️ 模板上那个 `.drop` 标记也一起走。
+
+        上一轮撤销时它留过一次，理由是「哪几块参与入场这件事没有变」——
+        留下的是一个没有任何样式挂着的 class，读的人得翻遍 CSS 才敢确认它
+        真的什么都不做。一个永远不生效的标记不是预留，是一道题。
+        """
+        # ⚠️ 走 `project_template_files()`，**不自己列一份目录清单**
+        #    （2026-09-12 改）。第一版手抄了八个 `*/templates` 目录 —— 那份清单
+        #    从写下的那一刻起就开始过期：第九个 app 的模板永远不会被这条扫到，
+        #    而它看起来在工作。那个共享的遍历器自己的 docstring 写着这件事：
+        #    「走出来的，不是列出来的 —— 明天加的模板今天就在覆盖范围里。」
+        offenders = []
+        for relative, markup in project_template_files():
+            markup = _blank_out_comments(markup)
+            for number, line in enumerate(markup.split("\n"), 1):
+                # ⚠️ 只认 class 串里那个独立的词。`drop-shadow-*` 是 Tailwind
+                #    的工具类，和这件事无关 —— 一条连它一起红的守卫会被删掉。
+                if re.search(r'class="[^"]*\bdrop\b(?!-)', line):
+                    offenders.append(f"{relative}:{number}")
+        self.assertEqual(
+            offenders,
+            [],
+            "又有元素挂上了入场的标记 `.drop`：\n" + "\n".join(offenders),
+        )
+
+
+class TheDeckWearsOneMaterialGuardTests(TestCase):
+    """Lint-as-test: 首页那一屏上的四块，深色下是**同一种材料**。
+
+    🔴 它钉的不是那几个数值，是「**只有一条规则说这件事**」。2026-09-12 之前
+       通栏自己写了一套玻璃（blur 14 / saturate 1.10 / 蓝黑 55%），而它正下方的
+       三张卡走的是内页那套（blur 3 / saturate 1.35 / 纯黑 40% + 高光 + 亮边环）
+       —— 同一屏上两种材料，在代码里各自看都没问题。
+
+    ⚠️ 这是这个项目**第二次**栽在同一件事上：`.hero-backdrop` 那一节还留着
+       2026-08-06 那次的注释（「材质要和卡片同一套……在代码里两条规则各自看都
+       没问题」）。两次都不是谁写错了，是同一句话被写在了两个地方。
+
+    ⚠️ 所以这条守卫不比对数值 —— 比对数值的守卫只能在两边**已经**分叉之后报警，
+       而且会把「两边一起调一个参数」变成一次要改测试的改动。它要的是结构：
+       说这句话的地方只有一处。
+    """
+
+    def test_only_one_rule_gives_the_deck_its_dark_glass(self):
+        css = (Path(settings.BASE_DIR) / "assets" / "app.css").read_text()
+        css = re.sub(r"/\*.*?\*/", "", css, flags=re.S)
+        # 每一条声明了 backdrop-filter、且选择器提到通栏或首页卡片的规则。
+        carriers = [
+            selectors.strip()
+            for selectors, body in re.findall(r"([^{}]+)\{([^{}]*)\}", css)
+            if "backdrop-filter" in body
+            and re.search(r"\.band\b|\.deck\s+\.card\b", selectors)
+        ]
+        self.assertEqual(
+            len(carriers), 1,
+            "首页那一屏的深色材质由 " + str(len(carriers)) + " 条规则给："
+            + " ⟡ ".join(carriers)
+            + "\n只许有一条，而且它要同时点名通栏和卡片 —— 两条规则各自看都"
+            "没问题，而它们会分叉。这个项目已经栽过两次。")
+        self.assertRegex(
+            carriers[0], r"\.band\b",
+            "那条规则不再点名通栏：" + carriers[0])
+        self.assertRegex(
+            carriers[0], r"\.deck\s+\.card\b",
+            "那条规则不再点名首页的卡片：" + carriers[0])
 
 
 class OrgTreeGuardTests(TestCase):
@@ -1647,7 +1899,22 @@ class DocTestReferenceGuardTests(TestCase):
            its own neighbour would then have to update a citation of itself.
         """
         root = Path(settings.BASE_DIR)
-        skip = {"node_modules", "staticfiles", ".venv", "migrations", "__pycache__"}
+        # ⚠️ `.claude` is in this list for the same reason it is in SKIPPED_DIRS,
+        #    and leaving it out here was a real hole rather than a tidy-up: the
+        #    `*/**/*.html` pattern below walks straight into `.claude/worktrees/`,
+        #    where another session's checkout is **a second complete copy of this
+        #    repository**. Measured on 2026-09-11: 106 templates picked up from
+        #    one worktree. A citation that exists only on that branch then fails
+        #    this guard *in the main checkout*, pointing at a path the person
+        #    reading the failure never wrote — which is the 2026-08-31 lesson
+        #    (five guards red at once from a worktree copy) arriving by a
+        #    different door, in the one guard that keeps its own skip list.
+        # ⚠️ 用共享的那一份，**不再手抄**（2026-09-12）。手抄的那份和
+        #    `SKIPPED_DIRS` 只差一个 `"venv"`，而那个差值就是漂移正在发生的样子：
+        #    下一个被加进 `SKIPPED_DIRS` 的目录不会到达这里 —— 而那正是上面
+        #    那段注释讲的 2026-08-31 事故（一份 worktree 副本一次放倒五条守卫）
+        #    从另一扇门回来。
+        skip = set(SKIPPED_DIRS)
         found = list(root.glob("docs/**/*.md"))
         for pattern in ("*/*.py", "*/**/*.html", "assets/*.css", "assets/**/*.js"):
             found += [path for path in root.glob(pattern)
@@ -4517,17 +4784,32 @@ class SharedHeadTests(TestCase):
                                 "the shared head is included after the title; "
                                 "charset is no longer first in the document")
 
-    def test_the_front_page_alone_skips_the_theme_boot(self):
-        """⚠️ The one difference the parameter exists for, stated in both
-        directions. The front page is white text over a photograph and does not
-        follow dark mode — and if it did boot the theme, `.dark` on `<html>`
-        would invert the top bar's whole white-text/navy-text rule set.
+    def test_the_front_page_boots_the_theme_only_once_somebody_is_signed_in(self):
+        """⚠️ The one difference the parameter exists for, restated by D44.
+
+        Until 2026-09-11 this asserted that the front page **never** booted the
+        theme: it was white text over a photograph, and dark mode had nothing to
+        offer it. Signed in, that page now carries the dashboard below the fold —
+        a whole screen of cards — and a reader with dark mode on would fall out
+        of a dim photograph into a sheet of white.
+
+        ⚠️ The old reason given for never theming it (`.dark` on `<html>` would
+           invert the top bar) was checked against the stylesheet and does not
+           hold: every `.dark` rule that touches the bar is selected through
+           `.is-solid`, which the front page does not pass. The record of that
+           check is in D25.
         """
         home = self.body(Path("core") / "templates" / "core" / "home.html")
         self.assertIn("_head.html", home)
-        self.assertNotIn("themed", home,
-                         "the front page now boots the theme; its top bar's "
-                         "colours invert the moment <html> gets .dark")
+        # ⚠️ **Not** an assertion on how the condition is spelled (2026-09-12).
+        #    This used to require the literal `themed=user.is_authenticated`,
+        #    which pinned one spelling of one decision: moving that decision
+        #    into the view — where it is named once instead of re-derived in
+        #    five places — turned this red for no behavioural reason, while a
+        #    page that gave the head and the bar *different* conditions passed.
+        #    The property is asserted where it can be seen: on what is served,
+        #    in both directions, by the test right below this one.
+        self.assertIn("themed=", home)
         for path in [Path("core") / "templates" / "core" / "base.html",
                      Path("gallery") / "templates" / "gallery" / "wall.html"]:
             with self.subTest(path=str(path)):
@@ -4541,6 +4823,11 @@ class SharedHeadTests(TestCase):
             with self.subTest(page=label):
                 self.assertContains(self.client.get(reverse(url_name)),
                                     "localStorage")
+        # 🔴 Both directions on the front page, because this pair **is** D44's
+        #    promise: the stranger's page is untouched, and only the person who
+        #    has a dashboard underneath gets the theme with it.
+        self.assertContains(self.client.get(reverse("home")), "localStorage")
+        self.client.logout()
         self.assertNotContains(self.client.get(reverse("home")), "localStorage")
 
     def test_the_three_titles_are_still_their_own(self):
@@ -4974,7 +5261,7 @@ class HomePageSingletonTests(TestCase):
     def test_one_query_for_the_row_however_many_places_ask(self):
         """⚠️ The front page asked for this row twice on every single hit.
 
-        `core.views.home` wants it for the verse and the picture, and the
+        `dashboard.views.front` wants it for the verse and the picture, and the
         `site_appearance` context processor wants it for the shell — and that
         processor runs on every page in the site, this one included. Two
         identical SELECTs on the busiest public URL there is, with neither call
@@ -5661,7 +5948,12 @@ class TheFrontPageServesOneFileGuardTests(EmptyBucketTestCase):
 
         This asserts the mechanism rather than the three real files: anything
         under the prefix that no field names is rubbish, and `MEDIA_FIELDS` is
-        now down to the two uploads.
+        down to the two uploads.
+
+        ⚠️ 2026-09-12 这里短暂多过第三个字段（照片底下一条**生成的**渗色条），
+           当天又撤掉了。留一句话是因为它会再回来：**派生出来的文件也躺在公开桶里，
+           所以它也必须登记在这个元组里** —— 不登记的话，清扫器会把当前那条活着的
+           文件当成孤儿删掉，而页面会在某次清扫之后少掉一块、什么都不报。
         """
         page = self.a_page_with_a_picture()
         storage = HomePage._meta.get_field("hero_image").storage
@@ -5674,6 +5966,10 @@ class TheFrontPageServesOneFileGuardTests(EmptyBucketTestCase):
         self.assertIn(f"{HomePage.MEDIA_DIR}/a-retired-rung.webp", reported)
         self.assertNotIn(page.hero_image.name, reported,
                          "the live picture is being called rubbish")
+        for field in HomePage.MEDIA_FIELDS:
+            name = getattr(page, field).name
+            if name:
+                self.assertNotIn(name, reported, f"{field} 活着却被当成了垃圾")
 
 
 class DecodeBudgetTests(SimpleTestCase):

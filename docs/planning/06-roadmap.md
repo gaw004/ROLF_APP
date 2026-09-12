@@ -2444,79 +2444,185 @@ def close_future_register(participation, *, now=None): ...
 理由：这个删除现在有两个调用方（个人退出 / 整门课停办），而本轮已经为同一形状
 付过一次账 ——「删一个角色会把整学期的点名册一起删掉」是 2026-09-08 修掉的 🔴，
 当时的成因正是保护条件只看 `Participation.hours`，而一门课的工时全在点名册上。
-它是[守卫 4](#本轮新增的守卫六条)（`GeneratedEventDeleteGuardTests`）在低一层上的同一条。
+它是[守卫 4](#本轮新增的守卫九条)（`GeneratedEventDeleteGuardTests`）在低一层上的同一条。
 
 ## L5.4 recurring events 那一档：`EventSeries` + 生成器
 
-第二档要的仍然是初版那两件事（按规则生成多场 + 多场归成一组），
-所以 `EventSeries` 留下来，但它的角色收窄了：**只服务第二档**。
+> ### 2026-09-10 落地，**和 L5.5 / L5.6 一起交付**。开工前的走查挑出九处，逐条改在下面
+>
+> 🔴 **第一处是范围，而它比后面八条加起来都重要。** 照原文只做 L5.4，交出去的是
+> **一张没有任何人写、也没有任何人读的表** —— 生成器在 L5.5、那句删除在 L5.6、
+> 页面在 L5.8。而 `events/models.py` 的 `Source` docstring 白纸黑字写着
+> 「它唯一的读者是 `_drop_generated_after()`」，所以 `Event.source` 单独落地
+> 就是一列**零读者**的字段。
+>
+> 这个项目为同一形状判过三次：`EventType` 整张表被删（说不出谁读它）、
+> L5.3 被走查抓到「只有列和谓词，中间那格是空的」、`people_pick_meetings`
+> 勾上会造出一门谁也上不了的课。而 [`participants.md` 第十节](participants.md)
+> 2026-09-10 刚为最后那次补了一条判据：
+>
+> > **读者存在不够，还要有人兑现得了它承诺的事。**
+>
+> 按这条判据，L5.4 单独落地会**当场违反它**。⚠️ 而 [`participants.md` 第十一节](participants.md)
+> 那条唯一还空着的验收（「按规则生成 N 场，N 场归成一组；改规则只动未来」）
+> 本身就横跨这三步 —— 任何一步单独交付都勾不上。所以三步一次交付，页面仍归 L5.8。
+>
+> | # | 原文写的 | 改成 | 为什么 |
+> |---|---|---|---|
+> | 1 | `Event.series`「可空 FK」，`on_delete` 一个字没写 | 改成 **`PROTECT`** | [D40 第三节](decisions/D40-undo-a-pattern-batch.md)专门为同一形状改过一次决定（`Shift.generated_from`）：`SET_NULL` 造出的是「机器造的、在未来的、不知道自己从哪来」的**孤儿** —— 每个生成器都按 `series=` 过滤，所以再没有任何一个收得走它，它会一直站在列表页上直到有人一行行手删 |
+> | 2 | `EventSeriesRole` 的唯一约束只写了约束本身 | 三样一起加，`core/constraints.py` 加映射 | 本仓规矩是「加一条约束 = 话术 + 错误码 + 映射」，少一样 `ConstraintMappingGuardTests` 当场红。全轮文件总表里 `core/constraints.py` 那一格也没提 L5.4 |
+> | 3 | L2×L3 含容不变量**一个字都没提** | 模板那一对在**发布时**就验，复用 `refuse_wider_than_event()` | 那个函数自己的注释写着「`bulk_create` 走过去，另一头是一个人报上了他看不见的活动」，而它**没有数据库约束兜底**。模板上错一格不是一次泄露，是**每一场各一次** |
+> | 4 | 没提 `org/permissions.py` | 加两行 `view_` | 注册进 admin **不等于**可达 —— L5.2 刚为这一格付过账，症状是「一页没做」 |
+> | 5 | 规则只要求带 `UNTIL` 或 `COUNT` | 再加一个**场次上限 52**（决定 31） | 那条挡的是「一直下去」。`COUNT=5000` 完全合法、完全有限，一次点击五千个活动、五千批角色、五千行历史。两个不同的失败，各要一句话 |
+> | 6 | 新函数叫 `occurrences()` | 改叫 **`occasions()`** | `events/schedule.py` 已经有一个 `occurrences()`，意思完全不同（把活动摊成日程上占的那些段），而视图层两边都 import |
+> | 7 | 「一个展开器，**三个**调用方」 | docstring 如实写「今天只有一个」 | roadmap 里没有任何一步在做「Program 按规则排十二讲」—— 排讲次至今是 admin 一条一条敲。不写清楚就是 L5.1（`Event.duration`）、L5.3（批量建点名行）那个「两份文档互相推」的**第三次** |
+> | 8 | `EventSeriesRole` 没写 `history` | 加上 | 它逐列照抄的 `EventRole` 有，理由是 `needed_count` 是对志愿者的承诺 —— 而在模板上那是**对每一场同时**做出的承诺 |
+> | 9 | 模板里没有 `status` | 加 `status`，生成时跟模板走（决定 30） | 「先生成、检查一遍、再发布」和「生成即发布」是两种完全不同的产品行为，而这一格原来是空的 |
+
+### 三个决定（2026-09-10，开工前）
+
+| # | 问题 | 定案 |
+|---|---|---|
+| 29 | 交付范围 | L5.4 + L5.5 + L5.6 一次交付；页面留 L5.8，本轮的门是 admin 上**四个** action（生成 / 即日停止 / 改规则 / 撤销） |
+| 30 | 生成出来的活动是什么状态 | **跟模板走**（`EventSeries.status`，默认 draft）。⚠️ 两个默认的失败方向相反，同 `requires_guardian_consent` 那段：默认发布，一个打错的规则是十二场错活动同时发给所有外部志愿者；默认草稿，它是一张有人翻一翻就改掉的列表 |
+| 31 | 一条规则最多生成几场 | **52**（一年周更）。跨年的周会因此要重建一条规则，这是有意的代价 —— 活动本来就有结束，正是 D33 第三节那条分歧的整个前提。⚠️ 照 D40 第五节对「七天」的写法：这个数没有别的依据，只有一句常识，试点跑一轮之后回来看它 |
+
+### 两条写下来的缺口（主动接受，各带重启条件）
+
+| 缺口 | 什么时候再看 |
+|---|---|
+| **模板不带图片。** `services.purge_event_image()` 在活动结束后**删掉文件**，十二场共用一个路径意味着第一场结束的第二天早上，其余十一场全变成碎图标，而且不报错；复制十二份字节则是为一张一个月后按设计会被删掉的图付十二倍存储 | L5.8 做系列页的时候，届时答案多半是「每场复制一份文件」 |
+| **撤销窗口沿用 [D40 第五节](decisions/D40-undo-a-pattern-batch.md)的七天**，判据一字不改：「我刚才建错了」→ 撤销，「我们改主意了」→ 改规则 / 即日停止 | 同 D40：试点跑一轮之后。⚠️ 窗口之外什么都没锁死 —— 规则照样能改、能停、场次能一条条删 |
+
+### 落库的形状（已实现，`events/models.py`）
 
 ```python
-class EventSeries(TimeStampedModel):
-    """一条规则 + 一份模板，生成 N 场**各自独立**的 Event。
+class EventSeries(Audience, ConstraintErrorFieldMixin, TimeStampedModel):
+    """一条规则 + 一份模板，生成 N 场**各自独立**的 Event。"""
 
-    ⚠️ 它和 Program 不是一回事，而这两个词在英文里几乎同义，所以写死：
-       · `EventSeries` → N 个 `Event`，各自报名、各自受众、各自出现在列表页
-       · Program       → 一个 `Event` + N 个 `Session`，报一次管全部
-       选哪一个是发布时的三档单选，选完不能互换（那是一次数据迁移）。
+    AUDIENCE_ON = "series"
+    AUDIENCE_PARENT = None
+    AUDIENCE_CHILDREN = "roles"
+    AUDIENCE_DAY = None                 # 模板自己没有场合 —— 同 Notice
 
-    ⚠️ 载体判定作废的记录：推迟清单里 `Event.parent`（活动系列）写的是
-       「按 D15 三条件检验 → 自引用 FK 正是对的载体」，其中第二条是
-       「关系自己没有属性」。而生成规则就是属性 —— D15 自己盯着这一格，
-       明写「条件破了就必须升级成表」。
-    """
-
-    name / ministry / owner
-    rule = models.TextField()          # RFC 5545 的 RRULE，不含 DTSTART
-    starts_on / start_time / duration
-    location / description / image
-    可见性三件套 / requires_guardian_consent                  # 模板
+    name / ministry(PROTECT) / owner(PROTECT)
+    rule = TextField(max_length=SHORT_TEXT)   # RFC 5545 的 RRULE，不含 DTSTART
+    starts_on = DateField() / start_time = TimeField() / duration = DurationField()
+    location / description
+    status                              # 决定 30，默认 draft
+    requires_guardian_consent
     ended_on                            # 「即日停止」
     undone_at / undone_by               # 整批撤销
     history = HistoricalRecords(m2m_fields=["visible_to_ministries"])
 ```
 
-`Event` 加两列：`series`（可空 FK）和 `source`（`manual` / `generated`）。
+⚠️ 它和 Program 不是一回事，而这两个词在英文里几乎同义，所以写死在 docstring 上：
+
+- `EventSeries` → N 个 `Event`，各自报名、各自受众、各自出现在列表页；
+- Program → 一个 `Event` + N 个 `Session`，报一次管全部。
+
+选哪一个是发布时的三档单选，选完不能互换（那是一次数据迁移）。
+
+⚠️ **载体判定作废的记录**：[推迟清单](deferred.md)里 `Event.parent`（活动系列）写的是
+「按 D15 三条件检验 → 自引用 FK 正是对的载体」，其中第二条是「关系自己没有属性」。
+而生成规则就是属性 —— [D15](decisions/D15-relationship-carriers.md) 自己盯着这一格，
+明写「条件破了就必须升级成表」。
 
 ⚠️ 为什么不是「第一场兼作母本」（Google / CiviCRM 的形状）：那让一行同时是
 系列和一场，删它、改它各有两种读法，而[三方集成里反复出问题的正是这一点](https://community.zapier.com/troubleshooting-99/new-or-updated-google-calendar-event-triggered-for-old-copies-of-recurring-events-42518)。
 独立成表还顺带解决了批次身份 —— 一个系列就是一次批量动作，
 [D40](decisions/D40-undo-a-pattern-batch.md) 的 `PatternBatch` 在这里不用单独建表。
 
-`rule` 的校验（`EventSeries.clean()`）：`rrulestr()` 解析得通，且必须带
-`UNTIL` 或 `COUNT`。⚠️ 这是不做滚动物化、不加第三条 cron 的代价：
-「每周一直下去」必须填一个截止日。[D33 第三节](decisions/D33-work-schedule.md)
-给班次选的是滚动窗口 + cron，这里选了另一条 —— 活动本来就有结束（一门课十二讲），
-班次没有。两处不同不是矛盾，但要在两边都写一句。
+`Event` 加两列：`series`（可空 FK，**PROTECT**）和 `source`（`manual` / `generated`）。
+
+### 🔴 那条 `ended_on >= starts_on` 的约束**不存在**，而初稿里有 —— 测试当场抓到
+
+建一批下个月的场次、其中一场有人报名、当天下午撤销：留下来的那一场让系列活着，
+`ended_on` 写成今天，于是约束拒绝了一次完全正常的动作。
+
+错在**把这两列读成了一段任期**（`Assignment` / `MinistryRole` 那个形状，两端确实
+夹着一件事）。这里不是：`starts_on` 是规则锚在哪一天，`ended_on` 说的是
+**这天之后不再生成**。截止早于锚点是一个真实、说得出口的状态 ——
+「它还没开始我们就停了」—— 而那正是撤销一批未来的场次的意思。
+
+⚠️ 写下来是因为「两个日期得有先后」是任何人读到这张表时**第一个会伸手去加**的东西，
+初稿就是这么加的。
 
 ### `EventSeriesRole`
 
 ```python
-class EventSeriesRole(TimeStampedModel):
-    series → EventSeries
-    role → ParticipationRole
-    needed_count / stop_at_needed_count / notes
-    可见性三件套（和 EventRole 同一套字段）
+class EventSeriesRole(Audience, ConstraintErrorFieldMixin, TimeStampedModel):
+    AUDIENCE_ON = "series_role"
+    AUDIENCE_PARENT = "series"          # ⬅️ 走查 3 靠这一行接上含容规则
+    AUDIENCE_CHILDREN = None
+    series → EventSeries / role → ParticipationRole
+    needed_count / stop_at_needed_count / notes    # 逐列照抄 EventRole
+    history = HistoricalRecords(m2m_fields=["visible_to_ministries"])
 ```
 
 生成第 N 场时，每条模板建一行真的 `EventRole`。唯一约束 `(series, role)`。
-改模板时只同步「未来的、且那一行角色上没有人报名的」场次。
 
-## L5.5 `events/recurrence.py` —— 纯函数，两档共用
+### 让含容不变量认得第三、第四张表 —— 而**不写第二份规则**
+
+`AudienceContainmentGuardTests` 禁止那三条比较出现在 `refuse_wider_than_event()`
+之外，而它本来就收两个 `Audience.Spec`、和表无关。缺的只是
+`refuse_bad_audience()` 里那段**靠字符串猜表**的分支：它写的是
+`AUDIENCE_ON == "role"` 加一句硬编码的 `row.event`，于是含容规则**只有把父表叫
+`event` 的表够得着**，而 `EventSeriesRole` 把它叫 `series`。
+
+所以 `Audience` 上加两个类属性 `AUDIENCE_PARENT` / `AUDIENCE_CHILDREN`，五张表各自
+声明一次，`refuse_bad_audience()` 读它们。**规则体一行没动。**
+
+⚠️ 漏掉这一格的表现是最坏的那种：模板那一对**根本不做含容检查**，
+因为分支会掉进「走一遍子行」那一支，而那边也什么都找不到。一个字都不报，
+另一头是一批角色开给了看不见它们的人。
+
+⚠️ `AudienceIsWiredUpTests` 因此多一条：每张带受众的表都要声明这两个属性，
+且声明的路径解析得动 —— 同它已有的那两条，写在 `Audience.__subclasses__()` 上，
+第五张表加进来的当天就被盯住。
+
+
+## L5.5 `events/recurrence.py` —— 纯函数
 
 ```python
-def occurrences(rule, *, starts_on, start_time, window_start, window_end) -> list[datetime]
+MAX_OCCASIONS = 52
+
+def has_an_ending(rule) -> bool
+def occasions(rule, *, starts_on, start_time, limit=MAX_OCCASIONS + 1) -> list[datetime]
 ```
 
-⚠️ **一个展开器，三个调用方**：Program 排 `Session`、recurring events 生成 `Event`、
-以及 D2a 的 `WorkPattern` 生成 `Shift`（那一步还没做，写进 docstring 免得再写一个）。
+⚠️ **改名了**（走查 6）：原文写的 `occurrences()` 和 `events/schedule.py` 里已有的
+`occurrences()` 撞名，而那个的意思完全不同（把一场活动摊成它在日程上占的那些段），
+且视图层两边都 import。
+
+⚠️ **一个展开器，写给三个调用方 —— 而今天只有一个**（走查 7）。三个是：
+recurring events 生成 `Event`（唯一在跑的那个）、Program 按规则一次排完十二讲、
+以及 D2a 的 `WorkPattern` 生成 `Shift`。后两个**没有任何一步在做** ——
+排讲次至今是 admin 一条一条敲。写进 docstring，做那两步时调这里，别再写一个。
 
 用 `dateutil.rrule.rrulestr()`。`python-dateutil` 已经在 `requirements.txt` 里，
-**不引入任何新依赖**。不用 `django-recurrence`：它多给的是一个字段类型和一个 widget，
-而按 D18 的落点规矩，生成器本来就该是这里的纯函数。
+**不引入任何新依赖**（核对过）。不用 `django-recurrence`：它多给的是一个字段类型
+和一个 widget，而按 D18 的落点规矩，生成器本来就该是这里的纯函数。
 
-必测夏令时切换那一天：按当地 19:00 重复的课，跨过 DST 之后 UTC 时刻会变，
-测试要钉住「当地时间不变」。⚠️ 不写就会在十一月的第一个周日撞上。
+🔴 **墙钟时间，不是绝对时刻。** 规则在 naive datetime 上展开，落出来的每一天再和
+`start_time` 拼成当地时刻。所以按当地 19:00 每周重复的活动，跨过十一月第一个周日
+之后仍然是 19:00 —— 而它对应的 UTC 时刻变了。反过来做（在 aware datetime 上加七天）
+会让那一场变成 18:00 或 20:00，**并且不报错**：日历上仍然是每周二。
+这正是 [D33 第二节](decisions/D33-work-schedule.md)给 `Shift` 存 date + time
+而不存 aware datetime 的同一条理由。
+
+⚠️ `limit` 默认是 `MAX_OCCASIONS + 1`，**多要一个**：少要一个的话「刚好 52 场」和
+「5000 场砍到 52」长得一模一样，而调用方要靠这个区别决定放行还是拒绝。
+用 `islice` 而不是先 `list()` —— 一条没有结束的规则是一个无穷迭代器，`list()` 会
+在这里挂住，而挂住的表现是一个永远转圈的页面，读起来像故障不像拒绝。
+
+⚠️ `MAX_OCCASIONS` **不放在 `core/limits.py`**：那个文件管的是「一个人手敲进来的值
+可以多长」，而这是「一条规则可以造出多少行」。两件事、两种失败（一句超长的描述
+vs 五千行数据），放一起会让那个文件自己的判据说不清楚。
+
+必测夏令时切换那一天，且**两个方向都要断言**：当地时间三场都是 19:00，
+而它们的 UTC 偏移**确实有两个值** —— 后半句不写，前半句在一个不跨越切换的
+fixture 上会永远绿。
 
 ## L5.6 生成、改未来、整批撤销
 
@@ -2524,19 +2630,74 @@ def occurrences(rule, *, starts_on, start_time, window_start, window_end) -> lis
 
 ```python
 def _drop_generated_after(series, after):
-    """这三个条件全仓只在这里出现。三个调用方：重算未来 / 即日停止 / 整批撤销。"""
+    """这三个条件全仓只在这里出现。⚠️ **两个**调用方：即日停止 / 整批撤销 —— D40 的第三个（重算未来）在这一侧不存在，因为规则冻结之后生成器没有该收的行了。"""
 ```
 
-比 D40 多一个条件：**有报名的场次一行都不许自动删**。
-`Event` 删除会两级级联到 `Participation`，所以漏掉这个条件的后果是删掉工时记录。
+三个条件：`source = generated`、**还没开始**、**一行报名都没有**。
 
-⚠️ Program 的 `Session` 同理：**有出勤记录的 `Session` 不许自动删**。
-两条是同一条规矩在两个层级上，所以那句删除也要覆盖它。
+⚠️ 第三个条件 D40 没有，因为班次没有报名。`Event` 删除会两级级联到
+`Participation`，所以漏掉它的后果是删掉工时记录 —— 和 2026-09-08 那次
+「删一个角色带走整学期点名册」是同一种损失，高一层。
+
+🔴 **切点是 `start_time`，不是 `end_time`** —— 这是对本仓 2026-08-18 合并出来那条
+硬规矩的一次**有意例外**，所以写下来而不是让它看起来像手滑。那条规矩答的是
+「它过去了没有」，全仓读 `end_time`（`is_over` / `open_for_signup()` /
+`from_today()` / `_meetings_still_to_come()`）。这里问的是另一件事：**它开始了没有**。
+一场正在进行的活动是有人站在里面的活动，把它从他们脚底下撤掉，正是
+「已经发生的绝不动」要挡的那件事。两个问题、两个列 —— 同 L5.3 那条
+「`shape` 判分类、有没有讲次判画什么」。
+
+⚠️ 生成器**不用 `bulk_create`**，和 D40 第二节给 `Shift` 的选择相反，两条理由都
+只在这一侧成立：`Event` 有 `history`（受众是发布出去的承诺），而 `bulk_create`
+不触发信号，整批生成会在历史表上一个字都不留；受众本身是 M2M，`bulk_create`
+根本写不了。D40 那边 `Shift` 没有 history、量是每周全量，那份沉默正是优点。
+
+⚠️ 每一行都走 `full_clean()` 和 `set_audience()`。后者的 docstring 从 2026-08-27
+起就把「批三的生成器」写成它存在的理由，本步是那句话变成真的。
+
+```python
+def generate_occasions(series, *, generated_by=None)   # 只补不删，见下
+def stop_series_today(series)                   # 「即日停止」
+def split_series(series, *, changed_by, **fields)   # → (successor, 撤掉几场)
+def undo_preview(series) -> UndoPreview
+def undo_series(series, *, undone_by)
+```
 
 「改规则只动未来」= 老系列 `ended_on = today` + 新建一个系列（Google 的 split）。
 不做原地改规则重算：原地改会让「这一场当初是按哪条规则生成的」没有答案。
+⚠️ 新系列从**今天**起，不是从老系列的 `starts_on` 起 —— 否则它会去重造已经发生过的
+那几场，被「已经站着」的检查静静挡掉，什么都不发生。
+⚠️ 角色模板要跟着搬过去：一个没有角色的后继系列是一批谁也报不上的活动，
+而它看起来和「有人建了一半」一模一样。
 
-整批撤销的确认屏照 D40 那一屏：数字真算，**并且把留下来的那部分写出来**。
+整批撤销照 D40 三步，另加两条自保：
+开头**先读一次 `undone_at`**，非空就拒绝而不是静静成功（第六节代价 3 —— 放过去会把
+`undone_by` 覆盖成一个什么都没撤的人）；只对 `generated_at >= 今天 − 7 天` 的批次
+开放（第五节）。
+
+确认屏照 D40 那一屏：数字真算，**并且把留下来的那部分按原因分组写出来**。
+`undo_preview()` 和按钮读的是同一份三条件 —— 一个自己数一遍的屏幕，可以和它下面
+那个按钮不一致，而不一致只会在按下之后才显出来。
+
+⚠️ Program 的 `Session` 同理：**有出勤记录的 `Session` 不许自动删**。
+两条是同一条规矩在两个层级上。
+
+### 本轮的门：admin 上四个 action，而生成不是保存的副作用
+
+🔴 **生成必须是一个明确的动作**，两条各自都足够的理由：
+
+1. Django 的 `ModelAdmin.save_related()` 先 `form.save_m2m()`、**再**存 inline，
+   所以任何挂在保存上的动作跑的时候，系列**还一个角色都没有**（新建时连受众都还没有）。
+   它会高高兴兴地生成十二场什么都没开的活动，一个字不报；
+2. `save_related` 本来就是 `AdminHasNoLogicGuardTests` 禁的四个钩子之一（D18）。
+
+而这正好落在 D40 想要的形状上：一批东西是有人按下去、看一眼、还能撤销的，
+不是他在改描述的时候顺手发生在他身上的。
+
+⚠️ `FOUNDATION_ADMIN_PERMISSIONS` 加两行 `view_`（**只给 view**，逐字沿用 L5.2 那段
+理由：建系列是「某个 ministry 的活动」上的动作，按 D20 属于 ministry 那一层，
+它的门是 L5.8）。在那之前唯一的写入者是超级用户，和 `Session` 同一个 footing。
+
 
 ## L5.7 L1.4 那几个工时口径要改（决定 20 的代价）
 
@@ -2660,13 +2821,558 @@ recurring events 那一档的路由照初版：`events/series/new/`、
 `events/series/<int:pk>/`、`events/series/<int:pk>/undo/`。
 ⚠️ `new` 排在 `<int:pk>` 前面，同这个文件里已有的两处。
 
+> ### 2026-09-10：L5.8 拆成 a / b 两半，a 已交付
+>
+> 上面那句「recurring events 那一档的路由照初版」和整节的 Programs 内容**不是
+> 同一件事**，而写在一节里读起来像一件。拆开的理由是它们一样东西都不共用：
+> 不共用模型（`EventSeries` / `Event.shape`）、不共用查询、不共用模板、
+> 不共用不变量。
+>
+> ⚠️ 决定 27 那条「详情页只许有一个」在这里**不成立**，别照搬：那条的理由是
+> Program 和 single 共用 `Event` 的六样东西（受众、角色、报名、签到、工时、
+> 通知），复制一份详情页就是复制六份判断。`EventSeries` 一样都不持有 ——
+> 它不是人们报名的那个东西，它是造出那些东西的配方。所以系列页是**新的一页**，
+> 而不是 `/events/<pk>/` 换一块。
+>
+> | | 装什么 | 状态 |
+> |---|---|---|
+> | L5.8a | recurring events 的发布者入口：发布页第三档 + 系列页 | ✅ 2026-09-10 |
+> | L5.8b | Programs 的三张列表页（上面那张表） | 未做 |
+
+### L5.8a 发布者那一端的门（2026-09-10 交付）
+
+L5.4–L5.6 把 `EventSeries` 整条链路做完了，**而它只有超级用户进得来**。
+这一步几乎不写业务逻辑 —— `generate_occasions` / `stop_series_today` /
+`undo_series` 全都写好、测过、有守卫盯着，缺的只是门。
+
+兑现的是 participants.md 第九节那条：需求 4 的后半句（基金会原话「可以让 admin
+**选**……显示成一个条目还是每周一个」）—— 一个**给发布者的选择**，而在这一步
+之前没有任何发布者被给到它。
+
+| 路由 | 干什么 |
+|---|---|
+| `events/publish/when/` | 换「什么时候」那一块（POST，无副作用） |
+| `events/series/preview/` | 这条规则会落在哪几天（POST，无副作用） |
+| `events/series/<int:pk>/` | 系列页：改配方（GET 渲染，POST 保存） |
+| `events/series/<int:pk>/roles/` | 加人手（镜像 `events/<pk>/roles/`） |
+| `events/series/roles/<int:pk>/delete/` | 删人手 |
+| `events/series/<int:pk>/generate/` | 生成 |
+| `events/series/<int:pk>/stop/` | 即日停止 |
+
+⚠️ 初版排的 `events/series/new/` **没有做，而且是故意的**：第三档长在
+`/events/new/` 这一张发布页上（决定 32），单独一条 `new` 会变成「同一件事有
+两个入口，而两边问的问题只差一块」。`undo/` 同样没做，理由在下面的缺口表。
+
+#### 这一步谈定的六条
+
+| # | 问题 | 定案 | 代价 / 为什么 |
+|---|---|---|---|
+| 32 | 选中第三档之后 | **同一张表单，只换「什么时候」那一块**。名字/地点/说明/图片/受众一个字不动 | 否掉的是「跳到另一页」：那一版会把填了一半的东西弄丢，而发布者答的本来就是同一个问题 |
+| 33 | 人手在哪一屏填 | **和 event 一样**：存完跳到系列页，在那一页加 | 一致性优先于少一次跳转。选了第三档不该遇到一套不一样的东西 |
+| 34 | 「生成」按下去做什么 | **让这一批对齐配方** —— 补缺的场次，也把后加的工种补到还没开始的场次上 | 代价见 35。换来的是这个按钮**按几次都安全**，这是它敢只有一个的原因 |
+| 35 | 被人手工删掉的角色 | **不放回去**。判据是 `EventRole` 影子表里有没有一条删除记录 | ⚠️ 不新增任何列。`EventRole` 本来就带 `HistoricalRecords` |
+| 36 | 一个人手都没有就按生成 | 放行 | 有了 34，留空生成不再是死胡同 —— 回头补工种再按一次就补上了。旧的那条拒绝正是为「没有退路」存在的 |
+| 37 | 生成出来的状态 | 表单上每次选（草稿 / 开放报名，草稿是默认值） | 维持现状，不新发明 |
+
+#### 🔴 决定 34 第一版借错了规矩，是被问出来的
+
+第一版的第四条写的是「**这一场已经有人报名 → 整场都不碰**」，理由写的是
+「和 `_collectable_occasions()` 同一条规矩：有人站在里面的东西不动」。
+
+用户问：「如果我加的工种不影响已经报名的人，为什么不可以加工种」。
+
+问得对，而这是一次**把一条规矩搬到它不成立的地方**：`_collectable_occasions()`
+之所以躲开有人报名的场次，是因为那里的动作是**删除** —— 删除拿走东西。
+开一个新工种什么都不拿走：报了名的人握着的是指向**另一个角色**的行，一动没动。
+而且一个已经有志愿者的晚上，恰恰是最可能需要多一个门口接待的那个晚上。
+
+所以真正该跳过的判据是**钟**，不是报名：在一个已经过去的晚上开工种，
+会凭空写出一笔那天从来不存在的人手缺口（`understaffed()` 和 `_role_gap()`
+都不按日期筛，已验证）。四条规则最后是：已经有了 → 跳过；被人手工删过 →
+跳过；**这一场已经开始了 → 跳过**；否则 → 补上。
+
+⚠️ 而这个修法当场暴露了我自己的一个 bug：`except ValidationError` 那一支会
+留下一个**受众全空**的半成品角色 —— 正是 `refuse_empty_audience()` 存在要
+防的那个状态。用 `transaction.atomic()` 存档点修掉。两条测试钉住：
+`test_signing_up_does_not_stop_a_later_job_from_being_added`、
+`test_an_evening_that_has_happened_gets_no_new_job`。
+
+#### ⚠️ 一个字段画两遍是静默的
+
+发布页把三档单选和「什么时候」那一块**摘出来自己画**（决定 32 要求它们成块），
+而 `core/components/form_fields.html` 是逐个字段平铺的。两边都画 =
+同一个 `name` 出现两次，浏览器提交的是**后一个**（空的）那份。不报错、
+不变红，只是人填的东西没了。
+
+所以 `PublishFormMixin.drawn_separately` 声明哪几格由页面自己画，
+`form_fields.html` 跳过它们。⚠️ 两个方向都要命，而且互为一行之差：
+多声明一格，那一格从页面上**消失**；少声明一格，它被画两遍。
+`NoFieldIsDrawnTwiceTests` 三张页面各钉一条。
+
+⚠️ 那段跳过写成 `{% if ... in ... %}{% else %}` 而不是更顺口的 `not in`：
+绝大多数表单没有 `drawn_separately`，Django 的 `{% if %}` 把成员判断里抛出的
+异常一律当 False，所以不带 `{% else %}` 的 `not in` 版本会让**全站每一张表单
+渲染成空白**。已实测两版。
+
+#### 🔴 走查抓到的那一条：回车键发布不了活动
+
+这一条**测试全绿、页面看着完全正常**，而它是这一步唯一一个让人做不成事的缺陷。
+
+在名称框里按回车，浏览器走的是「隐式提交」，用的是表单里**文档顺序上第一颗**
+提交按钮 —— 而没有 JS 时那条换档路留下的「Switch」排在真正的提交按钮前面。
+实测：填满一张完全合法的发布表单、按回车，**活动没有被发布**，页面只是原地
+换了一次档。没有报错，看起来就像回车没反应。
+
+⚠️ 「它被 JS 藏起来了」不解决这件事，这是当时最容易信的那句话：Chrome 找默认
+按钮时跳过的是 `disabled`，不是看不见的。藏起来只让它更难被发现。
+
+修法是在表单最前面放一颗剪到 1px 的**真**主提交按钮，让默认按钮是它。
+钉住它的是 `test_pressing_return_in_a_text_box_publishes_rather_than_switches`，
+而那条测试断言的是**顺序**，不是点击行为 —— 因为出问题的是顺序。
+
+⚠️ 这一条也是「为什么浏览器走查不能省」的当期例子：D24 要求的那条无 JS 路径，
+   它本身是对的（`curl` 走通了全程），代价却落在了有 JS 的那条路上。
+
+#### 走查当天改掉的五样（2026-09-10，都不是逻辑问题）
+
+| 看到的 | 改成 | 为什么记下来 |
+|---|---|---|
+| 三档单选画成三张大卡片 | `field.html` 新增可选参数 `plain_options`，这一处不画卡片 | 用户原话「跟下面 Who can see 一样」。⚠️ 没有改全局：另外两组单选（报名页的「以什么身份参加」、活动的 `shape`）今天要卡片，而 `checkin_confirm.html` **手写了同一套 class** —— 全局改会让那两处分叉，而分叉了没有任何东西会报错 |
+| 「多久一次」是个八行高的文本域 | `EventSeriesForm` 给 `rule` 指定 `TextInput` | `EventSeries.rule` 是 `TextField`（为了 `max_length=SHORT_TEXT`），ModelForm 照列类型给了个文本域。列类型不该决定这一格长什么样 |
+| 单选那一组和下面的间距比别处窄 | `#when-block` 手补 `mt-4` | 🔴 **这一条值钱**：字段间距来自 app.css 的 `.field + .field`，而那是一条**相邻兄弟**选择器。这一步把 `.field` 包进了一层 div，相邻关系断了，间距就静默地没了。任何一段「把几个字段包起来自己画」的代码都会踩到它 |
+| 日期预览那两句是中文 | 改成英文 | 全站界面是英文，注释是中文。新写的片段里混进了两句面向用户的中文 |
+| 「12 occasion(s) generated」 | `_occasions_worded()`，两条消息共用 | 斜杠 s 是网站在告诉用户「这句话是机器写的」。⚠️ `events/admin.py` 里还有四处没动，理由写在那个函数的 docstring 里（两条测试钉着那个字符串，而 admin 是另一拨读者）|
+
+⚠️ 走查中途有一次「JS 没生效」（藏 Switch 那段没跑），当时**排错排错了地方**，
+记在这里因为下一个人多半会犯同一个错：我当场断定是 dev server 在吃
+`staticfiles/`（collectstatic 的产物）而不是 `static/`，跑了一次 collectstatic
+就接着往下走了。
+
+真正的原因是**浏览器缓存**，而那一次 collectstatic 什么也没修好 —— 之后是
+`location.reload(true)` 让它变对的。事后拿一个只写进 `static/js/app.js` 的标记
+验过：`curl` 到的那一份**带**这个标记，`staticfiles/` 里那份没有。DEBUG 下
+staticfiles 走的是 finders，而 `static/` 就在 `STATICFILES_DIRS` 里。
+
+⚠️ 所以规矩是老规矩：`npm run build:js` 之后硬刷新一次，别 collectstatic ——
+   而更该记的是，那句「dev server 吃的是 staticfiles」当时听起来非常合理，
+   它只是没有人去验。
+
+#### 验收（浏览器，`seed_demo` + `zhangsan@example.invalid`）
+
+- [ ] `/events/new/` 三档单选在页面上；选第三档，**只有中间那块变了**，填了的名字还在
+- [ ] 填 `FREQ=WEEKLY;BYDAY=TU;COUNT=12` → 当场列出 12 个日期；打错成周四 → 日期跟着变
+- [ ] 保存 → 落在 `/events/series/<pk>/`
+- [ ] 加两个工种 → 「生成」→ 12 场出现在 `/events/` 上，各自报名
+- [ ] 再加第三个工种，按一次生成 → 12 场都多了这个工种（决定 34）
+- [ ] 从第 3 场手工删掉一个工种，再按生成 → **没有被放回去**（决定 35）
+- [ ] 一个人手都没有按生成 → 放行；补工种再按一次 → 补上了（决定 36）
+- [ ] 「即日停止」→ 未来那几场从 `/events/` 上消失，已发生的还在
+- [ ] **关掉 JavaScript** 重走一遍 → 单选旁边那个 Switch 按钮整页重渲，照样能发布，
+      而且填了一半的东西还在（图片除外，浏览器不允许回填文件框）
+
+### L5.8c 「多久一次」从手打改成选（2026-09-11 交付）
+
+L5.8a 把门做出来了，而门后第一格问的是
+`FREQ=WEEKLY;BYDAY=TU;COUNT=12` —— 一种只有这个仓库里的人认得的语言。
+用户原话：**「我不喜欢 How often 自己手打」**。
+
+#### 先纠正一个前提：一周两次本来就做得到
+
+谈的时候提出的问题是「一周两次是不是只能建两条规则」。**不是。**
+`FREQ=WEEKLY;BYDAY=TU,TH;COUNT=8` 就是周二 + 周四各一场，一条规则八场，
+`EventSeries.clean()` 也过 —— 当场实测过才这么答的。
+
+⚠️ 真正做不到的是**另一件事**：两天共用同一个时刻和同一个时长。
+「周二 19:00、周四 10:00」才是真的要两条规则。这句话现在写在
+`start_time` 那一格的说明里（用户要求加的），因为勾了好几天之后，
+页面看起来像是每天都能各自安排 —— 而这件事出问题的那天，是一个志愿者
+按 19:00 去了一个 10:00 就开始的周四。
+
+#### 谈定的六条
+
+| # | 问题 | 定案 |
+|---|---|---|
+| 38 | 转轮的数字是什么 | **间隔**（每 N 周 / 每 N 个月），1～4。旁边那句「一周 2 次」是**读数**，跟着星期条走，不能点 |
+| 39 | 一周几天 | 星期条随便点几天，点几天就是一周几次 |
+| 40 | 按月怎么排 | 和「按周」并列的第二档：每 N 个月 + 第〔一/二/三/四/最后〕个 + 星期几 |
+| 41 | 「第几个」能不能多选 | **能**。「每月第一个和第三个周六」是真实排法，单选画不出来 |
+| 42 | 什么时候停 | 二选一，默认「共 N 场」。RFC 5545 里 `COUNT` 和 `UNTIL` 本来就不能同时出现 |
+| 43 | 手打规则还留不留 | 留，收进折叠的「高级」里。选择器只画得出两档，`FREQ=DAILY`、`BYMONTHDAY=15` 得有地方去 |
+
+⚠️ 「第一个周六 + 第三个**周日**」仍然表达不了 —— 星期几只有一个下拉。
+   已知代价，走高级框。
+
+⚠️ 「每月第三周」和「每月第三个周六」**不是一回事**，RRULE 支持的是后者。
+   谈的时候专门确认过，因为中文这两句听起来一样。
+
+#### 🔴 存储一列没加
+
+九个控件写的是 `EventSeries.rule` 那**一个**字符串：`recurrence.compose()`
+拼进去，`recurrence.decompose()` 拆出来。加 `repeat_mode` / `repeat_interval`
+那几列会让「这条规则到底是什么」有两个答案 —— 而 D14 的整条规矩就是它只许有一个。
+`RecurrenceRuleWordingTests` 钉的正是这一对互为逆运算：拆了再拼，必须逐字不变。
+**这一步同样没有迁移。**
+
+#### 走查抓到的四条（测试全绿，页面不对）
+
+| 症状 | 真因 | 记它是因为 |
+|---|---|---|
+| 轮子怎么滚都停在两格之间，值永远是第一格 | 🔴 **`rotateX` 加在了滚动吸附的目标身上。** CSS 按**变换之后**的盒子算吸附点，所以把格子转一下，吸附点也跟着转走了（实测停在 90.5px） | 这是全场最不像 bug 的一行。修法是每格里再套一层 `.wheel-face`，转里面那层 |
+| 填好了选择器，日期预览却一直说「填好上面几格」 | 🔴 `clean()` 写的是 `if not self.errors` 才拼规则 —— 而预览是**边填边跑**的，`ministry` 那时候还空着。一个不相干的字段把规则挡掉了，而且一句话都不说 | 「稳妥起见多判一点」在这里正好是错的。判据必须**只看选择器自己那几格** |
+| 一个鼠标滚轮档位从 1 直接跳到 4 | 原生滚动一个档位是 ~100px ≈ 三格；第一版接管之后按累积量算，同样是三格 | 用户原话「电脑操作好像有点不 intuitive」。⚠️ 触摸、触控板、鼠标、键盘是**四种**输入，判据是一次事件的大小：≥40px 或 `deltaMode≠0` 是鼠标档位，走一格；小碎步是触控板，累积够一格才走 |
+| Tab 之后焦点不见了，但还能改值 | 升级之后 `<select>` 被剪成 1px，而它仍在 Tab 顺序里 | 滚筒现在自己是控件（`role="spinbutton"`、可聚焦、认上下/Home/End），`<select>` 退成那个值的持有者 |
+
+⚠️ 前两条有同一个形状，值得单独说一句：**它们都不是「写错了」，是「写对了一个
+   不成立的地方」** —— 一个把变换加在了不能变换的盒子上，一个把「谨慎」加在了
+   不该谨慎的判据上。本轮 L5.8a 那条「借错规矩」（决定 34）是第三个同类。
+
+#### 验收（浏览器，已走）
+
+- [x] 选「按周」，点亮周二 + 周四 → 读数变成「2 times a week」
+- [x] 换「按月」→ 星期条整块换成「第几个 + 星期几」，**纯 CSS 换的，没有 JS**
+- [x] 点亮第一个 + 第三个、星期六 → 当场出「The first and third Saturday of every month.」
+- [x] 日期预览列出 19 Sep · 3 Oct · 17 Oct · 7 Nov · 21 Nov · 5 Dec —— 正是每月第一和第三个周六
+- [x] 把「第几个」全取消 → 预览当场变成那句拒绝
+- [x] 轮子：鼠标一档一格、触控板累积、键盘上下/Home/End、点一下选那格、触摸走原生惯性
+- [x] `<select>` 和七个勾都在 HTML 里 —— 关掉 JS 照样选得动
+
+### L5.8d 日期预览改成小月历（2026-09-11 交付）
+
+L5.8c 之后，「这条规则会造出哪几天」仍旧是一行用「·」隔开的日期。
+用户原话：**「只用文字有点不方便」**。
+
+那一行**正确但要人自己在脑子里排**：`15 Sep · 17 Sep · 22 Sep · 24 Sep` 看不出
+它其实是「每周二和周四」，而那正是这一块唯一想让人看出来的东西。现在每个涉及
+的月份画一张小月历，规则落到的那几天高亮成实心圆 —— 一列竖着的高亮，
+「每周二」三个字不用写就看出来了。
+
+⚠️ **月历是服务端摆的**（`schedule.month_grids()`），和日期本身同一个来源。
+让浏览器按日期串自己画会出现第二个答案，而这一块存在的全部理由就是
+「按下去之前先看见」—— 那个答案必须和生成器的是同一个。
+
+⚠️ 那一行文字**留着**，没有被替换：月历是给眼睛的，那一行是给读屏和
+「一眼看总数」的。上面还多了一句「共 N 场，X 到 Y」。
+
+⚠️ 默认铺开 6 个月，其余的收进一个原生 `<details>`（「Show all N months」，
+没有 JS 也能展开）。`MAX_OCCASIONS` 是 52，而「每月第三个周六」的 52 场横跨
+**四年多** —— 五十二张月历一上来就铺开不是预览，是另一个页面。
+
+⚠️ **是折起来，不是丢掉**（2026-09-11 定）。这一块要答的是「按下生成会造出哪
+几天」，而一个答一半的答案会让人回头去数下面那一行文字。实测：一学期那种
+12 场横跨 4 个月，**什么都不用展开**；一年周更横跨 13 个月，铺 6 折 7。
+
+⚠️ 两档单选和那个转轮**并排**：它们是同一句话的两半（「按月，每 2 个月」），
+上下摆的时候转轮离那个由左边决定的单位词很远。
+
+#### 🔴 测试抓到的那一条：同一天被高亮两次
+
+每张月历的头尾都会带上邻月的几天（10 月那张第一行有 9 月 29 日）。第一版把
+「这一天在不在规则里」直接问了那些格子，于是**跨月那一天在两张月历上各高亮
+一次**。模板把邻月画成空格，所以**屏幕上完全看不出来** —— 数据里多一天，
+画面上一切正常。
+
+抓到它的是一条按「画出来的格子」反推日期、和 `moments` 逐一比对的断言。
+如果那条测试只查了「有没有画月历」，这个就过去了。
+
+### L5.8e 滚动生成：规则可以没有结束（2026-09-11 交付）
+
+⚠️ 本节原打算叫 L5.9，但那个号已经被「初版那份 `EventSeries` 哪些留下了」占着，
+L5.10 是测试 —— 所以跟着 a/c/d 排下来。
+
+#### 它换掉的是什么
+
+在这之前，一条重复规则**必须自带结束**，而且**超过 52 场直接拒绝保存**。
+用户原话：「直接拒绝『超过 52 场』不是很好 prevent 的办法」。
+
+他是对的，而且比「不好看」更实在：每周一次跑一年半是 78 场 —— 完全正常的排法，
+会被拒，而那句拒绝给的建议是「build it in shorter runs」，也就是让人替系统
+干体力活。
+
+#### 🔴 谈的时候量出来的那张表，是这次设计的转折点
+
+提出的替代方案是「可以有无数个 occasions，但结束必须在三年以内」。
+听起来合理，而**三年这个窗口兜不住行数**：
+
+| 排法 | 三年内场次 | |
+|---|---:|---|
+| 每天 | 1096 | 超过旧上限二十倍 |
+| 每个工作日 | 784 | |
+| 一周三次 | 470 | |
+| 每周一次 | 157 | |
+| 每月第三个周六 | 36 | |
+
+一条 `FREQ=DAILY` 的三年规则完全满足「三年以内」，一次点击造出 1096 个活动 ——
+比那条 52 挡住的东西大二十倍。**时间边界是时间边界，行数是频率决定的**，
+两者不能互相替换。量出来之前，两个方案听起来一样有道理。
+
+#### 定案：生成永远是滚动的
+
+规则可以没有结束；有结束的也只是滚到那个结束为止。按一次「生成」排出
+**从今天到一年后**，明年再按一次再往前。
+
+⚠️ 这条路和系统**已有**的设计合拍，不是新发明：决定 34 早就把「生成」定义成
+「让这一批对齐配方」，滚动只是同一句话在时间轴上的延伸；而「即日停止」本来就是
+系列的出口，现在它成了结束一条**无限**规则的唯一正路。
+
+| | 定案 | 为什么 |
+|---|---|---|
+| 窗口 | **12 个月**，从这条系列开始那天算起（`recurrence.horizon_for`） | 和「一年周更」那个直觉一致，每周一次正好 53 场 —— 和它替换掉的 52 几乎一样大 |
+| 无限规则靠什么接上 | 页面写明「已排到 X」+ **人手再按** | 不做 cron：定时任务挂了没人会发现，而页面上那行字挂不了 |
+| 还剩什么拒绝 | 只剩**密度**（`BATCH_CEILING = 750`） | 一年的每日规则 365 场要放行；高级框里一条 `FREQ=HOURLY` 是一年 8760 场，必须挡 |
+
+⚠️ `MAX_OCCASIONS` 改名成 `BATCH_CEILING`，因为**意思变了**：从「一条拒绝」
+变成「一张安全网」。名字不跟着意思走，下一个人就会照着旧名字读新行为。
+
+⚠️ 措辞也跟着改：旧的是「more than 52 occasions … build it in shorter runs」，
+新的是「repeats more often than this can build」。「分成几段短的」对一条每小时的
+规则是完全没用的建议 —— 它再短也是这个密度。
+
+#### 🔴 唯一一个不改就会坏的连带：图片会被误删
+
+`series_with_images_to_purge()` 的判据是「这条系列**没有一场在未来**了」，
+而它的 docstring 明写着「never on `ended_on`」，理由是「标记结束是人的动作，
+人会忘」。
+
+**那条理由在无限规则下不成立**：一条还活着的无限规则，只要有人忘了回来按
+「生成」、最后一场过去，就符合那个判据 —— 图片被删，然后下次按生成，新造的
+那一批全部指向一个不存在的文件。这正是 `Event.poster` 那一节警告过的碎图标，
+只是触发路径换了一条。
+
+判据改成「没有一场在未来，**而且这条规则不会再产出任何东西**」。一条 `COUNT=12`
+跑完的系列照常被清理 —— 这不是把清理关掉，是把「还活着」和「真的完了」分开。
+两条测试各钉一半。
+
+⚠️ 这一条是**写计划的时候找出来的**，不是测试抓出来的 —— 它没有任何一条现有
+测试会红。这是这一轮里计划模式唯一一次真正赚回成本的地方。
+
+#### 走查抓到的两条
+
+| 症状 | 真因 |
+|---|---|
+| 「Never」那一档下面多出一个日期框，提交上去的日期永远是空的 | `{% else %}` 里无条件画 `form.ends_on`，加第三档之后被画了**两遍**。`NoFieldIsDrawnTwiceTests` 当场抓到 —— 这条守卫这一轮已经救了两次 |
+| 高级框里手写规则，被「This field is required」挡住 | `ends_kind` 是必填的，而勾了「高级」就是不用选择器 —— 一格那个人根本没看的控件把他挡下来了。选择器那几格改成 `required=False`，默认在 `clean()` 里 |
+
+#### 2026-09-11 代码评审之后的八条修正
+
+评审在这一批上抓到八条，全部复现过才动手。**三条值得单独记**：
+
+| | 症状 | 真因 |
+|---|---|---|
+| 🔴 | 日期预览那两颗翻页键**一页都翻不动**，而页面看起来完全正常 | 模板问 `months.earlier_vals` / `at_the_start`，而 `MonthPage` 给的是 `earlier_page` / `has_earlier` —— 四个名字一个不对。Django 取不到属性时交回空串、不报错，于是按钮身上一个 `hx-vals` 都没有。实测：整段 HTML 里 `hx-vals` 出现 **0** 次 |
+| 🔴 | 「快排完了，再按一次生成」对一条**产不出东西**的规则也说 | `is_running_low()` 只问「最后一场近不近」，不问「再按一次还有东西可排吗」。一条跑完的 `COUNT=12` 会在最后一场前六周开始劝人按一颗按不出东西的按钮，而那句话永远不会消失 |
+| 🔴 | 明年秋天才开的课，保存合法、预览一场不显示、生成说「什么都没生成」 | 窗口从**今天**算。一条 14 个月后开始的系列整条落在窗口外 —— 而唯一的线索指向两个没有问题的格子 |
+
+第三条改掉了一个口径，**这里改口**：窗口不是「从今天起的一年」，是
+**「从这条系列开始那天起的一年」**（`recurrence.horizon_for`）。提前半年排明年的课，
+排出来的是它自己的头一年。
+
+⚠️ 它顺带修掉了另一件当时被我当成「窗口的正常表现」写进测试的事：`COUNT=52`
+原来只生成 51 场（五十二个周二从下周算起会越过今天+12 个月一点点）。
+现在 52 就是 52。
+
+另外五条：`_rule_for` 的往返比较忽略 `BYDAY` 顺序（`BYDAY=TH,TU` 会被判成
+「改了规则」而锁死整次保存）、无 JS 那颗 Switch 手写的 `class="btn"` 在 CSS 里
+没有任何规则（改走组件）、`bootRecurrenceWords` 每次 HTMX settle 都多挂一个监听、
+`_top_up_roles` 用 `.values_list()` 绕开了自己那份 prefetch（实测 4 场 12 条查询、
+16 场 24 条，一场一条）、换档时把 `start_time` 跨形状带过去（两档一个是
+datetime-local 一个是 time，塞过去浏览器直接丢）。
+
+⚠️ 新增一条守卫 `MonthPageMatchesItsTemplateGuardTests`：模板里每一个
+`months.X` 都必须在 `MonthPage` 上存在。它防的是**那一整类**失败 ——
+Django 模板取不到属性不报错，所以拼错或重构改名的表现是「那一块安静地什么都
+不做」。两个方向都验过：把 `at_the_start` 改个名，它当场红。
+
+#### 顺带：「开多久」拆成三格
+
+用户走查时说「Runs for 很融合有格式错误，分成三个格子中间用：隔开」。
+
+🔴 **它换掉的那一格有一个不报错的陷阱，而 `EventSeries.clean()` 里早就用一条
+   🔴 注释记着**：`DurationField` 把光秃秃的数字读成**秒**，所以想写「两小时」
+   敲了个 `2` 的人，得到的是五十二个**两秒**的活动 —— 而约束只挡得住零和负数，
+   所以一句话都没有。三个格子（时 : 分 : 秒）让那个歧义根本不存在。
+
+⚠️ 底下仍然是同一个 `DurationField`：`DurationBoxes.value_from_datadict()`
+   把三格拼回 `"H:MM:SS"` 交给它解析。校验、约束、admin 那一侧一个字没动 ——
+   admin 走的是 `EventSeriesAdminForm`，它没有这个部件。
+
+三条写下来的坑：
+
+| | |
+|---|---|
+| 循环变量必须叫 `widget` | Django 的部件模板读上下文里那个叫 `widget` 的东西。叫 `part` 的那一版不报错，只是三格全渲染成**外层**部件 —— 三个一模一样的 `id_duration`，`NoFieldIsDrawnTwiceTests` 抓到 |
+| `use_required_attribute()` 交回 False | `required` 会被发到每一个子部件上，于是「两小时」必须写成 `2` `0` `0`。留空分和秒正是这个控件想让人能做的事 |
+| 宽度写在 `.duration-part` 上，不写在 input 上 | `.field input:not(...)` 那条是 `width:100%` 且特指度更高。而且列宽本来就该由列定：不写的话三格被底下的单位字（hours 比 min 长）撑成不一样宽 |
+
+#### 验收（浏览器，已走）
+
+- [x] 「Runs for」是三格 `1 : 30 : `，各 72px，底下标着 hours / min / sec
+- [x] 选「Never」→ 预览说「52 occasions over the next year … it repeats until you stop it」
+- [x] 发布 → 系列页说「Booked through 7 Sep 2027」
+- [x] 按生成 → 52 场；再按一次 → 「Nothing new to make」，一场都不多
+- [x] `COUNT=500` → **不再被拒**，预览出一年那 52 场
+- [x] 「到 3026 年」→ **不再被拒**，同上
+- [x] 高级框 `FREQ=HOURLY;COUNT=9000` → 被拒，而且那句话说的是**太密**不是太长
+- [x] 「即日停止」→ 未来的撤掉、已发生的留着（回归）
+
+### L5.8f 撤销一批 / 改规则，交到 ministry admin 手里（2026-09-11 交付）
+
+两个服务 L5.4–L5.6 就写好、测过、有守卫盯着，**而只有超级用户按得动**。
+ministry admin 的退路一直只有「即日停止」。
+
+而这不只是少两个功能 —— 冻结那句拒绝写着「Stop this series instead, and
+**build the next one**」，**而没有任何控件做得了这件事**。一句指着不存在的控件
+的话，正是这个仓库反复付账的那一种。
+
+#### ⚠️ 即日停止和撤销到底差在哪（会被反复问到，所以记在这里）
+
+谈的时候问到这个，而答案不是「一个有记录一个没有」——`EventSeries` 带影子表，
+两个动作都进历史。真正的分界只有一条：
+
+| | 即日停止 | 撤销 |
+|---|---|---|
+| 收未来那些场次 | `_drop_generated_after()` | **同一句**（D40 唯一的那条不变量） |
+| 系列那一行 | 永远留着，写 `ended_on` | 一场都不剩 → 整行删掉，图一起清 |
+| 时限 | 随时 | 建成后 7 天（`UNDO_WINDOW`） |
+| 做过一次 | 可以再做 | 拒绝（`AlreadyUndone`） |
+
+它们答的是两个问题：**撤销说「这批东西本来就不该存在」，停止说「它存在过，
+但到此为止」**。停止那一行必须留着 —— 它是「为什么只有六场」的唯一答案。
+
+⚠️ 而一旦有东西留下来，撤销**连行也删不掉**，代码里就退化成一次停止加一条
+「谁撤的」。两者只在「什么都没留下」那 95% 的情况下真正分开 —— 而那正是 D40
+说这个功能值得做的理由。
+
+#### 改规则：就地改，保存时拦一屏确认
+
+否掉的是 admin 那一版（按一下**先**停掉旧的、给你一份副本去改）：世界在人想好
+新规则**之前**就变了。新的顺序是 **改 → 保存 → 确认屏 → 才动**，而人填的新规则
+直接用在新系列上，不必再填一遍。
+
+⚠️ `UNDO_WINDOW` 那个七天**一个字没动**（谈定）。D40 第五节自己写着它是
+「本条最可能定错的一个数…试点跑一轮之后回来看它」—— 这一步只开门，不改数：
+把一个没有依据的数在开门的同时一起改，就没有任何一轮数据说得清是哪一个改动
+起的作用。
+
+#### 🔴 做的时候踩到的三条，全都是「手里这个对象不等于那一行」
+
+| 症状 | 真因 |
+|---|---|
+| 确认之后整件事**无声地什么都没做**（系列数不变、`ended_on` 仍是 None、页面退回原处） | 传给 `split_series()` 的 `series` **就是 `form.instance`**，而表单在 `_post_clean()` 里已经把新值写进了这个内存对象 —— 它最后 `stop_series_today()` 时的 `full_clean()` 于是拿着一个「规则和库里不一样」的对象**再撞一次冻结**。改成重新取一行 |
+| 新系列建出来了，但带的是**旧**规则 —— 而人刚在上一屏读过新规则 | 🔴 Django 的 `add_error()` 会把出错字段从 `cleaned_data` 里**删掉**（`forms/forms.py`：`if field in self.cleaned_data: del …`），而冻结那条错误正挂在 `rule` 上。于是 `cleaned_data["rule"]` **不存在**，`split_series()` 静静回退到旧规则 |
+| 新系列被自己的 `clean()` 拒掉（「周二不在它重复的日子里」），而且是 500 | 我把 `starts_on` 也传了过去，它盖掉了算好的 `resumes_on` —— 而表单上那个「第一场」说的是**旧**系列什么时候开始的 |
+
+⚠️ 三条都不报错、或者报得离题，而**第二条尤其**：页面照常说成功。钉住它的是
+`test_confirming_starts_a_new_series_with_the_rule_i_typed`。
+
+⚠️ 顺带把 `split_series()` 的拒绝接住落成一句提示，不再冒成 500。
+
+#### 验收（浏览器，已走）
+
+- [x] 把每周二改成每周四 → 保存 → 出确认屏（12 场撤回、新系列从 9 月 17 日起、明说不自动生成）
+- [x] 确认 → 落在新系列页，旧的停在今天、场次归零、工种照搬
+- [x] 只改说明 → 照常就地保存，不出确认屏
+
+### L5.8g 「撤销」和「即日停止」合并成一颗键（2026-09-11 交付）
+
+L5.8f 刚把两颗键交到 ministry admin 手里，用户当场提出：
+
+> 并不是每个 admin 都会区分即日停止和撤销，education 成本不小，而且如果要选
+> 撤销，但是不清楚意思选了即日停止，很难 undone。
+
+#### 判断成立，而真正的论据比「教育成本」更硬
+
+**那个分支代码里一直是自动的。** `undo_series()` 合并之前就长这样：
+有东西剩下写 `ended_on`（= 即日停止），什么都没剩就 `delete()`（= 真的撤销）。
+两颗键之间那道选择题，系统反正会自己重答一遍 —— 而让人在两个「系统反正会自己
+决定」的选项之间选，是最难辩护的一种界面。
+
+实测过的三件事：
+
+| | |
+|---|---|
+| 按错的代价**不对称** | 误按撤销结果完全一样；误按停止要再按一次撤销才补得回来，而**那条补救路径需要的正是那个人没有的知识** |
+| 影子表记得「是谁」 | `HistoryRequestMiddleware` 装着，所以 `undone_by` 那一列记的东西是第二份 |
+| 那两列在这一侧从没有过理由 | D40 要它是因为「`bulk_create` 不触发信号」，而 D40 §8 自己写着这条在活动侧是反过来的 —— 当时没把线索跟到底 |
+
+#### 定案
+
+一颗键 `Stop this series`，按「有没有人报名」自动分支。**七天窗口取消**
+（「有没有人报名」是对同一件事的直接测量，窗口只是代理指标），
+**`undone_at` / `undone_by` 两列删掉**，admin 四个 action 变三个。
+
+⚠️ 那两列是在**未合并的** 0028 里建的，所以直接从那条迁移里拿掉 ——
+当初就别建，而不是建完再删。**没有新增迁移文件。**
+
+⚠️ `split_series()` 用的是拆出来的 `_stop_from_today()`，**不删行**：
+改规则的结果是「这一条停掉、那一条接上」，旧的那一行就是新那条的来历。
+用会删行的那个，一条没人报名的系列改个规则旧行会凭空消失 —— 从外面看就成了
+「就地改了规则」，而那正是整个 split 存在要避免的事。
+
+#### 🔴 同一个 bug 一天之内出了两次
+
+共用片段 `_withdrawal_summary.html` 要一个叫 `taken` 的变量：
+
+| 哪一处 | 传进去的叫什么 | 后果 |
+|---|---|---|
+| 站点确认屏（L5.8f） | `preview` | 「occasion still to come withdrawn」—— 数字整个不见 |
+| admin 确认屏（本步） | 循环变量还是 `preview` | 「 个场次会被移除」 |
+
+两次都**不报错**，页面照常渲染。第一次之后我加了一条读 HTML 的测试，第二次是
+那条测试的同族（`test_the_confirmation_screen_names_what_it_will_keep`）抓到的 ——
+它断言的是「留下来的原因」那句话，而数字不见时那句话也跟着不见了。
+
+⚠️ 教训写下来：**断言 context 的测试对「模板取不到变量」这一类失败是瞎的。**
+Django 取不到就当空串，不抛任何东西。
+
+#### 顺手修掉的一个死胡同
+
+admin 确认屏那颗提交键是 `{% if offerable %}`，而 **`offerable` 从来没有被传进
+上下文过** —— 于是整张确认屏看得见数字、按不下去。合并时才发现。
+
+#### code review 抓到的四件事（2026-09-11，同日）
+
+| | |
+|---|---|
+| 🔴 只改开始时间／只改时长，改规则那条路**静默地用回旧值** | `add_error()` 把出错字段从 `cleaned_data` 里删掉，而冻结那条错误挂在 `GENERATION_FIELDS` 里第一个变了的字段上 —— 规则没动的时候那就是 `start_time` 或 `duration`。`rule` 那个出口早就补过了，另外两个没有。实测：POST 20:00 → 新系列 19:00 |
+| 🔴 `series_form.html` 少一个 `</div>` | 「Roles on this rule」和整个工种面板渲染在按钮那一排**里面**，当 flex item。浏览器自己补上闭合标签，所以什么都不报，2211 条测试全绿 |
+| ⚠️ 那句成功提示报的是**新**名字 | `series` 就是 `form.instance`，表单已经把新名字写进去了。同一次保存里改了名，那句话就用新名字说旧系列停了 |
+| ⚠️ 系列页每渲染一次白算一遍 `withdrawal_preview()` | 注释写着「确认屏的依据」，而确认屏是另外三个视图、各自显式传。这一页的模板一个字都没读过它，而它要走遍这条系列的每一场 |
+
+⚠️ 另外两条是文档和代码对不上：D40 §9 写着确认屏「站点和 admin 两处共用」，
+而 admin 那一页其实还是自己写的一套说法；`stop_series` 叠了两个
+`@transaction.atomic`（改名时留下的）。都已改正。
+
+#### 🔴 新守卫：`TemplateDivsAreBalancedGuardTests`
+
+那个少掉的 `</div>` 是**这个仓库没有任何东西在看的一类失败**：浏览器替你补上，
+补在错的地方，页面照常出，测试照常绿 —— 因为每一条断言钉的要么是 context、
+要么是 body 里的一个字符串，而这两样在页面被重新拼装之后都还在。
+
+守卫读模板源码（不是渲染结果，理由和 `TemplateCommentsAreClosedGuardTests`
+一样：没有测试渲染过的模板照样要管），逐个数 `<div>` 和 `</div>`。
+⚠️ 写完先在**旧代码**上跑了一遍确认它会红 —— 全项目只有 `series_form.html`
+一个不平衡，所以这条守卫今天就是真的。
+
+⚠️ 一份「自己开了框、留给父模板关」的片段会被它误伤，这是它明写的取舍：
+今天项目里没有这种东西，而一份只有从对的父模板包进去才闭合的片段，比它抓的
+这个问题更糟。
+
+#### 验收（浏览器，待走）
+
+- [ ] 系列页上**只有一颗**「Stop this series」
+- [ ] 干净的一批 → 确认屏说「系列会被整个删掉」→ 确认 → 落在 `/events/manage/`
+- [ ] 有人报名的 → 确认屏改口说「系列留着」→ 确认 → 行还在、报了名那场留下
+- [ ] `generated_at` 改到 100 天前 → 照常能按（窗口没了）
+- [ ] admin 里选一条 → **先出确认页**，键按得下去 —— ⚠️ code review 之后那一页改成包站点的两份片段了，要重走
+- [ ] 已经停过的系列 → 页面上不再显示那颗键
+
 ## L5.9 初版那份 `EventSeries` 哪些留下了、哪些作废
 
 | 初版写的 | 现在 |
 |---|---|
 | `EventSeries` 一条规则生成 N 场 | ✅ 留下，但只服务 recurring events 那一档 |
 | `EventSeriesRole` 模板表 | ✅ 留下，同上 |
-| 纯函数生成器 | ✅ 留下，而且现在有三个调用方 |
+| 纯函数生成器 | ✅ 留下。⚠️ 「三个调用方」这句话 2026-09-10 改口了：**今天只有一个**（recurring events），另外两个还没有任何一步在做，见 L5.4 走查第 7 条 |
 | 一句删除、整批撤销、改未来 = split | ✅ 留下，多一条「有出勤的 Session 不许删」 |
 | 「例会是 `Shift`」那条边界 | ✅ 留下，写进 `Session` 的 docstring |
 | ⚠️ 「一门课十二讲 = 十二场 `Event`」 | ❌ **作废**。那是 recurring events，而一门课是 Program：一个 `Event` + 十二个 `Session` |
@@ -2694,13 +3400,31 @@ Program（决定 16–20）：
   —— L1/L4 那条规则在新表上同样成立
 - `test_a_session_somebody_attended_is_never_deleted_by_the_generator`
 
-recurring events：
+recurring events（2026-09-10 落地，**九个类 90 条** —— ⚠️ 这个数被审查抓到过一次「写着 34」， 下面是原文那五条，
+✅ 的实际落在哪个类写在后面）：
 
-- `test_twelve_occasions_are_generated_with_their_roles`
-- `test_changing_the_rule_leaves_past_occasions_alone`
-- `test_an_occasion_somebody_signed_up_for_is_never_deleted`
-- `test_undoing_a_batch_says_what_it_will_leave_behind`
-- `test_undoing_right_after_creating_leaves_nothing_behind`
+- `test_twelve_occasions_are_generated_with_their_roles` —— ✅ `EventSeriesTests`
+- `test_changing_the_rule_leaves_past_occasions_alone` —— ✅ `SeriesChangesTests`
+- `test_an_occasion_somebody_signed_up_for_is_never_deleted` —— ✅ 同上
+- `test_undoing_a_batch_says_what_it_will_leave_behind` —— ✅ `UndoSeriesTests`
+- `test_undoing_right_after_creating_leaves_nothing_behind` —— ✅ 同上
+
+⚠️ 原文这五条**漏了三类**，各自都是落地时才发现有话要说的：
+
+| 漏的那类 | 补了什么 | 为什么它不能省 |
+|---|---|---|
+| 规则本身的**第二种**拒绝 | `test_a_rule_that_would_run_past_a_year_is_refused`、`test_a_rule_nobody_could_parse_says_so_in_its_own_words` | 「带 UNTIL 或 COUNT」只挡住一种失败（走查 5） |
+| 那三个条件的**另外两个** | `test_an_occasion_added_by_hand_is_never_deleted`、`test_an_occasion_already_under_way_is_left_alone` | 原文只测了「有人报名」那一个。人手加的那一条是 `source` 这一列存在的全部理由；正在进行的那一条钉的是切点用 `start_time` 不用 `end_time` |
+| 模板上的**含容不变量** | `test_a_template_role_wider_than_its_series_is_refused`、`test_a_generated_occasion_inherits_the_series_audience` | 走查 3。模板上错一格是每一场各一次泄露，而它没有数据库约束兜底 |
+
+⚠️ 另外三条是这一轮**测试自己抓出来的设计问题**，各配了一条：
+`test_a_batch_with_survivors_is_stopped_rather_than_deleted`（`ended_on` 那条约束是错的，见 L5.4）、
+`test_undoing_twice_says_it_is_already_undone`（D40 第六节代价 3）、
+`test_the_preview_and_the_button_agree`（确认屏和按钮读同一份条件）。
+
+admin（本轮唯一的门，所以是唯一测得到的门）：`SeriesThroughTheAdminTests`，
+其中 `test_generating_from_the_admin_reaches_the_service` 钉的正是
+「生成不能是保存的副作用」那条 🔴。
 
 两个谓词：
 
@@ -2709,7 +3433,7 @@ recurring events：
 
 ---
 
-# 本轮新增的守卫（六条）
+# 本轮新增的守卫（九条）
 
 | # | 名字 | 盯什么 |
 |---|---|---|
@@ -2717,7 +3441,7 @@ recurring events：
 | 1b | `RolesAreNarrowedGuardTests` | 2026-08-29 加的第六条：函数体里出现 `select_related("role")`（也就是在**列角色行给人看**）的，必须同时调 `for_audience(`。点名三处管理侧例外 |
 | 2 | `AudienceContainmentGuardTests` | 「角色的范围 ⊆ 活动的范围」那三条比较只许出现在 `refuse_wider_than_event()` 里。⚠️ 改成多选之后可比的东西变多了，这条比枚举时代更必要 |
 | 3 | `HoursWriteGuardTests` | `.hours =` 只出现在 `events/services.py`（现在就成立，这一条是把现状钉住） |
-| 4 | `GeneratedEventDeleteGuardTests` | 生成场次的那三个删除条件只出现在 `_drop_generated_after()` |
+| 4 | `GeneratedEventDeleteGuardTests` | 2026-09-10 随 L5.4–L5.6 落地：生成场次的那三个删除条件只出现在 `_drop_generated_after()`。信号是「函数体里同时出现 `Source.GENERATED` 和 `.delete(`」，白名单只有那一个名字 —— 照 D40 第一节那条不变量的写法，它盯的是**条件**而不是「这几个文件可以删」，所以 D36 代价 4 警告的那种「白名单越放越宽」在这里没有入口。守卫 6 在低一层上的同一条 |
 | 5 | `LocalDayInSqlGuardTests` | `TruncDate(` 只出现在 `on_the_books_exists()` 所在的文件，且那一行带 `tzinfo=` |
 | 6 | `RegisterDeleteGuardTests` | 2026-09-09 随 L5.3 加的第七条：点名行的删除只许出现在 `close_future_register()`。守卫 4 在低一层上的同一条，而这一层已经出过一次事故（删角色带走整学期的点名册） |
 
@@ -2739,28 +3463,30 @@ recurring events：
 |---|---|---|
 | `events/models.py` | 一二三 | `nature`、`NOT_APPLICABLE`、新约束、第二个兜底工种、可见性的两个布尔 + 一张多对多（`Event` / `EventRole` 各一套）、`refuse_wider_than_event()`（⚠️ `Audience` 和 `AudienceQuerySetMixin` **2026-08-31 搬去了 `org/audience.py`**，留在这里的只有事件×角色那条含容规则，见 [D41 第四节](decisions/D41-notices-are-not-events.md)）、`Event.shape` + 两个谓词、`Session`（+ `duration`）、`SessionAttendance`（+ `records_hours` / `hours_received`）、`EventSeries`、`EventSeriesRole`、`Event.series` / `Event.source` |
 | `events/services.py` | 一二三 | `add_session()`（L5.1）、`add_attendance()` / `record_session_hours()` / `hours_received()`（L5.2）；`on_the_books_q()` / `on_the_books_exists()`、`default_served_as()`、`record_hours()`、`check_out()`、`create_participation_role()`、`ministry_report()`、`_people_served()`、`eligible()`（⚠️ `eligible_role_ids()` 判它不建，见 L2.4 那个补框）、`sign_up()`、系列的生成与撤销、⚠️ L5.7：工时的四个口径要 union `SessionAttendance` |
-| `events/forms.py` | 一二三 | `RoleChoiceField`、`SignUpForm`、`EventRoleForm`、`EventForm`（加三档单选）、`EventPeriodForm`、新的 `EventSeriesForm` |
+| `events/forms.py` | 一二三 | `RoleChoiceField`、`SignUpForm`、`EventRoleForm`、`EventForm`、`EventPeriodForm`。⚠️ **「`EventForm` 加三档单选」和「新的 `EventSeriesForm`」这一轮都没做** —— 第三档是 L5.8 的事，进了缺口表 |
 | `events/views.py` | 一二三 | `_visible_events()`、`_schedule()`、`_detail()`、`event_signup`、`event_registrations`、`event_attendance`、系列的三个视图 |
 | `events/urls.py` | 三 | 系列的三条路由 |
-| `org/permissions.py` | 三 | ⚠️ 原计划列在「不动」里，L5.2 推翻了 —— `FOUNDATION_ADMIN_PERMISSIONS` 加 `events.view_session` / `events.view_sessionattendance`，否则注册了也在 admin 首页上看不见 |
+| `org/permissions.py` | 三 | ⚠️ 原计划列在「不动」里，L5.2 推翻了 —— `FOUNDATION_ADMIN_PERMISSIONS` 加 `events.view_session` / `events.view_sessionattendance`，否则注册了也在 admin 首页上看不见。⚠️ L5.4 再加两行（`view_eventseries` / `view_eventseriesrole`），同一条理由第二次（走查 4） |
 | `events/tokens.py` | 三 | ⚠️ 同样原计划列在「不动」里（理由是「收窄的是发现，不是已经拥有的行」—— 那句话对受众成立，对讲次不成立）。码从按活动改成按讲次，取消 `WINDOW_BEFORE`，见 [D28](decisions/D28-qr-checkin.md) |
 | `events/schedule.py` | 三 | 新的 `Occurrence` / `occurrences()` / `meeting_summary()` / `when_line()` —— 日程按讲次画，详情页那行 When |
 | `dashboard/services.py` | 三 | L5.7 漏列的读者之一：`/me/` 的工时卡只读一列，一个整学期的助教在自己主页上看到 0 |
 | `events/admin.py` | 三 | ⚠️ 原计划整张表都没列它。L5.2 挂了 `Session` / `SessionAttendance` 两张表，L5.3 加 `ShapeFilter`（两个谓词今天唯一的读者）和 `SessionAdmin.form` |
 | `events/management/commands/seed_demo.py` | 三 | ⚠️ 同样没列。批一有整整一步（L1.5）在做演示数据，批三一步都没有 —— 而 L5.3 是「一门课报一次」第一次能在浏览器里走通的时刻 |
-| `events/admin.py` | 一二三 | `ParticipationRoleAdmin` 加 `nature`；`EventAdmin` 和 `EventRoleAdmin` 各加三个可见性字段；`Session` / `SessionAttendance` / `EventSeries` 注册。⚠️ `Session` 那一笔 L5.1 落地时漏了，L5.2 一起补 —— 在那之前那张表只有测试碰得到 |
-| `events/recurrence.py` | 三 | 新文件，纯函数 |
+| `events/admin.py` | 一二三 | ⚠️ L5.4 加 `EventSeriesAdmin` + `EventSeriesRoleInline` + **四个 action**（生成 / 即日停止 / 改规则 / 撤销），另加 `EventAdmin` 的 `series` 列和筛选，撤销那个渲染一张确认页 `templates/admin/events/eventseries/undo_confirm.html`。🔴 生成是 **action 不是保存的副作用**，两条理由见 L5.6。⚠️ 两个 action 都要 `permissions=["change"]` —— 少了这一行，`org/permissions.py` 里那个只给 `view_` 的授权**一点都不成立**（审查第 1 条）。`EventAdmin` 另加 `readonly_fields = ["series", "source"]` —— 那一列决定一条规则能不能把这一行收回去，不是一个偏好，见计划外记录第 2 条。`ParticipationRoleAdmin` 加 `nature`；`EventAdmin` 和 `EventRoleAdmin` 各加三个可见性字段；`Session` / `SessionAttendance` / `EventSeries` 注册。⚠️ `Session` 那一笔 L5.1 落地时漏了，L5.2 一起补 —— 在那之前那张表只有测试碰得到 |
+| `events/recurrence.py` | 三 | 新文件，纯函数。⚠️ 对外是 `occasions()`、`has_an_ending()` 和 `looks_like_a_rule()`，**不叫 `occurrences()`** —— 那个名字 `events/schedule.py` 已经占了，意思完全不同（走查 6） |
+| `org/audience.py` | 三 | ⚠️ 原计划整张表都没列它。`Audience` 加 `AUDIENCE_PARENT` / `AUDIENCE_CHILDREN` 两个类属性，`AUDIENCE_HEADING` / `EMPTY_AUDIENCE_MESSAGE` 各加两条 —— 含容不变量原来**只有把父表叫 `event` 的表够得着**（走查 3） |
+| `notices/models.py` | 三 | ⚠️ 同上：`Notice` 声明那两个属性各为 `None`。抽象类给第二个的默认值是 `"roles"`（五张表里三张的形状），而这张表正是当年为「猜而不是声明」付过账的那一张 |
 | `events/migrations/0016_participationrole_nature.py` | 一 | 新 |
 | `events/migrations/0017_served_as_not_applicable.py` | 一 | 新 |
 | ~~`events/migrations/0018_audience_and_signups.py`~~ | 二 | ❌ **没有这个文件**，2026-09-05 划掉。批二实际拆成了四条：`0018_second_catch_all_role`（L1.6，下面单独列着）、`0019_event_audience`（含回填）、`0020_audience_reverse_name`、`0021_drop_event_type`。后三条各自在正文里有说明，唯独这一行从没跟着改 —— 于是总表里一度同时存在两个 0018 |
 | `events/migrations/0022_session.py` | 三 | 新（L5.1）。⚠️ 编号：批二实际拆成了 0018–0021，所以批三从 0022 起 |
 | `events/migrations/0023_audience_help_text.py` | 二 | ⚠️ 2026-09-08 补进总表 —— 它 2026-09-04 就落了地，而这张表从没记过它。于是 L5.2 的编号是 **0024** 不是 0023 |
 | `events/migrations/0024_session_attendance.py` | 三 | 新（L5.2）。纯 `CreateModel`，无回填，同 0022 的形状 |
-| `events/migrations/00NN_event_series.py` | 三 | 新（L5.4）。⚠️ 编号等落地时定，不预写 |
-| `core/constraints.py` | 一三 | `CONSTRAINT_FIELD` 加一行；⚠️ 批三 L5.1 又加两行（`Session` 的两条约束）—— 这一格 2026-09-05 之前写的是「一」，而批三加约束不改它，`core/tests.py` 那条守卫会当场红。L5.2 再加**五行**（`SessionAttendance` 那一组） |
+| `events/migrations/0028_event_series.py` | 三 | 新（L5.4–L5.6，2026-09-10）。两张表 + 两张历史表 + `Event` / `HistoricalEvent` 各两列。**无回填**，而这一句是核对过的：两列的默认值对库里现存的每一行都成立，因为这条迁移之前没有规则造得出行来。⚠️ 对照 0027 —— 那一条**必须**回填，L5.1/L5.2 已经长了三天带讲次的活动 |
+| `core/constraints.py` | 一三 | ⚠️ L5.4 再加三行（`EventSeries` 一条 + `EventSeriesRole` 两条）—— 全轮这张表原来没提 L5.4，而少一行 `ConstraintMappingGuardTests` 当场红（走查 2）。`CONSTRAINT_FIELD` 加一行；⚠️ 批三 L5.1 又加两行（`Session` 的两条约束）—— 这一格 2026-09-05 之前写的是「一」，而批三加约束不改它，`core/tests.py` 那条守卫会当场红。L5.2 再加**五行**（`SessionAttendance` 那一组） |
 | `core/timeutils.py` | 一 | `local_day()` —— `local_date_of()` 的 ORM 双胞胎，`tzinfo` 包在里面 |
 | `core/querysets.py` | 一 | `in_effect_on()` 的 docstring：`on` 现在也可以是数据库表达式 |
-| `core/tests.py` | 一二三 | 五条新守卫 |
+| `core/tests.py` | 一二三 | 五条新守卫；⚠️ L5.4 再加三条：`GeneratedEventDeleteGuardTests`、`PosterIsAskedGuardTests`、`AdminActionsDeclarePermissionsGuardTests`，**每一条都做过双向验证** |
 | `events/tests.py` | 一二三 | 上面列的全部测试 |
 | `events/templates/events/_report_body.html` | 一 | 分母说明、`hours_missing` 措辞、People served |
 | `events/templates/events/_attendance_row.html` | 一 | attending 不画工时 |
@@ -2844,7 +3570,7 @@ grep 了一遍，它里面搜不到 `served_as`、`stop_at_needed_count`、`comp
 
 - `python manage.py check` / `makemigrations --check` / `ruff` 干净
 - 测试数只增不减
-- 五条新守卫全部做过双向验证
+- 八条新守卫全部做过双向验证
 - `python manage.py test core.tests.MarkdownLinkGuardTests core.tests.EmphasisGuardTests core.tests.DecisionSectionReferenceGuardTests` 绿。
   本轮改十份文档，三条都要跑：链接那条挡指不到的文件和锚点，
   节号那条挡正文里的假引用，强调那条挡「星号和加粗越写越多」
@@ -2900,13 +3626,23 @@ L5.3（Programs）—— ⚠️ 下面这些是**浏览器**验收，一条都�
 - [ ] 勾上「让学员自己挑讲次」→ 报名页真的问他哪几讲、只列还赶得上的、不选被拒
 - [ ] 照片墙灯箱：喂一个坏图 URL → 停在缩略图，不出碎图标
 
-L5.4–L5.6（recurring events）:
+L5.4–L5.6（recurring events）—— ⚠️ 2026-09-10 落地。下面同样是**浏览器**验收，
+一条都没走；自动化那半已经绿了（全量测试、`ruff`、`makemigrations --check`、
+四条文档守卫，以及 `GeneratedEventDeleteGuardTests` 的双向验证 ——
+故意在别处种一句同形状的删除，确认它真的红，再撤掉）。
 
-- [ ] 一门课按规则生成 N 场，N 场归成一组，每一场都带着角色
+- [ ] 按规则生成 N 场，N 场归成一组，每一场都带着角色，且状态跟模板走
 - [ ] 改规则只动未来的场次，且有人报名的那一场一行没动
+- [ ] 人手加进这一批的那一场，再按一次生成之后还在（⚠️ 现在生成只补不删，所以这一条比原来弱；真正该走的是下面两条新的）
+- [ ] 传一张图到系列上 → 每一场都显示它；换一张 → 每一场跟着换；最后一场结束之后图才消失
+- [ ] 「即日停止」之后未来那几场真的从 `/events/` 上没了（不是只停了生成）
 - [ ] 跨过夏令时切换，当地时间不变
 - [ ] 刚建完就撤销 → 库里干净得像没发生过
-- [ ] 三周后再撤销 → 确认屏说得出会留下几场、为什么留
+- [ ] 三周后再撤销 → 确认屏说得出会删几场、会留几场、每一场为什么留
+- [ ] 再撤一次 → 说「已经撤销过」，不报错
+- [ ] 模板角色勾得比系列宽 → **在发布那一刻被拦住**，不是等到生成时才炸
+- [ ] `COUNT=500` → 被拒，且话里说得出上限是多少
+- [ ] 报一个星期二 → 只报上那一场，下个星期二一行没有
 
 ---
 
@@ -3426,3 +4162,344 @@ L5.3 落地时红了两条，各自都是**照字面读需求会写出来的那�
 ⚠️ 记下来是因为本轮前几步的坑清一色是「照字面敲会漏抄一条」（L5.1 六处、
 L5.2 八处），那类靠对着仓库现状走查就能挑出来。这一次两条都是**设计本身**的
 歧义，走查挑不出来 —— 它们要跑起来才现形。两种坑，两种工具。
+
+## L5.4–L5.6 · 五条实施时才现形的，其中一条是浏览器抓到的（2026-09-10）
+
+本轮开工前的走查挑出九条（写在 L5.4 那张表里），那些是文档自己的坑。
+下面五条是**跑起来才现形**的，和 L5.3 那两条属于同一类。
+
+1. **`EventSeries` 上那条 `ended_on >= starts_on` 的约束是错的。** 初稿有它，
+   照 `Assignment` / `MinistryRole` 抄的。第一次跑撤销的测试就红了：建一批
+   **下个月**的场次、其中一场有人报名、当天下午撤销 —— 留下来的那一场让系列活着，
+   `ended_on` 写成今天，于是约束拒绝了一次完全正常的动作。
+
+   错在**把这两列读成了一段任期**。`Assignment` 那对确实夹着一件事；这一对不是：
+   `starts_on` 是规则锚在哪一天，`ended_on` 说的是「这天之后不再生成」，
+   截止早于锚点是一个真实、说得出口的状态 ——「它还没开始我们就停了」。
+   约束整条去掉，理由写在原地，因为「两个日期得有先后」是任何人读到这张表时
+   **第一个会伸手去加**的东西。
+
+2. **`Event.source` 让 admin 的建活动页整个不能用了，而抓到它的是一条和它毫无
+   关系的测试**（`AudienceThroughTheAdminTests`，L2 那一批的）。这一列有默认值
+   但没有 `blank=True`，于是 ModelForm 把它渲染成必填，而没有任何一个 payload
+   会带它。表现是「建活动被拒，说 source 是必填」——
+   而**新加的那五个测试类一条都不会红**，因为它们谁也不走建活动那条路。
+
+   ⚠️ 改法不只是让它别必填：`series` 和 `source` 一起进 `readonly_fields`。
+   🔴 `source` 不是一个偏好，它决定**一条规则能不能把这一行收回去**。
+   手工建的活动被人设成 `generated`，下一次重算就会连同上面的报名一起把它撤掉；
+   手工改 `series` 则是把一行塞给一个从没造过它的系列。两件事都只能走
+   `generate_occasions()`，或者根本不发生。
+
+3. ⚠️ **两条守卫式的收尾都是「反过来也要成立」才算数的。** 守卫四做了双向验证
+   （故意在别处种一句同形状的删除，确认它真的红，再撤掉）；
+   而夏令时那条测试断言的是**两件事**：三场当地时间都是 19:00，
+   **并且**它们的 UTC 偏移确实有两个值。后半句不写，前半句在一个不跨越切换的
+   fixture 上会永远绿 —— 那正是本项目定义的「没写的守卫」。
+
+4. 🔴 **含容不变量在表单那一侧还有一份，而我只修了服务那一侧。**
+   走查第 3 条的改法是让 `refuse_bad_audience()` 读 `AUDIENCE_PARENT` 而不是
+   猜一个叫 `event` 的属性。改完、测试全绿、浏览器点得通 —— 而
+   `events/forms.py` 的 `EventAudienceFormMixin.submitted_event()` 里**一模一样
+   的那个字面量**还在。
+
+   后果：admin 的 inline 上，给一个「仅在编可见」的系列加一个「对外可见」的
+   模板角色，**存得下去、返回 302、一个字不报**，而那条规则接下来生成的每一场
+   都带着这个缺口。而 inline 正是本轮唯一的门。
+
+   ⚠️ 抓到它的是一条**为这一页新写的**测试（`test_a_template_role_wider_than_
+   its_series_is_refused_on_the_page`）。规则那一层的测试是绿的，服务那一层的
+   测试是绿的 —— 因为它们测的是我修过的那一份。**一条规则有两份实现时，
+   修好一份会让另一份看起来也修好了**，这正是本仓一直在判的那个病，
+   而这一次它就发生在修那个病的同一个提交里。
+
+   ⚠️ 顺手把镜像的那一半（`refuse_narrowing_below_the_roles` 里的 `roles`）
+   也改成读 `AUDIENCE_CHILDREN`。那一处**本来就是对的** —— 三张有子行的表
+   恰好都叫 `roles` —— 但「碰巧对」不是值得留着的性质，尤其当那个声明就在旁边。
+
+5. **含容拒绝那句话在系列页上写着一个不存在的东西。** 浏览器上一屏读到的是
+   「This **event** is not open to people with no current post…」——
+   而那一页上没有活动，只有系列。
+
+   ⚠️ 值得记的不是这个字错了，是**这个仓库提前一年零几个月写下过它**：
+   `EventAudienceFormMixin` 的 docstring 里明写「含容那点算术搬得动，
+   **它的句子搬不动** —— `TOO_WIDE_STEM` 读作『This event is not open to…』，
+   而没有第三张表让这句话成立」。现在有第三张表了，而那句预言就在改动的文件里，
+   隔着二十行。
+
+   改法照本仓已有的做法：那个名词变成参数，按 `AUDIENCE_ON` 查一张
+   `PARENT_NOUN` 表 —— 和 `AUDIENCE_HEADING` / `EMPTY_AUDIENCE_MESSAGE`
+   同一个形状，那两张表自己的注释就写着「第四张表加一条就完事」。
+   ⚠️ 「改窄会落下角色」那句（`NARROWING_MESSAGE`）同一处病，一起改。
+
+⚠️ 五条的共同点值得单独说一句：**新功能的测试只盯着新功能**。第 2 条是全量
+测试里唯一红的一条，来自三周前写的、和这一轮无关的一个类。所以
+「新加的都绿了」不是可以提前收工的理由，跑全量才是。
+而第 4 条把这句话又推进一步：**新功能的测试也只盯着新功能里我刚碰过的那一份实现**。
+第 5 条再推一步：**它一个字都读不出来**。那句话对每一条测试都是「一个非空的错误」，
+只有把页面打开的人才看得见它说的是一个不存在的东西 —— 浏览器验收买到的就是这个。
+
+## L5.4–L5.6 · 一轮代码审查跑出八条，八条全部复现（2026-09-10，同日）
+
+上面那五条是实施时撞上的。这八条是**交付之后**一轮专门的代码审查跑出来的 ——
+而那次交付是绿的：2030 条测试、`ruff`、`makemigrations --check`、八条守卫、
+外加一遍浏览器走查。八条逐条复现过，没有一条是误报。
+
+> ⚠️ **复现的时候自己先错了一次，值得记下来。** 第 4 条第一次跑「没复现」，
+> 因为那条一次性脚本用 `start_time__date=` 筛当天 —— 那是 **UTC 的那一天**，
+> 正是 `TimeSourceGuardTests` 存在的全部理由。改成 `local_date_of()` 之后当场
+> 复现。**一个「没复现」和一个「复现了」一样需要被审视**，而这次的教训是：
+> 验证别人报的问题时，最先该怀疑的是自己那段验证代码。
+
+| # | 是什么 | 为什么绿着的测试看不见它 |
+|---|---|---|
+| 1 🔴 | **两个 action 都没写 `permissions=`，于是只有 `view_` 的 foundation admin 能生成、能整批撤销。** 实测：一个只持 `view_eventseries` 的账号建出 4 场活动、撤掉整批 | Django 的 `_filter_actions_by_permissions()` 放行任何**没有** `allowed_permissions` 的 action，而 changelist 对任何打得开这一页的人都渲染那个下拉。🔴 而唯一声称这里锁着的东西**是我自己写的那段 docstring** —— 一句承诺了锁的注释比一扇没锁的门更糟，它让下一个人不再去看 |
+| 2 | **「即日停止」之后再点一次生成，今晚那场回来了。** 停止按的是**时刻**（「开始了没有」），而重算的过滤按的是**日期**（「在停止那天或之前」）。一年里正好有一天两者不一致 —— 就是有人按下停止的那一天 | 那条测试（`test_a_stopped_series_does_not_grow_new_occasions`）**在大多数日子是绿的**，只在周二 19:00 之前会红。它不是漏了，是**按日期漂移的** |
+| 3 | 同一个边界，撤销那一侧：撤过的批次（因为有人报名而留了下来）离「被重新生成回来」只差一次点击，而那个按钮就在同一屏上 | 同上。撤销的部分分支也把 `ended_on` 写成今天 |
+| 4 | **原地改时间会把一场聚会变成两个活动。** 19:00 改 20:00 再生成：没人报名的那几场被收走重建在 20:00，**有人报名的那场不许删、留在 19:00**，于是同一晚上出现两个活动，志愿者占着其中一个 | 🔴 L5.6 正文早就写了「不做原地改规则重算」，`split_series()` 就是那条路 —— **而没有任何东西挡着另一条路**。又一次「决定写下来了，没有人兑现」，本轮第二次 |
+| 5 | 撤销确认屏对一个八天前的批次照样印「将删除 N 场」，按下去一场都不删 | `undo_preview()` 只算那三个删除条件，`undo_series()` 另外还判七天窗口。**这一屏存在的全部理由就是不说假话** |
+| 6 | 生成 action 没有接 `ValidationError`，于是一个受众为空的系列会把 admin 打成 500，而服务层的 `atomic` 已经把写回滚掉了 —— 人看到的是崩溃，不知道写没写进去 | 旁边的 `undo_batch` **接了**。同一个文件里两个 action，一个对一个错，和 2026-09-08 那次「两扇门，一扇忘了上锁」同形 |
+| 7 | `COUNT=100` 的规则静静生成 53 场，并且告诉你「53 occasion(s) generated」 | 上限只在 `clean()` 里判，而 `objects.create` / 导入 / seed 都不走它。D14 的老问题：规则只写在人打字的那道门上 |
+| 8 | `EventSeriesRoleInline.show_change_link = True` 什么都不做（`EventSeriesRole` 没注册进 admin） | Django 静默地不渲染它。一个**看起来像被谁弄坏了的链接**，而它从来就不存在 |
+
+### 八条的共同点，而这一条比八条本身值钱
+
+每一条都长在**两块各自正确的东西中间**。
+
+- 权限那一行是对的，action 没去要它；
+- 停止是对的，生成器不认它；
+- `split_series()` 是对的，没有任何东西把人送过去；
+- 那句拒绝是对的，屏幕没等它。
+
+一块一块地测，八条一条都测不出来 —— 这正是它们活过 2030 条绿测试和一遍浏览器
+走查的原因。⚠️ 本轮已经记过一次「新功能的测试只盯着新功能」，又记过一次
+「只盯着我刚碰过的那一份实现」。这八条是第三层：**测试盯着的是零件，而这些
+问题住在接缝上。**
+
+⚠️ 处置：八条全部修掉，各配一条测试，集中在 `SeriesReviewFindingsTests` ——
+**不打散到那四个类里**，因为它们的共同点是「怎么被发现的」，而下一个人在判断
+该信哪些测试的时候，应该能一次看见这一整张单子。
+
+## L5.4–L5.6 · 七个角度的独立审查，三十余条（2026-09-10，第三轮）
+
+第一轮是开工前走查（九条，文档自己的坑）。第二轮是实施时撞上的（五条）。
+第三轮是交付之后**七个各自只问一个问题**的独立审查：对不对得上前面、专不专业、
+漏没漏、直不直观和理不理性、完不完整、有没有兑现需求，外加一个「资深工程师」
+视角问这做法在业界靠不靠谱。
+
+### 🔴 第一条：`generate_occasions()` **根本不幂等**，而它的 docstring 说它是
+
+先 `_drop_generated_after()`，再读 `standing` —— 于是那个「已经站着的就跳过」的
+集合，对每一个刚刚被收走的行都是**空的**。跳过只保护了收不走的那些（有人报名的、
+已经开始的、人手加的），而**每一个没人碰过的未来场次都被删掉重建**。
+
+实测按两次生成：
+
+```
+第一次 pks [9, 10, 11, 12]
+第二次 pks [13, 14, 15, 16]   ← 同样四个晚上，四个新行
+提示语「4 occasion(s) generated. …nothing was removed」
+```
+
+跟着一起没的：
+
+| 没的东西 | 后果 |
+|---|---|
+| 一场被 admin **取消**的活动 | 回到 `open`，而且记录「已经通知过谁」的 `EventNotification` 跟着级联删掉 |
+| 手工改过的地点 / 说明 | 还原，一个字不说 |
+| 主键 | 每一条已经发出去的 `/events/<pk>/` 链接、`.ics` UID、签到二维码全部指向不存在的行 |
+| 历史 | 三次按下之后，四个场次留下 32 行历史 |
+
+⚠️ **而这一格的修法比 bug 本身简单**：自从「规则一旦生成过就冻结」落地，
+生成器已经**没有任何该收的行**了 —— 规则不能变，时刻集合就不会变。
+所以 `generate_occasions()` 现在**一行都不删**，只补缺的那些
+（`open_register()` 一张表之外早就写着的那句「补齐不是重建」）。
+删除仍然只有一处，三个调用方：停止、split、撤销 —— 生成不是其中之一。
+
+### 第二条：需求 4 的后半句**从来没有兑现**
+
+发布表单至今只有两档。`events/forms.py` 那条注释写着「第三档等生成器存在就加进
+这个字段」，生成器 2026-09-10 就存在了，没有人回来加。于是基金会原话
+「可以让 admin **选**」—— 一个给发布者的选择 —— 今天**没有任何发布者被给到**：
+建一条规则只有超级用户在 admin 里做得到。
+
+⚠️ 而代码和文档里有**五处**声称相反（`Event.Shape` 的 docstring、`EventSeries` 的
+docstring、那条注释、participants.md 第十节、L5.3 那句「届时加进同一个字段」）。
+五处全部改口，缺口进 participants.md 第九节，重启条件 L5.8 ——
+**不在这一轮补做**：第三档要在发布表单上多出规则和时长两栏、走另一条保存路径
+（建的是 `EventSeries` 不是 `Event`）、还要有一个「建完去哪儿」的答案，那是页面的事。
+
+### 其余（逐条修掉，各配测试）
+
+| # | 是什么 |
+|---|---|
+| 3 | **`stop_series_today()` 和 `split_series()` 都没有入口**，而两处注释写着「这是人按的按钮」，还有两句拒绝把人指向它们。`ended_on` 手填只停生成、**不收回任何东西** —— 填完之后四个已发布的晚上仍然站在日历上可报名。补了两个 action，并把 `ended_on` 设成只读：唯一的入口是那个两件事一起做的按钮 |
+| 4 | 撤销确认屏的 `within_window` 只包住了「将删除 N 场」那一行，**另一半还在说**「库里干净得像没发生过」—— 同一个假承诺，往下一段，而上面那条注释还写着它已经修好了 |
+| 5 | `has_an_ending()` 在**解析之前**问，于是「every tuesday」被判成「这条规则永远不停，加个结束」—— 对一个根本不是规则的输入给了「除了结束哪儿都对」的建议。⚠️ 而 `recurrence.py` 自己的 docstring 反方向写着这条危险 |
+| 6 | `duration` 填 `2` 是**两秒**（`DurationField` 把裸数字读成秒），五十二场两秒的活动，一个字不报 |
+| 7 | `starts_on` 不检查星期几。标签写着「First one on」，而周三配周二的规则被收下，第一场悄悄落在六天后 —— 撤销确认屏那句「first on 17 Sept」印的是一个什么都不发生的日子 |
+| 8 | `status` 给了全部五档，于是可以把一个月后的四场活动生成成「已结束」。决定 30 只论证了 draft / open 两档 —— **实现比它的理由宽** |
+| 9 | 上限那句话在非周更的规则上算错账：90 天的每日晨祷被一句「这超过一年的周更」拒绝，而月度规则能排到 2030 |
+| 10 | `COUNT=0` 得到的建议是「检查起始日和重复的星期几」，而那条规则里根本没有星期几 |
+| 11 | `EventAdmin` 上没有 `series` 列也没有筛选：一条规则放 52 行同名活动到那一页，而那是员工真正天天看的页面 |
+| 12 | 撤销的拒绝不报批次名（旁边那个 action 报），多选时分不清是哪一条 |
+| 13 | `split_series(**fields)` 把拼错的字段名**静静吞掉** —— 而它是改规则唯一被认可的路 |
+| 14 | 一场活动跨夏令时切换时，`moment + duration` 是**墙钟**加法：01:30 的两小时活动在春天那个早上只开了一个真实小时 |
+| 15 | 四个 `now=None` 参数、`_occasion_moments(upto=)`、`live()` 没有任何调用方 |
+
+### 图片：这一格没有进缺口表，当场做掉了
+
+原方案是「模板不带图片」，理由是 purge 会在第一场结束后删掉文件。
+走查时判定**不能接受** —— 「传一次、每场都有图」是一个合理到不该被拒绝的要求。
+三条路：
+
+| | 结果 |
+|---|---|
+| 复制 52 份字节 | 能用。换一张图要改 52 处，而且**一处都追不到已经生成的** —— 正是下面那条缺口的病 |
+| 52 行共用同一个**路径** | 🔴 最坏。第一场结束、purge 一跑，其余 51 场全变碎图标，而 `purge_event_image()` 自己的注释就写着「指向不存在的文件比没有图更糟」 |
+| **图放系列上，场次引用它**（`Event.poster`） | ✅ 一个文件、改一处全改、某一场想用别的图还可以单独传 |
+
+⚠️ **purge 那条规矩一个字都没改**，改的只是「那个东西」指谁：单场活动是它自己，
+系列那张图是**最后一场结束之后**。判据仍然是 `end_time` 不是 `status` ——
+现有那条 queryset 的理由（「靠人记得去标完成的图就是永远不会消失的图」）一字照抄。
+
+⚠️ 唯一复制字节的地方是 `split_series()`：两条系列**生命周期独立**，
+旧的最后一场先结束、purge 先删它的图，共用路径会把新的打碎。
+一次复制，因为有两个**所有者**；不是 52 次，因为场次不是所有者。
+
+⚠️ 守卫 `PosterIsAskedGuardTests`：模板只许问 `poster`，不许直接读 `.image` ——
+直接读的表现是 52 场全显示默认 logo，而那看起来和「这个系列没人传过图」一模一样。
+双向验证过。
+
+⚠️ **另一条写下来的缺口**：模板上的名称 / 地点 / 说明 / 受众是在生成那一刻**复制**
+过去的，之后各是各的 —— 改窄系列的受众**不会**改窄已经生成的场次。
+真正的答案是每个日历都会问的那三选一（「这一场 / 这一场及以后 / 全部」），
+而那需要一个页面去问。今天在 help text 上如实写出来，缺口进第九节。
+
+### 三轮加起来的那句话
+
+**「一句承诺了锁的注释比一扇没锁的门更糟」在这一个功能里出现了三次**，
+三次都是我自己写的注释：
+权限那一次（docstring 说只有超级用户，实际只持 `view_` 就能按）、
+幂等这一次（docstring 说手工改过的会活下来，实际全删）、
+以及「`stop_series_today()` / `split_series()` 是人按的按钮」那一次（两个都没有按钮）。
+
+⚠️ 第一轮靠对着仓库走查、第二轮靠跑起来、第三轮靠**七个只问一个问题的人**。
+三种工具找出三类完全不同的问题，而第三类（「你说它做得到，它做不到」）
+是前两种都找不出来的 —— 因为代码和测试是一致的，**不一致的是代码和它自己的注释**。
+
+## L5.4–L5.6 · 第四轮：修完之后再查一遍，又是十一条（2026-09-10）
+
+前三轮：开工前走查（九条）、实施时撞上（五条）、七个角度的独立审查（三十余条）。
+这一轮是**把修完的树重新交给同样那几个视角**，其中「Google 资深工程师」那一份
+给的结论是 **still not approved**，四个 block 点。四条全部修掉，另加七条。
+
+⚠️ **这一轮每一条都是一个真人在平常日子里会做的事** —— 双击一个慢按钮、
+把上学期的开始日期打进去、从 Google 日历粘一条规则。没有一条是刁难，
+而在这之前没有一条会报错。
+
+| # | 是什么 | 后果 |
+|---|---|---|
+| 1 🔴 | **双击「生成」会把整批建两遍。** 读「哪些时刻已经站着」和写之间没有锁，两次点击在 READ COMMITTED 下各自读到空集 | 实测 4 场变 8 场，**一个字不报**，两条绿色提示都说「4 occasion(s) generated」。而那个按钮慢到会让人想再点一次：52 场 × 2 个角色 ≈ 2500 条查询。修法两半：`(series, start_time)` 的**部分**唯一约束（同一时刻两场手工活动仍然合法 —— 一个周六早上两辆车）+ 生成时 `select_for_update` |
+| 2 🔴 | **起始日填在过去，会造出撤销够不着的活动。** 往回十二周的规则生成十二场，其中九场已经过去 —— 已发布、带角色、进 ministry 报表当成「开过但没人来」的会 | 而 `_collectable_occasions()` 按设计不碰任何已经开始的东西，所以撤销撤不掉，只能一行一行手删。⚠️ 改成**在门口拒绝**而不是让生成器跳过：跳过更省事也更糟，因为「为什么只有三场」在页面上没有任何地方答得出来 |
+| 3 🔴 | **`UNTIL=…Z` 被拒，而那是每个日历导出的标准写法。** 拒绝的话是 dateutil 的原文：「UNTIL values must be specified in UTC」—— 而他填的**就是** UTC，是我们的 `DTSTART` 是 naive 的 | 一个出不去的循环，踩在最可能被粘进来的那种输入上。⚠️ 修法是**换算**不是**去掉 Z**：`20270101T000000Z` 在加州是 12 月 31 日下午四点，去掉 Z 会把截止日挪掉一天 |
+| 4 🔴 | 规则里**夹带 `DTSTART:`** 会静静盖掉上面两个框。页面写着「19:00」，生成出来是 09:00 | 日期那一半被新加的「第一场必须等于 starts_on」抓到了，**时刻那一半没有**，而且不会被抓到 —— 没有任何一处比较它 |
+| 5 | 「改规则」是这组里**唯一一个不报数字的破坏性动作**。它撤掉四个已发布的晚上，只说「副本建好了 (#17)」 | 两个兄弟 action 都报了数 |
+| 6 | 撤销一整批会**遗弃系列那张图**：行删了，文件还在，而 `series_with_images_to_purge()` 查的是 `EventSeries` —— 再没有任何东西会去找它 |
+| 7 🔴 | **`SessionAdmin` 的删除保护问的是「工时」，而来参加的位置按设计不记工时**（决定 20）。一个满员的学员点名册求和是 0，删除按钮是亮的 —— 而 `SessionAttendance` 从 `session` 级联 | 那道守卫问的是**志愿那一半的问题**，问在一张专门为装下两半而建的表上。⚠️ 改成问「有没有证据」，而且是**证据不是预期**：`add_session()` 会给已报名的人自动开点名行，按行数算会让一个刚排错的讲次删不掉 |
+| 8 | 撤销窗口从 `series.created_at` 算，而**决定 30 保证这两个不一样** —— 系列生来是 draft，就是为了让人建完、看一眼、过几天再发布 | 实测：一个月前起草、三十秒前生成，撤销被拒，理由是「这批是七天前建的」。加 `generated_at` / `generated_by` 两列 |
+| 9 | 没有任何守卫盯着「admin action 必须声明 `permissions=`」—— 而那是本轮**最重的一条**学到的规矩，且这个类当天又长了两个 action | 补 `AdminActionsDeclarePermissionsGuardTests`：走 `admin.site._registry`，读每个 callable 的 `allowed_permissions`，所以它盯得住这个文件从没点过名的 action。双向验证过 |
+| 10 | `split_series()` 的后继从**今天**起算，而「第一场」必须落在规则重复的那一天 —— 于是七天里有六天，改规则这条唯一被认可的路会被一个它自己没碰过的字段拒掉 | 被一条为**图片**写的测试抓到 |
+| 11 | 一条「从来没生成过」的系列，撤销**应该**能把它整个删掉（D40 §1 的 95%），而我第一版的窗口判它「没有批次可撤」 | 被我自己写的那条测试抓到 —— 而我在它的 docstring 里把理由写反了 |
+
+### 图片：不接受那条缺口，当场做掉了
+
+原方案「模板不带图片」被判**不可接受**。三条路里选了**引用**而不是复制：
+图放系列上，场次通过 `Event.poster` 读它。一个文件、改一处全改、某一场想用
+别的图还可以单独传。purge 那条规矩一个字没改，只是「那个东西结束了」问的是
+**最后一场**。⚠️ 唯一复制字节的地方是 split —— 两条系列生命周期独立，
+共用路径会让旧的 purge 把新的打碎。守卫 `PosterIsAskedGuardTests`，双向验证过。
+
+### 四轮下来，那句话出现了四次
+
+**「一句承诺了锁的注释比一扇没锁的门更糟」** —— 权限那次、幂等那次、
+「stop / split 是人按的按钮」那次，以及这一轮的第 7 条（守卫的 docstring 说它
+挡住了删除，而它对半张表是瞎的）。四次都是我自己写的注释。
+
+⚠️ 而这一轮多出一条新的：**我的两条判断被我自己的测试推翻**（第 10、11 条）。
+第 11 条尤其值得记 —— 我在 docstring 里把「没生成过的系列不该能撤销」论证得很顺，
+测试一跑就发现论证是反的。**写得顺不等于是对的**，而测试是唯一不看文笔的读者。
+
+## L5.4–L5.6 · 第五轮：三个验证 agent 把修复本身又查了一遍（2026-09-10）
+
+修完第四轮之后，把**同一棵树**交给三个只问一件事的验证者：修复是不是真的、
+文档和代码现在对不对得上、以及「Google 资深工程师」再看一遍。
+又是九条，其中一条是这一整轮里**最值得记的一条**。
+
+### 🔴 最重的一条：我自己的重构把守卫拆废了，而拆的理由是「让它更硬」
+
+`GeneratedEventDeleteGuardTests` 的信号是「同一个函数体里既出现 `Source.GENERATED`
+又出现 `.delete(`」。第四轮我把那三个条件抽进 `_collectable_occasions()`，
+好让确认屏**数同一个查询**而不是自己复述一遍 —— 抽完之后：
+
+| | `Source.GENERATED` | `.delete(` |
+|---|---|---|
+| `_collectable_occasions()` | ✅ | ❌ |
+| `_drop_generated_after()` | ❌ | ✅ |
+
+**两边各有一半，于是守卫一个都匹配不到，继续绿。** 验证者种了一句
+`_collectable_occasions(series, after).delete()` —— 一个「最自然的写法」的第二个
+删除者 —— 守卫**没红**。
+
+⚠️ 这是「一个注释就能满足的守卫」那条教训**从反方向来的版本**：
+**一次读起来像收紧的重构，可以把信号拆散**，而没有任何东西会告诉你 ——
+一个什么都匹配不到的守卫，和一个没东西可抓的守卫，长得一模一样。
+改法是两个信号任取其一（点名 `generated` 那个源，或者调那个持有条件的函数），
+并且用那句「最自然的写法」重新做了双向验证。
+
+### 其余八条
+
+| # | 是什么 |
+|---|---|
+| 1 🔴 | **今天上传的图，今晚就被 purge 删掉。** 我写的「没有任何未来场次的系列要被收走」对一个「建完还没按生成」的系列同样成立 —— 上传、下班、第二天图没了。判据改成「**有没有跑过**」（`generated_at`）而不是「有没有未来」。代价写下来：建完就永远放着不管的系列会留一个小文件，而这比删掉别人刚传的图好得多 |
+| 2 🔴 | **系列那张图绕过了 EXIF 剥离。** `Event.image` 从落地起就走 `normalise_event_image()`，理由写在它自己的注释里：手机照片带 GPS，一张在别人家里拍的活动照会把住址发给每个登录用户。系列是这个功能**唯一新增的上传口**，而它走了后门 —— 而它的图还会显示在每一场上 |
+| 3 | `Source` 的 docstring 说「唯一的读者是 `_drop_generated_after()`」—— 抽完之后那个函数**什么都不读**了，它只是对 helper 交回的东西动手 |
+| 4 | 那句「三个调用方」在这一侧是**两个**：D40 的第三个（重算未来）在活动这边不存在，因为规则冻结之后生成器没有该收的行 |
+| 5 | 图片那条 🔴「没有图片列，这是一条写下来的缺口」—— 而那一列就在它下面四十行 |
+| 6 | `split_series()` 那条「没有入口」的缺口注 —— 入口第四轮就建好了 |
+| 7 | 确认屏印 `created_at`，而按钮判的是 `generated_at`；同一屏还写着「已经发生的永远不会被重新生成」，而生成器会填**任何**没有场次站着的时刻，包括过去的 |
+| 8 | `Event.poster` 在志愿者列表页是 **N+1** —— 每一个生成的行一次查询，而那是全站被打得最多的一页。`EventAdmin` 为这件事加过 join，公开那一页没有。实测 8 场 8 次查询 → 1 次 |
+| 9 | `PosterIsAskedGuardTests` 的正则只认 `event|occasion|e`，而 Django `DetailView` 的默认上下文名是 `object` —— **最可能的下一种写法正是它看不见的那一种** |
+
+⚠️ 另外补了一条守卫：`AdminActionsDeclarePermissionsGuardTests`。
+本轮最重的那条（只持 `view_` 也能按）原来只由一个「遍历这一个类的 actions」的
+循环钉着，而**同一天这个类又长了两个 action**。守卫改成走 `admin.site._registry`，
+读每个 callable 的 `allowed_permissions` —— 它盯得住这个文件从没点过名的 action。
+
+### 第五轮验证之后又补了四条，其中两条是**我刚修好的那两条守卫仍然绕得过去**
+
+| # | 是什么 |
+|---|---|
+| 1 🔴 | `GeneratedEventDeleteGuardTests` 两个信号仍然**都躲得开**：把过滤放一个 helper、`.delete()` 放调用方 —— 而那**正是这个功能刚引入的那种两函数形状**。所以下一个照着这个模式写的人，会直接走过为拦他而写的那道守卫。改法不是再加信号，是换一个问题：`DeletesInServicesAreEnumeratedGuardTests` 问的是「这个模块里**哪些函数会删东西**」，一个拆分答不过去 —— 整个服务层只有五个删除，逐个点名，加一个名字这件事本身就是「你得说清楚删的是什么、为什么可以删」的那一刻 |
+| 2 🔴 | `PosterIsAskedGuardTests` 被**任何含 `form` / `field` 的一行**解除武装 —— 而 `class="form-row"` 是最普通不过的 admin 样式类。一个样式类就能关掉的豁免不叫豁免。改成匹配**被渲染的那个变量**本身，而不是在整行里搜。另外它对注释是红的，而同文件的兄弟守卫早就有 `_blank_out_comments()` |
+| 3 | 「即日停止」那个 action 和 `ended_on` 的只读**一条测试都没有** —— 删掉任何一个，全量测试照样绿，而那一轮的记录把两者都写成「修复」 |
+| 4 | 确认屏那半边的修复同样没有测试兜住：`shipped` 那条只断言「关闭那句在」和「按钮不在」，而漏掉的那句就在下一段 |
+
+⚠️ 第 3、4 条合起来是一条：**「我修了 X」和「X 有测试盯着」是两件事**，
+而本轮的记录把前者写成了后者。
+
+### 五轮之后，那句话的最终形态
+
+「一句承诺了锁的注释比一扇没锁的门更糟」这一轮又添两次（第 3、5、6 条），
+但真正新的是这一条：
+
+一次读起来像收紧的重构，**可以把守卫的信号拆散**，而它会安静地继续绿。
+
+⚠️ 而修那条守卫的第一版**还是绕得过去** —— 我加了第二个信号，验证者用同一种
+两函数拆分又绕过去一次。真正的修法是换一个**拆分答不过去的问题**：
+不问「这个函数提到了什么」，问「这个模块里哪些函数会删东西」。
+信号可以被拆散，而**一份名单不能**。
+
+⚠️ 所以「守卫要双向验证」这条既有要求不够 —— 它只保证**写下来的那一刻**是红的。
+**动过被守卫盯着的那段代码之后，要重新验一遍**，用「下一个人最自然会写的那种
+写法」去验，而不是用当初那句。本轮为此把两条守卫各重验了一次。

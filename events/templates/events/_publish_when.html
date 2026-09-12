@@ -1,0 +1,41 @@
+{% comment %}
+「什么时候」那一块 —— 三档单选换掉的**唯一**一段（决定 32）。
+
+⭐ 只有这一块换。名字、地点、说明、图片、受众那十格是同一份 DOM，原地没动，
+   所以换档不会把人填了一半的东西弄丢 —— 那正是「跳到另一页」被否掉的理由。
+
+⚠️ 两档问的不是同一个问题：一场活动有两个时刻，一条规则有「多久一次 /
+   第一场哪天 / 几点 / 开多久」。所以块里的值也没有什么值得携带的。
+{% endcomment %}
+{% comment %}
+⚠️ `mt-4` 是手补的，别当成随手加的留白：字段之间那 1rem 来自 app.css 里
+   `.field + .field`，而那是一条**相邻兄弟**选择器 —— 这一块把自己的 `.field`
+   包进了一层 div，于是它和上面那组单选不再相邻，间距就没了，看起来比页面上
+   别的地方挤。数值跟着那条规则走，改一处要改两处。
+{% endcomment %}
+<div id="when-block" class="mt-4">
+  {% if building_a_series %}
+    {% include "events/_recurrence_picker.html" %}
+    <div class="mt-5">
+      {% include "core/components/field.html" with field=form.starts_on %}
+      {% include "core/components/field.html" with field=form.start_time %}
+      {% include "core/components/field.html" with field=form.duration %}
+    </div>
+    {% comment %}
+    ⚠️ 四格任意一格改动就重算日期。`hx-include="closest form"` 是因为算日期
+       要四个值一起，而不是刚改的那一个。
+    {% endcomment %}
+    <div hx-post="{% url 'events:series_preview' %}"
+         hx-trigger="change from:#when-block, keyup changed delay:400ms from:#when-block"
+         hx-include="closest form"
+         hx-target="#series-dates" hx-swap="outerHTML">
+      {% include "events/_series_dates.html" %}
+    </div>
+  {% else %}
+    {% include "core/components/field.html" with field=form.start_time %}
+    {% include "core/components/field.html" with field=form.end_time %}
+    {% if form.people_pick_meetings %}
+      {% include "core/components/field.html" with field=form.people_pick_meetings %}
+    {% endif %}
+  {% endif %}
+</div>

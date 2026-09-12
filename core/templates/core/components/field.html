@@ -11,6 +11,14 @@
    这样换掉整套样式不需要动任何一个 Form 类。
 
 参数：field（一个 bound field）。
+       plain_options（可选）—— 一组选项**不要画成卡片**，照 Django 自己那套
+       （每个 input 包在自己的 label 里）渲染，和一组勾选框长得一样。
+
+⚠️ 它是按字段选的，不是全局开关，而这一点是有代价的：默认仍然是卡片，所以
+   新加一组单选会长成卡片，除非那一页明确说不要。这样选是因为三组单选里
+   今天有两组要卡片（报名页那个「以什么身份参加」、活动的 shape），而
+   `checkin_confirm.html` 手写了同一套 class —— 见下面那段注释，全局改会让
+   那两处分叉，而它们分叉了没有任何东西会报错。
 {% endcomment %}
 <div class="field {% if field.errors %}field-invalid{% endif %}">
   {% if field.field.widget.use_fieldset %}
@@ -50,7 +58,7 @@
       <legend class="block text-sm font-medium text-ink-800 dark:text-ink-100">
         {{ field.label }}{% if field.field.required %}<span class="text-danger-fg dark:text-danger-fg-dark" aria-hidden="true"> *</span>{% endif %}
       </legend>
-      {% if field.field.widget.input_type == "radio" %}
+      {% if field.field.widget.input_type == "radio" and not plain_options %}
         <div class="mt-2 flex flex-col gap-2">
           {% for option in field %}
             <label class="card flex cursor-pointer items-center gap-3">
@@ -64,6 +72,10 @@
         Django 自己渲染的那一组 —— 每个 `<input>` 已经包在自己的 `<label>` 里，
         所以这里不重画。⚠️ 而受众那一块的置灰正是靠这一点：`audienceTicks`
         找的是包着控件的 `<label>`，重画成别的结构会让灰只剩下小方块。
+
+        ⚠️ `plain_options` 的单选也走这里。Django 给单选和勾选框的结构是同一套
+           （input 包在自己的 label 里），所以这一支不需要为它分岔 —— 而「长得
+           和下面那组一样」正是要它的人想要的东西。
         {% endcomment %}
         <div class="mt-2">{{ field }}</div>
       {% endif %}

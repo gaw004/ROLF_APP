@@ -5,22 +5,45 @@ with_signup_counts(), the shortfall from understaffed(). The test is whether
 deleting this file would lose any business logic — it must not.
 """
 
-from django.contrib import admin
+from django.contrib import admin, messages
+from django.contrib.admin import helpers
+from django.core.exceptions import ValidationError
 from django.db.models import Count
+from django.template.response import TemplateResponse
 from simple_history.admin import SimpleHistoryAdmin
 
-from .forms import AudienceAdminForm, SessionForm
-from .services import hours_recorded_at
+from .forms import AudienceAdminForm, EventSeriesAdminForm, SessionForm
+from .services import (
+    generate_occasions,
+    register_kept_at,
+    split_series,
+    stop_series,
+    withdrawal_preview,
+)
 from org.audience import Audience
 
 from .models import (
     Event,
     EventRole,
+    EventSeries,
+    EventSeriesRole,
     Participation,
     ParticipationRole,
     Session,
     SessionAttendance,
 )
+
+
+def _admin_contact(request):
+    """The Contact behind the logged-in admin, or None.
+
+    ⚠️ None is a normal answer rather than a failure: a superuser matches no
+       real person by design (D12) — that is why every `*_by` column on
+       these tables is nullable. Named once because the actions ask it, and
+       `views._my_contact()` is the same question on the other side of the D18
+       line — this file may not import it.
+    """
+    return getattr(request.user, "contact", None)
 
 
 @admin.register(ParticipationRole)
@@ -100,14 +123,35 @@ class EventAdmin(SimpleHistoryAdmin):
     form = AudienceAdminForm
     list_display = [
         "name", "ministry", "shape", "status", "start_time", "end_time",
-        "duration",
+        "duration", "series",
     ]
-    list_filter = ["status", ShapeFilter, "ministry", "visible_to_outsiders"]
+    # ⚠️ `series` in both, because a rule can put 52 rows on this page carrying
+    #    the same name, the same ministry and the same shape — and this is the
+    #    changelist staff actually live on. Without the column they are 52
+    #    indistinguishable lines; without the filter there is no way to pick out
+    #    the ones a rule made. `RelatedOnlyFieldListFilter` for the reason
+    #    SessionAdmin states: the plain version loads every row of the related
+    #    table into the dropdown on every page view.
+    list_filter = ["status", ShapeFilter, "ministry", "visible_to_outsiders",
+                   ("series", admin.RelatedOnlyFieldListFilter)]
     search_fields = ["name", "location"]
     date_hierarchy = "start_time"
     autocomplete_fields = ["ministry", "owner"]
-    list_select_related = ["ministry"]
+    list_select_related = ["ministry", "series"]
     inlines = [EventRoleInline]
+    # 🔴 L5.4's two columns are shown and never typed, and `source` in
+    #    particular is not a preference — it is what decides whether a rule may
+    #    take this row back. An admin who set a hand-made event to `generated`
+    #    would have it silently withdrawn by the next regeneration, taking any
+    #    signups on it; one who moved an event to another series would hand that
+    #    series a row it never made. Both go through
+    #    `services.generate_occasions()` or not at all.
+    #
+    # ⚠️ It is also what stops the add form demanding them. `source` has a
+    #    default but is not `blank`, so a ModelForm renders it required — which
+    #    broke the ordinary admin create the moment the column landed, and a
+    #    test caught it rather than a person.
+    readonly_fields = ["series", "source"]
 
     def get_list_display(self, request):
         """Appends role and signup counts, counted by the database once per page.
@@ -252,8 +296,15 @@ class SessionAdmin(SimpleHistoryAdmin):
     ordering = ["start_time"]
 
     def has_delete_permission(self, request, obj=None):
-        """Refuses a meeting that has hours on its register. D18: it asks, it
-        does not work it out — `services.hours_recorded_at()` is the answer.
+        """Refuses a meeting that has anybody on its register. D18: it asks, it
+        does not work it out — `services.register_kept_at()` is the answer.
+
+        🔴 **It asked about *hours* until 2026-09-10, and that made it blind to
+           half this table.** A place somebody attends records no hours by
+           design (decision 20), so a meeting with a full class register —
+           twelve students, all marked present — reported nothing to lose and
+           the delete button was enabled. The guard asked the volunteering
+           question on a table built to hold both halves.
 
         🔴 `SessionAttendance` cascades from `session`, so deleting week seven
            here takes its whole register with it: who came, the hours an
@@ -266,7 +317,7 @@ class SessionAdmin(SimpleHistoryAdmin):
            holds no rule of its own: the question is asked in services, and this
            returns its answer.
         """
-        if obj is not None and hours_recorded_at(obj):
+        if obj is not None and register_kept_at(obj):
             return False
         return super().has_delete_permission(request, obj)
 
@@ -334,3 +385,231 @@ class SessionAttendanceAdmin(SimpleHistoryAdmin):
     #    themselves. D28 §4.
     readonly_fields = ["checked_in_method"]
     ordering = ["-session__start_time"]
+
+
+class EventSeriesRoleInline(admin.TabularInline):
+    """The jobs the rule opens on every occasion it makes. L5.4.
+
+    ⚠️ `AudienceAdminForm` for the same reason `EventRoleInline` above carries
+       it: without a form the admin runs **no** audience checks at all, and here
+       what would go unchecked is the containment rule against the series — a
+       template role open wider than its series produces twelve real breaches of
+       the L2×L3 invariant in one press, silently.
+    """
+
+    model = EventSeriesRole
+    form = AudienceAdminForm
+    extra = 0
+    fields = ["role", "needed_count", "stop_at_needed_count", "notes",
+              *Audience.AUDIENCE_FIELDS]
+    autocomplete_fields = ["role"]
+    # ⚠️ No `show_change_link`, unlike `EventRoleInline` above — and the
+    #    difference is not an oversight. Django only renders that link when the
+    #    inline's model is registered in the admin (`has_registered_model`), and
+    #    this one is not: everything about a template role is on this row.
+    #    Setting it would have been a flag that silently does nothing, which is
+    #    indistinguishable from a link somebody broke.
+
+
+@admin.register(EventSeries)
+class EventSeriesAdmin(SimpleHistoryAdmin):
+    """A repeat rule and the batch of events it made. L5.4–L5.6.
+
+    🔴 **Generating is an action, never a side effect of saving**, and there are
+       two independent reasons — either one alone would settle it:
+
+         · `ModelAdmin.save_related()` calls `form.save_m2m()` **before** it
+           saves the inlines, so anything hooked onto a save runs while the
+           series still has no roles and, on an add, no audience. It would
+           cheerfully generate twelve events with nothing open on them;
+         · `save_related` is one of the four hooks `AdminHasNoLogicGuardTests`
+           refuses outright (D18).
+
+       Which lands on the shape D40 wanted anyway: a batch is something somebody
+       presses, looks at, and can undo — not something that happens to them
+       while they were editing a description.
+
+    ⚠️ Both actions are one line each into `events.services`. This file works
+       nothing out; the arithmetic on the confirmation screen is
+       `services.withdrawal_preview()`, so the numbers under the button and the rows
+       the button removes come from one place.
+
+    🔴 **Both actions declare `permissions=["change"]`, and without that line
+       the grant in org/permissions.py does not hold.** An earlier draft of this
+       docstring claimed the page was "open to superusers only" because
+       `FOUNDATION_ADMIN_PERMISSIONS` grants `view_` and no more. That is not
+       how Django gates actions: `_filter_actions_by_permissions()` allows any
+       action whose callable carries no `allowed_permissions`, and the
+       changelist renders the action form for anybody who can open the page. So
+       a view-only foundation admin saw both actions and could press them —
+       measured: four events created and a whole batch withdrawn by an account
+       holding `view_eventseries` alone.
+
+       ⚠️ Written out because the docstring was **the only thing** asserting the
+          lock, and a comment promising one is worse than an open door: it stops
+          the next person looking. Same failure this repository records against
+          `set_audience()`'s module note, which claimed a gate the services did
+          not have.
+
+    ⚠️ `change`, not a permission of its own, and it lands where D20 puts it:
+       building a batch is an act on **one ministry's** events, so it belongs to
+       the ministry tier. Until the series pages (L5.8) hand that tier a door,
+       the only account with `change_eventseries` is a superuser — which is what
+       the sentence above was trying to describe.
+    """
+
+    # ⚠️ Not the plain `AudienceAdminForm`: this one adds the picture pipeline
+    #    (`normalise_event_image` — resize, WebP, **strip EXIF**), which the
+    #    series upload went round the back of. A phone photo carries GPS.
+    form = EventSeriesAdminForm
+    list_display = ["name", "ministry", "rule", "starts_on", "start_time",
+                    "status", "ended_on"]
+    list_filter = ["status", "ministry"]
+    search_fields = ["name", "rule"]
+    autocomplete_fields = ["ministry", "owner"]
+    list_select_related = ["ministry"]
+    inlines = [EventSeriesRoleInline]
+    # ⚠️ `ended_on` is readonly, and that is a correctness fix rather than
+    #    tidiness. Typing a date into it stops **future generation** and
+    #    withdraws nothing, so an admin who set it believed they had called the
+    #    series off while four published evenings stood on the calendar, still
+    #    signable. The action below is the only thing that does both, so it is
+    #    the only way in.
+    readonly_fields = ["ended_on", "generated_at", "generated_by"]
+    actions = ["generate_occasions", "stop_series", "change_the_rule"]
+
+    def get_list_display(self, request):
+        """Counts the occasions once for the page, not once per row.
+
+        The same arrangement `EventAdmin.get_list_display` uses and for the same
+        reason: a method in `list_display` runs per row, which is the N+1 the
+        Contact changelist had to be rescued from. Built here rather than by
+        overriding `get_queryset`, which the layering guard forbids.
+        """
+        if not hasattr(request, "_series_counts"):
+            request._series_counts = dict(
+                EventSeries.objects.annotate(made=Count("occasions"))
+                .values_list("pk", "made"))
+        counts = request._series_counts
+
+        @admin.display(description="Occasions")
+        def occasions_made(obj):
+            return counts.get(obj.pk, 0)
+
+        return [*super().get_list_display(request), occasions_made]
+
+    @admin.action(description="Generate the occasions this rule calls for",
+                  permissions=["change"])
+    def generate_occasions(self, request, queryset):
+        for series in queryset:
+            try:
+                made = generate_occasions(
+                    series, generated_by=_admin_contact(request))
+            except ValidationError as refused:
+                # ⚠️ Reported, not raised — the same handling `stop_series` below
+                #    has. A series that reached the database without
+                #    `full_clean()` (an import, a script, the seed) can hold an
+                #    empty audience or a template role wider than itself, and
+                #    both are refused deep inside the service. Uncaught that is
+                #    a 500 on an admin page, with the batch silently rolled back
+                #    by the service's own `atomic` — the admin sees a crash and
+                #    has no idea whether anything was written.
+                self.message_user(
+                    request, f"“{series.name}”: {'; '.join(refused.messages)}",
+                    level=messages.WARNING)
+                continue
+            self.message_user(
+                request,
+                f"“{series.name}”: {len(made)} occasion(s) generated. "
+                f"They are {series.get_status_display().lower()} — nothing was "
+                "removed from occasions people had already signed up for.")
+
+    @admin.action(description="Stop this series", permissions=["change"])
+    def stop_series(self, request, queryset):
+        """停掉这一条，两趟：先看会发生什么，再做。
+
+        🔴 **The door the stopping service did not have.** Without it the only
+           way to stop a series was to type a date into `ended_on` — which stops
+           *generation* and withdraws *nothing*. An admin did that, saw the form
+           save, and left four published evenings standing on the public
+           calendar, open for signup.
+
+        🔴 **两趟是 2026-09-11（L5.8g）加的，而它不是礼貌，是必须**：合并之后
+           这个 action **会删掉整行系列**（什么都没剩下的时候）。一个不问就
+           删行的批量动作，是这个仓库刚为 `AdminActionsDeclarePermissionsGuardTests`
+           付过账的那一类邻居。确认屏用的就是原来「撤销」那一张。
+
+        ⚠️ 它吸收了原来那个「Undo this batch」。撤销和即日停止合并成了一件事 ——
+           理由见 `services.stop_series()`：那个分支本来就是自动的。
+        """
+        if request.POST.get("confirmed"):
+            for series in queryset:
+                name = series.name
+                try:
+                    dropped = stop_series(series)
+                except ValidationError as refused:
+                    # ⚠️ 点名。批量选了好几条时，一句不带名字的拒绝让人没法
+                    #    知道是哪一条出了问题。
+                    self.message_user(
+                        request, f"“{name}”: {'; '.join(refused.messages)}",
+                        level=messages.WARNING)
+                else:
+                    # ⚠️ `name` 是**删之前**取的：这一行可能已经不在了。
+                    self.message_user(
+                        request,
+                        f"“{name}”: {dropped} occasion(s) withdrawn.")
+            return None
+
+        return TemplateResponse(
+            request, "admin/events/eventseries/stop_confirm.html", {
+            **self.admin_site.each_context(request),
+            "title": "Stop these series",
+            # ⚠️ `select_related`：每一行都要印「谁建的」（`generated_by`，没有
+            #    就退到 `owner`），而不带它就是每选一条多两次 Contact 查询。
+            "batches": [(series, withdrawal_preview(series))
+                        for series in queryset.select_related(
+                            "generated_by", "owner")],
+            # ⚠️ 隐藏域也从 `batches` 里走，所以这一页只有**一份**「选中了哪些」。
+            #    原来这里还递一个 `queryset`（同一批行的第二种拼法）和一个
+            #    `media`（这张屏 extends `admin/base_site.html`，那里根本没有
+            #    `{{ media }}` 这一格，从来没渲染过）。
+            "action_checkbox_name": helpers.ACTION_CHECKBOX_NAME,
+            })
+
+    @admin.action(description="Change the rule from today on",
+                  permissions=["change"])
+    def change_the_rule(self, request, queryset):
+        """Stop this series and open an editable copy of it. 06-roadmap L5.6.
+
+        ⭐ The shape is Google's calendar split, and it is what makes the rule
+           freeze survivable: the successor has **no occasions yet**, so
+           `_refuse_rewriting_the_rule()` does not apply to it and every
+           generation column is editable. Change what you meant to change on the
+           copy, then press Generate.
+
+        ⚠️ Before this, the freeze's own refusal said "stop this series instead,
+           and build the next one" and neither half had a control — so the only
+           sanctioned way to change a rule was unreachable, and `split_series()`
+           had no caller outside the tests.
+
+        ⚠️ It deliberately does **not** ask what the new rule is. A form here
+           would be a second place that knows how to edit a series, and the
+           change page is already that place — this hands them the copy and gets
+           out of the way.
+        """
+        for series in queryset:
+            try:
+                successor, withdrawn = split_series(
+                    series, changed_by=_admin_contact(request))
+            except ValidationError as refused:
+                self.message_user(
+                    request, f"“{series.name}”: {'; '.join(refused.messages)}",
+                    level=messages.WARNING)
+            else:
+                self.message_user(
+                    request,
+                    f"“{series.name}”: stopped as of today — "
+                    f"{withdrawn} occasion(s) still to come were withdrawn, "
+                    "and what already happened stays. A copy is ready to edit "
+                    f"(#{successor.pk}): change when it repeats there, then "
+                    "generate its occasions.")

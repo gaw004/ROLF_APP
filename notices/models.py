@@ -81,6 +81,15 @@ class Notice(Audience, ConstraintErrorFieldMixin, TimeStampedModel):
     #: EMPTY_AUDIENCE_MESSAGE in org/audience.py.
     AUDIENCE_ON = "notice"
 
+    #: Both None: a notice has nothing above it to be wider than and nothing
+    #: underneath it to leave behind. ⚠️ Spelled out rather than inherited,
+    #: because the abstract model's default for the second one is `"roles"` —
+    #: the shape three of the five tables have — and this is the table that
+    #: found out what happens when the pair is guessed instead of declared
+    #: (2026-08-31: an AttributeError on `row.roles`, on the validation path).
+    AUDIENCE_PARENT = None
+    AUDIENCE_CHILDREN = None
+
     #: ⭐ None, meaning "judge who is on the books **today**". This table has no
     #:    day of its own, and that is not a gap to be filled with a stand-in —
     #:    see Audience.AUDIENCE_DAY for the case that decides it. It is also the

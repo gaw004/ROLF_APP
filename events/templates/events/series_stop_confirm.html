@@ -1,0 +1,42 @@
+{% extends "core/base.html" %}
+{% block title %}Stop this series{% endblock %}
+{% block main_width %}max-w-2xl{% endblock %}
+
+{% block content %}
+  {% comment %}
+  停掉一条系列的确认屏。D40 第一节要求它，而 `services.withdrawal_preview()`
+  已经把它要说的全算好了 —— 这一页不做任何算术。
+
+  ⭐ 一颗键，两种结局（2026-09-11，L5.8g）：什么都没剩下就连这一行一起收走，
+     剩下东西就只是「停了」。**这一屏说的是结局，不是机制** —— 人关心的是
+     「按下去之后会怎样」，而不是这个动作历史上叫什么名字。
+
+  🔴 **停掉 ≠ 回到从前，而这句话要写在按钮上**（D40 第一节的标题）。建批之后
+     时间会往前走：有些场次已经发生，有些已经有人报名，两者都不是我们能替人
+     收回的。只说「将删除 N 个」的人会以为库里干净了，然后下个月撞见幸存者。
+  {% endcomment %}
+  <h1 class="text-2xl font-semibold">Stop “{{ series.name }}”</h1>
+
+  <div class="card mt-6">
+      <p class="text-sm">
+        Stopping does not put things back the way they were. Time has moved
+        since this series was built, and an occasion that has already happened —
+        or that somebody has signed up for — is not ours to take back.
+      </p>
+
+      <div class="mt-4">
+        {% include "events/_withdrawal_summary.html" with taken=taken %}
+      </div>
+
+      {% include "events/_stop_outcome.html" with taken=taken %}
+
+      <form method="post" class="mt-6">
+        {% csrf_token %}
+        <div class="flex flex-wrap gap-2">
+          {% include "core/components/button.html" with label="Stop this series" variant="danger" %}
+          {% url 'events:series_detail' series.pk as back_url %}
+          {% include "core/components/button.html" with label="Back" href=back_url variant="ghost" %}
+        </div>
+      </form>
+  </div>
+{% endblock %}

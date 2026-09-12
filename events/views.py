@@ -30,28 +30,38 @@ from django.db.models import Prefetch
 from django.http import Http404, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
+from django.utils import formats
 from django.utils.http import urlencode
 from django.utils.text import get_text_list
 from django_ratelimit.decorators import ratelimit
 
+
 from core.pagination import page_holding, page_of
+from core.timeutils import local_date_of
 from org.models import Ministry
 from org.permissions import (
     SCOPED_DENIAL,
     in_foundation_tier,
     administers_one_of,
     can_manage_event,
+    can_manage_series,
     can_publish_event,
     event_access,
     ministry_ids_administered_by,
 )
 
 from . import schedule, tokens
+from .recurrence import has_an_ending
 from .forms import (
+    SHARED_PUBLISH_FIELDS,
+    WHEN_ANSWERS,
     FILTER_PARAMS,
+    PUBLISH_AS_SERIES,
     EventForm,
     EventPeriodForm,
     EventRoleForm,
+    EventSeriesForm,
+    EventSeriesRoleForm,
     EventStatusForm,
     HoursForm,
     NotifyForm,
@@ -62,6 +72,8 @@ from .models import (
     Event,
     EventNotification,
     EventRole,
+    EventSeries,
+    EventSeriesRole,
     Participation,
     Session,
     askable_served_as,
@@ -76,6 +88,15 @@ from .tokens import (
     window_message,
 )
 from .services import (
+    SPLITTABLE_FIELDS,
+    generated_through,
+    is_running_low,
+    resumes_on_after_split,
+    split_series,
+    withdrawal_preview,
+    generate_occasions,
+    series_moments,
+    stop_series,
     CHECKIN_CREDENTIAL_KEY,
     ConsentRequired,
     NoHoursHere,
@@ -433,7 +454,14 @@ def _visible_events(period, contact):
         #    不加这个注解的话那是**每行一次查询** —— 一页二十行，在全站被打得
         #    最多的一页上。判据本身没有在这里重写，见 `with_capacity()`。
         .with_capacity()
-        .select_related("ministry")
+        # ⚠️ `series` as well as `ministry` (L5.4). Every row renders
+        #    `Event.poster`, which falls back to the series' picture when the
+        #    occasion has none of its own — so without this it is **one query
+        #    per generated row**, on the busiest page in the system. Measured:
+        #    four occasions cost four extra queries on `events_eventseries`;
+        #    a weekly rule makes fifty-two. Same reason `with_capacity()` above
+        #    exists, one column further out.
+        .select_related("ministry", "series")
         .order_by("start_time")
     )
 
@@ -1280,23 +1308,84 @@ def ministry_report_page(request):
     })
 
 
+def _typed_so_far(post):
+    """A part-filled POST as `initial`, for redisplaying it without judging it.
+
+    ⚠️ One key can carry several values (the audience tick-boxes), and a plain
+       `.dict()` keeps only the last of them — so somebody who ticked three
+       ministries and then switched shape would come back with one. The reverse
+       matters too: a text box handed a one-item **list** renders the brackets,
+       so single values have to come back single.
+
+    ⚠️ The picture cannot be carried and no trick changes that — a page is not
+       allowed to put a value into a file input. The template says so next to
+       the button rather than letting it go missing quietly.
+    """
+    # 🔴 **只带两档都问的那几格**（2026-09-11 代码评审抓到）。带全部的那一版
+    #    会把「什么时候」那一块的值也塞过去，而两档在那里问的**不是同一个
+    #    问题**，格式也不一样：
+    #
+    #      · `start_time` 在一场活动上是 datetime-local（`2026-09-15T19:00`），
+    #        在一条规则上是 time（`19:00`）—— 互相塞进去，浏览器直接丢掉；
+    #      · 三格的 `duration_0/1/2` 在另一档上根本没有对应的字段。
+    #
+    #    结果是按钮旁边那句「Changing this keeps what you have typed」对那几格
+    #    来说是假的。而 `_publish_when.html` 自己的注释早就写着「两档问的不是
+    #    同一个问题…所以块里的值也没有什么值得携带的」—— 这里照那句话做。
+    carried = {"publish_as", *SHARED_PUBLISH_FIELDS}
+    return {key: values[0] if len(values) == 1 else values
+            for key, values in post.lists() if key in carried}
+
+
 @login_required
 def event_create(request):
     """P2: publish an event, for a ministry this person actually runs."""
     if not ministry_ids_administered_by(request.user):
         raise PermissionDenied(SCOPED_DENIAL)
 
-    # ⚠️ request.FILES is not optional. Without it the upload is silently
-    #    dropped: the form validates, the event saves, and no image arrives.
-    form = EventForm(request.POST or None, request.FILES or None, user=request.user)
-    if request.method == "POST" and form.is_valid():
+    # ⭐ Decision 32: one screen, three answers. Two of them build an `Event`
+    #    and the third builds an `EventSeries`, so the **page** is one and the
+    #    form is whichever the radio named. The alternative — one form saving
+    #    two models — is not available: a ModelForm belongs to its model.
+    #
+    # ⚠️ Read off the raw POST rather than off a cleaned form, because which
+    #    form to construct is the thing being decided. On a GET it is whatever
+    #    the query string says, so the no-JS "Switch" button below works by
+    #    reloading the page.
+    chosen = (request.POST.get("publish_as") if request.method == "POST"
+              else request.GET.get("publish_as"))
+    building_a_series = chosen == PUBLISH_AS_SERIES
+    form_class = EventSeriesForm if building_a_series else EventForm
+
+    # D24. The radio swaps the "when" block over HTMX; this is the same move
+    # without JavaScript — a plain submit that comes back as the other form.
+    switching = "switch_shape" in request.POST
+    if switching:
+        # ⭐ Unbound, filled from what they typed. Bound would be wrong:
+        #    *rendering* a bound form runs full_clean, so a page somebody is
+        #    halfway through would come back covered in "This field is
+        #    required" — for having done nothing but change their mind about
+        #    what they are publishing.
+        form = form_class(user=request.user,
+                          initial={**_typed_so_far(request.POST),
+                                   "publish_as": chosen})
+    else:
+        # ⚠️ request.FILES is not optional. Without it the upload is silently
+        #    dropped: the form validates, the event saves, and no image arrives.
+        form = form_class(request.POST or None, request.FILES or None,
+                          user=request.user,
+                          initial={"publish_as": chosen or Event.Shape.SINGLE})
+    if request.method == "POST" and not switching and form.is_valid():
         # Checked again, on the submitted value. The narrowed dropdown stops a
         # slip; this stops a forged POST. Two different jobs, both needed.
         if not can_publish_event(request.user, form.cleaned_data["ministry"]):
             raise PermissionDenied(SCOPED_DENIAL)
-        event = form.save(commit=False)
-        event.owner = _my_contact(request)
-        event.save()
+        published = form.save(commit=False)
+        published.owner = _my_contact(request)
+        if not building_a_series:
+            # The two Event shapes: the radio is the column, for those two.
+            published.shape = form.cleaned_data.get("publish_as") or Event.Shape.SINGLE
+        published.save()
         # ⚠️ **Not optional**, for the same reason request.FILES above is not:
         #    without it the tick is silently dropped. `commit=False` defers the
         #    many-to-many, and `visible_to_ministries` is the only part of an
@@ -1306,10 +1395,490 @@ def event_create(request):
         #    event_update until 2026-09-08; notices.views.notice_create had it
         #    from the day it was written.
         form.save_m2m()
+        if building_a_series:
+            # ⚠️ The same sentence its sibling uses, and the same shape of
+            #    flow (decision 33): what you publish is not finished until it
+            #    says what help it needs. On a rule that is doubly true —
+            #    nothing it makes can be signed up for until then.
+            messages.success(
+                request, "Series created. Next, open the roles it needs — "
+                         "then generate the occasions.")
+            return redirect("events:series_detail", pk=published.pk)
         messages.success(request, "Event created. Next, open the roles it needs.")
-        return redirect("events:event_update", pk=event.pk)
+        return redirect("events:event_update", pk=published.pk)
 
-    return render(request, "events/event_form.html", {"form": form, "event": None})
+    return render(request, "events/event_form.html", {
+        "form": form, "event": None, "building_a_series": building_a_series,
+    })
+
+
+# --- L5.8a: the publisher's door onto a repeat rule ------------------------
+# ⭐ Every one of these is a door onto a service that already existed and had
+#    nobody but a superuser to press it. The only logic here is which template
+#    and which redirect — the rules are all in events/services.py.
+
+
+def _dates_context(moments, page=0, *, rule=""):
+    """The dates a rule falls on, laid out as one page of small calendars.
+
+    ⚠️ One helper, two callers (the rule's page and the live preview). Two
+       copies would be two chances for the page and the fragment to show the
+       same rule differently — and the fragment replaces part of the page, so
+       they would be visibly side by side.
+
+    ⚠️ The paging arithmetic is `schedule.month_page()`, not here: this file's
+       third rule is that views hold no arithmetic, and that module's opening
+       line is that layout arithmetic belongs to it.
+    """
+    return {
+        "moments": moments,
+        # ⚠️ 有没有结束决定这一块**怎么说话**，不决定它画什么（L5.9）：
+        #    一条不结束的规则不是「共 52 场」—— 它是「这一年里 52 场」，
+        #    而说成前者会让人以为排完就没了。`has_an_ending()` 自 2026-09-11
+        #    起就是一个问句而不是一条校验，这里是它的第一个读者。
+        "rule_ends": has_an_ending(rule or ""),
+        "months": schedule.month_page(
+            [local_date_of(moment) for moment in moments], page=page),
+    }
+
+
+def _month_page_asked_for(request):
+    """Which page of calendars the buttons asked for, or the first.
+
+    ⚠️ Anything unreadable is page 0 rather than an error: this number is a
+       view of something, not part of what gets saved.
+    """
+    try:
+        return int(request.POST.get("month_page", 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _managed_series(request, pk):
+    """A repeat rule this account may manage, or a refusal.
+
+    The mirror of `_managed_event()`, and the same choice about the lookup: it
+    is not narrowed to their ministries, because for a series that exists "not
+    yours" is the honest answer and the message explains the scoping.
+    """
+    series = get_object_or_404(
+        EventSeries.objects.select_related("ministry"), pk=pk)
+    if not can_manage_series(request.user, series):
+        raise PermissionDenied(SCOPED_DENIAL)
+    return series
+
+
+def _series_page_context(series, *, form=None, role_form=None, user=None):
+    """Everything the series page needs, from whichever view got the POST.
+
+    ⚠️ Built once for the same reason `_edit_page_context()` is: three views
+       render this page, and only one of the forms is bound on any given
+       request — the others have to be fresh or the page comes back wearing
+       somebody else's errors.
+    """
+    booked_to = generated_through(series)
+    return {
+        "series": series,
+        "can_manage": True,
+        # ⭐ 「已排到哪」是滚动生成的另一半（L5.9）。一条没有结束的规则一次只排
+        #    一年 —— 没有这行字，一条排完了的规则会安安静静地停在那里：
+        #    `/events/` 上不再出现新的场次，而这一页看起来一切正常。
+        "booked_through": booked_to,
+        # ⚠️ 判据在 `services.is_running_low()`，不在这里：这个文件第三条
+        #    规矩是视图不做算术。⚠️ `booked_to` 递进去 —— 它自己也要问
+        #    「排到哪天」，而上面刚问过，不递就是同一句查询每渲染跑两遍。
+        "running_low": is_running_low(series, booked_to=booked_to),
+        # ⚠️ **这里不算 `withdrawal_preview()`。** 它曾经在这一格上，注释写着
+        #    「确认屏的依据」—— 而确认屏是另外三个视图，它们各自显式传自己那
+        #    一份。这一页的模板一个字都没读过它，所以它是白算的：它
+        #    要走一遍这条系列的**每一场**（一次 `values_list` 加一次带
+        #    `Exists` 注解的遍历），而一条排满一年的滚动系列于是每渲染一次
+        #    这一页就付一次，三个视图都付。
+        "form": form if form is not None else EventSeriesForm(
+            instance=series, user=user),
+        "role_form": role_form if role_form is not None else EventSeriesRoleForm(
+            parent=series),
+        # ⚠️ `prefetch_related`：工种面板每一行都印 `role.audience_in_words`，
+        #    而那句话要读受众那个多对多。实测（一条系列，渲染那一块）：
+        #
+        #        四个按牧区开放的工种   5 条查询 → 2 条
+        #        工种都是「所有人」     1 条查询 → 2 条
+        #
+        #    也就是说它**在最常见的那一档上多花一条**，换掉的是另一档上没有上限
+        #    的 N 条。这笔账值得，而且是 `Audience.Spec.of()` 的 docstring 自己
+        #    要的：它写明「这样写，调用方预取就有用；写成 values_list 就静默
+        #    没用」。⚠️ 受众是「所有人」时那句话会短路，于是这条 N+1 在本地
+        #    看不出来。
+        "roles": (series.roles.select_related("role")
+                  .prefetch_related("visible_to_ministries")),
+        # ⚠️ The dates the rule falls on, computed rather than stored — the
+        #    same expander the generator uses, so the page cannot promise a
+        #    different set of evenings from the one the button would build.
+        **_dates_context(series_moments(series), rule=series.rule),
+        # ⚠️ 一个数，不是一整套行。模板只问「有没有」和「有几个」，而这一格
+        #    原来是把每一场的整行（说明、图片、受众那几列）都拉过来 —— 一条排满
+        #    一年的系列是五十二行，三个视图每渲染一次各付一遍。
+        "occasions_built": series.occasions.count(),
+    }
+
+
+@login_required
+def series_detail(request, pk):
+    """The rule, the jobs it opens, and the button that makes the occasions.
+
+    ⭐ The mirror of the merged event edit page, and deliberately the same
+       shape: publish, land here, open the roles. What is extra is one button,
+       because a rule — unlike an event — is not itself the thing people sign
+       up for. Decision 33.
+    """
+    series = _managed_series(request, pk)
+    form = EventSeriesForm(request.POST or None, request.FILES or None,
+                           instance=series, user=request.user)
+    if request.method == "POST" and form.is_valid():
+        if not can_publish_event(request.user, form.cleaned_data["ministry"]):
+            raise PermissionDenied(SCOPED_DENIAL)
+        series = form.save(commit=False)
+        series.save()
+        # ⚠️ Not optional, for the reason `event_create` spells out: the
+        #    audience's ministries live in a many-to-many that `commit=False`
+        #    defers, and dropping it stores an audience of nobody.
+        form.save_m2m()
+        messages.success(request, "Series saved.")
+        return redirect("events:series_detail", pk=series.pk)
+
+    # ⭐ 改规则那条路（L5.8f）。表单没过，而**唯一**挡住它的是冻结 ——
+    #    那不是「填错了」，那是「你想改的东西已经生成过场次了」，而这件事
+    #    是有正当做法的：停掉这一条、用你刚填的值新起一条（`split_series`）。
+    #
+    # ⚠️ 在这之前，这条路的尽头是一句「Stop this series instead, and build the
+    #    next one」，而**没有任何控件做得了这件事** —— 一句指着不存在的控件的话，
+    #    正是这个仓库反复付账的那一种。
+    if request.method == "POST" and _only_the_freeze_refused(form):
+        if not can_publish_event(request.user, form.cleaned_data["ministry"]):
+            raise PermissionDenied(SCOPED_DENIAL)
+        # 🔴 **人填的值全部从 `form.instance` 上取，一格都不从 `cleaned_data`。**
+        #    冻结那条错误挂在 `GENERATION_FIELDS` 里**第一个变了的**字段上，而
+        #    Django 的 `add_error()` 会把出错字段从 `cleaned_data` 里**删掉** ——
+        #    于是不在的那一格，恰恰是人刚改的那一格。实测过三次，每次页面都照常
+        #    说成功：改规则 → 新系列带**旧**规则；只改 20:00 → 新系列 19:00；
+        #    只改 2:30 → 新系列 2:00。
+        #
+        # ⚠️ `form.instance` 上放着的正是人填的东西：`_post_clean()` 先
+        #    `construct_instance()` 把清洗过的值写进这个内存对象，**之后**才
+        #    `instance.full_clean()` 撞上冻结。而这条路的前提是
+        #    `_only_the_freeze_refused()` —— 除了冻结没有别的错误，所以这些值
+        #    都是过了字段级清洗的。
+        #
+        # ⚠️ 这样取比逐格补**更准**，不只是更短：`rule` 上那个值是 `clean()` 经
+        #    `_rule_for()` 写下的（「意思没变就留住原来的拼法」），而另起一次
+        #    `compose()` 会把一条根本没动过的规则重拼成另一种拼法交给新系列。
+        #
+        # 🔴 **`starts_on` 不传。** 它一旦传过去就会盖掉 `split_series()` 算好的
+        #    `resumes_on` —— 而表单上那个「第一场」说的是**旧**系列什么时候
+        #    开始的，不是新的。实测：把每周二改成每周四之后仍然把那个周二传过去，
+        #    新系列被自己的 `clean()` 拒掉（「周二不在它重复的日子里」），而那句
+        #    拒绝是 500 冒出来的。
+        carried = {name: getattr(form.instance, name)
+                   for name in SPLITTABLE_FIELDS if name != "starts_on"}
+        if request.POST.get("confirm_new_series"):
+            # ⚠️ 那句话要说**旧**名字。`series` 就是 `form.instance`，而人填的新
+            #    名字已经写进它了 —— 同一次保存里顺手改了名的话，用它说「旧系列
+            #    停了」会让新旧两条对不上号。
+            #
+            # ⚠️ 只读这一格，不取整行：`split_series()` 自己会去取它要的那一行
+            #    （见它开头那段），所以这里没有第二个「干净副本」要维护。
+            stopped_name = (EventSeries.objects
+                            .values_list("name", flat=True).get(pk=series.pk))
+            try:
+                successor, withdrawn = split_series(
+                    series, changed_by=_my_contact(request), **carried)
+            except ValidationError as refused:
+                # ⚠️ 拒绝要落回人眼前，不是 500。`split_series()` 里那几次
+                #    `full_clean()` 都可能开口，而这一屏是它唯一的读者。
+                messages.error(request, " ".join(refused.messages))
+                return redirect("events:series_detail", pk=series.pk)
+            messages.success(request, (
+                f"“{stopped_name}” was stopped today and a new series started "
+                f"from your new rule — {_occasions_worded(withdrawn)} still to "
+                "come were withdrawn. Nothing is generated yet: press Generate "
+                "when the rule looks right."))
+            return redirect("events:series_detail", pk=successor.pk)
+        return render(request, "events/series_rule_change_confirm.html", {
+            "series": series,
+            # ⚠️ 和停止那一屏读同一个函数 —— 两处各算一遍就是两个答案，
+            #    而底下收场次用的是同一句删除。
+            "taken": withdrawal_preview(series),
+            # ⚠️ 原始 POST 逐条交给模板，让它原样回传 —— 多值字段（星期条、
+            #    受众那组勾）按表单字段回传会被压成一个列表字面量。
+            #    ⚠️ csrf 去掉：确认那张表单自己会发一个新的。
+            "submitted": [
+                (name, value) for name, values in request.POST.lists()
+                for value in values if name != "csrfmiddlewaretoken"],
+            # ⚠️ 读的是上面那份 `carried`，和确认之后真的交给 `split_series()`
+            #    的是**同一批值** —— 屏上写的那一天和真的会发生的那一天隔着一次
+            #    点击，各算一遍就是两个答案。
+            "resumes_on": resumes_on_after_split(
+                series, rule=carried["rule"], start_time=carried["start_time"]),
+        })
+
+    return render(request, "events/series_form.html",
+                  _series_page_context(series, form=form, user=request.user))
+
+
+def _only_the_freeze_refused(form):
+    """这次保存被挡住的**唯一**原因，是那条「规则已经生成过场次」吗？
+
+    🔴 **靠 code，不靠比对那句话的文字。** 文字比对是脆的：谁改一个字，
+       「你是不是想新起一条系列」那一屏就静默地再也不出现，而人重新对着一句
+       读不懂的拒绝发呆。`rule_is_frozen` 是 `EventSeries.clean()` 挂上去的，
+       和这个仓库给数据库约束用的 `violation_error_code` 是同一个机制。
+
+    ⚠️ 「唯一」两个字是认真的：规则本身写错了（拼写、没有结束、密度太高）要走
+       普通那条路，把错误显示在框底下。把两者混成一屏，人会以为自己那条写错的
+       规则「确认一下」就能用。
+    """
+    faults = form.errors.as_data()
+    if not faults:
+        return False
+    return all(error.code == "rule_is_frozen"
+               for errors in faults.values() for error in errors)
+
+
+@login_required
+def series_roles(request, pk):
+    """Open a job on the rule. Every occasion it makes will open it too.
+
+    ⚠️ A POST-only door, exactly like `event_roles()`: a GET goes back to the
+       page that renders the panel, because the panel has no page of its own.
+    """
+    series = _managed_series(request, pk)
+    if request.method != "POST":
+        return redirect("events:series_detail", pk=series.pk)
+
+    form = EventSeriesRoleForm(request.POST, parent=series)
+    if form.is_valid():
+        form.save()
+        messages.success(request, "Role added.")
+        # ⭐ The plain-form path is the one that must always work: redirect, so
+        #    a refresh cannot post twice. HTMX gets the panel back instead.
+        if not request.headers.get("HX-Request"):
+            return redirect("events:series_detail", pk=series.pk)
+        form = EventSeriesRoleForm(parent=series)
+    elif not request.headers.get("HX-Request"):
+        return render(request, "events/series_form.html",
+                      _series_page_context(series, role_form=form,
+                                           user=request.user))
+
+    return render(request, _template(
+        request, "events/series_form.html", "events/_series_roles_swap.html"),
+        _series_page_context(series, role_form=form, user=request.user))
+
+
+@login_required
+def series_role_delete(request, pk):
+    """Take a job off the rule.
+
+    ⚠️ It does **not** close that job on occasions already made, and the
+       confirmation says so. Closing it there would take signups with it —
+       `EventRole` cascades into `Participation` — so removing a job from one
+       evening stays something done on that evening's own page.
+    """
+    role = get_object_or_404(
+        EventSeriesRole.objects.select_related("series__ministry"), pk=pk)
+    if not can_manage_series(request.user, role.series):
+        raise PermissionDenied(SCOPED_DENIAL)
+    series = role.series
+    if request.method == "POST":
+        role.delete()
+        messages.success(request, "Role removed from the rule.")
+        if not request.headers.get("HX-Request"):
+            return redirect("events:series_detail", pk=series.pk)
+    return render(request, _template(
+        request, "events/series_form.html", "events/_series_roles_swap.html"),
+        _series_page_context(series, user=request.user))
+
+
+@login_required
+def series_generate(request, pk):
+    """Make the occasions the rule calls for — and top up the ones already made.
+
+    ⚠️ POST only. It writes, and a GET that writes is a thing a link preview
+       can fire.
+    """
+    series = _managed_series(request, pk)
+    if request.method != "POST":
+        return redirect("events:series_detail", pk=series.pk)
+    try:
+        made = generate_occasions(series, generated_by=_my_contact(request))
+    except ValidationError as refused:
+        # ⚠️ Shown, not raised. A rule that cannot be expanded is something the
+        #    publisher can fix on this page, and a 500 would tell them nothing.
+        messages.error(request, "; ".join(refused.messages))
+    else:
+        messages.success(request, _generated_sentence(series, made))
+    return redirect("events:series_detail", pk=series.pk)
+
+
+def _occasions_worded(count):
+    """"1 occasion" / "12 occasions" — the word, not a slash-s.
+
+    ⚠️ Both of this page's messages said "occasion(s)" until 2026-09-10, and a
+       slash-s is the site telling somebody that a machine wrote the sentence.
+       Every other count on these pages picks the word — see `event_update`'s
+       "1 person who signed up is" against "3 people ... are".
+
+    ⚠️ `events/admin.py` still says "occasion(s)" in four places. Left alone
+       deliberately: two tests pin that exact string, and the admin is a
+       different audience from the publisher pages this serves. Worth doing
+       when somebody is in there anyway — not worth a drive-by that turns two
+       unrelated tests red.
+    """
+    return "1 occasion" if count == 1 else f"{count} occasions"
+
+
+def _generated_sentence(series, made):
+    """What a press actually did, in the publisher's terms.
+
+    ⚠️ Both numbers, because since decision 34 a press can add nothing and
+       still have done something — topping up a job on evenings that already
+       existed. "0 occasions generated" alone would read as "nothing
+       happened", which would be false.
+    """
+    standing = series.occasions.count()
+    # ⚠️ 「排到哪天」也说一句（L5.9）：生成是滚动的，一条没有结束的规则这一press
+    #    只买到一年。不说的话，按完只知道「造了 52 场」，不知道它有尽头。
+    booked = generated_through(series)
+    through = f" Booked through {formats.date_format(booked, 'j M Y')}." if booked else ""
+    if made:
+        return (f"{_occasions_worded(len(made))} generated — "
+                f"{standing} in this series now. "
+                f"{'It is' if standing == 1 else 'They are'} "
+                f"{series.get_status_display().lower()}.{through}")
+    if standing:
+        already = ("the one occasion this rule makes already exists"
+                   if standing == 1
+                   else f"all {standing} occasions already exist")
+        return (f"Nothing new to make — {already}.{through} Any job you have "
+                "added since is now open on the ones still to come.")
+    return ("Nothing was generated. Check the rule and the first date — the "
+            "dates it falls on are listed above.")
+
+
+@login_required
+def series_stop(request, pk):
+    """停掉这一条。两趟：先看会发生什么，再做。
+
+    ⭐ **一颗键,两种结局** —— 2026-09-11（L5.8g）把「即日停止」和「整批撤销」
+       合成了这一个。理由不是省一颗按钮：那个分支**本来就是自动的**
+       （见 `services.stop_series()`），而让人在两个系统反正会自己决定的选项
+       之间选，是最难辩护的一种界面。
+
+    ⚠️ 实测过按错的代价是**不对称**的：误按撤销结果完全一样，而误按停止要再按
+       一次撤销才能补救 —— 那条补救路径需要的恰恰是「分得清这两者」的知识。
+
+    ⚠️ GET 出确认屏、POST 才做。确认屏说的是**结局**（「系列会被整个删掉」还是
+       「系列留着」），而不是机制 —— 人关心的是前者。
+    """
+    series = _managed_series(request, pk)
+    if request.method != "POST":
+        return render(request, "events/series_stop_confirm.html", {
+            "series": series,
+            "taken": withdrawal_preview(series),
+        })
+
+    dropped = stop_series(series)
+
+    # 🔴 **这一行可能已经不在了**，而那正是这个动作 95% 的用法（建错了、还没
+    #    人碰过）。往一个刚被删掉的 pk 上重定向是一个 404 —— 落在管理列表上，
+    #    并且那句话要说清楚它是整条没了还是只收了未来。
+    if EventSeries.objects.filter(pk=pk).exists():
+        messages.success(request, (
+            f"Stopped as of today — {_occasions_worded(dropped)} still to come "
+            "were withdrawn. What had already happened, and anything somebody "
+            "had signed up for, stays."))
+        return redirect("events:series_detail", pk=pk)
+    messages.success(request, (
+        f"Stopped — the series and {_occasions_worded(dropped)} it had made are "
+        "gone. Nothing had happened on it yet."))
+    return redirect("events:event_manage_list")
+
+
+@login_required
+def publish_when(request):
+    """The "when" block for whichever shape the radio now says. Decision 32.
+
+    ⭐ It renders **only that block**, which is why nothing else on the page
+       needs carrying: the name, the place and the ticks are untouched DOM. The
+       two shapes ask genuinely different questions there — two instants
+       against a rule, a first date, a time and a length — so nothing inside
+       the block is worth carrying either.
+
+    ⚠️ No side effects, and a POST all the same: it is handed a part-filled
+       form, and putting that in a query string would scatter a draft event
+       through the server logs.
+    """
+    if not ministry_ids_administered_by(request.user):
+        raise PermissionDenied(SCOPED_DENIAL)
+    chosen = request.POST.get("publish_as")
+    building_a_series = chosen == PUBLISH_AS_SERIES
+    form_class = EventSeriesForm if building_a_series else EventForm
+    return render(request, "events/_publish_when.html", {
+        "form": form_class(user=request.user, initial={"publish_as": chosen}),
+        "building_a_series": building_a_series,
+    })
+
+
+@login_required
+def series_preview(request):
+    """The dates a rule falls on, while it is still being typed.
+
+    ⭐ This is what makes one press safe (decision 36's other half): the
+       publisher sees the twelve evenings **before** the button, on the same
+       screen, so a Tuesday typed as a Thursday is visible rather than
+       discovered by twelve volunteers.
+
+    🔴 It re-implements **no rule**. The values go into an unsaved
+       `EventSeries` and `full_clean()` judges them — so the sentence shown
+       here and the sentence shown on save are the same sentence, and a rule
+       added to `clean()` tomorrow reaches this page for free.
+    """
+    if not ministry_ids_administered_by(request.user):
+        raise PermissionDenied(SCOPED_DENIAL)
+    form = EventSeriesForm(request.POST, user=request.user)
+    # ⚠️ Only the four that decide *when*. The rest of the form is very likely
+    #    half-filled — this fires while somebody is still typing — and their
+    #    errors are not this block's business.
+    form.is_valid()
+    return render(request, "events/_series_dates.html", {
+        **_dates_context(
+            series_moments(form.instance) if _rule_is_usable(form) else [],
+            page=_month_page_asked_for(request), rule=form.instance.rule),
+        "complaint": _rule_complaint(form),
+    })
+
+
+def _rule_is_usable(form):
+    """Did the "when" answers survive validation?
+
+    ⚠️ The list is `forms.WHEN_ANSWERS`, not a copy. It grew from four names to
+       twelve when the picker landed (2026-09-11), and a second copy here would
+       have kept answering the old question — which fails **silently**: a field
+       missing from the list is one whose complaint this page never shows.
+    """
+    return not any(name in form.errors for name in WHEN_ANSWERS)
+
+
+def _rule_complaint(form):
+    """The first thing wrong with the rule, or None.
+
+    ⚠️ In the order the boxes appear on screen, so the sentence shown is about
+       the first thing somebody would look at rather than whichever field
+       Django happened to validate first.
+    """
+    for name in WHEN_ANSWERS:
+        if name in form.errors:
+            return form.errors[name][0]
+    return None
 
 
 @login_required
@@ -1433,7 +2002,7 @@ def _edit_page_context(event, *, form=None, role_form=None, user=None):
         # shared nav does not have to treat "missing" as "false".
         "can_manage": True,
         "form": form if form is not None else EventForm(instance=event, user=user),
-        "role_form": role_form if role_form is not None else EventRoleForm(event=event),
+        "role_form": role_form if role_form is not None else EventRoleForm(parent=event),
         "roles": event.roles.with_signup_counts().select_related("role"),
     }
 
@@ -1452,7 +2021,7 @@ def event_roles(request, pk):
     if request.method != "POST":
         return redirect("events:event_update", pk=event.pk)
 
-    form = EventRoleForm(request.POST, event=event)
+    form = EventRoleForm(request.POST, parent=event)
     if form.is_valid():
         form.save()
         messages.success(request, "Role added.")
@@ -1465,7 +2034,7 @@ def event_roles(request, pk):
         #    write, same message, one fewer full page.
         if not request.headers.get("HX-Request"):
             return redirect("events:event_update", pk=event.pk)
-        form = EventRoleForm(event=event)
+        form = EventRoleForm(parent=event)
     elif not request.headers.get("HX-Request"):
         # Errors have to survive, so this one renders rather than redirects —
         # and it renders the merged page, because that is the only page these

@@ -8,10 +8,12 @@ imports the same functions unchanged.
 import datetime
 import io
 import uuid
+from pathlib import Path
 from dataclasses import dataclass
 from decimal import Decimal
 
 from django.core.exceptions import ValidationError
+from django.core.files.base import ContentFile
 from django.db import transaction
 from django.db import models
 from django.db.models import Count, F, Q, Sum
@@ -25,11 +27,12 @@ from contact.models import Contact, ContactQuerySet
 from core.images import (decode_complaint, draft_to, over_decode_budget,
                          stored_size, upright_size)
 from core.notifications.base import EMAIL, SMS, Message, get_backend
-from core.timeutils import local_date_of, local_day, local_now
+from core.timeutils import local_date_of, local_day, local_now, local_today
 from org.audience import Audience, on_the_books_exists, on_the_books_q
 from org.models import Assignment
 
 from . import schedule, tokens
+from .recurrence import BATCH_CEILING, horizon_for, occasions
 from .models import (
     NOT_COMING,
     roles_narrower_than_event,
@@ -37,6 +40,8 @@ from .models import (
     Event,
     EventNotification,
     EventRole,
+    EventSeries,
+    EventSeriesRole,
     Participation,
     ParticipationRole,
     Session,
@@ -2357,6 +2362,89 @@ def events_with_images_to_purge(now=None):
     return Event.objects.filter(end_time__lt=now or local_now()).exclude(image="")
 
 
+def series_with_images_to_purge(now=None):
+    """Series whose **last** occasion is over and still holding a picture. L5.4.
+
+    ⭐ The same sentence `events_with_images_to_purge()` above says, asked of
+       the row that owns the file. A series' picture is shown by every occasion
+       it made (`Event.poster`), so deleting it when the *first* one ends would
+       take the picture off the other fifty-one — which is why the rule is the
+       last one and not the first.
+
+    ⚠️ Judged on `end_time`, never on `status` or on `ended_on`, and that is
+       copied deliberately from its neighbour: marking things finished is a
+       human action somebody forgets, and a picture that only disappears when
+       somebody remembers is a picture that stays. A stopped series with one
+       evening still ahead of it keeps its picture until that evening is over.
+
+    🔴 **A series that has never generated is left alone**, and the first draft
+       of this collected it — reasoning that nothing is ahead of it, so nothing
+       is left to show the picture on. True, and it deletes the picture of a
+       series somebody built this afternoon: upload it, go home, and tonight's
+       purge takes it before anybody has pressed Generate. Measured.
+
+       ⚠️ So the question is not "has it nothing ahead" but "has it had its
+          run": `generated_at` is what says a batch was ever built, which is
+          also the column the undo window reads. A series built and then
+          abandoned for ever does keep its file — that is the cost, it is one
+          small file per abandoned draft, and it is a much better trade than
+          deleting a picture the moment somebody uploads it. The undone case is
+          already handled: `stop_series()` purges before deleting the row.
+    """
+    ahead = Event.objects.filter(
+        series=models.OuterRef("pk"), end_time__gte=now or local_now())
+    ran_out = (EventSeries.objects.exclude(image="")
+               .exclude(generated_at__isnull=True)
+               .exclude(models.Exists(ahead)))
+    # 🔴 **「没有一场在未来」不再等于「这条系列完了」**（2026-09-11，L5.9）。
+    #    在滚动生成之前，每条规则都自带结束，所以两句话是同一句。现在一条
+    #    没有结束的规则只排一年 —— 有人忘了回来按「生成」，最后一场过去，
+    #    它就符合上面那个查询，而它**还活着**。
+    #
+    #    代价很具体：图片被删掉，然后下次按生成，新造的那一批全部指向一个
+    #    已经不存在的文件。这正是 `Event.poster` 那一节警告过的碎图标，
+    #    只是触发路径换了一条。
+    #
+    # ⚠️ 所以再问一句：这条规则还产得出东西吗？产得出就留着它的图。
+    #    一条 `COUNT=12` 跑完的系列照常被清理 —— 它的规则确实产不出新的了。
+    #    这不是把清理关掉，是把「还活着」和「真的完了」分开。
+    #
+    # ⚠️ 在 Python 里筛，不在查询里：「这条规则还产得出东西吗」要展开一次
+    #    RRULE，而那是 `_occasion_moments()` 的事，不是数据库的。这个查询
+    #    一天跑一次、结果集是「有图且已生成过」的那几行，代价可以忽略。
+    moment = now or local_now()
+    finished = [series.pk for series in ran_out
+                if not _still_to_come(series, moment)]
+    return ran_out.filter(pk__in=finished)
+
+
+def _still_to_come(series, moment):
+    """这条规则在窗口之内还有没有没排过的场次？
+
+    ⚠️ 读不懂的规则算作「没有」—— 一条坏掉的规则产不出任何东西，而让一个
+       无法解析的字符串永久保住一个文件，是把两种不同的失败绑在一起。
+    """
+    try:
+        return any(m > moment for m in _occasion_moments(series))
+    except ValidationError:
+        return False
+
+
+def purge_series_image(series):
+    """Delete one series' picture and forget it. Safe to call twice.
+
+    ⚠️ The column is cleared as well as the file, for the reason
+       `purge_event_image()` gives: a row pointing at a deleted file renders a
+       broken image, which is worse than rendering the default.
+    """
+    if not series.image:
+        return False
+    series.image.delete(save=False)
+    series.image = ""
+    series.save(update_fields=["image", "updated_at"])
+    return True
+
+
 def purge_event_image(event):
     """Delete one event's picture and forget it. Safe to call twice.
 
@@ -2503,6 +2591,59 @@ def hours_recorded_at(session):
         return ""
     text = f"{total:.2f}".rstrip("0").rstrip(".")
     return f"{text} hour" + ("" if total == 1 else "s")
+
+
+def register_kept_at(session):
+    """What this meeting's register would lose, as a phrase, or "" when nothing.
+
+    🔴 **The question `hours_recorded_at()` could not answer, and the reason is
+       L1's whole axis.** That one sums hours, and a place somebody **attends**
+       records no hours by design (decision 20 / the `attending` half of
+       `ParticipationRole.Nature`). So a meeting with a full class register —
+       twelve students, every one of them marked present — reported `""` and
+       the admin's delete button was enabled. `SessionAttendance` cascades from
+       `session`, so pressing it took the entire register: who came, and the
+       meeting lengths `hours_received()` reads to tell a learner how many
+       hours the foundation spent on them (D43).
+
+       In other words the guard asked about the volunteering half of this
+       system and was therefore blind to the whole of the other half — on a
+       table built specifically to hold both.
+
+    ⚠️ Rows, not hours, and that is the fix: the rule 06-roadmap L5.6 writes
+       down is "有出勤记录的 `Session` 不许自动删" — a meeting somebody
+       **attended**. Hours were a proxy for that, and they are a proxy that is
+       empty for exactly the people this table was added to serve.
+
+    ⚠️ "Attended" and not "expected", which is the other half of getting the
+       predicate right — see the comment on the query.
+
+    ⚠️ A phrase rather than a boolean, matching its two siblings, so all three
+       refusals read the same way and all three are falsy when there is nothing
+       to lose. It names both numbers when there are both: "12 on the register,
+       5 hours" is what somebody about to delete a meeting needs to weigh.
+    """
+    # 🔴 **Rows that say something happened, not rows that expect somebody.**
+    #    `add_session()` opens a register line for everybody already signed up,
+    #    so a meeting scheduled by mistake has twelve rows on it one second
+    #    later — and a guard counting rows would refuse to let anybody remove
+    #    it. What may not be lost is evidence: somebody marked present or
+    #    absent, somebody who pulled out of that evening, or hours recorded.
+    #    An untouched `registered` row is a plan, and `close_future_register()`
+    #    already deletes those by the thousand.
+    #
+    # ⚠️ Spelled as "not still the default" rather than listing the three, for
+    #    the reason B5 gives about complements elsewhere in this file: a fifth
+    #    per-meeting status should count as evidence by default, because the
+    #    failure of the other direction is silent data loss.
+    rows = (SessionAttendance.objects.filter(session=session)
+            .exclude(status=Participation.Status.REGISTERED, hours__isnull=True))
+    people = rows.count()
+    if not people:
+        return ""
+    said = f"{people} on the register"
+    hours = hours_recorded_at(session)
+    return f"{said}, {hours}" if hours else said
 
 
 def signups_left_outside(event):
@@ -2970,11 +3111,835 @@ def hours_received(participation):
     return duration_hours(total or datetime.timedelta())
 
 
-# --- P6: telling people the event changed --------------------------------
-# Who to tell and at what address is business logic and stays here. Putting a
-# message on the wire is an adapter (core/notifications). The dividing question
-# is D18's, aimed at a different target: change notification provider — does
-# this code have to move? If yes, it does not belong in the adapter.
+# --- L5.6: recurring events — generating, changing, undoing ----------------
+# One rule and one template produce N separate events (06-roadmap L5.4). The
+# two functions people press are `generate_occasions` and `stop_series`; both
+# collect what they are allowed to collect through the
+# one delete below, and none of them can express any other kind.
+
+
+def _collectable_occasions(series, after):
+    """The occasions a rule is allowed to take back. **The three conditions.**
+
+    ⭐ A queryset rather than a delete, and that is what makes "one place" true
+       rather than merely asserted. `_drop_generated_after()` deletes what this
+       returns; `withdrawal_preview()` counts it and describes the complement. Before
+       this split the preview re-derived all three in Python — negated and
+       reordered — 289 lines below a docstring promising they appeared nowhere
+       else, and neither the guard nor the tests could see it:
+
+         · `GeneratedEventDeleteGuardTests` wants `Source.GENERATED` **and**
+           `.delete(` in one body, and the copy had only the first;
+         · `test_the_preview_and_the_button_agree` exercises one of the three
+           branches and compares one integer, so flipping `<=` to `<` in the
+           copy leaves it green.
+
+       What that buys an admin: the screen says "6 will be removed", the button
+       removes 5, and the gap is invisible until after the press — on the one
+       screen whose whole purpose is not doing that.
+
+    The three, and why each:
+
+      · `source = generated` — a rule made it, so a rule may unmake it. The
+        make-up evening somebody added by hand is theirs, not ours;
+      · it has not **started** — see `_drop_generated_after()` for why this one
+        column and not `end_time`;
+      · **nobody has signed up.** Not in D40, because a shift has no signups.
+
+    ⚠️ "Signed up" means any `Participation` row at all, including a cancelled
+       or withdrawn one. Deliberately: those rows carry a person's history with
+       this occasion, and `Event` cascades two levels into them. It does mean
+       `withdrawal_preview()` says "somebody has signed up" about an evening nobody
+       is now coming to, which is a wording debt rather than a wrong decision.
+    """
+    return series.occasions.filter(
+        start_time__gt=after,
+        source=Source.GENERATED,
+    ).exclude(
+        models.Exists(Participation.objects.filter(
+            event_role__event=models.OuterRef("pk")))
+    )
+
+
+def _drop_generated_after(series, after):
+    """Withdraw the occasions a rule made and nobody has touched. Returns a count.
+
+    ⭐ **These three conditions appear nowhere else in the repository**, and
+       that is the whole design rather than a tidiness preference — D40's ⭐
+       says it in full. ⚠️ **Two callers, and D40's third is deliberately gone**:
+       stopping a series today, and undoing a batch. Its "recomputing the
+       future" was `generate_occasions()`, which this round stopped deleting
+       altogether once the rule became frozen — there is no longer any such
+       thing as a row it should collect. D40 has three because a shift rota
+       genuinely regenerates; an event series does not. Written out at each of them, "undo" would be
+       a second deleter free to grow a fourth reading of what may be deleted;
+       written here it is a third **caller**, and the guard
+       (`GeneratedEventDeleteGuardTests`) watches for the conditions rather than
+       policing a list of files that may delete.
+
+    The three:
+
+      · `source = generated` — a rule made it, so a rule may unmake it. The
+        make-up session somebody added by hand is theirs, not ours;
+      · it has not started — see below;
+      · **nobody has signed up.** This one is not in D40, because a shift has no
+        signups. An `Event` cascades two levels into `Participation`, so an
+        occasion dropped with somebody on it takes their signup, their
+        attendance and their hours with it. That is the exact loss the register
+        guard one level down was written for, and it is silent.
+
+    🔴 **The cut is `start_time`, not `end_time`**, and this is a deliberate
+       exception to the rule this codebase merged its way to on 2026-08-18 —
+       so it is written down rather than left to look like a slip. That rule
+       answers *"is it over"* and reads `end_time` everywhere (`is_over`,
+       `open_for_signup()`, `from_today()`, `_meetings_still_to_come()`). This
+       asks a different question: *"has it started"*. An occasion under way is
+       an occasion with people standing in a room, and withdrawing it from
+       underneath them is the thing "never touch what already happened" is
+       about. Two questions, two columns — the same shape L5.3 settled for
+       `shape` versus "does it have meetings".
+
+    ⚠️ Returns how many rows went, not the queryset: every caller is reporting
+       a number to a person, and a lazy queryset evaluated after the delete
+       reports zero.
+    """
+    doomed = _collectable_occasions(series, after)
+    # ⚠️ Counted before the delete rather than read off its return value:
+    #    `.delete()` reports every cascaded row too (roles, notifications), so
+    #    its number answers "how many rows" where every caller is asking "how
+    #    many occasions".
+    going = doomed.count()
+    doomed.delete()
+    return going
+
+
+def _occasion_moments(series):
+    """When this series' occasions fall, honouring an early stop.
+
+    ⚠️ `ended_on` is applied **here** rather than inside the expander, because
+       it is not part of the rule — the rule still says what it always said, and
+       the series stopping early is a separate fact about this series. Folding
+       it into the rule string would rewrite history: "why did it stop in May"
+       would have no answer left.
+
+    🔴 **Strictly before `ended_on`, and the strictness is the whole fix.** The
+       first draft compared `<=`, which read naturally and was wrong for exactly
+       one day — the day somebody stops the series. Stopping drops what has not
+       **started** (an instant), and this kept everything falling on that
+       **date**, so the evening that had just been withdrawn was inside the set
+       the generator was free to re-make. Pressing Generate after Stop put it
+       straight back. Measured on a Tuesday morning: five withdrawn, one
+       returned.
+
+       ⚠️ The occasions **earlier** that day are not lost by the strictness, and
+          that is the thing to check before reading this as too blunt: they
+          already exist, `_drop_generated_after()` never touches them (it only
+          drops what has not started), and `standing` below skips them. What
+          this excludes is only the re-making of rows that are gone on purpose.
+
+       ⚠️ So "stopped on D" means **no more occasions from D onwards**, which is
+          what `ended_on`'s help text now says. It used to say "after this date",
+          a sentence this code did not implement and a person would have had no
+          way to test.
+
+    ⚠️ The same boundary settles undo: its partial branch sets `ended_on` to
+       today too, so without this an undone batch grew back the moment anybody
+       pressed Generate — the button being right there on the same screen.
+    """
+    # 🔴 **一次只排到一年后**（2026-09-11，L5.9）。这一行是整条滚动生成的落点：
+    #    `generate_occasions()` 和 `series_moments()`（日期预览）都从这个函数
+    #    拿日期，所以改这一处，两边一定一致 —— 而两边不一致正是这一块最贵的
+    #    失败：页面说会造 12 场，按下去造了 53 场。
+    #
+    # ⚠️ 于是一条没有结束的规则不再是「要生成到永远」。明年再按一次，窗口往前
+    #    滑，接着排。页面上那行「已排到 X」是这件事的另一半 —— 没有它，
+    #    一条排完了的无限规则会安安静静地停在那里。
+    try:
+        moments = occasions(
+            series.rule, starts_on=series.starts_on, start_time=series.start_time,
+            not_after=horizon_for(series.starts_on, local_today()))
+    except (ValueError, TypeError) as unreadable:
+        # ⚠️ A `ValidationError`, not the raw `ValueError` dateutil throws, and
+        #    the reason is the caller: the admin action catches ValidationError
+        #    and shows it, so an unreadable rule reaches a person as a sentence
+        #    instead of a 500 page. `EventSeries.clean()` makes the same
+        #    translation for the form; this is the same rule on the path that
+        #    has no form — an imported row, a script, the seed.
+        #
+        # 🔴 It was the one case the admin's catch did **not** cover, while its
+        #    own comment named "a series that reached the database without
+        #    full_clean()" as the reason it existed. A bad rule is the commonest
+        #    such row there is.
+        raise ValidationError(
+            f"That is not a repeat rule this understands ({unreadable}). "
+            "It looks like FREQ=WEEKLY;BYDAY=TU;COUNT=12."
+        ) from None
+    # ⚠️ The expander stops one past the limit so its callers can tell "exactly
+    #    the limit" from "far more than it" — and this is the caller that has to
+    #    say so out loud. `EventSeries.clean()` refuses an over-long rule at the
+    #    form, but a row that reached the database another way (an import, a
+    #    script, `objects.create` in a fixture) would otherwise have been
+    #    quietly cut to 53 here, with the admin told "53 occasion(s) generated"
+    #    and no mention of the 47 the rule asked for. D14's shape: the rule is
+    #    enforced where the write happens, not only where a person types.
+    if len(moments) > BATCH_CEILING:
+        raise ValidationError(
+            f"That repeats more often than this can build — more than "
+            f"{BATCH_CEILING} occasions in a single year. Nothing was "
+            "generated. Check the rule: this is usually a unit that slipped, "
+            "such as hourly where daily was meant."
+            # ⚠️ Word for word the sentence `EventSeries.clean()` uses, and
+            #    deliberately: this is the same rule enforced on the path a row
+            #    takes when it did **not** come through a form (an import, a
+            #    script, `objects.create` in a fixture). Two different
+            #    sentences for one rule would make the same mistake read as two.
+            #
+            # ⚠️ What it refuses changed on 2026-09-11 (L5.9): it used to be
+            #    "this rule is longer than 52 occasions", which is no longer a
+            #    problem — generation is windowed now. What is left is density:
+            #    a rule too tight to fit a year.
+        )
+    stop = series.ended_on
+    if stop is None:
+        return moments
+    return [moment for moment in moments if local_date_of(moment) < stop]
+
+
+def _open_role_from(template, occasion):
+    """Copy one role template onto one occasion. Returns the new row."""
+    role = EventRole(
+        event=occasion,
+        role=template.role,
+        needed_count=template.needed_count,
+        stop_at_needed_count=template.stop_at_needed_count,
+        notes=template.notes,
+    )
+    role.full_clean()
+    role.save()
+    return set_audience(role, Audience.Spec.of(template))
+
+
+def _was_removed_by_hand(occasion, template):
+    """Did somebody open this job on this evening and then take it off again?
+
+    ⭐ **Asked of the history table, and that is why decision 35 costs nothing.**
+       `EventRole` has kept history since it was written — the reason on the
+       model is that `needed_count` is a promise published to volunteers — and
+       simple-history records a deletion as a row with `history_type="-"`. So
+       "this occasion deliberately does not want this job" is a question the
+       database could already answer; it did not need a column, a migration or
+       a new concept to remember it.
+
+    ⚠️ Measured before relying on it: deleting a role leaves `[('-',…),('+',…)]`
+       for that (event, role) pair, and a job that was never opened there
+       matches nothing. Both directions checked, because a false positive here
+       silently stops a legitimate top-up and a false negative silently undoes
+       somebody's decision.
+
+    ⚠️ It cannot be confused by the generator's own withdrawals. Stopping or
+       undoing a series deletes whole `Event` rows and their roles cascade —
+       but that history hangs on **that** event, and regenerating builds a new
+       row with a new primary key, which matches nothing here.
+    """
+    return EventRole.history.filter(
+        event_id=occasion.pk, role_id=template.role_id, history_type="-"
+    ).exists()
+
+
+def _top_up_roles(occasion, templates, *, now):
+    """Give this occasion any job the recipe has and it has never had.
+
+    ⭐ Decision 34: pressing Generate makes the batch **match the recipe**, not
+       merely fill in missing evenings. Adding a job two weeks in is an ordinary
+       thing to want — "we have realised we need somebody on the door" — and
+       before this it reached only occasions that did not exist yet, which is to
+       say nothing at all on a batch already built.
+
+    Three rules, and each is a different question:
+
+      · the occasion already has it        → leave it, it is there;
+      · it had it and somebody removed it  → **leave it alone**. Decision 35:
+        a deletion is a decision, and putting it back would overrule somebody
+        who pressed a button on purpose;
+      · otherwise                          → open it.
+
+    🔴 **Signups are not a reason to skip, and the first draft said they were.**
+       That rule was borrowed from `_collectable_occasions()` — "a thing people
+       are standing in is not ours to rearrange" — and the borrowing was wrong
+       because the actions are not alike. Withdrawing an occasion **takes
+       something away**; opening a job on it takes nothing from anybody. The
+       people signed up hold rows pointing at a different `EventRole`, which is
+       untouched. And the evenings that already have volunteers on them are
+       precisely the ones most likely to want a door steward.
+
+    ⚠️ **What is a reason is the clock.** An occasion that has already started
+       is skipped, because opening a job on an evening that has happened writes
+       down a shortfall that never existed: `EventRole.objects.understaffed()`
+       and the report's `_role_gap()` neither of them filter by date, so a job
+       opened on last Tuesday reports for ever that last Tuesday wanted a
+       steward and nobody came. Nobody was ever asked.
+
+       ⚠️ The cut is `start_time`, the same one `_drop_generated_after()` makes
+          and for the same reason — "has it started", not "is it over". See
+          that function for why this codebase's usual `end_time` rule does not
+          apply to either of them.
+
+    ⚠️ It **never deletes**. A template removed from the recipe does not close
+       that job on occasions already built, and that is deliberate: closing a
+       job takes signups with it (`EventRole` cascades into `Participation`),
+       which is exactly the loss the delete guards exist for. Removing a job
+       from an evening stays a thing a person does on that evening's own page.
+    """
+    if occasion.start_time <= now:
+        return []
+    # ⚠️ `.all()` 而不是 `.values_list()`,而这一行是有代价的:
+    #    `generate_occasions()` 那边特地 `prefetch_related("roles")` 过,
+    #    但 `.values_list()` 每次都另起一个查询、**绕开那份缓存** —— 于是
+    #    一条 52 场的系列多发 52 条查询,而那份 prefetch 白取了一遍。
+    #    2026-09-11 代码评审抓到。
+    standing = {role.role_id for role in occasion.roles.all()}
+    opened = []
+    for template in templates:
+        if template.role_id in standing:
+            continue
+        if _was_removed_by_hand(occasion, template):
+            continue
+        try:
+            # 🔴 **A savepoint, not a bare try.** `_open_role_from()` saves the
+            #    row and *then* sets its audience, so catching without rolling
+            #    back left the role standing with no audience at all —
+            #    (False, False, none), a job nobody on earth can sign up for,
+            #    on a published event. That is precisely the state
+            #    `refuse_empty_audience()` exists to prevent, reached through
+            #    the error handling written to be careful. Measured, not
+            #    reasoned: the test for the narrowing case found a `door` role
+            #    where it had asserted there would be none.
+            #
+            # ⚠️ It also keeps the outer transaction usable. Catching a
+            #    database error inside `atomic()` without a savepoint leaves
+            #    the whole transaction broken, and every later query in this
+            #    press would fail with something that names none of this.
+            with transaction.atomic():
+                opened.append(_open_role_from(template, occasion))
+        except ValidationError:
+            # ⚠️ Skipped, not raised, and the case is real: somebody may have
+            #    narrowed **one** occasion's audience by hand, and a template
+            #    wider than it cannot be opened there without breaking L2×L3.
+            #    Raising would abort the whole press — one hand-edited evening
+            #    would stop every other occasion being topped up — so this
+            #    occasion keeps the audience its publisher gave it and the rest
+            #    of the batch is served.
+            continue
+    return opened
+
+
+def series_moments(series):
+    """The moments this rule falls on, for a page that wants to show them.
+
+    ⭐ The same expander the generator walks, so the list a publisher reads
+       before pressing the button is the set of evenings the button will build.
+       A page that worked them out for itself would be free to disagree, and
+       the disagreement would only surface after the press.
+
+    ⚠️ Returns `[]` rather than raising when the rule is unusable. Its callers
+       are pages: one is a preview of something still being typed, and half a
+       rule is the ordinary state there, not an error to report twice — the
+       form is what says what is wrong with it.
+    """
+    if not (series.rule and series.starts_on and series.start_time):
+        return []
+    try:
+        return _occasion_moments(series)
+    except ValidationError:
+        return []
+
+
+def generated_through(series):
+    """这条系列已经排到哪一天（当地日期），没排过就是 None。
+
+    ⭐ 滚动生成之后，这是页面上最要紧的一个读数。一条没有结束的规则**不会自己
+       一直排下去** —— 它一次排一年。没有这句话，一条排完了的规则会安安静静地
+       停在那里：`/events/` 上不再出现新的场次，而系列页看起来一切正常。
+
+    ⚠️ 读的是最后一场的 `start_time`，**不是** `series.generated_at`。后者是
+       「上一次有人按按钮」，前者才是「排到哪天」—— 两个都存在，而混用的表现是
+       页面上写着「已排到今天」。
+    """
+    last = series.occasions.order_by("-start_time").values_list(
+        "start_time", flat=True).first()
+    return local_date_of(last) if last else None
+
+
+#: 最后一场在这么久之内，就该提醒「快排完了」（2026-09-11，L5.9）。
+#:
+#: ⚠️ 判据是**最后一场还有多远**，不是还剩几场：五场一周一次是五周，
+#:    五场一天一次是五天，而要提醒的是「快没了」，不是「剩几行」。
+#:
+#: ⚠️ 六周只有一句常识，没有别的依据 —— 和 `HORIZON_MONTHS`、`BATCH_CEILING`
+#:    一样。试点跑一轮之后回来看它。
+RUNNING_LOW = datetime.timedelta(weeks=6)
+
+
+def has_more_to_build(series):
+    """这条规则还有没有**没建过**的场次？
+
+    ⚠️ 问的不是「还有没有未来的场次」—— 一条 `COUNT=12` 全部生成完的系列，
+       未来当然还有十一场，但它们都已经在库里了，按「生成」一个都不会多。
+       两个问题差一个词，而答错的表现是页面一直劝人按一颗按不出东西的按钮。
+
+    ⚠️ `_occasion_moments()` 已经把 `ended_on` 算进去了，所以一条「即日停止」
+       过的系列在这里自然答 False —— 不需要另写一条判断。
+    """
+    standing = set(series.occasions.values_list("start_time", flat=True))
+    try:
+        return any(moment not in standing
+                   for moment in _occasion_moments(series))
+    except ValidationError:
+        # 读不懂的规则产不出东西。它有它自己的那句拒绝，不在这里说。
+        return False
+
+
+def is_running_low(series, *, booked_to=None):
+    """排到头的那天近了，**而且**再按一次真的还能排出东西吗？
+
+    ⚠️ `booked_to` 是给已经问过 `generated_through()` 的调用方的 —— 系列页两样
+       都要，而不传它就是同一句 `ORDER BY start_time DESC LIMIT 1` 每次渲染跑
+       两遍。不传照常自己去问。
+
+    🔴 **后半句是 2026-09-11 代码评审补的，而漏掉它会让这行提醒变成谎话。**
+       原来只问前半句，于是：一条 `COUNT=12` 全部生成完的系列，在它最后一场
+       前六周开始显示「快排完了 —— 再按一次生成」，而按下去一场都不会多，
+       那句话也永远不会消失。「即日停止」过的系列同样中招。
+
+    ⚠️ 「没排过」不算快没了 —— 那是「还没开始」，是另一件事，页面上也不该
+       用同一句话说它。
+    """
+    booked_to = generated_through(series) if booked_to is None else booked_to
+    return bool(booked_to
+                and booked_to <= local_today() + RUNNING_LOW
+                and has_more_to_build(series))
+
+
+@transaction.atomic
+def generate_occasions(series, *, generated_by=None):
+    """Make the events this rule calls for. Returns the ones it created.
+
+    ⭐ **It only ever adds.** Every moment the rule names that has no occasion
+       standing on it gets one; everything already there is left exactly as it
+       is, down to its primary key. Press it twice and the second press creates
+       nothing and reports nothing — the shape `open_register()` describes for
+       itself one table over: 补齐不是重建, top up rather than rebuild.
+
+    🔴 **It used to withdraw first, and that was a silent wrecking ball.** The
+       first draft opened with `_drop_generated_after(series, after=now)` and
+       then skipped "any moment that already has an occasion standing on it" —
+       but `standing` was read **after** the drop, so it was empty for precisely
+       the rows the drop had just taken. The skip therefore only ever protected
+       what the drop had already spared, and every untouched future occasion was
+       deleted and made again. Measured on a four-occasion batch: a second press
+       reported "4 occasion(s) generated" and every primary key had changed.
+       What went with them:
+
+         · an occasion an admin had **cancelled** came back `open` — its
+           cancellation, and the `EventNotification` rows recording that people
+           had been told, cascaded away;
+         · any hand edit to a future occasion (its place, its description) was
+           reverted with nothing said;
+         · every `/events/<pk>/` link already sent to a volunteer died, because
+           the row behind it was a new row.
+
+       ⚠️ The docstring claimed the opposite of all three, which is the part
+          worth keeping: it said an occasion "somebody moved by hand" survived.
+          A comment describing a protection that is not there is the failure
+          this repository keeps convicting, and this is the second one in this
+          feature (see `EventSeriesAdmin`'s permissions note).
+
+    ⚠️ **Nothing is dropped here at all any more, and that is a consequence of
+       the freeze rather than a second policy.** Since `_refuse_rewriting_the_rule()`
+       landed, the columns that decide *when* occasions fall cannot change while
+       occasions exist — so the set of moments this walks is fixed, and there is
+       no such thing as a row this function should collect. Withdrawing belongs
+       to the three functions that own a reason to: stopping, splitting, undoing.
+       One deleter, two callers, and this is not one of them.
+
+    ⚠️ **Not `bulk_create`, and D40 section 2 chose the opposite for shifts.**
+       Both reasons are specific to this side: `Event` carries history — an
+       audience is a promise published to the outside world — and `bulk_create`
+       fires no signals, so a whole batch would leave the history table empty.
+       The audience itself is a many-to-many, which `bulk_create` cannot write
+       at all. Over on D33 a `Shift` has no history and the generator runs the
+       whole rota every week, where the silence is the point.
+
+    ⚠️ Every row goes through `full_clean()` and `set_audience()` rather than
+       straight to `save()`. `set_audience()`'s own docstring has named "batch
+       three's generator" as the caller it exists for since 2026-08-27; this is
+       that sentence coming true. Without it a template pair could put a role in
+       front of people who cannot see the event it hangs on — the L2×L3
+       invariant, which has no database constraint behind it.
+    """
+    # ⚠️ Locked for the length of the transaction, so two presses on one
+    #    series queue rather than race. The unique constraint on
+    #    `(series, start_time)` is what catches a race this cannot see — a
+    #    caller that reaches the ORM without coming through here — and this is
+    #    what keeps the ordinary double-click from meeting it as a 500.
+    series = EventSeries.objects.select_for_update().get(pk=series.pk)
+    # ⚠️ One reading of the clock for the whole press, so a batch spanning the
+    #    moment an occasion starts cannot top up one of its evenings and skip
+    #    the next on a difference of milliseconds.
+    now = local_now()
+    audience = Audience.Spec.of(series)
+    templates = list(series.roles.prefetch_related("visible_to_ministries"))
+    # ⚠️ **A series with no roles is allowed to generate** (decision 36), and it
+    #    was refused until 2026-09-10. The refusal was right at the time: a
+    #    batch nobody could sign up for was a dead end, because Generate only
+    #    ever added missing *occasions* and never touched the roles on ones
+    #    already built — so adding the job afterwards reached none of them.
+    #
+    #    Decision 34 removed the dead end. `_top_up_roles()` below opens a job
+    #    on every occasion that has never had it, so the way back is now one
+    #    press: add the role template, press Generate again. With a retreat in
+    #    place, refusing costs a publisher a step and buys nothing.
+    # ⚠️ Read before anything is written, and nothing is deleted before it —
+    #    the two halves of the bug above. A map rather than a set since
+    #    decision 34: an occasion that is already standing is not skipped any
+    #    more, it is handed to `_top_up_roles()`.
+    standing = {occasion.start_time: occasion
+                for occasion in series.occasions.prefetch_related("roles")}
+
+    made = []
+    for moment in _occasion_moments(series):
+        if moment in standing:
+            _top_up_roles(standing[moment], templates, now=now)
+            continue
+        # ⚠️ Everything the rule says, and `shape` stated flatly rather than
+        #    left to the column default: this option produces N events that are
+        #    every one of them a one-off, which is the sentence Event.Shape's
+        #    docstring spends a paragraph on. A default is not a statement.
+        occasion = Event(
+            name=series.name,
+            ministry=series.ministry,
+            owner=series.owner,
+            start_time=moment,
+            # ⚠️ Added in **absolute** time, not on the wall clock, and the two
+            #    differ on exactly two mornings a year. `moment + duration` on a
+            #    zoneinfo-aware datetime keeps the tzinfo and does not
+            #    renormalise, so a two-hour occasion starting at 01:30 on the
+            #    spring-forward day came out ending at 03:30 — one real hour
+            #    later, and `Event.duration` then reported 1:00 for a rule that
+            #    says 2:00. `duration` is how long the thing **lasts**; the wall
+            #    clock is only how its start is decided (see recurrence.py).
+            end_time=moment.astimezone(datetime.timezone.utc) + series.duration,
+            location=series.location,
+            description=series.description,
+            status=series.status,
+            requires_guardian_consent=series.requires_guardian_consent,
+            shape=Event.Shape.SINGLE,
+            series=series,
+            source=Source.GENERATED,
+        )
+        occasion.full_clean()
+        occasion.save()
+        set_audience(occasion, audience)
+        for template in templates:
+            _open_role_from(template, occasion)
+        made.append(occasion)
+    if made:
+        # ⚠️ Only when something was actually built. Pressing Generate on a
+        #    finished series must not restart the undo window on a batch
+        #    nobody rebuilt — the window is about "I have just built this
+        #    wrong", and nothing was built.
+        series.generated_at = local_now()
+        series.generated_by = generated_by or series.generated_by
+        series.save(update_fields=["generated_at", "generated_by", "updated_at"])
+    return made
+
+
+@transaction.atomic
+def stop_series(series):
+    """停掉这一条：收回没人认领的未来场次；要是什么都没剩下，连这一行也收走。
+
+    ⭐ **一个动作，两种结局，而分支不是一个选项** —— 2026-09-11（L5.8g）把
+       「即日停止」和「整批撤销」合成了这一个。理由不是省一颗按钮，是
+       **这个分支本来就是自动的**：撤销那个服务当初写的就是
+       `if series.occasions.exists(): ended_on = today`，
+       `if not ...exists(): delete()`。两颗键之间那道选择题，系统反正会自己
+       重答一遍。
+
+    ⚠️ 两种结局答的是两个问题：**剩下东西 = 「它存在过，到此为止」**
+       （`ended_on` 是「为什么只有六场」的唯一答案，所以那一行必须留着）；
+       **什么都没剩 = 「它本来就不该存在」**（一行空系列解释不了任何事）。
+
+    🔴 **收场次那一句一个字没动**：`_drop_generated_after()`，也就是 D40 那条
+       ⭐ 不变量（撤销和生成器共用同一句删除）。合并之后它的调用方从两个变成
+       一个，那条不变量因此**更强**，不是更弱。
+
+    ⚠️ **不记「是谁」。** 这里原来有 `undone_at` / `undone_by` 两列，一起删了：
+       `EventSeries` 带 `history` 而且 `HistoryRequestMiddleware` 装着，
+       影子表连改前改后都有。D40 当初要那两列是因为班次那边走 `bulk_create`、
+       simple-history 一个字不记 —— 而 D40 §8 自己写着这条在活动这一侧是
+       反过来的。
+
+    ⚠️ **没有时间窗口。** 撤销那一侧原来只对七天内的批次开放，理由是分开
+       「我建错了」和「我们改主意了」。而「有没有人报名」是对同一件事的**直接
+       测量**，窗口只是它的代理指标 —— 有了直接测量就不需要代理了。
+       ⚠️ 班次那边没有报名行，所以 D40 第五节在**那里**仍然成立。
+
+    交回收走了几场。⚠️ 这一行还在不在，调用方自己去数据库问 —— 那是权威答案，
+    而不是这里的一个交代。
+    """
+    dropped = _stop_from_today(series)
+    if not series.occasions.exists():
+        # ⚠️ 先清图再删行：`purge_series_image()` 要读 `series.image`，
+        #    而行删掉之后那个 FieldFile 就没有依托了。
+        purge_series_image(series)
+        series.delete()
+    return dropped
+
+
+def _stop_from_today(series):
+    """写上 `ended_on`、收回未来那些 —— **不碰这一行的存亡**。
+
+    ⚠️ 抽出来是给 `split_series()` 用的，而那里**必须留下那一行**：改规则的
+       结果是「这一条停掉、那一条接上」，旧的那一行就是新那条的来历，而确认屏
+       上也是这么写的。用会删行的 `stop_series()` 的话，一条没人报名的系列改个
+       规则，旧行会凭空消失 —— 从外面看就成了「就地改了规则」，而那正是整个
+       split 存在要避免的事。
+    """
+    now = local_now()
+    series.ended_on = local_today()
+    series.full_clean()
+    series.save(update_fields=["ended_on", "updated_at"])
+    return _drop_generated_after(series, after=now)
+
+
+#: What `split_series()` will carry over or replace. ⚠️ Named, so a misspelled
+#: keyword is refused rather than silently ignored — see its docstring.
+SPLITTABLE_FIELDS = frozenset({
+    "name", "rule", "starts_on", "start_time", "duration", "location",
+    "description", "status", "requires_guardian_consent",
+})
+
+
+def resumes_on_after_split(series, *, rule=None, start_time=None):
+    """改规则之后，新系列的第一场落在哪天。
+
+    🔴 **The next day the rule actually falls on, not simply today.** The
+       successor's `starts_on` is its "First one on", and `EventSeries.clean()`
+       refuses one whose weekday the rule does not repeat on — so handing it
+       today refused every split on six days out of seven, which is to say the
+       only sanctioned way to change a rule worked on Tuesdays. Found by a test
+       written for something else entirely (the picture), which is the third
+       time in this feature that the check for one thing has caught a different
+       thing.
+
+    ⚠️ Asked of the rule rather than computed from the weekday, because the rule
+       is the only thing that knows: `BYSETPOS`, `INTERVAL` and monthly rules
+       all have answers no weekday arithmetic here would get right.
+
+    ⚠️ 从**今天**往后找第一场，不是从旧系列的 `starts_on`：新的这条是从今天
+       接着走的。`limit=1` 让一条没有结束的规则也停得下来。
+
+    ⚠️ 一条从今天起再也落不到任何一天的规则（比如 `UNTIL` 已经过去），交回今天
+       本身 —— 那条新系列会是空的，而那是真话，不是错误。
+    """
+    stop_at = local_today()
+    ahead = occasions(rule or series.rule, starts_on=stop_at,
+                      start_time=start_time or series.start_time, limit=1)
+    return local_date_of(ahead[0]) if ahead else stop_at
+
+
+@transaction.atomic
+def split_series(series, *, changed_by, **fields):
+    """Change the rule from today on: stop this series, start a new one.
+
+    Returns `(successor, how many occasions were withdrawn)`.
+
+    ⭐ **Not an in-place edit**, which is the tempting shape and the wrong one.
+       Rewriting `rule` on the existing row leaves "which rule was this occasion
+       generated under" with no answer — and that question is asked every time
+       somebody looks at a term that changed halfway. Google's calendar splits a
+       recurring event for the same reason.
+
+    ⚠️ The new series starts **today**, not on the old one's `starts_on`: what
+       is being changed is the future, and generating it from the original start
+       would try to re-make occasions that already happened (and be refused by
+       the standing-occasion check above, silently doing nothing).
+
+    🔴 **An unknown keyword is refused, not ignored.** `**fields` read through
+       `fields.get(name, default)` means a typo lands on no field and changes
+       nothing — so `split_series(s, changed_by=me, start_tiem=time(20, 0))`
+       returned a successor at the old time and raised nothing. Since the freeze
+       makes this the **only** sanctioned way to change a rule, that turned "I
+       changed the time" into "I cloned the series" with no way to tell.
+    """
+    unknown = sorted(set(fields) - SPLITTABLE_FIELDS)
+    if unknown:
+        raise TypeError(
+            f"split_series() got unexpected field(s): {', '.join(unknown)}. "
+            f"It carries over or replaces: {', '.join(sorted(SPLITTABLE_FIELDS))}.")
+    # 🔴 **从库里重新取一行，不信调用方手里那个对象。** 调用方多半递进来的是一张
+    #    表单的 `instance`，而表单在 `_post_clean()` 里已经把人填的新值写进了那个
+    #    内存对象 —— 下面 `_stop_from_today()` 的 `full_clean()` 于是拿着一个
+    #    「规则和库里不一样」的对象**再撞一次冻结**，整件事无声地什么都没做
+    #    （实测：系列数不变、`ended_on` 仍是 None、页面退回原处）。
+    #
+    # ⚠️ 新值一格都不靠这个对象 —— 它们全在 `**fields` 里，那是这个函数的签名
+    #    说的话。所以这里要的恰恰是**没被碰过**的那一行，而让它自己去取，比在
+    #    每个调用方那里写一句「别把脏对象递进来」可靠：那种约定只在写下它的那
+    #    一处成立，下一个调用方踩上去的时候身边一个字都没有。
+    series = type(series).objects.get(pk=series.pk)
+    # ⚠️ 抽成函数是因为**确认屏要先说这个数**（L5.8f）：人按保存、看见
+    #    「新系列从 9 月 17 日开始」、然后才决定确不确认。屏上那个数和这里真的
+    #    用的那个必须是同一个 —— 各算一遍就是两个答案，而它们隔着一次点击。
+    resumes_on = resumes_on_after_split(
+        series,
+        rule=fields.get("rule"),
+        start_time=fields.get("start_time"))
+    successor = EventSeries(
+        name=fields.get("name", series.name),
+        ministry=series.ministry,
+        # ⚠️ `changed_by or series.owner`, because `owner` is NOT NULL while the
+        #    person doing this may legitimately have no Contact — a superuser
+        #    matches no real person (D12), and today a superuser is the only
+        #    account that can reach the control at all. Written as `changed_by`
+        #    alone, the one sanctioned way to change a rule failed with "This
+        #    field cannot be null" for every caller that exists.
+        owner=changed_by or series.owner,
+        rule=fields.get("rule", series.rule),
+        starts_on=fields.get("starts_on", resumes_on),
+        start_time=fields.get("start_time", series.start_time),
+        duration=fields.get("duration", series.duration),
+        location=fields.get("location", series.location),
+        description=fields.get("description", series.description),
+        status=fields.get("status", series.status),
+        requires_guardian_consent=fields.get(
+            "requires_guardian_consent", series.requires_guardian_consent),
+    )
+    if series.image:
+        # 🔴 **A copy of the file, not the same path** — and this is the one
+        #    place in this feature where copying bytes is right. Everywhere
+        #    else the occasions share the series' file because they die with
+        #    it; here the two series have **independent lifetimes**. The old
+        #    one's last evening comes first, the daily purge deletes its
+        #    picture, and a successor pointing at that path would go to a
+        #    broken image — the exact failure `Event.poster` refuses for the
+        #    occasions. One copy, because there are two owners; not fifty-two,
+        #    because the occasions are not owners.
+        #
+        # ⚠️ `.read()` of an already-normalised file, so it is not re-encoded:
+        #    the bytes on disk are the WebP `normalise_event_image()` produced,
+        #    and running them through it again would recompress a picture that
+        #    is already at the target size.
+        series.image.open("rb")
+        try:
+            successor.image.save(
+                Path(series.image.name).name, ContentFile(series.image.read()),
+                save=False)
+        finally:
+            series.image.close()
+    successor.full_clean()
+    successor.save()
+    set_audience(successor, Audience.Spec.of(series))
+    for template in series.roles.prefetch_related("visible_to_ministries"):
+        carried = EventSeriesRole(
+            series=successor,
+            role=template.role,
+            needed_count=template.needed_count,
+            stop_at_needed_count=template.stop_at_needed_count,
+            notes=template.notes,
+        )
+        carried.full_clean()
+        carried.save()
+        set_audience(carried, Audience.Spec.of(template))
+    # ⚠️ Returned, not swallowed. This function **withdraws** the old series'
+    #    future occasions, and its admin action was the only destructive one in
+    #    the set that reported no number — "a copy is ready to edit" while four
+    #    published evenings had just gone. Its two siblings both say how many.
+    withdrawn = _stop_from_today(series)
+    return successor, withdrawn
+
+
+def withdrawal_preview(series):
+    """这条系列现在按下去会收走什么、留下什么、为什么。三张确认屏共用。
+
+    ⚠️ Computed rather than estimated, and computed **from the same three
+       conditions** `_drop_generated_after()` deletes on — a preview built from
+       its own filter is a preview free to disagree with the button under it.
+
+    ⚠️ Computed rather than estimated, and computed **from the same three
+       conditions** `_drop_generated_after()` deletes on — a preview built from
+       its own filter is a preview free to disagree with the button under it.
+    """
+    now = local_now()
+    # 🔴 **Asked of the same queryset the button deletes**, never re-derived.
+    #    The reasons below describe what is left over, which is a presentation
+    #    question; *which* rows are left over is the rule, and the rule has one
+    #    body — see `_collectable_occasions()`.
+    going_pks = set(_collectable_occasions(series, now)
+                    .values_list("pk", flat=True))
+    staying = {}
+    signed_up = Participation.objects.filter(
+        event_role__event=models.OuterRef("pk"))
+    # ⚠️ `only()`：底下只读这三格加上那个注解，而不写它就是把每一场的整行
+    #    （说明、图片、受众那几列）拉过来数一个数 —— admin 一次可以选二十条。
+    for occasion in (series.occasions
+                     .only("pk", "source", "start_time")
+                     .annotate(taken=models.Exists(signed_up))
+                     .order_by("start_time")):
+        if occasion.pk in going_pks:
+            continue
+        # ⚠️ Worked out only for the rows the rule already refused to take, and
+        #    only to say **why**. If these ever disagree with the queryset the
+        #    answer is "no reason given", not a different set of rows.
+        if occasion.source != Source.GENERATED:
+            reason = "added by hand"
+        elif occasion.start_time <= now:
+            reason = "already started or over"
+        elif occasion.taken:
+            reason = "somebody has signed up"
+        else:
+            # ⚠️ Unreachable by construction — a row that is none of the three
+            #    is one the queryset above already listed, and those `continue`
+            #    six lines up. Kept as a named value rather than an exception
+            #    because the honest answer on a screen is "it is staying and I
+            #    cannot tell you why", never a 500 in front of somebody who is
+            #    mid-undo.
+            reason = "kept"
+        staying.setdefault(reason, []).append(
+            f"{local_date_of(occasion.start_time):%-d %b}")
+    return Withdrawal(going=len(going_pks), staying=list(staying.items()))
+
+
+@dataclass(frozen=True)
+class Withdrawal:
+    """`_drop_generated_after()` 会拿走什么、留下什么、以及为什么。
+
+    ⭐ **两张确认屏问的是同一个问题**（2026-09-11，L5.8f）：撤销那一屏，和
+       「改规则会新起一条系列」那一屏 —— 后者底下的 `split_series()` 收未来场次
+       用的也是同一句删除。各算一遍就是两个答案，而它们会并排出现在同一个功能里。
+
+    `staying` 是 `[(理由, [日期, 写好的])]`。⚠️ 理由是**给人看的**，而哪几行留下
+    是规则说了算 —— 见 `withdrawal_preview()` 里那段 🔴。
+    """
+
+    going: int
+    staying: list
+
+    @property
+    def total_staying(self):
+        return sum(len(days) for _, days in self.staying)
+
+    @property
+    def series_survives(self):
+        """按下去之后，系列那一行还在不在？
+
+        ⚠️ 这**不是**这里定的政策，是 `Event.series` 那个 PROTECT 让它成真的：
+           还有场次指着它，行就删不掉。写在这里只是为了让确认屏说得出来。
+
+        ⚠️ 原来这一格在 `UndoPreview` 上，而那个类 2026-09-11 整个删掉了 ——
+           撤销和即日停止合并之后只剩一颗键，一颗键只该有一种预览。
+        """
+        return bool(self.staying)
 
 
 @dataclass(frozen=True)

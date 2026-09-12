@@ -12,6 +12,7 @@ import io
 import os
 import ast
 import re
+from types import SimpleNamespace
 import shutil
 import smtplib
 import tempfile
@@ -799,6 +800,279 @@ class RegisterDeleteGuardTests(TestCase):
         )
 
 
+class GeneratedEventDeleteGuardTests(TestCase):
+    """Lint-as-test: an occasion a rule made is withdrawn in one function, only.
+
+    ⭐ The sibling `RegisterDeleteGuardTests` above names — one level up, on the
+       events themselves rather than on the register inside them. D40's ⭐ writes
+       the rule out in full: the conditions under which a generated row may be
+       taken back appear **once**, and undo is not a second deleter but a third
+       caller of the one that exists.
+
+    🔴 The obvious alternative is what D40 refuses by name: add "and undo's
+       delete is fine too" to a guard's allow-list. D36's cost 4 had just warned
+       that an allow-list is where a guard is quietly widened until it protects
+       nothing — so the rule was made structural instead. Extracted into one
+       function, this guard needs no exceptions at all: it watches for the
+       **conditions**, not for a list of files that may delete.
+
+    ⚠️ What is on the other side of a missed one is not a tidy row count. An
+       `Event` cascades two levels into `Participation`, so an occasion dropped
+       with somebody on it takes their signup, their attendance and the hours
+       they gave with it. That is the same loss the register guard was written
+       for, arriving one table higher — and the register guard exists because
+       this project has already shipped it once.
+
+    ⚠️ A function-body scan, so a docstring discussing generated rows and a
+       delete in the same paragraph does not trip it (`our_functions()` strips
+       prose — the lesson the roadmap records about a guard a comment could
+       satisfy). The signal is deliberately broader than the exact queryset:
+       any function that mentions the `generated` source and deletes is doing
+       this, however it is spelled.
+    """
+
+    #: Either one is enough on its own, and that is the correction. The signal
+    #: used to require **both** in one body — and the moment the conditions were
+    #: extracted into `_collectable_occasions()` so that the preview could share
+    #: them, neither function had both: the helper has the filter and no delete,
+    #: the deleter has the delete and no filter. The guard went on passing while
+    #: watching nothing, and a second deleter written the natural way —
+    #: `_collectable_occasions(series, after).delete()` — sailed straight past
+    #: it. Proved by planting exactly that and seeing green.
+    #:
+    #: 🔴 This is the failure the roadmap records about a guard satisfied by a
+    #:    comment, arriving from the other side: **a refactor that reads as
+    #:    tightening can take the signal apart**, and nothing tells you, because
+    #:    a guard that matches nothing is indistinguishable from a guard with
+    #:    nothing to catch.
+    SIGNALS = ("Source.GENERATED", "_collectable_occasions(")
+    DELETES = ".delete("
+
+    #: The two halves of the one rule, and nothing else. `_collectable_occasions`
+    #: names what may go; `_drop_generated_after` is the only thing that may act
+    #: on it.
+    ALLOWED = {"_drop_generated_after", "_collectable_occasions"}
+
+    def test_generated_occasions_are_dropped_in_one_place(self):
+        offenders = [
+            where
+            for where, name, code in our_functions()
+            if name not in self.ALLOWED
+            and any(signal in code for signal in self.SIGNALS)
+            and self.DELETES in code
+        ]
+        self.assertEqual(
+            offenders,
+            [],
+            "An occasion a rule made is withdrawn by "
+            "events.services._drop_generated_after() and nowhere else. It "
+            "checks three things first — a rule made it, it has not started, "
+            "and nobody signed up — and a second spelling is a second answer "
+            "to what may be taken back:\n" + "\n".join(offenders),
+        )
+
+
+class AdminActionsDeclarePermissionsGuardTests(TestCase):
+    """Lint-as-test: every admin action says which permission it needs.
+
+    🔴 **The rule this repository learned the expensive way.** Django's
+       `ModelAdmin._filter_actions_by_permissions()` allows any action whose
+       callable carries no `allowed_permissions`, and the changelist renders the
+       action dropdown for anybody who can open the page. So an action without
+       `permissions=` is offered to every account with `view_` — measured on
+       `EventSeriesAdmin`: an account holding `view_eventseries` alone generated
+       four events and withdrew a whole batch.
+
+    ⭐ It is a guard rather than two more assertions because the fix was pinned
+       by a loop over one class's `actions` list, and within the same day that
+       class grew **two more actions**. A rule learned once and re-checked only
+       where it was learned is a rule that holds until somebody adds the third
+       action — which is the shape `D36` cost 4 warns about from the other side.
+
+    ⚠️ It reads the registry rather than the source, so an action inherited from
+       a mixin or added by a future ModelAdmin is covered without this file
+       naming anything. `delete_selected` is Django's own and gates itself on
+       `delete`; it is the one exemption and it is exempt by name.
+
+    ⚠️ It does not judge **which** permission — that is D20's tiering question
+       and it differs per table. It judges only that somebody decided.
+    """
+
+    #: Django's built-in, which does its own permission check internally.
+    SHIPPED_WITH_DJANGO = {"delete_selected"}
+
+    def test_every_admin_action_names_a_permission(self):
+        from django.contrib import admin as django_admin
+
+        # ⚠️ A request whose user holds everything, so `get_actions()` returns
+        #    the whole set rather than the subset this account may run — the
+        #    point is to inspect every action, including the ones a real user
+        #    would correctly be denied.
+        request = RequestFactory().get("/")
+        request.user = SimpleNamespace(
+            has_perm=lambda *args, **kwargs: True,
+            is_active=True, is_superuser=True)
+
+        offenders = []
+        for model, model_admin in django_admin.site._registry.items():
+            for name, (function, _, _) in model_admin.get_actions(request).items():
+                if name in self.SHIPPED_WITH_DJANGO:
+                    continue
+                if not getattr(function, "allowed_permissions", None):
+                    offenders.append(
+                        f"{type(model_admin).__name__}.{name} "
+                        f"({model._meta.label})")
+        self.assertEqual(
+            offenders,
+            [],
+            "An admin action with no `permissions=` is offered to everybody "
+            "who can open the changelist — which includes every account "
+            "holding only `view_`. Add permissions=[\"change\"] (or whichever "
+            "this action really needs):\n" + "\n".join(offenders),
+        )
+
+
+class PosterIsAskedGuardTests(TestCase):
+    """Lint-as-test: a template asks an event for its `poster`, never `.image`.
+
+    ⭐ Since L5.4 an event's picture may not be its own. A rule makes N
+       occasions from one template, and the file lives on the series so that
+       one upload serves all of them and changing it changes all of them —
+       `Event.poster` is the one place that knows to look there. A template
+       reading `.image` directly shows the **default logo** on every generated
+       occasion.
+
+    🔴 And that failure is silent in the worst available way: it looks exactly
+       like a series nobody gave a picture to. Nothing raises, no page breaks,
+       and the person who uploaded the picture sees fifty-two grey placeholders
+       and concludes the upload did not work.
+
+    ⚠️ It scans templates rather than Python, because that is where the read
+       happens — `_event_list_results.html` was the only one at the time this
+       was written, and a guard that names one file is a guard that stops
+       covering the second. The Python side has no reader to protect: nothing
+       outside a template renders a picture.
+
+    ⚠️ `EventSeries`'s own admin form renders `image` as a **field**, which is
+       an edit rather than a display, so the pattern is deliberately anchored
+       on `event.image` and not on the bare word.
+    """
+
+    #: `event.image` / `occasion.image` / `e.image` in a template — a picture
+    #: being *shown*. Written as a regex so this file can scan itself.
+    #: ⚠️ Any variable at all, not a list of names I could think of. The first
+    #:    version matched `event|occasion|e`, which missed `{{ object.image }}`
+    #:    — and `object` is Django's own default context name for a DetailView,
+    #:    so the likeliest future spelling was the one it could not see. The
+    #:    variable is **captured** so the exemption below can be about what is
+    #:    being rendered rather than about what the line happens to contain.
+    SHOWS_A_PICTURE = re.compile(r"\{[\{%][^}]*?\b(\w+)\.image\b")
+
+    #: The variables for which `.image` is a form field being **edited** rather
+    #: than a picture being shown.
+    #:
+    #: 🔴 Matched against the captured variable, not searched for in the line —
+    #:    and the first version searched. `class="form-row"` and `field-label`
+    #:    are ordinary admin markup, so any `<img class="form-row" src="{{
+    #:    event.image.url }}">` silently disarmed the whole guard. An exemption
+    #:    that a stylesheet class can trigger is not an exemption.
+    EDITING = frozenset({"form", "field", "adminform", "widget", "bf"})
+
+    def test_templates_ask_for_the_poster(self):
+        offenders = []
+        for relative, text in project_template_files():
+            # ⚠️ Prose stripped first, the lesson `our_functions()` records on
+            #    the Python side: this guard's own explanatory comment quotes
+            #    the thing it hunts for, so without this it went red on itself.
+            for number, line in enumerate(
+                    _blank_out_comments(text).splitlines(), start=1):
+                shown = self.SHOWS_A_PICTURE.search(line)
+                if shown and shown.group(1) not in self.EDITING:
+                    offenders.append(f"{relative}:{number}: {line.strip()}")
+        self.assertEqual(
+            offenders,
+            [],
+            "Ask the event for `poster`, not `image`: an occasion a rule made "
+            "carries no picture of its own, and `.image` there renders the "
+            "default logo on every one of them — which looks exactly like a "
+            "series nobody gave a picture to:\n" + "\n".join(offenders),
+        )
+
+
+class DeletesInServicesAreEnumeratedGuardTests(TestCase):
+    """Lint-as-test: every delete in the events service layer is named here.
+
+    ⭐ **The backstop that makes the two guards above un-evadable**, and it
+       exists because they were both evaded on the same afternoon. Each of
+       those watches for a *signal* — "this function mentions the generated
+       source and also deletes", "this function touches the register and also
+       deletes" — and a signal can always be split across two functions:
+
+           def _what_may_go(series, after):
+               return series.occasions.filter(source=Source.GENERATED, ...)
+
+           def some_new_caller(series):
+               _what_may_go(series, local_now()).delete()      # green
+
+       Neither half trips anything. That is not a hypothetical shape: it is
+       **exactly** the shape `_collectable_occasions()` / `_drop_generated_after()`
+       introduced, so the next person to copy the pattern under new names walks
+       straight past the guard written to stop them.
+
+    🔴 So this one does not look for a signal at all. It asks a question a
+       split cannot answer around: *which functions in this module delete
+       anything?* A new deleter has to appear here, whatever it filters on and
+       however it spells it — and the act of adding a name is the moment
+       somebody has to say what is being destroyed and why that is allowed.
+
+    ⚠️ Scoped to `events/services.py` deliberately. That is where this
+       project's irreplaceable data lives — signups, hours, attendance, the
+       meetings D43 reads — and where D18 says every rule belongs. Widening it
+       to the whole repository would add dozens of legitimate deletes from
+       tests, migrations and the admin, and a guard with a long allow-list is
+       the thing D36's cost 4 warns about.
+    """
+
+    WHERE = "events/services.py"
+    DELETES = ".delete("
+
+    #: Every function in that module that destroys anything, and what.
+    #: ⚠️ Adding a name here is not a formality — it is a claim that this
+    #:    delete has a written reason in its own docstring.
+    ALLOWED = {
+        # A meeting's register row: the clock AND the row still untouched.
+        "close_future_register",
+        # An occasion a rule made: generated, not started, nobody signed up.
+        "_drop_generated_after",
+        # The series row itself, once stopping has left nothing behind.
+        # ⚠️ 2026-09-11：原来这里是 `undo_series`。撤销和即日停止合并成了
+        #    一颗键，删行的人跟着换了名字 —— 而这条守卫当场红了，这正是它
+        #    存在的理由：删东西的人换了，这份名单必须有人重新签一次字。
+        "stop_series",
+        # Picture files, once the thing that owns them is over.
+        "purge_event_image",
+        "purge_series_image",
+    }
+
+    def test_every_delete_in_the_service_layer_is_named(self):
+        offenders = [
+            where
+            for where, name, code in our_functions()
+            if where.startswith(self.WHERE)
+            and name not in self.ALLOWED
+            and self.DELETES in code
+        ]
+        self.assertEqual(
+            offenders,
+            [],
+            "This module holds the data that cannot be recreated — signups, "
+            "hours, attendance. A new delete has to be named in "
+            "DeletesInServicesAreEnumeratedGuardTests.ALLOWED, and the act of "
+            "naming it is where you say what is destroyed and why that is "
+            "allowed:\n" + "\n".join(offenders),
+        )
+
+
 class LocalDayInSqlGuardTests(TestCase):
     """Lint-as-test: a day taken in SQL is taken in the foundation's timezone.
 
@@ -1024,6 +1298,15 @@ class RolesAreNarrowedGuardTests(TestCase):
         # left out roles would answer "how many did we open" with a number that
         # depends on who asked.
         "event_summary",
+        # L5.8a. The rule's own page, and the same answer as `_edit_page_context`
+        # one line up — it is the list the publisher adds and deletes rows in,
+        # behind `_managed_series()`. There is also a second reason that only
+        # applies here: these rows are a **recipe**, not an offer. Nobody signs
+        # up to an `EventSeriesRole`; it is the template each occasion's real
+        # roles are stamped from, and those get narrowed per viewer where they
+        # are actually shown. Narrowing the recipe would hide from a publisher
+        # the job they just wrote down.
+        "_series_page_context",
     }
 
     def test_a_page_that_lists_roles_asks_who_is_looking(self):
@@ -2010,6 +2293,51 @@ class TemplateCommentsAreClosedGuardTests(TestCase):
             "`{#` must close on the same line — Django's lexer is not DOTALL, "
             "so these blocks render as visible text. Use {% comment %} for "
             "anything longer than one line:\n" + "\n".join(offenders))
+
+
+class TemplateDivsAreBalancedGuardTests(TestCase):
+    """Every `<div>` a template opens, that same template closes.
+
+    🔴 **A dropped `</div>` cannot fail.** The browser closes it for you, at
+       the wrong place: everything after the missing tag gets adopted by
+       whichever box was still open. Found 2026-09-11 in `series_form.html`,
+       which opened five and closed four — "Roles on this rule" and the whole
+       roles panel were rendering **inside** the occasions card's
+       `flex flex-wrap gap-2` button row, laid out as flex items beside
+       "Generate the occasions". Nothing raised. 2211 tests stayed green,
+       because every one of them asserts on context or on a string in the
+       body, and both survive the page being reassembled around them.
+
+    ⚠️ Source, not rendered output — same reasoning as the guard above: a
+       template no test renders would otherwise slip through, and the one that
+       broke was rendered by four tests.
+
+    ⚠️ A template that deliberately opens a box for its parent to close (or
+       closes one its parent opened) would go red here, and that is the trade
+       this guard makes: today nothing in the project does it, and a fragment
+       whose tags only balance when included from the right parent is worse
+       than the imbalance this catches. If one ever has to exist, it needs a
+       name here and a reason, not a silently forgiving regex.
+    """
+
+    def test_no_template_leaves_a_div_open(self):
+        offenders = []
+        for relative, source in project_template_files():
+            # ⚠️ 用现成的 `_blank_out_comments()`，不要自己再拼一遍那两个正则 ——
+            #    `INLINE_TEMPLATE_COMMENT` 上面那段 🔴 注释说的就是它必须和
+            #    Django 的 lexer 保持一致，而第三份拼法就是第三个会漂的地方。
+            masked = _blank_out_comments(source)
+            opened = len(re.findall(r"<div\b", masked))
+            closed = len(re.findall(r"</div\s*>", masked))
+            if opened != closed:
+                offenders.append(
+                    f"{relative}: {opened} <div> opened, {closed} closed")
+        self.assertEqual(
+            offenders, [],
+            "A template that does not close its own <div>s hands the rest of "
+            "the page to whichever box was still open — the browser fixes it "
+            "silently and lays the content out in the wrong place:\n"
+            + "\n".join(offenders))
 
 
 class InterfaceLanguageGuardTests(TestCase):

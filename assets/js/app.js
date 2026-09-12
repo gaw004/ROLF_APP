@@ -2211,3 +2211,333 @@ document.body.addEventListener("htmx:afterSettle", () => bootSchedules(document)
   //    小窗就那么钉在屏幕上，直到下一次悬停。
   document.body.addEventListener("htmx:beforeSwap", hide);
 })();
+
+// ---------------------------------------------------------------------------
+// 发布页：三档单选换掉「什么时候」那一块（L5.8a，决定 32）
+//
+// ⚠️ 这里**只做一件事：把服务端那条路的按钮藏起来**。换块本身是 HTMX 的
+//    hx- 属性做的，写在模板上 —— 不是这个文件做的，别到这儿来找。
+//
+// ⭐ 顺序是这条规矩的全部意义（D24）：没有这个文件，单选照样能换档，只是要
+//    多按一下「Switch」、多走一趟整页重渲。有了它，那一下按钮成了多余，
+//    所以由脚本自己把它撤掉 —— 而不是模板一开始就赌脚本一定会到。
+//
+// ⚠️ `hidden` 而不是删掉：它在一张正在填的表单里，删节点会让焦点无处可去。
+for (const fallback of document.querySelectorAll("[data-when-switch]")) {
+  fallback.hidden = true;
+}
+
+// ---------------------------------------------------------------------------
+// 转轮 —— 把一个 <select> 升级成 iOS 闹钟那种滚筒（L5.8c，2026-09-11）
+//
+// ⭐ **值的唯一持有者始终是那个 `<select>`。** 滚筒动到哪一格就写回它并派发一次
+//    `change`（日期预览挂在 change 上，靠这一下更新）。滚筒自己**不存**任何东西 ——
+//    一旦存了，屏幕上显示的和提交上去的就成了两份状态，而它们迟早会不一致。
+//
+// 🔴 **三种输入方式是三回事，别拿一种去想另外两种**（2026-09-11 用户走查提出：
+//    「手控制和键盘鼠标控制确实不太一样」）。这里逐一给了各自该有的行为：
+//
+//      触摸 / 触控板 → 浏览器原生滚动。惯性曲线各平台自己是对的，
+//                      `scroll-snap-type: y mandatory` 负责停在整格上。
+//                      ⚠️ 自己写摩擦系数的那一版只会在写它的那台机器上手感对。
+//      鼠标滚轮     → **接管**。一个滚轮档位在原生滚动里是 ~100px，
+//                      也就是差不多三格，于是一下跳过三个数字再弹回来 ——
+//                      这正是「电脑上不 intuitive」的那个感觉。这里改成
+//                      累积 deltaY，够一格就走一格。
+//      键盘         → 滚筒自己可聚焦，`role="spinbutton"` + 上下 / PageUp/Down
+//                      / Home / End。⚠️ 在这之前 Tab 会停在那个**看不见的**
+//                      `<select>` 上：焦点在页面上凭空消失一格，而它还能改值。
+const WHEEL_VISIBLE = 3;          // 露出几格（中间那格 + 上下各一格）
+const WHEEL_NOTCH = 28;           // 鼠标滚轮累积多少像素算走一格
+
+function buildWheel(mount) {
+  const select = mount.querySelector("select");
+  if (!select || mount.dataset.wheelReady) return;
+
+  const drum = document.createElement("div");
+  drum.className = "wheel-drum";
+
+  // ⚠️ 上下各垫一格,第一项和最后一项才滚得到中间那条带子里。没有这两块,
+  //    1 和 4 永远选不中 —— 而表现是「轮子滚不到头」。
+  const pad = () => {
+    const filler = document.createElement("div");
+    filler.style.height = `calc(var(--wheel-item) * ${(WHEEL_VISIBLE - 1) / 2})`;
+    return filler;
+  };
+
+  drum.append(pad());
+  // 🔴 **每一格里再套一层 `.wheel-face`，立体旋转加在它身上，不加在格子上。**
+  //    这不是结构洁癖：CSS 的滚动吸附是按**变换之后**的盒子算吸附点的，所以
+  //    把 rotateX 加在 `.wheel-item`（吸附目标）上会把吸附点一起转走 ——
+  //    实测表现是轮子停在 90.5px 这种两格之间的位置，怎么滚都回不到整格，
+  //    而写回 `<select>` 的那一步于是永远认为当前是第一格。
+  const items = [...select.options].map((option) => {
+    const cell = document.createElement("div");
+    cell.className = "wheel-item";
+    cell.dataset.value = option.value;
+    const face = document.createElement("span");
+    face.className = "wheel-face";
+    face.textContent = option.textContent.trim();
+    cell.append(face);
+    drum.append(cell);
+    return cell;
+  });
+  drum.append(pad());
+
+  const band = document.createElement("div");
+  band.className = "wheel-band";
+
+  mount.append(band, drum);
+  mount.dataset.wheelReady = "1";
+
+  // --- 无障碍：滚筒接手，`<select>` 退到幕后 ---------------------------------
+  //
+  // ⚠️ `<select>` 留在 DOM 里、留在表单里，只是不再出现在 Tab 顺序和无障碍树中 ——
+  //    它的角色从「那个控件」变成「那个值」。语义由下面这几行接过去。
+  select.setAttribute("tabindex", "-1");
+  select.setAttribute("aria-hidden", "true");
+  drum.setAttribute("role", "spinbutton");
+  drum.setAttribute("tabindex", "0");
+  drum.setAttribute("aria-valuemin", "1");
+  drum.setAttribute("aria-valuemax", String(items.length));
+  if (mount.dataset.label) drum.setAttribute("aria-label", mount.dataset.label);
+
+  const itemHeight = () => items[0]?.offsetHeight || 36;
+  const indexOfValue = () =>
+    Math.max(0, items.findIndex((cell) => cell.dataset.value === select.value));
+
+  // 按每一格离中心的距离画出滚筒的弧度。
+  //
+  // ⚠️ 跟的是**滚动位置**而不是时间,所以用 rAF 合并连续的 scroll 事件 ——
+  //    scroll 在惯性滚动里一秒能来上百次,每次都重排会让这个轮子变卡,
+  //    而「卡」正是这个控件唯一不能出的问题。
+  let pending = false;
+  const paint = () => {
+    pending = false;
+    const height = itemHeight();
+    const middle = drum.scrollTop + drum.clientHeight / 2;
+    let nearest = null;
+    let nearestGap = Infinity;
+    items.forEach((cell) => {
+      const centre = cell.offsetTop + height / 2;
+      const gap = centre - middle;
+      const steps = gap / height;
+      // 每偏一格转 22 度,超过两格半就基本卷过去了。
+      const angle = Math.max(-70, Math.min(70, steps * 22));
+      const face = cell.firstElementChild;
+      face.style.transform =
+        `rotateX(${(-angle).toFixed(2)}deg) translateZ(${(-Math.abs(steps) * 6).toFixed(2)}px)`;
+      face.style.opacity = String(Math.max(0.25, 1 - Math.abs(steps) * 0.32));
+      if (Math.abs(gap) < nearestGap) {
+        nearestGap = Math.abs(gap);
+        nearest = cell;
+      }
+    });
+    items.forEach((cell) => {
+      if (cell === nearest) cell.dataset.current = "1";
+      else delete cell.dataset.current;
+    });
+    return nearest;
+  };
+
+  const announce = () => {
+    const cell = items[indexOfValue()];
+    drum.setAttribute("aria-valuenow", String(indexOfValue() + 1));
+    drum.setAttribute("aria-valuetext", cell?.textContent.trim() || select.value);
+  };
+
+  const adopt = (value) => {
+    if (select.value === value) return;
+    select.value = value;
+    select.dispatchEvent(new Event("change", { bubbles: true }));
+  };
+
+  // 滚停之后写回 <select>。
+  //
+  // ⚠️ 用 `scrollend` —— 它就是为这件事存在的。老浏览器没有,所以退回一个
+  //    防抖计时器;两条路写回的是同一个函数,不是两份逻辑。
+  const settle = () => {
+    const nearest = paint();
+    if (nearest) adopt(nearest.dataset.value);
+  };
+
+  let idle;
+  drum.addEventListener("scroll", () => {
+    if (!pending) {
+      pending = true;
+      requestAnimationFrame(paint);
+    }
+    if ("onscrollend" in window) return;
+    clearTimeout(idle);
+    idle = setTimeout(settle, 90);
+  }, { passive: true });
+  if ("onscrollend" in window) drum.addEventListener("scrollend", settle);
+
+  const showSelected = (behavior = "auto") => {
+    const cell = items[indexOfValue()];
+    if (cell) {
+      drum.scrollTo({
+        top: cell.offsetTop - (drum.clientHeight - itemHeight()) / 2,
+        behavior,
+      });
+    }
+    paint();
+    announce();
+  };
+
+  const step = (delta) => {
+    const next = Math.min(items.length - 1, Math.max(0, indexOfValue() + delta));
+    adopt(items[next].dataset.value);
+    showSelected("smooth");
+  };
+
+  // --- 鼠标滚轮 ------------------------------------------------------------
+  //
+  // ⚠️ `{ passive: false }` 是必须的：下面要 `preventDefault()`，而被动监听器
+  //    里那一句是没有效果的（浏览器只在控制台里警告一声）。
+  //
+  // ⚠️ 累积而不是「一次事件走一格」：触控板发的是一串很小的 deltaY，
+  //    一格一事件会让触控板变得飞快。累积到一格的量才走，两种设备于是都对。
+  // ⚠️ 两种设备要分开认，而判据是**一次事件的大小**：
+  //
+  //    鼠标滚轮一个档位发一次事件，deltaY 在 100 上下（或者 deltaMode 不是
+  //    像素）。一个档位就该走一格 —— 第一版按累积量算，一次 100px 够走三格，
+  //    于是一个档位从 1 直接跳到 4，比原生滚动还糟。
+  //
+  //    触控板发的是一串 5～15px 的小事件。那些要累积，够一格才走，
+  //    否则轻轻一划就飞过整个轮子。
+  let wheelDebt = 0;
+  drum.addEventListener("wheel", (event) => {
+    event.preventDefault();
+    const isMouseNotch = event.deltaMode !== 0 || Math.abs(event.deltaY) >= 40;
+    if (isMouseNotch) {
+      wheelDebt = 0;
+      step(Math.sign(event.deltaY));
+      return;
+    }
+    wheelDebt += event.deltaY;
+    if (Math.abs(wheelDebt) >= WHEEL_NOTCH) {
+      step(Math.sign(wheelDebt));
+      wheelDebt = 0;
+    }
+  }, { passive: false });
+
+  // --- 键盘 ----------------------------------------------------------------
+  const KEYS = {
+    ArrowUp: -1, ArrowDown: 1, ArrowLeft: -1, ArrowRight: 1,
+    PageUp: -1, PageDown: 1,
+  };
+  drum.addEventListener("keydown", (event) => {
+    if (event.key === "Home" || event.key === "End") {
+      event.preventDefault();
+      adopt(items[event.key === "Home" ? 0 : items.length - 1].dataset.value);
+      showSelected("smooth");
+      return;
+    }
+    const delta = KEYS[event.key];
+    if (delta === undefined) return;
+    event.preventDefault();
+    step(delta);
+  });
+
+  // 点一下就选那一格 —— 不是所有人都愿意滚。
+  drum.addEventListener("click", (event) => {
+    const cell = event.target.closest?.(".wheel-item");
+    if (cell) {
+      adopt(cell.dataset.value);
+      showSelected("smooth");
+    }
+  });
+
+  // ⚠️ 别的地方改了这个 select（比如表单重填）要把滚筒拨过去。
+  select.addEventListener("change", () => showSelected("smooth"));
+  showSelected();
+}
+
+function bootWheels(root) {
+  for (const mount of root.querySelectorAll("[data-wheel]")) buildWheel(mount);
+}
+
+bootWheels(document);
+
+// 🔴 **换块之后要重新升级。** 转轮住在 `#when-block` 里，而那一整块会被
+//    `publish_when` 整个换掉（三档单选一变就换）—— 换进来的是一段全新的 DOM，
+//    上面那一趟 parse 时的循环碰不到它。
+//
+//    实测（2026-09-11 走查）：直接打开 `?publish_as=series` 转轮是好的，
+//    而**从单选切过去**得到的是一个光秃秃的 `<select>`。也就是说，正常那条路
+//    反而是坏的 —— 而我先前每一次测都走的是直接打开那条。
+//
+// ⚠️ `htmx:afterSettle` 而不是 `afterSwap`，同这个文件里日程那一处：
+//    out-of-band 的那一块在 afterSwap 时还没落位。
+//
+// ⚠️ `buildWheel()` 自己认得已经升级过的（`dataset.wheelReady`），
+//    所以重复跑是安全的 —— 它本来就是照这个前提写的。
+document.body.addEventListener("htmx:afterSettle", () => bootWheels(document));
+
+// ---------------------------------------------------------------------------
+// 选择器下面那句读数（L5.8c，2026-09-11）
+//
+// ⚠️ **它只读不写。** 按周那一档显示「一周几次」，按月那一档把整条规则复述成
+//    一句人话。没有脚本时这两句是空的 —— 少一句提示，不少一个功能，而真正的
+//    安全网是下面那张服务端算出来的日期表（`_series_dates.html`），
+//    它才是「按下去会造出哪几天」的答案。
+//
+// ⚠️ 措辞在这里拼，而规则在服务端拼（`recurrence.compose`）。两处都在描述同一
+//    件事，但描述的**层次**不同：这一句是给正在选的人看的即时反馈，那一份是
+//    存进库里的规则。真正防止两者走岔的不是这段代码，是那张日期表。
+const ORDINAL_WORDS = { 1: "first", 2: "second", 3: "third", 4: "fourth", "-1": "last" };
+
+function joinWithAnd(words) {
+  if (words.length <= 1) return words.join("");
+  if (words.length === 2) return `${words[0]} and ${words[1]}`;
+  return `${words.slice(0, -1).join(", ")} and ${words[words.length - 1]}`;
+}
+
+function paintRecurrenceWords(root) {
+  const ticked = (name) =>
+    [...root.querySelectorAll(`input[name="${name}"]:checked`)];
+
+  const weekCount = root.querySelector("[data-week-count]");
+  if (weekCount) {
+    const days = ticked("repeat_weekdays").length;
+    weekCount.textContent = days === 0 ? ""
+      : days === 1 ? "once a week" : `${days} times a week`;
+  }
+
+  const words = root.querySelector("[data-month-words]");
+  if (words) {
+    const which = ticked("repeat_ordinals").map((box) => ORDINAL_WORDS[box.value]);
+    const daySelect = root.querySelector('select[name="repeat_weekday"]');
+    const day = daySelect?.selectedOptions[0]?.textContent.trim();
+    const every = Number(root.querySelector('select[name="repeat_every"]')?.value || 1);
+    const months = every === 1 ? "every month" : `every ${every} months`;
+    words.textContent = which.length && day
+      ? `The ${joinWithAnd(which)} ${day} of ${months}.`
+      : "";
+  }
+}
+
+function bootRecurrenceWords(where) {
+  for (const root of where.querySelectorAll("[data-recurrence]")) {
+    // ⚠️ 委托到这一块上,而不是给每个勾各挂一个:星期条和「第几个」加起来十二个
+    //    控件,挂十二次监听是十二个会忘记拆的东西。
+    //
+    // 🔴 **只挂一次。** 这个函数每一次 `htmx:afterSettle` 都会再跑一遍,而日期
+    //    预览是边打字边换的(`keyup changed delay:400ms`)—— `[data-recurrence]`
+    //    不在被换掉的那一块里,所以它活得下来,于是每敲几个字就又多一个监听。
+    //    handler 本身是幂等的,所以症状不是结果错,是白跑的次数越积越多。
+    //    `buildWheel` 用 `dataset.wheelReady` 防的是同一件事。
+    if (root.dataset.recurrenceWordsReady) continue;
+    root.dataset.recurrenceWordsReady = "1";
+    root.addEventListener("change", () => paintRecurrenceWords(root));
+    paintRecurrenceWords(root);
+  }
+}
+
+bootRecurrenceWords(document);
+
+// ⚠️ 同上面转轮那一条：这一块也住在会被换掉的 `#when-block` 里。
+//    换进来的是新节点，所以监听要重挂、那句读数要重画。
+document.body.addEventListener("htmx:afterSettle",
+                               () => bootRecurrenceWords(document));

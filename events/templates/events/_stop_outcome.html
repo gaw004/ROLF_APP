@@ -1,0 +1,32 @@
+{% comment %}
+按下「停掉这一条」之后**这一行还在不在** —— 一句话，两个分支。参数：taken
+（一个 `services.Withdrawal`）。
+
+⭐ 和 `_withdrawal_summary.html` 分开的，因为读者不一样：那一份说「收走几场、
+   留下哪些」，三张屏都要；这一份说「系列本身活不活」，而**改规则那一屏不能用
+   它** —— split 永远留着旧那一行（它是新系列的来历），所以那里印「系列会被
+   删掉」是一句错话。
+
+⚠️ 站点和 admin 两张停止屏共用这一份。它们原来各写一遍，而这个功能已经因为
+   「两份拷贝」付过两次账了（2026-09-11 同一天两次：共用片段要 `taken`，两处
+   传的都叫 `preview`，句子照常渲染、数字整个不见、不报错）。
+
+⚠️ **两处都要 `with taken=…` 显式传**，理由同上。
+{% endcomment %}
+<p class="mt-4 text-sm">
+  {% if taken.series_survives %}
+    {% comment %}
+    ⚠️ 这一支是「撤销退化成一次即日停止」的那一半 —— 说清楚，否则人会以为整条
+       系列都没了，而它其实还在列表上。
+    {% endcomment %}
+    Because those stay,
+    <strong>the series itself stays too</strong> and is marked stopped as of
+    today — it is the answer to “why were there only six of these”.
+  {% else %}
+    {# ⚠️ 这两句**不要换行断在词组中间**：测试钉的是它们印在页上的原话，而 #}
+    {#    Django 原样保留换行，一个换行就让断言找不到那句话。 #}
+    Nothing has happened on this series yet, so
+    <strong>the series itself will be deleted</strong> — it will be as though it
+    had never been built.
+  {% endif %}
+</p>

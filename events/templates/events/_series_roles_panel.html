@@ -1,0 +1,64 @@
+{% comment %}
+一条规则上的工种列表 + 添加表单。整页和 HTMX 片段渲染的是同一份。
+
+⚠️ 和 `_event_roles_panel.html` 逐行对照着写的，少两列：`Signed up` 和 `Full`。
+   模板上没有人报名 —— 那两格在这里没有意义，而画一个永远是 0 的数字会让人
+   以为是「还没人报」而不是「这里根本不收报名」。
+
+⚠️ 删除那一行说的话也不一样：从规则上去掉一个工种**不会**关掉已经生成的那些
+   场次上的同名工种。关掉它会连报名一起带走（`EventRole` 级联到
+   `Participation`），而那正是删除守卫存在的理由 —— 所以那件事留在那一场
+   自己的页面上做。
+{% endcomment %}
+<div id="roles-panel">
+  {% if roles %}
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th>Role</th><th>Kind</th><th>Open to</th><th>Wanted</th><th>Notes</th><th></th></tr>
+        </thead>
+        <tbody>
+          {% for role in roles %}
+            <tr>
+              <td class="font-medium">{{ role.role.name }}</td>
+              <td class="text-ink-600 dark:text-ink-300">{{ role.role.get_nature_display }}</td>
+              <td class="text-ink-600 dark:text-ink-300">{{ role.audience_in_words|join:", " }}</td>
+              <td>
+                {{ role.needed_count|default_if_none:"No limit" }}
+                {% if role.needed_count and not role.stop_at_needed_count %}
+                  <span class="text-xs text-ink-600 dark:text-ink-300">(target, more welcome)</span>
+                {% endif %}
+              </td>
+              <td class="whitespace-normal">{{ role.notes }}</td>
+              <td>
+                {% comment %}
+                ⭐ 完整的服务端表单，`hx-post` 只是快路 —— 关掉 JavaScript 照样删得掉。
+                {% endcomment %}
+                <form method="post" action="{% url 'events:series_role_delete' role.pk %}"
+                      hx-post="{% url 'events:series_role_delete' role.pk %}"
+                      hx-target="#roles-panel" hx-swap="outerHTML">
+                  {% csrf_token %}
+                  {% include "core/components/button.html" with label="Delete" variant="danger" confirm="Take this job off the rule? Occasions already generated keep it — remove it there if you mean to." %}
+                </form>
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% else %}
+    {% include "core/components/empty.html" with message="No roles on this rule yet. Every occasion it makes will open the jobs you add here." %}
+  {% endif %}
+
+  <form method="post" action="{% url 'events:series_roles' series.pk %}"
+        hx-post="{% url 'events:series_roles' series.pk %}"
+        hx-target="#roles-panel" hx-swap="outerHTML"
+        class="card mt-6" x-data="audienceTicks">
+    {% csrf_token %}
+    <h2 class="mb-4 text-lg font-semibold">Add a role</h2>
+    {% include "core/components/form_fields.html" with form=role_form %}
+    <div class="mt-6">
+      {% include "core/components/button.html" with label="Add" variant="primary" %}
+    </div>
+  </form>
+</div>

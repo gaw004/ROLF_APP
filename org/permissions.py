@@ -110,6 +110,22 @@ def can_publish_event(user, ministry) -> bool:
     return administers(user, ministry)
 
 
+def can_manage_series(user, series) -> bool:
+    """Edit a repeat rule, open jobs on it, generate and stop its occasions.
+
+    The same question `can_manage_event()` asks, of the row one level up: a
+    series belongs to a ministry, and running that ministry is what entitles
+    somebody to schedule its evenings.
+
+    ⚠️ Not the `view_eventseries` grant in FOUNDATION_ADMIN_PERMISSIONS. That
+       one is the **admin's** door and is deliberately read-only (D20: building
+       a batch is an act on one ministry's events, so it belongs to the
+       ministry tier). This is that tier's door, and L5.4's note beside those
+       two lines predicted it.
+    """
+    return administers(user, series.ministry)
+
+
 def can_manage_event(user, event) -> bool:
     """Edit it, open roles on it, check people in, notify the people signed up.
 
@@ -338,6 +354,43 @@ FOUNDATION_ADMIN_PERMISSIONS = [
     #    a superuser — the same footing event creation is on.
     "events.view_session",
     "events.view_sessionattendance",
+    # L5.4's two, on the same footing and for the same reason as the pair above.
+    # A repeat rule and the roles it opens are part of "what did this ministry
+    # run", which is what R1–R3 are read off — and a batch of twelve events with
+    # no visible rule behind them is twelve events nobody can explain.
+    #
+    # ⚠️ View only, deliberately. Building a batch is an act on **one ministry's**
+    #    events, so by D20's test it belongs to the ministry tier rather than to
+    #    a foundation-wide grant.
+    #
+    # ⚠️ Its door **is now built** (L5.8a, 2026-09-10): `/events/series/<pk>/`,
+    #    gated on `can_manage_series()`. So the sentence that stood here until
+    #    that day — "until those exist the only writer is a superuser" — is no
+    #    longer true, and the line below is no longer the reason a ministry
+    #    admin cannot build one. It is view-only here because the writing
+    #    happens on the site rather than in the admin, which is the opposite
+    #    reason and reads the same from a distance.
+    #
+    # ⚠️ 2026-09-11（L5.8f）之前这里写着「撤销一批和改规则仍然只有超级用户
+    #    做得了」。**那句话过期了** —— 两者现在都在系列页上：撤销走
+    #    `/events/series/<pk>/stop/`（一张确认屏 + 一次 POST），改规则就在那张
+    #    表单上改、保存时拦一屏确认（底下是 `services.split_series()`）。
+    #    两条都按 `can_manage_series()` 收给 ministry admin。
+    #
+    # ⚠️ 2026-09-11（L5.8g）「撤销」和「即日停止」合并成了一颗键，所以上面写的
+    #    是 `/stop/` 而不是 `/undo/` —— 后者不存在了。
+    #
+    # ⚠️ admin 上那三个 action 一个没删：它们仍是超级用户的路，而且能一次处理
+    #    多条系列（站点那一侧一次只管一条）。两套门，两拨读者。
+    #
+    # 🔴 And they are here at all because registering a model in admin.py is not
+    #    what makes it reachable: Django hides a model from the admin index
+    #    entirely when you hold no permission on it, so a registered-but-ungranted
+    #    table is invisible to every account except a superuser and looks exactly
+    #    like a page nobody built. That is how add_ministry went missing, and how
+    #    L5.2 lost two days on 2026-09-08.
+    "events.view_eventseries",
+    "events.view_eventseriesrole",
     # Ministries themselves. A production database comes up with none, and
     # nothing else in the interface can create one — so without these the
     # foundation cannot get started at all. Django hides a model from the admin

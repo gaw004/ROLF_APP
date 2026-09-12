@@ -43,6 +43,25 @@ urlpatterns = [
     # and this comment is here so that adding it does not break this route.
     path("events/manage/report/", views.ministry_report_page, name="ministry_report"),
     path("events/new/", views.event_create, name="event_create"),
+    # L5.8a — the publisher's door onto a repeat rule. ⚠️ Every word-shaped
+    # segment goes before `<int:pk>`, the same rule `new` and `manage` follow
+    # above: the other order reads "preview" as a primary key and 404s.
+    #
+    # ⚠️ `publish/when/` is not under `series/` on purpose — it serves the
+    #    publish page whichever of the three shapes is selected, including the
+    #    two that are not series at all.
+    path("events/publish/when/", views.publish_when, name="publish_when"),
+    path("events/series/preview/", views.series_preview, name="series_preview"),
+    path("events/series/roles/<int:pk>/delete/",
+         views.series_role_delete, name="series_role_delete"),
+    path("events/series/<int:pk>/", views.series_detail, name="series_detail"),
+    path("events/series/<int:pk>/roles/", views.series_roles, name="series_roles"),
+    path("events/series/<int:pk>/generate/",
+         views.series_generate, name="series_generate"),
+    # ⚠️ 两趟（GET 看确认屏、POST 执行），所以它是一条路由而不是系列页上的一个
+    #    POST：那一屏要说清楚会发生什么，而一屏是要有地址的。
+    #    ⚠️ 这里原来还有一条 `/undo/`，2026-09-11（L5.8g）合并掉了。
+    path("events/series/<int:pk>/stop/", views.series_stop, name="series_stop"),
     # C0.2.2 — the only way to move an event, and the only way to mark one
     # completed. Its absence is what left services.reschedule() unreachable.
     path("events/<int:pk>/edit/", views.event_update, name="event_update"),

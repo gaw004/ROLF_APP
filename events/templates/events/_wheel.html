@@ -1,0 +1,24 @@
+{% comment %}
+一个转轮（2026-09-11）。参数：field —— 一个选项不多的 bound field。
+
+⭐ **这里渲染的是一个真的 `<select>`。** 它自己就完整可用：能点、能用键盘、
+   读屏念得出、没有 JavaScript 照样提交。脚本做的是把它**升级**成 iOS 闹钟那种
+   带惯性的滚筒，并且把 `<select>` 留在原地继续当那个值的唯一持有者 ——
+   滚筒滚到哪一格，就写回它并派发一次 `change`。
+
+⚠️ 所以这一段没有「JS 版的值」和「无 JS 版的值」两份状态。滚筒是一层皮，
+   底下始终是同一个 `<select>`。一旦写成两份，它们迟早会不一致，而表现是
+   屏幕上显示 2、提交上去是 1。
+
+⚠️ 惯性和吸附用的是**浏览器原生的滚动**（`overflow-y: scroll` +
+   `scroll-snap-type`），不是 JS 里自己算速度和摩擦。原生那一份在触控板、
+   触摸屏、鼠标滚轮上的手感各自都是对的，而手写的物理只会在写它的那台设备上对。
+{% endcomment %}
+{% comment %}
+⚠️ `data-label` 是给升级之后那个滚筒用的无障碍名字。旁边那个「Every」是版面上的
+   词，不是标签 —— 读屏念到这一格时只会说「1」，说不出这个 1 是什么。
+{% endcomment %}
+<div class="wheel" data-wheel
+     data-label="How many weeks or months between occasions">
+  {{ field }}
+</div>

@@ -18,10 +18,35 @@ as_p 出来的标签结构我们控制不了，错误也会跑到字段上方去
    一样，于是读起来像「同一个设置渲染了两遍」，改下面那组的人以为自己在改活动
    的可见性。而「看得见 ≠ 报得上」正是这一轮设计的中心句。
 {% endcomment %}
+{% comment %}
+⚠️ `drawn_separately` 同样是可选的（决定 32）：一张表单上要是有几个字段**彼此
+   有关系** —— 选了哪一档决定下面问什么 —— 那一段得由页面自己画成一块，而这里
+   是逐个平铺的。声明在表单上而不是写死在某张模板的 if 里，同 `audience_
+   heading_before` 的理由：知道这件事的是表单，不是渲染它的那一段。
+
+⚠️ 漏掉它的后果不报错，只是**画两遍**：同一个字段出现两次，人填的是上面那个，
+   而后一个同名的空输入框覆盖它，提交上去是空值。
+
+⚠️ 这里写成 `in` 加一个空的 if 分支，看着别扭，别顺手改成
+   `{% if field.name not in form.drawn_separately %}…{% endif %}`（少一层缩进，
+   下一个人多半会这么写）—— **那一版会让全站每一张表单渲染成空白**。
+
+   因为绝大多数表单根本没有 `drawn_separately`，而 Django 的 `{% if %}` 把成员
+   判断里抛出的 TypeError 一律当成 False（smartif.py 给 infix 运算符包了
+   try/except），`not in` 并不会因此翻成 True。现在这一版里，那个 False 落进
+   `{% else %}`，字段照常全画；改成不带 else 的那一版，False 就是「跳过」，
+   于是没声明过这个属性的表单一个字段都不剩。两版都不报错。
+
+   （`not in` 配 `{% else %}` 本身没问题，问题只在省掉 else 的那一版 ——
+   而省掉 else 正是改用 `not in` 的唯一动机。）
+{% endcomment %}
 {% include "core/components/_non_field_errors.html" %}
 {% for field in form %}
-  {% if field.name == form.audience_heading_before %}
-    <h3 class="mt-6 mb-2 text-sm font-semibold">{{ form.audience_heading }}</h3>
+  {% if field.name in form.drawn_separately %}
+  {% else %}
+    {% if field.name == form.audience_heading_before %}
+      <h3 class="mt-6 mb-2 text-sm font-semibold">{{ form.audience_heading }}</h3>
+    {% endif %}
+    {% if field.is_hidden %}{{ field }}{% else %}{% include "core/components/field.html" %}{% endif %}
   {% endif %}
-  {% if field.is_hidden %}{{ field }}{% else %}{% include "core/components/field.html" %}{% endif %}
 {% endfor %}

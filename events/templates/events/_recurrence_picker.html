@@ -1,0 +1,176 @@
+{% comment %}
+「多久一次」+「什么时候停」这一整块（2026-09-11）。发布页和系列页共用一份。
+
+🔴 **这里一个字段都不是列。** 九个控件写的是 `EventSeries.rule` 那一个 RRULE
+   字符串：`EventSeriesForm.__init__` 把它拆开喂给这些控件，`clean()` 再拼回去。
+   规则只有一处，见 `recurrence.compose` / `decompose`。
+
+⚠️ **没有 JavaScript 也要能用**（D24），而且这一块**不依赖 JS 换档**：
+   哪一档显示是 CSS 用 `:has()` 按单选的选中状态决定的（见 app.css
+   `.recurrence`）。脚本做的只有两件事：把转轮升级成 iOS 那种带惯性的滚筒，
+   和把下面那句读数填上。两件都是锦上添花，掉了不影响发布。
+
+⚠️ `:has()` 万一不支持，表现是**两档都显示**——难看，但两档的值仍然照常提交，
+   而服务端只读被选中那一档的（`clean()` 里的 `mode`）。降级成啰嗦，不是坏掉。
+{% endcomment %}
+<div class="recurrence" data-recurrence>
+
+  {% comment %}
+  ⚠️ 两档和转轮**并排**（2026-09-11 定）：它们是同一句话的两半 ——
+     「按月，每 2 个月」。上下摆的时候转轮离那个单位词很远，而那个词
+     （week(s) / month(s)）正是由左边这两档决定的。
+
+  ⚠️ 转轮**只画一次**，放在两档外面。两档各画一个的话，同一个 `name` 和同一个
+     `id` 会出现两遍 —— 浏览器提交两个值，而人填的是上面那个。变的只有后面那个
+     单位词，由 CSS 按选中的档切换。`NoFieldIsDrawnTwiceTests` 盯着这件事。
+
+  ⚠️ `flex-wrap`：窄屏上转轮掉到下一行，而不是把单位词挤出卡片外面。
+  {% endcomment %}
+  <div class="flex flex-wrap items-center gap-x-8 gap-y-3">
+    {% include "core/components/field.html" with field=form.repeat_mode plain_options=True %}
+    <div class="flex items-center gap-3">
+      <span class="text-sm text-ink-800 dark:text-ink-100">Every</span>
+      {% include "events/_wheel.html" with field=form.repeat_every %}
+      <span class="text-sm text-ink-800 dark:text-ink-100"
+            data-unit="weekly">week(s)</span>
+      <span class="text-sm text-ink-800 dark:text-ink-100"
+            data-unit="monthly">month(s)</span>
+    </div>
+  </div>
+
+  <div data-mode="weekly" class="mt-3">
+    <div class="flex items-center gap-3">
+      {% comment %}
+      ⚠️ 读数，不是输入（2026-09-11 定）。它由脚本跟着星期条实时改，
+         所以没有 JS 时它是空的 —— 少一句提示，不少一个功能。
+      {% endcomment %}
+      <span class="text-sm text-ink-600 dark:text-ink-300"
+            data-week-count aria-live="polite"></span>
+    </div>
+
+    <div class="mt-3">
+      <span class="block text-sm font-medium text-ink-800 dark:text-ink-100">
+        {{ form.repeat_weekdays.label }}
+      </span>
+      {% comment %}
+      ⚠️ 逐个画成一排圆点，而不是走 `field.html` 的那一组勾：七个选项要**一眼
+         全看见**，竖着排七行会把下面所有东西挤下屏幕。里面仍旧是七个原生
+         `<input type="checkbox">`，名字和值一个没动 —— 所以没有 JS 照样点得动。
+      ⚠️ `|title` 把 RRULE 的 `MO` 变成 `Mo`。单字母会撞车（周二和周四都是 T，
+         周六和周日都是 S），而撞车的表现是点错一天。
+      {% endcomment %}
+      <div class="day-strip mt-2">
+        {% for option in form.repeat_weekdays %}
+          <label class="day-toggle" title="{{ option.choice_label }}">
+            {{ option.tag }}
+            <span aria-hidden="true">{{ option.data.value|title }}</span>
+            <span class="sr-only">{{ option.choice_label }}</span>
+          </label>
+        {% endfor %}
+      </div>
+      {% for error in form.repeat_weekdays.errors %}
+        <p class="mt-1 text-xs font-medium text-danger-fg dark:text-danger-fg-dark">{{ error }}</p>
+      {% endfor %}
+    </div>
+  </div>
+
+  {# --- 按月 ----------------------------------------------------------- #}
+  <div data-mode="monthly" class="mt-3">
+    <div class="mt-3">
+      <span class="block text-sm font-medium text-ink-800 dark:text-ink-100">
+        {{ form.repeat_ordinals.label }}
+      </span>
+      {% comment %}
+      ⚠️ 可多选（2026-09-11 定）：「每月第一个和第三个周六」是真实排法，
+         单选画不出来。⚠️ 「最后一个」和「第四个」在有五个周六的月份里
+         **不是同一天**，所以两个都给。
+      {% endcomment %}
+      <div class="day-strip mt-2">
+        {% for option in form.repeat_ordinals %}
+          <label class="day-toggle day-toggle-wide">
+            {{ option.tag }}
+            <span>{{ option.choice_label }}</span>
+          </label>
+        {% endfor %}
+      </div>
+      {% for error in form.repeat_ordinals.errors %}
+        <p class="mt-1 text-xs font-medium text-danger-fg dark:text-danger-fg-dark">{{ error }}</p>
+      {% endfor %}
+    </div>
+
+    <div class="mt-3 max-w-xs">
+      {% include "core/components/field.html" with field=form.repeat_weekday %}
+    </div>
+    <p class="mt-2 text-sm text-ink-600 dark:text-ink-300"
+       data-month-words aria-live="polite"></p>
+  </div>
+
+  {# --- 什么时候停 ------------------------------------------------------ #}
+  {% comment %}
+  ⚠️ 二选一，不是两个都填（2026-09-11 定）。RFC 5545 里 `COUNT` 和 `UNTIL`
+     本来就不能同时出现，两个都收下就必须有一条「听谁的」的规矩，而那条规矩
+     在屏幕上是看不见的。没选中的那一格由 CSS 灰着（`.recurrence` 那一段）。
+  {% endcomment %}
+  <div class="ends mt-5" data-ends>
+    <span class="block text-sm font-medium text-ink-800 dark:text-ink-100">
+      {{ form.ends_kind.label }}
+    </span>
+    <div class="mt-2 space-y-2">
+      {% for option in form.ends_kind %}
+        <div class="ends-row" data-ends-row="{{ option.data.value }}">
+          <label class="flex items-center gap-2 text-sm">
+            {{ option.tag }}
+            {% if option.data.value == "count" %}
+              <span>After</span>
+            {% elif option.data.value == "on" %}
+              <span>On</span>
+            {% else %}
+              {% comment %}
+              ⚠️ 这一档没有输入框。`{% else %}` 里原来无条件画 `form.ends_on`，
+                 加上第三档之后它就被画了**两遍** —— 同一个 name、同一个 id，
+                 而人填的是上面那个。`NoFieldIsDrawnTwiceTests` 当场抓到。
+              {% endcomment %}
+              <span>Never — until I stop it</span>
+            {% endif %}
+          </label>
+          {% if option.data.value == "count" %}
+            <div class="ends-input ends-input-count">{{ form.ends_after }}</div>
+            <span class="text-sm text-ink-600 dark:text-ink-300">occasions</span>
+          {% elif option.data.value == "on" %}
+            <div class="ends-input">{{ form.ends_on }}</div>
+          {% endif %}
+        </div>
+      {% endfor %}
+    </div>
+    <p class="mt-2 text-xs text-ink-600 dark:text-ink-300" data-never-note>
+      A rule with no end is booked a year at a time — come back and press
+      Generate again when it runs low. The rule’s own page says how far it is
+      booked.
+    </p>
+    {% for error in form.ends_after.errors %}
+      <p class="mt-1 text-xs font-medium text-danger-fg dark:text-danger-fg-dark">{{ error }}</p>
+    {% endfor %}
+    {% for error in form.ends_on.errors %}
+      <p class="mt-1 text-xs font-medium text-danger-fg dark:text-danger-fg-dark">{{ error }}</p>
+    {% endfor %}
+  </div>
+
+  {# --- 高级 ----------------------------------------------------------- #}
+  {% comment %}
+  ⚠️ 折叠着，而且**默认折叠**：绝大多数人一辈子不需要打开它。但它必须存在 ——
+     这个选择器只画得出「每 N 周的某几天」和「每 N 个月的第几个某天」两种，
+     `FREQ=DAILY`、`BYMONTHDAY=15` 这些完全合法的规则得有地方去。
+
+  ⚠️ 打开一条选择器表达不了的老规则时，`__init__` 会把这个勾预先打上、
+     把原字符串原样放进去 —— 既不报错，也**绝不偷偷改写**它。
+  {% endcomment %}
+  <details class="advanced mt-5" {% if form.use_advanced.value or form.rule.errors %}open{% endif %}>
+    <summary class="cursor-pointer text-sm text-ink-600 dark:text-ink-300">
+      Advanced: write the rule yourself
+    </summary>
+    <div class="mt-3">
+      {% include "core/components/field.html" with field=form.use_advanced %}
+      <div class="mt-2">{% include "core/components/field.html" with field=form.rule %}</div>
+    </div>
+  </details>
+</div>

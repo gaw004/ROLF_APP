@@ -1,0 +1,38 @@
+{% comment %}
+`_drop_generated_after()` 会收走什么、留下什么、为什么。参数：taken（一个
+`services.Withdrawal`）。
+
+⚠️ **每一处都要 `with taken=…` 显式传。** 不传的话它去上下文里找一个正好叫
+   `taken` 的变量，找不到就当空 —— 句子照样渲染成「occasion still to come
+   withdrawn」，数字整个不见，而且不报错。2026-09-11 同一天犯了两次（站点一次、
+   admin 循环变量一次），两次都是走查和测试撞见的，不是谁报的错。
+
+⭐ **三张屏共用一份**：站点的停止屏、admin 的停止屏，和「改规则会新起一条系列」
+   那一屏。底下收场次用的是同一句删除（D40 的 ⭐ 不变量），所以说法也该是同一份。
+   ⚠️ admin 那一页没有站点的 Tailwind，于是这些 class 在那里不生效，渲染成朴素的
+   p / ul —— 数字和说法对得上，比排版重要。
+
+⚠️ 「系列本身活不活」**不在这一份里**，它在 `_stop_outcome.html`：改规则那一屏
+   永远留着旧那一行，在那里印「系列会被删掉」是一句错话。
+
+⚠️ 「留下的那部分」不能省。D40 第一节写死了这一条：只说「将删除 386 个」的人
+   会以为库里干净了，然后下个月在周视图上撞见幸存者 —— 而那时他已经不记得
+   自己撤销过什么。
+{% endcomment %}
+<p class="text-sm">
+  {{ taken.going }} occasion{{ taken.going|pluralize }} still to come
+  {{ taken.going|pluralize:"is,are" }} withdrawn.
+</p>
+
+{% if taken.staying %}
+  <div class="mt-3 rounded-lg border border-warning-fg/30 bg-warning-bg p-3 dark:border-warning-fg-dark/30 dark:bg-warning-bg-dark">
+    <p class="text-sm font-medium text-warning-fg dark:text-warning-fg-dark">
+      {{ taken.total_staying }} stay{{ taken.total_staying|pluralize:"s," }} behind:
+    </p>
+    <ul class="mt-1 space-y-0.5 text-sm text-warning-fg dark:text-warning-fg-dark">
+      {% for reason, days in taken.staying %}
+        <li>{{ days|length }} {{ reason }} — {{ days|join:", " }}</li>
+      {% endfor %}
+    </ul>
+  </div>
+{% endif %}

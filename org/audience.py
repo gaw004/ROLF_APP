@@ -183,6 +183,30 @@ class Audience(models.Model):
     #: role branch of the other. Subclasses override it; the forms read it too.
     AUDIENCE_ON = "event"
 
+    #: The row this one may not be wider than, as the name of the attribute
+    #: holding it — and the reverse accessor for the rows that may not be wider
+    #: than this one. `None` on either side means "no such side".
+    #:
+    #: ⭐ **The shape of the pair, declared rather than guessed.** Until batch
+    #:    three these two facts were spelled as `AUDIENCE_ON == "role"` inside
+    #:    refuse_bad_audience(), with `row.event` and `row.roles` hard-coded
+    #:    beside it — so the containment rule was reachable only by a table
+    #:    that called its parent `event`. The recurring-events templates
+    #:    (`EventSeries` / `EventSeriesRole`) are the same pair one level up and
+    #:    call it `series`, and a string comparison had no way to say so.
+    #:
+    #: ⚠️ Both `None` is a real answer, not a missing one: Notice is a table
+    #:    with no parent to be wider than and no children to leave behind, and
+    #:    the two rules that survive that (not empty, not redundant) are all of
+    #:    its rules. See refuse_bad_audience()'s own table.
+    #:
+    #: 🔴 They change **which** rule bodies run, never what a rule says. Every
+    #:    comparison still happens inside events.models.refuse_wider_than_event()
+    #:    — AudienceContainmentGuardTests exists precisely to stop a second
+    #:    implementation growing wherever a new table is wired in.
+    AUDIENCE_PARENT = None
+    AUDIENCE_CHILDREN = "roles"
+
     #: Which column decides **which day** "on the books" is judged on, for the
     #: audience filter. `start_time` here; a table hanging off an event says so
     #: through its own path to it. ⚠️ Beside AUDIENCE_ON for the reason written
@@ -443,6 +467,16 @@ AUDIENCE_HEADING = {
     "event": "Who can see this event",
     "role": "Who may sign up for this role",
     "notice": "Who needs to know this",
+    # ⚠️ Both say "every occasion", because a template is not a thing anybody
+    #    can see — what people meet is the twelve events it produced. A heading
+    #    reading "who can see this series" would be describing a row that never
+    #    appears on any page (06-roadmap L5.4).
+    # ⚠️ "will make", not "makes". The audience is copied onto each occasion as
+    #    it is generated, so narrowing this does not narrow occasions that
+    #    already exist — a publisher reading "can see every occasion this makes"
+    #    would reasonably believe it did. participants.md §9 carries the gap.
+    "series": "Who can see the occasions this will make",
+    "series_role": "Who may sign up for this role, on every occasion",
 }
 
 EMPTY_AUDIENCE_MESSAGE = {
@@ -462,6 +496,20 @@ EMPTY_AUDIENCE_MESSAGE = {
     "notice": (
         "Say who needs to know this. A notice nobody can see is one nobody "
         "will be told, and it will look like it went out."
+    ),
+    # ⚠️ Their own sentences rather than borrowing the two above, for the reason
+    #    the notice entry gives: what is at stake differs. A template's fault is
+    #    multiplied — one unticked box becomes twelve invisible occasions, and
+    #    it is found twelve times over, by twelve people, on twelve evenings.
+    "series": (
+        "Say who this is for. Every occasion this makes will be published to "
+        "the same people, so an empty answer here is not one hidden event — "
+        "it is all of them."
+    ),
+    "series_role": (
+        "Say who may sign up for this. A role nobody can take is opened on "
+        "every occasion this makes, and each of them looks like one somebody "
+        "forgot to finish."
     ),
 }
 

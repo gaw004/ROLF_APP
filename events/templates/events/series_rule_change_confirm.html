@@ -1,0 +1,77 @@
+{% extends "core/base.html" %}
+{% block title %}Change the rule{% endblock %}
+{% block main_width %}max-w-2xl{% endblock %}
+
+{% block content %}
+  {% comment %}
+  改规则的确认屏（L5.8f）。
+
+  ⭐ **顺序是这一屏存在的全部意义**：人改完规则按保存，先看见会发生什么，
+     确认之后世界才变。否掉的是 admin 那一版 —— 按一下「改规则」当场就把旧的
+     停掉、给你一份副本，而那时人还没想好新规则。
+
+  ⚠️ 为什么不是「就地改」：一条已经生成过场次的规则，改动它会让**已经有人报名**
+     的那几场留在旧时间上，旁边冒出新的。所以做法是停掉这一条、用新规则起一条 ——
+     `services.split_series()`，而这是 06-roadmap L5.6 早就写下的那条路。
+
+  ⚠️ 人填的新规则**直接用在新系列上**，不必再填一遍：`form.cleaned_data` 在冻结
+     挡住保存时仍然是填好的（冻结是模型级错误，字段级清洗已经跑完）。
+  {% endcomment %}
+  <h1 class="text-2xl font-semibold">Change the rule</h1>
+
+  <div class="card mt-6">
+    <p class="text-sm">
+      “{{ series.name }}” has already made occasions, so its rule cannot be
+      edited in place — people may have signed up for the ones it made.
+      Confirming will <strong>stop this series today and start a new one</strong>
+      from the rule you just typed.
+    </p>
+
+    <h2 class="mt-5 text-sm font-semibold">What happens to “{{ series.name }}”</h2>
+    <p class="mt-1 text-sm text-ink-600 dark:text-ink-300">
+      Everything that has already happened stays exactly as it is.
+    </p>
+    <div class="mt-2">
+      {% include "events/_withdrawal_summary.html" with taken=taken %}
+    </div>
+
+    <h2 class="mt-5 text-sm font-semibold">The new series</h2>
+    <ul class="mt-1 space-y-0.5 text-sm text-ink-600 dark:text-ink-300">
+      <li>Starts on {{ resumes_on|date:"j F Y" }}</li>
+      <li>The jobs and the audience come across unchanged</li>
+      {% comment %}
+      ⚠️ 说清楚它**不会**自动生成。生成永远是一个明确的动作（决定 33 / 34），
+         而一次确认不该顺手造出十二场活动 —— 何况人还想在新页上再看一眼规则。
+      {% endcomment %}
+      <li><strong>Nothing is generated yet</strong> — you press Generate when
+        the rule looks right</li>
+    </ul>
+
+    {% comment %}
+    ⚠️ 人刚才填的那些值原样回传，因为确认之后 split 用的就是它们。少了它，
+       确认那一下只能拿库里的旧值去 split —— 人改的东西凭空消失，而这一屏
+       刚刚才把它们念了一遍。
+
+    🔴 **从原始 POST 逐条回传，不是逐个表单字段。** 按字段来的那一版对
+       **多值**字段是错的：星期条和受众那组勾在 `field.value` 上是一个列表，
+       渲染成一个隐藏域就成了 `value="['TU', 'TH']"` —— 提交回去是一个谁也
+       解析不了的字符串，而页面上什么都看不出来。
+
+    ⚠️ 图片带不回来（浏览器不允许给文件框赋值），和换档那一处同一个限制。
+       所以这一屏不碰图：新系列的图由 `split_series()` 从旧系列复制。
+    {% endcomment %}
+    <form method="post" action="{% url 'events:series_detail' series.pk %}"
+          class="mt-6">
+      {% csrf_token %}
+      {% for name, value in submitted %}
+        <input type="hidden" name="{{ name }}" value="{{ value }}">
+      {% endfor %}
+      <input type="hidden" name="confirm_new_series" value="1">
+      <div class="flex flex-wrap gap-2">
+        {% include "core/components/button.html" with label="Confirm — start a new series" variant="primary" %}
+        {% url 'events:series_detail' series.pk as back_url %}
+        {% include "core/components/button.html" with label="Back" href=back_url variant="ghost" %}
+      </div>
+    </form>
+  </div>
+{% endblock %}

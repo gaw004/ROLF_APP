@@ -70,7 +70,14 @@ event_list 的结果区。整页和 HTMX 片段渲染的是同一份 —— 视�
         {% endcomment %}
         <div class="event-row-thumb relative shrink-0">
           <img class="event-thumb absolute inset-0 h-full w-full rounded-[14px] object-cover sm:rounded-[19px]"
-               src="{% if event.image %}{{ event.image.url }}{% else %}{% static 'core/img/event-default.webp' %}{% endif %}"
+               {% comment %}
+               ⚠️ `poster`, never `.image` (L5.4). An occasion a rule made
+                  carries no picture of its own — the file lives on the series
+                  and every occasion reads it — so `.image` here would show the
+                  default logo on all 52, which looks exactly like a series
+                  nobody gave a picture to. Held by PosterIsAskedGuardTests.
+               {% endcomment %}
+               src="{% if event.poster %}{{ event.poster.url }}{% else %}{% static 'core/img/event-default.webp' %}{% endif %}"
                alt="" loading="lazy" decoding="async">
         </div>
         <div class="card flex min-w-0 flex-1 flex-col justify-center">

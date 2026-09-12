@@ -69,7 +69,7 @@ def register(request):
        reloading the page.
     """
     if request.user.is_authenticated:
-        return redirect("dashboard:me")
+        return redirect("home")
 
     if getattr(request, "limited", False):
         # ⚠️ Before the form is even built, so a refused attempt writes nothing
@@ -94,7 +94,7 @@ def register(request):
                 # proved it, and the person did not change the box afterwards.
                 mark_email_verified(user)
                 login(request, user)
-                return redirect("dashboard:me")
+                return redirect("home")
             send_verification_code(user)
             request.session[PENDING_SESSION_KEY] = user.pk
             return redirect("accounts:verify_email")
@@ -136,7 +136,7 @@ def register_with_google(request):
        them exactly where they would have been without the button.
     """
     if request.user.is_authenticated:
-        return redirect("dashboard:me")
+        return redirect("home")
     if request.method != "POST":
         return redirect("accounts:register")
 
@@ -227,7 +227,7 @@ def verify_email(request):
        tab, and both of those want the same thing next.
     """
     if request.user.is_authenticated:
-        return redirect("dashboard:me")
+        return redirect("home")
 
     user = _pending_user(request)
     if user is None:
@@ -252,7 +252,7 @@ def verify_email(request):
                 login(request, user)
                 messages.success(
                     request, "Your email address is confirmed. Welcome.")
-                return redirect("dashboard:me")
+                return redirect("home")
 
     return render(request, "accounts/verify_email.html",
                   _verify_context(request, user, form))
@@ -325,7 +325,7 @@ class SiteLoginView(LoginView):
            所有人一样、仍然不跳转。这里管的是「**登录表单提交成功之后**去
            哪」，D25 一个字都没管过。两件事，两个问题。
         """
-        return self.get_redirect_url() or reverse_lazy("dashboard:me")
+        return self.get_redirect_url() or reverse_lazy("home")
 
 
 class SiteLogoutView(LogoutView):

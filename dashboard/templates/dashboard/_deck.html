@@ -1,0 +1,156 @@
+{% comment %}
+登录之后那一段的全部内容（D44）。它是 `/` 的下半页 —— **这一页只有一个地址**，
+`/me/` 是一条跳到这里来的路，不再自己渲染一份。
+
+⚠️ 「连在一起」的意思是同一页的内容，不是两页之间有个动画。仪表盘住在自己的
+   地址上时，它是一张**没有上半身**的页面：往上滚不到 hero，因为上面确实什么
+   都没有。理由的长版本在 D44 第三节。
+
+⚠️ **没有参数，因为只有一个使用者。** 这里曾经有一个 `on_photo`：`/` 传真值、
+   `/me/` 不传，两种形态一份模板。`/me/` 变成 302 之后第二条路再没有人走过，
+   2026-09-12 连同 `.deck--on-photo` 一起删了 —— 一个只有一种取值的开关，
+   读的人却要把两种形态都在脑子里跑一遍。
+
+⚠️ 卡片从五张变成三张加一条通栏，不是删功能，是两样东西换了位置：
+   `Needs you` 横过整幅（见 `_needs_you_band.html`），
+   `Volunteer hours` 的两个数搬进了问候那一行的右端。两处都还在，只是不再是卡片。
+
+🔴 **这一段里没有任何动画**（2026-09-12 撤销，D44 第四节）。这几块上曾经挂着
+   `.drop`，标的是「这一块参与入场」—— 内容先被抛在 hero 上方的空中，再随着滚动
+   落回自己的位置。那件事整套删了，判定是「要一模一样，而且不要任何动画」：
+   连在一起的意思是 hero 就是原来那一屏、仪表盘就是原来那一页，两半都一个像素不动，
+   而入场动画做的正好相反 —— 它让下半页在读者滚到之前处在别的位置上。
+   ⚠️ 标记这一次也一起删了，不留：一个没有任何样式挂着的 class，读的人得翻遍
+      app.css 才敢确认它真的什么都不做。守卫 core.tests.TheEntranceStaysGoneGuardTests
+      盯着它不许回来。
+{% endcomment %}
+<div class="deck">
+ {% comment %}
+ 🔴 **版心只由这一层负责。** 2026-09-11 之前是问候区、通栏、卡片网格各写一份
+    `max-width + padding-inline`，而那样对不齐：通栏的**边框**画在它自己的外沿，
+    卡片却在网格那一层的内边距**里面**，于是通栏比下面的卡片左右各宽出 16px。
+    一层负责之后，通栏的边框和卡片的外沿落在同一条线上。
+ {% endcomment %}
+ <div class="deck-inner">
+  <header class="deck-head">
+    <p class="deck-date">{{ today|date:"l, j F" }}</p>
+
+    <div class="deck-head-row">
+      <div class="min-w-0">
+        <h1 class="deck-greeting">{{ greeting }}, {{ user.display_name }}</h1>
+        {% comment %}
+        🔴 在编的人列出**每一条**任职，不是第一条 —— D32 的不变量是一人可多岗，
+           而 `.first()` 在这张表上是 bug：它在页面上把一个人的第二个身份悄悄抹掉。
+        ⚠️ 外部志愿者这一行**整行不出现**，不画一句「你没有职位」（D27）。
+        {% endcomment %}
+        {% if posts %}
+          <div class="deck-posts">
+            {% for post in posts %}
+              <p>{{ post.position.name }} · {{ post.position.ministry.name }}</p>
+            {% endfor %}
+          </div>
+        {% endif %}
+      </div>
+
+      {% comment %}
+      工时两个数（D44 第六节）。大字是本年度，小字是累计。
+
+      🔴 大字会在一月一号清零，而这正是 D42 当初拒绝印年度数字的理由 ——
+         接住它的是下面那一行累计：那个数只增不减。两个一起印才是完整的话，
+         少任何一个都会有人误会自己的贡献没了。
+
+      ⚠️ 0 也照画，不藏。对一个还没开始的人，0 是一个真答案。
+
+      🔴 标签上那个**账本名不许省成 "Hours this year"**。D42 第四节的理由一个字
+         没变：`Participation.hours` 和 `Shift` 是两个账本、永不相加，而只说
+         "hours" 是在暗示这是他给出去的全部时间 —— 它不是。带着账本名，
+         D2a 那天 `Work hours` 并排加进来时这一行一个字都不用改。
+         守卫：dashboard.tests.TheHoursFigureTests。
+      {% endcomment %}
+      <p class="deck-hours">
+        <span class="deck-hours-figure">{{ hours_this_year|floatformat:"-2" }}</span>
+        <span class="deck-hours-label">Volunteer hours this year</span>
+        <span class="deck-hours-total">{{ hours_given|floatformat:"-2" }} since you started</span>
+      </p>
+    </div>
+  </header>
+
+  {% include "dashboard/_needs_you_band.html" %}
+
+  {% comment %}
+  ⚠️ 侧栏在**左**、约占两成（`lg:grid-cols-5` 里的 1 比 4），照 Planning Center
+     Services 那一版的比例：时间导航靠边站，主区不被日历占掉。
+  ⚠️ 手机上它仍然排到**最后**（`order-last lg:order-first`）——
+     月历不该占掉第一屏。
+  {% endcomment %}
+  {% comment %}
+  ⚠️ 这里曾经套着两层只有名字的 div（`.deck-ground` 和 `.deck-grid`）——
+     两个 class 在 app.css 里**一条规则都没有**，版面全部来自旁边那几个工具类。
+     它们是 2026-09-12 那次「清掉陈旧副本」删过头留下的空壳，同一天一起收掉。
+     🔴 `.deck-grid` 当时还有一个「使用者」：一条测试拿它当地标字符串断言。
+        一个靠测试提到它才显得有人用的 class，比单纯的死代码更难发现 ——
+        那条断言改成认真渲染出来的东西了。
+  {% endcomment %}
+  <div class="grid gap-6 lg:grid-cols-5">
+    <div class="grid content-start gap-6 sm:grid-cols-2 lg:col-span-4 lg:order-last">
+      {% if notices %}
+        {% comment %}
+        ⚠️ 没有公告时**整张卡不出现** —— 没有公告不是一种缺失，是「一切照常」。
+        {% endcomment %}
+        {% url 'notices:notice_list' as notices_url %}
+        {% include "dashboard/_card.html" with icon="📣" title="Notices" tone="rose" body="notices/_current_notices.html" href=notices_url href_label="View all notices" %}
+      {% endif %}
+
+      {% url 'events:my_participations' as signups_url %}
+      {% include "dashboard/_card.html" with icon="📅" title="Coming up" tone="sky" body="dashboard/_body_coming.html" href=signups_url href_label="See all your signups" %}
+
+      {% url 'events:event_list' as events_url %}
+      {% include "dashboard/_card.html" with icon="✨" title="Happening soon" tone="violet" body="dashboard/_body_happening.html" href=events_url href_label="See all events" %}
+    </div>
+
+    {% comment %}
+    侧栏。⚠️ 这个月历是一个**跳转控件**，不是第三个日历页面 ——
+       它不翻月、不显示活动名。翻月是 /events/schedule/ 的活。
+    {% endcomment %}
+    <aside class="order-last space-y-4 lg:order-first">
+      <section class="card">
+        <h2 class="mb-3 text-center text-sm font-semibold">{{ month_name }}</h2>
+        <table class="w-full table-fixed text-center text-xs">
+          <thead>
+            <tr class="text-ink-500 dark:text-ink-400">
+              {% for initial in weekday_initials %}
+                <th class="pb-1 font-normal">{{ initial }}</th>
+              {% endfor %}
+            </tr>
+          </thead>
+          <tbody>
+            {% for week in weeks %}
+              <tr>
+                {% for cell in week %}
+                  <td class="py-1">
+                    {% if cell.day %}
+                      <span class="mx-auto flex h-6 w-6 items-center justify-center rounded-full
+                                   {% if cell.is_today %}bg-brand-600 font-semibold text-white dark:bg-brand-500 dark:text-ink-950{% endif %}">
+                        {{ cell.day }}
+                      </span>
+                      {% comment %}
+                      ⚠️ 点在数字**下面**而不是替换数字：一个人要同时知道
+                         「几号」和「那天有事」，二选一等于没说。
+                      {% endcomment %}
+                      <span class="mx-auto mt-0.5 block h-1 w-1 rounded-full {% if cell.marked %}bg-brand-600 dark:bg-brand-400{% endif %}"></span>
+                    {% endif %}
+                  </td>
+                {% endfor %}
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+        <div class="mt-3">
+          {% url 'events:event_schedule' as schedule_url %}
+          {% include "core/components/button.html" with label="Open the calendar" href=schedule_url variant="secondary" full=True %}
+        </div>
+      </section>
+    </aside>
+  </div>
+ </div>
+</div>

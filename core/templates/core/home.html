@@ -11,33 +11,60 @@
     鼠标移到页面上端时白色 bar 从虚到实淡入，字从白变成主题深蓝
   · 左侧菜单面板：点 Menu 滑出，背景压暗，条目自上而下逐个入场
 {% endcomment %}<!doctype html>
-<html lang="en" class="h-full">
+<html lang="en" class="{{ site_root_class }}">
 <head>
   {% comment %}
   charset / 图标 / 样式表 / app.js，和内页、Memories 共用（2026-08-13 抽出来）。
 
-  ⚠️ **不传 `themed`**，所以这一页不 include 主题引导脚本。首页不跟随深色模式，
-     也不读 localStorage.theme：它是一张满屏的照片加白字，深色版本没有意义 ——
-     而如果这里也切主题，那段脚本给 <html> 加上 .dark 之后，顶栏那套
-     「白字 / 深蓝字」的规则会全部翻转。这是片段里那个参数存在的唯一理由。
-
   ⚠️ 抽出来顺带补上了图标：在此之前这一页**一个 favicon 都没有声明**，
      标签页上是浏览器自带的地球，而内页早就有四个尺寸。三份 `<head>` 各写各的，
      漏掉一份也没人看得出来 —— 那正是抽它的理由。
+
+  ⚠️ `themed` 收的是 `deck`（2026-09-12）——「这一页在 hero 下面还有第二屏」。
+     视图里算一次（`dashboard.views.front`），这个文件不再各判各的：
+     在此之前 `user.is_authenticated` 在本文件里被重新判断了**五次**。
+     主题跟不跟随，跟的就是有没有那一屏，理由见下一段。
   {% endcomment %}
-  {% include "core/components/_head.html" %}
+  {% comment %}
+  ⚠️ `themed` **只在有那一屏时为真**（2026-09-11 定，D44），而这个条件本身就是那条承诺：
+     未登录的人拿到的 `/` 和 2026-09-11 之前逐字节相同 —— 没有主题引导脚本、
+     `<html>` 上永远没有 `.dark`、那张满屏照片配白字一个像素没动。
+
+     登录的人下面接着一整屏卡片，所以那一半必须跟随深色模式：不跟随的话，
+     一个开着深色模式的人会从一张暗照片一头撞进一片纯白。
+
+  ⚠️ 本文件和 `_head.html` 原来都写着「首页不跟随深色模式，因为 `<html>` 一旦
+     有了 `.dark`，顶栏那套白字 / 深蓝字的规则会全部翻转」。那句话**对顶栏不成立**，
+     2026-09-11 逐条查过：`app.css` 里每一条动顶栏的 `.dark` 规则都带 `.is-solid`，
+     而首页这条 bar 不传 `solid`，一条都命中不了；首页的白字写在无条件的
+     `.home-bar-item` 上。真正会变的只有侧边菜单面板，它会变成深色玻璃 ——
+     而对一个开着深色模式的人，那正是它该有的样子。完整的查证在 D25 里。
+  {% endcomment %}
+  {% include "core/components/_head.html" with themed=deck %}
   <title>River of Life Foundation</title>
 </head>
 
-<body class="h-full overflow-hidden bg-ink-950">
+{% comment %}
+⚠️ `overflow-hidden` **只留给未登录的人**。它当初的意思是「这一页就是一屏」，
+   而登录之后这一页有两屏半 —— 留着它，往下滚这件事根本不会发生。
+{% endcomment %}
+<body class="min-h-full{% if deck %} home-paper{% else %} bg-ink-950 h-full overflow-hidden{% endif %}">
   {% comment %}
-  整页一个 Alpine 作用域：`menu` 管左侧面板，`bar` 管顶栏浮不浮出来。
-  两个都是纯 UI 状态，符合 D24 对 x- 属性的口径。
+  整页一个 Alpine 作用域。`menu` 管左侧面板，`bar` 管顶栏浮不浮出来，
+  另外两个是 D44 加的：`past` 记「滚过 hero 了没有」，`hover` 记鼠标在不在感应区。
+
+  ⚠️ 四个都是纯 UI 状态，符合 D24 对 x- 属性的口径 —— 这里没有权限判断、
+     没有工时或金额的计算、没有日期运算。
+
+  ⚠️ `bar = past || hover` 这个写法是**两个来源一个开关**：滚过 hero 之后顶栏
+     一直实着（底下是卡片不是照片，白字会消失），而鼠标离开感应区时它不能
+     直接归 false —— 那会在滚到下半页时把唯一的导航重新藏起来。
 
   ⚠️ Esc 关菜单。一个只能用鼠标点关闭的模态，对键盘用户是个死胡同。
   {% endcomment %}
-  <div class="relative h-full w-full" x-data="{ menu: false, bar: false }"
-       x-on:keydown.escape.window="menu = false">
+  <div class="relative w-full" x-data="{ menu: false, bar: false, past: false, hover: false }"
+       x-on:keydown.escape.window="menu = false"
+       x-on:scroll.window.passive="past = window.scrollY > window.innerHeight * 0.6; bar = past || hover">
 
     {% comment %}
     --- 背景：视频优先，其次图片，都没有就用基金会的 logo ---
@@ -67,9 +94,34 @@
     ⚠️ `hero` 为空时退回基金会 logo，是首页独有的。内页在同样情况下退回纯深色
        —— 见 `_hero_backdrop.html`，那是有意的差别，不是漏了。
     {% endcomment %}
+    {% comment %}
+    整页的画布：照片（或视频）加那两层压暗。
+
+    ⚠️ **照片和仪表盘之间的过渡 2026-09-12 整套移除了**，改在一个模拟器里重做。
+       现在它就是固定铺满的一张，仪表盘那一块自己铺底色盖住它 ——
+       交界处因此是一条硬边，而那是临时的、知情的。
+
+    🔴 下一版要解决的那件事记在这里，免得再走一遍弯路：用户要的不是
+       「照片淡出、露出纸」（那样照片的颜色**没了**），而是
+       「**照片自己的底色向外渗出去、越来越淡**」。
+
+    🔴 遮罩必须跟照片一起待在这一层里，而不是留在 hero 那一屏内 ——
+       2026-09-11 差一点就留在那里了：照片一改成 `fixed`，滚过交界之后它仍然在，
+       而深色模式下卡片区是透明的（让照片透上来，同内页），于是那一段会看到
+       **一张完全没有压暗的照片**衬在玻璃卡片后面。浅色模式下看不出来，
+       因为那边的底是不透明的 —— 也就是说这个 bug 只在一半的人身上出现。
+
+    ⚠️ 和 `_hero_backdrop.html` 是同一个形制（fixed + `-z-10` + 遮罩当子元素），
+       而那正是它该有的样子：内页深色模式下的背景本来就是这张照片、这两层遮罩。
+       区别只有一个 —— 那边只在深色下出现，这里两种模式都在。
+
+    ⚠️ `-z-10`：画在 body 的底色之上、内容之下。遮罩是它的**子元素**，
+       因为那两个 div 是 `absolute inset-0`，要一个定位父级（片段自己写着）。
+    {% endcomment %}
+    <div aria-hidden="true" class="home-canvas -z-10">
     {% with hero=page.hero %}
       {% if hero.kind == "video" %}
-        <video class="absolute inset-0 h-full w-full object-cover"
+        <video class="canvas-photo"
                style="object-position: {{ page.hero_focus }}"
                src="{{ hero.file.url }}"
                autoplay muted loop playsinline preload="metadata"
@@ -97,12 +149,14 @@
 
         ⚠️ 没有图时退回基金会 logo，这是首页独有的；内页在同样情况下退回纯深色。
         {% endcomment %}
-        <img class="absolute inset-0 h-full w-full object-cover"
+        <img class="canvas-photo"
              style="object-position: {{ page.hero_focus }}"
              src="{% if hero %}{{ hero.file.url }}{% else %}{% static 'core/img/event-default.webp' %}{% endif %}"
              alt="" fetchpriority="high">
       {% endif %}
     {% endwith %}
+      {% include "core/components/_hero_scrim.html" %}
+    </div>
 
     {% comment %}
     两层压暗，不是装饰，是**可读性的唯一保障**。
@@ -115,20 +169,37 @@
        2026-08-06 起内页的背景照片也用同一份，而「两处一样」只有靠共用
        才维持得住。所有 class 串和数值都在 `_hero_scrim.html`。
     {% endcomment %}
-    {% include "core/components/_hero_scrim.html" %}
+    {% comment %}
+    hero 那一屏。⚠️ 它现在是一个**明确的整屏容器**，不再是「外面那个 h-full」——
+       登录之后这一页会长过一屏，而经文是相对这一屏定位的（`bottom-[14vh]`）。
+       少了它，经文会跑到整篇文档的底部去，也就是卡片区的最下面。
+    {% endcomment %}
+    <section class="home-screen relative">
 
     {% comment %}
     --- 顶栏 ---
     和内页共用同一个组件（core/components/_top_bar.html）。首页**不传 solid**，
-    所以它平时透明、鼠标碰到页面上端才淡入；也**不传 themed**，因为首页不跟随
-    深色模式。
+    所以它平时透明、鼠标碰到页面上端才淡入。
+
+    ⚠️ `themed` 收的是和 `<head>` 那边**同一个** `deck`（2026-09-12 起由视图给）：
+       有那一屏的人右上角多一个主题切换按钮和自己的名字；匿名访客那一页
+       仍然只有 Log in，也仍然不跟随深色模式。
+       ⚠️ 这两样是同一个开关带出来的（组件里在同一个条件里），不为拆开它们
+          再加第三个参数 —— 那条 bar 已经有两个开关了。
 
     ⚠️ 感应区是顶部一条 96px 高的透明带，不是顶栏自己 —— 顶栏平时是透明的，
        鼠标要先能碰到它才谈得上浮出来。
+
+    ⚠️ 有那一屏时 `fixed`（D44）：这一页从此有两屏半，而顶栏是这一页**唯一的**导航。
+       跟着 hero 一起滚走的话，人在下半屏就必须先滚回顶部才找得到 Menu ——
+       同 base.html 上那条「导航全收进菜单之后，bar 不能跟着内容滚走」。
+       未登录的人只有一屏，`absolute` 和 `fixed` 在那一屏上看起来完全一样，
+       所以那条路径上一个字节都没变。
     {% endcomment %}
-    <div class="absolute inset-x-0 top-0 z-20"
-         x-on:mouseenter="bar = true" x-on:mouseleave="bar = false">
-      {% include "core/components/_top_bar.html" %}
+    <div class="{% if deck %}fixed{% else %}absolute{% endif %} inset-x-0 top-0 z-20"
+         x-on:mouseenter="hover = true; bar = true"
+         x-on:mouseleave="hover = false; bar = past">
+      {% include "core/components/_top_bar.html" with themed=deck %}
     </div>
 
     {% comment %}
@@ -155,6 +226,21 @@
         {% endif %}
       </div>
     {% endif %}
+    </section>
+
+    {% comment %}
+    --- 登录之后接在下面的那一屏（D44）---
+    ⚠️ 未登录时这一整块**连渲染都不渲染** —— 不是藏起来。上下文里那时也只有
+       `page` 一项（见 `dashboard.views.front`）。
+    ⚠️ 不带参数：这一段只有这一个使用者，所以它自己负责版心和底色。
+    {% endcomment %}
+    {% if deck %}
+      {% comment %}
+      ⚠️ hero 和这一段之间**没有任何东西**：过渡那一套 2026-09-12 整套撤了，
+         交界是一条硬边。为什么是硬边，写在上面画布那一段。
+      {% endcomment %}
+      {% include "dashboard/_deck.html" %}
+    {% endif %}
 
     {% comment %}
     --- 左侧菜单 ---
@@ -172,9 +258,9 @@
      相对那个祖先定位，而那个容器里将来加什么谁也说不准。它是 fixed，
      所以放在这里和放在里面看起来完全一样。
 
-  ⚠️ 传 `on_photo`：首页背后永远是一张压暗的照片，而首页**不跟随深色模式**，
-     `<html>` 上永远没有 `.dark` —— 靠深色模式那条规则的话，
-     首页会拿到给浅色页准备的那档硬边投影，压在暗照片上基本看不见。
+  ⚠️ 传 `on_photo`：首页背后永远是一张压暗的照片。靠深色模式那条规则不够 ——
+     浅色模式下（以及未登录的每一次）`<html>` 上没有 `.dark`，首页会拿到
+     给浅色页准备的那档硬边投影，压在暗照片上基本看不见。
   {% endcomment %}
   {% include "core/components/_feather_sky.html" with on_photo=True %}
 </body>

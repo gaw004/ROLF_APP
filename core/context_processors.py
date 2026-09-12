@@ -85,7 +85,7 @@ def _menu_for(user, administered, foundation):
     menu = [
         # ⚠️ 第一条，因为它是登录之后的落脚点 —— 别的每一条都答一个他带着来的
         #    问题，只有这一条告诉他「有什么在等你」。
-        _link("Home", "dashboard:me"),
+        _link("Home", "home"),
         _link("Events", "events:event_list"),
         # ⚠️ Second, above My Signups, and the order is the argument. A notice is
         #    the one thing on this menu somebody might not know they need to
@@ -202,7 +202,7 @@ def site_appearance(request):
        site. Two query-count tests caught that within a minute of it landing.
 
     ⚠️ `for_request()` rather than `current()` as of 2026-08-13, and it is the
-       front page that was paying: `core.views.home` needs the same row for the
+       front page that was paying: `dashboard.views.front` needs the same row for the
        verse, so that one page — the busiest public URL in the site — ran this
        SELECT twice. Neither call site could see the other, which is why the
        caching is on the model rather than a note asking people to be careful.
@@ -237,5 +237,23 @@ def site_appearance(request):
         #    busy. **It does not error and it does not look like a missing
         #    class.** `wall.html` said exactly that in a comment while holding
         #    the second copy of the condition; it has been hit once already.
+        #
+        # ⚠️ **Image only, and `/` is the one page where that shows** (noted
+        #    2026-09-12, deliberately not "fixed"). Since D44 the signed-in front
+        #    page reads this class too, and its own canvas is happy with a video
+        #    or with the built-in fallback picture — so a foundation whose hero
+        #    is a video gets a front page that plainly has a picture behind it
+        #    while `<html>` says it has none. The visible consequence is bounded:
+        #    in dark mode the deck's cards come out solid instead of glass. Both
+        #    states are legible, and the scrim is painted either way, because it
+        #    lives inside `.home-canvas` rather than behind this flag.
+        #
+        # 🔴 Do not "fix" this by making the class follow `page.hero` instead.
+        #    That would make every **inner** page claim `has-hero` on a video-only
+        #    site, and those pages deliberately paint no backdrop for a video
+        #    (see the note above this function) — the glass would then be
+        #    sampling a plain dark background, which is the bug this class was
+        #    introduced to stop. The two pages want different questions answered;
+        #    one flag cannot answer both.
         "site_root_class": "h-full has-hero" if hero_image else "h-full",
     }

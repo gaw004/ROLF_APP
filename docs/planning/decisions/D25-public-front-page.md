@@ -88,6 +88,39 @@ CSS**，它会把照片推出自己的框，页面出来基本是空的，而没
 >   `dashboard.tests.TheDashboardIsForOnePersonTests.test_it_does_not_replace_the_public_front_page`；
 > · **公开页面仍然只有三个**：`/`、登录、注册。分界线一格都没再动。
 
+## 2026-09-11：`/` 往下滚就是仪表盘，而「同一页」那句话改口了
+
+见 [D44](D44-the-front-page-scrolls-into-the-dashboard.md)。本文件开头写着
+「`/` 对所有人开放，登录与否看到的是**同一页**」—— 后半句从这天起不成立：
+登录的人在 hero 下面接着一整屏仪表盘，未登录的人看到的 `/` 一个像素都没变。
+
+改口只改这一句。三件事一个字没动，而且第二件正是本决策推翻过的那个东西：
+
+- 公开边界仍然只有 `/`、登录、注册三个页面；
+- `/` 登录之后仍然**不跳转**，仍然 200。钉住它的还是
+  `dashboard.tests.TheDashboardIsForOnePersonTests.test_it_does_not_replace_the_public_front_page`；
+- 判据仍然是「这一页是不是要发给一个还没有账号的人看的」。它现在的答案还是「是」——
+  陌生人打开看到的就是那张满幅的照片和经文，一行别人的数据都没有。
+
+### 首页开始跟随深色模式，而本文件那句担心是查过的
+
+本文件和 [`_head.html`](../../../core/templates/core/components/_head.html) 都写过：
+首页不跟随深色模式，因为「`<html>` 一旦有了 `.dark`，顶栏那套『白字 / 深蓝字』的规则
+会全部翻转」。2026-09-11 逐条查过 `app.css` 里每一条命中 `.home-*` 的 `.dark` 规则，
+**这句话对顶栏不成立**：
+
+    .dark .home-bar.is-solid                 内页那条实心 bar
+    .dark .home-bar.is-solid .home-bar-item
+    .dark.has-hero .home-bar.is-solid
+    .dark .home-menu  /  .dark.has-hero .home-menu  /  .dark .home-menu-heading
+
+前三条都带 `.is-solid`，而首页那条 bar **不传 `solid`** —— 一条都命中不了；
+首页的白字写在无条件的 `.home-bar-item` 上。真正会变的只有侧边菜单面板，
+它会变成深色玻璃，而对一个开着深色模式的人，那正是它该有的样子。
+
+改口的真正理由是首页不再「只是一张照片加白字」：它下面现在有一整屏卡片。
+不跟随主题的话，深色模式的人会从一张暗照片一头撞进一片纯白。
+
 ## 公开与登录的分界线，动了一格
 
 在此之前只有 `login` 和 `register` 是公开的。现在多一个 `/`。

@@ -1612,22 +1612,50 @@ class ParticipationQuerySet(models.QuerySet):
         """Sum the hours on these rows. `Decimal("0")` when there are none.
 
         ⚠️ Only meaningful after `volunteering()` — on its own it would add the
-           two ledgers together, which is the one thing D36 forbids. It is a
-           separate method rather than folded into the filter because the
-           dashboard needs the number while `/me/participations/` needs the
-           rows.
+           two ledgers together, which is the one thing D36 forbids.
 
-        ⚠️ `or Decimal("0")`: `Sum` over no rows is None, and a page that prints
-           "None hours volunteered" is the failure this line exists to stop.
-           Zero is a true answer for somebody who has not started yet; None is
-           not an answer at all.
+        🔴 **One line, because the sum itself lives next door** (2026-09-12).
+           Until then this method carried its own copy of the two-ledger
+           arithmetic *and* of the reasoning behind it — the same two aggregates,
+           the same four `or Decimal("0")` guards, the same "not a join, not
+           `distinct=True`" argument that `hours_given_and_within()` states. Two
+           copies of a calculation whose failure mode is a **silently too-small
+           number**: the D20 bug below shipped exactly once and took a term's
+           worth of hours off an assistant's own page. When D2a adds a third
+           hours column, there must be one place to teach.
+
+        ⚠️ It has no caller outside tests today (D44 moved the dashboard to
+           `hours_given_and_within()`, which gets both figures in one pass).
+           It stays because "how many hours has this person given" is the
+           question this queryset exists to answer, and a caller that does not
+           need a window should not have to pass one.
+        """
+        return self.hours_given_and_within()[0]
+
+    def hours_given_and_within(self, start=None, end=None):
+        """All the hours on these rows, and the part of them inside [start, end).
+
+        Returns `(total, within)`. D44 prints both on the dashboard: the year as
+        the large figure, the running total underneath it. Called without a
+        window it returns `(total, None)` — `None` rather than the total again,
+        so a caller that forgot to pass the dates cannot mistake one figure for
+        the other. `hours_given()` is that call.
+
+        🔴 **This is the one place the two ledgers are added up.** `hours_given()`
+           delegates here rather than repeating the arithmetic; the three
+           warnings below are therefore written once.
+
+        ⚠️ `or Decimal("0")` on every half: `Sum` over no rows is None, and a
+           page that prints "None hours volunteered" is the failure this guard
+           exists to stop. Zero is a true answer for somebody who has not
+           started yet; None is not an answer at all.
 
         🔴 **Both columns since 2026-09-08.** Decision 20 put a second hours
            column on `SessionAttendance`, and on a run `Participation.hours` is
            `None` by design — so an assistant who gave twenty-four hours across
            a spring term read **0 hours volunteered** on their own dashboard.
            The zero defended above is the honest one ("has not started yet");
-           this was a different zero wearing it.
+           that was a different zero wearing it.
 
         ⚠️ **Two queries, not one Sum over a join**, and not `distinct=True`
            either. Summing across the join multiplies each signup's hours by its
@@ -1640,13 +1668,54 @@ class ParticipationQuerySet(models.QuerySet):
         ⚠️ Still one direction. This adds two halves of **hours given**; what it
            must never take in is hours received (D43), which is not a column at
            all and so cannot arrive here by accident.
+
+        🔴 **The two halves are dated by two different columns, and that is the
+           whole difficulty of this method.** A signup is dated by its event
+           (`event_role__event__start_time`); a register row is dated by the
+           evening it records (`session__start_time`). Cutting both at the
+           event's date would take a course that began last December and count
+           **the whole term** into last year — and a course spanning the new
+           year is not an edge case, it is what `SessionAttendance` exists for.
+           Nothing raises; one figure is simply wrong, in January, for exactly
+           the people who gave the most time.
+
+        ⚠️ One pass per half, not two. Asking `hours_given()` and then asking
+           again with a date filter reads the same rows twice for a figure the
+           database can add up while it is already there — and this page is the
+           most query-hungry in the site (D42 第五节). The conditional `Sum`
+           cannot multiply anything: both filters cross a ForeignKey, so each
+           row still has exactly one event and one session.
+
+        ⚠️ Same one-ledger safety as `hours_given()`: it is only meaningful
+           after `volunteering()`, and there is deliberately still no method
+           here that would add the two ledgers D36 forbids adding.
         """
-        signups = self.aggregate(total=models.Sum("hours"))["total"] or Decimal("0")
+        # ⚠️ 无窗口时连那两个条件 `Sum` 都不发 —— 不是发一个恒真的条件。
+        #    `hours_given()` 走的就是这条路，而它不该为一个要不到的数字付钱。
+        windowed = start is not None and end is not None
+        extra = {}
+        if windowed:
+            extra["within"] = models.Sum("hours", filter=models.Q(
+                event_role__event__start_time__gte=start,
+                event_role__event__start_time__lt=end))
+        signups = self.aggregate(total=models.Sum("hours"), **extra)
+
+        extra = {}
+        if windowed:
+            extra["within"] = models.Sum("hours", filter=models.Q(
+                session__start_time__gte=start, session__start_time__lt=end))
         sessions = (
             SessionAttendance.objects.filter(participation__in=self)
-            .aggregate(total=models.Sum("hours"))["total"] or Decimal("0")
+            .aggregate(total=models.Sum("hours"), **extra)
         )
-        return signups + sessions
+        # ⚠️ `or Decimal("0")` on every half, for the reason in the docstring:
+        #    a page that prints "None hours volunteered" is the failure those
+        #    guards exist to stop, and there are four chances to hit it here.
+        total = (signups["total"] or Decimal("0")) + (sessions["total"] or Decimal("0"))
+        if not windowed:
+            return total, None
+        within = (signups["within"] or Decimal("0")) + (sessions["within"] or Decimal("0"))
+        return total, within
 
     def mine(self, contact):
         """This person's signups, narrowed in the query rather than the template.

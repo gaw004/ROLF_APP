@@ -48,6 +48,23 @@ def local_date_of(moment):
     return timezone.localtime(moment).date()
 
 
+def local_hour_of(moment):
+    """Which hour of the day, in the foundation's timezone, an instant falls in.
+
+    The greeting on the dashboard picks morning / afternoon / evening off this
+    (D44), and asking the instant itself is the same mistake local_date_of()
+    exists to prevent, one field over: `local_now()` is UTC-aware, so at 10am
+    Pacific its `.hour` is 17 and every volunteer in California is wished a
+    good evening over breakfast. Nothing raises — the page is simply wrong for
+    most of the working day.
+
+    ⚠️ It is D16's trap asked of the clock rather than the calendar, and it is
+       guarded alongside the five `.date()` spellings in
+       core.tests.TimeSourceGuardTests.
+    """
+    return timezone.localtime(moment).hour
+
+
 def local_day(field):
     """The same question as local_date_of(), asked of a column instead of a value.
 
@@ -97,6 +114,23 @@ def day_start(day):
     5pm on the 31st. Nothing raises — the count is just wrong.
     """
     return timezone.make_aware(datetime.datetime.combine(day, datetime.time.min))
+
+
+def year_bounds(year):
+    """[start, end) covering one calendar year, in the foundation's timezone.
+
+    Half-open for the same reason as month_bounds, and built out of the same
+    day_start so that "this year" and "this month" cannot come to disagree
+    about where a day begins.
+
+    ⚠️ The calendar year, and that is a decision rather than the obvious
+       reading: D42 had refused to print a yearly figure at all because "year"
+       was undefined — fiscal or calendar — and D44 answered it with the
+       calendar one. A fiscal year would take a configured starting month, and
+       this function would then be the wrong shape rather than the wrong
+       constant.
+    """
+    return day_start(datetime.date(year, 1, 1)), day_start(datetime.date(year + 1, 1, 1))
 
 
 def month_bounds(year, month):

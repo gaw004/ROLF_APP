@@ -20,12 +20,18 @@ from django.contrib import admin
 from django.urls import include, path
 
 from core.health import HEALTH_PATH
-from core.views import healthz, home
+from core.views import healthz
+from dashboard.views import front
 
 urlpatterns = [
     # The public front page. ⚠️ No login_required: this is the one page a link
     # shared with a stranger has to open. See D25.
-    path('', home, name='home'),
+    #
+    # ⚠️ The view lives in `dashboard`, not `core`, since 2026-09-11 — signed in,
+    #    this page carries the dashboard below the fold, and `core` may not
+    #    import its own downstream apps (D17). The **name** is unchanged, which
+    #    is why no template had to be touched. See D44.
+    path('', front, name='home'),
     # ⚠️ Before anything that could shadow it, and outside every app: the
     #    platform's health check has to answer even while the rest of the site
     #    is having a bad day. See core/views.py::healthz.

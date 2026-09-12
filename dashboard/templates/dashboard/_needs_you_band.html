@@ -1,0 +1,68 @@
+{% comment %}
+通栏那一块「有事在等你」（D44）。它是 D42 那张 admin 专属卡片的后身 ——
+从卡片网格里拿出来、横过整幅，因为它是这一屏上**唯一一件要人动手的事**。
+
+⚠️ 一块地方，两种形态，而模板不判断读它的人是谁：服务层给的三个列表里，
+   ministry admin 填的是 short / unfinished，其余人填的是 open。
+   「我是哪一种人」那句判断留在 services.py（D24：x- 属性和模板里不许有权限判断）。
+
+⚠️ 空态照画，不整块藏起来。没有事在等你是一个**答案**，不是一种缺失（D27）——
+   而且整块消失会让登录的人每次打开首页看到的版面高度都不一样。
+
+⚠️ 出口那一格通向的都是**已经存在**的页面（D42 门槛第三条）。
+{% endcomment %}
+<section class="band">
+  <h2 class="band-head">
+    <span class="band-dot" aria-hidden="true"></span>
+    <span>Needs you</span>
+    {% if needs_you.count %}
+      <span class="band-count">{{ needs_you.count }} item{{ needs_you.count|pluralize }}</span>
+    {% endif %}
+  </h2>
+
+  {% if needs_you.count %}
+    <div class="band-tiles">
+      {% for role in needs_you.short %}
+        <a class="band-tile" href="{% url 'events:event_registrations' role.event.pk %}">
+          <span class="band-when">{{ role.event.start_time|date:"D j M" }} · {{ role.event.start_time|date:"H:i" }}</span>
+          <span class="band-what">{{ role.event.name }}</span>
+          <span class="band-note">{{ role.registered_count }} of {{ role.needed_count }} {{ role.role.name }} filled</span>
+        </a>
+      {% endfor %}
+
+      {% for event in needs_you.unfinished %}
+        <a class="band-tile" href="{% url 'events:event_attendance' event.pk %}">
+          <span class="band-when">{{ event.end_time|date:"D j M" }}</span>
+          <span class="band-what">{{ event.name }}</span>
+          <span class="band-note">Attendance not wrapped up</span>
+        </a>
+      {% endfor %}
+
+      {% comment %}
+      ⚠️ 志愿者那一档的第三行说的是「还缺人」，而不是活动的时间 ——
+         这一块问的是「什么在等你」，那个数字就是等他的理由。
+      {% endcomment %}
+      {% for event in needs_you.open %}
+        <a class="band-tile" href="{% url 'events:event_detail' event.pk %}">
+          <span class="band-when">{{ event.start_time|date:"D j M" }} · {{ event.start_time|date:"H:i" }}</span>
+          <span class="band-what">{{ event.name }}</span>
+          {% comment %}
+          ⚠️ 这句话和 `Happening soon` 那张卡里的**必须是同一句**（2026-09-12 对齐）：
+             两块并排说的就是同一件事，而一屏之内两种说法会读成两回事。
+             那边写在 `_body_happening.html`，前面多一个间隔点。
+          {% endcomment %}
+          <span class="band-note">Still needs people</span>
+        </a>
+      {% endfor %}
+
+      <div class="band-tile band-tile--exits">
+        {% if is_ministry_admin %}
+          <a class="band-exit" href="{% url 'events:event_manage_list' %}">Events I manage →</a>
+        {% endif %}
+        <a class="band-exit" href="{% url 'events:event_list' %}">All events →</a>
+      </div>
+    </div>
+  {% else %}
+    <p class="band-empty">Nothing waiting on you.</p>
+  {% endif %}
+</section>

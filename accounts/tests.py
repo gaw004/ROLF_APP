@@ -1165,7 +1165,7 @@ class EmailVerificationFlowTests(TestCase):
         self.register()
         response = self.client.post(reverse("accounts:verify_email"),
                                     {"code": self.code_from_the_email()})
-        self.assertRedirects(response, reverse("dashboard:me"))
+        self.assertRedirects(response, reverse("home"))
         user = User.objects.get(email="lisi@example.com")
         self.assertTrue(user.email_verified)
         self.assertEqual(self.client.session.get("_auth_user_id"), str(user.pk))
@@ -1243,7 +1243,7 @@ class EmailVerificationFlowTests(TestCase):
         self.assertRedirects(
             self.client.post(reverse("accounts:verify_email"),
                              {"code": self.code_from_the_email()}),
-            reverse("dashboard:me"))
+            reverse("home"))
 
     def test_the_resend_button_is_rationed(self):
         # 被限住的表现是**不发信**，不是一句好话。
@@ -1288,7 +1288,7 @@ class EmailVerificationFlowTests(TestCase):
         code = self.code_from_the_email()
         response = self.client.post(reverse("accounts:verify_email"),
                                     {"code": f"{code[:3]} {code[3:]}"})
-        self.assertRedirects(response, reverse("dashboard:me"))
+        self.assertRedirects(response, reverse("home"))
 
     def test_a_code_that_starts_with_zero_survives_the_round_trip(self):
         """⚠️ 前导零。码当成整数走一圈的话，「004821」会变成 4821，
@@ -1304,7 +1304,7 @@ class EmailVerificationFlowTests(TestCase):
         session["pending_verification_user"] = user.pk
         session.save()
         response = self.client.post(reverse("accounts:verify_email"), {"code": "004821"})
-        self.assertRedirects(response, reverse("dashboard:me"))
+        self.assertRedirects(response, reverse("home"))
 
 
 class UnverifiedLoginTests(TestCase):
@@ -1338,7 +1338,7 @@ class UnverifiedLoginTests(TestCase):
 
     def test_a_verified_account_logs_in_as_before(self):
         mark_email_verified(self.user)
-        self.assertRedirects(self.login(), reverse("dashboard:me"))
+        self.assertRedirects(self.login(), reverse("home"))
 
     def test_the_wrong_password_is_still_just_the_wrong_password(self):
         """🔴 这条钉的是那个检查**放在哪一层**。
@@ -1388,7 +1388,7 @@ class GoogleRegistrationVerificationTests(TestCase):
     def test_a_google_verified_address_skips_the_code(self):
         self.prefill()
         response = self.register()
-        self.assertRedirects(response, reverse("dashboard:me"))
+        self.assertRedirects(response, reverse("home"))
         self.assertEqual(mail.outbox, [])
         self.assertTrue(User.objects.get(email="mei@example.com").email_verified)
 
@@ -1498,7 +1498,7 @@ class ChangingTheLoginAddressTests(TestCase):
         self.client.post(reverse("accounts:login"), {
             "username": "new@example.com", "password": "a-good-long-password"})
         response = self.client.post(reverse("accounts:verify_email"), {"code": code})
-        self.assertRedirects(response, reverse("dashboard:me"))
+        self.assertRedirects(response, reverse("home"))
         self.user.refresh_from_db()
         self.assertTrue(self.user.email_verified)
 

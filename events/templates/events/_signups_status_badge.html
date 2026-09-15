@@ -1,0 +1,30 @@
+{% comment %}
+「我报的名」那两页的状态标签（2026-09-15 抽出来）。
+
+⚠️ 抽的是**「哪个状态该配哪个语气」这条判断**，不是那几行 HTML —— 同
+   `_status_badge.html` 当初被抽出来的理由。原来 `my_participations.html`
+   和它 include 的 `_course_card.html` 各写了一遍逐字相同的 if/else；两处都对，
+   而下次加一档状态、或者把 `attended` 换个语气时，**改一处漏一处的表现是
+   同一个人在同一屏上显示成两种颜色** —— 表格那一行一种，底下那张课卡另一种。
+
+🔴 **这和 `_status_badge.html` 是两份，而且必须是两份。** 那个文件里写着全站
+   一共三套映射、三套不一样是有意的（语气跟着「这一页在问什么」走），并且明说
+   「不要把另外两处并到这里来」。这一份就是它说的第三套：
+
+     registered=success  —— 未来那条才是要他行动的
+     attended=info       —— 已经发生的事，报告口吻
+     其余中性
+
+   ⚠️ 所以这个片段**不** include `_status_badge.html`；它们回答的是不同的问题。
+   ⚠️ 守卫 `core.tests` 那条「三套各自独立」原来盯着 `my_participations.html`
+      里的字面量，现在跟着盯这个文件。
+
+参数：row —— 一条 `Participation`。
+{% endcomment %}
+{% if row.status == "registered" %}
+  {% include "core/components/badge.html" with label=row.get_status_display tone="success" %}
+{% elif row.status == "attended" %}
+  {% include "core/components/badge.html" with label=row.get_status_display tone="info" %}
+{% else %}
+  {% include "core/components/badge.html" with label=row.get_status_display %}
+{% endif %}

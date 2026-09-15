@@ -806,21 +806,55 @@
   .filter-trigger:hover { color: var(--color-ink-950); }
   .dark .filter-trigger:hover { color: #fff; }
 
-  /* ⚠️ 和日期弹层同一套外观和同一套定位（`POSITIONED` 那个名单）——
-   *    同一条筛选栏上两个弹层长得不一样，读起来是两个不同的东西。 */
+  /* 弹层的**共用外壳** —— 三个弹层一处（2026-09-15 simplify）。
+   *
+   * 🔴 **漂移已经发生过一次，而且是注释先变成假话的。**
+   *    `.filter-menu` 头上原来写着「和日期弹层同一套外观」，而它的内边距和
+   *    圆角实际跟着 `.row-menu`、只有阴影跟着日期弹层 —— 三份各写一遍的代价
+   *    就是这个：改一处时另两处不动，而没有任何东西会说一声。
+   *
+   * ⚠️ **阴影统一到两层那一个**（原 `.row-menu` 的）。这是一次**有意的
+   *    视觉统一**，它动到了日期弹层和 Role 弹层：那两个原来是单层
+   *    `0 10px 30px rgb(0 0 0/.14)`。挑两层那一个是因为它更细致，而且
+   *    `.row-menu` 的阴影**没有任何注释解释它**（那段注释讲的是
+   *    `margin`/`inset`），所以统一它不推翻任何写下来的决定。
+   *
+   * 🔴 `margin: 0` 和 `inset: auto` 是**必需**的，不是重置洁癖：
+   *    `[popover]` 的 UA 样式表默认 `inset: 0` + `margin: auto`，也就是
+   *    **视口居中**。不清掉的话，app.js 写上去的 `top/left` 会被这两条按住 ——
+   *    坐标算对了，菜单还在屏幕中间。三个弹层都靠 app.js 定位，所以三个都要。
+   *
+   * 🔴 三个都在 **top layer**（`popover`），所以这里既不需要 z-index，也不会被
+   *    `.table-wrap` 的 `overflow-x: auto` 裁掉、被 `.card` 的 `backdrop-filter`
+   *    抓住、或者被 `.filter-card` 钉在那一层。
+   *
+   * ⚠️ 各自只留 `padding` 和 `border-radius`（以及 `.row-menu` 的 `min-width`）——
+   *    那三样是真的按内容不同的：日历是一块版面，另两个是一排菜单项。
+   * ⚠️ `.row-menu` 定义在本文件很靠后（管理行那一段），那里有一句指回这里。
+   *    两条规则同层（都在 `@layer components`）且同特异度，靠先后顺序分胜负 ——
+   *    所以共用外壳写在**前面**，三条各自的写在后面。
+   * 守卫：core.tests.PopoverShellIsOneRuleTests。 */
+  .row-menu,
+  .date-popover,
   .filter-menu {
     margin: 0;
     inset: auto;
-    padding: 0.375rem;
     border: 1px solid var(--color-ink-200);
-    border-radius: 0.75rem;
     background-color: #fff;
-    box-shadow: 0 10px 30px rgb(0 0 0 / 0.14);
+    box-shadow: 0 12px 32px rgb(15 23 42 / 0.16), 0 2px 8px rgb(15 23 42 / 0.08);
   }
 
+  .dark .row-menu,
+  .dark .date-popover,
   .dark .filter-menu {
     border-color: var(--color-ink-700);
     background-color: var(--color-ink-900);
+  }
+
+  /* Role 那一格的弹层。外壳在上面那条共用规则里。 */
+  .filter-menu {
+    padding: 0.375rem;
+    border-radius: 0.75rem;
   }
 
   .filter-menu-row {
@@ -920,23 +954,13 @@
   }
   .dark .date-chip:hover { background-color: var(--color-ink-700); }
 
-  /* 🔴 **`popover` 进 top layer**，所以这里既不需要 z-index，也不会被
-   *    `.filter-card` 钉住那一层、或者外面那列的 `overflow` 裁掉。
-   * ⚠️ `margin: 0` 和 `inset: auto` 是必需的：`[popover]` 的 UA 样式表默认
-   *    `inset: 0` + `margin: auto`，也就是**视口居中** —— 定位那一段在 app.js。 */
+  /* 日期弹层。外壳（top layer / `margin` / `inset` / 边框 / 底色 / 阴影）在上面
+   * 那条三个弹层共用的规则里，理由也写在那里。
+   * ⚠️ 这里的内边距和圆角比另两个大，而那是有理由的：它装的是**两个月的
+   *    日历版面**，不是一排菜单项。 */
   .date-popover {
-    margin: 0;
-    inset: auto;
     padding: 1rem;
-    border: 1px solid var(--color-ink-200);
     border-radius: 1rem;
-    background-color: #fff;
-    box-shadow: 0 10px 30px rgb(0 0 0 / 0.14);
-  }
-
-  .dark .date-popover {
-    border-color: var(--color-ink-700);
-    background-color: var(--color-ink-900);
   }
 
   .date-popover-nav {
@@ -4621,30 +4645,21 @@
   .meeting-calendar-link:hover { background-color: var(--color-ink-100); }
   .dark .meeting-calendar-link:hover { background-color: var(--color-ink-800); }
 
-  /* 面板。⚠️ 它在 **top layer**（`popover`），所以这里既不需要 z-index，
-   *    也不会被 `.table-wrap` 的 `overflow-x: auto` 裁掉、被 `.card` 的
-   *    `backdrop-filter` 抓住 —— 那三件事写在 row_menu.html 上，
-   *    每一件都是这个仓库付过学费的。
+  /* 面板。🔴 **外壳不在这里**（2026-09-15 simplify）：top layer、
+   * `margin: 0`、`inset: auto`、边框、底色、阴影都在本文件上面那条
+   * `.row-menu, .date-popover, .filter-menu` 共用规则里，所有理由（包括
+   * `margin`/`inset` 为什么是必需的、为什么不需要 z-index）也写在那里。
+   * ⚠️ 搜 `.row-menu,` 就能找到它 —— 两处相隔四千行，而守卫
+   *    core.tests.PopoverShellIsOneRuleTests 盯着三个类名都在那一条里。
    *
-   * 🔴 `margin: 0` 和 `inset: auto` 是**必需**的，不是重置洁癖：
-   *    `[popover]` 的 UA 样式表默认 `inset: 0` + `margin: auto`，也就是
-   *    **视口居中**。不清掉的话，app.js 写上去的 `top/left` 会被这两条按住 ——
-   *    坐标算对了，菜单还在屏幕中间。 */
+   * ⚠️ 这里留的三样都是这一个弹层自己的：`position: fixed` 显式写出来
+   *    （app.js 按触发器的视口坐标放它）、一个最小宽、以及一排菜单项的
+   *    内边距和圆角。 */
   .row-menu {
     position: fixed;
-    inset: auto;
-    margin: 0;
     min-width: 12rem;
     padding: 0.375rem;
-    border: 1px solid var(--color-ink-200);
     border-radius: 0.75rem;
-    background-color: #fff;
-    box-shadow: 0 12px 32px rgb(15 23 42 / 0.16), 0 2px 8px rgb(15 23 42 / 0.08);
-  }
-
-  .dark .row-menu {
-    border-color: var(--color-ink-700);
-    background-color: var(--color-ink-900);
   }
 
   /* 菜单里的一项 —— 链接和 `<button>` 长得必须一模一样：一半是导航、

@@ -1,5 +1,14 @@
 {% extends "core/base.html" %}
-{% block title %}Events I Manage{% endblock %}
+{% comment %}
+🔴 **标签页上的字也走 `manage_list_name`**（2026-09-15 simplify 抓到）。
+
+   它原来写死「Events I Manage」，而下面那个 `<h1>` 渲染的是
+   `{{ manage_list_name }}` —— 于是 foundation tier 打开这一页，标签页写着
+   「Events I Manage」而版心标题写着「All Events」。
+   ⚠️ `ManageListHeadTests` 钉的是「页头条那一格 = `<h1>`」，**够不到标签页**，
+      所以这一处是那条守卫的盲区。守卫已经跟着扩到三处一起断言。
+{% endcomment %}
+{% block title %}{{ manage_list_name }}{% endblock %}
 
 {% comment %}
 🔴 **这一页用全站默认的版心（max-w-6xl），没有 `main_width` 覆盖**（2026-08-29

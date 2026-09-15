@@ -40,7 +40,7 @@
        请求回来才变（约 400ms 的防抖之后），而日历上的高亮是**当场**就有的，
        所以「点中了没有」这件事不靠它回答。
     {% endcomment %}
-    <span id="date-chip-label">{{ period.date_chip }}</span>
+    {% include "events/_date_chip_label.html" %}
     <svg width="14" height="14" viewBox="0 0 20 20" fill="none" stroke="currentColor"
          stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
       <path d="M5 8l5 5 5-5"/>

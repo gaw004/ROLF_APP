@@ -155,9 +155,7 @@
          而可点的东西放在最外侧，手指和光标都够得最省事。
       {% endcomment %}
       <div class="flex items-baseline gap-3">
-        <p id="event-count" class="text-sm text-ink-600 dark:text-ink-300">
-          {{ total }} in this period
-        </p>
+        {% include "events/_event_count.html" %}
         {% if can_see_all_events %}
           {% url 'events:event_manage_list' as manage_url %}
           {% include "core/components/manage_link.html" with href=manage_url label="Manage events" %}

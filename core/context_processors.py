@@ -27,7 +27,7 @@ from org.permissions import (
 )
 
 
-def manage_list_name(user):
+def manage_list_name(user, *, foundation=None):
     """管理那一页叫什么 —— **全站唯一一处定义这对词的地方**（2026-09-03）。
 
     `events/manage/` 的标题、顶栏那一排里它自己那一格、以及 `_event_nav.html`
@@ -52,8 +52,17 @@ def manage_list_name(user):
        那条守卫留着，这个函数让它守的东西**从结构上就不可能分家**。
 
     ⚠️ `events` import `core` 是允许的方向（D17）；反过来不行。
+
+    ⚠️ `foundation` 让**已经知道答案的调用方**把它传进来（同
+       `services.default_served_as()` 的 `on_the_books`）。`in_foundation_tier()`
+       是一次没有缓存的 `groups.filter().exists()`，而 `navigation()` 上面两行
+       刚算过它 —— 不给这个口子的话，这个抽取会给**每一个登录后的页面渲染**
+       （连同每一个 HTMX 片段）多加一次查询。实测过：普通页面从 2 次
+       `auth_group` 涨到 3 次。
     """
-    return "All Events" if in_foundation_tier(user) else "Events I Manage"
+    if foundation is None:
+        foundation = in_foundation_tier(user)
+    return "All Events" if foundation else "Events I Manage"
 
 
 def _link(label, url_name, icon, query=""):
@@ -227,7 +236,8 @@ def navigation(request):
         "can_grant_ministry_admin": can_grant_ministry_admin(user),
         # ⭐ 这一页叫什么，只定义在一处 —— 见 `manage_list_name()`，
         #    顶栏那一排里它自己那一格读的是同一个函数。
-        "manage_list_name": manage_list_name(user),
+        # ⚠️ 把上面已经算好的 `foundation` 递进去 —— 见那个函数的最后一条。
+        "manage_list_name": manage_list_name(user, foundation=foundation),
     }
 
 

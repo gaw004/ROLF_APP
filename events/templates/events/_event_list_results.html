@@ -28,17 +28,15 @@ event_list 的结果区。整页和 HTMX 片段渲染的是同一份 —— 视�
   ⚠️ 名词不再出现在计数那句话里（原来是「21 events in this period.」）：标题行
      就在它左边写着 Events / Programs，紧挨着再说一遍是重复。
   {% endcomment %}
+  {% comment %}
+  ⚠️ 三块**都走各自的片段**（2026-09-15 simplify 抓到）：原来只有摘要那一块
+     抽了，另外两块是手抄的第二份。三份里任何一份和它的正本在 id 或措辞上分家，
+     OOB 就**静默失败** —— 而整页加载时看起来完全正常。
+  {% endcomment %}
   {% if is_htmx %}
-    <p id="event-count" hx-swap-oob="true"
-       class="text-sm text-ink-600 dark:text-ink-300">
-      {{ total }} in this period
-    </p>
+    {% include "events/_event_count.html" with oob=1 %}
     {% include "events/_filter_summary.html" with oob=1 %}
-    {% comment %}
-    ⚠️ 第三块：日期胶囊上那几个字。理由同上 —— 它也在筛选表单里，也就是
-       `#event-results` 外面。少了它，选完日期列表变了而胶囊还写着「Dates」。
-    {% endcomment %}
-    <span id="date-chip-label" hx-swap-oob="true">{{ period.date_chip }}</span>
+    {% include "events/_date_chip_label.html" with oob=1 %}
   {% endif %}
 
   <ul class="space-y-3">

@@ -126,13 +126,7 @@
                 {% endif %}
               </td>
               <td>
-                {% if row.status == "registered" %}
-                  {% include "core/components/badge.html" with label=row.get_status_display tone="success" %}
-                {% elif row.status == "attended" %}
-                  {% include "core/components/badge.html" with label=row.get_status_display tone="info" %}
-                {% else %}
-                  {% include "core/components/badge.html" with label=row.get_status_display %}
-                {% endif %}
+                {% include "events/_signups_status_badge.html" %}
               </td>
               {% if show_attendance %}
                 {% comment %}
@@ -203,17 +197,49 @@
      合计没有定义。⚠️ 接受到的那个数**没有的时候整段不画**，不写 0 ——
      「一堂课都没上过」和「这个问题在他身上不成立」是两个答案。
   {% endcomment %}
-  {% if not is_past and past_count %}
+  {% comment %}
+  🔴 **三样东西的可见条件不是同一个**（2026-09-15 review 抓到）。
+
+     这里原来是 `{% templatetag openblock %} if not is_past and past_count {% templatetag closeblock %}` 一个条件门控三样，
+     而那**把 `_signups_footer()` 当初修掉的 bug 请了回来**：那个函数的 docstring
+     写着「两个数的范围和那个计数不一样，而这是被一条测试逼出来的 …… 第一版
+     三样都只算结束了的，于是一个**课上到一半的学员**看到的是空的」——
+     而 `past_count == 0` 的人正是那个学员。
+
+  ⚠️ 所以：整段在**有任何一样可说**时就画（`past_count` 或两个数任一），
+     而「N past signups →」那一格自己再判一次 —— 一个还没有任何历史的人不该
+     看到一条通往空页面的链接。
+  {% endcomment %}
+  {% comment %}
+  ⚠️ 外面先判 `not is_past`：Django 模板里 `and` 的优先级高于 `or`，写成
+     `not is_past and past_count or hours_given` 的话，**历史页上只要有工时
+     它照样会画** —— 而那一页的底下不该有这一条（它指向的正是那一页自己）。
+  {% endcomment %}
+  {% if not is_past %}
+  {% comment %}
+  ⚠️ 判的是 `hours_received is not None` 而不是它的真假：**0 是一个答案**，
+     而「这个问题在他身上不成立」是另一个（`_signups_footer` 交回 `None`）——
+     D36 那条「一堂课都没上过和这个问题不成立是两个答案」说的正是它。
+     ⚠️ `hours_given` 恒有值（0 也是值），所以它不进这个条件 —— 写进去的话
+        一个刚报名、还没出过工的人整段就没了，而他的 volunteer hours 该是 0。
+  {% endcomment %}
+  {% if past_count or hours_received is not None or courses or occasions %}
     <div class="flex flex-wrap items-baseline justify-between gap-3 border-t border-ink-200 pt-4 text-sm text-ink-600 dark:border-ink-800 dark:text-ink-300">
       <span>
-        {{ past_count }} past signup{{ past_count|pluralize }}
-        · {{ hours_given|floatformat:"-2" }} volunteer hours
+        {% if past_count %}
+          {{ past_count }} past signup{{ past_count|pluralize }}
+          ·
+        {% endif %}
+        {{ hours_given|floatformat:"-2" }} volunteer hours
         {% if hours_received is not None %}
           · {{ hours_received|floatformat:"-2" }} hours received
         {% endif %}
       </span>
-      <a href="{% url 'events:past_participations' %}" class="prose-link">View history &rarr;</a>
+      {% if past_count %}
+        <a href="{% url 'events:past_participations' %}" class="prose-link">View history &rarr;</a>
+      {% endif %}
     </div>
+  {% endif %}
   {% endif %}
 
   {% comment %}

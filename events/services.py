@@ -1727,14 +1727,27 @@ def ministry_report(events):
 
 
 def _helping_signups_on_runs(helped):
-    """课上那些帮忙的报名行有几条 —— 它们**不该**算进「缺一条工时」。
+    """课上那些帮忙的、**而且没有工时记录**的报名行有几条 —— 它们不该算进
+    「缺一条工时」。
 
     ⚠️ 单独一个函数而不是一句内联的 `filter().count()`，因为它是一个**减项**，
        而减项最容易被下一个人读成「多余的一次查询」删掉。删掉之后那个数字不会
        报错，只会每开一门课就多涨一点，正是它要防的事。
+
+    🔴 **`hours__isnull=True` 是 2026-09-15 review 补上的，而它修的是一个真的
+       负数**（实测 `hours_missing = -1`）：一门课上的助教角色是 `helping`，
+       而 `Participation.records_hours` 只看 `nature != ATTENDING`、**不看
+       shape** —— 所以 `record_hours()` 会收下它。那一行于是被减了两次：
+       一次在 `(helping_signups - hours_records)` 里被自己的工时记录抵掉，
+       一次在这里被整个减掉。
+       ⚠️ 页面会印出「−1 signups with no hours」，而调用处那段注释写着
+          「两半都是同一批行的两个聚合，所以各自都不会变成负数」——
+          那句话此前一直是假的。
     """
     return helped.filter(
-        event_role__event__shape=Event.Shape.PROGRAM).count()
+        event_role__event__shape=Event.Shape.PROGRAM,
+        hours__isnull=True,
+    ).count()
 
 
 def _people_served(events, parts):
@@ -3276,7 +3289,7 @@ def _calendar_place(event):
     return ", ".join(filter(None, (event.location, event.postal_address)))
 
 
-def calendar_occasions(event, *, host, url_for, meetings=None):
+def calendar_occasions(event, *, host, url_for, meetings=None, numbers=None):
     """这一场（或这一门课的每一讲）→ 一串 `ics.Occasion`。
 
     ⭐ **形状和日程那一层是同一条判据**：有讲次就摊成各讲，没有就是它自己
@@ -3311,20 +3324,35 @@ def calendar_occasions(event, *, host, url_for, meetings=None):
             sequence=_sequence(event.updated_at), cancelled=cancelled,
             organizer=organizer,
         )]
+    # 🔴 **序号取自整门课，不是取自「交给我几条」**（2026-09-15 review 抓到）。
+    #
+    #    这里原来写的是 `enumerate(meetings, 1)`，而**两个调用方都交子集**：
+    #    `session_calendar` 交进 `[那一讲]`，`event_calendar` 和订阅源交进
+    #    `my_meetings()`。于是单下第七讲写着「meeting 1」，而第五周才加入的人
+    #    （决定 18）整份文件被重新编号 —— 上面那句注释说的正好是反过来的事。
+    #
+    # ⚠️ 最刺眼的形状是**同一行上自相矛盾**：讲次表里 Google 那条链接写
+    #    「meeting 7」（`meeting_calendar_links` 走的就是下面这个函数），
+    #    而紧挨着的 `.ics` 链接写「meeting 1」。
+    # ⚠️ 一次查完，和交进来几条无关 —— 逐行去问是每行一次查询。
+    #    ⚠️ 订阅源把**所有课的序号一次查好**再传进来（见 `my_calendar_occasions`）：
+    #       它逐门课调这个函数，而那条路由是免登录、被日历客户端按自己节奏轮询的。
+    #       `numbers=None` 时照旧自己查，两条下载路由因此一个字都不用改。
+    numbers = _meeting_numbers({event.pk}) if numbers is None else numbers
     return [
         ics.occasion(
             uid=ics.uid_for("session", meeting.pk, host),
             # ⚠️ 带上「第几讲」，因为日历里这十二条**否则一模一样** —— 人翻到
             #    十一月那一条时，没有任何办法知道它是第几讲。序号取自整门课的
             #    授课顺序，和站内每一处说的是同一个数。
-            summary=f"{event.name} · meeting {number}",
+            summary=f"{event.name} · meeting {numbers[meeting.pk]}",
             start=meeting.start_time, end=meeting.end_time,
             location=_calendar_place(event),
             description=event.description, url=link,
             sequence=_sequence(max(meeting.updated_at, event.updated_at)),
             cancelled=cancelled, organizer=organizer,
         )
-        for number, meeting in enumerate(meetings, 1)
+        for meeting in meetings
     ]
 
 
@@ -3335,47 +3363,113 @@ def meeting_calendar_links(event, meetings, *, host, url_for):
        一个事件，而**一讲正好是一个事件**。整期那一份因此只有下载那一条路。
        规矩一句话：**深链只出现在「这一格就是一个事件」的地方。**
 
-    ⚠️ 一次把全部讲次交给 `calendar_occasions()`，不是逐讲调一次：那个函数里
-       `enumerate(meetings, 1)` 算的是**整门课**的序号，逐讲调的话每一次都从 1
-       开始 —— 于是第七讲的标题写着「meeting 1」，而它在站内每一处都叫第七讲。
+    🔴 **序号只有一个来源：`_meeting_numbers()`**（2026-09-15 simplify 抓到）。
+
+       这里原来用 `enumerate(zip(meetings, rows), 1)` 自己数一遍，而同一个
+       comprehension 里 `one.summary` 带的是 `_meeting_numbers()` 算的那个数 ——
+       **一行上两个来源**。今天它们一致，只因为唯一的调用方传的是全部讲次；
+       交进一个子集，那一行的读屏标签就会说「meeting 1」，而它包着的 Google
+       链接说「meeting 7」。那正是本轮刚在 `calendar_occasions()` 里修掉的形状。
+       ⚠️ 顺带：这一段原来的注释在讲「`calendar_occasions()` 里的
+          `enumerate(meetings, 1)`」，而那一行已经不存在了。
+    ⚠️ 也因此只查一次：算好交给 `calendar_occasions()`，它不必再查一遍。
     """
+    numbers = _meeting_numbers({event.pk})
+    here = _attendance_counts({event.pk})
     rows = calendar_occasions(event, host=host, url_for=url_for,
-                              meetings=meetings)
+                              meetings=meetings, numbers=numbers)
     return [
         {
             "meeting": meeting,
-            "ordinal": number,
+            "ordinal": numbers[meeting.pk],
+            # 「来了几个人」。⚠️ 模板里**不要**写 `meeting.attendances.count` ——
+            #    那是每一行一次 COUNT，十二讲的课就是十二次多余查询（实测
+            #    1 讲 20 次、12 讲 31 次）。守卫：`DetailPageQueryCountTests`。
+            "here": here.get(meeting.pk, 0),
             "ics": reverse("events:session_calendar", args=[meeting.pk]),
             "google": ics.google_link(one),
             "outlook": ics.outlook_link(one),
         }
-        for number, (meeting, one) in enumerate(zip(meetings, rows), 1)
+        for meeting, one in zip(meetings, rows)
     ]
 
 
 def my_meetings(event, contact):
     """这个人下载这门课时，文件里该有哪几讲 —— 或者 None（整场，不是课）。
 
+    ⚠️ **一门课一次的问法**，规矩本身在 `my_meetings_for()`。两条下载路由
+       （整期、单讲）一次只问一门课，在那里这个形状是对的；订阅源一次问十门，
+       走的是同一条规矩的批量入口。查询数和拆开之前一样，仍是两条。
+
+    ⚠️ 这也是那份文件**必须按人缓存**的原因（视图上那句
+       `Cache-Control: private`）：同一个地址对不同的人给不同的内容。
+    """
+    return my_meetings_for([event.pk], contact)[event.pk]
+
+
+def meetings_by_event(event_ids):
+    """{event_pk: [Session]} —— 一条查询，按每门课自己的授课顺序。
+
+    ⚠️ 排序**显式写出来**，尽管 `Session.Meta.ordering` 正好也是这两列：
+       讲次的序号是从这个顺序数出来的（`_meeting_numbers()` 用同样两列），
+       而一个只写在模型 Meta 上的顺序，改动时没有任何东西会想到这里。
+
+    ⚠️ 没有讲次的活动**不在返回值里**（不是空列表）。调用方用
+       `.get(pk, [])` 取，于是「不是一门课」和「一门课暂时没排讲次」在这一层
+       长得一样 —— 它们在下游本来就走同一条分支。
+    """
+    grouped = {}
+    for meeting in (Session.objects.filter(event_id__in=event_ids)
+                    .order_by("start_time", "id")):
+        grouped.setdefault(meeting.event_id, []).append(meeting)
+    return grouped
+
+
+def my_meetings_for(event_ids, contact, *, all_meetings=None):
+    """{event_pk: [Session] | None} —— 决定 17/18 那条规矩的**唯一实现**。
+
+    🔴 **`my_meetings()` 和订阅源都走这里**（2026-09-15 simplify 抓到）。
+       在此之前订阅源为了不逐门课发两条查询，把这段判据**抄了一份**在
+       `my_calendar_occasions()` 里，注释还写着「和它逐字一致」—— 而没有任何
+       东西钉住那份一致。改规矩的人会去改 `my_meetings()`（所有注释和测试都
+       指向它），抄件不跟着变，表现是**某人手机日历里多出他没报的晚上**：
+       他看得见，我们看不见，而这是唯一不需要登录就能访问的路由。
+
     🔴 **挑过讲次的人拿到的是他挑的那几讲，不是这门课的全部。**
        决定 17 让学员自己挑哪几个晚上，决定 18 让中途加入的人前几讲**根本不存在**
        —— 而这两条的唯一落点都是点名册上**存在哪几行**。把整门课的讲次一股脑
        写进他的日历，等于替他排上他没报、也没人等他去的晚上。
 
-    ⚠️ 这也是那份文件**必须按人缓存**的原因（视图上那句
-       `Cache-Control: private`）：同一个地址对不同的人给不同的内容。
+    ⚠️ `None` 的含义和 `my_meetings()` 一字不差：「他没有自己那一份，
+       用这场活动本身的默认」。**两种情况都是它** —— 不是一门课，以及是一门课
+       但他一行点名都没有（路人问的是「这门课什么时候上」，答案就是全部十二讲）。
+       下游 `calendar_occasions(meetings=None)` 会去取 `event.sessions.all()`，
+       正好就是那个默认。
 
-    ⚠️ 没有点名行的人（没报名、只是想记一笔的路人）拿到整门课 —— 那是对的：
-       他问的是「这门课什么时候上」，而答案就是全部十二讲。
+    ⚠️ `all_meetings=` 让**已经查过讲次的调用方把结果递进来**，省掉重复的
+       那一次 —— 同 `default_served_as(..., on_the_books=None)` 的形状。
+
+    ⚠️ 点名行按**讲次所属的活动**归组，而不是按报名所属的活动（旧写法）。
+       `SessionAttendance.clean()` 规则 1 要求两者相同，而裸 `create()` 走得过去；
+       坏数据上这个取法更严（A 课的讲次不会出现在 B 课的文件里），好数据上
+       两者逐字相同。
     """
-    if not event.sessions.exists():
-        return None
-    mine = list(
-        Session.objects.filter(
-            attendances__participation__contact=contact,
-            attendances__participation__event_role__event=event,
-        ).distinct().order_by("start_time", "id")
-    )
-    return mine or None
+    ids = set(event_ids)
+    if all_meetings is None:
+        all_meetings = meetings_by_event(ids)
+    mine = {}
+    for event_id, session_id in (
+            SessionAttendance.objects
+            .filter(participation__contact=contact, session__event_id__in=ids)
+            .values_list("session__event_id", "session_id")):
+        mine.setdefault(event_id, set()).add(session_id)
+    picked = {}
+    for event_id in ids:
+        his = mine.get(event_id, ())
+        chosen = [one for one in all_meetings.get(event_id, ())
+                  if one.pk in his]
+        picked[event_id] = chosen or None
+    return picked
 
 
 #: 订阅源往回看多久。
@@ -3426,17 +3520,49 @@ def my_calendar_occasions(contact, *, host, url_for, now=None):
         .exclude(status__in=NOT_IN_A_CALENDAR)
         .filter(event_role__event__end_time__gte=cutoff)
         .select_related("event_role__event")
-        .prefetch_related("event_role__event__sessions")
+        # ⚠️ **不再 `prefetch_related` 讲次**（2026-09-15 simplify 抓到）：
+        #    下面那一次 `meetings_by_event()` 已经把同一批行取回来了，
+        #    prefetch 只是又传一遍。
     )
-    found, seen = [], set()
+    # 🔴 **一次查完所有讲次，不是每门课问两次**（2026-09-15 review 抓到）。
+    #
+    #    这里原来是**逐门课**调 `my_meetings()`，而它每次发两条查询 ——
+    #    实测每多一门课多 2 次查询（1 门 5 次、
+    #    5 门 13 次）。而这条路由**不认登录态**、由 Google / Apple 按它们自己的
+    #    节奏来拉（`REFRESH_INTERVAL` 是我们的请求，不是它们的承诺），所以
+    #    「每门课两次」是一个会被别人替我们放大的数。
+    #
+    # ⚠️ **规矩本身不在这里**（2026-09-15 simplify）。这里原来把
+    #    `my_meetings()` 那段判据**抄了一份**，注释还写着「和它逐字一致」——
+    #    而没有任何东西钉住那份一致。现在两边调同一个 `my_meetings_for()`，
+    #    改规矩只有一处可改。
+    events = {}
     for row in rows:
-        event = row.event_role.event
-        if event.pk in seen:
-            continue
-        seen.add(event.pk)
+        events.setdefault(row.event_role.event.pk, row.event_role.event)
+    # 这些课的全部讲次，一条查询 —— 编号和「他自己那几讲」都从它推，
+    # 所以递给 `my_meetings_for()`，它就不再查第二遍。
+    all_sessions = meetings_by_event(events)
+    picked = my_meetings_for(events, contact, all_meetings=all_sessions)
+
+    # 全部课的讲次序号 —— **从上面那一份推出来，不再查第二遍**
+    # （2026-09-15 simplify 抓到）。`all_sessions` 已经按课分好组，而且排序
+    # 正好就是编号所用的那个（`start_time`, `id`）——`_meeting_numbers()` 会把
+    # 同样的行再查一次，而这条路由正是为了省查询才改成批量的。
+    numbers = {one.pk: number
+               for rows_of_one_course in all_sessions.values()
+               for number, one in enumerate(rows_of_one_course, 1)}
+    found = []
+    for event_id, event in events.items():
+        # ⚠️ 交列表而不是 `None`：`my_meetings_for()` 用 `None` 说「他没有
+        #    自己那一份，用这场活动本身的默认」，而那个默认正好就是
+        #    `all_sessions` 里已经查好的那几行。交 `None` 的话
+        #    `calendar_occasions()` 会再 `list(event.sessions.all())` 一次 ——
+        #    一次我们刚刚才查过的查询。不是一门课时两边都是 `[]`，
+        #    落到 `calendar_occasions()` 那条 `if not meetings` 分支上。
+        meetings = picked[event_id] or all_sessions.get(event_id, [])
         found.extend(calendar_occasions(
-            event, host=host, url_for=url_for,
-            meetings=my_meetings(event, contact)))
+            event, host=host, url_for=url_for, meetings=meetings,
+            numbers=numbers))
     # ⚠️ 排序在这里，不在查询里：一门课的十二讲是算出来的，不是数据库给的顺序。
     return sorted((one for one in found if one.end >= cutoff),
                   key=lambda one: one.start)
@@ -3531,12 +3657,6 @@ def next_up(contact, *, now=None, limit=NEXT_UP):
     return sorted(moments, key=lambda moment: moment.start_time)[:limit]
 
 
-#: 进度方块的四种底色。⚠️ 「今天」**不在这里面**，它是叠在底色之上的一圈环 ——
-#: 一个人今天已经签到了，那一格既是「今天」又是「出席」，压进一个颜色就会丢掉
-#: 一个。同 D27 那条「没有和没算不能长得一样」。
-MEETING_STATES = ("attended", "missed", "unmarked", "ahead")
-
-
 @dataclass(frozen=True)
 class Meeting:
     """他名下的一讲，以及它在那一排方块里长什么样。"""
@@ -3602,12 +3722,43 @@ def course_progress(participations, *, now=None):
 
 
 def _meeting_state(row, now):
-    """这一格画成什么。⚠️ 判据的顺序有意义：点过名的以点名为准，没点过的才问时钟。"""
+    """这一格画成什么 —— 四种，而且**只有这四种**。
+
+    ⚠️ 判据的顺序有意义：点过名的以点名为准，没点过的才问时钟。
+
+    🔴 **「今天」不是第五种。** 它是叠在底色之上的一圈环 —— 一个人今天已经签到
+       了，那一格既是「今天」又是「出席」，压进一个颜色就会丢掉一个。
+       同 D27 那条「没有和没算不能长得一样」。
+       ⚠️ 这段话原来挂在一个叫 `MEETING_STATES` 的常量上，而那个常量**零读者**
+          （四个字符串在这里和 `_course_card.html` 里各写了一遍字面量）——
+          一个看起来像「状态词表的出处」而其实不是的东西，比没有更糟。
+          2026-09-15 删掉它，把话搬到真正产生这四个词的地方。
+    """
     if row.status == Participation.Status.ATTENDED:
         return "attended"
     if row.status == Participation.Status.ABSENT:
         return "missed"
     return "ahead" if row.session.start_time > now else "unmarked"
+
+
+def _attendance_counts(event_ids):
+    """{session_pk: 点了几个人的名}，一次查完。
+
+    🔴 **统计在这里，不在视图里**（`ViewsAreThinGuardTests`：统计属于 QuerySet
+       和 service，写进视图的那一份会跟着下一次界面改动一起被重写）。第一版把
+       `Count()` 写进了 `views.event_detail`，守卫当场抓到。
+
+    ⚠️ 形状照隔壁 `_meeting_numbers()`：一次查出整门课的答案、按 session 取，
+       而不是每一行去问一次。理由也一样 —— 逐行问的表现是页面一个字不差，只是
+       每多一讲多一次查询。
+    """
+    counts = (
+        SessionAttendance.objects
+        .filter(session__event_id__in=event_ids)
+        .values("session_id")
+        .annotate(here=Count("pk"))
+    )
+    return {row["session_id"]: row["here"] for row in counts}
 
 
 def _meeting_numbers(event_ids):

@@ -1376,8 +1376,14 @@ class EventPeriodForm(forms.Form):
         #    所以框里那句提示是看得见的人唯一读得到的说明。
         #    ⚠️ 标签**没有删**，只是不显示 —— 读屏的人照旧听得到「Search by name
         #       or location」，而那句话比 placeholder 说得更全。
-        widget=forms.TextInput(attrs={
-            "type": "search", "placeholder": "Search events or locations"}),
+        #
+        # 🔴 **那句话里的名词跟着页面走**（2026-09-15 review 抓到）：第一版写死了
+        #    「Search events or locations」，于是 `/programs/` 上那个框 ——
+        #    **唯一看得见的说明** —— 说的是「events」。正是这个分支另外四个
+        #    commit 在拆的那种假名词，从一个新开的门走了回来。
+        #    ⚠️ 真正的 placeholder 在 `__init__` 里按 `noun` 填（widget 在这里
+        #       是类属性，构造时才知道自己在哪一页上）。
+        widget=forms.TextInput(attrs={"type": "search"}),
     )
     start = forms.DateField(
         required=False, label="From",
@@ -1425,6 +1431,14 @@ class EventPeriodForm(forms.Form):
            one, and getting an empty list with nothing saying why (2026-08-05).
         """
         super().__init__(*args, **kwargs)
+        # 🔴 **搜索框那句提示里的名词跟着页面走**（2026-09-15 review 抓到）。
+        #    自 2026-09-15 起这一格的标签是 `sr-only`，所以这句 placeholder 是
+        #    **看得见的人唯一读得到的说明** —— 写死「events」的话，`/programs/`
+        #    上那个框说的就是错词，而那正是这个分支另外四个 commit 在拆的东西。
+        #    ⚠️ 在这里填而不是在字段定义上：widget 是类属性，构造时才知道自己
+        #       在哪一页上。
+        self.fields["q"].widget.attrs["placeholder"] = (
+            f"Search {noun}s or locations")
         if ministries is not None:
             self.fields["ministry"].queryset = ministries
         self._audience = audience
@@ -1453,12 +1467,15 @@ class EventPeriodForm(forms.Form):
             #    （跟着新版式）。同 ministry 那一格：说的从「当前没筛」变成
             #    「这一格管什么」，而状态由底下那行 `Filtered by …` 说。
             #
-            # 🔴 **`noun` 这个参数因此在这一格上没有对象了。** 它 2026-09-14 加进来
-            #    是为了让空选项在课程页上说「All programs」而不是「All events」——
-            #    走查时抓到的，那一页每一行都是课程而框里写着 events。
+            # ⚠️ **`noun` 在这一格上没有对象了**（而它在别处有，见 `__init__`
+            #    里那句 placeholder）。它 2026-09-14 加进来是为了让空选项在课程页上
+            #    说「All programs」而不是「All events」—— 走查时抓到的。
             #    现在空选项是「Role」，两页一个词，那件事**不可能再发生**。
-            #    ⚠️ 参数留着：`views.LIST_PAGES` 仍然传它，而这个表单别处
-            #       （`q` 的 label）还用得上；这里只是不再需要它。
+            # 🔴 **这一份同时是弹层上画的那几行**（2026-09-15 simplify）。
+            #    `nature_options` 和 `nature_label` 现在都从这个字段派生 ——
+            #    在此之前它们各从 `Nature.choices` 另拼一遍，于是「看得见的菜单」
+            #    和「把关的名单」是两份。改这里就是改屏幕上看得见的那几行，
+            #    这两件事从结构上不可能再分家。
             self.fields["nature"] = forms.ChoiceField(
                 required=False, label="Role",
                 choices=[("", "Any role")] + [
@@ -1536,18 +1553,48 @@ class EventPeriodForm(forms.Form):
            **不是** `NATURE_EXPLANATIONS`。两本字典的区别 2026-09-08 写过：后者是
            第三人称的说明（「他们付出时间」），而这里是在**邀请这个人挑一边**，
            所以用第二人称那一本。
+
+        🔴 **选项从字段派生，不再自己拼**（2026-09-15 simplify）。
+           在此之前这里和字段的 `choices` 是**两份各自独立的名单**：一份决定
+           屏幕上看得见几行，另一份决定提交上来的值算不算数，连「Any role」
+           那四个字都各硬写了一遍。今天两份一致，所以零症状。
+           任何一次「让选项跟着人或页面变」的改动（「某类账号不该看到
+           Attending」、「课程页不提供 Helping」）都会落在**把关那份**上 ——
+           因为那才是校验发生的地方 —— 而显示那份不会跟着变。
+           那时的症状特别难查：人选了一个菜单里明明画着的选项 → 校验判它无效
+           → `is_valid()` 为假 → 筛选**什么都没筛** → 页面列出**全部**活动，
+           而按钮上还写着他选的那个 Role。**全程没有任何报错。**
+           守卫：`RoleOptionsComeFromTheFieldTests`。
+
+        ⚠️ 没有 `nature` 字段时交空列表（`audience is NO_AUDIENCE` 的那几页），
+           而不是 `KeyError` —— 模板那一格本来就不画。
+
+        ⚠️ `NATURE_INVITATIONS` 用 `.get(value, "")`：字段里多出一个没写解释的值时，
+           弹层少一句解释，而不是整页 500。空选项走的也是这条（它本来就
+           没有解释）。
         """
-        return [("", "Any role", "")] + [
-            (value, label, NATURE_INVITATIONS[value])
-            for value, label in ParticipationRole.Nature.choices]
+        field = self.fields.get("nature")
+        if field is None:
+            return []
+        return [(value, label, NATURE_INVITATIONS.get(value, ""))
+                for value, label in field.choices]
 
     @property
     def nature_label(self):
-        """收起时那一格上写的字：选了就是那个词，没选就是「Role」。"""
+        """收起时那一格上写的字：选了就是那个词，没选就是字段自己的标签。
+
+        ⚠️ 和 `nature_options` 同一个来源（2026-09-15 simplify）。在此之前这里
+           第三次 `dict(ParticipationRole.Nature.choices)` 自己推一遍，而「Role」
+           那个词又硬写了两遍 —— 改措辞时只改一处的表现是：收起时按钮上
+           的词和展开后第一行的词对不上。
+        """
+        field = self.fields.get("nature")
+        if field is None:
+            return ""
         chosen = self.cleaned_data.get("nature") if self.is_valid() else ""
         if not chosen:
-            return "Role"
-        return dict(ParticipationRole.Nature.choices).get(chosen, "Role")
+            return field.label
+        return dict(field.choices).get(chosen, field.label)
 
     @property
     def filtered_by(self):

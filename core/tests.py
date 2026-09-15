@@ -719,6 +719,73 @@ class TheDeckWearsOneMaterialGuardTests(TestCase):
             "那条规则不再点名首页的卡片：" + carriers[0])
 
 
+class PopoverShellIsOneRuleTests(TestCase):
+    """三个弹层的**外壳只写一遍**（2026-09-15 simplify）。
+
+    🔴 `.row-menu`（管理行的 ⋮ 菜单）、`.date-popover`（双月日历）、
+       `.filter-menu`（Role）都是同一种东西：一个靠 app.js 定位的 `[popover]`。
+       外壳各写一份时，**漂移已经发生过**：`.filter-menu` 头上写着「和日期
+       弹层同一套外观」，而它的内边距和圆角实际跟着 `.row-menu`、只有阴影跟着
+       日期弹层。注释先变成了假话，而没有任何东西报警。
+
+    ⚠️ 和隔壁那条深色材质的守卫同一个形状：**不比对数值**，只要求「说这句话的
+       地方只有一处」。比对数值的守卫只能在两边**已经**分叉之后报警，而且会把
+       「三边一起调一个参数」变成一次要改测试的改动。
+
+    ⚠️ 内边距和圆角**不在守卫范围内** —— 日历装的是一块版面，另两个是一排菜单项，
+       那两样本来就该不同。
+    """
+
+    SKINS = (".row-menu", ".date-popover", ".filter-menu")
+
+    def names(self, selectors):
+        """选择器里点到了哪几个弹层。
+
+        ⚠️ 按**完整类名**配，不是子串：`.filter-menu` 会匹上 `.filter-menu-row:hover`，
+           而那是菜单里的一项、不是弹层自己。这条守卫的第一版就是这么红的。
+        """
+        return {skin for skin in self.SKINS
+                if re.search(re.escape(skin) + r"(?![\w-])", selectors)}
+
+    def rules(self):
+        css = (Path(settings.BASE_DIR) / "assets" / "app.css").read_text()
+        css = re.sub(r"/\*.*?\*/", "", css, flags=re.S)
+        return re.findall(r"([^{}]+)\{([^{}]*)\}", css)
+
+    def test_one_rule_carries_the_shell_for_all_three(self):
+        """给其中一个弹层写外壳属性的规则，必须同时点名另外两个。"""
+        for prop in ("box-shadow", "background-color", "border"):
+            with self.subTest(prop=prop):
+                carriers = [
+                    (selectors.strip(), self.names(selectors))
+                    for selectors, body in self.rules()
+                    if re.search(r"(^|[;{\s])" + prop + r"\s*:", body)
+                    and self.names(selectors)
+                ]
+                self.assertTrue(carriers, "没有任何规则给弹层写 " + prop)
+                for one, hit in carriers:
+                    self.assertEqual(
+                        hit, set(self.SKINS),
+                        "这条规则给弹层写了 " + prop + "，却只点名了一部分："
+                        + " ".join(one.split())
+                        + " —— 三个弹层的外壳要么一起写、要么一起不写，"
+                        "各写一份正是 2026-09-15 抓到的那次漂移的起因。")
+
+    def test_the_positioning_reset_reaches_every_one_of_them(self):
+        """🔴 `margin: 0` + `inset: auto` 漏掉哪一个，那个弹层就**停在屏幕正中间**
+        （`[popover]` 的 UA 样式是 `inset: 0` + `margin: auto`）—— 坐标算对了也没用。"""
+        for skin in self.SKINS:
+            with self.subTest(skin=skin):
+                got = {prop for selectors, body in self.rules()
+                       if skin in self.names(selectors)
+                       for prop in ("margin", "inset")
+                       if re.search(r"(^|[;{\s])" + prop + r"\s*:", body)}
+                self.assertEqual(
+                    got, {"margin", "inset"},
+                    skin + " 没有清掉 margin 和 inset（拿到的是 " + str(sorted(got))
+                    + "）：它会被 UA 样式表按在视口正中间。")
+
+
 class OrgTreeGuardTests(TestCase):
     """Lint-as-test: the reporting chain is walked in exactly one place."""
 
@@ -7167,10 +7234,23 @@ class SharedFragmentGuardTests(TestCase):
         self.assertIn('tone="warning"', attendance)
         self.assertNotIn("events/_status_badge.html", attendance)
 
+        # ⚠️ **2026-09-15 改口**：「我报的名」那一套从 `my_participations.html`
+        #    的正文搬进了 `_signups_status_badge.html` —— 因为它和那一页 include
+        #    的 `_course_card.html` 原来各写了一遍逐字相同的 if/else，而改一处
+        #    漏一处的表现是**同一个人在同一屏上两种颜色**（表格一行一种、
+        #    底下那张课卡另一种）。
+        #    🔴 **守的东西没变**：这一套仍然独立于 `_status_badge.html`，
+        #       只是现在盯的是它自己那个文件。
         mine = self.body(
-            Path("events") / "templates" / "events" / "my_participations.html")
+            Path("events") / "templates" / "events" / "_signups_status_badge.html")
         self.assertIn('tone="info"', mine)
         self.assertNotIn("events/_status_badge.html", mine)
+        # 而那两处都真的走了这个片段 —— 否则「抽出来」只是多了一个没人用的文件。
+        for name in ("my_participations.html", "_course_card.html"):
+            with self.subTest(template=name):
+                body = self.body(Path("events") / "templates" / "events" / name)
+                self.assertIn("events/_signups_status_badge.html", body)
+                self.assertNotIn('tone="info"', body)
 
     #: ⚠️ 报名那一份 2026-08-19 从 `event_signup.html` 挪到了
     #:    `_event_signup_body.html`（整页和右面板共用同一份正文）。守的东西没变 ——

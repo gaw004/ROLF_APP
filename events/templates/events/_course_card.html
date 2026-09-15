@@ -14,13 +14,7 @@
     <a href="{% url 'events:event_detail' row.event_role.event.pk %}?from=mine"
        class="prose-link min-w-0 text-lg font-semibold">{{ row.event_role.event.name }}</a>
     <span class="shrink-0">
-      {% if row.status == "registered" %}
-        {% include "core/components/badge.html" with label=row.get_status_display tone="success" %}
-      {% elif row.status == "attended" %}
-        {% include "core/components/badge.html" with label=row.get_status_display tone="info" %}
-      {% else %}
-        {% include "core/components/badge.html" with label=row.get_status_display %}
-      {% endif %}
+      {% include "events/_signups_status_badge.html" %}
     </span>
   </div>
 
@@ -83,7 +77,7 @@
       {% endfor %}
     </ul>
 
-    <div class="mt-3 flex items-baseline justify-between gap-3 text-sm">
+    <div class="mt-3 text-sm">
       <span class="text-ink-600 dark:text-ink-300">
         {{ progress.attended }} attended
         {% comment %}
@@ -94,27 +88,42 @@
           · next {{ progress.next_meeting.start_time|date:"D j M, H:i" }}{% if row.event_role.event.location %}, {{ row.event_role.event.location }}{% endif %}
         {% endif %}
       </span>
-      {% comment %}
-      ⚠️ 走的是**和取消同一条路**（`participation_cancel`），只是这里叫
-         "Leave course"。`services.cancel()` 已经按「来过没有」自己分成
-         withdrew / cancelled 并收走未来那几讲的点名行 —— 这里不写第二套逻辑。
-      {% endcomment %}
-      <span class="flex items-center gap-3">
-        {% comment %}
-        ⚠️ 一颗**图标**，不是一串字（用户 2026-09-14）。这一行已经有「N attended ·
-           next 周二…」和一颗 Leave course，再加一串「Add to calendar」就是把这一行
-           挤成三件事。
-        ⚠️ 只给下载那一条：两条深链一次只加一个事件，而那个差别要两句话才说得清
-           —— 一行上塞不下，塞不下就会变成几颗看起来一样的键，而其中两颗会让人的
-           日历长出重复条目。整套带说明的在详情页上。
-        {% endcomment %}
-        {% url 'events:event_calendar' row.event_role.event.pk as cal_url %}
-        {% include "events/_calendar_icon_link.html" with href=cal_url label="Add "|add:row.event_role.event.name|add:" to your calendar" %}
-        {% if row.status == "registered" or row.status == "attended" %}
-          {% url 'events:participation_cancel' row.pk as leave_url %}
-          {% include "core/components/button.html" with label="Leave course" href=leave_url variant="ghost" %}
-        {% endif %}
-      </span>
     </div>
   {% endif %}
+
+  {% comment %}
+  🔴 **这两颗键在 `{% templatetag openblock %} if progress {% templatetag closeblock %}` 外面**（2026-09-15 review 抓到）。
+
+     它们原来在里面，而 `progress` 是 `course_progress().get(row.pk)` ——
+     **一门没有任何点名行的课，它是 `None`**。那不是边角情况：`open_register()`
+     只给 `end_time > now` 的讲次建行，所以讲次还没生成、或者剩下的讲次全都
+     过去了（而课程本身还没结束）的课，这张卡上**一条退出的路都没有** ——
+     而在改成卡片之前，那一行永远带着它的取消键。
+
+  ⚠️ 进度那一段仍然留在里面：没有点名行时它确实无话可说，而那正是它画不出来
+     的原因；动作和「有没有进度可显示」无关。
+  ⚠️ 因此它自己要一个行容器：原来它靠父 div 的 `justify-between` 靠右，
+     而那个 div 跟着进度一起留在 `{% templatetag openblock %} if progress {% templatetag closeblock %}` 里了。
+  {% endcomment %}
+    {% comment %}
+    ⚠️ 走的是**和取消同一条路**（`participation_cancel`），只是这里叫
+       "Leave course"。`services.cancel()` 已经按「来过没有」自己分成
+       withdrew / cancelled 并收走未来那几讲的点名行 —— 这里不写第二套逻辑。
+    {% endcomment %}
+  <div class="mt-3 flex items-center justify-end gap-3">
+      {% comment %}
+      ⚠️ 一颗**图标**，不是一串字（用户 2026-09-14）。这一行已经有「N attended ·
+         next 周二…」和一颗 Leave course，再加一串「Add to calendar」就是把这一行
+         挤成三件事。
+      ⚠️ 只给下载那一条：两条深链一次只加一个事件，而那个差别要两句话才说得清
+         —— 一行上塞不下，塞不下就会变成几颗看起来一样的键，而其中两颗会让人的
+         日历长出重复条目。整套带说明的在详情页上。
+      {% endcomment %}
+      {% url 'events:event_calendar' row.event_role.event.pk as cal_url %}
+      {% include "events/_calendar_icon_link.html" with href=cal_url label="Add "|add:row.event_role.event.name|add:" to your calendar" %}
+      {% if row.status == "registered" or row.status == "attended" %}
+        {% url 'events:participation_cancel' row.pk as leave_url %}
+        {% include "core/components/button.html" with label="Leave course" href=leave_url variant="ghost" %}
+      {% endif %}
+  </div>
 </li>

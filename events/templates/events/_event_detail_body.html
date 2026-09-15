@@ -393,7 +393,13 @@
             <tr>
               <td>{{ row.ordinal }}</td>
               <td>{{ row.meeting.start_time }} &ndash; {{ row.meeting.end_time|time }}</td>
-              {% if sees_every_role %}<td>{{ row.meeting.attendances.count }}</td>{% endif %}
+              {% comment %}
+              ⚠️ `row.here` 由 `services.meeting_calendar_links()` 一次数完给出，
+                 **不是** `row.meeting.attendances.count` —— 后者是每一行一次
+                 COUNT，十二讲的课就是十二次多余查询（实测 20 → 31）。
+                 守卫：`DetailPageQueryCountTests`。
+              {% endcomment %}
+              {% if sees_every_role %}<td>{{ row.here }}</td>{% endif %}
               <td class="whitespace-nowrap text-right">
                 {% if sees_every_role %}
                   <a href="{% url 'events:session_checkin_display' row.meeting.pk %}"

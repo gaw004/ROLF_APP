@@ -68,6 +68,7 @@ from django.contrib.admin import helpers
 
 from accounts.services import register_account
 from contact.models import Contact, EmergencyContact, RelationshipType
+from core.context_processors import manage_list_name
 from core.limits import LONG_TEXT, SEARCH
 from core.notifications.locmem import LocmemBackend
 from core.timeutils import (
@@ -84,7 +85,7 @@ from org.permissions import foundation_admin_group
 from .management.commands import seed_demo
 from .management.commands.seed_demo import demo_login
 
-from . import schedule, tokens
+from . import schedule, tokens, views
 from .schedule import PREVIEW_MONTHS, month_grids, month_page
 from .forms import (
     FILTER_PARAMS,
@@ -126,6 +127,8 @@ from .recurrence import (
     occasions,
 )
 from .services import (
+    calendar_occasions,
+    my_meetings,
     NoHoursHere,
     add_attendance,
     check_in_session,
@@ -12764,6 +12767,40 @@ class ManageListHeadTests(ManageListPage, PageTestCase):
                 self.assertNotIn("Events I Manage", self.head(
                     self.client.get(reverse(name)).content.decode()))
 
+    def test_every_place_that_names_this_page_reads_the_same_function(self):
+        """🔴 **四处，而其中两处曾经各算各的**（2026-09-15 simplify 抓到）。
+
+        这一页的名字出现在：浏览器标签页、版心 `<h1>`、页头条那一格、以及活动
+        详情页上那颗返回键。抽出 `manage_list_name()` 那一次只改到了后两处 ——
+        标签页写死着「Events I Manage」，而 `_back_link()` 自己算一遍**而且判据
+        是反的**（它先问「管不管得了某个 ministry」，那个函数先问「在不在
+        foundation tier」）。
+
+        ⚠️ 于是**两顶帽子都戴的人**看到的是：导航和标题说「All Events」，
+           标签页和返回键说「Events I Manage」。实测过，而原来那条守卫看不见
+           它 —— 它只比对页头条和 `<h1>`。
+        """
+        from django.contrib.auth.models import Group
+        from org.permissions import FOUNDATION_ADMIN_GROUP
+        # 两顶帽子：`self.zhang` 已经是 ministry admin，再加 foundation tier。
+        self.zhang.groups.add(
+            Group.objects.get_or_create(name=FOUNDATION_ADMIN_GROUP)[0])
+        self.login(self.zhang)
+        expected = manage_list_name(self.zhang)
+        self.assertEqual(expected, "All Events",
+                         "判据变了 —— 这条守卫后面的断言跟着失去意义")
+
+        html = self.client.get(self.url()).content.decode()
+        self.assertIn(f"<title>{expected}", html, "标签页说的是另一个名字")
+        self.assertRegex(html, rf"<h1[^>]*>\s*{expected}\s*</h1>")
+        self.assertIn(expected, self.head(html), "页头条说的是另一个名字")
+
+        # 返回键那一处在**另一页**上。
+        back = self.client.get(
+            reverse("events:event_detail", args=[self.event.pk]),
+            {"from": "manage"}).content.decode()
+        self.assertIn(expected, back, "返回键说的是另一个名字")
+
     def test_the_manage_cell_is_named_by_the_same_function_as_the_heading(self):
         """⚠️ 只读那一档：这一排和 `<h1>` 都必须写「All Events」。
 
@@ -15399,6 +15436,571 @@ class CalendarDownloadTests(PageTestCase):
         self.assertIn("aria-expanded", button)
 
 
+class DetailPageQueryCountTests(PageTestCase):
+    """讲次表的查询数**和这门课有几讲无关**（2026-09-15 simplify 实测到 +1/讲）。
+
+    ⚠️ 「来了几个人」那一列只有 ministry admin 看得见，所以这条打的是**管理侧
+       每一次打开任何一门课** —— 而一门每周一次、开一年的课是 52 次多余的 COUNT。
+    """
+
+    def detail_queries(self, meetings):
+        run = make_run(ministry=self.pantry, owner=self.zhang.contact,
+                       name=f"Run of {meetings}", start_time=NOW - DAY,
+                       end_time=NOW + 60 * DAY)
+        for n in range(meetings):
+            add_session(run, start_time=NOW + (n + 1) * DAY,
+                        end_time=NOW + (n + 1) * DAY + 2 * HOUR)
+        # ⚠️ 用 ministry admin 登录 —— 志愿者看不见那一列，拿他测等于没测。
+        self.login(self.zhang)
+        with CaptureQueriesContext(connection) as queries:
+            page = self.client.get(reverse("events:event_detail", args=[run.pk]))
+        self.assertEqual(page.status_code, 200)
+        return len(queries)
+
+    def test_a_twelve_week_course_costs_the_same_as_a_single_meeting(self):
+        one = self.detail_queries(1)
+        twelve = self.detail_queries(12)
+        self.assertEqual(
+            twelve, one,
+            f"查询数跟着讲数涨了（1 讲 {one} 次、12 讲 {twelve} 次）—— "
+            "多半是哪一处又在模板里按行数点名人数了，那要走视图上的 annotate")
+
+
+class RoleOptionsComeFromTheFieldTests(PageTestCase):
+    """看得见的菜单 = 把关的名单（2026-09-15 simplify）。
+
+    🔴 Role 那个筛选格曾经有**两份各自独立的选项清单**：字段的
+       `choices`（决定提交上来的值算不算数）和 `nature_options`（决定弹层上
+       画几行），两份各从 `ParticipationRole.Nature.choices` 拼一遍，
+       连「Any role」那四个字都各硬写了一次。
+
+    ⭐ 所以这一条**把字段的 `choices` 换掉**再问显示那份 —— 只断言「今天两边
+       长得一样」的话，它在两份各拼各的年代也是绿的，等于什么都没守。
+
+    ⚠️ 分家之后的症状没有任何报错：人选了一个菜单里画着的选项 → 校验
+       判它无效 → `is_valid()` 为假 → 筛选什么都没筛 → 页面列出全部活动。
+    """
+
+    def form(self):
+        return EventPeriodForm(audience=self.lisi.contact)
+
+    def test_the_menu_is_exactly_what_the_field_accepts(self):
+        form = self.form()
+        self.assertEqual([value for value, _, _ in form.nature_options],
+                         [value for value, _ in form.fields["nature"].choices])
+
+    def test_narrowing_the_field_narrows_the_menu(self):
+        """这一条就是那个尚未到来的需求：「某些人不该看到 Attending」。"""
+        form = self.form()
+        form.fields["nature"].choices = [("", "Any role"), ("helping", "Helping")]
+        self.assertEqual(form.nature_options,
+                         [("", "Any role", ""),
+                          ("helping", "Helping", "give your time")])
+
+    def test_the_collapsed_word_comes_from_the_same_place(self):
+        """⚠️ 第三份：收起时那颗按钮上的词。改一次措辞只改一处的表现是
+        按钮上的词和展开后第一行的词对不上。"""
+        form = EventPeriodForm(audience=self.lisi.contact)
+        form.fields["nature"].label = "Doing what"
+        self.assertEqual(form.nature_label, "Doing what")
+        chosen = EventPeriodForm({"nature": "attending"},
+                                 audience=self.lisi.contact)
+        self.assertEqual(
+            chosen.nature_label,
+            dict(chosen.fields["nature"].choices)["attending"])
+
+    def test_a_page_without_the_field_draws_nothing(self):
+        """⚠️ 没有 audience 的那几页根本没有这个字段 —— 交空，不是 `KeyError`。"""
+        bare = EventPeriodForm()
+        self.assertNotIn("nature", bare.fields)
+        self.assertEqual(bare.nature_options, [])
+        self.assertEqual(bare.nature_label, "")
+
+
+class PageBarCellsComeFromOneMouldTests(PageTestCase):
+    """五个页面的页头条格子**键集合相同**（2026-09-15 simplify）。
+
+    🔴 在此之前 `_sibling_tabs()`（活动 / 课程 / 管理页）和 `_signups()`
+       （我报的名 / 历史记录）**各拼各的**，而 `page_bar.html` 要的是同一种字典。
+       给这个格子加第四个键时只会加到其中一套上 —— 而模板对取不到的键
+       **不报错**，所以表现是两排标签长得不一样，而每一排单独看都正常。
+
+    ⚠️ 断言的是**键集合**，不是值：它守的恰恰是「加了一个键只加了一处」，
+       而每一排的标签和地址本来就各不相同（那些由 `ManageListHeadTests` 等守）。
+    """
+
+    def cells_on(self, url):
+        page = self.client.get(url)
+        self.assertEqual(page.status_code, 200, url)
+        tabs = page.context["page_tabs"]
+        self.assertTrue(tabs, f"{url} 上这一排是空的")
+        return tabs
+
+    def test_every_page_bar_cell_has_the_same_keys(self):
+        self.client.force_login(self.zhang)
+        shapes = {}
+        for url in (reverse("events:event_list"),
+                    reverse("events:program_list"),
+                    reverse("events:event_manage_list"),
+                    reverse("events:my_participations"),
+                    reverse("events:past_participations")):
+            for cell in self.cells_on(url):
+                shapes.setdefault(frozenset(cell), []).append(url)
+        self.assertEqual(
+            len(shapes), 1,
+            "页头条的格子有两种形状了："
+            + "; ".join(f"{sorted(keys)} 出现在 {sorted(set(urls))}"
+                        for keys, urls in shapes.items()))
+        self.assertEqual(set(next(iter(shapes))), {"label", "url", "is_here"})
+
+    def test_exactly_one_cell_is_the_current_page(self):
+        """⚠️ 同一个模具的另一半：`is_here` 不能一个都没有（那排上没有
+        `aria-current`，人不知道自己在哪），也不能有两个。"""
+        self.client.force_login(self.zhang)
+        for url in (reverse("events:event_list"),
+                    reverse("events:program_list"),
+                    reverse("events:event_manage_list"),
+                    reverse("events:my_participations"),
+                    reverse("events:past_participations")):
+            with self.subTest(url=url):
+                here = [one for one in self.cells_on(url) if one["is_here"]]
+                self.assertEqual(len(here), 1, f"{url}: {here}")
+
+
+class ListingCarriesItsOwnNounTests(PageTestCase):
+    """结果片段要的两样配料由**同一个函数**给（2026-09-15 simplify）。
+
+    🔴 `_event_list_results.html` 的空状态写的是
+       `No {{ list_noun }}s for you in this period`。名词原来只由 `_list_page()` 给，
+       而数据由 `_listing()` 给 —— 于是每个渲染或 OOB 发这块片段的视图都要
+       **记得调两个**。漏掉第二个的表现是「No s for you…」，
+       而且**只在列表为空时看得见**。
+
+    ⚠️ 这不是假设的风险：`event_detail_panel` 就漏过（本轮 review 抓到），
+       而 commit 6a5fb66 记着同一家族的另一次「因为演示数据里恰好有一门课」
+       而没被发现。
+
+    ⭐ 所以这一条断言的是**只拿 `_listing()` 一份上下文就能把话说完**。
+    """
+
+    def context_for(self, shape):
+        """⚠️ 带一个筛不到任何东西的 `q` —— 这条守的就是**空列表**那一句话，
+        而基底 fixture 里是有活动的。演示数据通常不空，正是这类缺口活得久的原因。"""
+        from django.test import RequestFactory
+        request = RequestFactory().get("/?q=nothingmatchesthisatall")
+        request.user = self.lisi
+        period = EventPeriodForm(request.GET, noun="event")
+        period.is_valid()
+        return request, views._listing(request, period, self.lisi.contact,
+                                       shape=shape)
+
+    def test_the_noun_comes_with_the_data(self):
+        for shape, noun in ((Event.Shape.SINGLE, "event"),
+                            (Event.Shape.PROGRAM, "program")):
+            with self.subTest(shape=shape):
+                _, context = self.context_for(shape)
+                self.assertEqual(context.get("list_noun"), noun)
+
+    def test_the_empty_sentence_is_whole_with_that_context_alone(self):
+        """⚠️ 渲染真的那句话，而不是只看键在不在 —— 模板对取不到的
+        变量**不报错**，它只是把那一截留空。"""
+        for shape, noun in ((Event.Shape.SINGLE, "events"),
+                            (Event.Shape.PROGRAM, "programs")):
+            with self.subTest(shape=shape):
+                request, context = self.context_for(shape)
+                # ⚠️ `request=` 不是补上一份缺的上下文：分页那一格的
+                #    `{% querystring %}` 读的是请求本身，任何一次真渲染里它都在。
+                html = render_to_string("events/_event_list_results.html",
+                                        context, request=request)
+                self.assertIn(f"No {noun} for you in this period", html)
+                self.assertNotIn("No s for you", html)
+
+
+class FeedFollowsTheSameRuleAsTheDownloadTests(PageTestCase):
+    """订阅源里的讲次 = `my_meetings()` 说的那几讲（2026-09-15 simplify）。
+
+    🔴 **这条守的是「两处不得各写一份」。** 订阅源曾经为了把每门课两条
+       查询降成常数，把「该收到哪几讲」那段判据**抄了一份**在
+       `my_calendar_occasions()` 里，注释写着「和它逐字一致」—— 而没有任何东西
+       钉住那份一致。改规矩的人会去改 `my_meetings()`（所有注释和测试都指向它），
+       抄件不跟着变，表现是**某人手机日历里多出他没报的晚上**。
+
+    ⭐ 所以这里用 `my_meetings()` 做**神谕**，而不是断言两个函数彼此相等 ——
+       后者在今天的写法下是厢语（一个就是另一个的包装），而且有人重新抄一份
+       到订阅源里时它照样是绿的。这一条比的是**订阅源真正发出去的内容**。
+
+    ⚠️ 四种形状一次测完，而且同一个人四种都有 —— 因为订阅源是一次性
+       把他全部的报名摄在一起算的，一种一个人地测会放过「批量那一步把讲次
+       归错了课」这类错。
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.me = self.lisi.contact
+        self.picked = self.course("Picked evenings", meetings=3)
+        self.late = self.course("Joined late", meetings=3)
+        self.passerby = self.course("Never on a register", meetings=3)
+        # ⚠️ 先排讲次再报名：`add_session()` 会给已有的报名补上点名行
+        #    （决定 18 的另一端），反过来写的话三门课全部自动满名，
+        #    三种形状会坦成同一种而测试照样绿。
+        self.signups = {
+            name: Participation.objects.create(
+                contact=self.me,
+                event_role=make_role(run, f"seat_{name}", nature="attending"),
+                served_as=Participation.ServedAs.NOT_APPLICABLE)
+            for name, run in (("picked", self.picked),
+                              ("late", self.late),
+                              ("passerby", self.passerby))
+        }
+        add_attendance(self.signups["picked"], self.picked.sessions.all()[0])
+        add_attendance(self.signups["picked"], self.picked.sessions.all()[2])
+        add_attendance(self.signups["late"], self.late.sessions.all()[2])
+
+        # 第四种：单场活动，没有讲次 —— `my_meetings()` 对它返回 None。
+        self.one_off = make_event(
+            ministry=self.pantry, owner=self.zhang.contact, name="Welcome desk",
+            start_time=NOW + DAY, end_time=NOW + DAY + 2 * HOUR)
+        Participation.objects.create(
+            contact=self.me, event_role=make_role(self.one_off, "welcome"))
+        self.feed = CalendarFeed.objects.create(contact=self.me)
+
+    def course(self, name, *, meetings):
+        run = make_run(ministry=self.pantry, owner=self.zhang.contact,
+                       name=name, start_time=NOW - 10 * DAY,
+                       end_time=NOW + 30 * DAY)
+        for n in range(meetings):
+            add_session(run, start_time=NOW + (n + 1) * DAY,
+                        end_time=NOW + (n + 1) * DAY + 2 * HOUR)
+        return run
+
+    def uids_in_the_feed(self):
+        self.client.logout()
+        text = self.client.get(
+            reverse("events:calendar_feed", args=[self.feed.token])
+        ).content.decode()
+        return {line[len("UID:"):].strip()
+                for line in text.splitlines() if line.startswith("UID:")}
+
+    def uids_the_download_would_give(self):
+        """神谕：逐门课问 `my_meetings()`，把它的答案翻成 UID。
+
+        ⚠️ `None` 是「他没有自己那一份，用这场活动本身的默认」，
+           而那个默认在一门课上是全部讲次、在单场活动上是它自己 ——
+           和 `calendar_occasions(meetings=None)` 走的是同一条分支。
+        """
+        wanted = set()
+        for run in (self.picked, self.late, self.passerby, self.one_off):
+            mine = my_meetings(run, self.me)
+            if mine is None:
+                mine = list(run.sessions.all())
+            if not mine:
+                wanted.add(uid_for("event", run.pk, "testserver"))
+            else:
+                wanted |= {uid_for("session", one.pk, "testserver")
+                           for one in mine}
+        return wanted
+
+    def test_the_feed_carries_exactly_what_the_download_would(self):
+        """这一条红 = 两条路的规矩分家了。"""
+        self.assertEqual(self.uids_in_the_feed(),
+                         self.uids_the_download_would_give())
+
+    def test_the_fixture_really_holds_four_different_shapes(self):
+        """⚠️ 上面那一条在「三门课碰巧都拿全部」时也是绿的 ——
+        而那正是 `add_session()` 自动补点名行踩出来的坑。这一条盯着 fixture。"""
+        picked = self.picked.sessions.all()
+        self.assertEqual(my_meetings(self.picked, self.me),
+                         [picked[0], picked[2]], "挑过晚上的：第 1、3 讲")
+        self.assertEqual(my_meetings(self.late, self.me),
+                         [self.late.sessions.all()[2]], "中途加入的：只有第 3 讲")
+        self.assertIsNone(my_meetings(self.passerby, self.me),
+                          "没有点名行的路人：None（= 整门课）")
+        self.assertIsNone(my_meetings(self.one_off, self.me),
+                          "不是一门课：None")
+
+
+class FeedQueryCountTests(PageTestCase):
+    """订阅源的查询数**和报了几门课无关**（2026-09-15 review 抓到）。
+
+    🔴 这条路由**不认登录态**，而且由 Google / Apple 按**它们自己的**节奏来拉
+       （`REFRESH_INTERVAL` 是我们的请求，不是它们的承诺）。所以「每门课两次
+       查询」不是一个我们自己承担的数 —— 它会被别人替我们放大。
+
+    ⚠️ 实测过的退化：修之前 1 门 5 次、5 门 13 次（每门 +2）；
+       批量取数之后每门 +1（那一次是讲次序号）；两处都收掉之后**斜率 0**。
+    """
+
+    def signed_up_to(self, count):
+        me = self.lisi.contact
+        for n in range(count):
+            run = make_run(ministry=self.pantry, owner=self.zhang.contact,
+                           name=f"Course {n}", start_time=NOW - DAY,
+                           end_time=NOW + 30 * DAY)
+            add_session(run, start_time=NOW + DAY,
+                        end_time=NOW + DAY + 2 * HOUR)
+            Participation.objects.create(
+                contact=me,
+                event_role=make_role(run, "seat", nature="attending"),
+                served_as=Participation.ServedAs.NOT_APPLICABLE)
+        feed, _ = CalendarFeed.objects.get_or_create(contact=me)
+        return feed
+
+    def fetch(self, feed):
+        """⚠️ `logout()` 先跑 —— 这条路由的全部要点就是它不认登录态。"""
+        self.client.logout()
+        with CaptureQueriesContext(connection) as queries:
+            page = self.client.get(
+                reverse("events:calendar_feed", args=[feed.token]))
+        return len(queries), page.content.decode().count("BEGIN:VEVENT")
+
+    def test_ten_courses_cost_the_same_as_one(self):
+        few, few_entries = self.fetch(self.signed_up_to(1))
+        many, many_entries = self.fetch(self.signed_up_to(9))
+        self.assertEqual(few_entries, 1)
+        self.assertEqual(many_entries, 10, "十门课应该出十条日程")
+        self.assertEqual(
+            many, few,
+            f"查询数跟着课数涨了（1 门 {few} 次、10 门 {many} 次）—— "
+            "而这条路由是免登录、被日历客户端按自己节奏轮询的")
+
+
+class HoursMissingNeverNegativeTests(PageTestCase):
+    """「缺一条工时」这个数**不会是负的**（2026-09-15 review 抓到，实测过 −1）。
+
+    🔴 页面会照样印出「−1 signups with no hours」，而 `ministry_report()` 里那段
+       注释写着「两半都是同一批行的两个聚合，所以各自都不会变成负数」——
+       那句话此前一直是假的。
+
+    ⭐ 走得到的路径不是边角：一门课上的**助教**角色是 `helping`，而
+       `Participation.records_hours` 只看 `nature != ATTENDING`、**不看 shape**，
+       所以 `record_hours()` 会收下它。那一行于是被减了两次 —— 一次在
+       `(helping_signups - hours_records)` 里被自己的工时抵掉，一次又被
+       `_helping_signups_on_runs()` 整个减掉。
+    """
+
+    def figures(self, events):
+        return ministry_report(events)["figures"]
+
+    def test_a_program_helper_with_hours_does_not_drive_it_below_zero(self):
+        run = make_run(ministry=self.pantry, owner=self.zhang.contact,
+                       name="ESL term", start_time=NOW - 10 * DAY,
+                       end_time=NOW + 10 * DAY)
+        helper = Participation.objects.create(
+            contact=self.lisi.contact,
+            event_role=make_role(run, "assisting", nature="helping"),
+            served_as=Participation.ServedAs.VOLUNTEER)
+        # ⚠️ 走 `record_hours()` 而不是直接写字段：这一条守的正是「那扇门收下了
+        #    它」，绕过去就等于假设它收不下。
+        record_hours(helper, Decimal("2.00"))
+        self.assertGreaterEqual(
+            self.figures(Event.objects.filter(pk=run.pk))["hours_missing"], 0)
+
+    def test_a_program_helper_without_hours_still_does_not_count_as_missing(self):
+        """⚠️ 另一半，也是那个减项当初的用意：课上的助教**没有**工时是常态
+        （工时在点名册上），不该算成「缺一条记录」。这一修不许把它弄丢。"""
+        run = make_run(ministry=self.pantry, owner=self.zhang.contact,
+                       name="ESL term 2", start_time=NOW - 10 * DAY,
+                       end_time=NOW + 10 * DAY)
+        Participation.objects.create(
+            contact=self.lisi.contact,
+            event_role=make_role(run, "assisting", nature="helping"),
+            served_as=Participation.ServedAs.VOLUNTEER)
+        self.assertEqual(
+            self.figures(Event.objects.filter(pk=run.pk))["hours_missing"], 0)
+
+    def test_a_one_off_helper_with_no_hours_is_still_counted(self):
+        """🔴 而真正该数的那一种一个没少：单场活动上帮忙、却没人记工时 ——
+        那正是这个数字存在的理由。"""
+        Participation.objects.create(
+            contact=self.lisi.contact,
+            event_role=make_role(self.event, "stacking", nature="helping"),
+            served_as=Participation.ServedAs.VOLUNTEER)
+        self.assertGreaterEqual(
+            self.figures(Event.objects.filter(pk=self.event.pk))["hours_missing"], 1)
+
+
+class FilterNounTests(PageTestCase):
+    """筛选栏上那句**看得见的**提示，名词跟着页面走（2026-09-15 review 抓到）。
+
+    🔴 自 2026-09-15 起搜索框的标签是 `sr-only`（一条式的版式里没有位置放它），
+       所以那句 placeholder 是**看得见的人唯一读得到的说明**。第一版写死了
+       「Search events or locations」—— 于是 `/programs/` 上那个框说的是错词，
+       而那正是这个分支另外四个 commit 在拆的那种假名词，从一个新开的门走回来。
+    """
+
+    def test_each_list_says_its_own_word_in_the_search_box(self):
+        self.login(self.lisi)
+        for name, word in (("events:event_list", "events"),
+                           ("events:program_list", "programs")):
+            with self.subTest(page=name):
+                html = self.client.get(reverse(name)).content.decode()
+                self.assertIn(f'placeholder="Search {word} or locations"', html)
+
+    def test_the_hidden_label_still_says_more_than_the_placeholder(self):
+        """⚠️ 标签**没有删**，只是不显示 —— 读屏的人照旧听得到完整的那一句。"""
+        self.login(self.lisi)
+        html = self.client.get(reverse("events:event_list")).content.decode()
+        self.assertIn("Search by name or location", html)
+
+
+class SignupsFooterVisibilityTests(PageTestCase):
+    """底下那一条的三样东西，可见条件**不是同一个**（2026-09-15 review 抓到）。
+
+    🔴 模板原来用 `past_count` 一个条件门控三样，而那**把 `_signups_footer()`
+       当初修掉的 bug 请了回来**：那个函数的 docstring 写着「两个数的范围和那个
+       计数不一样，而这是被一条测试逼出来的 —— 第一版三样都只算结束了的，
+       于是一个**课上到一半的学员**看到的是空的」。而那个学员的 `past_count`
+       正好是 0。
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.me = self.lisi.contact
+
+    def page(self, url_name="events:my_participations"):
+        self.login(self.lisi)
+        return self.client.get(reverse(url_name)).content.decode()
+
+    def test_a_learner_halfway_through_their_first_course_sees_the_hours(self):
+        """🔴 这一条就是那个 bug：没有任何**结束了的**报名，但课上了一半。"""
+        run = make_run(ministry=self.pantry, owner=self.zhang.contact,
+                       name="ESL term", start_time=NOW - 10 * DAY,
+                       end_time=NOW + 30 * DAY)
+        signup = Participation.objects.create(
+            contact=self.me,
+            event_role=make_role(run, "esl_seat", nature="attending"),
+            served_as=Participation.ServedAs.NOT_APPLICABLE)
+        meeting = add_session(run, start_time=NOW - DAY,
+                              end_time=NOW - DAY + 2 * HOUR)
+        signup.attendances.filter(session=meeting).update(
+            status=Participation.Status.ATTENDED)
+
+        html = self.page()
+        self.assertIn("volunteer hours", html)
+        # ⚠️ 而「N past signups →」那一格**不该**画：他还没有任何历史，
+        #    一条通往空页面的链接比没有链接更让人困惑。
+        self.assertNotIn("past signup", html)
+
+    def test_somebody_with_nothing_at_all_still_sees_no_footer(self):
+        """⚠️ 另一半：三样都没有的人，整段不画。"""
+        self.assertNotIn("volunteer hours", self.page())
+
+    def test_the_history_page_never_grows_this_footer(self):
+        """🔴 `and` 的优先级高于 `or` —— 写成
+        `not is_past and past_count or hours_given` 的话，**历史页上只要有工时
+        它照样会画**，而它指向的正是那一页自己。我的第一版就是这么写的。
+        """
+        # ⚠️ 角色名不能和基类 setUp 里那个撞（`eventrole_unique_per_event`）。
+        Participation.objects.create(
+            contact=self.me, event_role=make_role(self.event, "stacking"),
+            status=Participation.Status.ATTENDED, hours=Decimal("3.00"),
+            served_as=Participation.ServedAs.VOLUNTEER)
+        self.assertNotIn("View history", self.page("events:past_participations"))
+
+
+class CourseCardActionsTests(PageTestCase):
+    """课卡上那两颗键**不跟着进度走**（2026-09-15 review 抓到）。
+
+    🔴 它们原来包在一个模板条件里（`if progress`），
+       而 `progress` 对**一门没有任何点名行的课**是 `None` —— 那不是边角情况：`open_register()` 只给
+       `end_time > now` 的讲次建行，所以讲次还没生成、或者剩下的讲次全过去了
+       （而课程本身还没结束）的课，卡上**一条退出的路都没有**。
+       改成卡片之前，那一行永远带着它的取消键。
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.me = self.lisi.contact
+        # ⚠️ 一门**还没结束、但一条讲次都没有**的课 —— 正是那个会出事的形状。
+        self.run = make_run(
+            ministry=self.pantry, owner=self.zhang.contact, name="ESL term",
+            start_time=NOW - DAY, end_time=NOW + 30 * DAY)
+        self.signup = Participation.objects.create(
+            contact=self.me,
+            event_role=make_role(self.run, "esl_seat", nature="attending"),
+            served_as=Participation.ServedAs.NOT_APPLICABLE)
+
+    def page(self):
+        self.login(self.lisi)
+        return self.client.get(reverse("events:my_participations")).content.decode()
+
+    def test_a_course_with_no_register_still_offers_a_way_out(self):
+        """🔴 这一条是那个 bug 本身：没有点名行 → 没有进度 → 从前连取消都没了。"""
+        html = self.page()
+        self.assertIn(self.run.name, html)
+        self.assertIn(reverse("events:participation_cancel", args=[self.signup.pk]),
+                      html)
+
+    def test_it_still_offers_the_calendar_download(self):
+        self.assertIn(reverse("events:event_calendar", args=[self.run.pk]),
+                      self.page())
+
+    def test_a_course_with_a_register_is_unchanged(self):
+        """⚠️ 另一半：有讲次的课照旧两样都在，这一修不许动它。"""
+        # ⚠️ 只加讲次，不手工建点名行 —— `add_session()` 已经替**当前报了名的
+        #    每个人**开好了（那正是 `open_registers_for()` 的用处），再加一次会
+        #    撞上 `sessionattendance_duplicate` 那条唯一约束。
+        add_session(self.run, start_time=NOW + DAY,
+                    end_time=NOW + DAY + 2 * HOUR)
+        html = self.page()
+        self.assertIn(reverse("events:participation_cancel", args=[self.signup.pk]),
+                      html)
+        self.assertIn("attended", html)
+
+
+class MeetingNumberTests(PageTestCase):
+    """讲次的序号取自**整门课**，不是取自「交给我几条」（2026-09-15 review 抓到）。
+
+    🔴 `calendar_occasions()` 原来用 `enumerate(meetings, 1)` 编号，而它的两个
+       调用方都会交进**子集**：
+       · `session_calendar` 交进 `[那一讲]` —— 于是单下第七讲，文件里写「meeting 1」；
+       · `event_calendar` / 订阅源交进 `my_meetings()` —— 于是第五周才加入的人
+         （决定 18）、或者挑过晚上的人（决定 17），整份文件被**重新编号**。
+
+    ⚠️ 这一条最刺眼的形状是**同一行上自相矛盾**：讲次表里 Google 那条链接写着
+       「meeting 7」（走 `meeting_calendar_links`，它用 `_meeting_numbers`），
+       而紧挨着的 `.ics` 链接写「meeting 1」。
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.run = make_run(
+            ministry=self.pantry, owner=self.zhang.contact, name="ESL term",
+            start_time=NOW - 10 * DAY, end_time=NOW + 40 * DAY)
+        self.meetings = [
+            add_session(self.run, start_time=when, end_time=when + 2 * HOUR)
+            for when in (NOW + DAY, NOW + 8 * DAY, NOW + 15 * DAY, NOW + 22 * DAY)
+        ]
+
+    def numbers(self, meetings):
+        found = calendar_occasions(
+            self.run, host="testserver", url_for=lambda url: url,
+            meetings=meetings)
+        return [int(one.summary.rsplit("meeting ", 1)[1]) for one in found]
+
+    def test_one_meeting_on_its_own_keeps_its_place_in_the_course(self):
+        """🔴 单下第三讲，文件里就得写 meeting 3。"""
+        self.assertEqual(self.numbers([self.meetings[2]]), [3])
+
+    def test_a_late_joiner_is_not_renumbered_from_one(self):
+        """🔴 决定 18：第五周才加入的人，他的第一堂课**不叫 meeting 1**。
+
+        `_meeting_numbers()` 的 docstring 早就写过这个坑 —— 而这里正是它说的
+        那种「不报错，只是把第五周才来的那位的第一堂课叫成 meeting 1」。
+        """
+        self.assertEqual(self.numbers(self.meetings[2:]), [3, 4])
+
+    def test_picked_evenings_keep_the_gaps(self):
+        """⚠️ 决定 17：挑着上的人拿到的是 1 和 4，中间那两个数**空着** ——
+        序号说的是「这门课的第几讲」，不是「我的第几条」。"""
+        self.assertEqual(
+            self.numbers([self.meetings[0], self.meetings[3]]), [1, 4])
+
+    def test_the_whole_course_is_unchanged(self):
+        """⚠️ 另一半：整期下载照旧 1..N，这一修不许动它。"""
+        self.assertEqual(self.numbers(self.meetings), [1, 2, 3, 4])
+
+
 class CalendarSubscriptionTests(PageTestCase):
     """那条订阅地址真的被 Google 的服务器请求时会发生什么（2026-09-14）。
 
@@ -15455,8 +16057,10 @@ class CalendarSubscriptionTests(PageTestCase):
     def test_it_carries_the_meetings_this_person_is_on_and_no_others(self):
         """🔴 决定 17/18 在订阅上的那一面：挑过讲次的人只拿到他挑的那几讲。
 
-        ⚠️ 这条判断**不在这里实现** —— 它走 `my_meetings()`，和下载那条同一个
-           函数。订阅绕开的是登录态，不是任何一条「谁看得见什么」的规矩。
+        ⚠️ 这条判断**不在这里实现** —— 它和下载那条走同一个
+           `my_meetings_for()`。订阅绕开的是登录态，不是任何一条「谁看得见什么」
+           的规矩。⚠️ 这句话曾经是假的（订阅源那时自己抄了一份），
+           而钉住它的是 `FeedFollowsTheSameRuleAsTheDownloadTests`。
         """
         add_attendance(self.learner, self.meetings[0],
                        status=Participation.Status.REGISTERED)

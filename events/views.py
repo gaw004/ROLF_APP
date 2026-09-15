@@ -273,12 +273,20 @@ def _back_link(request, event=None):
     #    behaviour an old bookmark carrying `?from=past` gets, and the reason
     #    this function was written as a whitelist in the first place.
     if marker == "manage":
-        administers_any = bool(ministry_ids_administered_by(request.user))
-        if administers_any or in_foundation_tier(request.user):
-            # Same label the navigation uses for this account, so the two do
-            # not name one page two different things.
-            label = "Events I Manage" if administers_any else "All Events"
-            return reverse("events:event_manage_list") + state, label
+        if (ministry_ids_administered_by(request.user)
+                or in_foundation_tier(request.user)):
+            # 🔴 **和导航、标题读同一个函数**（2026-09-15 simplify 抓到）。
+            #
+            #    这里原来自己算一遍，而且判据是**反的** —— 它先问「管不管得了
+            #    某个 ministry」，`manage_list_name()` 先问「在不在 foundation
+            #    tier」。于是**两顶帽子都戴的人**：导航和 `<h1>` 说「All Events」，
+            #    而这颗返回键说「Events I Manage」。实测过。
+            #    ⚠️ 而它上面原来那句注释写着「Same label the navigation uses …
+            #       so the two do not name one page two different things」——
+            #       一句每个字都对、而事实上是假的话，正是这个抽取要消灭的东西。
+            #    ⚠️ 权限判断留着：它问的是另一件事（够不够得着那一页）。
+            return (reverse("events:event_manage_list") + state,
+                    manage_list_name(request.user))
     # 🔴 2026-09-14（决定 45）。**没有这一支的后果不是少一个标签，是回不去**：
     #    两张列表页从今天起互斥，所以一门课的返回键要是还写「← Events」，它指向
     #    的那一页**不含这门课** —— 人点回去，看到的是一张没有他刚才那一行的列表。
@@ -408,8 +416,30 @@ LIST_PAGES = {
 }
 
 
+def _page_tabs(cells, here):
+    """页头条那一排的**唯一模具**。`cells` 是 `[(key, label, url)]`。
+
+    🔴 **两排标签一个模具**（2026-09-15 simplify）。在此之前
+       `_sibling_tabs()`（活动 / 课程 / 管理页）和 `_signups()`（我报的名 /
+       历史记录）**各拼各的**，而 `page_bar.html` 要的是同一种字典。
+       给这个格子加第四个键（计数徽章、`aria-label`、`new_tab`）时，
+       只会加到其中一套上 —— 而模板把取不到的键当空字符串，
+       所以表现是**两排标签长得不一样，而每一排单独看都正常**。
+
+    🔴 **顺序固定，两排都是。** 原话：左右按谁是当前页对调的话，
+       同一条 bar 上的字会在跳转的一瞬间横着挪。所以这个函数**不排序**
+       也不调位，只标出谁是当前页 —— 顺序由调用方交进来的 `cells` 决定。
+
+    ⚠️ `key` 只用来认「哪一格是当前页」，不进模板：两排的 key
+       各是各的（这边是 `Event.Shape` 和 `MANAGE_TAB`，那边是路由名），
+       而那本来就是调用方自己的事。
+    """
+    return [{"label": label, "url": url, "is_here": key == here}
+            for key, label, url in cells]
+
+
 def _sibling_tabs(request, here=None):
-    """顶栏那一排并排的兄弟页，**顺序固定**。
+    """顶栏那一排并排的兄弟页，**顺序固定**（模具在 `_page_tabs()`）。
 
     🔴 这一排是「并排的兄弟」，不是面包屑 —— `page_bar.html` 两种形态里的那一种。
        当初那条规矩写着「顺序固定：左右按谁是当前页对调的话，同一条 bar 上的字会在
@@ -444,17 +474,19 @@ def _sibling_tabs(request, here=None):
 
     `here` 是当前页那一格的 key（`Event.Shape` 之一，或 `MANAGE_TAB`）。
     """
-    tabs = [{"key": shape, "label": page["title"], "url": reverse(page["list"])}
-            for shape, page in LIST_PAGES.items()]
+    cells = [(shape, page["title"], reverse(page["list"]))
+             for shape, page in LIST_PAGES.items()]
     if here == MANAGE_TAB:
         # ⚠️ 插在**中间**，不是追加在末尾 —— 用户指名的位置。
-        tabs.insert(1, {
-            "key": MANAGE_TAB,
-            "label": manage_list_name(request.user),
-            "url": request.get_full_path(),
-        })
-    return [{"label": one["label"], "url": one["url"],
-             "is_here": one["key"] == here} for one in tabs]
+        #
+        # 🔴 **这一格是显式代码，不往 `LIST_PAGES` 里塞一行**（2026-09-15
+        #    simplify 里有人建议过后者）。它的标签是**按身份算的**
+        #    （`manage_list_name(user)`），地址是**按当前请求算的**
+        #    （`request.get_full_path()`）—— 两样都塞不进一张静态表。它确实是
+        #    特例，代码里就该看起来像特例。
+        cells.insert(1, (MANAGE_TAB, manage_list_name(request.user),
+                         request.get_full_path()))
+    return _page_tabs(cells, here)
 
 
 def _list_page(request, shape):
@@ -462,9 +494,8 @@ def _list_page(request, shape):
     here = LIST_PAGES[shape]
     return {
         "page_title": here["title"],
-        # 「这一页上的东西叫什么」。⚠️ 模板里一律 `{{ list_noun }}{{ n|pluralize }}`，
-        #    不写死 —— 三处读它（计数、空状态那两句），而筛选框那一处由表单读。
-        "list_noun": here["noun"],
+        # ⚠️ `list_noun` **不在这里**（2026-09-15 simplify 搬走的）：它是结果
+        #    片段的配料，已经跟着数据一起由 `_listing()` 给。理由在那边。
         "list_url": reverse(here["list"]),
         "schedule_url": reverse(here["schedule"]),
         "page_tabs": _sibling_tabs(request, here=shape),
@@ -680,6 +711,15 @@ def _listing(request, period, contact, page_number=None,
         # for. ⚠️ The whole filtered set, not this page — "20 events" under a
         # filter that matched 180 would answer a question nobody asked.
         "total": page.paginator.count,
+        # 🔴 **「这一页上的东西叫什么」跟着数据走**（2026-09-15 simplify 从
+        #    `_list_page()` 搬过来）。`_event_list_results.html` 要两样配料才画得对：
+        #    数据和它们的名词。分在两个函数里时，每一个渲染或 OOB 发这块片段的
+        #    视图都要**记得调两个**，漏掉第二个的表现是空状态渲染成
+        #    **「No s for you in this period.」** —— 而且**只在列表为空时看得见**。
+        #    ⚠️ 不是假设：`event_detail_panel` 就漏过一次（本轮 review 抓到）。
+        #    ⚠️ 模板里一律 `{{ list_noun }}{{ n|pluralize }}`，不写死；筛选框里那一处
+        #       由表单自己读，不走这里。
+        "list_noun": LIST_PAGES[shape]["noun"],
         # 每一行通向整页详情的那条链接要带上的筛选串（2026-09-08）。
         # ⚠️ 传 `page` 而不是让它去读 `request.GET["page"]` —— 从日程点过来的那一次
         #    请求里，这一列被翻到了另一页，见 `_list_state` 的 docstring。
@@ -997,9 +1037,11 @@ def _detail(request, pk):
         #
         # 🔴 这是那句话被**一个新功能**推翻的例子，不是它当初写错了：一条理由
         #    会随着页面上多出来的东西失效，而失效的时候它读起来还是很有道理。
+        # ⚠️ 「来了几个人」那一列由 `meeting_calendar_links()` 一次数完 ——
+        #    统计不写在视图里（`ViewsAreThinGuardTests`，而它当场抓到了第一版）。
         "sessions": meeting_calendar_links(
             event, list(event.sessions.all()),
-            host=request.get_host().split(":")[0],
+            host=_calendar_host(request),
             url_for=request.build_absolute_uri),
         "mine": mine,
         # ⚠️ The property, not `status in OPEN_FOR_SIGNUP` (2026-08-19). It asks
@@ -1097,6 +1139,12 @@ def event_detail_panel(request, pk):
 
     number = page_holding(_visible_events(period, contact, shape), pk,
                           EVENTS_PER_PAGE)
+    # ⚠️ 这条路会把左边那一列作为 out-of-band 的第二块送回去（见下面的
+    #    `results_oob`），所以整页那份上下文也要给。
+    #    ⚠️ 那份模板自己要的 `list_noun` 已经跟着 `_listing()` 走了
+    #       （2026-09-15 simplify）—— 在此之前它在 `_list_page()` 里，而这一行
+    #       漏掉过一次，表现是空状态写成 **"No s for you…"**。
+    context.update(_list_page(request, shape))
     context.update(_listing(request, period, contact, page_number=number,
                             shape=shape))
     context.update({
@@ -1297,7 +1345,7 @@ def _signups(request, *, past):
     # ⚠️ 点名册一次查完，和课的张数无关 —— 逐张卡去问是每张一次查询。
     progress = course_progress(courses) if courses else {}
 
-    here = SIGNUP_PAGES[1] if past else SIGNUP_PAGES[0]
+    here = SIGNUP_PAGES[1 if past else 0]
     return render(request, "events/my_participations.html", {
         "page_title": here[0],
         # 🔴 两段的小标题**跟着页面改口**（2026-09-14 走查抓到的）。写死成
@@ -1315,14 +1363,14 @@ def _signups(request, *, past):
         "is_past": past,
         "kind": kind,
         "kind_choices": SIGNUP_KINDS,
-        # ⚠️ 顺序**写死**成 My Signups 在左、Past Signups 在右，两页都一样 ——
-        #    和 `_list_page()` 那一排同一条规矩：按谁是当前页对调的话，字会在
-        #    跳转的一瞬间横着挪。
-        "page_tabs": [
-            {"label": label, "url": reverse(name),
-             "is_here": (label, name) == here}
-            for label, name in SIGNUP_PAGES
-        ],
+        # ⚠️ 顺序**写死**成 My Signups 在左、Past Signups 在右，两页都一样。
+        #    理由和模具都在 `_page_tabs()` 上 —— 在此之前这里是自己拼的一段
+        #    推导式，和兄弟页那排各写一份。
+        # ⚠️ key 用路由名（`name`），不用标签：改一个页面的叫法不应该
+        #    把「哪一格是当前页」一起改掉。
+        "page_tabs": _page_tabs(
+            [(name, label, reverse(name)) for label, name in SIGNUP_PAGES],
+            here[1]),
         "courses": [(row, progress.get(row.pk)) for row in courses]
                    if kind in ("all", "programs") else [],
         "occasions": occasions if kind in ("all", "events") else [],
@@ -1475,7 +1523,7 @@ def _calendar_links(request, event):
         #    用来判断「画不画那两条深链」的开关。
         return {"calendar_is_part": True, "calendar_one": None}
     one = calendar_occasions(
-        event, host=request.get_host().split(":")[0],
+        event, host=_calendar_host(request),
         url_for=request.build_absolute_uri)[0]
     return {
         "calendar_one": one,
@@ -1525,9 +1573,24 @@ def session_calendar(request, pk):
     return _calendar_response(request, event, [meeting])
 
 
+def _calendar_host(request):
+    """写进 `.ics` UID 的那个域名 —— **四条路共用一处**（2026-09-15 simplify 抓到）。
+
+    🔴 `ics.uid_for()` 的 docstring 写着 UID「必须只由『这是哪一行』决定」——
+       因为一个会变的 UID 意味着**每次下载都是一条新日程**，而不是更新已有那条，
+       也就是这个功能存在的全部意义。而域名正是 UID 的另一半。
+
+    ⚠️ 原来这一句在四条路上各写一遍。改一次取法（跟着 settings 走、小写化、
+       开发环境带端口）而漏掉其中一条，那条路就有了**自己的 UID 命名空间** ——
+       同一讲从详情页下一次、从订阅源来一次，在同一个日历里变成两条，
+       而没有任何东西会报错。
+    """
+    return request.get_host().split(":")[0]
+
+
 def _calendar_response(request, event, meetings):
     """把记录写成一份可下载的 `.ics`。两条路由共用。"""
-    host = request.get_host().split(":")[0]
+    host = _calendar_host(request)
     text = ics.calendar_for(
         calendar_occasions(event, host=host,
                            url_for=request.build_absolute_uri,
@@ -1581,7 +1644,7 @@ def calendar_feed(request, token):
     """
     feed = get_object_or_404(
         CalendarFeed.objects.select_related("contact"), token=token)
-    host = request.get_host().split(":")[0]
+    host = _calendar_host(request)
     text = ics.calendar_for(
         my_calendar_occasions(feed.contact, host=host,
                               url_for=request.build_absolute_uri),

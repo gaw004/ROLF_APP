@@ -3261,6 +3261,21 @@ def hours_received_total(participations):
 # --- 加进个人日历：把一场活动摊成 ICS 那一层要的记录 -------------------------
 
 
+def _calendar_place(event):
+    """写进 `.ics` 的 `LOCATION`：房间加街道地址。
+
+    ⭐ **别人日历里那条日程要导航得了。** 在加地址之前这里交出去的是 `Chapel` ——
+       一个只有本院的人看得懂的词，而这份文件的全部意义就是它住在**别人**手机里。
+       日历客户端普遍会拿 LOCATION 去开地图，所以这一行决定了那一下点得动点不动。
+
+    ⚠️ 房间在前、地址在后，和详情页 Where 那一块同一个顺序：日历里那一行很短，
+       先看到的应该是「到了之后去哪一间」。
+    ⚠️ 两个都可能为空，所以照旧走 `filter(None, ...)` —— 只有地址的活动交出去的
+       是地址本身，不是 `, 123 Main St`。
+    """
+    return ", ".join(filter(None, (event.location, event.postal_address)))
+
+
 def calendar_occasions(event, *, host, url_for, meetings=None):
     """这一场（或这一门课的每一讲）→ 一串 `ics.Occasion`。
 
@@ -3291,7 +3306,8 @@ def calendar_occasions(event, *, host, url_for, meetings=None):
         return [ics.occasion(
             uid=ics.uid_for("event", event.pk, host),
             summary=event.name, start=event.start_time, end=event.end_time,
-            location=event.location, description=event.description, url=link,
+            location=_calendar_place(event),
+            description=event.description, url=link,
             sequence=_sequence(event.updated_at), cancelled=cancelled,
             organizer=organizer,
         )]
@@ -3303,7 +3319,8 @@ def calendar_occasions(event, *, host, url_for, meetings=None):
             #    授课顺序，和站内每一处说的是同一个数。
             summary=f"{event.name} · meeting {number}",
             start=meeting.start_time, end=meeting.end_time,
-            location=event.location, description=event.description, url=link,
+            location=_calendar_place(event),
+            description=event.description, url=link,
             sequence=_sequence(max(meeting.updated_at, event.updated_at)),
             cancelled=cancelled, organizer=organizer,
         )
@@ -4129,6 +4146,13 @@ def generate_occasions(series, *, generated_by=None):
             #    clock is only how its start is decided (see recurrence.py).
             end_time=moment.astimezone(datetime.timezone.utc) + series.duration,
             location=series.location,
+            # 🔴 地址跟着 `location` 一起复制（2026-09-15）。漏掉不报错 ——
+            #    表现是一门每周的课，十二个晚上在地图上全部打不开，而手工建的
+            #    单场活动好好的。`ForwardAddressTests` 钉着这一条。
+            address_street=series.address_street,
+            address_city=series.address_city,
+            address_state=series.address_state,
+            address_postal_code=series.address_postal_code,
             description=series.description,
             status=series.status,
             requires_guardian_consent=series.requires_guardian_consent,
@@ -4309,6 +4333,13 @@ def split_series(series, *, changed_by, **fields):
         start_time=fields.get("start_time", series.start_time),
         duration=fields.get("duration", series.duration),
         location=fields.get("location", series.location),
+        # ⚠️ 和上面那一处同一条：地址跟着 `location` 走，否则改写过的系列从此
+        #    生成没有地址的活动。
+        address_street=fields.get("address_street", series.address_street),
+        address_city=fields.get("address_city", series.address_city),
+        address_state=fields.get("address_state", series.address_state),
+        address_postal_code=fields.get(
+            "address_postal_code", series.address_postal_code),
         description=fields.get("description", series.description),
         status=fields.get("status", series.status),
         requires_guardian_consent=fields.get(

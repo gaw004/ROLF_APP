@@ -39,6 +39,7 @@ from django.views.decorators.http import require_POST
 from django_ratelimit.decorators import ratelimit
 
 
+from core.context_processors import manage_list_name
 from core.pagination import page_holding, page_of
 from core.timeutils import local_date_of
 from org.models import Ministry
@@ -158,8 +159,17 @@ def _template(request, full, fragment):
        answers a plain GET or POST with a complete page, which is what keeps the
        end-to-end tests (they never send HX-Request) testing the real thing —
        see D24's progressive-enhancement rule.
+    ⚠️ 判据由 `is_htmx()` 一处给（2026-09-15），模板里的 `is_htmx` 读的也是它 ——
+       结果片段里那两块 out-of-band 的东西**只在这条路上画**，整页那一次外面已经
+       各画过一遍。两处各判一次的话，分家的表现是整页 DOM 里出现**两个同名 id**，
+       而那不报错、页面看起来也完全正常，只能靠数出来发现。
     """
-    return fragment if request.headers.get("HX-Request") else full
+    return fragment if is_htmx(request) else full
+
+
+def is_htmx(request):
+    """这一次是 HTMX 发来的吗。**全站唯一一处问这件事的地方。**"""
+    return bool(request.headers.get("HX-Request"))
 
 
 #: 「你刚才在看的是哪一份列表」—— 筛选卡上的每一格，加上页码（2026-09-08）。
@@ -378,6 +388,10 @@ def _volunteer_period(request, noun="event"):
 #: ⚠️ 不从 `title` 派生（`title.lower().rstrip("s")`）：那对 "Events" 碰巧对，
 #:    而对任何一个不规则复数都不对，且错法是安静的。两个形式各写一次，
 #:    它们在同一个字典里挨着，走散不了。
+#: 顶栏那一排里管理页那一格的 key。⚠️ 它**不是** `Event.Shape` —— 那一页列的是
+#  两种形状的全部，所以它在 `LIST_PAGES` 里没有、也不该有一行。
+MANAGE_TAB = "manage"
+
 LIST_PAGES = {
     Event.Shape.SINGLE: {
         "title": "Events",
@@ -394,15 +408,57 @@ LIST_PAGES = {
 }
 
 
-def _list_page(shape):
-    """这一页叫什么、两条路由、以及顶栏那一排（固定顺序）。
+def _sibling_tabs(request, here=None):
+    """顶栏那一排并排的兄弟页，**顺序固定**。
 
-    🔴 顶栏这一排是**并排的兄弟页**，2026-09-14 新加的第三种形状 ——
-       `page_bar.html` 原来只有「你在哪儿 + 从哪儿来」那一种。那条规矩当初写着
-       「顺序固定：外层在左、当前在右」，理由是「左右按谁是当前页对调的话，同一条
-       bar 上的字会在跳转的一瞬间横着挪」。**那个理由在这里仍然成立，而且被遵守
-       了**：Events 永远在左、Programs 永远在右，换页时一个字都不动。
+    🔴 这一排是「并排的兄弟」，不是面包屑 —— `page_bar.html` 两种形态里的那一种。
+       当初那条规矩写着「顺序固定：左右按谁是当前页对调的话，同一条 bar 上的字会在
+       跳转的一瞬间横着挪」。**那条理由在这里仍然成立且被遵守**：顺序永远是
+       Events → Events I Manage → Programs，换页时一个字都不动。
+
+    🔴 **管理页那一格只在管理页自己身上出现**（2026-09-15，用户定的）。
+       Events 和 Programs 两页照旧是两格。
+
+       理由是用户那句「管理页是他自己 manage 的那些页面的**附属**」：附属的东西
+       不该在主页面的这一排上自我宣传。进去的路仍然是列表页标题行右端那颗 ⋮
+       （2026-09-03 定的那个唯一入口），而这一排在**里面**才变成三格 ——
+       它此刻的用处是回到两边的兄弟页。
+       ⚠️ 所以 2026-09-03 那条「一个东西一个入口」**一点没被破坏**：入口还是
+          只有那一颗，这一排是到了里面之后的导航，不是第二道门。
+
+    ⚠️ 因此这里**不需要判权限**：`here` 是 `MANAGE_TAB` 就意味着人已经站在那一页
+       上了，而那一页的视图早就判过。再判一遍是把同一条规矩写第二遍。
+
+    🔴 管理页那一格的名字**调 `core.context_processors.manage_list_name()`**，
+       和那一页的 `<h1>` 是同一个函数：foundation tier 看到的那一页叫
+       「All Events」，ministry admin 才是「Events I Manage」。
+       ⚠️ 第一版在这里把词写死了，于是只读那一档出现「这一排写 Events I Manage、
+          而版心标题写 All Events」—— 一个页面两个名字，被 `ManageListHeadTests`
+          当场抓住。守卫留着，而调同一个函数让它守的东西**从结构上不可能分家**。
+
+    🔴 管理页那一格的地址是 `request.get_full_path()`，不是裸的列表地址。
+       这一页有查询串（period 筛选、`?report=1`、翻页），而当前页那一格带着
+       `aria-current="page"` —— 写成裸 URL 的话，那是一个自称本页、点了却把你的
+       筛选和页码全丢掉的链接。这条注意事项原来写在 `event_manage_list.html` 上，
+       改成兄弟排时**它仍然成立**，所以跟着搬到这里，没有删。
+
+    `here` 是当前页那一格的 key（`Event.Shape` 之一，或 `MANAGE_TAB`）。
     """
+    tabs = [{"key": shape, "label": page["title"], "url": reverse(page["list"])}
+            for shape, page in LIST_PAGES.items()]
+    if here == MANAGE_TAB:
+        # ⚠️ 插在**中间**，不是追加在末尾 —— 用户指名的位置。
+        tabs.insert(1, {
+            "key": MANAGE_TAB,
+            "label": manage_list_name(request.user),
+            "url": request.get_full_path(),
+        })
+    return [{"label": one["label"], "url": one["url"],
+             "is_here": one["key"] == here} for one in tabs]
+
+
+def _list_page(request, shape):
+    """这一页叫什么、两条路由、以及顶栏那一排。"""
     here = LIST_PAGES[shape]
     return {
         "page_title": here["title"],
@@ -411,11 +467,7 @@ def _list_page(shape):
         "list_noun": here["noun"],
         "list_url": reverse(here["list"]),
         "schedule_url": reverse(here["schedule"]),
-        "page_tabs": [
-            {"label": page["title"], "url": reverse(page["list"]),
-             "is_here": page is here}
-            for page in LIST_PAGES.values()
-        ],
+        "page_tabs": _sibling_tabs(request, here=shape),
     }
 
 
@@ -472,7 +524,12 @@ def _list_of(request, shape):
     return render(request, _template(
         request, "events/event_list.html", "events/_event_list_results.html"), {
         "period": period,
-        **_list_page(shape),
+        # ⚠️ 片段里那两块 OOB 只在这条路上画 —— 见 `_template()` 那段。
+        #    ⚠️ 日程那条路也给：它和列表共用同一份结果片段的上下文形状，
+        #       而一个缺了这个键的上下文会让那两块**永远不画**（模板里取不到
+        #       的变量是假值，而 Django 对此不报错）。
+        "is_htmx": is_htmx(request),
+        **_list_page(request, shape),
         # 右边那块面板开着没有、开的是哪一场（2026-09-09）。见 `_open_panel()`。
         **_open_panel(request),
         **_listing(request, period, contact, shape=shape),
@@ -711,7 +768,12 @@ def _schedule_of(request, shape):
     period = _volunteer_period(request, LIST_PAGES[shape]["noun"])
     return render(request, "events/_schedule.html", {
         "period": period,
-        **_list_page(shape),
+        # ⚠️ 片段里那两块 OOB 只在这条路上画 —— 见 `_template()` 那段。
+        #    ⚠️ 日程那条路也给：它和列表共用同一份结果片段的上下文形状，
+        #       而一个缺了这个键的上下文会让那两块**永远不画**（模板里取不到
+        #       的变量是假值，而 Django 对此不报错）。
+        "is_htmx": is_htmx(request),
+        **_list_page(request, shape),
         # 箭头翻页要顺手把筛选卡里那个隐藏的 `from` 也改掉，否则下一次筛选会
         # 把窗口拽回起点 —— 见 _period_filter.html 里那一段。
         "schedule_partial": True,
@@ -1779,6 +1841,12 @@ def event_manage_list(request):
         "page": page,
         "total": page.paginator.count,
         "period": period,
+        "is_htmx": is_htmx(request),
+        # 顶栏那一排（2026-09-15）。⚠️ 这一页原来画的是**面包屑**形态
+        #    （`parent="Events"` + 自己那一格），理由是「从 Events 点进来之后
+        #    回不到 Events」。改成兄弟排之后那个理由被更好地满足了：两边的
+        #    兄弟页各一格，而不是只回得去来路那一格。
+        "page_tabs": _sibling_tabs(request, here=MANAGE_TAB),
         # 🔴 页面级那个 `can_manage` 2026-09-03 一分为二 —— 它一直在同时回答
         #    两个不同的问题，而一张列表之后这两个问题的答案会不一样：
         #

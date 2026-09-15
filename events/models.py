@@ -849,7 +849,31 @@ class EventQuerySet(AudienceQuerySetMixin, models.QuerySet):
         return self.filter(shape=Event.Shape.SINGLE)
 
 
-class Event(Audience, ConstraintErrorFieldMixin, TimeStampedModel):
+class PostalAddressMixin:
+    """把四个地址字段拼成一行。`Event` 和 `EventSeries` 共用（2026-09-15）。
+
+    🔴 **只带行为，不带字段** —— 照 `core.models.ImmutableCodeMixin` 的先例：
+       一个带字段的抽象模型会把两张表的迁移绑在同一个类上，而它们的列本来就
+       略有不同（系列那几个带 `help_text`，说的是「生成时复制过去」）。
+
+    🔴 四个调用方，而它们都不能各拼各的：详情页 Where 那一行、那条地图链接、
+       `.ics` 的 `LOCATION`（走 `services._calendar_place()`）、以及把系列和它
+       生成的活动逐条比对的那一处。分处拼的话，某一处漏掉一个字段既不报错、
+       也没有任何页面看得出来 —— 而那条地图链接会安静地指向一个不完整的地方。
+
+    ⚠️ `filter(None, ...)` 是这里的全部机关：四个字段里空的那些**整个不参与**，
+       所以只填了城市的活动得到的是 `Springfield`，不是 `, Springfield, , `。
+       一条带着空档的地址交给地图，搜出来的是别处。
+    """
+
+    @property
+    def postal_address(self):
+        return ", ".join(filter(None, (
+            self.address_street, self.address_city,
+            self.address_state, self.address_postal_code)))
+
+
+class Event(PostalAddressMixin, Audience, ConstraintErrorFieldMixin, TimeStampedModel):
     """One occasion: a food distribution on Saturday morning.
 
     Several shifts are several Events, not one Event plus a shift table: the
@@ -981,7 +1005,33 @@ class Event(Audience, ConstraintErrorFieldMixin, TimeStampedModel):
     ministry = models.ForeignKey(Ministry, on_delete=models.PROTECT, related_name="events")
     start_time = models.DateTimeField()
     end_time = models.DateTimeField()
+    # 🔴 **`location` 是「楼里的哪一间」，不是地址**（2026-09-15 确认的，不是猜的）。
+    #    库里现有的值全是 `Chapel` / `Room 2B` / `Kitchen` / `Back garden` ——
+    #    这些在地图上打不开。街道地址是**新增的一层**，在下面，两者都显示。
     location = models.CharField(max_length=200, blank=True)
+
+    # --- 街道地址（2026-09-15 加）------------------------------------------
+    #
+    # ⭐ 加在 `Event` 上，不新建场地表 —— 用户看着代价定的：代价是同一栋楼的地址
+    #    要在每一场活动上各填一遍，改地址要改很多条。换来的是不引进第二个模型，
+    #    以及「这一场到底用哪个地址」这个问题根本不存在。
+    #
+    # ⚠️ 字段名和 `max_length` **逐字照 `contact.Contact`**：全站两处存地址，
+    #    长得不一样的话，将来想合并或者做一次地址校验都要先对齐一遍。
+    #
+    # 🔴 **没有 `address_country`，而 `Contact` 有。** 这是有意的，不是漏抄：
+    #    活动是基金会在本地办的实体场所，而这些字段的唯一去处是「在地图里打开
+    #    这个地方」—— 本地地址的地图查询不需要国家，而每一张活动表单上多一个
+    #    永远是 US 的下拉框是纯粹的摩擦。真要办跨国的活动，加它是一次迁移。
+    #
+    # ⚠️ 全部 `blank=True`：绝大多数活动在自己楼里，而**地址可以晚一点补** ——
+    #    把它变成必填会让「先建草稿、回头再补细节」这条路走不通。
+    address_street = models.CharField(max_length=255, blank=True)
+    address_city = models.CharField(max_length=100, blank=True)
+    address_state = models.CharField(
+        max_length=100, blank=True, verbose_name="state / province / region")
+    address_postal_code = models.CharField(max_length=20, blank=True)
+
     owner = models.ForeignKey(Contact, on_delete=models.PROTECT, related_name="events_owned")
     # Whether this event holds minors to the consent rule. Per event, and not a
     # setting, because it genuinely differs: a Saturday food sort with parents
@@ -2624,7 +2674,7 @@ class EventSeriesQuerySet(AudienceQuerySetMixin, models.QuerySet):
     """
 
 
-class EventSeries(Audience, ConstraintErrorFieldMixin, TimeStampedModel):
+class EventSeries(PostalAddressMixin, Audience, ConstraintErrorFieldMixin, TimeStampedModel):
     """One rule and one template, producing N **separate** events. L5.4.
 
     The third of the three shapes the foundation asked for, and the one the
@@ -2762,6 +2812,25 @@ class EventSeries(Audience, ConstraintErrorFieldMixin, TimeStampedModel):
         max_length=200, blank=True,
         help_text="Copied onto each occasion as it is made. Changing it later "
                   "does not move occasions that already exist.")
+
+    # --- 街道地址（2026-09-15 加，跟着 `location` 走同一条路）------------------
+    #
+    # 🔴 **系列必须也有这四个，否则它生成的活动有房间、没地址。** 生成那一步是
+    #    逐个字段复制的（`services` 里 `location=series.location` 那两处），
+    #    漏掉地址不报错 —— 表现是一门每周的课，十二个晚上在地图上全部打不开，
+    #    而手工建的单场活动好好的。
+    #
+    # ⚠️ 定义逐字照 `Event` 上那四个（同名、同 max_length），理由同那边：两处
+    #    长得不一样的话，将来想合并或者做一次地址校验都要先对齐一遍。
+    #    `address_country` 同样不在这里，理由写在 `Event` 那一组上。
+    address_street = models.CharField(
+        max_length=255, blank=True,
+        help_text="Copied onto each occasion as it is made.")
+    address_city = models.CharField(max_length=100, blank=True)
+    address_state = models.CharField(
+        max_length=100, blank=True, verbose_name="state / province / region")
+    address_postal_code = models.CharField(max_length=20, blank=True)
+
     description = models.TextField(
         blank=True, max_length=LONG_TEXT,
         help_text="Copied onto each occasion as it is made. Changing it later "

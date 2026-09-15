@@ -27,6 +27,35 @@ from org.permissions import (
 )
 
 
+def manage_list_name(user):
+    """管理那一页叫什么 —— **全站唯一一处定义这对词的地方**（2026-09-03）。
+
+    `events/manage/` 的标题、顶栏那一排里它自己那一格、以及 `_event_nav.html`
+    的面包屑都读它。面包屑此前读的是**逐场活动**的 `can_manage`（`event_access`
+    算的），而列表页读的是页面级那个 —— 一张列表之后这两个不再同步：两顶帽子的
+    人在自己的活动上会看到「← Events I Manage」，而那一页的标题写着「All Events」。
+    同一个页面两个名字，正是 events.tests 那条「one page should not have two
+    names」钉的。
+
+    ⭐ **判据是「这一页列的是不是全部」，不是「你能不能改」**：两顶帽子的人两者
+       都为真，而页面上列的确实是全部。
+
+    ⚠️ 匿名也答得了（`in_foundation_tier` 对匿名返回 False）—— 管理页对他是 302
+       到登录，但活动详情页那条面包屑**匿名可达**，少了这个值它会渲染成一个空
+       字符串的链接，而模板不报错。
+
+    🔴 两个调用方，而它们画的是同一页上的两个东西：
+       · 这个模块的 `navigation()` → `manage_list_name`，模板拿去画 `<h1>`；
+       · `events.views._sibling_tabs()` → 顶栏那一排里管理页那一格的字。
+       写成两份的表现是「这一排写 Events I Manage、而版心标题写 All Events」——
+       一个页面两个名字，而 `ManageListHeadTests` 正是为这件事钉着两处必须同词。
+       那条守卫留着，这个函数让它守的东西**从结构上就不可能分家**。
+
+    ⚠️ `events` import `core` 是允许的方向（D17）；反过来不行。
+    """
+    return "All Events" if in_foundation_tier(user) else "Events I Manage"
+
+
 def _link(label, url_name, icon, query=""):
     """一个菜单项。
 
@@ -173,10 +202,8 @@ def navigation(request):
             "can_grant_ministry_admin": False,
             "is_ministry_admin": False,
             "can_see_all_events": False,
-            # ⚠️ 匿名分支也要给这个键。管理页对他是 302 到登录，但
-            #    `_event_nav.html` 的面包屑在**活动详情页**上，而那一页匿名可达 ——
-            #    少了它面包屑会渲染成一个空字符串的链接，而模板不报错。
-            "manage_list_name": "Events I Manage",
+            # ⚠️ 匿名分支也要给这个键，理由在 `manage_list_name()` 的 docstring 里。
+            "manage_list_name": manage_list_name(AnonymousUser()),
             "site_menu": _menu_for(AnonymousUser(), set(), False),
         }
 
@@ -198,18 +225,9 @@ def navigation(request):
         #    rather than by any test.
         "can_see_all_events": bool(administered) or foundation,
         "can_grant_ministry_admin": can_grant_ministry_admin(user),
-        # ⭐ **这一页叫什么，只在这里定一次**（2026-09-03）。
-        #
-        #    `events/manage/` 的标题、页头条和 `_event_nav.html` 的面包屑都读它。
-        #    面包屑此前读的是**逐场活动**的 `can_manage`（`event_access` 算的），
-        #    而列表页读的是页面级那个 —— 一张列表之后这两个不再同步：
-        #    两顶帽子的人在自己的活动上会看到「← Events I Manage」，
-        #    而那一页的标题写着「All Events」。同一个页面两个名字，
-        #    正是 events.tests 那条「one page should not have two names」钉的。
-        #
-        # ⚠️ 判据是「这一页列的是不是全部」，不是「你能不能改」——
-        #    两顶帽子的人两者都为真，而页面上列的确实是全部。
-        "manage_list_name": "All Events" if foundation else "Events I Manage",
+        # ⭐ 这一页叫什么，只定义在一处 —— 见 `manage_list_name()`，
+        #    顶栏那一排里它自己那一格读的是同一个函数。
+        "manage_list_name": manage_list_name(user),
     }
 
 

@@ -4500,190 +4500,6 @@ class BorderlessCardTests(TestCase):
             "box has no outline at all:\n" + "\n".join(offenders))
 
 
-class FilterSearchAlignmentTests(TestCase):
-    """The search box lines up with the row of controls under it, structurally.
-
-    ⚠️ It cannot be a fixed width. "Level with Clear" is a different number on
-       each page — measured at 642px on Events and 790px on the management list,
-       because that page has an extra `Generate report` button. A pixel value
-       would be wrong on one of them, and wrong again the next time a button
-       label changes.
-
-       `width: fit-content` on a column wrapper sizes it to its widest child (the
-       controls row), so the search stretches to exactly that. Nothing is written
-       down, and it follows the buttons on its own.
-    """
-
-    def markup(self):
-        return (Path(settings.BASE_DIR) / "events" / "templates" / "events"
-                / "_period_filter.html").read_text()
-
-    def test_the_wrapper_sizes_itself_to_the_controls_row(self):
-        self.assertIn("w-fit", self.markup())
-
-    def test_the_wrapper_cannot_push_the_page_sideways(self):
-        # ⚠️ `fit-content` resolves to max-content, and the controls row unwrapped
-        #    is wider than a phone. Without this cap the whole page scrolls
-        #    sideways at 375px — the same bug this row caused once before.
-        wrapper = re.search(r'class="flex w-fit ([^"]*)"', self.markup()).group(0)
-        self.assertIn("max-w-full", wrapper)
-
-    def test_the_search_box_does_not_span_the_whole_card(self):
-        # `basis-full` was the first attempt and it reached the card's edge.
-        markup = _blank_out_comments(self.markup())
-        search_line = next(line for line in markup.splitlines() if "period.q" in line)
-        self.assertNotIn("basis-full", search_line)
-        self.assertNotIn("w-full", search_line)
-
-
-
-
-class FilterCollapseTests(TestCase):
-    """筛选卡收起来那一档（2026-09-09）。
-
-    上一批给这张卡加了第四格（Role kind），量到连下边距 330.5px —— 而开着日程时
-    它是**钉住的**，800px 高的窗口上留给活动卡片的只剩约 3 张。用户要一个收起
-    功能，「收起来的时候只有一行」。
-
-    ⚠️ 这和 2026-09-03 那次「折成一条」不冲突：那次是**永远**一条（搜索框因此
-       失去了可对齐的对象），当天被撤回；这次是**默认两层、可以手动收起**，
-       展开态一个像素都没动，`FilterSearchAlignmentTests` 三条照样守着它。
-    """
-
-    def markup(self):
-        return (Path(settings.BASE_DIR) / "events" / "templates" / "events"
-                / "_period_filter.html").read_text()
-
-    def css(self):
-        return (Path(settings.BASE_DIR) / "assets" / "app.css").read_text()
-
-    def test_the_summary_is_the_form_s_own_sentence(self):
-        """🔴 摘要复用 `EventPeriodForm.description()`，模板里不另写一份。
-
-        那个方法已经把四格都说全了，而完整报表页顶上印的、以及它变成的那张纸上
-        印的，就是同一句。⚠️ 代价：改那句措辞会同时改这两处 —— 这条测试存在，
-        是为了让下一个在模板里手写一句摘要的人当场变红。
-        """
-        self.assertIn("{{ period.description }}", self.markup())
-
-    def test_the_toggle_says_which_way_it_goes(self):
-        """⚠️ 2026-08-28 从 `button.html` 删掉过 `toggles`，理由是「一颗按钮同时
-        是打开和关掉，而它旁边没有任何东西说明此刻按下去是哪一件」。
-
-        这一颗是开关，所以它必须自己把那句话补上：`aria-expanded` 跟着状态变、
-        读屏念的那句也跟着变、箭头跟着转。三样缺一条，那条决定就被悄悄撤销了。
-        """
-        markup = _blank_out_comments(self.markup())
-        self.assertIn('x-bind:aria-expanded="open"', markup)
-        self.assertIn("x-bind:aria-label=", markup)
-        self.assertIn('aria-controls="filter-card-body"', markup)
-        self.assertIn("rotate(180deg)", self.css())
-
-    def test_there_is_exactly_one_arrow_and_it_never_moves(self):
-        """🔴 一个箭头，两个状态**同一个位置**。用户报过两次，两次都在这一点上：
-        「箭头应该跟 clear 和 schedule 在一条线上，现在因为箭头，filter 卡片下面
-        多了很多空白」，以及「箭头上下都应该在一个位置，偏移让我很难受」。
-
-        中间试过 include 成一份、放在两个位置（控件行一份、摘要行一份）—— 那是在
-        **忠实地复现**用户抱怨的那个跳动，因为两个位置就是两个位置。绝对定位到
-        卡片右下角之后，位置只有一个，重复也就不存在了。
-        ⚠️ 所以这条测试钉的是「只有一个」，而不是「两份长得一样」。
-        """
-        markup = _blank_out_comments(self.markup())
-        self.assertEqual(markup.count('class="filter-toggle"'), 1)
-        rule = self.css()[self.css().index("  .filter-toggle {"):]
-        rule = rule[:rule.index("}")]
-        self.assertIn("position: absolute;", rule)
-
-    def test_the_bare_arrow_keeps_a_touch_sized_hit_area(self):
-        """🔴 圆底撤掉之后（用户：「不要圆圈，只要箭头可以不？」）可点区域只剩字形。
-
-        ⚠️ 靠 `padding` 撑不够 —— 量出来是 32×40，两个方向都差一点，而这种差一点
-           在截图上完全看不出来。所以那个数是写死的。
-        """
-        rule = self.css()[self.css().index("  .filter-toggle {"):]
-        rule = rule[:rule.index("}")]
-        self.assertIn("min-width: 2.75rem;", rule)
-        self.assertIn("min-height: 2.75rem;", rule)
-        self.assertNotIn("panel-close", _blank_out_comments(self.markup()))
-
-    def test_the_collapse_rules_sit_outside_the_component_layer(self):
-        """🔴 被收起的那一层带着 Tailwind 的 `flex`（对齐机制的一部分，动不得），
-        而工具类在 `@layer utilities` —— **层的顺序压过特异性**。
-
-        写在 components 里的 `display: none` 再具体也赢不了一个 `.flex`：实测点了
-        收起卡片**反而高了 14px**（241.5 → 255.5），字段一个没藏起来，而摘要那一行
-        又加了上去，没有任何报错。未分层的作者样式胜过所有层，所以只有那里是对的。
-        """
-        css = self.css()
-        rule = css.index("html.filters-collapsed .filter-card-body,")
-        # 那条规则之前最后一次出现的 `@layer` 必须已经闭合 —— 用缩进当判据：
-        # 层里的规则缩进两格，未分层的顶格。
-        self.assertTrue(
-            css[rule - 1] == "\n",
-            "the collapse rules must be unlayered (top-level), or a Tailwind "
-            "utility will beat them")
-
-    def test_the_boot_script_runs_before_the_card_and_cannot_take_the_page_down(self):
-        """🔴 没有它，记着「收起」的人每次进页面都会先看到整张卡再看到它塌下去。
-
-        同深色模式那次（`_theme_boot.html`），三条一样：内联、在那张卡**之前**、
-        整段包在 try 里（隐私模式下 localStorage 直接抛）。
-        ⚠️ 脚本里的注释写英文 —— 它进了发给浏览器的 HTML，而界面语言守卫的口径是
-           「模板里注释块之外没有汉字」。
-        """
-        markup = self.markup()
-        script = markup.index("<script>")
-        self.assertLess(script, markup.index("<form method=\"get\""))
-        body = markup[script:markup.index("</script>", script)]
-        self.assertIn("try {", body)
-        self.assertIn("localStorage", body)
-        self.assertNotIn("filters-collapsed\"", body.split("classList")[0][-40:])
-        self.assertEqual([c for c in body if _is_cjk(c)], [])
-
-    def test_the_arrow_stays_symmetric_so_the_rotation_costs_nothing(self):
-        """🔴 画的是 SVG，不是一个箭头字符。
-
-        `&#x2304;` 那一版盒子上下对称、**墨迹不对称**（那个字形在字框里偏下），
-        于是转 180° 之后它偏上，和旁边那句摘要不在一条线上。
-        ⚠️ 这一条**量不出来**：`getBoundingClientRect()` 报的是 20/20，因为它量的
-           是盒子；差的是盒子里那笔墨。而且它跟着字体走 —— 换一次字体栈这个偏移量
-           就变一次，没有任何东西会提醒你。
-        ⚠️ 两笔加起来是 4.5..13.5，中点正是 10 —— 加第二笔（用户要的「两个箭头
-           叠一起」）不许把这条性质弄丢。
-        """
-        markup = _blank_out_comments(self.markup())
-        self.assertNotIn("&#x2304;", markup)
-        self.assertIn('d="M5 4.5l5 5 5-5"', markup)
-        self.assertIn('d="M5 8.5l5 5 5-5"', markup)
-        # ⚠️ 渐变靠两笔各自的 opacity，不是 `<linearGradient>` —— 后者要一个 id，
-        #    而这张卡在站上有两个页面在用，id 撞了之后是个只在某些浏览器上出现的
-        #    毛病。
-        self.assertNotIn("linearGradient", markup)
-
-    def test_the_whole_collapsed_card_expands_but_only_when_collapsed(self):
-        """⚠️ 两道闸，缺一个就出一种毛病：展开着的时候这一层必须完全不管事
-        （否则点一下输入框卡片就收起来了），而箭头自己那一下会**冒泡**上来
-        （否则展开态点箭头是「收起，然后立刻又展开」，屏幕上什么都不动）。
-        """
-        self.assertIn('x-on:click="expandFromCard($event)"',
-                      _blank_out_comments(self.markup()))
-        js = (Path(settings.BASE_DIR) / "assets" / "js" / "app.js").read_text()
-        block = js[js.index("  expandFromCard(event) {"):]
-        block = block[:block.index("  toggleFilters()")]
-        self.assertIn("if (this.open) return;", block)
-        self.assertIn('closest(".filter-toggle")', block)
-
-    def test_the_key_is_per_page(self):
-        """⚠️ 这张卡 Events 和管理列表两页共用，但那是两件事 —— 在一页收起不该把
-        另一页也收了。⚠️ 两处（boot 脚本和 app.js）的键必须同形，分家的表现是
-        「收起之后刷新又回来了」。
-        """
-        self.assertIn('"filters:" + location.pathname', self.markup())
-        js = (Path(settings.BASE_DIR) / "assets" / "js" / "app.js").read_text()
-        self.assertIn("`filters:${window.location.pathname}`", js)
-
-
 class CardExitLinkTests(TestCase):
     """卡底那条出口：常态没有下划线，而箭头是它的承重结构（2026-09-08）。
 
@@ -5273,6 +5089,138 @@ class SiteMenuTests(TestCase):
         page = self.client.get(reverse("accounts:profile")).content.decode()
         numbers = [int(n) for n in re.findall(r"--i: (\d+)", page)]
         self.assertEqual(numbers, list(range(len(numbers))))
+
+
+class FilterBarTests(TestCase):
+    """一条式的筛选栏（2026-09-15，用户给了截图）。
+
+    🔴 **这一版重开了一个 2026-09-03 当天被撤回的决定**，而两次的区别值得写下来：
+       那一次也是「折成一条」，撤回的理由是**搜索框失去了可对齐的对象** ——
+       当时是「搜索框一整行 + 下面一行控件」，靠一个 `w-fit` 的列外壳让前者自动
+       等于后者的宽度，而那条规矩由三条守卫钉着。压成一条之后那个对象不存在了。
+       **这一版搜索框和控件在同一行**，靠 `flex: 1` 吃掉剩下的空间 —— 对齐的
+       对象变成「这一行的右端」，一个不用量的东西。所以那三条守卫连同
+       `FilterCollapseTests` 那九条一起撤了，是**机制没了**，不是守卫碍事。
+    """
+
+    def setUp(self):
+        from accounts.services import register_account
+        self.user = register_account(
+            email="bar@example.com", password="a-good-long-password",
+            legal_first_name="Bar", legal_last_name="Keeper")
+        self.client.force_login(self.user)
+
+    def page(self, **params):
+        return self.client.get(reverse("events:event_list"), params).content.decode()
+
+    def summary(self, html):
+        """摘要那一行的**纯文字**。
+
+        ⚠️ 必须剥掉标签再断言：那句话里「dates」是包在 `<strong>` 里的（加粗的是
+           筛了哪几类，那才是这一行的信息）。直接找 `"Filtered by dates"` 这串
+           连续字符会红，而页面完全正常 —— 我的第一版就是这么红的。
+        """
+        found = re.search(r'id="filter-summary".*?</p>', html, re.S)
+        return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", "", found.group(0) if found else "")).strip()
+
+    # --- 撤除 ---------------------------------------------------------------
+
+    def test_nothing_is_left_of_the_collapse(self):
+        """🔴 撤除守卫。收起那一整套（引导脚本 / localStorage / 箭头 / 摘要）
+        没有留下任何一半 —— 半套留下来的表现是一颗点了没反应的箭头。"""
+        html = self.page()
+        for gone in ("filter-toggle", "filters-collapsed", "filter-card-summary",
+                     "filter-card-body", "filterCard"):
+            with self.subTest(gone=gone):
+                self.assertNotIn(gone, html)
+
+    def test_the_hook_the_sticky_rule_and_the_two_scripts_read_is_still_there(self):
+        """⚠️ `.filter-card` 这个钩子**不能跟着删**：三处读它 —— app.css 那条
+        钉住规则，以及 app.js 的 `watchFilterHeight()` 和 `occludedTop()`。
+        删掉它不报错，表现是开着日程时筛选卡不再钉住、翻页时第一行被挡住。"""
+        self.assertIn("filter-card", self.page())
+
+    # --- 新的一条 -----------------------------------------------------------
+
+    def test_the_bar_carries_every_control_in_one_row(self):
+        html = self.page()
+        for part in ("filter-bar", "filter-bar-search", "filter-bar-controls",
+                     "date-chip"):
+            with self.subTest(part=part):
+                self.assertIn(part, html)
+
+    def test_the_two_native_date_fields_are_in_the_response(self):
+        """🔴 它们有两个身份，而**两个都靠这一条守着**：
+        ① 没有 JavaScript 时唯一的日期入口（日历是脚本画的）；
+        ② 所有人设定**单边区间**的正经入口（日历点两下只说得出一段）。
+        哪天有人把它们改成由脚本生成，这一条会红。"""
+        html = self.page()
+        self.assertIn('name="start"', html)
+        self.assertIn('name="end"', html)
+        self.assertIn('type="date"', html)
+
+    def test_the_filter_button_still_exists_only_for_people_without_js(self):
+        """⚠️ 它在 `<noscript>` 里，所以对有 JS 的人**不存在**（不是藏起来）——
+        藏起来的话它仍然在 Tab 顺序里，键盘用户会走到一颗看不见的按钮上。"""
+        html = self.page()
+        self.assertIn("<noscript>", html)
+        self.assertIn("Filter", html.split("<noscript>")[1].split("</noscript>")[0])
+
+    # --- 摘要那一行 ----------------------------------------------------------
+
+    def test_nothing_filtered_draws_no_summary_line(self):
+        """⚠️ 一句「Filtered by nothing」加一颗清空空筛选的键，两个都是噪音。"""
+        self.assertNotIn("Filtered by", self.page())
+
+    def test_the_summary_names_which_kinds_are_filtered(self):
+        self.assertIn("Filtered by dates",
+                      self.summary(self.page(start="2026-09-15", end="2026-10-01")))
+
+    def test_the_summary_lists_several_kinds_in_english(self):
+        """⚠️ `get_text_list` 给的是「a, b and c」—— 那是这句话被读出来的样子。"""
+        self.assertIn("Filtered by search and dates",
+                      self.summary(self.page(q="kitchen", start="2026-09-15")))
+
+    # --- 两块 out-of-band 的东西 ----------------------------------------------
+
+    def test_live_filtering_carries_the_count_and_the_summary_with_it(self):
+        """🔴 两者都在 `#event-results` **外面**（一个在标题行，一个在筛选表单里），
+        而 HTMX 只换那一块 —— 所以只有 OOB 送得到它们。
+
+        ⚠️ 少了这一条的后果**整页加载时完全看不出来**：那时两处都由外面的模板
+           各画过一遍，curl 一抓全都在。只有真的在页面上改一个筛选才暴露 ——
+           列表变了，而右上角那个数不动、「Filtered by … / Clear」压根不出现。
+           后者是用户报上来的。
+        """
+        fragment = self.client.get(
+            reverse("events:event_list"), {"start": "2026-09-15"},
+            headers={"HX-Request": "true"}).content.decode()
+        for part in ('id="event-count"', 'id="filter-summary"', "hx-swap-oob"):
+            with self.subTest(part=part):
+                self.assertIn(part, fragment)
+        self.assertIn("Filtered by dates", self.summary(fragment))
+
+    def test_a_whole_page_never_carries_the_same_id_twice(self):
+        """🔴 整页那一次外面已经各画过一遍，所以片段里那两块**不能再画**。
+
+        ⚠️ 重复 id 不报错，页面看起来也完全正常 —— 而 OOB 的落点从此是不确定
+           的那一个。只能靠数出来发现，所以这一条数它。
+        """
+        html = self.page()
+        for once in ('id="event-count"', 'id="filter-summary"'):
+            with self.subTest(id=once):
+                self.assertEqual(html.count(once), 1)
+
+    def test_the_summary_is_in_the_dom_even_when_nothing_is_filtered(self):
+        """🔴 没筛时它**在 DOM 里但 hidden**，不是不渲染。
+
+        OOB 交换要求落点已经在 DOM 里：整个元素不存在的话，第一次筛完那一份
+        OOB 就没有东西可替换 —— 表现和上面那个 bug 一模一样。
+        """
+        html = self.page()
+        self.assertIn('id="filter-summary"', html)
+        self.assertIn("hidden", html.split('id="filter-summary"')[1][:120])
+        self.assertNotIn("Filtered by", html)
 
 
 class TextInputsComeFromFormsGuardTests(TestCase):

@@ -4282,6 +4282,37 @@ class EventSeriesTests(TestCase):
         self.assertIn("role", refused.exception.error_dict)
 
 
+class ForwardAddressTests(EventSeriesTests):
+    """系列生成活动时，街道地址跟着 `location` 一起复制（2026-09-15）。
+
+    🔴 **漏掉它不报错。** 表现是一门每周的课，十二个晚上在别人日历里全部打不开
+       地图，而手工建的单场活动好好的 —— 而这两条路走的是两段不同的代码
+       （`services` 里那两处逐字段复制）。
+    """
+
+    ADDRESS = {"address_street": "120 Riverbank Road", "address_city": "Springfield",
+               "address_state": "CA", "address_postal_code": "90210"}
+
+    def test_every_occasion_is_born_with_the_address(self):
+        series = self.make_series(location="Chapel", **self.ADDRESS)
+        self.add_template(series)
+        generate_occasions(series)
+        made = Event.objects.filter(series=series)
+        self.assertTrue(made.exists(), "一场都没生成 —— 这条守卫就空守了")
+        for one in made:
+            with self.subTest(event=one.pk):
+                self.assertEqual(one.postal_address, series.postal_address)
+                self.assertEqual(one.location, "Chapel")
+
+    def test_a_series_with_no_address_makes_occasions_with_none(self):
+        """⚠️ 另一半：没填地址的系列不该给它的活动编出一个地址来。"""
+        series = self.make_series(location="Chapel")
+        self.add_template(series)
+        generate_occasions(series)
+        for one in Event.objects.filter(series=series):
+            self.assertEqual(one.postal_address, "")
+
+
 class SeriesChangesTests(TestCase):
     """L5.6: recomputing the future, stopping today, and what is never touched.
 
@@ -12698,6 +12729,56 @@ class ManageListHeadTests(ManageListPage, PageTestCase):
         self.assertIsNotNone(found, "页头条没渲染出来")
         return found.group(1)
 
+    def cells(self, html):
+        """页头条里那几格的字，按画出来的顺序。"""
+        return re.findall(r">([^<>]+)</a>", self.head(html))
+
+    def test_the_manage_cell_sits_between_the_two_sibling_pages(self):
+        """🔴 **顺序是 Events → 这一页 → Programs**（用户 2026-09-15 指名的位置）。
+
+        ⚠️ 断言的是**整个顺序**，不是「那一格在不在」。这一排当初定「顺序固定」的
+           理由是「左右按谁是当前页对调的话，同一条 bar 上的字会在跳转的一瞬间
+           横着挪」—— 只断言存在的话，哪天有人把它追加到末尾，这条守卫照旧是绿的，
+           而那正是它要防的那种「每一页单独看都正常」。
+        """
+        self.login(self.zhang)
+        cells = self.cells(self.client.get(self.url()).content.decode())
+        self.assertEqual(cells, ["Events", "Events I Manage", "Programs"])
+
+    def test_the_two_reading_pages_do_not_advertise_this_one(self):
+        """🔴 **Events / Programs 两页照旧只有两格**（用户 2026-09-15 定的）。
+
+        用户的话是「管理页都是他自己 manage 的那些页面的**附属**」：附属的东西不该
+        在主页面的这一排上自我宣传。进去的路仍然是列表页标题行右端那颗 ⋮ ——
+        所以 2026-09-03 那条「一个东西一个入口」一点没被破坏，这一排只是到了里面
+        之后用来回到两边兄弟页的导航。
+
+        ⚠️ 用**能看见那一页的账号**测，否则这一条会因为权限而绿，而不是因为规则。
+        """
+        self.login(self.zhang)
+        for name in ("events:event_list", "events:program_list"):
+            with self.subTest(page=name):
+                cells = self.cells(
+                    self.client.get(reverse(name)).content.decode())
+                self.assertEqual(cells, ["Events", "Programs"])
+                self.assertNotIn("Events I Manage", self.head(
+                    self.client.get(reverse(name)).content.decode()))
+
+    def test_the_manage_cell_is_named_by_the_same_function_as_the_heading(self):
+        """⚠️ 只读那一档：这一排和 `<h1>` 都必须写「All Events」。
+
+        两处现在调的是同一个 `core.context_processors.manage_list_name()`，
+        所以这一条守的是「那个函数真的被两边用上了」—— 第一版在视图里把词写死，
+        于是这一排写 Events I Manage、而标题写 All Events。
+        """
+        from django.contrib.auth.models import Group
+        from org.permissions import FOUNDATION_ADMIN_GROUP
+        chief = self.account("chief2", "吴", birth_date=datetime.date(1980, 1, 1))
+        chief.groups.add(Group.objects.get_or_create(name=FOUNDATION_ADMIN_GROUP)[0])
+        self.login(chief)
+        cells = self.cells(self.client.get(self.url()).content.decode())
+        self.assertEqual(cells, ["Events", "All Events", "Programs"])
+
     def test_the_word_is_in_both_places_and_the_h1_is_the_one_in_the_page(self):
         """两处都写着「Events I Manage」：页头条上一格，版心里一个标题
         （2026-09-03 第二轮）。而 `<h1>` 只有版心里那一个 —— 页头条是下滑时的
@@ -15458,6 +15539,251 @@ class CalendarSubscriptionTests(PageTestCase):
         self.assertIn("noindex", page["X-Robots-Tag"])
 
 
+class RoleFilterTests(PageTestCase):
+    """Role 那一格：收起一个词，展开带解释（2026-09-15，用户定的版式）。
+
+    🔴 **它不是 `<select>`，而这是被需求逼出来的，不是偏好**：原生下拉收起时显示
+       的就是选中那个 `<option>` 的文字 —— 两处同一个字符串，做不到「收起短、
+       展开长」。旁边的 Ministry 仍然是原生 select，判据是「选项需不需要解释」。
+    """
+
+    def page(self, **params):
+        self.login(self.lisi)
+        return self.client.get(reverse("events:event_list"), params).content.decode()
+
+    def test_collapsed_it_says_one_word(self):
+        """⚠️ 没选时写「Role」（这一格管什么），选了写那个词本身。"""
+        self.assertIn(">Role</span>", self.page())
+        self.assertIn(">Helping</span>", self.page(nature="helping"))
+
+    def test_opened_every_choice_carries_its_invitation(self):
+        """🔴 这一格存在的全部理由。少了解释，「Helping / Attending」对一个
+        第一次来的人是两个猜谜 —— 而这两个词决定他会被放进哪一本账。"""
+        html = self.page()
+        self.assertIn("give your time", html)
+        self.assertIn("receive a service", html)
+
+    def test_the_word_and_the_gloss_are_not_glued_together(self):
+        """🔴 回到 `Nature` 那条注释本来的主张：「一个词一档，解释放在旁边而不是
+        塞进标签」。是这张筛选表单当初把两半粘回去了（`Helping (give your time)`），
+        而那正是收起时太长的原因。"""
+        self.assertNotIn("Helping (give your time)", self.page())
+
+    def test_it_works_without_javascript_and_still_filters(self):
+        """🔴 `popovertarget` 是**声明式 HTML**，开合不用脚本；里面是三个真的
+        radio，跟着表单提交、键盘方向键原生可走。所以这一格**没有**付「自制下拉
+        要重做键盘和读屏」那笔代价 —— 那笔代价是给 div 拼出来的假控件的。
+
+        ⚠️ 断言落在「它们是 radio 且同名」上：换成 div + JS 的那一天这条会红。
+        """
+        html = self.page()
+        self.assertEqual(html.count('name="nature"'), 3)
+        self.assertIn('type="radio"', html)
+        self.assertIn("popovertarget=", html)
+
+    def test_choosing_one_actually_narrows_the_list(self):
+        """⚠️ 三个 radio 和表单字段**同名**，所以它们就是那个字段，不是它的影子。
+
+        ⚠️ 断言的是**相对行为**（选一档之后另一档的活动不在了），不是具体条数：
+           第一版抄了开发库里那两个数（8 / 21），而测试库里只有一场活动 ——
+           一条绑死在别人数据上的断言，红起来和真 bug 长得一模一样。
+        """
+        # ⚠️ 另建一场**只有 attending 角色**的活动：`self.event` 本来就带着一个
+        #    helping 的角色，给它再加一个 attending 之后它**两档都匹配** ——
+        #    拿它做断言的话，「筛掉了」那一半永远不成立。第一版就是这么红的。
+        seated = make_event(ministry=self.pantry, owner=self.zhang.contact,
+                            name="ESL drop-in", start_time=NOW + DAY,
+                            end_time=NOW + DAY + 2 * HOUR)
+        make_role(seated, "esl_seat", nature="attending")
+        self.assertIn(seated.name, self.page(nature="attending"))
+        self.assertNotIn(seated.name, self.page(nature="helping"))
+
+
+class DateChipTests(TestCase):
+    """那颗日期胶囊上的字（2026-09-15）。
+
+    🔴 **单边区间是一等公民，不是边角情况**（用户定的）：「从九月一号起、
+       不限截止」是一个真实的筛选，而日历上点两下说不出它 —— 那两个原生日期框
+       才说得出来，所以这三个分支都要有自己的说法。
+    """
+
+    def chip(self, **params):
+        return EventPeriodForm(params).date_chip
+
+    def test_both_ends(self):
+        self.assertEqual(
+            self.chip(start="2026-09-15", end="2026-10-01"), "Sep 15 – Oct 1")
+
+    def test_only_a_start(self):
+        self.assertEqual(self.chip(start="2026-09-15"), "From Sep 15")
+
+    def test_only_an_end(self):
+        self.assertEqual(self.chip(end="2026-10-01"), "Until Oct 1")
+
+    def test_nothing_chosen_says_what_the_control_is_for(self):
+        """⚠️ 空着时写「Dates」而不是留白 —— 一颗没有字的胶囊说不出自己是干嘛的。"""
+        self.assertEqual(self.chip(), "Dates")
+
+    def test_the_chip_is_shorter_than_the_report_sentence(self):
+        """🔴 它和 `description()` 共用三个分支，但**格式不同**，不要合并：
+        报表正文那句带年份（给一页数字说明自己涵盖什么），而这颗胶囊在一条
+        筛选栏上，一个多余的年份就会把那一格挤宽。"""
+        form = EventPeriodForm({"start": "2026-09-15", "end": "2026-10-01"})
+        self.assertNotIn("2026", form.date_chip)
+        self.assertIn("2026", form.description())
+
+
+class EventAddressTests(PageTestCase):
+    """街道地址，以及 Where 那一行上那条地图链接（2026-09-15，用户提的）。
+
+    ⭐ **`location` 和地址是两层信息，不是同一个问题的两种写法。** 库里 `location`
+       存的全是房间名（`Chapel` / `Room 2B` / `Back garden`）—— 这些在地图上打不开。
+       到了门口的人要知道哪一间，还没出门的人要知道哪一栋。
+    """
+
+    ADDRESS = {"address_street": "120 Riverbank Road", "address_city": "Springfield",
+               "address_state": "CA", "address_postal_code": "90210"}
+    ONE_LINE = "120 Riverbank Road, Springfield, CA, 90210"
+
+    def detail(self, event=None):
+        self.login(self.lisi)
+        return self.client.get(reverse(
+            "events:event_detail", args=[(event or self.event).pk])).content.decode()
+
+    def where(self, html):
+        """Where 那一格，切到下一个 `<div>` 为止。"""
+        block = html.split(">Where<", 1)[1]
+        return block[:block.index("</div>")]
+
+    # --- 拼那一行 ------------------------------------------------------------
+
+    def test_a_partly_filled_address_leaves_no_empty_gaps(self):
+        """🔴 只填了城市的活动得到的是 `Springfield`，不是 `, Springfield, , `。
+
+        一条带着空档的地址交给地图，搜出来的是别处 —— 而链接看起来完全正常。
+        """
+        self.event.address_city = "Springfield"
+        self.event.save(update_fields=["address_city"])
+        self.assertEqual(self.event.postal_address, "Springfield")
+
+    def test_no_address_at_all_is_an_empty_string_not_a_row_of_commas(self):
+        self.assertEqual(self.event.postal_address, "")
+
+    def test_the_whole_address_joins_in_reading_order(self):
+        for field, value in self.ADDRESS.items():
+            setattr(self.event, field, value)
+        self.assertEqual(self.event.postal_address, self.ONE_LINE)
+
+    # --- 页面 ---------------------------------------------------------------
+
+    def test_the_room_and_the_street_are_both_shown(self):
+        """⚠️ 两个都要画。只画地址的话，到了楼下的人不知道进哪一间。"""
+        self.event.location = "Chapel"
+        for field, value in self.ADDRESS.items():
+            setattr(self.event, field, value)
+        self.event.save()
+        where = self.where(self.detail())
+        self.assertIn("Chapel", where)
+        self.assertIn(self.ONE_LINE, where)
+
+    def test_an_address_with_no_room_yet_still_gets_a_where_line(self):
+        """⚠️ 条件是「房间**或**地址」，不是只看房间 —— 否则一场只填了地址、
+        还没定房间的活动整格不画，而地址明明已经填了。"""
+        self.event.location = ""
+        for field, value in self.ADDRESS.items():
+            setattr(self.event, field, value)
+        self.event.save()
+        self.assertIn(self.ONE_LINE, self.where(self.detail()))
+
+    def test_the_map_link_carries_the_whole_address_escaped(self):
+        """⚠️ `urlencode` 不能省：地址里有逗号和空格，不转义的话查询串在半路被
+        截断，地图打开的是别处 —— 而它看起来完全正常。"""
+        for field, value in self.ADDRESS.items():
+            setattr(self.event, field, value)
+        self.event.save()
+        where = self.where(self.detail())
+        self.assertIn("google.com/maps/search/", where)
+        self.assertIn("120%20Riverbank%20Road%2C%20Springfield", where)
+
+    def test_a_room_with_no_address_draws_no_map_link(self):
+        """🔴 没有地址就**完全不画**那条链接，而不是画一个指向空查询的。
+
+        一条点开是「搜索：（空）」的地图链接，比没有链接更难解释。
+        """
+        self.event.location = "Chapel"
+        self.event.save(update_fields=["location"])
+        where = self.where(self.detail())
+        self.assertIn("Chapel", where)
+        self.assertNotIn("google.com/maps", where)
+        self.assertNotIn("maps.apple.com", where)
+
+    def test_both_map_destinations_are_offered_side_by_side(self):
+        """🔴 **两条并排，让人自己选**（2026-09-15 第二轮，用户改的主意）。
+
+        第一版是「一条链接，系统自己选」—— 而它把**平台**当成了**偏好**。
+        用户的原话：「我虽然用 mac，但是我更熟悉 Google Map 而不是 Apple Map」。
+        多数人的习惯不是这个人的习惯，而那一版**连选的机会都不给**：
+        `target="_blank"` 意味着点下去 Apple 地图已经在新标签页打开了。
+
+        ⭐ 顺带整套消失的东西：`navigator.platform` 嗅探（连同 iPadOS 报
+           `MacIntel` 那条特例）、两个钩子属性、一个 `htmx:afterSwap` 监听，
+           以及一句欠着的代价（「关掉 JS 的 iPhone 用户会落到 Google 网页版」）。
+           现在零状态、零嗅探，**没有 JavaScript 时两条都完整可用** ——
+           而这一条断言的正是「两条都在服务端的响应里」。
+        """
+        for field, value in self.ADDRESS.items():
+            setattr(self.event, field, value)
+        self.event.save()
+        where = self.where(self.detail())
+        self.assertIn("https://www.google.com/maps/search/", where)
+        self.assertIn("https://maps.apple.com/?q=", where)
+        self.assertIn("Google Maps", where)
+        self.assertIn("Apple Maps", where)
+
+    # --- 搜索 ---------------------------------------------------------------
+
+    def test_searching_by_street_finds_it(self):
+        """🔴 这一格的标签写着「Search by name or location」。
+
+        在加地址之前 `location` 就是全部的「哪里」；加完之后不补这两列的话，
+        那句话就成了一句**每个字都对的假话** —— 有人输入街道名，一条都搜不到。
+        """
+        for field, value in self.ADDRESS.items():
+            setattr(self.event, field, value)
+        self.event.save()
+        self.login(self.lisi)
+        found = self.client.get(reverse("events:event_list"), {"q": "Riverbank"})
+        self.assertContains(found, self.event.name)
+
+    def test_searching_by_city_finds_it(self):
+        for field, value in self.ADDRESS.items():
+            setattr(self.event, field, value)
+        self.event.save()
+        self.login(self.lisi)
+        self.assertContains(
+            self.client.get(reverse("events:event_list"), {"q": "Springfield"}),
+            self.event.name)
+
+    # --- 日历 ---------------------------------------------------------------
+
+    def test_the_calendar_entry_can_be_navigated_to(self):
+        """⭐ 这份文件住在**别人**手机里，而日历客户端普遍拿 LOCATION 去开地图。
+
+        在加地址之前这里交出去的是 `Chapel` —— 一个只有本院的人看得懂的词。
+        """
+        self.event.location = "Chapel"
+        for field, value in self.ADDRESS.items():
+            setattr(self.event, field, value)
+        self.event.save()
+        self.login(self.lisi)
+        text = self.client.get(reverse(
+            "events:event_calendar", args=[self.event.pk])).content.decode()
+        line = next(one for one in text.replace("\r\n ", "").split("\r\n")
+                    if one.startswith("LOCATION:"))
+        self.assertIn("Chapel", line)
+        self.assertIn("120 Riverbank Road", line)
+
+
 class CalendarSubscriptionPageTests(PageTestCase):
     """My Signups 上那一块：发钥匙、显示地址、换钥匙（2026-09-14）。"""
 
@@ -15755,8 +16081,15 @@ class TwoListsTests(PageTestCase):
                                   ("events:program_list", "program", "event")):
             with self.subTest(page=name):
                 page = self.page(name)
-                self.assertIn(f"All {word}s", page)
-                self.assertIn(f"{word} in this period", page)
+                # ⚠️ **2026-09-15 改口**：这一条原来断言的三处里，有两处的措辞
+                #    随新版筛选栏变了 ——
+                #      · 角色那一格的空选项从「All events / All programs」变成
+                #        「Role」（两页同一个词，收起时只写一个词）；
+                #      · 计数从「1 event in this period.」变成「1 in this period」
+                #        （标题行就在它左边写着 Events / Programs）。
+                #    🔴 **那两处因此不再可能说错词，所以这一条不必再看它们** ——
+                #       而它守的东西没变：**空状态那一句**仍然逐字用那个名词，
+                #       而那正是当初漏掉、演示数据恰好盖住的第三处。
                 self.assertNotIn(f"All {other}s", page)
                 empty = self.page(name, q="nothing-matches-this")
                 self.assertIn(f"No {word}s for you in this period", empty)
@@ -16208,17 +16541,31 @@ class LiveFilterTests(PageTestCase):
                          "the filter is live, and reads as a step you missed")
 
     def test_clear_survives_because_it_is_not_a_filter_button(self):
-        # Four boxes to empty by hand is exactly what it saves, and live
-        # filtering does not empty them for you.
+        """Clear 不是提交键，所以实时筛选那一轮没有把它一起撤掉。
+
+        ⚠️ **2026-09-15 改口**：它现在跟着底下那行摘要走，**筛过东西才画**
+           （用户给的版式里，Clear 就在「Filtered by dates」那一行上）。
+           这一条原来断言它无条件存在，而那半句不再成立 —— 但它真正守的东西
+           没变：四个框要手工清空，而实时筛选不会替你清，所以**只要有东西可清，
+           这条路就必须在**。两头都断言，免得哪天它被顺手撤掉。
+        """
         self.login(self.lisi)
+        self.assertNotContains(
+            self.client.get(reverse("events:event_list")), ">Clear</a>",
+            msg_prefix="没筛任何东西时不该有一颗清空空筛选的键")
         self.assertContains(
-            self.client.get(reverse("events:event_list")), ">Clear</a>")
+            self.client.get(reverse("events:event_list"), {"q": "kitchen"}),
+            ">Clear</a>")
 
     def test_the_management_list_is_live_too_and_keeps_its_report_button(self):
+        """⚠️ 那颗键 2026-09-15 从「Generate report」改叫「Generate」（用户定的：
+        管理页不需要 Schedule，那一格改成 Generate）—— 名字变了，**它仍然是
+        这张表单的第二个 submit**，而那才是这一条守的东西。"""
         form = self.form("events:event_manage_list", user=self.zhang)
         self.assertIn("hx-trigger", form)
         html = self.client.get(reverse("events:event_manage_list")).content.decode()
-        self.assertIn(">Generate report</button>", html)
+        self.assertIn(">Generate</button>", html)
+        self.assertIn('name="report"', html)
 
 
 class ScheduleToggleTests(PageTestCase):
@@ -18127,10 +18474,13 @@ class RoleKindFilterTests(PageTestCase):
         self.assertEqual(list(narrowed).count(self.helping_only), 1)
         self.assertEqual(narrowed.count(), 2)
         # 页面上那行计数同样只数一次 —— 分页正是被重复行毁掉的第一样东西。
+        # ⚠️ **2026-09-15 改口**：那句话从「2</span> events in this period.」变成
+        #    了「2 in this period」（计数搬到标题行右端，而那一行左边就写着
+        #    Events / Programs，名词不必再说一遍）。断言的数字和意图没变。
         self.login(self.lisi)
         html = self.client.get(
             reverse("events:event_list"), {"nature": "helping"}).content.decode()
-        self.assertIn("2</span>\n    event", html)
+        self.assertIn("2 in this period", html)
 
     def test_a_role_that_is_not_open_to_them_does_not_pull_its_event_in(self):
         """🔴 判据是 `for_audience()`，不是这场活动的全部角色。
@@ -18190,8 +18540,13 @@ class RoleKindFilterTests(PageTestCase):
         """
         self.login(self.lisi)
         html = self.client.get(reverse("events:event_list")).content.decode()
-        self.assertIn("Helping (give your time)", html)
-        self.assertIn("Attending (receive a service)", html)
+        # ⚠️ **2026-09-15 改口**：那句解释不再拼进标签（`Helping (give your time)`），
+        #    而是画在展开的那一列里、词的下面一行 —— 用户要的版式，收起时只写
+        #    一个词。🔴 **这一条守的东西一个字没变**：那句话必须是**第二人称**的
+        #    「give your time」，而不是 `NATURE_EXPLANATIONS` 那本的「they give
+        #    their time」。读它的人就是那个人，用第三人称等于当着他的面把他称作别人。
+        self.assertIn("give your time", html)
+        self.assertIn("receive a service", html)
         self.assertNotIn("they give their time", html)
 
     def test_the_management_list_has_no_such_box_and_ignores_the_parameter(self):
@@ -18981,13 +19336,17 @@ class ScheduleOpeningViewTests(SimpleTestCase):
         · 有 `data-clear-filters` 钩子 —— 没有它就退回整页重来；
         · 那段 JS **不碰任何面板状态**：这条是「Clear 不该关面板」的字面形式。
         """
-        markup = self.source("events", "templates", "events", "_period_filter.html")
-        clear = [line for line in markup.splitlines()
-                 if 'label="Clear"' in line]
-        self.assertTrue(clear, "Clear 那颗按钮不见了")
-        for line in clear:
-            self.assertIn("href=", line, "Clear 不再是一个真链接 —— 没有 JS 时它就死了")
-            self.assertIn("clears=1", line)
+        # ⚠️ **2026-09-15 改口两处**：Clear 从一颗 `button.html` 的按钮变成了
+        #    一行字（用户定的版式），而它连同那行摘要一起搬进了
+        #    `_filter_summary.html`（那一行要走 out-of-band，见那个文件）。
+        #    🔴 **守的三件事一件没少**，只是 `clears=1` 那个参数换成了它唯一
+        #       产生的那个属性：`data-clear-filters`。
+        markup = self.source("events", "templates", "events", "_filter_summary.html")
+        clear = [line for line in markup.splitlines() if ">Clear</a>" in line]
+        self.assertTrue(clear, "Clear 不见了")
+        whole = markup[markup.index("<a href="):]
+        self.assertIn("href=", whole, "Clear 不再是一个真链接 —— 没有 JS 时它就死了")
+        self.assertIn("data-clear-filters", whole)
 
         body = self.clear_handler()
         for word in ("detail", "schedule", "isOpen"):
@@ -19027,7 +19386,12 @@ class ScheduleOpeningViewTests(SimpleTestCase):
     def test_the_hook_is_a_class_of_its_own_not_form_dot_card(self):
         """⚠️ 靠 `form.card` 去匹配会命中将来任何一张长在表单里的卡片。"""
         markup = self.source("events", "templates", "events", "_period_filter.html")
-        self.assertIn('class="filter-card card', markup)
+        # ⚠️ **2026-09-15 改口**：`.card` 从这张卡上撤掉了 —— 它从一张 180px 的
+        #    大白卡变成了一条 53px 的 bar，自己就是容器（见 app.css 的
+        #    `.filter-bar`）。🔴 **这一条守的是那个钩子还在**，而那件事更要紧了：
+        #    现在有三处读 `.filter-card`（钉住那条 CSS、`watchFilterHeight()`、
+        #    `occludedTop()`）。
+        self.assertIn('class="filter-card', markup)
         self.assertNotIn("form.card", self.styles())
 
 

@@ -8,6 +8,7 @@ reaching into a request. Phase C's views construct the same classes unchanged.
 import datetime
 
 from django import forms
+from django.utils.text import get_text_list
 from django.core.exceptions import ValidationError
 from django.conf import settings
 from django.db.models import Q
@@ -602,7 +603,14 @@ class AudienceAdminForm(EventAudienceFormMixin, forms.ModelForm):
 #: same questions" has been a mixin since `AudienceFormMixin` (which serves
 #: five tables the same way).
 SHARED_PUBLISH_FIELDS = (
-    "name", "ministry", "location", "status", "requires_guardian_consent",
+    "name", "ministry", "location",
+    # ⚠️ 紧跟着 `location`，因为它们回答的是同一个问题的两半：房间在哪一栋楼里。
+    #    ⚠️ 代价如实说：表单是**逐个字段平铺**渲染的（`form_fields.html`），
+    #       所以活动编辑页因此长了四行。分组要动 `drawn_separately` 那套机制，
+    #       而那是「几个字段彼此有关系、选了哪一档决定下面问什么」才用的东西 ——
+    #       这四个之间没有那种关系，硬套会把一个简单的东西说复杂。
+    "address_street", "address_city", "address_state", "address_postal_code",
+    "status", "requires_guardian_consent",
     # L3. Right after the lifecycle fields and before the prose, because
     # "who is this for" is a publishing decision rather than a detail.
     *Audience.AUDIENCE_FIELDS,
@@ -1363,7 +1371,13 @@ class EventPeriodForm(forms.Form):
         # `type="search"` is semantic, not styling — it is what gives a phone the
         # right keyboard and the browser its own clear button. Same exception
         # `type="date"` gets under phase-c.md's placement rules.
-        widget=forms.TextInput(attrs={"type": "search"}),
+        # ⚠️ placeholder 是**语义**属性（同 `type="date"` 那条例外），不是样式：
+        #    2026-09-15 起这一格的标签是 `sr-only`（一条式的版式里没有位置放它），
+        #    所以框里那句提示是看得见的人唯一读得到的说明。
+        #    ⚠️ 标签**没有删**，只是不显示 —— 读屏的人照旧听得到「Search by name
+        #       or location」，而那句话比 placeholder 说得更全。
+        widget=forms.TextInput(attrs={
+            "type": "search", "placeholder": "Search events or locations"}),
     )
     start = forms.DateField(
         required=False, label="From",
@@ -1380,7 +1394,11 @@ class EventPeriodForm(forms.Form):
     #    they are part of.
     ministry = forms.ModelChoiceField(
         queryset=Ministry.objects.filter(is_active=True).order_by("name"),
-        required=False, label="Ministry", empty_label="All ministries",
+        # ⚠️ 空选项从「All ministries」改成「Ministry」（2026-09-15，跟着新版式）。
+        #    **代价如实说**：原来那句说的是「当前没筛」，新的说的是「这一格管什么」。
+        #    可接受，是因为「筛了什么」现在由底下那行 `Filtered by …` 承担 ——
+        #    在此之前没有那一行，所以那时选「All ministries」是唯一说得出状态的地方。
+        required=False, label="Ministry", empty_label="Ministry",
     )
 
     def __init__(self, *args, ministries=None, audience=NO_AUDIENCE,
@@ -1431,18 +1449,26 @@ class EventPeriodForm(forms.Form):
             #    time". Both live side by side in events/models.py; the reason
             #    there are two is written there.
             #
-            # ⚠️ The empty option says "All events", not "Any kind": the box
-            #    filters *events*, and an event is not a kind of anything.
-            # ⚠️ `noun` since 2026-09-14: this same form serves the Programs page,
-            #    where the thing being filtered is a **program**. It was found in
-            #    a walkthrough — the box sat there saying "All events" on a page
-            #    whose every row was a course. The word is passed in rather than
-            #    derived from anything here, because this form has no idea which
-            #    list it is on; `views.LIST_PAGES` is where it is written once.
+            # ⚠️ 空选项 2026-09-15 改成「Role」，标签从「Role kind」改成「Role」
+            #    （跟着新版式）。同 ministry 那一格：说的从「当前没筛」变成
+            #    「这一格管什么」，而状态由底下那行 `Filtered by …` 说。
+            #
+            # 🔴 **`noun` 这个参数因此在这一格上没有对象了。** 它 2026-09-14 加进来
+            #    是为了让空选项在课程页上说「All programs」而不是「All events」——
+            #    走查时抓到的，那一页每一行都是课程而框里写着 events。
+            #    现在空选项是「Role」，两页一个词，那件事**不可能再发生**。
+            #    ⚠️ 参数留着：`views.LIST_PAGES` 仍然传它，而这个表单别处
+            #       （`q` 的 label）还用得上；这里只是不再需要它。
             self.fields["nature"] = forms.ChoiceField(
-                required=False, label="Role kind",
-                choices=[("", f"All {noun}s")] + [
-                    (value, f"{label} ({NATURE_INVITATIONS[value]})")
+                required=False, label="Role",
+                choices=[("", "Any role")] + [
+                    # 🔴 **标签只有一个词**（2026-09-15）。解释不再拼进来 ——
+                    #    它跟着走 `nature_options` 那条路，画在展开的那一列上。
+                    #    ⚠️ 这一版**回到了 `Nature` 那条注释本来的主张**：
+                    #       「一个词一档，解释放在旁边而不是塞进标签 —— 带着注解
+                    #       的标签在问的那张表单上读得好，在报出来的那一格里读得
+                    #       糟」。是这张筛选表单当初把两半又粘回去了。
+                    (value, label)
                     for value, label in ParticipationRole.Nature.choices],
             )
         # ⚠️ Ministry first (2026-08-05). Declared after the dates because it was
@@ -1496,6 +1522,82 @@ class EventPeriodForm(forms.Form):
             day_start(start) if start else None,
             day_start(end + datetime.timedelta(days=1)) if end else None,
         )
+
+    @property
+    def nature_options(self):
+        """Role 那一格展开时的每一行：`(值, 一个词, 一句解释)`。
+
+        🔴 **收起时只写那个词，展开时才有解释**（用户 2026-09-15 定的版式）。
+           原生 `<select>` 做不到这件事 —— 收起时显示的就是选中那个 `<option>`
+           的文字，两处是同一个字符串。所以这一格是自绘的（用户批的破例），
+           而这个属性是那一列的数据。
+
+        ⚠️ 解释走 `NATURE_INVITATIONS`（「give your time」/「receive a service」），
+           **不是** `NATURE_EXPLANATIONS`。两本字典的区别 2026-09-08 写过：后者是
+           第三人称的说明（「他们付出时间」），而这里是在**邀请这个人挑一边**，
+           所以用第二人称那一本。
+        """
+        return [("", "Any role", "")] + [
+            (value, label, NATURE_INVITATIONS[value])
+            for value, label in ParticipationRole.Nature.choices]
+
+    @property
+    def nature_label(self):
+        """收起时那一格上写的字：选了就是那个词，没选就是「Role」。"""
+        chosen = self.cleaned_data.get("nature") if self.is_valid() else ""
+        if not chosen:
+            return "Role"
+        return dict(ParticipationRole.Nature.choices).get(chosen, "Role")
+
+    @property
+    def filtered_by(self):
+        """底下那一行摘要：**筛了哪几类**，没筛则空串（2026-09-15）。
+
+        🔴 和 `description()` 是两句话，不要合并。`description()` 说的是「筛出了
+           什么」（"All ministries · 15 Sep 2026 – 01 Oct 2026"），报表正文印的是
+           它 —— 一页数字没有一句说明自己涵盖什么，会被人读成「全部」。
+           这一句说的是「你此刻筛着哪几类」，配一颗 Clear，短得多。
+
+        ⚠️ 表单无效时交回空串，于是那一行整个不画。**这是有意的**：无效时
+           `description()` 会答 "All ministries · all dates"，而那句话正好是一句
+           假话盖在错误上（错误另有一行，在表单最底下）。
+        """
+        if not self.is_valid():
+            return ""
+        named = []
+        if self.cleaned_data.get("q"):
+            named.append("search")
+        if self.cleaned_data.get("ministry"):
+            named.append("ministry")
+        if self.cleaned_data.get("nature"):
+            named.append("role")
+        if self.cleaned_data.get("start") or self.cleaned_data.get("end"):
+            named.append("dates")
+        # ⚠️ `get_text_list` 而不是 `", ".join` —— 它给的是「a, b and c」，
+        #    那是这句话要被读出来的样子。Django 自带，且跟着语言走。
+        return get_text_list(named, "and") if named else ""
+
+    @property
+    def date_chip(self):
+        """那颗胶囊上的字：`Sep 15 – Oct 1` / `From Sep 15` / `Until Oct 1` / `Dates`。
+
+        🔴 **和 `description()` 共用那三个分支，但格式不同** —— 那边给报表正文，
+           带年份（`15 Sep 2026 – 01 Oct 2026`）；这里在一条筛选栏上，一个多余的
+           年份就会把那一格挤宽。合并会让其中一个变形。
+
+        ⚠️ 单边区间是**一等公民**，不是边角情况（用户 2026-09-15 定的）：
+           「从九月一号起，不限截止」是一个真实的筛选，而日历上点两下说不出它 ——
+           那两个原生日期框才说得出来。
+        """
+        start = self.cleaned_data.get("start") if self.is_valid() else None
+        end = self.cleaned_data.get("end") if self.is_valid() else None
+        if start and end:
+            return f"{start:%b %-d} – {end:%b %-d}"
+        if start:
+            return f"From {start:%b %-d}"
+        if end:
+            return f"Until {end:%b %-d}"
+        return "Dates"
 
     def description(self):
         """One English line saying what this filter selected.
@@ -1558,8 +1660,18 @@ class EventPeriodForm(forms.Form):
             #    space from a phone's autocorrect would make `icontains` match
             #    nothing at all, and the page would come back empty with the box
             #    apparently holding a perfectly good word.
+            # 🔴 **街道和城市也在搜索范围里**（2026-09-15 加地址时补的）。
+            #    这一格的标签写着「Search by name or location」，而在加地址之前
+            #    `location` 就是全部的「哪里」。加完之后不补这两列的话，页面上那句
+            #    话就成了一句**每个字都对的假话**：有人输入街道名，一条都搜不到，
+            #    而标签明写着能按 location 搜。
+            #    ⚠️ **不搜** state / postal_code：没有人输入「CA」或一串邮编来找
+            #       活动，而每一列都是一次 `icontains`。
             events = events.filter(
-                Q(name__icontains=search) | Q(location__icontains=search))
+                Q(name__icontains=search)
+                | Q(location__icontains=search)
+                | Q(address_street__icontains=search)
+                | Q(address_city__icontains=search))
         nature = self.cleaned_data.get("nature") if self.is_valid() else ""
         if nature:
             # 🔴 **A subquery, never a join.** Written

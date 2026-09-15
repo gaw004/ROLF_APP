@@ -11,14 +11,35 @@ event_list 的结果区。整页和 HTMX 片段渲染的是同一份 —— 视�
      对志愿者可见的活动，里面有满员的、有取消的、还有今天上午已经跑完的 ——
      句子里留着 open for signup 就是一个当场可以被右边那一列标签证伪的说法。
   {% endcomment %}
-  <p class="mb-4 text-sm text-ink-600 dark:text-ink-300">
+  {% comment %}
+  🔴 **两块 out-of-band 的东西**（2026-09-15）：计数在标题行右端、摘要在筛选表单
+     底下 —— 两者都在 `#event-results` **外面**，而 HTMX 只换这一块。少了 OOB，
+     改一个筛选之后列表变了、而那两处**永远不动**：一个是每个字都对只是过期的数，
+     另一个是「Filtered by … / Clear」压根不出现。后者是用户报上来的。
+
+  🔴 **只在 HTMX 那条路上画**（`is_htmx`）。整页那一次它们已经由
+     `event_list.html` 和 `_period_filter.html` 各画过一遍了 —— 不加这个条件的话，
+     整页 DOM 里会有**两个同名 id**，而 OOB 的落点从此是不确定的那一个。
+     ⚠️ 重复 id 不报错，页面看起来也完全正常，所以只能靠数出来发现。
+
+  ⚠️ `id` 必须和外面那两份**一字不差**，否则 OOB 找不到落点而**静默失败**
+     （htmx 不报错，那两处就是不更新）。
+
+  ⚠️ 名词不再出现在计数那句话里（原来是「21 events in this period.」）：标题行
+     就在它左边写着 Events / Programs，紧挨着再说一遍是重复。
+  {% endcomment %}
+  {% if is_htmx %}
+    <p id="event-count" hx-swap-oob="true"
+       class="text-sm text-ink-600 dark:text-ink-300">
+      {{ total }} in this period
+    </p>
+    {% include "events/_filter_summary.html" with oob=1 %}
     {% comment %}
-    ⚠️ 名词从视图来（`list_noun`，2026-09-14）：同一份模板画 Events 和 Programs
-       两页，写死 "event" 的话课程页上会说「1 event in this period」。
+    ⚠️ 第三块：日期胶囊上那几个字。理由同上 —— 它也在筛选表单里，也就是
+       `#event-results` 外面。少了它，选完日期列表变了而胶囊还写着「Dates」。
     {% endcomment %}
-    <span class="font-semibold text-ink-900 dark:text-ink-50">{{ total }}</span>
-    {{ list_noun }}{{ total|pluralize }} in this period.
-  </p>
+    <span id="date-chip-label" hx-swap-oob="true">{{ period.date_chip }}</span>
+  {% endif %}
 
   <ul class="space-y-3">
     {% for event in events %}

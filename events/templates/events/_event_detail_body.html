@@ -137,10 +137,29 @@
           <dd class="text-xs text-ink-600 dark:text-ink-300">{{ when_detail }}</dd>
         {% endif %}
       </div>
-      {% if event.location %}
+      {% comment %}
+      Where（2026-09-15 加了街道地址和那条地图链接）。
+
+      🔴 **两层信息，都要画**：`location` 是「楼里的哪一间」（`Chapel` /
+         `Room 2B`），`postal_address` 是街道地址。它们不是同一个问题的两种写法 ——
+         到了门口的人要知道哪一间，还没出门的人要知道哪一栋。
+         ⚠️ 因此条件是 `location or postal_address`，不是只看前者：一场只填了
+            地址、还没定房间的活动照样要有 Where。
+
+      ⚠️ 地址那一行用 `postal_address`，而它是**模型上唯一一处拼地址的地方**。
+         在这里用 `{{ event.address_street }}, {{ event.address_city }}…` 的话，
+         只填了城市的活动会渲染成 `, Springfield, , `。
+      {% endcomment %}
+      {% if event.location or event.postal_address %}
         <div>
           <dt class="text-xs text-ink-600 dark:text-ink-300">Where</dt>
-          <dd>{{ event.location }}</dd>
+          {% if event.location %}<dd>{{ event.location }}</dd>{% endif %}
+          {% if event.postal_address %}
+            <dd class="text-sm text-ink-700 dark:text-ink-200">{{ event.postal_address }}</dd>
+            <dd class="mt-1">
+              {% include "events/_map_link.html" with address=event.postal_address %}
+            </dd>
+          {% endif %}
         </div>
       {% endif %}
       {% comment %}

@@ -29,13 +29,22 @@
 {% endcomment %}
 {% block page_bar %}
   {% comment %}
-  🔴 **地址用 `request.get_full_path`，不是 `{% templatetag openblock %} url {% templatetag closeblock %}`。**
-     这一页有查询串（period 筛选、`?report=1`、翻页），而 `aria-current="page"`
-     说的是「你在这一页」。写成裸 URL 的话，那是一个自称本页、点了却把你的
-     筛选和页码全丢掉的链接 —— 正是这条属性在防的那种谎。
+  🔴 **2026-09-15 从面包屑改成并排的兄弟页**（用户提的：这一页要插进 Events 和
+     Programs 中间）。在此之前这里是「你在哪儿 + 从哪儿来」的两格，理由写在上面
+     那段注释里 ——「从 Events 点 manage 进去以后，回不到 Events 界面了」。
+     ⚠️ **那个理由被更好地满足了**，不是被否掉：现在两边的兄弟页各有一格，
+        而不是只回得去来路那一格。
+
+  ⚠️ 顺序和另外两页**一字不差**，由 `views._sibling_tabs()` 一处写死 ——
+     三页各拼一份的话，迟早有一页的顺序不一样，而那正是这一排当初定「顺序固定」
+     时要防的「字在跳转的一瞬间横着挪」。
+
+  ⚠️ 原来这里那条「地址用 `request.get_full_path` 不用裸 URL」的注意事项**不再
+     适用**：兄弟排里当前页那一格的地址由 `_sibling_tabs()` 给，而它给的是裸的
+     列表地址。代价是点自己这一格会丢掉筛选串 —— 和另外两页的行为一致
+     （那两页一直如此），所以这一排上三格是同一种东西。
   {% endcomment %}
-  {% url 'events:event_list' as list_url %}
-  {% include "core/components/page_bar.html" with title=manage_list_name url=request.get_full_path parent="Events" parent_url=list_url %}
+  {% include "core/components/page_bar.html" with tabs=page_tabs %}
 {% endblock %}
 
 {% block content %}
@@ -103,7 +112,14 @@
   {% endif %}
 
   {% url 'events:event_manage_list' as manage_url %}
-  {% include "events/_period_filter.html" with action=manage_url report_button=1 %}
+  {% comment %}
+⚠️ `past_selectable` 是**显式**传的，不从 `report_button` 反推（2026-09-15）：
+   两个必须手工保持一致的开关迟早会分家，而这里分家的表现是「报表筛选选不了
+   过去」—— 而报表正是活动结束之后才要看的东西。
+   ⚠️ 志愿者那两页不传它：它们本来就只列今天往后的，所以过去的日子选了也是
+      空列表，灰掉是在**说实话**，不是在拦人。
+{% endcomment %}
+{% include "events/_period_filter.html" with action=manage_url report_button=1 past_selectable=1 %}
 
   {% include "events/_event_manage_results.html" %}
 

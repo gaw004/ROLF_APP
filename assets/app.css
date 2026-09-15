@@ -610,125 +610,6 @@
       visibility 560ms;
   }
 
-  /* 筛选卡收起来的样子（2026-09-09）。展开时是这张卡一直以来的样子，
-   * 收起时只剩一行：一句摘要 + 那颗展开键。
-   *
-   * 🔴 **为什么收起是必要的，而 2026-09-03 那次折成一条又被撤回。**
-   *    那一次是**永远**一条（搜索框因此失去了可对齐的对象，见
-   *    `FilterSearchAlignmentTests`），用户当天判它「保留两层更好用」。
-   *    这一次是**默认两层、可以手动收起** —— 展开态一个像素都没动，那三条对齐
-   *    守卫照样守着它。真正逼出这一版的是上一批：Role kind 那一格让这张卡长到
-   *    330.5px，而开着日程时它是**钉住的**，800px 高的窗口上只剩约 3 张卡片。
-   *
-   * 🔴 **两套选择器，因为有两个时刻。**
-   *    `html.filters-collapsed …` 是 Alpine 加载**之前**那一段（由模板里那段内联
-   *    boot 脚本写上，同深色模式那次）；`.filter-card.is-collapsed …` 是 Alpine
-   *    接手之后。接手时那段 JS 会把 html 上的 class 摘掉，所以两套永远不同时活着 ——
-   *    真让它们并存就是一场特异性官司，而输的那一次表现为「点了收起没反应」。
-   *
-   * ⚠️ 用 `display: none` 收起来，字段因此**照样跟着表单提交**（隐藏字段是提交的）。
-   *    收起一张筛选卡不该顺手把筛选清掉。
-   *
-   * ⚠️ 没有 JS 时两套都不生效 —— 脚本不跑、Alpine 不在，卡片就是展开的那个样子。
-   *    `<noscript>` 里那颗 Filter 按钮因此照样够得着。 */
-  /* 摘要那一句：**只有收起的时候才出现**。展开时卡片就摆在屏幕上，再说一遍
-   * 「你筛了什么」是同一件事说两遍。
-   * ⚠️ 一行不折、放不下就省略号：开着日程时这张卡只有 34rem，而摘要可能是
-   *    "Food Pantry · 1 Oct 2026 – 31 Oct 2026 · matching “kitchen” · helping roles"。
-   *    折成两行就不是「收起来只有一行」了。
-   * ⚠️ 右边给箭头让开 2.75rem + 一点余量 —— 它是绝对定位的，不占位置，
-   *    不让的话长摘要会从它底下穿过去。 */
-  .filter-card-summary {
-    display: none;
-    min-width: 0;
-    padding-right: 3.25rem;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    font-size: 0.875rem;
-    color: var(--color-ink-600);
-  }
-
-  .dark .filter-card-summary {
-    color: var(--color-ink-300);
-  }
-
-  /* 箭头。**没有圆底**（2026-09-09，用户：「不要圆圈，只要箭头可以不？」）。
-   *
-   * ⚠️ 它一度用的是 `.panel-close`（全站共享的圆形图标按钮，面板那颗 × 用的就是
-   *    它）。撤掉不是因为「不好看」：那个圆底在面板那两处是**浮在内容之上**的，
-   *    需要一块自己的底才看得清；而这一颗待在卡片里、四周是留白，圆底只是多一层
-   *    没有工作要做的装饰。
-   *
-   * 🔴 **圆底一去，可点区域就只剩那个字形了** —— 所以这里必须自己把热区撑回来。
-   *    `min-width` / `min-height` 写死 2.75rem = **44px**，触控目标的下限，
-   *    而屏幕上看到的只是一个箭头。这是这次改动**唯一**要补的东西，别删。
-   *    ⚠️ 靠 `padding` 撑**不够**：量出来是 32×40（内边距加上字形自己的宽高），
-   *       两个方向都差一点，而这种差一点在截图上完全看不出来。写死那个数。
-   *
-   * ⚠️ 收起时转 180°，展开时朝下（「按我收起来」）。这个旋转不是装饰：它是这颗
-   *    开关**说出自己此刻是哪一件事**的方式，而那正是 2026-08-28 删掉 `toggles`
-   *    时缺的东西。所以 reduced-motion 下**只去掉过渡，不去掉那个角度**。
-   *
-   * 🔴 **里面画的是 SVG，不是一个箭头字符。** 用 `&#x2304;` 那一版盒子上下对称、
-   *    **墨迹不对称**（那个字形在字框里偏下），于是转 180° 之后它偏上，和旁边
-   *    那句摘要不在一条线上。⚠️ 这一条量不出来 —— `getBoundingClientRect()`
-   *    报的是 20/20，因为它量的是盒子；差的是盒子里那笔墨。而且它跟着字体走。 */
-  .filter-toggle {
-    /* 🔴 **绝对定位在卡片右下角，两个状态一个位置。** 用户报过两次，两次都在这一
-     *    点上：「箭头应该跟 clear 和 schedule 在一条线上，现在因为箭头，filter
-     *    卡片下面多了很多空白」（它当时自己占一行），以及「箭头上下都应该在一个
-     *    位置，偏移让我很难受」（收 / 展之间它在跳）。
-     *    在流里做不到这两条：展开时它得落在控件行那一条线上，而那一行在 `w-fit`
-     *    的内层里（宽度是内容宽，不是卡片宽）；收起时控件行整块藏起来了。
-     *    绝对定位一次答完 —— 展开时它正落在卡片最后一行（Clear / Schedule）那条
-     *    线上，收起时落在那一句摘要旁边，**x 一个像素都没变**。
-     * ⚠️ 定位父级是 `.card` 自己的 `position: relative`（那一行在 `.card` 上，
-     *    注释写着它是给亮边那个 `::after` 用的 —— 这里是第二个使用者）。
-     * ⚠️ 因此它**不占流内高度**：卡片下面不会再多出一截空白，而这一整件事就是
-     *    为了给这张卡减高度。 */
-    position: absolute;
-    right: 0.5rem;
-    /* ⚠️ 0.75rem 是量出来的，不是挑的：0.5rem 时箭头的中线比 Clear 的中线低 4px
-     *    （386 对 382）。4px 在截图上看不出来，在屏幕上是「这一行有点歪」。 */
-    bottom: 0.75rem;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    min-width: 2.75rem;
-    min-height: 2.75rem;
-    line-height: 1;
-    color: var(--color-ink-600);
-    transition: transform 200ms ease, color 150ms ease;
-  }
-
-  .filter-toggle:hover {
-    color: var(--color-ink-900);
-  }
-
-  .dark .filter-toggle {
-    color: var(--color-ink-300);
-  }
-
-  .dark .filter-toggle:hover {
-    color: var(--color-ink-50);
-  }
-
-  @media (prefers-reduced-motion: reduce) {
-    .filter-toggle {
-      transition: none;
-    }
-  }
-
-  /* 收起之后卡片和下面结果区之间那 24px（`mb-6`）显得太空 —— 一行高的卡片配
-   * 一整个行距，读起来像它掉队了。⚠️ 改的是这一档的外边距，不是模板上的
-   * `mb-6`：展开态那个数是对的，而它同时也是 `#event-results` 那条
-   * `scroll-margin-top` 公式里的一项。 */
-  html.filters-collapsed .filter-card,
-  .filter-card.is-collapsed {
-    margin-bottom: 1rem;
-  }
-
   /* 日程开着时，筛选卡钉在顶上（2026-08-18）。
    *
    * ⚠️ **只在开着的时候**（选择器带 `.is-open`）。关着那一档是全站最常打开的
@@ -755,6 +636,405 @@
    *       是这一格的价钱，写在这里是因为下一个往这张卡上加东西的人要先看见它。
    *    800px 高的窗口上剩给活动卡片的约 3 张（一行量到 112px，加 `space-y-3`
    *    的 12px）。这是知情的取舍，不是没量。 */
+  /* --- 一条式的筛选栏（2026-09-15，用户给了截图）--------------------------
+   *
+   * 🔴 **搜索框靠 `flex: 1` 吃掉剩下的全部空间**，而这正是这一版和 2026-09-03
+   *    那个被撤回的版本的区别：那一次「对齐的对象」是下面那行控件的宽度（每页
+   *    不一样，要靠一个 `w-fit` 的外壳去量），这一次是**这一行的右端** ——
+   *    一个不用量的东西。所以那三条对齐守卫连同它们守的机制一起撤掉了。
+   *
+   * ⚠️ `flex-wrap` + 搜索框的 `min-width`：窄屏上搜索框先占满一行，其余控件
+   *    换到第二行。`min-width: 0` 在控件那一格上不能少 —— flex 项默认
+   *    `min-width: auto`（不许缩到比内容窄），而两个原生日期控件加起来超过
+   *    375px。这张卡为这件事栽过一次，表现是**整页横向滚动**，而宽屏上正常。 */
+  /* 🔴 **这条 bar 自己就是容器，不再套 `.card`**（2026-09-15）。
+   *    套着的时候它是「一张大白卡里的一条」—— 上下各一截卡片的内边距，
+   *    整块量到 180px 高。要的是一条 56px 的细条，所以卡片那一层去掉了。 */
+  .filter-bar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.375rem 0.375rem 0.375rem 0.875rem;
+    border: 1px solid var(--color-ink-200);
+    border-radius: 0.875rem;
+    background-color: #fff;
+    box-shadow: 0 1px 2px rgb(0 0 0 / 0.04);
+  }
+
+  .dark .filter-bar {
+    border-color: var(--color-ink-700);
+    background-color: var(--color-ink-900);
+  }
+
+  /* 搜索那一格：图标压在框上，框自己**没有边框也没有底色** —— 边框由整条 bar
+   * 提供，里面再画一个框就是两层边框。 */
+  .filter-bar-search {
+    position: relative;
+    display: flex;
+    align-items: center;
+    flex: 1 1 16rem;
+    min-width: 0;
+  }
+
+  .filter-bar-icon {
+    position: absolute;
+    left: 0;
+    color: var(--color-ink-500);
+    pointer-events: none;
+  }
+
+  /* ⚠️ `.field` 那一层在筛选栏里要退掉它的外观：全站的输入框是「标签在上、
+   *    带边框的盒子」，而这里要的是一条裸的行内输入。 */
+  .filter-bar .field { flex: 1; min-width: 0; }
+  .filter-bar .field label { position: absolute; width: 1px; height: 1px;
+    padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%);
+    white-space: nowrap; border-width: 0; }
+
+  /* 🔴 **选择器要跟得上基础那一条的特异度。**
+   *    基础规则写的是
+   *      `.field input:not([type="checkbox"]):not([type="radio"])`
+   *    —— 两个 `:not()` 把它顶到 (0,3,1)，而第一版这里写的是
+   *    `.filter-bar-search input`（0,2,1），**同层之下输掉**。
+   *    表现：bar 自己一个圆角框、里面那个输入框**又一个框**，而且放大镜压在
+   *    文字上（padding 也没生效）。用户截图抓到的。
+   *    ⚠️ 所以这里照抄那两个 `:not()` —— 不是装饰，是把特异度抬到同一档再靠
+   *       后写赢。改基础那条的形状时，这里要跟着改。 */
+  .filter-bar-search .field input:not([type="checkbox"]):not([type="radio"]) {
+    margin-top: 0;
+    width: 100%;
+    border: 0;
+    border-radius: 0;
+    background-color: transparent;
+    padding: 0.5rem 0.5rem 0.5rem 1.75rem;
+    font-size: 0.9375rem;
+  }
+
+  .filter-bar-search .field input:focus { outline: none; }
+
+  /* 同一条理由：下拉那一格也要抬到同一档，否则它照旧带着边框和白底。 */
+  .filter-select select:not([type="checkbox"]):not([type="radio"]) {
+    margin-top: 0;
+    width: auto;
+    appearance: none;
+    border: 0;
+    background-color: transparent;
+  }
+
+  /* 🔴 控件那一组左边**一条竖线**（用户版式里有）：它把「找什么」和「筛什么」
+   *    分开 —— 没有它，五个控件读起来是一排平等的东西。 */
+  .filter-bar-controls {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.25rem;
+    min-width: 0;
+    padding-left: 0.75rem;
+    border-left: 1px solid var(--color-ink-200);
+  }
+
+  .dark .filter-bar-controls { border-color: var(--color-ink-700); }
+
+  /* ⚠️ 窄屏上那条竖线要去掉：控件换到第二行之后，一条挂在左边的竖线指的是
+   *    上一行的东西。 */
+  @media (max-width: 47.99rem) {
+    .filter-bar-controls {
+      padding-left: 0;
+      border-left: 0;
+    }
+  }
+
+  /* --- 破例自绘的下拉（2026-09-15）----------------------------------------
+   *
+   * 🔴 用户明说「例外，自绘，更精致一点」。理由和**这次破例为什么比 `.field
+   *    select` 那条注释写的便宜**，全写在 `_filter_select.html` 上：底下仍然是
+   *    真的 `<select>`，去掉的只有浏览器自带的箭头。
+   * ⚠️ 破例**限定在 `.filter-select` 里**，全站别处的下拉一个字没动。 */
+  .filter-select {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+  }
+
+  .filter-select select {
+    margin-top: 0;
+    width: auto;
+    appearance: none;
+    border: 0;
+    background-color: transparent;
+    padding: 0.375rem 1.5rem 0.375rem 0.5rem;
+    font-size: 0.875rem;
+    font-weight: 500;
+    color: var(--color-ink-800);
+    cursor: pointer;
+  }
+
+  .dark .filter-select select { color: var(--color-ink-100); }
+
+  .filter-select:hover select { color: var(--color-ink-950); }
+  .dark .filter-select:hover select { color: #fff; }
+
+  /* ⚠️ `pointer-events: none` —— 箭头压在 select 上面，不让它把点击吃掉。
+   *    少了它，点箭头那一下什么都不会发生，而点旁边的字正常。
+   * ⚠️ `:scope >` 限定：Role 那一格里的箭头在一颗**按钮**里（见下），
+   *    它自己就该吃点击，不能被这一条盖住。 */
+  .filter-select > svg {
+    position: absolute;
+    right: 0.375rem;
+    color: var(--color-ink-500);
+    pointer-events: none;
+  }
+
+  /* --- Role 那一格：一颗按钮 + 一个 popover（2026-09-15）--------------------
+   *
+   * 🔴 它不是 `<select>`，理由写在 `_role_filter.html` 上（原生下拉做不到
+   *    「收起短、展开长」）。这颗触发器要和旁边那个真 select **看起来一样** ——
+   *    两格的区别只应该在展开时出现。 */
+  .filter-trigger {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+    padding: 0.375rem 0.5rem;
+    font-size: 0.875rem;
+    font-weight: 500;
+    color: var(--color-ink-800);
+    cursor: pointer;
+    white-space: nowrap;
+  }
+
+  .dark .filter-trigger { color: var(--color-ink-100); }
+  .filter-trigger:hover { color: var(--color-ink-950); }
+  .dark .filter-trigger:hover { color: #fff; }
+
+  /* ⚠️ 和日期弹层同一套外观和同一套定位（`POSITIONED` 那个名单）——
+   *    同一条筛选栏上两个弹层长得不一样，读起来是两个不同的东西。 */
+  .filter-menu {
+    margin: 0;
+    inset: auto;
+    padding: 0.375rem;
+    border: 1px solid var(--color-ink-200);
+    border-radius: 0.75rem;
+    background-color: #fff;
+    box-shadow: 0 10px 30px rgb(0 0 0 / 0.14);
+  }
+
+  .dark .filter-menu {
+    border-color: var(--color-ink-700);
+    background-color: var(--color-ink-900);
+  }
+
+  .filter-menu-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.5rem;
+    padding: 0.5rem 0.625rem;
+    border-radius: 0.5rem;
+    cursor: pointer;
+  }
+
+  .filter-menu-row:hover { background-color: var(--color-ink-100); }
+  .dark .filter-menu-row:hover { background-color: var(--color-ink-800); }
+
+  /* ⚠️ 一个词一行、解释在它下面 —— 这就是这一格存在的全部理由。 */
+  .filter-menu-word {
+    display: block;
+    font-size: 0.875rem;
+    font-weight: 500;
+  }
+
+  .filter-menu-gloss {
+    display: block;
+    font-size: 0.75rem;
+    color: var(--color-ink-600);
+  }
+
+  .dark .filter-menu-gloss { color: var(--color-ink-400); }
+
+  /* 底下那一行：筛了什么 + Clear。
+   *
+   * 🔴 **不是 flex，而这不是风格选择。** 第一版写的是 `display: flex` + `gap`，
+   *    而 flex 容器会把**裸文本节点变成一个个匿名 flex item** —— 「Filtered by」
+   *    是一个、`<strong>` 是一个、`Clear` 又是一个，于是那个 gap 在每两个之间
+   *    都加一次，一句话被拆得七零八落。
+   *    一句话就该按普通文本流排，间距由 `Clear` 自己的左外边距给。 */
+  .filter-bar-summary {
+    margin-top: 0.5rem;
+    font-size: 0.8125rem;
+    color: var(--color-ink-600);
+  }
+
+  .filter-bar-summary a { margin-left: 0.75rem; }
+
+  /* Where 那一行上并排的两条地图链接（2026-09-15）。
+   * ⚠️ `flex-wrap`：窄屏上两条各占一行，而不是把 Where 那一块撑出版心。 */
+  .map-links {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.25rem 1rem;
+  }
+
+  /* 🔴 **绝对定位，所以它永远不参与版面。** `.htmx-indicator` 靠 `opacity`
+   *    显隐（不是 `display`），普通定位下它会一直占着一行 —— 而它一年里有
+   *    九成时间是看不见的。
+   * ⚠️ 落在搜索框右端、竖线左边那一小块空白上：那里在加载时本来就是空的，
+   *    而人的视线此刻正在搜索框上。 */
+  .filter-busy {
+    position: absolute;
+    right: 0.75rem;
+    font-size: 0.75rem;
+    color: var(--color-ink-500);
+    pointer-events: none;
+  }
+
+  .dark .filter-bar-summary { color: var(--color-ink-300); }
+
+  /* ⚠️ `[hidden]` 的 UA 样式是 `display: none`，而上面那条 `display: flex`
+   *    **压得过它**（同层、而类选择器比 UA 样式重）。所以这一条不能省 ——
+   *    少了它，没筛任何东西时那里是一行空白加一截外边距。
+   *    ⚠️ 元素本身无条件渲染（`hidden` 只是藏起来），因为 OOB 交换要求落点
+   *       已经在 DOM 里 —— 理由写在 `_filter_summary.html` 上。 */
+  .filter-bar-summary[hidden] { display: none; }
+
+  /* --- 日期胶囊和它的弹层 --------------------------------------------------
+   *
+   * ⚠️ 胶囊是**浅色底的一格**，不是一颗按钮的样子：它和旁边两个下拉框是同一类
+   *    东西（「筛什么」），而右边那颗深色键才是动作。三者长得一样的话，人会
+   *    以为点胶囊会发生什么事。 */
+  .date-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.375rem;
+    padding: 0.375rem 0.625rem;
+    border-radius: 9999px;
+    background-color: var(--color-ink-100);
+    color: var(--color-ink-800);
+    font-size: 0.875rem;
+    white-space: nowrap;
+    cursor: pointer;
+  }
+
+  .date-chip:hover { background-color: var(--color-ink-200); }
+  .dark .date-chip {
+    background-color: var(--color-ink-800);
+    color: var(--color-ink-100);
+  }
+  .dark .date-chip:hover { background-color: var(--color-ink-700); }
+
+  /* 🔴 **`popover` 进 top layer**，所以这里既不需要 z-index，也不会被
+   *    `.filter-card` 钉住那一层、或者外面那列的 `overflow` 裁掉。
+   * ⚠️ `margin: 0` 和 `inset: auto` 是必需的：`[popover]` 的 UA 样式表默认
+   *    `inset: 0` + `margin: auto`，也就是**视口居中** —— 定位那一段在 app.js。 */
+  .date-popover {
+    margin: 0;
+    inset: auto;
+    padding: 1rem;
+    border: 1px solid var(--color-ink-200);
+    border-radius: 1rem;
+    background-color: #fff;
+    box-shadow: 0 10px 30px rgb(0 0 0 / 0.14);
+  }
+
+  .dark .date-popover {
+    border-color: var(--color-ink-700);
+    background-color: var(--color-ink-900);
+  }
+
+  .date-popover-nav {
+    display: grid;
+    grid-template-columns: auto 1fr 1fr auto;
+    align-items: center;
+    gap: 0.5rem;
+    margin-bottom: 0.5rem;
+    font-weight: 600;
+  }
+
+  .date-popover-nav span { text-align: center; }
+  .date-popover-nav button {
+    padding: 0.25rem 0.5rem;
+    border-radius: 0.5rem;
+    cursor: pointer;
+  }
+  .date-popover-nav button:hover { background-color: var(--color-ink-100); }
+  .dark .date-popover-nav button:hover { background-color: var(--color-ink-800); }
+
+  /* 两个月并排；⚠️ 窄屏**竖着排**（用户定的）—— 并排放不下 390px。 */
+  .date-popover-grid {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 1rem;
+  }
+
+  @media (min-width: 40rem) {
+    .date-popover-grid { grid-template-columns: 1fr 1fr; }
+  }
+
+  .date-popover-month {
+    display: grid;
+    grid-template-columns: repeat(7, 2rem);
+    gap: 0.125rem;
+  }
+
+  .date-popover-month button {
+    height: 2rem;
+    border-radius: 9999px;
+    font-size: 0.8125rem;
+    cursor: pointer;
+  }
+
+  .date-popover-month button:hover:not(:disabled) {
+    background-color: var(--color-ink-100);
+  }
+  .dark .date-popover-month button:hover:not(:disabled) {
+    background-color: var(--color-ink-800);
+  }
+
+  /* ⚠️ 置灰的那些**同时**要 `disabled`：只灰不禁用的话它们照样点得下去，
+   *    而「点了没反应」比「看得出点不了」难懂得多。禁用在模板/JS 里给。 */
+  .date-popover-month button:disabled {
+    color: var(--color-ink-300);
+    cursor: default;
+  }
+  .dark .date-popover-month button:disabled { color: var(--color-ink-600); }
+
+  /* 🔴 **选中的那两天用主题色**（用户 2026-09-15 定的），不是中性的深灰。
+   *    ⚠️ 跟着 `--color-brand-*` 走而不是写死一个色值：这一套色阶**由首页那张
+   *       照片量化出来**（`site_appearance` 那一段），所以换一张首页图它会跟着
+   *       变 —— 而一个写死的蓝会在那一天变成站里唯一不合群的颜色。
+   *    ⚠️ 深色档用 brand-500 配 ink-950 的字，和全站 primary 按钮、仪表盘那个
+   *       「今天」的圆点同一套取值 —— 深色下 brand-600 上压白字对比度不够。 */
+  .date-popover-month button.is-chosen {
+    background-color: var(--color-brand-600);
+    color: #fff;
+  }
+  .dark .date-popover-month button.is-chosen {
+    background-color: var(--color-brand-500);
+    color: var(--color-ink-950);
+  }
+
+  /* 区间里那些天：同一套主题色最浅的一档，让整段读起来是一条带子。
+   * ⚠️ 不能用 brand-600 的半透明 —— 底下压着的是白底或深色玻璃两种，
+   *    半透明在其中一档上会偏色。 */
+  .date-popover-month button.is-within {
+    background-color: var(--color-brand-50);
+    color: var(--color-brand-800);
+  }
+  .dark .date-popover-month button.is-within {
+    background-color: var(--color-brand-900);
+    color: var(--color-brand-200);
+  }
+
+  /* 两个原生日期框，在日历下面。⚠️ 它们不是兜底 —— 单边区间只有它们说得出来。 */
+  .date-popover-exact {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+    margin-top: 0.75rem;
+    padding-top: 0.75rem;
+    border-top: 1px solid var(--color-ink-200);
+  }
+
+  .dark .date-popover-exact { border-color: var(--color-ink-700); }
+
   .events-shell.is-open .filter-card {
     position: sticky;
     top: calc(var(--head-h) + 1rem);
@@ -4908,75 +5188,7 @@
   }
 }
 
-/* --- 筛选卡收起来的那一档（2026-09-09）------------------------------------------
- *
- * 🔴 **这一段故意写在 `@layer components` 外面**，和下面那段玻璃按钮一模一样的
- *    理由：被收起来的那一层在模板上带着 Tailwind 的 `flex`（那是
- *    `FilterSearchAlignmentTests` 守着的对齐机制的一部分，动不得），而工具类在
- *    `@layer utilities` —— **层的顺序压过特异性**，所以写在 components 里的
- *    `display: none` 再具体也赢不了一个 `.flex`。
- *    实测到的表现很有意思：点了收起，卡片**反而高了 14px**（241.5 → 255.5）——
- *    字段一个没藏起来，而摘要那一行又加了上去。没有任何报错。
- *    **未分层的作者样式胜过所有层**，所以这里是唯一正确的位置。
- *
- * 🔴 **两套选择器，因为有两个时刻。** `html.filters-collapsed …` 是 Alpine 加载
- *    **之前**那一段（由 `_period_filter.html` 里那段内联 boot 脚本写上，同深色模式
- *    那次）；`.filter-card.is-collapsed …` 是 Alpine 接手之后。接手时那段 JS 会把
- *    html 上的 class 摘掉，所以两套永远不同时活着 —— 真让它们并存就是一场特异性
- *    官司，而输的那一次表现为「点了收起没反应」。
- *
- * ⚠️ 用 `display: none` 收起来，字段因此**照样跟着表单提交**（隐藏字段是提交的）。
- *    收起一张筛选卡不该顺手把筛选清掉。
- *
- * ⚠️ 没有 JS 时两套都不生效 —— 脚本不跑、Alpine 不在，卡片就是展开的那个样子。
- *    `<noscript>` 里那颗 Filter 按钮因此照样够得着。 */
-html.filters-collapsed .filter-card-body,
-.filter-card.is-collapsed .filter-card-body {
-  display: none;
-}
 
-html.filters-collapsed .filter-card-summary,
-.filter-card.is-collapsed .filter-card-summary {
-  display: block;
-}
-
-/* 收起之后这张卡只剩那一句摘要，而箭头是绝对定位的、不占高度 —— 所以要给卡片
- * 一个下限，否则 44px 的箭头会从一行文字的卡片里探出去。
- * ⚠️ 量出来的：摘要一行 21px + 卡片上下内边距 32px = 53px，而箭头是 44px。
- *    取 3.75rem = 60px，两个都容得下且不显空。
- *
- * 🔴 **`min-height` 不会把里面的东西居中，它只是把多出来的高度堆在下面。**
- *    所以这一档必须自己 `display: flex` + `align-items: center` —— 少了这两行，
- *    那 7px 全落在摘要下面，读起来是「这句话偏上了」（用户报的：「收起来以后的
- *    summary 感觉也不居中」）。 */
-html.filters-collapsed .filter-card,
-.filter-card.is-collapsed {
-  display: flex;
-  align-items: center;
-  min-height: 3.75rem;
-  /* 整张卡都能点开，所以整张卡都要说自己可点（2026-09-09）。
-   * ⚠️ 只在这一档：展开着的时候卡片里是一堆输入框，一个 pointer 光标会让人
-   *    以为哪儿都能点出点什么来。 */
-  cursor: pointer;
-}
-
-/* 🔴 **收起时箭头改成上下居中，不再锚在底部。**
- *    展开时锚底是对的（它要落在 Clear / Schedule 那条线上，那是卡片最后一行）；
- *    而收起时卡片只有 60px，锚底意味着上边只剩 4px、下边 12px —— 用户报的
- *    「向下的箭头和下边的距离，和向上的箭头和上边的距离不太一致」就是这 8px。
- * ⚠️ `top: 0; bottom: 0` + `margin-block: auto` 是绝对定位里的垂直居中写法：
- *    两端都给了值、而高度是内容定的，剩下的空间由 auto 外边距平分。 */
-html.filters-collapsed .filter-toggle,
-.filter-card.is-collapsed .filter-toggle {
-  top: 0;
-  bottom: 0;
-  margin-block: auto;
-}
-
-html.filters-collapsed .filter-toggle,
-.filter-card.is-collapsed .filter-toggle {
-  transform: rotate(180deg);
-}
 
 /* --- 深色 + 照片下的玻璃按钮（2026-08-06）--------------------------------------
  *

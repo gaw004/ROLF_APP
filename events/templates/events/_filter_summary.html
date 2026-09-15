@@ -1,0 +1,45 @@
+{% comment %}
+筛选栏底下那一行：筛了什么 + Clear（2026-09-15）。
+
+🔴 **抽成片段，因为它要画两遍**，而两遍必须一字不差：
+   ① `_period_filter.html` 里那一遍是**首屏**（整页请求，不经过 HTMX）；
+   ② `_event_list_results.html` 里那一遍带 `hx-swap-oob`，是**实时筛选**那条路。
+
+   ⚠️ 少了第②遍的后果是一个**看不出来的 bug**：这一行在表单里，而 HTMX 只换
+      `#event-results` —— 于是改一个筛选，列表变了而这一行**永远不出现**。
+      用户报的「也没有 clear 在下面」就是它。整页加载时它是好的，所以 curl 验
+      不出来，只有真的在页面上点一下才看得见。
+
+🔴 **那个 `<p>` 无条件画，靠 `hidden` 藏**，不是「没筛就不渲染」。
+   OOB 交换要求落点**已经在 DOM 里**：没筛时如果整个元素不存在，第一次筛完
+   那一份 OOB 就没有东西可替换 —— 表现和上面那个 bug 一模一样。
+
+⚠️ Clear 的 `href` 用 `request.path`：这一行在两页上各画一次，而 `action`
+   那个变量只有表单那边的 include 给得出来。两者在这两页上是同一个值，而
+   `request.path` 在片段里也拿得到。
+
+参数：oob —— 真值则带上 `hx-swap-oob`（只有结果片段那一遍要）。
+{% endcomment %}
+<p id="filter-summary" class="filter-bar-summary"
+   {% if oob %}hx-swap-oob="true"{% endif %}
+   {% if not period.filtered_by %}hidden{% endif %}>
+  {% if period.filtered_by %}
+    Filtered by <strong class="font-medium text-ink-900 dark:text-ink-50">{{ period.filtered_by }}</strong>
+    {% comment %}
+    🔴 **Clear 是一行字，不是一颗按钮**（用户 2026-09-15 定的版式）。原来它走
+       `button.html`，画出来是一颗带内边距的药丸 —— 在一行 13px 的小字旁边，
+       那颗药丸比它要清空的那句话还重。
+
+    🔴 **`data-clear-filters` 不能跟着丢。** 那是 `button.html` 的 `clears` 参数
+       唯一做的事，而行为在 app.js：拦下跳转、把这张表单里看得见的字段清空、
+       再触发表单本来就有的那一次 htmx 请求。
+       ⚠️ 少了它，点 Clear 变回**整页重载** —— Alpine 的状态全部归零，正开着的
+          活动详情或日程当场消失。那正是 2026-08-28 修掉的东西，用户当时的原话是
+          「点 clear 会直接关掉右边面板？Clear 只是取消 filter」。
+
+    ⚠️ `href` 照旧给，而且它仍然是那条真路：没有 JS 时点下去就是清空之后的那一页。
+    {% endcomment %}
+    <a href="{{ request.path }}" data-clear-filters
+       class="prose-link text-inherit">Clear</a>
+  {% endif %}
+</p>

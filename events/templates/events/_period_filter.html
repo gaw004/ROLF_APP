@@ -11,8 +11,12 @@
 
 参数：
   action          表单要打的 URL
-  report_button   真值 → 多一个「Generate report」按钮（只有管理列表用）
-  schedule_button 真值 → 多一个「Schedule」按钮（**只负责打开**，关掉归日程面板
+  report_button   真值 → 尾部那颗深色键是「Generate」（只有管理列表用）
+  past_selectable 真值 → 日期弹层里**今天之前的日子可点**（只有管理列表用，
+                  报表要拉历史区间）。⚠️ 显式的参数，**不从 report_button 反推**：
+                  两个必须手工保持一致的开关迟早会分家，而分家的表现是一张
+                  选不了过去的报表筛选，或者一页选了也没结果的志愿者列表。
+  schedule_button 真值 → 尾部那颗深色键是「Schedule」（**只负责打开**，关掉归日程面板
                   右上角那颗 ×），外加一个隐藏的 `from`（日程翻到了哪一天）。
                   Events 和 Programs 两页用（2026-09-14 起两页共用这一整套，
                   见 views.LIST_PAGES）。
@@ -66,338 +70,166 @@
 ⚠️ `hx-indicator` 比原来更要紧：以前有按钮，按下去就是反馈；现在唯一说明
    「你的字已经收到了、正在取」的东西就是它。
 {% endcomment %}
+
 {% comment %}
-收起态的「先手一步」（2026-09-09）。**必须内联、必须排在这张卡之前**，
-和 `core/templates/core/components/_theme_boot.html` 是同一个问题的同一个解法：
-记着「收起」的人否则会先看到一整张 330px 的卡片、再看到它塌成一行，
-而那一下闪动**在本机开发时几乎看不出来**（Alpine 加载太快），只有真实网络下才明显。
+🔴 **收起／展开那一整套 2026-09-15 撤掉了**（用户：「可以取消所有 collapse 的
+   功能」）。跟着走的有：`<html>` 上那个引导脚本、`localStorage` 里按 pathname
+   分的那个键、`app.js` 的 `filterCard` 组件、右下角那颗两态共用的箭头、
+   收起态那句摘要，以及钉着它们的那九条守卫（连同三条对齐守卫一起删掉了）。
 
-⚠️ 它写的是 `<html>` 上的一个 class，因为脚本跑的时候这张卡还没被解析出来 ——
-   够不着它。Alpine 接手之后立刻把这个 class 摘掉（见 app.js 的 `filterCard`），
-   于是任何时刻只有一套机制在管这件事：接手前是这个 class，接手后是表单上那个。
-   两套同时活着的话就是一场特异性官司，而输的那一次表现为「点了收起没反应」。
+   ⚠️ 撤掉它的前提是这张卡**本身变矮了**：收起功能 2026-09-09 之所以存在，是因为
+      加了第四格之后它连下边距量到 330.5px，而开着日程时它是钉住的，800px 的窗口
+      只剩约三张活动卡。一条式的 bar 让那个问题不再存在 —— 所以这不是「把一个
+      有用的东西删了」，是**它要解决的那件事没有了**。
 
-⚠️ 键按 `pathname` 分：这张卡 Events 和管理列表两页共用，但那是两件事 ——
-   在一页收起不该把另一页也收了。
-
-⚠️ 隐私模式下 localStorage 直接抛异常，所以整段包在 try 里：一个折叠偏好读不到，
-   不该把整个页面带下去。同 `_theme_boot.html`。
-
-⚠️ 这段脚本里的注释写英文，不写中文 —— 它虽然不显示给人看，但它**进了发给浏览器的
-   HTML**，而界面语言守卫的口径是「模板里注释块之外没有汉字」。
-{% endcomment %}<script>
-  (function () {
-    try {
-      /* Same key shape as filterCard() in app.js — the two must agree. */
-      if (localStorage.getItem("filters:" + location.pathname) === "collapsed") {
-        document.documentElement.classList.add("filters-collapsed");
-      }
-    } catch (e) {
-      /* See the template comment above: a blocked localStorage must not
-         take the page down with it. */
-    }
-  })();
-</script>
-{% comment %}
-⚠️ `x-data="filterCard"` 挂在**表单上**（2026-09-09）。它是这张卡自己的状态，
-   和外壳那个 `eventsShell` 是两回事；嵌在里面不影响 Schedule 那颗按钮调
-   `showSchedule()` —— Alpine 的作用域是往上找的。
-
-⚠️ 收起来的时候那些字段是 `display: none`，**不是被摘掉**，所以它们照样跟着表单
-   提交。收起一张筛选卡不该顺手把筛选清掉。
+⚠️ `filter-card` 这个钩子**留着**，而且有三个读它的地方，一个都不能漏：
+   ① app.css 的 `.events-shell.is-open .filter-card`（开着日程时钉住）；
+   ② app.js 的 `watchFilterHeight()`（实测高度写进 `--filter-h`）；
+   ③ app.js 的 `occludedTop()`（翻页时判「这一行被钉住的卡挡住没有」）。
+   ⚠️ 后两处**一个字都不用改**：它们读的是实测出来的高度和计算出来的
+      `position`，所以 bar 变矮之后自动跟上。这正是当初「高度不写死」换来的。
 {% endcomment %}
 <form method="get" action="{{ action }}"
-      x-data="filterCard"
-      x-bind:class="open ? '' : 'is-collapsed'"
-      {% comment %}
-      收起时整张卡都能点开（2026-09-09，用户：「在 filter 卡片收起的时候，
-      点卡片任何一个地方都可以展开卡片」）。
-
-      ⚠️ 判据是 `!open`，**不是**「点的是不是那个箭头」—— 展开着的时候这一层必须
-         完全不管事，否则点一下输入框、点一下下拉，卡片自己就收起来了。
-      ⚠️ 那颗箭头照旧留着：它是这颗开关**说出自己此刻是哪一件事**的方式
-         （`aria-expanded` 挂在它身上），而一整张可点的卡片对读屏是不存在的。
-      🔴 **箭头自己那一下会冒泡到这里**，所以这一层必须把它认出来并让开 ——
-         否则展开态点箭头是「收起，然后立刻又展开」，屏幕上什么都不动。
-         判断写在 app.js 里，见 `expandFromCard()`。
-      {% endcomment %}
-      x-on:click="expandFromCard($event)"
       hx-get="{{ action }}" hx-target="#event-results" hx-swap="outerHTML"
       hx-trigger="input delay:400ms, submit"
       hx-sync="this:replace"
       hx-replace-url="true" hx-indicator="#filter-busy"
       {% comment %}
-      ⚠️ `filter-card` 是**给 CSS 用的钩子**，不是样式（外观仍然是 `.card`）。
-         日程开着时这张卡要钉在顶上，而那条规则得挂在一个稳定的选择器上 ——
-         靠 `form.card` 去匹配会命中将来任何一张长在表单里的卡片。
-         同 `.btn` / `.event-row` 那几个钩子的理由。
+      ⚠️ `filter-card` 是**给 CSS 和 JS 用的钩子**，不是样式。三处读它：
+         app.css 的 `.events-shell.is-open .filter-card`（开着日程时钉住）、
+         app.js 的 `watchFilterHeight()`（实测高度写进 `--filter-h`）、
+         以及 `occludedTop()`（翻页时判这一行有没有被钉住的卡挡住）。
+         ⚠️ 后两处在 2026-09-15 这次改成一条式之后**一个字都不用改** ——
+            它们读的是实测高度和计算出来的 `position`。这正是当初「高度不写死」
+            换来的东西。
       {% endcomment %}
-      class="filter-card card mb-6">
+      {% comment %}
+      ⚠️ `mb-4` 而不是 `mb-6`（2026-09-15）：这条 bar 从 180px 的大卡片收成了
+         53px 的一条，而卡片那一档的 24px 下边距是配着那个体量定的。
+         ⚠️ 不是越紧越好 —— 底下那行摘要属于这张表单，而列表是另一件事，
+            两者之间要看得出是一道分界。
+      {% endcomment %}
+      class="filter-card mb-4">
   {% if schedule_button %}
     {% comment %}
     日程翻到了哪一天（2026-08-18）。⚠️ 它必须是这张表单里的一个**字段**，
-    理由和上面那段一模一样：`method="get"` 的表单提交时只带它自己
-    序列化出来的那一份，action 上的查询串整个丢掉。少了这一行，翻到第三屏之后
-    随便改一个筛选，日程就自己弹回起点 —— 而列表看起来完全正常。
+    理由和头部那段一模一样：`method="get"` 的表单提交时只带它自己序列化出来的
+    那一份，action 上的查询串整个丢掉。少了这一行，翻到第三屏之后随便改一个
+    筛选，日程就自己弹回起点 —— 而列表看起来完全正常。
 
-    ⚠️ 箭头翻页时由 `_schedule.html` 用 out-of-band 把这里改掉。两处必须一致，
-       否则「先翻页、再筛选」会退回翻页之前的窗口。
+    ⚠️ 箭头翻页时由 `_schedule.html` 用 out-of-band 把这里改掉。
     {% endcomment %}
     <input type="hidden" name="from" id="schedule-from"
            value="{{ schedule_from|date:'Y-m-d' }}">
   {% endif %}
+
   {% comment %}
-  ⚠️ `w-fit max-w-full` 是搜索框宽度的**全部机关**（2026-08-06）。
+  🔴 **一条式的筛选条**（2026-09-15，用户给了截图）。
 
-     要的效果是「搜索框右边缘和下面那行控件的右边缘对齐」，而那个宽度**每页不一样**：
-     管理列表多一个 `Generate report` 按钮，实测两页差 148px。写死一个像素值必然
-     在其中一页上不对。
+     ⚠️ **这等于重开一个 2026-09-03 当天被撤回的决定**，所以把两次的差别写下来：
+        那一次也是「折成一条」，撤回的理由是**搜索框失去了可对齐的对象** ——
+        当时的版面是「搜索框一整行，下面一行控件」，靠一个 `w-fit` 的列外壳让
+        前者自动等于后者的宽度（那条规矩由三条守卫钉着）。压成一条之后那个
+        「对齐的对象」不存在了，于是搜索框只能写死一个宽度，而那个数在两页上
+        不一样。用户当时判「保留两层更好用」。
+        **这一版不同的地方**：搜索框和控件在**同一行**，它靠 `flex: 1` 吃掉
+        剩下的全部空间 —— 对齐的对象从「下面那行的宽度」变成了「这一行的右端」，
+        而那是一个不用量的东西。所以那三条守卫连同它们守的机制一起撤掉，
+        不是「守卫碍事所以删掉」。
 
-     `width: fit-content` 让这个包装器按**最宽的那个子元素**定宽 —— 也就是控件行 ——
-     于是里面的搜索框 `w-full` 正好等于控件行的宽度。没有一个像素被写下来，
-     按钮文案改了也自动跟着变。
-
-  ⚠️ `max-w-full` 不能少：`fit-content` 取的是 max-content，而控件行**不换行时**
-     比窄屏的卡片宽。不加这一条，375px 上整页会横向滚动 —— 和这一行当初那个
-     bug 是同一个成因（见下面 min-w-0 那段）。
+  ⚠️ 窄屏靠 `flex-wrap`：搜索框 `min-w-[16rem]` 保证它先占满一行，其余控件
+     换到第二行。`min-w-0` 一个都不能少 —— flex 项的默认 `min-width: auto`
+     是「不许缩到比内容窄」，而两个原生日期控件加起来超过 375px。
+     那个 bug 这张卡栽过一次，表现是**整页横向滚动**而宽屏上一切正常。
   {% endcomment %}
-  {% comment %}
-  搜索框自己一整行（2026-08-06）。`basis-full` 而不是 `w-full` —— 这是 flex 行里
-  「占满一行并把后面的挤到下一行」的写法，`w-full` 在 `flex-wrap` 下也能达到同样
-  效果，但 basis 说的是意图（我要一整条），宽度只是它的结果。
-
-  ⚠️ 它在**第一位**：已经知道要找哪场活动的人直接打名字，扫下拉框是不知道时才做的事。
-     顺序在 `EventPeriodForm.order_fields` 里，这里只负责给它一整行。
-
-  ⚠️ 输入框由 Form 渲染，不是手写的 —— 手写的 `<input type="search">` 会被
-     `core.tests.TextInputsComeFromFormsGuardTests` 拦下，而那条守卫存在的理由
-     正是长度上限只在 form 层生效。
-
-  🔴 **2026-09-03 试过折成一条，当天撤回。** 那一版把这块从 180px 压到 56px、
-     第一屏从四行数据变九行，代价是搜索框失去了可对齐的对象 —— 而
-     `core.tests.FilterSearchAlignmentTests` 守的正是那条对齐规矩：
-     「跟按钮对齐」在两个页面上是两个不同的数（活动页 642px、管理列表 790px，
-     后者多一颗 Generate report），所以宽度不写死，靠 `w-fit` 的列外壳自己去量。
-     压成一条之后那条规矩没有对象可守了。**用户选择保留两层**，理由是这一版
-     更好用；那三条守卫因此原样留着。
-  {% endcomment %}
-  <div id="filter-card-body" class="flex w-fit max-w-full flex-col gap-4 filter-card-body">
-  <div>{% include "core/components/field.html" with field=period.q %}</div>
-  {% comment %}
-  ⚠️ `w-full sm:w-auto` + `min-w-0`，两个都不能少。
-
-     第一版写的是 `grow sm:grow-0`，375px 下**整页横向滚动**了 —— flex 项的
-     `min-width` 默认是 `auto`，也就是「不许缩到比内容窄」，而两个 date 控件
-     的固有宽度加上间距超过 375px。表现是导航条被推出屏幕、卡片右边被切掉，
-     而在宽屏上一切正常。
-     `min-w-0` 解除那条下限，`w-full` 让它们在窄屏上直接各占一行。
-  {% endcomment %}
-  <div class="flex flex-wrap items-end gap-4">
-  <div class="w-full min-w-0 sm:w-auto">{% include "core/components/field.html" with field=period.ministry %}</div>
-  {% comment %}
-  「来帮忙的位置 / 来接受服务的位置」（2026-09-08）。L1 那根轴一直画在活动详情页
-  角色表的 Kind 那一列上，而在此之前**没有任何一页能按它筛** —— 一个只想来接受
-  服务的人，得把活动一场一场点开才知道哪一场有他的位子。
-
-  ⚠️ 条件是 `period.by_role_kind`，**不是** `{% templatetag openblock %} if period.nature {% templatetag closeblock %}`。后者能用，
-     但它靠的是模板对 `KeyError` 的静默吞掉（字段不存在时恰好取到空串）——
-     一个失败路径冒充一个问题。理由写全在 `EventPeriodForm.by_role_kind` 上。
-
-  ⚠️ 也没有再加一个模板参数（像 `schedule_button` 那样）：那会变成「视图传了
-     audience」和「模板传了 flag」两个必须手工保持一致的开关，而它们分家的表现
-     是画着一个筛不动任何东西的下拉框。这里问的就是**字段在不在**。
-
-  ⚠️ 挨着 ministry，因为两者都是「这是哪一类东西」；日期在后。顺序真正的落点在
-     `EventPeriodForm.order_fields`，这一行只负责给它一格。
-
-  ⚠️ 代价如实说：这一行因此有四格，而开着日程时这张卡只有 34rem 宽 ——
-     必然多换一行，而这张卡在那一档里是**钉住的**（见 app.css 的
-     `.events-shell.is-open .filter-card`，那里量过高度）。那个数已经跟着改了。
-  {% endcomment %}
-  {% if period.by_role_kind %}
-    <div class="w-full min-w-0 sm:w-auto">{% include "core/components/field.html" with field=period.nature %}</div>
-  {% endif %}
-  <div class="w-full min-w-0 sm:w-auto">{% include "core/components/field.html" with field=period.start %}</div>
-  <div class="w-full min-w-0 sm:w-auto">{% include "core/components/field.html" with field=period.end %}</div>
-  <div class="flex flex-wrap items-center gap-2">
+  <div class="filter-bar">
     {% comment %}
-    ⚠️ 这里原来是一颗 `Filter` 主按钮（2026-08-17 撤掉）。筛选实时之后它是一颗
-       **按不按都一样**的按钮，而一颗点了什么都不改变的按钮比没有按钮更难懂 ——
-       人会以为自己漏了一步。
-
-    ⚠️ 但它对**没有 JavaScript 的人**不是多余的：那条路上表单要靠提交才走。
-       `<noscript>` 里的内容只在 JS 关掉时才渲染，所以这颗按钮对其余所有人
-       不存在，对他们则照旧是唯一那条完整的服务端路径（D24 的渐进增强）。
-       ⚠️ 别改成 `x-show` / CSS 藏起来：那样它仍然在 DOM 和 Tab 顺序里，
-          键盘用户会 Tab 到一颗看不见的按钮上。
+    ⚠️ 输入框由 Form 渲染，不是手写的 —— 手写的 `<input type="search">` 会被
+       `core.tests.TextInputsComeFromFormsGuardTests` 拦下，而那条守卫存在的
+       理由是长度上限只在 form 层生效。
     {% endcomment %}
-    <noscript>
-      {% include "core/components/button.html" with label="Filter" variant="primary" %}
-    </noscript>
-    {% if report_button %}
+    <div class="filter-bar-search">
       {% comment %}
-      ⚠️ 报表**不跟着筛选实时算**（2026-08-05 拍板）。十三个指标是十来条聚合查询，
-         挂在每一次改日期上会让筛选本身变慢，而大多数时候人只是在翻列表。
-
-      ⚠️ 它是同一个表单里的第二个 submit，靠 name=report 区分 —— 于是筛选条件和
-         「要不要报表」一起进 URL，这一份报表可以被收藏、被转发、被刷新。
-         另开一个表单的话两边的日期会各填各的。
-
-      ⚠️ 反过来：不带 report 的那次请求一到，报表就消失。一份算给旧筛选的报表
-         贴在新列表旁边，是会主动误导人的 —— 那两个东西看起来属于同一页。
-
-      ⚠️ 筛选实时之后这条**更常发生**（2026-08-17）：出了报表再去改一个日期，
-         报表当场消失。这不是回归，是同一条规矩在新的触发频率下的样子 ——
-         提交按钮的 name/value 只有**点它那一次**才会带上，实时那条路带不上。
-         真要让报表跟着筛选活，那是「十来条聚合查询挂在每一次敲键上」，
-         正是这颗按钮当初被拆出来的原因。
+      ⚠️ 放大镜是**画的**，不是一个 `type="search"` 自带的东西 —— 那个图标各家
+         浏览器长得不一样，有的干脆没有。`aria-hidden`：它旁边那个框有自己的
+         标签（`sr-only`），图标再念一遍是噪音。
       {% endcomment %}
-      {% include "core/components/button.html" with label="Generate report" variant="secondary" name="report" value="1" %}
-    {% endif %}
-    {% comment %}
-    ⚠️ 「Clear」清掉的是**筛选条件**，不是别的。它曾经要额外带上 `scope`
-       （「我在看谁的活动」），否则在「全基金会」那一页上点 Clear 会跳回
-       「我管的那几个」，而按钮上写的是 Clear。2026-09-03 那个参数没有了 ——
-       管理页一张列表列全部，「我在看谁的活动」不再是一个可切的状态。
-       ⚠️ 这条区分本身仍然成立：以后再有「不是筛选、但要跨 Clear 活下来」的
-          东西，它同样不能被这颗按钮清掉。
-
-    🔴 **`clears` 2026-08-28 加的：它清筛选，不许再关掉右边那块面板。**
-
-       在此之前它是一个普普通通的链接，点下去是**整页重新加载** —— 于是
-       Alpine 的状态全部归零：正开着的活动详情/报名表单没了，日程也退回今天。
-       用户报上来的原话是「点 clear 会直接关掉右边面板？Clear 只是取消 filter，
-       不应该关任何右边面板」。对，而整页重来这件事从来不在这颗按钮的意思里，
-       它只是当时最省事的实现。
-
-       ⚠️ 换法是「拦下来、清空字段、重发这张表单」，**不是**给这个链接挂一个
-          `hx-get`。挂 hx-get 只会换掉 `#event-results` —— 而四个输入框在
-          那一块的外面，屏幕上会变成「列表清空了，可搜索框里还写着 kitchen」，
-          再敲一个字它就自己回去了。
-       ⚠️ `href` 照旧留着，而且它仍然是那条真路：没有 JS 时点下去就是清空后的
-          那一页（D24）。
-    {% endcomment %}
-    {% include "core/components/button.html" with label="Clear" href=action variant="ghost" clears=1 %}
-    {% if schedule_button %}
+      <svg class="filter-bar-icon" width="18" height="18" viewBox="0 0 20 20"
+           fill="none" stroke="currentColor" stroke-width="1.75"
+           stroke-linecap="round" aria-hidden="true">
+        <circle cx="9" cy="9" r="5.25"/><path d="M13 13l4 4"/>
+      </svg>
+      {% include "core/components/field.html" with field=period.q %}
       {% comment %}
-      日程开关（2026-08-17）。点一下，列表整体往左让出右侧，日程画在腾出来的地方。
+      🔴 **加载态放在这一格里，而且是绝对定位的**（2026-09-15）。
 
-      ⚠️ **排在最后**，因为它不是同一类事：前面那些是「对这次筛选做点什么」，
-         这一颗是「换一种看法」。挨着 Clear 放在它前面会让两者看起来二选一。
+         它原来是表单最底下一个普通的 `<span>`，而 `.htmx-indicator` 靠
+         `opacity: 0` 显隐、**不是 `display: none`** —— 于是一个一年里九成时间
+         看不见的元素，一直占着 18px 高的一行。量出来：摘要到列表之间那 48px
+         里有一半是它。用户报的「感觉还是有点空旷」，一半是这个。
 
-      ⚠️ 它**不是这张表单的第二个提交**（`Generate report` 才是）。日程开的是一个
-         版面状态，不是一次查询 —— 走 URL 的话每开一次都要往服务器跑一趟，
-         还会丢掉当前的滚动位置。`shows` 因此强制 `type="button"`：
-         默认的 submit 会让「点一下」变成「提交一次筛选」。
+      ⚠️ 放在**这一格**里而不是 controls 那一格：绝对定位要一个 `position:
+         relative` 的祖先，而这一格本来就是（放大镜也靠它定位）。放在 controls
+         里的话它会往上找到不知道哪一层做参照 —— 那种错在宽屏上常常看不出来。
 
-      🔴 **它只负责打开**（2026-08-28，原来是一颗开关）。关掉日程那件事归日程
-         面板右上角那颗 ×，和活动详情那一块一模一样 —— 用户原话：「schedule
-         这个按钮只用来打开 schedule，schedule 面板需要在右上角同（event
-         details 一样）有叉叉可以关掉」。
-         ⚠️ 走 `showSchedule()` 而不是 `schedule = true`：开日程时还要把压在
-            它上面的详情让开，而那条规则住在 app.js 的 `eventsShell` 里。
-            少了这一半，「详情开着时按 Schedule」屏幕上一个像素都不会动。
-
-      ⚠️ `schedule` 这个状态属于**外层的 `.events-shell`**（在 event_list.html 上），
-         不属于这张卡。刻意如此：HTMX 筛选和翻页换掉的是 `#event-results`，
-         而 shell 在它外面，于是「日程开着」这件事在筛选和翻页之后仍然成立。
-         真正的版面（列多宽、面板多宽）也只有 shell 那一层看得全。
+      ⚠️ 挪位置而不是删掉：实时筛选之后它是**唯一**告诉人「你的字已经收到了、
+         正在取」的东西 —— 原来那颗 Filter 按钮按下去本身就是反馈，而那颗按钮
+         2026-08-17 就不在了。
       {% endcomment %}
-      {% include "core/components/button.html" with label="Schedule" variant="secondary" shows="showSchedule()" expanded="schedule" controls="schedule-panel" %}
-    {% endif %}
-    {% comment %}
-    加载态。⚠️ 筛选实时化之后它**更要紧了**（2026-08-17）：原来按下 Filter 那一下
-    本身就是反馈，现在唯一告诉人「你的字收到了、正在取」的东西只剩它。
-    （原来的理由是「没有加载态的按钮用户会点第二次」——那颗按钮已经不在了，
-    但同一条规矩下面签到那几个按钮点第二次是有后果的，写法仍然要一致。）
-    {% endcomment %}
-    <span id="filter-busy" class="htmx-indicator text-xs text-ink-600 dark:text-ink-300">Loading…</span>
+      <span id="filter-busy" class="htmx-indicator filter-busy">Loading&hellip;</span>
+    </div>
 
+    <div class="filter-bar-controls">
+      {% include "events/_filter_select.html" with field=period.ministry %}
+      {% comment %}
+      「来帮忙的位置 / 来接受服务的位置」（2026-09-08）。
+
+      ⚠️ 条件是 `period.by_role_kind`，**不是** `{% templatetag openblock %} if period.nature {% templatetag closeblock %}`：后者靠的是
+         模板对 `KeyError` 的静默吞掉（字段不存在时恰好取到空串）—— 一个失败
+         路径冒充一个问题。理由写全在 `EventPeriodForm.by_role_kind` 上。
+      {% endcomment %}
+      {% if period.by_role_kind %}
+        {% include "events/_role_filter.html" %}
+      {% endif %}
+
+      {% include "events/_date_range.html" %}
+
+      {% comment %}
+      尾部那颗深色键。两页各一种，而**永远只有一颗** —— 用户 2026-09-15 定的：
+      管理页不需要 Schedule，那一格改成 Generate。
+
+      ⚠️ Generate 必须是**这张表单的第二个 submit**（靠 `name=report` 区分）：
+         筛选条件和「要不要报表」一起进 URL，于是这一份报表可以被收藏、被转发、
+         被刷新。另开一张表单的话两边的日期会各填各的。
+      ⚠️ 反过来：不带 report 的那次请求一到，报表就消失 —— 一份算给旧筛选的
+         报表贴在新列表旁边，是会主动误导人的。
+      {% endcomment %}
+      {% if report_button %}
+        {% include "core/components/button.html" with label="Generate" variant="primary" name="report" value="1" %}
+      {% elif schedule_button %}
+        {% comment %}
+        ⚠️ 它**不是**这张表单的提交：日程开的是一个版面状态，不是一次查询。
+           `shows` 因此强制 `type="button"`。走 `showSchedule()` 而不是
+           `schedule = true` —— 开日程时还要把压在它上面的详情让开，
+           那条规则住在 app.js 的 `eventsShell` 里。
+        {% endcomment %}
+        {% include "core/components/button.html" with label="Schedule" variant="primary" shows="showSchedule()" expanded="schedule" controls="schedule-panel" %}
+      {% endif %}
+    </div>
   </div>
-  </div>
-  </div>
+
+  {% include "events/_filter_summary.html" %}
+
   {% comment %}
-  🔴 **错误在收起区外面**（2026-09-09 挪出来的）。它原来在里面，而那意味着
-     「结束日期早于开始日期」这句话会跟着卡片一起被收掉 —— 人看到的是一张
-     收起的卡和一份没变的列表，没有任何东西说明为什么。
-     ⚠️ 而且收起态那句摘要在表单无效时是 "All ministries · all dates"
-        （`description()` 对无效表单的答复），也就是一句假话正好盖在错误上。
-        错误必须活在收起之外。
+  ⚠️ 这颗按钮**只对没有 JavaScript 的人存在**：`<noscript>` 里的内容只在 JS 关掉
+     时才渲染。实时筛选之后它对其余所有人是一颗按不按都一样的键，而一颗点了
+     什么都不改变的按钮比没有按钮更难懂。
+     ⚠️ 别改成 `x-show` / CSS 藏起来：那样它仍然在 DOM 和 Tab 顺序里，
+        键盘用户会 Tab 到一颗看不见的按钮上。
   {% endcomment %}
-  {% comment %}
-  收起态那一句摘要，和那个**两态共用的**箭头（2026-09-09）。
-
-  🔴 **箭头只有一个，而且它在两个状态里位置一模一样** —— 绝对定位在卡片的右下角
-     （几何在 app.css）。用户报过两次，两次都在这一点上：
-       · 「箭头应该跟 clear 和 schedule 在一条线上，现在因为箭头，filter 卡片
-         下面多了很多空白」—— 它当时自己占一行；
-       · 「而且箭头上下都应该在一个位置，偏移让我很难受」—— 收 / 展之间它在跳。
-     绝对定位一次答完两条：展开时它落在 Clear / Schedule 那条线上（那是卡片最后
-     一行），收起时它落在那一句摘要旁边，**x 一个像素都没变**。
-
-  ⚠️ 因此它也**不必抄第二份**。一度真的抄过（控件行一份、摘要行一份，靠 include
-     共用），撤了 —— 两个位置就是两个位置，而这里要的正好是「只有一个位置」。
-
-  ⚠️ 摘要走 `period.description()`，模板里不另写一份。那个方法已经存在，已经把
-     四格（含 Role kind）都说全了 —— 完整报表页顶上印的、以及它变成的那张纸上
-     印的，就是同一句。
-     🔴 **代价如实说：改那句措辞会同时改这两处。** 这是对的（两处答的是同一个
-        问题「这份筛选选了什么」），但下一个改文案的人必须知道自己在改两个地方。
-        守卫：core.tests.FilterCollapseTests。
-  ⚠️ 一格没填时它是 "All ministries · all dates" —— 读起来正是「没筛」，
-     所以空态不用另写一句。⚠️ 展开时这句话整个不出现：卡片就摆在屏幕上，
-     再说一遍「你筛了什么」是把一件看得见的事又说了一遍（初版在卡顶放过一颗写着
-     Filters 的键，用户当场问「why is the name Filters 在筛选卡片最上面」）。
-
-  🔴 **这一颗是开关，而 2026-08-28 从 `button.html` 删掉过 `toggles`** —— 不冲突。
-     当时删的理由是「一颗按钮同时是打开和关掉，而它旁边没有任何东西说明此刻按下去
-     是哪一件」。这一颗有：箭头自己跟着状态转，`aria-expanded` 跟着状态变，读屏念
-     的那句 `aria-label` 也跟着变。所以它不走 `button.html`（那个组件的 `shows`
-     明确是「只负责打开」），而是自己一小段标记。
-
-  ⚠️ **没有圆底**（用户：「不要圆圈，只要箭头可以不？」）。它一度用的是全站共享的
-     圆形图标按钮长相 `.panel-close` —— 那个圆底在面板那两处是**浮在内容之上**的，
-     需要一块自己的底才看得清；这一颗待在卡片里、四周是留白，圆底只是多一层没有
-     工作要做的装饰。⚠️ 代价：可点区域因此只剩字形，热区由 app.css 写死撑回 44px。
-
-  ⚠️ `aria-label` 而不是可见文字：纯图标控件，而收起时它旁边已经有一整句摘要在说
-     这张卡是干什么的。静态那一份是给 Alpine 没加载出来时兜底的。
-
-  🔴 **画的是 SVG，不是 `&#x2304;` 那个字符**（2026-09-09 换的）。字符那一版
-     边界框是对称的、墨迹不是 —— `⌄` 在字框里本身偏下，于是转 180° 之后它偏上，
-     和旁边那句摘要不在一条线上（用户：「收起来的时候，感觉向上的箭头和 summary
-     不在一条线上，箭头偏高」）。
-     ⚠️ 这一条**量不出来**：`getBoundingClientRect()` 报的是 20/20 上下对称，
-        因为它量的是盒子。差的是盒子里那笔墨。
-     ⚠️ 而且它**跟着字体走** —— 换一次字体栈这个偏移量就变一次，没有任何东西
-        会提醒你。SVG 的路径是自己画的：`M5 7.5l5 5 5-5` 上下正好各留 6.5，
-        绕中心转 180° 之后**和原来一模一样**。
-  {% endcomment %}
-  <p class="filter-card-summary">{{ period.description }}</p>
-  <button type="button" class="filter-toggle"
-          x-on:click="toggleFilters()"
-          x-bind:aria-expanded="open"
-          x-bind:aria-label="open ? 'Hide the filters' : 'Show the filters'"
-          aria-label="Hide the filters"
-          aria-controls="filter-card-body">
-    {% comment %}
-    ⚠️ **两笔，不是一笔**（用户：「箭头只有一笔画太单薄了，两个箭头叠一起，渐变」）。
-       一笔 2px 的线在一整张卡片的右下角确实压不住场。
-    ⚠️ 两笔的**中点仍然是 10**（上面那笔 4.5→9.5，下面那笔 8.5→13.5，合起来
-       4.5..13.5），所以绕中心转 180° 之后还是和原来一模一样 —— 这是上一版换成
-       SVG 时买来的那条性质，加第二笔不许把它弄丢。
-    ⚠️ 渐变靠**两笔各自的透明度**，不是 `<linearGradient>`：后者要一个
-       `id`，而这一块**在页面上出现两次**（Events 和管理列表各一张卡）时 id 会撞，
-       撞了之后 Safari 会让第二个引用指向第一个的定义 —— 一个只在某些浏览器上、
-       某些页面上出现的毛病。透明度写在元素上，没有这个问题。
-    {% endcomment %}
-    <svg width="20" height="20" viewBox="0 0 20 20" fill="none"
-         stroke="currentColor" stroke-width="1.75" stroke-linecap="round"
-         stroke-linejoin="round" aria-hidden="true">
-      <path d="M5 4.5l5 5 5-5" opacity="0.45"/>
-      <path d="M5 8.5l5 5 5-5"/>
-    </svg>
-  </button>
+  <noscript>
+    {% include "core/components/button.html" with label="Filter" variant="primary" %}
+  </noscript>
 
   {% for error in period.non_field_errors %}
     <p class="text-xs font-medium text-danger-fg dark:text-danger-fg-dark">{{ error }}</p>

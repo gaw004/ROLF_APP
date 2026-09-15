@@ -124,16 +124,45 @@
        两种。画给别人就是一个点了必定 403 的链接 —— 读起来是「站坏了」，
        而不是「这一页不归你」。
     {% endcomment %}
-    <div class="mb-6 flex items-center justify-between gap-3">
+    <div class="mb-3 flex flex-wrap items-baseline justify-between gap-3">
       {% comment %}
       ⚠️ 标题从视图来（2026-09-14）：同一份模板画 Events 和 Programs 两页，
          而这一格和顶栏那一排必须是同一个词 —— 一个页面不该有两个名字。
       {% endcomment %}
       <h1 class="text-2xl font-semibold">{{ page_title }}</h1>
-      {% if can_see_all_events %}
-        {% url 'events:event_manage_list' as manage_url %}
-        {% include "core/components/manage_link.html" with href=manage_url label="Manage events" %}
-      {% endif %}
+      {% comment %}
+      🔴 **计数 2026-09-15 从列表上方搬到了标题行右端**（用户给的版式）。
+
+         ⚠️ 它原来住在 `_event_list_results.html` 里 —— 也就是 HTMX **换掉的
+            那个片段**里，所以筛一次它就跟着新数字一起回来。搬到标题行之后它
+            在片段**外面**，于是必须靠 out-of-band 交换才跟得上，否则表现是
+            「筛掉一半，而右上角还写着 21」—— 一个每个字都对、只是过期的数。
+            片段里那一份带着 `hx-swap-oob`，见那个文件。
+
+         ⚠️ 这里这一份是**首屏**那一次（整页请求，不经过 HTMX）。两处的标记
+            必须一致，否则 OOB 找不到落点，而它**静默失败**。
+      {% endcomment %}
+      {% comment %}
+      🔴 **计数和那颗 ⋮ 并成右边一组**，不是这一行上的两个独立成员。
+
+         第一版把三样东西直接摆进一条 `justify-between` 里 —— 于是它们抢**两个**
+         端点：标题在左、⋮ 在右，而计数被挤到中间和 ⋮ 贴在一起。用户报的
+         「21 in this period 和 manage 打架了」就是这个。
+         `justify-between` 分的是**相邻成员之间的空隙**，成员从两个变成三个时，
+         中间那个必然落在中央 —— 这不是间距没调好，是用错了那条规则。
+
+      ⚠️ 两者并排的顺序是「数在左、⋮ 在右」：⋮ 是这一行唯一可点的东西，
+         而可点的东西放在最外侧，手指和光标都够得最省事。
+      {% endcomment %}
+      <div class="flex items-baseline gap-3">
+        <p id="event-count" class="text-sm text-ink-600 dark:text-ink-300">
+          {{ total }} in this period
+        </p>
+        {% if can_see_all_events %}
+          {% url 'events:event_manage_list' as manage_url %}
+          {% include "core/components/manage_link.html" with href=manage_url label="Manage events" %}
+        {% endif %}
+      </div>
     </div>
 
     <div class="events-row">

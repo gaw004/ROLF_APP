@@ -597,63 +597,157 @@ window.onGoogleCredential = function (response) {
 //    模板把服务端的答案插进 `x-data="eventsShell(true)"`。
 //    ⚠️ 默认值 `false` 不能省 —— 别的地方（真站上只有这一处，但守卫和将来的
 //       调用方不一定）写 `x-data="eventsShell"` 时 Alpine 是**不带参数**调用它的。
-// 筛选卡收起来了没有（2026-09-09）。
+// ---------------------------------------------------------------------------
+// dateRange —— 筛选栏那颗日期胶囊背后的双月日历（2026-09-15）
 //
-// 🔴 **为什么是 class 而不是 `x-show`。** 收起态要在 Alpine 加载**之前**就画对
-//    （否则记着「收起」的人会先看到一整张 330px 的卡再看到它塌成一行），而那件事
-//    只有一段内联脚本做得到 —— 它写 `<html>` 上的一个 class。若这边再用 `x-show`
-//    的内联 `display`，两套机制会在同一个元素上打架：Alpine 说「显示」写的是
-//    `display: ''`，而那正好把权力交回给那个 class 规则，于是展开点不动。
-//    所以两边都用 class，而且**接手时立刻把 html 上那个摘掉**：任何时刻只有一套
-//    在管这件事。
+// 🔴 **日历在这里画，不在服务端。** 写下来免得下一个人以为我没看见现成的两个：
+//    `events.schedule.month_grids()` 和 `dashboard.calendar` 都是服务端的，
+//    而且是按「有活动的那些天」建的（前者只交回含 marked 日期的月份）。
+//    这里要的是任意两个月，而且**翻月不能发请求**。
 //
-// ⚠️ 键里带 `pathname`：这张卡 Events 和管理列表两页共用，但那是两件事 ——
-//    在一页收起不该把另一页也收了。键的形状和模板里那段 boot 脚本**必须一致**，
-//    两处分家的表现是「收起之后刷新又回来了」。
+// 🔴 **它不碰后端，也不碰 HTMX。** 点完日期之后它做的全部事情是：把值写进那两个
+//    原生 `<input type="date">`，然后手动派发一个 `input` 事件 —— 于是表单上那条
+//    现成的 `hx-trigger="input delay:400ms"` 照常把请求发出去。
+//    ⚠️ 派发时必须 `bubbles: true`：那条触发器挂在 `<form>` 上，靠的是事件从字段
+//       冒泡上去。少了它，日历点完什么都不会发生，而框里的值明明变了。
 //
-// ⚠️ 读写都包在 try 里（隐私模式下 localStorage 直接抛）。读不到就当没收起 ——
-//    默认展开，和这一页一直以来的样子相同。
-const FILTERS_KEY = () => `filters:${window.location.pathname}`;
+// ⚠️ 那两个原生框**不是兜底，是设定单边区间的正经入口**（用户定的）：日历上点两下
+//    得到的是一段，而「从九月一号起、不限截止」只有它们说得出来。所以这个组件
+//    **从它们读初值**，也只往它们写 —— 两边永远是同一个真相。
+Alpine.data("dateRange", (pastSelectable = false) => ({
+  // 左边那个月的第一天。⚠️ 从已选的开始日期起，否则一个筛着十一月的人打开
+  // 弹层看到的是九月，还得自己翻回去。
+  cursor: null,
 
-Alpine.data("filterCard", () => ({
-  open: true,
+  // 🔴 **选中的两端是组件自己的响应式状态，不只是 DOM 里那两个框的值。**
+  //    第一版只往框里写，于是点完日期**日历不重画** —— `x-html="grid()"` 只在
+  //    响应式依赖变化时重跑，而一个 input 的 value 不是依赖。表现是：点了一天，
+  //    筛选确实生效了（HTMX 发出去了），可格子上**没有任何高亮**，人不知道自己
+  //    点中了没有。浏览器里才看得见，服务端测试一个字都分不出来。
+  //    ⚠️ 两边仍然是同一个真相：状态一变就写进那两个框（`pick()` 里），
+  //       而人手改那两个框时也同步回状态（模板上那两个 `x-on:input`）。
+  start: "",
+  end: "",
 
   init() {
-    const root = document.documentElement;
-    // 接手：先认下 boot 脚本已经画出来的那个状态，再把它的 class 摘掉。
-    // ⚠️ 顺序不能反 —— 先摘再读的话，读到的是「没收起」，卡片会当场弹开。
-    this.open = !root.classList.contains("filters-collapsed");
-    root.classList.remove("filters-collapsed");
+    this.sync();
+    const from = this.start ? new Date(this.start + "T00:00:00") : new Date();
+    this.cursor = new Date(from.getFullYear(), from.getMonth(), 1);
   },
 
-  // ⚠️ 一个开关，而 2026-08-28 从 `button.html` 删掉过 `toggles` —— 不冲突。
-  //    当时删的理由是「一颗按钮同时是打开和关掉，而它旁边没有任何东西说明此刻
-  //    按下去是哪一件」。这一颗有：箭头跟着转、`aria-expanded` 跟着变、
-  //    读屏念的那句也跟着变。所以它不走那个组件，直接用共享的图标按钮长相。
-  // 收起时整张卡都能点开（2026-09-09）。
-  //
-  // 🔴 **两道闸，缺一个就出一种毛病：**
-  //    ① `!this.open` —— 展开着的时候这一层完全不管事。少了它，点一下输入框、
-  //       点一下下拉、点一下 Clear，卡片自己就收起来了。
-  //    ② 让开那颗箭头 —— 它自己的 `x-on:click` 先跑，然后这一下会**冒泡**到
-  //       表单上。少了它，展开态点箭头是「收起，然后立刻又展开」，
-  //       而屏幕上什么都不动，读起来像按钮坏了。
-  //
-  // ⚠️ 用 `closest()` 而不是 `event.target === button`：点中的可能是箭头里面那个
-  //    `<svg>`（或者它里面的 `<path>`），那时 target 根本不是按钮本身。
-  expandFromCard(event) {
-    if (this.open) return;
-    if (event.target.closest(".filter-toggle")) return;
-    this.toggleFilters();
+  /** 从那两个原生框读回状态 —— 人直接改框时走这条。 */
+  sync() {
+    this.start = this.field("start").value;
+    this.end = this.field("end").value;
   },
 
-  toggleFilters() {
-    this.open = !this.open;
-    try {
-      localStorage.setItem(FILTERS_KEY(), this.open ? "open" : "collapsed");
-    } catch (e) {
-      /* A blocked localStorage costs the memory of this choice, nothing more. */
+  field(which) {
+    // ⚠️ 按 name 找，不按 id：`field.html` 给的 id 带前缀，而 name 是表单契约。
+    //
+    // 🔴 **`$root` 而不是 `$el`**，而这是浏览器里才抓到的：在 Alpine 里 `$el` 是
+    //    「**当前正在求值的那个指令**所在的元素」，不是 `x-data` 的根。`grid()`
+    //    是被子元素上的 `x-html` 调用的，那一刻 `$el` 指向 `.date-popover-months`
+    //    —— 那里面没有日期框，`querySelector` 交回 `null`，于是
+    //    `TypeError: Cannot read properties of null (reading 'value')`。
+    //    表现是**弹层开得出来、两个日期框在、而日历一天都没画**。
+    //    ⚠️ 服务端测试看不见这一条：HTML 一个字不差，错只发生在浏览器里。
+    return this.$root.querySelector(`[name="${which}"]`);
+  },
+
+  shift(months) {
+    this.cursor = new Date(
+      this.cursor.getFullYear(), this.cursor.getMonth() + months, 1);
+  },
+
+  // --- 画 -------------------------------------------------------------------
+
+  grid() {
+    return `<div class="date-popover-nav">
+        <button type="button" data-shift="-1" aria-label="Previous month">&lsaquo;</button>
+        <span>${this.monthName(0)}</span>
+        <span>${this.monthName(1)}</span>
+        <button type="button" data-shift="1" aria-label="Next month">&rsaquo;</button>
+      </div>
+      <div class="date-popover-grid">${this.month(0)}${this.month(1)}</div>`;
+  },
+
+  monthName(offset) {
+    const day = new Date(
+      this.cursor.getFullYear(), this.cursor.getMonth() + offset, 1);
+    return day.toLocaleDateString(undefined, {month: "long", year: "numeric"});
+  },
+
+  month(offset) {
+    const first = new Date(
+      this.cursor.getFullYear(), this.cursor.getMonth() + offset, 1);
+    const year = first.getFullYear();
+    const month = first.getMonth();
+    // ⚠️ 本地时间的「今天」，不是 UTC —— 同 `core.timeutils.local_today()` 那条
+    //    理由：UTC 的日期在傍晚就翻页了，于是「今天」会早一天变灰。
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const start = this.start;
+    const end = this.end;
+
+    let cells = "";
+    // 周日开头，和 `dashboard.calendar` 的 `firstweekday=0` 一致。
+    for (let blank = 0; blank < first.getDay(); blank += 1) cells += "<span></span>";
+    const last = new Date(year, month + 1, 0).getDate();
+    for (let day = 1; day <= last; day += 1) {
+      const date = new Date(year, month, day);
+      const iso = `${year}-${String(month + 1).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+      // 🔴 **置灰分页定**：志愿者那两页只列今天往后的，所以过去的日子选了也是
+      //    空列表；管理页要拉历史报表，一天都不能灰。判据由服务端传进来
+      //    （`past_selectable`），不在这里重算「这是哪一页」。
+      const past = !pastSelectable && date < today;
+      const chosen = iso === start || iso === end;
+      const within = start && end && iso > start && iso < end;
+      cells += `<button type="button" data-day="${iso}"${past ? " disabled" : ""}`
+        + ` class="${chosen ? "is-chosen" : ""}${within ? " is-within" : ""}"`
+        + `>${day}</button>`;
     }
+    return `<div class="date-popover-month">${cells}</div>`;
+  },
+
+  // --- 点 -------------------------------------------------------------------
+
+  pick(event) {
+    const shift = event.target.closest("[data-shift]");
+    if (shift) {
+      this.shift(Number(shift.dataset.shift));
+      return;
+    }
+    const cell = event.target.closest("[data-day]");
+    if (!cell || cell.disabled) return;
+
+    const iso = cell.dataset.day;
+    // 🔴 第一下定起点并**清掉终点**，第二下定终点。少了那一下清空，从一段旧区间
+    //    里点一个新的开始日期会得到一个 start > end 的组合 —— 表单会红，而人
+    //    只是想重新选。
+    if (!this.start || this.end || iso < this.start) {
+      this.start = iso;
+      this.end = "";
+    } else {
+      this.end = iso;
+    }
+    // 🔴 **两个框先都写完，再一起派发** —— 不能一边写一边派发。
+    //
+    //    `announce()` 派发的 `input` 会**冒泡**到 `.date-popover-exact`，而那里
+    //    挂着 `x-on:input="sync()"`，`sync()` 把两个框的**当前值**读回状态。
+    //    写一个派发一个的话：第一圈写完 start 就派发，此时 end 那个框还没写，
+    //    于是 `sync()` 把刚算出来的 end **抹回空** —— 表现是「第一下选得上，
+    //    第二下怎么点都没反应」。浏览器里点两下才看得见，服务端测试分不出来。
+    const fields = ["start", "end"].map((which) => {
+      const field = this.field(which);
+      field.value = this[which];
+      return field;
+    });
+    fields.forEach((field) => this.announce(field));
+  },
+
+  announce(field) {
+    // ⚠️ `bubbles: true` —— 表单上那条 hx-trigger 靠冒泡听见它。
+    field.dispatchEvent(new Event("input", {bubbles: true}));
   },
 }));
 
@@ -1903,9 +1997,16 @@ function positionRowMenus() {
     panel.style.top = `${top}px`;
   };
 
+  // 🔴 **两种面板共用这一套定位**（2026-09-15 把日期弹层纳进来）。
+  //    再抄一份是很有诱惑力的 —— 而这一套里已经写着两条付过学费的细节：
+  //    「第三个参数 true，少了它一次都不会跑」，以及 beforetoggle / toggle
+  //    的两段分工。抄一份就是让那两条学费有机会再付一次。
+  const POSITIONED = ["row-menu", "date-popover", "filter-menu"];
+
   const mine = (event) => {
     const panel = event.target;
-    return panel?.classList?.contains("row-menu") ? panel : null;
+    return POSITIONED.some((name) => panel?.classList?.contains(name))
+      ? panel : null;
   };
 
   // 🔴 **第三个参数 `true`（捕获阶段），少了它这段一次都不会跑。**

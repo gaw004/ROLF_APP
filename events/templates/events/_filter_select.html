@@ -1,0 +1,33 @@
+{% comment %}
+筛选栏上那种「纯文字 + ⌄」的下拉（2026-09-15，用户给了版式并明说「例外，自绘」）。
+
+🔴 **这是对 `.field select` 那条「不用 `appearance: none`」的一次有意破例**，
+   而它比那条注释写的**便宜得多**，所以先把那条注释里混在一起的两件事拆开：
+
+     (a) `appearance: none` + 自画一个箭头，**底下仍然是真的 `<select>`**
+         —— 键盘、读屏、手机上调起的系统选择器，一样不少。去掉的只有浏览器
+         自带的那个箭头。这是这里做的事。
+     (b) 把 `<select>` 换成一套 div 拼的自制下拉 —— 那才要重做键盘和读屏的
+         一整套，也正是那条注释真正在拦的东西。**这里没有做 (b)。**
+
+   所以这次破例的真实代价只有一条：**箭头要自己画，而且要在浅色/深色两档下
+   都对**。写下来是因为下一个看到那条注释的人会以为这里违反了它。
+
+⚠️ 破例**限定在这一个组件里**（`.filter-select`），全站别处的下拉一个字没动。
+   一条破例不加范围，下一次就成了默认。
+
+⚠️ 标签转 `sr-only` 而不是删掉：一条式的版式里没有位置放它，但读屏的人仍然
+   需要知道这一格是什么。⚠️ 空选项因此改成了「Ministry」/「Role」——
+   看得见的人从框里那个词知道它管什么，代价写在 `forms.py` 那两处。
+
+参数：field —— 一个绑定过的表单字段。
+{% endcomment %}
+<div class="filter-select min-w-0">
+  <label class="sr-only" for="{{ field.id_for_label }}">{{ field.label }}</label>
+  {{ field }}
+  <svg width="14" height="14" viewBox="0 0 20 20" fill="none" stroke="currentColor"
+       stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"
+       aria-hidden="true">
+    <path d="M5 8l5 5 5-5"/>
+  </svg>
+</div>

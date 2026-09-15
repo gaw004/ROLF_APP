@@ -1,0 +1,51 @@
+{% comment %}
+「在地图里打开」——两条并排（2026-09-15 第二轮，用户改的主意）。
+
+🔴 **第一版是「一条链接，系统自己选」，而它把平台当成了偏好。**
+   用户的原话：「我虽然用 mac，但是我更熟悉 Google Map 而不是 Apple Map。
+   虽然我知道用 mac 的大部分用 apple map」。多数人的习惯不是这个人的习惯，
+   而那一版**连选的机会都不给** —— `target="_blank"` 意味着点下去 Apple 地图
+   已经在新标签页打开了。
+
+⭐ **两条并排之后，一整套东西跟着消失了**，这是净减法不是加法：
+   · `app.js` 里那段 `navigator.platform` 嗅探（连同「iPadOS 报 MacIntel」那条特例）；
+   · `data-map-link` / `data-address` 两个钩子属性；
+   · 一个 `htmx:afterSwap` 监听；
+   · 以及一句欠着的代价——「关掉 JavaScript 的 iPhone 用户会落到 Google 网页版」。
+   现在是零状态、零嗅探，**没有 JavaScript 时两条都完整可用**。
+
+⚠️ 这和「Add to calendar 那一排」看着像，其实是两件事，所以摆法也不同：
+   那一排三个是**三种不同的动作**（下载的会更新已有那条、两条深链每次多一条），
+   所以它们必须画得不等价、还要配一行小字说清差别；而这两个是**同一个动作的
+   两个去处**，摆并排读起来就是一个选择，不需要任何解释。
+
+⚠️ `urlencode` 两条都不能省：地址里有逗号和空格，不转义的话查询串在半路被截断，
+   地图打开的是别处 —— 而它看起来完全正常。
+
+⚠️ 不用 `geo:` URI（它才是名义上的「系统自己选」）：桌面浏览器不认它，点下去
+   什么都不会发生，而且不报错。一条静默失效的链接比一条指向次优应用的链接糟得多。
+
+参数：address —— 一行字符串，走 `Event.postal_address`（唯一一处拼它的地方）。
+{% endcomment %}
+<span class="map-links">
+  <a class="prose-link inline-flex items-center gap-1.5 text-sm"
+     href="https://www.google.com/maps/search/?api=1&amp;query={{ address|urlencode }}"
+     target="_blank" rel="noopener noreferrer">
+    <svg width="16" height="16" viewBox="0 0 20 20" fill="none" stroke="currentColor"
+         stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M10 17.5s5.5-5 5.5-9a5.5 5.5 0 1 0-11 0c0 4 5.5 9 5.5 9z"/>
+      <circle cx="10" cy="8.5" r="2"/>
+    </svg>
+    Google Maps
+  </a>
+  <a class="prose-link inline-flex items-center gap-1.5 text-sm"
+     href="https://maps.apple.com/?q={{ address|urlencode }}"
+     target="_blank" rel="noopener noreferrer">
+    <svg width="16" height="16" viewBox="0 0 20 20" fill="none" stroke="currentColor"
+         stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M10 17.5s5.5-5 5.5-9a5.5 5.5 0 1 0-11 0c0 4 5.5 9 5.5 9z"/>
+      <circle cx="10" cy="8.5" r="2"/>
+    </svg>
+    Apple Maps
+  </a>
+</span>

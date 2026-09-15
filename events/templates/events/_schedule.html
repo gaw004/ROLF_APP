@@ -80,11 +80,16 @@
     <span class="schedule-arrow-slot">
       {% for tier in schedule_nav %}
         {% if tier.prev %}
+          {% comment %}
+          ⚠️ 两条路由从上下文来（2026-09-14，决定 44）：这一块同时服务
+             `/events/` 和 `/programs/`，写死其中一个的表现是**在课程页上翻一下
+             日程就被扔回活动页** —— 而它不报错，看起来只是「怎么跳走了」。
+          {% endcomment %}
           <a class="schedule-arrow schedule-arrow--{{ tier.days }}"
-             href="{% url 'events:event_list' %}{% querystring from=tier.prev %}"
-             hx-get="{% url 'events:event_schedule' %}{% querystring from=tier.prev %}"
+             href="{{ list_url }}{% querystring from=tier.prev %}"
+             hx-get="{{ schedule_url }}{% querystring from=tier.prev %}"
              hx-target="#schedule" hx-swap="outerHTML"
-             hx-replace-url="{% url 'events:event_list' %}{% querystring from=tier.prev %}"
+             hx-replace-url="{{ list_url }}{% querystring from=tier.prev %}"
              aria-label="Earlier days">&lsaquo;</a>
         {% else %}
           {% comment %}
@@ -114,10 +119,10 @@
       {% endcomment %}
       {% for tier in schedule_nav %}
         <a class="schedule-arrow schedule-arrow--{{ tier.days }}"
-           href="{% url 'events:event_list' %}{% querystring from=tier.next %}"
-           hx-get="{% url 'events:event_schedule' %}{% querystring from=tier.next %}"
+           href="{{ list_url }}{% querystring from=tier.next %}"
+           hx-get="{{ schedule_url }}{% querystring from=tier.next %}"
            hx-target="#schedule" hx-swap="outerHTML"
-           hx-replace-url="{% url 'events:event_list' %}{% querystring from=tier.next %}"
+           hx-replace-url="{{ list_url }}{% querystring from=tier.next %}"
            aria-label="Later days">&rsaquo;</a>
       {% endfor %}
     </span>

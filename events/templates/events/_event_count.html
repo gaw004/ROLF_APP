@@ -1,0 +1,17 @@
+{% comment %}
+「N in this period」——标题行右端那个计数（2026-09-15 抽出来）。
+
+🔴 **它要画两遍，而两遍必须一字不差**：一遍在标题行上（整页请求），一遍带着
+   `hx-swap-oob` 跟在结果片段里（实时筛选那条路）。理由和 `_filter_summary.html`
+   顶上那段一模一样 —— 这一块在 `#event-results` **外面**，而 HTMX 只换那一块。
+
+⚠️ 抽成片段之前这两份是**手抄**的。OOB 在 id 或落点对不上时**静默失败**：
+   筛掉一半，而右上角还写着筛之前的数 —— 每个字都对，只是过期。
+   而整页加载时两份都对，所以 curl 抓不出来。
+
+参数：oob —— 真值则带上 `hx-swap-oob`（只有结果片段那一遍要）。
+{% endcomment %}
+<p id="event-count" {% if oob %}hx-swap-oob="true"{% endif %}
+   class="text-sm text-ink-600 dark:text-ink-300">
+  {{ total }} in this period
+</p>

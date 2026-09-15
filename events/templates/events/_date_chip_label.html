@@ -1,0 +1,12 @@
+{% comment %}
+日期胶囊上那几个字（2026-09-15 抽出来）。同 `_event_count.html`：它在筛选表单
+里，也就是 `#event-results` **外面**，所以要画两遍 —— 一遍在胶囊上，一遍带着
+`hx-swap-oob` 跟在结果片段里。
+
+⚠️ 少了 OOB 那一遍：选完日期列表变了，而胶囊还写着「Dates」。
+⚠️ 字由服务端给（`EventPeriodForm.date_chip`），不在 JS 里算 —— 那三个分支连同
+   格式已经写在表单上了，再写一份 JS 的就是同一条措辞规则的第二个真相。
+
+参数：oob —— 真值则带上 `hx-swap-oob`。
+{% endcomment %}
+<span id="date-chip-label" {% if oob %}hx-swap-oob="true"{% endif %}>{{ period.date_chip }}</span>

@@ -1,0 +1,52 @@
+{% comment %}
+Role 那一格：收起只写一个词，展开每一行带一句解释（2026-09-15，用户定的版式）。
+
+🔴 **为什么这一格不是 `<select>`，而旁边的 Ministry 是。**
+   原生 `<select>` **做不到**「收起短、展开长」—— 收起时显示的就是选中那个
+   `<option>` 的文字，两处是同一个字符串。而用户要的正是两处不同。
+
+   ⚠️ 两格因此长得一样（都是「一个词 + ⌄」），**只有展开时才不同**，这是有意的：
+      · Ministry 有 N 个，名字本身就说明一切，而且会变多 —— 原生下拉在手机上
+        调起系统选择器，选项一多那比任何自绘的列都好用；
+      · Role **永远只有两个**，而每一个都需要一句解释才选得对。
+      判据是「选项需不需要解释」，不是「哪个更好看」。
+
+🔴 **没有 JavaScript 也完整可用，而且不是靠降级。**
+   `popovertarget` 是**声明式的 HTML**，开合不需要脚本；里面是三个真的
+   `<input type="radio">`，跟着表单提交、键盘方向键原生可走、读屏念得出
+   `fieldset`/`legend`。所以这里**没有**付「自制下拉要重做键盘和读屏」的那笔
+   代价 —— 那笔代价是给 div 拼出来的假控件的。
+
+⚠️ 选中之后弹层**不自动关**（关它要脚本）。这是知情的取舍：单选按钮当场变黑、
+   底下那行 `Filtered by …` 当场变，所以「选上了没有」是看得见的；而为了自动关
+   去引一段脚本，等于把无 JS 那条路挂在脚本上。
+
+⚠️ `name="nature"` 和表单字段同名 —— 这三个 radio **就是**那个字段，不是它的
+   影子。HTMX 那条 `hx-trigger="input delay:400ms"` 挂在 `<form>` 上，radio 的
+   `input` 事件照常冒泡上去，所以筛选一个字都不用改。
+{% endcomment %}
+<div class="filter-select">
+  <button type="button" class="filter-trigger" popovertarget="role-filter">
+    <span>{{ period.nature_label }}</span>
+    <svg width="14" height="14" viewBox="0 0 20 20" fill="none" stroke="currentColor"
+         stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M5 8l5 5 5-5"/>
+    </svg>
+  </button>
+
+  <div id="role-filter" popover class="filter-menu">
+    <fieldset>
+      <legend class="sr-only">{{ period.nature.label }}</legend>
+      {% for value, word, gloss in period.nature_options %}
+        <label class="filter-menu-row">
+          <input type="radio" name="nature" value="{{ value }}"
+                 {% if period.nature.value|default:"" == value %}checked{% endif %}>
+          <span>
+            <span class="filter-menu-word">{{ word }}</span>
+            {% if gloss %}<span class="filter-menu-gloss">{{ gloss }}</span>{% endif %}
+          </span>
+        </label>
+      {% endfor %}
+    </fieldset>
+  </div>
+</div>

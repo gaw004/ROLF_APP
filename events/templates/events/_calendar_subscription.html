@@ -1,0 +1,93 @@
+{% comment %}
+「订阅」——把这一页变成他自己日历里的一条源（2026-09-14，用户提的）。
+
+⭐ **它补的是下载那条路的洞。** 下载下来的 `.ics` 是活动时间地点的第二份拷贝，
+   住在别人手机里，基金会一改期它就在他唯一会看的地方静默地假。订阅不会：
+   每次刷新都重新取，退掉的自己消失，加的讲次自己出现。
+
+🔴 **默认只有一颗键，因为地址是懒发的。** 渲染这一页就顺手建一行的话，
+   库里每一个打开过 My Signups 的人都被签发了一条真能用的凭证，而绝大多数人
+   永远不会订阅。理由的长版本在 `events/models.py` 的 `CalendarFeed` 上。
+
+🔴 **那行小字里的两句都不能省**，它们各自防一件会真的发生的事：
+   ① 这条地址**就是一把钥匙** —— 转给别人等于把自己整个日程交出去。人是会转的
+      （「你把课表发我一下」），而收到的人不会知道自己拿到的是什么。
+   ② 之前下载过 `.ics` 的人，订阅之后同一个晚上会**显示两次** —— 两份住在两个
+      日历里。这不是 bug，是两条路同时存在的必然结果，但人不会这么理解。
+
+⚠️ `webcal://` 和 `https://` 两条都给：前者点一下直接交给系统日历，但要本机
+   注册过这个协议；后者是纯文本，给「粘贴一个地址」的那类流程用。只给按钮的话，
+   没注册协议的人点下去什么都不发生，而他会以为功能坏了。
+{% endcomment %}
+{% comment %}
+⚠️ `open` 只在**刚刚发过或换过钥匙**的那一次给（`?subscribed=1`，由
+   `views._back_to_subscription()` 带回来）。少了它，人按完 Create 跳回来
+   看到的是一个又关上了的折叠，而他刚拿到的东西藏在里面。
+⚠️ 不是「有地址就一直展开」：那样每次进 My Signups 都摊着一块设置，
+   而这一页是给他看报名的。
+{% endcomment %}
+<details class="mt-8 border-t border-ink-200 pt-4 dark:border-ink-800"
+         {% if calendar_just_changed %}open{% endif %}>
+  <summary class="inline-flex cursor-pointer items-center gap-1.5 text-sm text-ink-700 hover:text-ink-900 dark:text-ink-200 dark:hover:text-ink-50">
+    <svg width="16" height="16" viewBox="0 0 20 20" fill="none" stroke="currentColor"
+         stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M3.5 5.5a2 2 0 012-2h1M16.5 14.5a2 2 0 01-2 2h-1"/>
+      <path d="M3.5 10a6.5 6.5 0 016.5-6.5M16.5 10a6.5 6.5 0 01-6.5 6.5"/>
+      <circle cx="10" cy="10" r="1.5"/>
+    </svg>
+    Subscribe in your calendar
+  </summary>
+
+  {% if calendar_feed %}
+    <div class="mt-3 space-y-2 text-sm" x-data="copyable">
+      <div class="flex flex-wrap items-center gap-2">
+        {% comment %}
+        ⚠️ `<code>` 而不是一个只读的 `<input>`，两条理由：
+
+           ① 守卫 `TextInputsComeFromFormsGuardTests` 不许模板手写文本框
+              （自由文本必须由 Form 渲染，好让 core/limits.py 生效）。这一个
+              收不了输入，理由上不适用 —— 但**为了让自己的代码过去去松守卫**
+              是这个仓库定过罪的事，所以换写法，不动守卫。
+           ② 没有 JavaScript 的时候两者一样：那一下「点进去自动全选」本来就
+              要脚本，而一段 `<code>` 照样选得中。
+
+        ⚠️ `break-all`：这串地址有 43 个字符的令牌，窄屏上不断行就会把整块
+           撑出版心。
+        {% endcomment %}
+        <code x-ref="address"
+              class="min-w-0 flex-1 break-all rounded-md border border-ink-300 bg-ink-50 px-2 py-1 font-mono text-xs text-ink-700 dark:border-ink-700 dark:bg-ink-900 dark:text-ink-200">{{ calendar_feed_url }}</code>
+        {% comment %}
+        ⚠️ `x-cloak` —— 没有 JavaScript 时这颗键不画。剪贴板只有脚本够得着，
+           而上面那个框本来就选得中，所以少了它不缺任何一条路。
+        {% endcomment %}
+        <button type="button" x-cloak x-on:click="copy()"
+                class="rounded-md border border-ink-300 px-2 py-1 text-xs text-ink-700 hover:bg-ink-100 dark:border-ink-700 dark:text-ink-200 dark:hover:bg-ink-800"
+                x-text="copied ? 'Copied' : 'Copy'"></button>
+        <a href="{{ calendar_feed_webcal }}" class="prose-link text-xs">Open in my calendar</a>
+      </div>
+
+      <p class="text-xs text-ink-600 dark:text-ink-300">
+        Anyone with this address can see everything you are signed up for, so
+        keep it to yourself. If you already downloaded an .ics file, delete
+        those entries first — otherwise each one will show up twice.
+      </p>
+
+      <form method="get" action="{% url 'events:calendar_feed_reset' %}">
+        <button type="submit" class="prose-link text-xs">
+          Replace this address&hellip;
+        </button>
+      </form>
+    </div>
+  {% else %}
+    <form method="post" action="{% url 'events:calendar_feed_create' %}" class="mt-3">
+      {% csrf_token %}
+      <p class="mb-2 text-sm text-ink-600 dark:text-ink-300">
+        Your calendar can follow this page: new signups appear on their own, and
+        anything you withdraw from disappears.
+      </p>
+      <button type="submit" class="prose-link text-sm">
+        Create a subscription address
+      </button>
+    </form>
+  {% endif %}
+</details>

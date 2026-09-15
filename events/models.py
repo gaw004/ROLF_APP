@@ -13,6 +13,7 @@ that one had to be split out of the other.
 """
 
 import datetime
+import secrets
 from decimal import Decimal
 
 from django.conf import settings
@@ -848,7 +849,31 @@ class EventQuerySet(AudienceQuerySetMixin, models.QuerySet):
         return self.filter(shape=Event.Shape.SINGLE)
 
 
-class Event(Audience, ConstraintErrorFieldMixin, TimeStampedModel):
+class PostalAddressMixin:
+    """把四个地址字段拼成一行。`Event` 和 `EventSeries` 共用（2026-09-15）。
+
+    🔴 **只带行为，不带字段** —— 照 `core.models.ImmutableCodeMixin` 的先例：
+       一个带字段的抽象模型会把两张表的迁移绑在同一个类上，而它们的列本来就
+       略有不同（系列那几个带 `help_text`，说的是「生成时复制过去」）。
+
+    🔴 四个调用方，而它们都不能各拼各的：详情页 Where 那一行、那条地图链接、
+       `.ics` 的 `LOCATION`（走 `services._calendar_place()`）、以及把系列和它
+       生成的活动逐条比对的那一处。分处拼的话，某一处漏掉一个字段既不报错、
+       也没有任何页面看得出来 —— 而那条地图链接会安静地指向一个不完整的地方。
+
+    ⚠️ `filter(None, ...)` 是这里的全部机关：四个字段里空的那些**整个不参与**，
+       所以只填了城市的活动得到的是 `Springfield`，不是 `, Springfield, , `。
+       一条带着空档的地址交给地图，搜出来的是别处。
+    """
+
+    @property
+    def postal_address(self):
+        return ", ".join(filter(None, (
+            self.address_street, self.address_city,
+            self.address_state, self.address_postal_code)))
+
+
+class Event(PostalAddressMixin, Audience, ConstraintErrorFieldMixin, TimeStampedModel):
     """One occasion: a food distribution on Saturday morning.
 
     Several shifts are several Events, not one Event plus a shift table: the
@@ -980,7 +1005,33 @@ class Event(Audience, ConstraintErrorFieldMixin, TimeStampedModel):
     ministry = models.ForeignKey(Ministry, on_delete=models.PROTECT, related_name="events")
     start_time = models.DateTimeField()
     end_time = models.DateTimeField()
+    # 🔴 **`location` 是「楼里的哪一间」，不是地址**（2026-09-15 确认的，不是猜的）。
+    #    库里现有的值全是 `Chapel` / `Room 2B` / `Kitchen` / `Back garden` ——
+    #    这些在地图上打不开。街道地址是**新增的一层**，在下面，两者都显示。
     location = models.CharField(max_length=200, blank=True)
+
+    # --- 街道地址（2026-09-15 加）------------------------------------------
+    #
+    # ⭐ 加在 `Event` 上，不新建场地表 —— 用户看着代价定的：代价是同一栋楼的地址
+    #    要在每一场活动上各填一遍，改地址要改很多条。换来的是不引进第二个模型，
+    #    以及「这一场到底用哪个地址」这个问题根本不存在。
+    #
+    # ⚠️ 字段名和 `max_length` **逐字照 `contact.Contact`**：全站两处存地址，
+    #    长得不一样的话，将来想合并或者做一次地址校验都要先对齐一遍。
+    #
+    # 🔴 **没有 `address_country`，而 `Contact` 有。** 这是有意的，不是漏抄：
+    #    活动是基金会在本地办的实体场所，而这些字段的唯一去处是「在地图里打开
+    #    这个地方」—— 本地地址的地图查询不需要国家，而每一张活动表单上多一个
+    #    永远是 US 的下拉框是纯粹的摩擦。真要办跨国的活动，加它是一次迁移。
+    #
+    # ⚠️ 全部 `blank=True`：绝大多数活动在自己楼里，而**地址可以晚一点补** ——
+    #    把它变成必填会让「先建草稿、回头再补细节」这条路走不通。
+    address_street = models.CharField(max_length=255, blank=True)
+    address_city = models.CharField(max_length=100, blank=True)
+    address_state = models.CharField(
+        max_length=100, blank=True, verbose_name="state / province / region")
+    address_postal_code = models.CharField(max_length=20, blank=True)
+
     owner = models.ForeignKey(Contact, on_delete=models.PROTECT, related_name="events_owned")
     # Whether this event holds minors to the consent rule. Per event, and not a
     # setting, because it genuinely differs: a Saturday food sort with parents
@@ -1222,6 +1273,25 @@ class Event(Audience, ConstraintErrorFieldMixin, TimeStampedModel):
     def duration(self):
         """R3. Derived, never stored: two columns already say it."""
         return self.end_time - self.start_time
+
+    @property
+    def when_line(self):
+        """(headline, detail) — 「什么时候」这一行，两处共用一份。
+
+        🔴 **它是一个 property 而不是各页各算，因为这句话已经错过一次。**
+           2026-09-08 走查在详情页顶上抓到的那句假话 ——
+           「Aug. 9, 2026, 4:05 p.m. — Nov. 7, 2026, 3:05 p.m.」——
+           当时只在详情页修好了，而**列表页上那一行原样留着**（它直接印两个
+           时间戳）。同一句假话，两个地方，只修了一个；这个 property 是为了
+           让下一处要显示「什么时候」的页面无处可以再写一份。
+
+        ⚠️ 算术全在 `events/schedule.py`（视图和模型都不做日期运算）。这里只是
+           把那个纯函数接到行上。
+        ⚠️ 它会读 `self.sessions` —— 列表页那一份查询因此带着
+           `prefetch_related("sessions")`，少了就是每行一次查询。
+        """
+        from . import schedule
+        return schedule.when_line(self)
 
     @property
     def is_over(self):
@@ -1749,6 +1819,28 @@ class ParticipationQuerySet(models.QuerySet):
         return self.filter(
             event_role__event__end_time__gt=now or local_now(),
         ).order_by("event_role__event__start_time")
+
+    def past(self, now=None):
+        """Over and done, most recent first — what Past Signups holds.
+
+        🔴 **`upcoming()` 的严格镜像，而「严格」是这里唯一要守的东西**（决定 51）。
+           两个方法合起来必须**不重不漏**地盖住每一行：漏了的那一行在两页上都
+           不出现（一个人报过的名字凭空消失），重了的那一行两页都印（他以为自己
+           报了两次）。两种都不报错。钉住它的是
+           `test_upcoming_and_past_split_every_signup_between_them`。
+           所以这里是 `__lte`，对面是 `__gt`，同一列、同一个 `now`。
+
+        ⚠️ 判据**只有时钟**，不看状态。一场还没开始就取消掉的报名仍然留在
+           My Signups 上、带着它自己的状态徽章 —— 「我退掉的那一场是哪天来着」
+           是在那一页上问的问题，而不是在历史里。这一条是当面定的（2026-09-14），
+           否决的是「取消/退出的立刻进历史」。
+
+        ⚠️ 倒序，和 `upcoming()` 的正序相反：将要发生的事从最近的一件读起，
+           已经发生的事从最新的一件读起。两页各自都是「离今天最近的排最前」。
+        """
+        return self.filter(
+            event_role__event__end_time__lte=now or local_now(),
+        ).order_by("-event_role__event__start_time")
 
 
 class Participation(ConstraintErrorFieldMixin, TimeStampedModel):
@@ -2582,7 +2674,7 @@ class EventSeriesQuerySet(AudienceQuerySetMixin, models.QuerySet):
     """
 
 
-class EventSeries(Audience, ConstraintErrorFieldMixin, TimeStampedModel):
+class EventSeries(PostalAddressMixin, Audience, ConstraintErrorFieldMixin, TimeStampedModel):
     """One rule and one template, producing N **separate** events. L5.4.
 
     The third of the three shapes the foundation asked for, and the one the
@@ -2720,6 +2812,25 @@ class EventSeries(Audience, ConstraintErrorFieldMixin, TimeStampedModel):
         max_length=200, blank=True,
         help_text="Copied onto each occasion as it is made. Changing it later "
                   "does not move occasions that already exist.")
+
+    # --- 街道地址（2026-09-15 加，跟着 `location` 走同一条路）------------------
+    #
+    # 🔴 **系列必须也有这四个，否则它生成的活动有房间、没地址。** 生成那一步是
+    #    逐个字段复制的（`services` 里 `location=series.location` 那两处），
+    #    漏掉地址不报错 —— 表现是一门每周的课，十二个晚上在地图上全部打不开，
+    #    而手工建的单场活动好好的。
+    #
+    # ⚠️ 定义逐字照 `Event` 上那四个（同名、同 max_length），理由同那边：两处
+    #    长得不一样的话，将来想合并或者做一次地址校验都要先对齐一遍。
+    #    `address_country` 同样不在这里，理由写在 `Event` 那一组上。
+    address_street = models.CharField(
+        max_length=255, blank=True,
+        help_text="Copied onto each occasion as it is made.")
+    address_city = models.CharField(max_length=100, blank=True)
+    address_state = models.CharField(
+        max_length=100, blank=True, verbose_name="state / province / region")
+    address_postal_code = models.CharField(max_length=20, blank=True)
+
     description = models.TextField(
         blank=True, max_length=LONG_TEXT,
         help_text="Copied onto each occasion as it is made. Changing it later "
@@ -3252,3 +3363,82 @@ class EventNotification(ConstraintErrorFieldMixin, TimeStampedModel):
 
     def __str__(self):
         return f"{self.event.name} — {self.get_reason_display()} @ {self.sent_at:%Y-%m-%d %H:%M}"
+
+
+class CalendarFeed(TimeStampedModel):
+    """一条订阅地址背后的那一行 —— 一个人一条（2026-09-14）。
+
+    ⭐ **订阅和下载是两件不同的东西，而差别全在这张表上。**
+       下载走登录态；订阅走一条地址，**因为抓取订阅源的是 Google / Apple 的
+       服务器，它不带 cookie**。照 `event_calendar` 那条 `@login_required` 的
+       路由订下去，对方拿到的是登录页的 302 —— 订阅「成功」，日历里一条都没有，
+       而且不报错。这是本仓库反复定罪的那种失败，所以订阅必须带令牌。
+
+    🔴 **一张表，不是 `Contact` 上加一列，而理由是「不要凭空发钥匙」。**
+       加一列等于给库里每一个人（包括永远不会订阅的那几千个）都签发一把能用的
+       凭证。一张表的话，**没人按那颗键就不存在这个秘密**。
+       顺带两件：`TimeStampedModel` 白送「这条地址哪天发的」；而 `Contact` 同时
+       装着机构，订阅是 events 的概念。
+
+    🔴 **不走 `events/tokens.py` 那套 HMAC。** 那一套是 90 秒的签到码：纯函数、
+       不落库、**撤不掉**。而这里要的恰恰是撤得掉 —— 签名要能撤就得为每个人存
+       一份盐，那时它已经是这张表了，只是绕了一圈。
+
+    ⚠️ **这一行不进 admin**（`events/admin.py` 是逐个 `@admin.register` 的，
+       所以「不注册」就是全部动作）。注册它等于在一张列表里把所有人的钥匙
+       印出来给任何一个 staff 看。
+    """
+
+    #: 随机的字节数。256 位 —— 猜不到，而且不依赖任何可推算的东西。
+    TOKEN_BYTES = 32
+    #: 上面那些字节转成 URL-safe base64 之后的字符数，正好是列宽。
+    #  ⚠️ 两个数由 `test_the_column_is_exactly_as_wide_as_the_token` 绑在一起。
+    TOKEN_CHARS = 43
+
+    contact = models.OneToOneField(
+        Contact, on_delete=models.CASCADE, related_name="calendar_feed",
+        verbose_name="whose calendar")
+    #: ⚠️ `unique=True` 自己就建索引，所以**不再写** `db_index=True` ——
+    #  两个一起写是同一列上的两个索引。
+    token = models.CharField(max_length=TOKEN_CHARS, unique=True,
+                             verbose_name="subscription token")
+
+    class Meta:
+        verbose_name = "calendar feed"
+        verbose_name_plural = "calendar feeds"
+
+    @staticmethod
+    def new_token():
+        """一把新钥匙。
+
+        ⚠️ `secrets`，不是 `random` —— 后者是可预测的伪随机，而这一串是凭证。
+        """
+        return secrets.token_urlsafe(CalendarFeed.TOKEN_BYTES)
+
+    def save(self, *args, **kwargs):
+        # ⚠️ 在这里发，而不是用 `default=`：`default` 会在**每次**构造实例时求值，
+        #    包括那些只是拿来读的实例，白白消耗熵；更要紧的是，它让「这一行是
+        #    什么时候有了钥匙的」这件事散在两处。
+        if not self.token:
+            self.token = self.new_token()
+        super().save(*args, **kwargs)
+
+    def rotate(self):
+        """换一把钥匙，旧的当场作废。
+
+        🔴 这是这张表存在的第二个理由。一条订阅地址就是一把钥匙：转给别人等于
+           把自己的整个日程交出去，而人是会转的（「你把课表发我一下」）。
+           没有这个动作，一次转发就是永久的。
+        """
+        self.token = self.new_token()
+        self.save(update_fields=["token", "updated_at"])
+        return self.token
+
+    def __str__(self):
+        """🔴 **绝不带 token。**
+
+        它会出现在 admin 列表、日志、以及 500 报错邮件里 —— 那是一次真正的泄露，
+        而且发生在没有人会去看的地方。守卫：
+        `CalendarFeedTests.test_printing_one_never_prints_the_address`。
+        """
+        return f"Calendar feed for {self.contact}"

@@ -1,0 +1,40 @@
+{% comment %}
+「Next up」—— My Signups 顶端那一条（2026-09-14，L5.8b）。
+
+⭐ **它答的不是「我报了什么」，是「我下一次几点到哪去」。** 下面那两段答的是前者：
+   一门课在那里是**一张卡**（报一次，决定 19）。而人在周一早上打开这一页想知道的
+   是「这周我哪几个晚上有事」，那是**场合**，不是报名 —— 一门课在这里是它的
+   第 3 讲、第 4 讲，各占一格。
+
+⚠️ 三格是横着排的，窄屏上叠成三行（`sm:grid-cols-3`）。左边那道竖线是唯一的
+   分隔，不画卡中卡 —— 这一条本身就在一张卡里面了。
+
+⚠️ 一个人**一场都没有**时整条不画（视图给空列表）。这里不写「你没有安排」——
+   底下那两段已经在说这件事，而在同一屏上说两遍会让人以为那是两个空。
+{% endcomment %}
+{% if next_up %}
+  <section class="card mb-6">
+    <h2 class="mb-3 text-sm font-semibold">Next up</h2>
+    <ul class="grid gap-4 sm:grid-cols-3">
+      {% for moment in next_up %}
+        <li class="border-l-2 border-brand-500 pl-3">
+          <p class="text-sm font-semibold">{{ moment.start_time|date:"D j M, H:i" }}</p>
+          <p class="truncate text-sm text-ink-600 dark:text-ink-300">
+            {{ moment.event.name }}{% comment %}
+            ⚠️ 第几讲是**整门课**里的序号，不是他自己那几行里的 —— 第五周才加入的
+               人，第一次上课是 meeting 5。判据在 services._meeting_numbers()。
+            {% endcomment %}{% if moment.ordinal %} · meeting {{ moment.ordinal }}{% endif %}
+          </p>
+          {% comment %}
+          ⚠️ 没填地点时**什么都不画**，不留占位行 —— 和活动列表那一行相反，
+             理由也相反：那边行高是定死的，少一行就空一块；这三格各自撑高，
+             而「地点待定」对一件今晚就要去的事说了等于没说。
+          {% endcomment %}
+          {% if moment.location %}
+            <p class="truncate text-sm text-ink-600 dark:text-ink-300">{{ moment.location }}</p>
+          {% endif %}
+        </li>
+      {% endfor %}
+    </ul>
+  </section>
+{% endif %}

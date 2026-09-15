@@ -1,0 +1,129 @@
+{% comment %}
+一门课在 My Signups 上的那张卡（2026-09-14，L5.8b）。
+
+⚠️ **课是卡片、单场是表格行，而这不是装饰。** 一门课要说的东西一行装不下：
+   学期两端、每周几点、我上了几讲、下一讲在哪。单场活动的那四列（什么时候、
+   什么角色、什么状态）一行正好。同一张表里塞两种东西的代价是其中一种永远有
+   四五个空格 —— My Signups 那张六列表在课上就是这样，Hours 那一列对一门课
+   **永远是空的**（决定 20：课的工时在点名册上）。
+
+参数：row（一行 Participation）、progress（services.course_progress 的一格，可能是 None）。
+{% endcomment %}
+<li class="card">
+  <div class="flex items-baseline justify-between gap-3">
+    <a href="{% url 'events:event_detail' row.event_role.event.pk %}?from=mine"
+       class="prose-link min-w-0 text-lg font-semibold">{{ row.event_role.event.name }}</a>
+    <span class="shrink-0">
+      {% include "events/_signups_status_badge.html" %}
+    </span>
+  </div>
+
+  {% comment %}
+  学期两端 + 每周的节奏 + 他在这门课里是什么角色，一行。
+  ⚠️ 前两样走 `Event.when_line`，和活动列表行、详情页**同一份** —— 这句话
+     2026-09-08 在详情页上修好过一次，而列表行上的那一份漏到了 09-14。
+  {% endcomment %}
+  {% with when=row.event_role.event.when_line %}
+    <p class="mt-1 text-sm text-ink-600 dark:text-ink-300">
+      {{ when.0 }}{% if when.1 %} · {{ when.1 }}{% endif %} · {{ row.event_role.role.name }}
+    </p>
+  {% endwith %}
+  {% comment %}
+  🔴 **身份和「是谁定的」，D38 第四节那条「看得见不可交易」的唯一落点。**
+
+     ⚠️ 这一格 2026-09-14 差点在改版里丢掉：课从那张表搬成卡片，而卡片第一版
+        只画了名字、时段和角色 —— 一个人被 admin 把自己捐出去的一学期改写成
+        上班，站内**再没有任何一页显示这件事**。一条走查测试抓到的
+        （`test_an_admin_can_correct_an_identity_and_the_person_sees_who_did_it`），
+        不是我复查出来的。搬版面最容易丢的就是这种「只有一个落点」的东西。
+
+     ⚠️ 「是谁定的」不能省：只显示身份的话，admin 改过的和本人自己填的长得
+        一模一样，而这两件事在 FLSA 上不是一回事。
+     ⚠️ 空值不画（那表示这一行早于这个字段），`records_hours` 为假也不画
+        （来上课的位子上存的是 `not_applicable`，照直印出来是一句
+        "Not applicable"，读起来像系统没认出他来）。
+  {% endcomment %}
+  {% if row.served_as and row.records_hours %}
+    <p class="text-xs text-ink-600 dark:text-ink-300">
+      {{ row.get_served_as_display }}{% if row.served_as_declared_by %} · {{ row.get_served_as_declared_by_display }}{% endif %}
+    </p>
+  {% endif %}
+
+  {% if progress %}
+    {% comment %}
+    进度条：他名下**存在的那几讲**，一讲一格（决定 18）。第五周才加入的人这里
+    是 8 格不是 12 格，而没有任何一处在做减法 —— 那四讲对他根本没有行。
+
+    🔴 **四种底色，不是三种。** 「过去了而没有人点过名」必须和「缺席」长得不一样：
+       画成缺席就是替没人核实过的事作证，凭空记他一次没来。同一条规矩
+       `services._session_attendance()` 已经守过一次（registered 的行从出勤率的
+       分子分母里双双拿掉），D27 那句是「没有和没算不能长得一样」。
+
+    ⚠️ 「今天」是**叠在底色上的一圈环**，不是第五种底色 —— 他今天已经签到了，
+       那一格既是今天又是出席，压进一个颜色会丢掉一个。
+
+    ⚠️ `aria-label` 一格一个：屏幕上这是一排颜色，读屏里必须是一句话。
+    {% endcomment %}
+    <ul class="mt-3 flex flex-wrap gap-1.5" aria-label="Attendance so far">
+      {% for meeting in progress.meetings %}
+        <li class="h-6 min-w-[2.5rem] flex-1 rounded
+                   {% if meeting.state == 'attended' %}bg-brand-600 dark:bg-brand-500
+                   {% elif meeting.state == 'missed' %}bg-danger-bg dark:bg-danger-bg-dark
+                   {% elif meeting.state == 'unmarked' %}bg-ink-200 dark:bg-ink-700
+                   {% else %}bg-brand-100 dark:bg-brand-900{% endif %}
+                   {% if meeting.is_today %}ring-2 ring-ink-900 dark:ring-ink-100{% endif %}"
+            title="Meeting {{ meeting.ordinal }} · {{ meeting.start_time|date:'j M' }}"
+            aria-label="Meeting {{ meeting.ordinal }}, {{ meeting.start_time|date:'j M' }}: {{ meeting.state }}"></li>
+      {% endfor %}
+    </ul>
+
+    <div class="mt-3 text-sm">
+      <span class="text-ink-600 dark:text-ink-300">
+        {{ progress.attended }} attended
+        {% comment %}
+        ⚠️ 「下一讲」在**没有下一讲时整句不画**，而不是写「没有了」：一门上完的课
+           不需要每次打开都被告知它上完了 —— 它的状态徽章已经在说这件事。
+        {% endcomment %}
+        {% if progress.next_meeting %}
+          · next {{ progress.next_meeting.start_time|date:"D j M, H:i" }}{% if row.event_role.event.location %}, {{ row.event_role.event.location }}{% endif %}
+        {% endif %}
+      </span>
+    </div>
+  {% endif %}
+
+  {% comment %}
+  🔴 **这两颗键在 `{% templatetag openblock %} if progress {% templatetag closeblock %}` 外面**（2026-09-15 review 抓到）。
+
+     它们原来在里面，而 `progress` 是 `course_progress().get(row.pk)` ——
+     **一门没有任何点名行的课，它是 `None`**。那不是边角情况：`open_register()`
+     只给 `end_time > now` 的讲次建行，所以讲次还没生成、或者剩下的讲次全都
+     过去了（而课程本身还没结束）的课，这张卡上**一条退出的路都没有** ——
+     而在改成卡片之前，那一行永远带着它的取消键。
+
+  ⚠️ 进度那一段仍然留在里面：没有点名行时它确实无话可说，而那正是它画不出来
+     的原因；动作和「有没有进度可显示」无关。
+  ⚠️ 因此它自己要一个行容器：原来它靠父 div 的 `justify-between` 靠右，
+     而那个 div 跟着进度一起留在 `{% templatetag openblock %} if progress {% templatetag closeblock %}` 里了。
+  {% endcomment %}
+    {% comment %}
+    ⚠️ 走的是**和取消同一条路**（`participation_cancel`），只是这里叫
+       "Leave course"。`services.cancel()` 已经按「来过没有」自己分成
+       withdrew / cancelled 并收走未来那几讲的点名行 —— 这里不写第二套逻辑。
+    {% endcomment %}
+  <div class="mt-3 flex items-center justify-end gap-3">
+      {% comment %}
+      ⚠️ 一颗**图标**，不是一串字（用户 2026-09-14）。这一行已经有「N attended ·
+         next 周二…」和一颗 Leave course，再加一串「Add to calendar」就是把这一行
+         挤成三件事。
+      ⚠️ 只给下载那一条：两条深链一次只加一个事件，而那个差别要两句话才说得清
+         —— 一行上塞不下，塞不下就会变成几颗看起来一样的键，而其中两颗会让人的
+         日历长出重复条目。整套带说明的在详情页上。
+      {% endcomment %}
+      {% url 'events:event_calendar' row.event_role.event.pk as cal_url %}
+      {% include "events/_calendar_icon_link.html" with href=cal_url label="Add "|add:row.event_role.event.name|add:" to your calendar" %}
+      {% if row.status == "registered" or row.status == "attended" %}
+        {% url 'events:participation_cancel' row.pk as leave_url %}
+        {% include "core/components/button.html" with label="Leave course" href=leave_url variant="ghost" %}
+      {% endif %}
+  </div>
+</li>

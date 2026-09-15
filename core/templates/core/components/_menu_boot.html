@@ -1,0 +1,32 @@
+{% comment %}
+钉住状态的首帧（2026-09-14）。
+
+🔴 **必须在渲染之前跑完，而这是它单独存在的全部理由。** `app.js` 是带 `defer`
+   的打包产物，等它跑起来页面已经画过一遍了 —— 于是每一页都是「先画没有侧栏的
+   样子，再滑进来」。那一下闪动是 `app.js` 顶上说的「廉价感最大的单一来源」，
+   而这个人选择了让菜单一直在那儿。
+
+⚠️ 它写的是 `<html>` 上的一个 class，因为脚本跑的时候那块面板还没被解析出来 ——
+   够不着它。同 `_period_filter.html` 那一段。
+
+🔴 **key 和 `app.js` 里 `siteShell` 读写的那个必须一字不差。** 两处分家的表现是
+   「钉住之后刷新一下又回到没钉住」，而它不报错。`filterCard` 为同一件事栽过一次。
+
+⚠️ 整段包在 try 里：隐私模式下 `localStorage` 直接抛，而一个菜单偏好读不到，
+   不该把整个页面带下去。同 `_theme_boot.html`。
+
+⚠️ 这段脚本里的注释写英文 —— 它进了发给浏览器的 HTML，而界面语言守卫（D23）
+   的口径是「模板里注释块之外没有汉字」。
+{% endcomment %}<script>
+  (function () {
+    try {
+      /* Same key as siteShell() in app.js — the two must agree. */
+      if (localStorage.getItem("menu:pinned") === "yes") {
+        document.documentElement.classList.add("menu-pinned");
+      }
+    } catch (e) {
+      /* See the template comment above: a blocked localStorage must not
+         take the page down with it. */
+    }
+  })();
+</script>

@@ -27,8 +27,56 @@ from org.permissions import (
 )
 
 
-def _link(label, url_name, query=""):
-    return {"label": label, "url": reverse(url_name) + query}
+def manage_list_name(user, *, foundation=None):
+    """管理那一页叫什么 —— **全站唯一一处定义这对词的地方**（2026-09-03）。
+
+    `events/manage/` 的标题、顶栏那一排里它自己那一格、以及 `_event_nav.html`
+    的面包屑都读它。面包屑此前读的是**逐场活动**的 `can_manage`（`event_access`
+    算的），而列表页读的是页面级那个 —— 一张列表之后这两个不再同步：两顶帽子的
+    人在自己的活动上会看到「← Events I Manage」，而那一页的标题写着「All Events」。
+    同一个页面两个名字，正是 events.tests 那条「one page should not have two
+    names」钉的。
+
+    ⭐ **判据是「这一页列的是不是全部」，不是「你能不能改」**：两顶帽子的人两者
+       都为真，而页面上列的确实是全部。
+
+    ⚠️ 匿名也答得了（`in_foundation_tier` 对匿名返回 False）—— 管理页对他是 302
+       到登录，但活动详情页那条面包屑**匿名可达**，少了这个值它会渲染成一个空
+       字符串的链接，而模板不报错。
+
+    🔴 两个调用方，而它们画的是同一页上的两个东西：
+       · 这个模块的 `navigation()` → `manage_list_name`，模板拿去画 `<h1>`；
+       · `events.views._sibling_tabs()` → 顶栏那一排里管理页那一格的字。
+       写成两份的表现是「这一排写 Events I Manage、而版心标题写 All Events」——
+       一个页面两个名字，而 `ManageListHeadTests` 正是为这件事钉着两处必须同词。
+       那条守卫留着，这个函数让它守的东西**从结构上就不可能分家**。
+
+    ⚠️ `events` import `core` 是允许的方向（D17）；反过来不行。
+
+    ⚠️ `foundation` 让**已经知道答案的调用方**把它传进来（同
+       `services.default_served_as()` 的 `on_the_books`）。`in_foundation_tier()`
+       是一次没有缓存的 `groups.filter().exists()`，而 `navigation()` 上面两行
+       刚算过它 —— 不给这个口子的话，这个抽取会给**每一个登录后的页面渲染**
+       （连同每一个 HTMX 片段）多加一次查询。实测过：普通页面从 2 次
+       `auth_group` 涨到 3 次。
+    """
+    if foundation is None:
+        foundation = in_foundation_tier(user)
+    return "All Events" if foundation else "Events I Manage"
+
+
+def _link(label, url_name, icon, query=""):
+    """一个菜单项。
+
+    🔴 **`icon` 是必填的位置参数，而那是故意的。** 钉住之后这个菜单收成一条只有
+       图标的窄栏（2026-09-14），于是「有没有图标」不再是装饰问题 —— 漏一个就是
+       窄栏上一个**看不出是什么的空格**，而页面不报错。做成必填之后，加一条新
+       菜单项却忘了配图标的那一刻是一个 `TypeError`，不是一次走查。
+
+    ⚠️ 名字而不是一段 SVG：这里是**数据**，画在 `_menu_icons.html` 上。
+       把标记塞进 context processor 的话，改一个图形要动 Python。
+    """
+    return {"label": label, "url": reverse(url_name) + query, "icon": icon}
 
 
 def _menu_for(user, administered, foundation):
@@ -72,28 +120,39 @@ def _menu_for(user, administered, foundation):
     """
     # ⚠️ "Past Events" left this menu on 2026-08-17 along with the page itself.
     #    Events now starts at today rather than at "not started yet", so the
-    #    one entry covers what the two used to; a volunteer's own finished
-    #    events are on My Signups, and any period at all is on the management
-    #    list for the tier that has it.
+    #    one entry covers what the two used to; any period at all is on the
+    #    management list for the tier that has it.
+    #
+    # ⚠️ 那句话原来还有半句 ——「志愿者自己结束了的活动**在 My Signups 上**」——
+    #    2026-09-14 起不成立了：它们搬去了 `/me/participations/past/`（决定 48）。
+    #    这里**不加第七条菜单项**，去那一页的路是 My Signups 顶栏上并排的那一格，
+    #    外加它底下那条「9 past signups →」。一个东西一个入口，而这个模块开头
+    #    数着的那五个缺口讲的是**没有**入口，不是只有一个。
     if not user.is_authenticated:
         return [
-            _link("Events", "events:event_list"),
-            _link("Log In", "accounts:login"),
-            _link("Register", "accounts:register"),
+            _link("Events", "events:event_list", "events"),
+            _link("Programs", "events:program_list", "programs"),
+            _link("Log In", "accounts:login", "login"),
+            _link("Register", "accounts:register", "register"),
         ]
 
     menu = [
         # ⚠️ 第一条，因为它是登录之后的落脚点 —— 别的每一条都答一个他带着来的
         #    问题，只有这一条告诉他「有什么在等你」。
-        _link("Home", "home"),
-        _link("Events", "events:event_list"),
+        _link("Home", "home", "home"),
+        _link("Events", "events:event_list", "events"),
+        # ⭐ 紧跟着 Events，因为它就是 Events 的一半（2026-09-14，决定 45）：
+        #    两张列表页互斥，一门课**只**在这一格后面。没有这一条的话，
+        #    Programs 那一页只有顶栏那一排进得去，而顶栏要先到得了 /events/ ——
+        #    正是这个模块开头列的那五个缺口的形状。
+        _link("Programs", "events:program_list", "programs"),
         # ⚠️ Second, above My Signups, and the order is the argument. A notice is
         #    the one thing on this menu somebody might not know they need to
         #    read — everything else answers a question they arrived with. It is
         #    not first because Events is what most people came for.
-        _link("Notices", "notices:notice_list"),
-        _link("My Signups", "events:my_participations"),
-        _link("My Profile", "accounts:profile"),
+        _link("Notices", "notices:notice_list", "notices"),
+        _link("My Signups", "events:my_participations", "signups"),
+        _link("My Profile", "accounts:profile", "profile"),
     ]
 
     if administered:
@@ -107,7 +166,7 @@ def _menu_for(user, administered, foundation):
             #    it, the upload page is reachable only by typing its URL, which
             #    is precisely the shape of the five gaps this module exists to
             #    close.
-            _link("Memories Photos", "gallery:manage"),
+            _link("Memories Photos", "gallery:manage", "photos"),
         ]
 
     if foundation:
@@ -117,9 +176,9 @@ def _menu_for(user, administered, foundation):
         #    it is the same URL either way, and the page itself widens for the
         #    tier. Two entries pointing at one page reads as a bug.
         if not administered:
-            menu.append(_link("Memories Photos", "gallery:manage"))
+            menu.append(_link("Memories Photos", "gallery:manage", "photos"))
         if can_grant_ministry_admin(user):
-            menu.append(_link("Ministry Admins", "org:ministry_list"))
+            menu.append(_link("Ministry Admins", "org:ministry_list", "ministries"))
 
     if user.is_staff:
         # ⚠️ Its own section, and not folded into either tier above. `is_staff`
@@ -135,7 +194,10 @@ def _menu_for(user, administered, foundation):
         #    have been a POST. Every other entry is a page of this site, and
         #    opening those in new tabs would just accumulate them.
         menu += [{"heading": "Staff"},
-                 {"label": "Admin Site", "url": "/admin/", "new_tab": True}]
+                 {"label": "Admin Site", "url": "/admin/", "new_tab": True,
+                  # ⚠️ 这一条是手写的（它不走 `reverse()`），所以 `_link()` 那个
+                  #    必填参数管不到它 —— `SiteMenuIconsGuardTests` 兜住的正是它。
+                  "icon": "admin"}]
 
     return menu
 
@@ -149,10 +211,8 @@ def navigation(request):
             "can_grant_ministry_admin": False,
             "is_ministry_admin": False,
             "can_see_all_events": False,
-            # ⚠️ 匿名分支也要给这个键。管理页对他是 302 到登录，但
-            #    `_event_nav.html` 的面包屑在**活动详情页**上，而那一页匿名可达 ——
-            #    少了它面包屑会渲染成一个空字符串的链接，而模板不报错。
-            "manage_list_name": "Events I Manage",
+            # ⚠️ 匿名分支也要给这个键，理由在 `manage_list_name()` 的 docstring 里。
+            "manage_list_name": manage_list_name(AnonymousUser()),
             "site_menu": _menu_for(AnonymousUser(), set(), False),
         }
 
@@ -174,18 +234,10 @@ def navigation(request):
         #    rather than by any test.
         "can_see_all_events": bool(administered) or foundation,
         "can_grant_ministry_admin": can_grant_ministry_admin(user),
-        # ⭐ **这一页叫什么，只在这里定一次**（2026-09-03）。
-        #
-        #    `events/manage/` 的标题、页头条和 `_event_nav.html` 的面包屑都读它。
-        #    面包屑此前读的是**逐场活动**的 `can_manage`（`event_access` 算的），
-        #    而列表页读的是页面级那个 —— 一张列表之后这两个不再同步：
-        #    两顶帽子的人在自己的活动上会看到「← Events I Manage」，
-        #    而那一页的标题写着「All Events」。同一个页面两个名字，
-        #    正是 events.tests 那条「one page should not have two names」钉的。
-        #
-        # ⚠️ 判据是「这一页列的是不是全部」，不是「你能不能改」——
-        #    两顶帽子的人两者都为真，而页面上列的确实是全部。
-        "manage_list_name": "All Events" if foundation else "Events I Manage",
+        # ⭐ 这一页叫什么，只定义在一处 —— 见 `manage_list_name()`，
+        #    顶栏那一排里它自己那一格读的是同一个函数。
+        # ⚠️ 把上面已经算好的 `foundation` 递进去 —— 见那个函数的最后一条。
+        "manage_list_name": manage_list_name(user, foundation=foundation),
     }
 
 

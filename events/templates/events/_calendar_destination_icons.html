@@ -1,0 +1,63 @@
+{% comment %}
+「Add to calendar」那四条链接前面的四个小标志（2026-09-14，用户当天要的：
+「google 有 google calendar 的标志，outlook 有 outlook 的标志，download 应该有
+download 的标志」）。
+
+⭐ **图标在这里不是装饰，它替那行小字说了一半的话。** 前两条是**下载**（一个
+   文件，进你自己的日历，再下一次会更新它）；后两条是**去另一个网站**（打开一张
+   新建草稿，再点一次多一条）。两类东西并排摆成四条一模一样的蓝链接时，这个
+   区别只剩底下那行小字在说；给它们两种标志，一眼就分得开。
+
+⚠️ **Google 和 Outlook 那两个是简化的近似标志，不是官方品牌资产。**
+   两家的真标志都是注册商标，官方 SVG 要从各自的 brand guidelines 取
+   （Google Brand Resource Center / Microsoft Brand Central），而且各自带使用条款
+   （最小尺寸、留白、不许改色）。这里画的是认得出的近似版：
+   · Google Calendar —— 四色边框的日历方块（蓝/绿/黄/红是它的识别色）
+   · Outlook —— 蓝色信封
+   ⚠️ 真要换成官方那份时，换的是这个文件里的两段 `<svg>`，别处一个字不用动。
+   ⚠️ 不去 CDN 取：那是一次对外请求，会把「谁打开了这一页」告诉第三方，
+      而这一页上有这个人报名了什么。
+
+⚠️ 四个都 `aria-hidden` —— 每一条链接自己的文字已经把话说全了（"Google"、
+   "All meetings (.ics)"），给图标再来一个名字，读屏的人会听到两遍。
+
+参数：kind —— download / google / outlook 之一。
+{% endcomment %}
+{% if kind == "google" %}
+  {% comment %}
+  ⚠️ **白底 + 四色边框**，不是四色填充。填满之后在 15px 上读出来的是「一个彩色
+     方块中间有道白条」—— 第一版就是那样，放大一看根本不像日历。Google Calendar
+     那个标志的识别点恰恰是**白色的中心**和四边不同的颜色，所以颜色要退到边上去。
+  ⚠️ 中间不画「31」：15px 上两位数字糊成一团灰，反而把干净的白心弄脏。
+  {% endcomment %}
+  <svg width="15" height="15" viewBox="0 0 20 20" aria-hidden="true" class="shrink-0">
+    <rect x="3" y="3" width="14" height="14" rx="2" fill="#fff"/>
+    <path d="M5 3h12a2 2 0 012 2v1H3V5a2 2 0 012-2z" fill="#4285F4"/>
+    <path d="M17 3a2 2 0 012 2v12a2 2 0 01-2 2h-1V3z" fill="#0F9D58"/>
+    <path d="M3 14h16v3a2 2 0 01-2 2H5a2 2 0 01-2-2z" fill="#F4B400"/>
+    <path d="M3 5a2 2 0 012-2h1v16H5a2 2 0 01-2-2z" fill="#DB4437"/>
+    <rect x="6.5" y="7.5" width="7" height="6" rx="0.5" fill="#fff"/>
+  </svg>
+{% elif kind == "outlook" %}
+  {% comment %}
+  ⚠️ 信封而不是那个 "O"：Outlook 的方标在 15px 上只剩一团蓝，而信封的折线
+     在这个尺寸上仍然读得出来。颜色取它的识别蓝。
+  {% endcomment %}
+  <svg width="15" height="15" viewBox="0 0 20 20" aria-hidden="true" class="shrink-0">
+    <rect x="2.5" y="5" width="15" height="10" rx="1.5" fill="#0F6CBD"/>
+    <path d="M2.5 6.5l7.5 5 7.5-5" fill="none" stroke="#fff" stroke-width="1.4"
+          stroke-linecap="round" stroke-linejoin="round"/>
+  </svg>
+{% else %}
+  {% comment %}
+  ⚠️ 下载那个标志跟着文字走 `currentColor`，**不给它颜色** —— 上面两个带色的是
+     「别人家的东西」，这一个是本站自己的动作，两者在视觉上本来就该分开。
+  {% endcomment %}
+  <svg width="15" height="15" viewBox="0 0 20 20" fill="none" stroke="currentColor"
+       stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"
+       aria-hidden="true" class="shrink-0">
+    <path d="M10 3.5v8.5"/>
+    <path d="M6.5 8.75L10 12.25l3.5-3.5"/>
+    <path d="M3.5 14.5v1a1 1 0 001 1h11a1 1 0 001-1v-1"/>
+  </svg>
+{% endif %}

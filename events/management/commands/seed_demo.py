@@ -523,6 +523,14 @@ class Command(BaseCommand):
                 "ministry": self.pantry,
                 "start_time": now + 7 * DAY, "end_time": now + 7 * DAY + 3 * HOUR,
                 "location": "Church ground floor", "owner": self.pantry_admin.contact,
+                # ⚠️ 演示数据里**必须至少有一场带街道地址的活动**（2026-09-15）：
+                #    没有的话，Where 那一行的地址和那条地图链接在演示数据上
+                #    一次都画不出来 —— 一个看不见的功能没有人会去检查它。
+                #    ⚠️ 用 example 式的假地址，不是真实门牌：这份数据会被截图。
+                "address_street": "120 Riverbank Road",
+                "address_city": "Springfield",
+                "address_state": "CA",
+                "address_postal_code": "90210",
                 "status": Event.Status.OPEN,
                 "visible_to_outsiders": True,
                 "visible_to_all_staff": True,
@@ -832,6 +840,13 @@ class Command(BaseCommand):
                 "start_time": datetime.time(19, 0),
                 "duration": datetime.timedelta(hours=1, minutes=30),
                 "location": "Chapel",
+                # ⚠️ 系列也带一份 —— 它生成的每一场都会复制过去，而「系列漏掉
+                #    地址」正是那条最容易悄悄发生的错（十二个晚上全打不开地图，
+                #    而手工建的单场活动好好的）。演示数据里有它才验得了。
+                "address_street": "120 Riverbank Road",
+                "address_city": "Springfield",
+                "address_state": "CA",
+                "address_postal_code": "90210",
                 "status": Event.Status.OPEN,
                 "visible_to_outsiders": True,
                 "visible_to_all_staff": True,

@@ -1,0 +1,82 @@
+{% comment %}
+日期区间：一颗胶囊，点开是双月日历（2026-09-15，用户给了截图）。
+
+🔴 **底下那两个原生日期框有两个身份，两个都要**：
+   ① **没有 JavaScript 时唯一的入口** —— 日历是脚本画的，而筛选是读操作，
+      D24 那条硬规矩管不到它；即便如此，留着这条路的成本是零。
+   ② **所有人设定单边区间的正经入口**（用户 2026-09-15 定的）：日历上点两下
+      得到的是一段，而「从九月一号起，不限截止」只有这两个框说得出来。
+      `EventPeriodForm.description()` 早就支持单边（`from X` / `until Y`），
+      所以后端一个字都不用改。
+
+🔴 **用原生 `popover`，不用 Alpine 的 `x-show` 也不用绝对定位的下拉** ——
+   照 `row_menu.html` 那一套：自带 light-dismiss 和 Esc，渲染在 **top layer**，
+   祖先的 `overflow` 和 `backdrop-filter` 都够不着它。这张卡在开着日程时是
+   钉住的、外面还套着会滚的列，绝对定位的下拉在那里会被裁掉。
+   ⚠️ 没有 JS 时 popover 落在**视口居中**（规范的默认锚定），定位由 app.js
+      那段补 —— 同 `row_menu.html`，那里第一次踩到并记下了。
+
+⚠️ 胶囊上的字走 `period.date_chip`：它和 `description()` 共用那三个分支
+   （两端 / 只有 start / 只有 end），但**格式不同** —— 报表正文要的是
+   「15 Sep 2026 – 01 Oct 2026」（带年份），这颗胶囊要的是「Sep 15 – Oct 1」。
+   两处各有各的去处，合并会让其中一个变形。
+
+参数：past_selectable —— 真值则日历里今天之前的日子可点（管理页报表要拉历史）。
+{% endcomment %}
+<div class="date-range">
+  <button type="button" class="date-chip"
+          popovertarget="date-range-popover"
+          aria-label="Choose a date range">
+    {% comment %}
+    🔴 **胶囊上的字由服务端给，而且跟着 out-of-band 更新**（2026-09-15）。
+
+       它在 `#event-results` **外面**（在筛选表单里），所以实时筛选那条路上只有
+       OOB 送得到它 —— 和底下那行摘要、右上角那个计数是同一类。少了它，选完
+       日期列表变了、而这颗胶囊还写着「Dates」。
+
+    ⚠️ 为什么不在 JS 里算：那三个分支（两端 / 只有 start / 只有 end）连同格式
+       已经写在 `EventPeriodForm.date_chip` 上了。在这里再写一份 JS 的，就是
+       同一条措辞规则的第二个真相 —— 而两份迟早会不一样。代价是胶囊要等那一次
+       请求回来才变（约 400ms 的防抖之后），而日历上的高亮是**当场**就有的，
+       所以「点中了没有」这件事不靠它回答。
+    {% endcomment %}
+    {% include "events/_date_chip_label.html" %}
+    <svg width="14" height="14" viewBox="0 0 20 20" fill="none" stroke="currentColor"
+         stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M5 8l5 5 5-5"/>
+    </svg>
+  </button>
+
+  {% comment %}
+  ⚠️ `x-data` 挂在 popover 上而不是外层：日历只有它自己要，而这张卡在两个页面上
+     各画一次 —— 状态挂高了会和外壳那个 `eventsShell` 争同一个作用域。
+  ⚠️ `x-cloak` 不需要：这一层平时由 `popover` 自己藏着（UA 样式），
+     而那是 CSS 不是 Alpine，所以没有「Alpine 接手之前闪一下」这回事。
+  {% endcomment %}
+  <div id="date-range-popover" popover class="date-popover"
+       x-data="dateRange({{ past_selectable|yesno:'true,false' }})">
+    {% comment %}
+    日历本身由 JS 画（`app.js` 的 `dateRange`）。
+
+    ⚠️ **不复用 `events.schedule.month_grids()` 或 `dashboard.calendar`** ——
+       写下来免得下一个人以为我没看见它们：那两个都是**服务端**的，而且是按
+       「有活动的那些天」建的（`month_grids(days)` 只交回含有 marked 日期的月份）。
+       这里要的是任意两个月、且前后翻月**不能发请求**。
+    {% endcomment %}
+    <div class="date-popover-months" x-html="grid()"
+         x-on:click="pick($event)"></div>
+
+    {% comment %}
+    🔴 **两个原生框在日历下面，而不是替代品** —— 见本文件顶上那两条理由。
+       ⚠️ 它们由 Form 渲染（`field.html`），所以 `type="date"` 和长度上限都在。
+    {% endcomment %}
+    {% comment %}
+    ⚠️ `x-on:input="sync()"` —— 人直接改这两个框时，把值同步回组件状态，
+       否则日历上的高亮和框里的值会各说各的。两边永远是同一个真相。
+    {% endcomment %}
+    <div class="date-popover-exact" x-on:input="sync()">
+      <div class="min-w-0">{% include "core/components/field.html" with field=period.start %}</div>
+      <div class="min-w-0">{% include "core/components/field.html" with field=period.end %}</div>
+    </div>
+  </div>
+</div>

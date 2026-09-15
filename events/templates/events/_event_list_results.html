@@ -11,10 +11,33 @@ event_list 的结果区。整页和 HTMX 片段渲染的是同一份 —— 视�
      对志愿者可见的活动，里面有满员的、有取消的、还有今天上午已经跑完的 ——
      句子里留着 open for signup 就是一个当场可以被右边那一列标签证伪的说法。
   {% endcomment %}
-  <p class="mb-4 text-sm text-ink-600 dark:text-ink-300">
-    <span class="font-semibold text-ink-900 dark:text-ink-50">{{ total }}</span>
-    event{{ total|pluralize }} in this period.
-  </p>
+  {% comment %}
+  🔴 **两块 out-of-band 的东西**（2026-09-15）：计数在标题行右端、摘要在筛选表单
+     底下 —— 两者都在 `#event-results` **外面**，而 HTMX 只换这一块。少了 OOB，
+     改一个筛选之后列表变了、而那两处**永远不动**：一个是每个字都对只是过期的数，
+     另一个是「Filtered by … / Clear」压根不出现。后者是用户报上来的。
+
+  🔴 **只在 HTMX 那条路上画**（`is_htmx`）。整页那一次它们已经由
+     `event_list.html` 和 `_period_filter.html` 各画过一遍了 —— 不加这个条件的话，
+     整页 DOM 里会有**两个同名 id**，而 OOB 的落点从此是不确定的那一个。
+     ⚠️ 重复 id 不报错，页面看起来也完全正常，所以只能靠数出来发现。
+
+  ⚠️ `id` 必须和外面那两份**一字不差**，否则 OOB 找不到落点而**静默失败**
+     （htmx 不报错，那两处就是不更新）。
+
+  ⚠️ 名词不再出现在计数那句话里（原来是「21 events in this period.」）：标题行
+     就在它左边写着 Events / Programs，紧挨着再说一遍是重复。
+  {% endcomment %}
+  {% comment %}
+  ⚠️ 三块**都走各自的片段**（2026-09-15 simplify 抓到）：原来只有摘要那一块
+     抽了，另外两块是手抄的第二份。三份里任何一份和它的正本在 id 或措辞上分家，
+     OOB 就**静默失败** —— 而整页加载时看起来完全正常。
+  {% endcomment %}
+  {% if is_htmx %}
+    {% include "events/_event_count.html" with oob=1 %}
+    {% include "events/_filter_summary.html" with oob=1 %}
+    {% include "events/_date_chip_label.html" with oob=1 %}
+  {% endif %}
 
   <ul class="space-y-3">
     {% for event in events %}
@@ -192,7 +215,24 @@ event_list 的结果区。整页和 HTMX 片段渲染的是同一份 —— 视�
             </span>
           </div>
           <p class="mt-2 text-sm text-ink-600 dark:text-ink-300">
-            {{ event.start_time }} &ndash; {{ event.end_time }}
+            {% comment %}
+            🔴 走 `Event.when_line`（2026-09-14）。这一行原来是 `start_time – end_time`
+               两个时间戳直接印出来，而对一门课那两列是**学期的两端** ——
+               「Aug 9, 4:05 p.m. – Nov 7, 3:05 p.m.」读起来像一场开了三个月的活动。
+               详情页上这句假话 2026-09-08 就修掉了，**这一行上原样留到今天**：
+               同一句话两个地方，只修了一个。判据在那个 property 上，不在这里。
+            {% endcomment %}
+            {% comment %}
+            ⚠️ `{% templatetag openblock %} with {% templatetag closeblock %}` 而不是写三遍 `event.when_line` ——
+               那是一个 property，每写一次就重算一次那句话（讲次本身有 prefetch
+               兜着，不会多查询，但重算三遍没有理由）。
+            {% endcomment %}
+            {% with when=event.when_line %}
+              {{ when.0 }}
+              {% if when.1 %}
+                <br><span class="text-xs">{{ when.1 }}</span>
+              {% endif %}
+            {% endwith %}
             {% comment %}
             ⚠️ 没填地点也**照样占一行**。留空的话这张卡矮一行，而行高是定死的 ——
                矮下来的是文字、不是卡片，看起来就是下面空一块。说一句真话比留白好，
@@ -287,7 +327,11 @@ event_list 的结果区。整页和 HTMX 片段渲染的是同一份 —— 视�
          长得一样」。详情页的角色那一层早就为同一个问题做对了。
       {% endcomment %}
       <li>
-        {% include "core/components/empty.html" with message="No events for you in this period. Try a wider date range — some events are only open to certain groups." %}
+        {% comment %}
+        ⚠️ 同上。这一句在走查当天**没有被发现**，因为演示数据里恰好有一门课，
+           空状态没露出来 —— 一个词写三处，下一次只会改到其中两处。
+        {% endcomment %}
+        {% include "core/components/empty.html" with message="No "|add:list_noun|add:"s for you in this period. Try a wider date range — some are only open to certain groups." %}
       </li>
     {% endfor %}
   </ul>

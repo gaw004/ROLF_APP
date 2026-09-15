@@ -18,12 +18,24 @@ urlpatterns = [
     #    `<int:pk>` 只吃数字，所以 "schedule" 撞不上它，顺序在这里无所谓。
     #    写在这里只是因为它属于 event_list 那一页。
     path("events/schedule/", views.event_schedule, name="event_schedule"),
+    # L5.8b — 课程那一份（2026-09-14，决定 44/45）。⚠️ 它和上面那两条是**同一个
+    #    视图**喂了另一种形状，不是第二套页面；分开的只有地址，而地址分开正是
+    #    「我们替人预先筛好」这句话的落点。
+    #
+    # ⚠️ 不在 `events/` 下面：这两页是并排的兄弟（顶栏上那一排也是这么画的），
+    #    挂成 `events/programs/` 读起来是「活动的一个子集的一个子页」，而它不是。
+    path("programs/", views.program_list, name="program_list"),
+    path("programs/schedule/", views.program_schedule, name="program_schedule"),
     path("events/<int:pk>/", views.event_detail, name="event_detail"),
     # 日程上点一张卡时换进面板的那一块（2026-08-18）。⚠️ 同一份模板、同一份
     # 上下文、同一道权限，只是外面少了一层页面 —— 见 views.event_detail_panel。
     path("events/<int:pk>/panel/", views.event_detail_panel, name="event_detail_panel"),
     path("events/<int:pk>/signup/", views.event_signup, name="event_signup"),
     path("me/participations/", views.my_participations, name="my_participations"),
+    # L5.8b（2026-09-14，决定 48）。⚠️ 上面那条**保持原样**不改名：它已经进过
+    #    六处登录后跳转、站点菜单和别人的书签，而改地址换来的只是对称。
+    path("me/participations/past/", views.past_participations,
+         name="past_participations"),
     # D28 — the two halves of a scan. `confirm` comes first for the same reason
     # `new` does below: the token pattern matches any string, so the other order
     # would read the word "confirm" as a token and refuse it as expired.
@@ -94,6 +106,32 @@ urlpatterns = [
         views.checkin_token,
         name="checkin_token",
     ),
+    # 「加进我的日历」（2026-09-14）。⚠️ 走 `.ics` 结尾而不是 `/calendar/`：
+    #    有的客户端（尤其是手机上从短信里点开的那种）按后缀认文件类型，
+    #    而 `Content-Type` 对头都不一定读得到。
+    path("events/<int:pk>/calendar.ics", views.event_calendar,
+         name="event_calendar"),
+    # ⚠️ 单独一讲（用户 2026-09-14）。整期那一条在上面 —— 一门课两种下法都要有，
+    #    而它们是两个地址，因为它们答的是两个问题。
+    path("events/sessions/<int:pk>/calendar.ics", views.session_calendar,
+         name="session_calendar"),
+
+    # 订阅源（2026-09-14）。
+    #
+    # ⚠️ `<slug:token>` 而不是 `<str:token>`：slug 的字符集 `[-a-zA-Z0-9_]+`
+    #    **正好**是 `secrets.token_urlsafe()` 的产物，而 `str` 是 `[^/]+` ——
+    #    后者会把 `.ics` 也吞进去再靠回溯吐出来。能用，但它默许了一个带点的
+    #    令牌，而我们从不签发那种。
+    #
+    # ⚠️ 不在 `events/` 前缀下面：它不是某一场活动的东西，是**这个人的**。
+    path("calendar/<slug:token>.ics", views.calendar_feed,
+         name="calendar_feed"),
+    # 发一把钥匙 / 换一把钥匙。⚠️ 两条都在 `me/` 下面，因为它们是**这个人的**
+    #    设置，不是某一场活动的东西 —— 同 `me/participations/`。
+    path("me/calendar/create/", views.calendar_feed_create,
+         name="calendar_feed_create"),
+    path("me/calendar/reset/", views.calendar_feed_reset,
+         name="calendar_feed_reset"),
     path("events/<int:pk>/report/", views.event_report, name="event_report"),
     # B11 — P6. Same permission as attendance: sending is a write.
     path("events/<int:pk>/notify/", views.event_notify, name="event_notify"),

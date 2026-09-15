@@ -1,0 +1,46 @@
+{% comment %}
+讲次表一行里那三个日历图标（2026-09-14）。
+
+⭐ **一讲正好是一个事件，所以这里三个去处都成立** —— 而顶上那颗
+   「Add to calendar」只给得了下载那一条（Google 和 Outlook 的深链一次加一个
+   事件，一门课有十二讲）。这个不对称是它们的限制，不是我们的选择。
+
+🔴 **这三个不再收在每一行自己的 `<details>` 里**（2026-09-14 第三轮，用户定的）。
+   原来每行有一颗「⋯」，点开才看得见它们 —— 要点两次才够得着一个本来就该在那儿
+   的链接。收纳比它收起来的三个 16px 的标志更贵，所以收纳撤掉了。
+
+   收起 / 摊开现在是**整张表一个开关**，由表头那颗键管，落点是 wrapper 上的一个
+   class（`meeting-calendars-collapsed`）。
+
+   ⚠️ 连同那个 `<details>` 一起撤掉的，是它那段「为什么不用 `popover`」的论证：
+      那段话的第①条理由是「那颗键的全部意思就是一次全打开，而 popover 同时只开
+      一个」—— 而那颗键现在开的是一个 class，不是十二个元素，理由连同前提一起
+      不成立了。留一段解释不存在之物的注释，比没有注释贵。
+
+⚠️ 三个**图标**横排，不是三行字：这一列很窄，而三个带色的标志已经把「去哪儿」
+   说清楚了。文字在顶上那一排（那里有地方解释三者的差别）。
+
+🔴 每个各带 `aria-label`，而且带上第几讲。图标对读屏是空的，而一张十二行的表里
+   十二组一模一样的「Google Calendar」分不出哪一组是哪一讲 —— `row_menu.html`
+   为同一件事写过一次。
+
+参数：row —— `services.meeting_calendar_links()` 的一格
+     （meeting / ordinal / ics / google / outlook）。
+{% endcomment %}
+<span class="meeting-calendar-links">
+  <a href="{{ row.ics }}" class="meeting-calendar-link"
+     title="Download (.ics)"
+     aria-label="Download meeting {{ row.ordinal }} as a calendar file">
+    {% include "events/_calendar_destination_icons.html" with kind="download" %}
+  </a>
+  <a href="{{ row.google }}" target="_blank" rel="noopener noreferrer"
+     class="meeting-calendar-link" title="Google Calendar"
+     aria-label="Add meeting {{ row.ordinal }} to Google Calendar">
+    {% include "events/_calendar_destination_icons.html" with kind="google" %}
+  </a>
+  <a href="{{ row.outlook }}" target="_blank" rel="noopener noreferrer"
+     class="meeting-calendar-link" title="Outlook"
+     aria-label="Add meeting {{ row.ordinal }} to Outlook">
+    {% include "events/_calendar_destination_icons.html" with kind="outlook" %}
+  </a>
+</span>

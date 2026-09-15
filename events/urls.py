@@ -115,6 +115,23 @@ urlpatterns = [
     #    而它们是两个地址，因为它们答的是两个问题。
     path("events/sessions/<int:pk>/calendar.ics", views.session_calendar,
          name="session_calendar"),
+
+    # 订阅源（2026-09-14）。
+    #
+    # ⚠️ `<slug:token>` 而不是 `<str:token>`：slug 的字符集 `[-a-zA-Z0-9_]+`
+    #    **正好**是 `secrets.token_urlsafe()` 的产物，而 `str` 是 `[^/]+` ——
+    #    后者会把 `.ics` 也吞进去再靠回溯吐出来。能用，但它默许了一个带点的
+    #    令牌，而我们从不签发那种。
+    #
+    # ⚠️ 不在 `events/` 前缀下面：它不是某一场活动的东西，是**这个人的**。
+    path("calendar/<slug:token>.ics", views.calendar_feed,
+         name="calendar_feed"),
+    # 发一把钥匙 / 换一把钥匙。⚠️ 两条都在 `me/` 下面，因为它们是**这个人的**
+    #    设置，不是某一场活动的东西 —— 同 `me/participations/`。
+    path("me/calendar/create/", views.calendar_feed_create,
+         name="calendar_feed_create"),
+    path("me/calendar/reset/", views.calendar_feed_reset,
+         name="calendar_feed_reset"),
     path("events/<int:pk>/report/", views.event_report, name="event_report"),
     # B11 — P6. Same permission as attendance: sending is a write.
     path("events/<int:pk>/notify/", views.event_notify, name="event_notify"),

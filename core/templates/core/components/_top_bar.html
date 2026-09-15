@@ -14,8 +14,15 @@
 <header class="home-bar{% if solid %} is-solid{% endif %}"
         x-bind:class="bar ? 'is-open' : ''">
   <nav class="relative mx-auto flex max-w-7xl items-center px-4 py-4 sm:px-6 sm:py-5">
+    {% comment %}
+    ⚠️ `flex items-center gap-2` **搬进了 app.css 的 `.home-bar-menu`**（2026-09-14）。
+       钉住之后这颗键要收掉（窄栏就是那个菜单，而且它会盖住这颗键），
+       而 `display: none` 在 components 层压不过工具类的 `flex`。
+       🔴 这是本轮第三次栽在同一件事上（面板宽度、Close、这里）：
+          **任何一个「显隐要随状态变」的元素，都不能在模板上带 display 类的工具类。**
+    {% endcomment %}
     <button type="button" x-on:click="menu = true"
-            class="home-bar-item flex shrink-0 items-center gap-2 text-sm tracking-wide">
+            class="home-bar-item home-bar-menu shrink-0 text-sm tracking-wide">
       <svg width="18" height="18" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
         <path d="M3 5h14v1.5H3V5zm0 4.25h14v1.5H3v-1.5zM3 13.5h14V15H3v-1.5z"/>
       </svg>

@@ -132,6 +132,33 @@ STALE_COPY_NOTE = ("This entry will not change if the event does. "
 #:    不提供出路的话。留着它，是因为一条没有地址的记录仍然不该悄无声息。
 STALE_COPY_NOTE_WITHOUT_A_LINK = "This entry will not change if the event does."
 
+#: 订阅源里换上的那一句。
+#:
+#: 🔴 **上面那句话在一条订阅源里是假的**，而它假得正是这个仓库反复在拆的形状：
+#:    每个字都对、不报错、没有任何测试会红 —— 而读的人会照它行事。他会每次都
+#:    回站里核对一遍，订阅等于白订。所以订阅源不是**省掉**那句话，是**换一句
+#:    成立的**：模块仍然无条件交代「这份拷贝有多新」，调用方仍然没有机会忘记。
+#:
+#: ⚠️ 用词同样是定死的，两句短话，和上面那一组逐句对应：
+#:    (a) 这一条会跟着活动变；(b) 最新的说法在活动页上，地址就在眼前。
+#:
+#: ⚠️ **不说「立刻」**，而这是斟酌过的：跟上的快慢由客户端的刷新周期决定
+#:    （`REFRESH_INTERVAL` 只是我们的请求，不是它的承诺）。写「immediately」
+#:    会造出第二句假话，而这一次是我们自己造的。
+LIVE_COPY_NOTE = ("This entry updates itself when the event changes. "
+                  "The current details are on the event page: {url}")
+
+#: 同上的退化情况，理由和 `STALE_COPY_NOTE_WITHOUT_A_LINK` 一条不差。
+LIVE_COPY_NOTE_WITHOUT_A_LINK = "This entry updates itself when the event changes."
+
+#: 建议客户端多久回来取一次，ISO 8601 的时长。
+#:
+#: ⚠️ 十二小时是「改期之后当天之内跟上」和「不要每小时来敲一次门」之间的那条线。
+#:    少了这个声明，每个客户端各按各的性子刷（Google 常常是一天一次），表现是
+#:    「站里改了课表，而他的日历三天之后才跟上」—— 而他问的会是「你们的订阅
+#:    是不是坏了」。
+REFRESH_INTERVAL = "PT12H"
+
 
 @dataclass(frozen=True)
 class Occasion:
@@ -271,7 +298,7 @@ def _line(name, value):
 # --- 一份日历 ----------------------------------------------------------------
 
 
-def calendar_for(occasions, *, prodid_host, stamp=None):
+def calendar_for(occasions, *, prodid_host, stamp=None, updates=False, name=None):
     """一串记录 → 一整份 VCALENDAR 文本。
 
     一门十二讲的课是**一个文件里的十二个 VEVENT**，不是十二个文件。这是
@@ -290,7 +317,20 @@ def calendar_for(occasions, *, prodid_host, stamp=None):
 
     ⚠️ 不写 `METHOD:PUBLISH`。带上它，Outlook 会把这份文件当成一封 iTIP 会议
        消息来处理（连带 ATTENDEE 那一套，见模块顶上）；不带，它就是一份普通的
-       导入文件，而这正是我们要的语义。
+       导入文件，而这正是我们要的语义。**订阅源也不写** —— 那里更容易有人想加上
+       它，而理由一个字都没变。
+
+    🔴 `updates` 说的是「这份东西是一条**订阅源**，不是一份下载下来的拷贝」。
+       它改两件事：每条 DESCRIPTION 末尾那句话换成成立的那一句（见
+       `LIVE_COPY_NOTE`），以及多出两行「多久回来一次」。
+
+       ⚠️ **默认 False，而这是围栏不是默认值的随手选择。** 这个参数是整个模块
+          里唯一能让那句「这份拷贝有多新」跑偏的地方，而模块顶上那条契约的全部
+          意思是调用方没有机会弄错。默认站在现成两条下载路由那一边，它们因此
+          一个字都不用改，也不可能因为漏传而悄悄变成撒谎的那一档。
+
+    ⚠️ `name` 是这份日历在对方侧栏里显示的名字（`X-WR-CALNAME`）。给了才写：
+       这个模块不知道自己在给谁写，「这是谁的订阅」是视图才答得了的话。
     """
     stamped = _utc(stamp or local_now())
     lines = [
@@ -300,15 +340,26 @@ def calendar_for(occasions, *, prodid_host, stamp=None):
         _line("PRODID", _escape_text(f"-//River of Life//{prodid_host}//EN")),
         "CALSCALE:GREGORIAN",
     ]
+    if name:
+        lines.append(_line("X-WR-CALNAME", _escape_text(name)))
+    if updates:
+        # ⚠️ 两个名字说的是同一件事，两个都写：前者是 RFC 7986 的正名，
+        #    后者是 Outlook 一直认的那个老名字。只写一个就有一半客户端听不见。
+        lines.append(_line("REFRESH-INTERVAL;VALUE=DURATION", REFRESH_INTERVAL))
+        lines.append(_line("X-PUBLISHED-TTL", REFRESH_INTERVAL))
     for one in occasions:
-        lines.extend(_vevent(one, stamped))
+        lines.extend(_vevent(one, stamped, updates=updates))
     lines.append("END:VCALENDAR")
     # ⚠️ 末尾也有一个 CRLF：iCalendar 是一个行流，最后一行同样要结束掉。
     return CRLF.join(lines) + CRLF
 
 
-def _vevent(one, stamped):
-    """一场。交回还没拼起来的那几行。"""
+def _vevent(one, stamped, *, updates=False):
+    """一场。交回还没拼起来的那几行。
+
+    `updates` 只往下传给 `_described()` —— 一条 VEVENT 里受它影响的只有
+    DESCRIPTION 末尾那句话。
+    """
     lines = [
         "BEGIN:VEVENT",
         # ⚠️ UID 也是 TEXT（RFC 5545 §3.8.4.7），照样转义 —— 一个带逗号的 UID
@@ -324,9 +375,10 @@ def _vevent(one, stamped):
         _line("STATUS", "CANCELLED" if one.cancelled else "CONFIRMED"),
         _line("TRANSP", "OPAQUE"),
     ]
-    # ⚠️ DESCRIPTION 永远写，哪怕活动本身一个字的说明都没有 —— 那一句
-    #    「这份副本不会自己更新」是无条件的（见 STALE_COPY_NOTE）。
-    lines.append(_line("DESCRIPTION", _escape_text(_described(one))))
+    # ⚠️ DESCRIPTION 永远写，哪怕活动本身一个字的说明都没有 —— 末尾那句
+    #    「这份拷贝有多新」是无条件的（见 STALE_COPY_NOTE / LIVE_COPY_NOTE）。
+    lines.append(
+        _line("DESCRIPTION", _escape_text(_described(one, updates=updates))))
     if one.location:
         lines.append(_line("LOCATION", _escape_text(one.location)))
     if one.url:
@@ -348,8 +400,12 @@ def _vevent(one, stamped):
     return lines
 
 
-def _described(one):
-    """活动自己的说明，后面空一行，再跟那句「这份副本不会自己更新」。
+def _described(one, *, updates=False):
+    """活动自己的说明，后面空一行，再跟那句「这份拷贝有多新」。
+
+    🔴 两句里挑哪一句由 `updates` 定，而**「挑不挑得了」和「补不补」是两件事**：
+       补是无条件的，调用方没有办法让这一段没有结尾。一份下载下来的文件说它
+       不会跟着变，一条订阅源说它会 —— 两句都是实话，而说错哪一句都不报错。
 
     ⚠️ 顺序是定的：活动自己的话在**上面**。打开一条日程先看到的应该是这场
        活动在说什么，不是一段关于这个文件的声明 —— 一份把免责声明顶在最前面的
@@ -361,8 +417,9 @@ def _described(one):
     ⚠️ 这里交回的是**没有转义过**的文本，转义在 `_vevent` 里统一走
        `_escape_text()` —— 在这里先转义一半，那两个换行会被再转义一次。
     """
-    note = (STALE_COPY_NOTE.format(url=one.url) if one.url
-            else STALE_COPY_NOTE_WITHOUT_A_LINK)
+    with_link, without = ((LIVE_COPY_NOTE, LIVE_COPY_NOTE_WITHOUT_A_LINK) if updates
+                          else (STALE_COPY_NOTE, STALE_COPY_NOTE_WITHOUT_A_LINK))
+    note = with_link.format(url=one.url) if one.url else without
     return f"{one.description}\n\n{note}" if one.description else note
 
 

@@ -4928,6 +4928,16 @@ class SharedHeadTests(TestCase):
             with self.subTest(path=str(path)):
                 self.assertIn("themed=1", self.body(path))
 
+    #: 主题引导那一段的指纹。
+    #
+    # ⚠️ 2026-09-14 从 `"localStorage"` 收窄成这一串，而**意图一个字没变**。
+    #    那天 `<head>` 里多了第二段引导脚本（菜单钉没钉住），它也读 localStorage，
+    #    而且**不受 `themed` 控制** —— 菜单在两种页面上是同一个菜单。于是原来
+    #    那个断言开始拿「有没有 localStorage」当「有没有主题引导」用，而这两件事
+    #    从那天起不再是同一件。收窄到主题自己的 key 之后，这一条问的仍然是
+    #    「主题引导到了它该到的页面、没到别的」。
+    THEME_BOOT = 'getItem("theme")'
+
     def test_the_theme_boot_still_reaches_the_pages_that_want_it(self):
         # Through the fragment now, so a grep for the include in the page files
         # would read the refactor as a removal. Assert on what is served.
@@ -4935,13 +4945,13 @@ class SharedHeadTests(TestCase):
                                 ("Memories", "gallery:wall")]:
             with self.subTest(page=label):
                 self.assertContains(self.client.get(reverse(url_name)),
-                                    "localStorage")
+                                    self.THEME_BOOT)
         # 🔴 Both directions on the front page, because this pair **is** D44's
         #    promise: the stranger's page is untouched, and only the person who
         #    has a dashboard underneath gets the theme with it.
-        self.assertContains(self.client.get(reverse("home")), "localStorage")
+        self.assertContains(self.client.get(reverse("home")), self.THEME_BOOT)
         self.client.logout()
-        self.assertNotContains(self.client.get(reverse("home")), "localStorage")
+        self.assertNotContains(self.client.get(reverse("home")), self.THEME_BOOT)
 
     def test_the_three_titles_are_still_their_own(self):
         self.assertContains(self.client.get(reverse("home")),
@@ -5055,6 +5065,98 @@ class SiteMenuTests(TestCase):
         return register_account(
             email="mei@example.com", password="a-good-long-password",
             legal_first_name="Ann", legal_last_name="Mei")
+
+    #: 钉住状态那个 localStorage 的 key。引导脚本和 app.js 各写一次。
+    PINNED_KEY = "menu:pinned"
+
+    def test_the_pinned_key_is_spelled_the_same_in_both_places(self):
+        """🔴 `<head>` 里那段引导脚本，和 `app.js` 里 `siteShell` 读写的那一个。
+
+        引导脚本管「进来时钉没钉住」（它必须在首帧之前跑完），`app.js` 管「点了
+        之后变成什么」。两处分家的表现是**钉住之后刷新一下又回到没钉住** ——
+        不报错，而且只有真的刷新一次才看得见。`filterCard` 为同一件事栽过一次。
+        """
+        boot = (Path(settings.BASE_DIR) / "core" / "templates" / "core"
+                / "components" / "_menu_boot.html").read_text()
+        js = (Path(settings.BASE_DIR) / "assets" / "js" / "app.js").read_text()
+        for source, where in ((boot, "引导脚本"), (js, "app.js")):
+            with self.subTest(source=where):
+                self.assertIn(f'"{self.PINNED_KEY}"', source)
+
+    def test_nothing_whose_display_changes_carries_a_display_utility(self):
+        """🔴 本轮栽了三次的同一件事，钉在这里（2026-09-14）。
+
+        Tailwind 的工具类在 `@layer utilities`，而这些组件类在 `@layer components`
+        —— **层的优先级高于选择器具体度**，所以 `.menu-pinned .home-menu-close`
+        再具体也盖不过模板上那个 `flex`。三次的表现各不相同，而且都不报错：
+
+          面板宽度   钉住之后面板照旧 24rem 宽，里面的图标已经按窄栏排好了
+          Close      窄栏顶上 Close 和 Unpin 挤成一团
+          Menu 键    钉住之后它还在，而窄栏正盖在它身上
+
+        所以：**显隐或尺寸要随状态变的元素，那几个属性一律写在 app.css 上，
+        模板的 class 串里一个都不留。**
+
+        ⚠️ 只查这三个 —— 它们是已经被状态管起来的那几个。别的元素没有第二档，
+           不会有人来盖，把整份模板都查一遍只会制造假阳性。
+        """
+        # ⚠️ 先把注释抹掉，否则这一条会咬到**解释这件事的那段注释自己**
+        #    ——它里面正引着 `flex items-center gap-2`。第一版就是这么红的。
+        components = Path(settings.BASE_DIR) / "core" / "templates" / "core" / "components"
+        menu = _blank_out_comments((components / "_site_menu.html").read_text())
+        bar = _blank_out_comments((components / "_top_bar.html").read_text())
+        bad = re.compile(r"\b(flex|block|inline-flex|hidden|w-full|max-w-\w+|px-\d)\b")
+        for source, marker, where in (
+                (menu, "home-menu fixed", "面板"),
+                (menu, "home-menu-close", "Close"),
+                (menu, "home-menu-nav", "菜单那一列"),
+                (bar, "home-bar-menu", "Menu 键")):
+            with self.subTest(element=where):
+                tag = source.split(marker, 1)[1].split(">", 1)[0]
+                found = bad.findall(tag)
+                self.assertEqual(
+                    found, [],
+                    f"{where} 的 class 串里还有 {found} —— 它们会压掉 app.css "
+                    f"里那条随状态变的规则，而页面不报错")
+
+    def test_every_entry_every_account_sees_carries_a_drawable_icon(self):
+        """🔴 钉住之后这个菜单收成一条**只有图标的窄栏**（2026-09-14）。
+
+        于是「有没有图标」不再是装饰问题：漏一个就是窄栏上一个**看不出是什么的
+        空格**，而页面不报错、别的测试全绿。
+
+        ⚠️ 两头都要查，而第二头才是容易漏的：
+           ① 每一条都**带**一个图标名 —— `_link()` 已经把它做成必填的位置参数，
+              所以这一半主要是兜住手写的那条 `Admin Site`（它不走 `_link()`）；
+           ② 那个名字在 `_menu_icons.html` 里**画得出来**。名字对不上的表现是一个
+              空方块 —— 比漏掉更难发现，因为窄栏上确实有东西。
+
+        ⚠️ 逐档账号都过一遍：管理侧那几条只对某些人画，而只测一个普通志愿者的话
+           `Memories Photos` / `Ministry Admins` / `Admin Site` 一条都走不到。
+        """
+        from org.models import Ministry, MinistryRole
+        from org.permissions import foundation_admin_group
+
+        drawn = (Path(settings.BASE_DIR) / "core" / "templates" / "core"
+                 / "components" / "_menu_icons.html").read_text()
+
+        everyone = self.volunteer()
+        pantry = Ministry.objects.create(code="food_pantry", name="Food Pantry")
+        MinistryRole.objects.create(contact=everyone.contact, ministry=pantry)
+        everyone.groups.add(foundation_admin_group())
+        everyone.is_staff = True
+        everyone.save(update_fields=["is_staff"])
+
+        for who, menu in (("a stranger", self.menu()),
+                          ("every hat at once", self.menu(everyone))):
+            for item in menu:
+                if item.get("heading"):
+                    continue
+                with self.subTest(who=who, entry=item.get("label")):
+                    icon = item.get("icon")
+                    self.assertTrue(icon, "这一条没有图标名")
+                    self.assertIn(f'"{icon}"', drawn,
+                                  f"`{icon}` 在 _menu_icons.html 里画不出来")
 
     def test_a_stranger_sees_only_the_public_entries(self):
         # ⚠️ "Past Events" was between Events and Log In until 2026-08-17.

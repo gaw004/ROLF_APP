@@ -13,6 +13,7 @@ that one had to be split out of the other.
 """
 
 import datetime
+import secrets
 from decimal import Decimal
 
 from django.conf import settings
@@ -3293,3 +3294,82 @@ class EventNotification(ConstraintErrorFieldMixin, TimeStampedModel):
 
     def __str__(self):
         return f"{self.event.name} — {self.get_reason_display()} @ {self.sent_at:%Y-%m-%d %H:%M}"
+
+
+class CalendarFeed(TimeStampedModel):
+    """一条订阅地址背后的那一行 —— 一个人一条（2026-09-14）。
+
+    ⭐ **订阅和下载是两件不同的东西，而差别全在这张表上。**
+       下载走登录态；订阅走一条地址，**因为抓取订阅源的是 Google / Apple 的
+       服务器，它不带 cookie**。照 `event_calendar` 那条 `@login_required` 的
+       路由订下去，对方拿到的是登录页的 302 —— 订阅「成功」，日历里一条都没有，
+       而且不报错。这是本仓库反复定罪的那种失败，所以订阅必须带令牌。
+
+    🔴 **一张表，不是 `Contact` 上加一列，而理由是「不要凭空发钥匙」。**
+       加一列等于给库里每一个人（包括永远不会订阅的那几千个）都签发一把能用的
+       凭证。一张表的话，**没人按那颗键就不存在这个秘密**。
+       顺带两件：`TimeStampedModel` 白送「这条地址哪天发的」；而 `Contact` 同时
+       装着机构，订阅是 events 的概念。
+
+    🔴 **不走 `events/tokens.py` 那套 HMAC。** 那一套是 90 秒的签到码：纯函数、
+       不落库、**撤不掉**。而这里要的恰恰是撤得掉 —— 签名要能撤就得为每个人存
+       一份盐，那时它已经是这张表了，只是绕了一圈。
+
+    ⚠️ **这一行不进 admin**（`events/admin.py` 是逐个 `@admin.register` 的，
+       所以「不注册」就是全部动作）。注册它等于在一张列表里把所有人的钥匙
+       印出来给任何一个 staff 看。
+    """
+
+    #: 随机的字节数。256 位 —— 猜不到，而且不依赖任何可推算的东西。
+    TOKEN_BYTES = 32
+    #: 上面那些字节转成 URL-safe base64 之后的字符数，正好是列宽。
+    #  ⚠️ 两个数由 `test_the_column_is_exactly_as_wide_as_the_token` 绑在一起。
+    TOKEN_CHARS = 43
+
+    contact = models.OneToOneField(
+        Contact, on_delete=models.CASCADE, related_name="calendar_feed",
+        verbose_name="whose calendar")
+    #: ⚠️ `unique=True` 自己就建索引，所以**不再写** `db_index=True` ——
+    #  两个一起写是同一列上的两个索引。
+    token = models.CharField(max_length=TOKEN_CHARS, unique=True,
+                             verbose_name="subscription token")
+
+    class Meta:
+        verbose_name = "calendar feed"
+        verbose_name_plural = "calendar feeds"
+
+    @staticmethod
+    def new_token():
+        """一把新钥匙。
+
+        ⚠️ `secrets`，不是 `random` —— 后者是可预测的伪随机，而这一串是凭证。
+        """
+        return secrets.token_urlsafe(CalendarFeed.TOKEN_BYTES)
+
+    def save(self, *args, **kwargs):
+        # ⚠️ 在这里发，而不是用 `default=`：`default` 会在**每次**构造实例时求值，
+        #    包括那些只是拿来读的实例，白白消耗熵；更要紧的是，它让「这一行是
+        #    什么时候有了钥匙的」这件事散在两处。
+        if not self.token:
+            self.token = self.new_token()
+        super().save(*args, **kwargs)
+
+    def rotate(self):
+        """换一把钥匙，旧的当场作废。
+
+        🔴 这是这张表存在的第二个理由。一条订阅地址就是一把钥匙：转给别人等于
+           把自己的整个日程交出去，而人是会转的（「你把课表发我一下」）。
+           没有这个动作，一次转发就是永久的。
+        """
+        self.token = self.new_token()
+        self.save(update_fields=["token", "updated_at"])
+        return self.token
+
+    def __str__(self):
+        """🔴 **绝不带 token。**
+
+        它会出现在 admin 列表、日志、以及 500 报错邮件里 —— 那是一次真正的泄露，
+        而且发生在没有人会去看的地方。守卫：
+        `CalendarFeedTests.test_printing_one_never_prints_the_address`。
+        """
+        return f"Calendar feed for {self.contact}"

@@ -62,7 +62,14 @@
 
   ⚠️ Esc 关菜单。一个只能用鼠标点关闭的模态，对键盘用户是个死胡同。
   {% endcomment %}
-  <div class="relative w-full" x-data="{ menu: false, bar: false, past: false, hover: false }"
+  {% comment %}
+⚠️ 2026-09-14 从内联的那四个状态换成具名组件：菜单里多了一颗「钉住」的键，
+   而它要的 `pinned` 在**两个**顶层模板上都得有。只给 base.html 加的话，
+   首页上那颗键是一个 Alpine 报错（"pinned is not defined"），而屏幕上看起来
+   只是它没有字 —— 本轮在 `copyable` 上刚见过一次同样的形状。
+   两个外壳共用一份钉住的逻辑，见 app.js 的 `pinning()`。
+{% endcomment %}
+<div class="relative w-full" x-data="homeShell"
        x-on:keydown.escape.window="menu = false"
        x-on:scroll.window.passive="past = window.scrollY > window.innerHeight * 0.6; bar = past || hover">
 

@@ -1,0 +1,29 @@
+{% extends "core/base.html" %}
+{% comment %}
+换一把钥匙的确认页（2026-09-14）。照 `participation_cancel.html` 那条先例：
+GET 问一遍，POST 才动手。
+
+🔴 **要确认的理由是它的后果是静默的。** 换掉之后，所有已经订上旧地址的日历
+   不会报错，只是**停在原地** —— 人要过一阵子才会发现自己的课表不再更新，
+   而那时他多半不会把两件事联系起来。一个当场看得见后果的动作可以不问；
+   这一个必须问。
+{% endcomment %}
+{% block title %}Replace your subscription address{% endblock %}
+{% block main_width %}max-w-2xl{% endblock %}
+{% block content %}
+  <h1 class="text-2xl font-semibold">Replace your subscription address?</h1>
+  <p class="mt-3 text-sm text-ink-700 dark:text-ink-200">
+    The address you have now will stop working straight away. Any calendar that
+    is already subscribed to it will quietly stop updating — it will not show an
+    error, it will just stay as it is.
+  </p>
+  <p class="mt-2 text-sm text-ink-700 dark:text-ink-200">
+    Do this if the address has been shared with somebody it was not meant for.
+    Afterwards you will need to subscribe again with the new one.
+  </p>
+  <form method="post" class="mt-6 flex flex-wrap items-center gap-3">
+    {% csrf_token %}
+    <button type="submit" class="btn-primary">Replace it</button>
+    <a href="{% url 'events:my_participations' %}" class="prose-link text-sm">Keep the one I have</a>
+  </form>
+{% endblock %}

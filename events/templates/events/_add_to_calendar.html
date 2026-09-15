@@ -66,10 +66,17 @@
   {% endcomment %}
   <p class="mt-1.5 text-xs text-ink-600 dark:text-ink-300">
     The file updates what you already have.
-    {% if calendar_one %}
-      Google and Outlook add one date{% if calendar_is_part %}
-      ({{ calendar_part_when|date:"D j M" }}){% endif %} and make a second entry
-      each time.
-    {% endif %}
+    {% if calendar_one %}Google and Outlook make a second entry each time.{% endif %}
   </p>
+
+  {% comment %}
+  ⚠️ 指向订阅（2026-09-14）。放在**代价那一行的下面**，因为它是那一行的出路：
+     上面刚说完「这份文件不会自己跟着变」，紧接着告诉他有一个会跟着变的东西。
+  ⚠️ 只对登录的人画：订阅地址是这个人自己的，匿名访客没有可指的地方。
+  {% endcomment %}
+  {% if user.is_authenticated %}
+    <p class="mt-1 text-xs text-ink-600 dark:text-ink-300">
+      <a class="prose-link" href="{% url 'events:my_participations' %}">Subscribe to everything you are signed up for &rarr;</a>
+    </p>
+  {% endif %}
 </details>

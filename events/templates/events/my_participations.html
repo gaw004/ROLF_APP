@@ -215,4 +215,13 @@
       <a href="{% url 'events:past_participations' %}" class="prose-link">View history &rarr;</a>
     </div>
   {% endif %}
+
+  {% comment %}
+  订阅那一块 —— ⚠️ **只在未来那一页**，同上面那一条。一条订阅源说的是
+  「接下来要去哪儿」，而历史页说的是已经结束的事；把它摆在历史页上，等于
+  在一份记录旁边请人订阅一个不会再有新东西的源。
+  {% endcomment %}
+  {% if not is_past %}
+    {% include "events/_calendar_subscription.html" %}
+  {% endif %}
 {% endblock %}

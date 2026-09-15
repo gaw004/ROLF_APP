@@ -3311,17 +3311,29 @@ def calendar_occasions(event, *, host, url_for, meetings=None):
     ]
 
 
-def next_meeting(event, *, now=None):
-    """这门课下一次聚会是哪一讲，或者 None（已经上完 / 还没排 / 它不是课）。
+def meeting_calendar_links(event, meetings, *, host, url_for):
+    """每一讲的三个去处：下载、Google、Outlook。
 
-    ⚠️ 在服务层，不在视图里 —— 视图里一行 `local_now()` 都不许有（D18，
-       `ViewsAreThinGuardTests` 盯着）。而这条规矩在这里不是形式：Google 和
-       Outlook 那两条深链**只加得了一个事件**，「哪一个」是一条业务判断，
-       它要和别处对同一个问题的回答保持一致。
+    ⭐ **讲次表上每一行都给全三个，而顶上那颗键只给下载** —— 两条深链一次只加
+       一个事件，而**一讲正好是一个事件**。整期那一份因此只有下载那一条路。
+       规矩一句话：**深链只出现在「这一格就是一个事件」的地方。**
+
+    ⚠️ 一次把全部讲次交给 `calendar_occasions()`，不是逐讲调一次：那个函数里
+       `enumerate(meetings, 1)` 算的是**整门课**的序号，逐讲调的话每一次都从 1
+       开始 —— 于是第七讲的标题写着「meeting 1」，而它在站内每一处都叫第七讲。
     """
-    now = now or local_now()
-    return next((one for one in event.sessions.all()
-                 if one.start_time > now), None)
+    rows = calendar_occasions(event, host=host, url_for=url_for,
+                              meetings=meetings)
+    return [
+        {
+            "meeting": meeting,
+            "ordinal": number,
+            "ics": reverse("events:session_calendar", args=[meeting.pk]),
+            "google": ics.google_link(one),
+            "outlook": ics.outlook_link(one),
+        }
+        for number, (meeting, one) in enumerate(zip(meetings, rows), 1)
+    ]
 
 
 def my_meetings(event, contact):
@@ -3347,6 +3359,70 @@ def my_meetings(event, contact):
         ).distinct().order_by("start_time", "id")
     )
     return mine or None
+
+
+#: 订阅源往回看多久。
+#:
+#: ⚠️ 订阅源每次刷新是**全量重发**，所以这个窗口就是每次传输的大小。把三年的
+#:    历史挂在上面，等于让每一个客户端反复重新解析它早就有的东西。往回九十天
+#:    够人翻上个季度，也够一门刚结束的课整门留在日历里。
+FEED_LOOKBACK = datetime.timedelta(days=90)
+
+#: 不进订阅源的两种状态。
+#:
+#: 🔴 **`cancel()` 是改状态，不是删行**（它在「取消」和「中途退出」之间二选一），
+#:    所以只靠 `mine()` 的话，一条退掉的报名会**永远留在订阅源里** —— 而这正是
+#:    人退掉之后第一眼要看的地方。
+#:
+#: ⚠️ 一门课其实有一半是自动的：`cancel()` 会清掉还没发生的那些讲次的点名行，
+#:    于是未来的讲次自己就没了（`test_cancelling_clears_the_meetings_that_have_
+#:    not_happened`）。缺口在**单场活动**上 —— 它的 occasion 来自 `Event` 自己，
+#:    和点名行无关，不排除状态的话它会一直在。两种形状用同一条规矩，不留这种
+#:    「一半对」的实现。
+#:
+#: ⚠️ `WITHDREW` 也在内，而它确实会把已经去过的那几讲也一并拿掉。这是有意的：
+#:    日历说的是「接下来要去哪儿」，而「他上过六周」是记录，记录在 My Signups
+#:    和报表里，不在日历里。
+NOT_IN_A_CALENDAR = (Participation.Status.CANCELLED, Participation.Status.WITHDREW)
+
+
+def my_calendar_occasions(contact, *, host, url_for, now=None):
+    """这个人的订阅源里该有哪些场次 —— 一串 `ics.Occasion`。
+
+    ⭐ **它和 My Signups 那一页读的是同一批行**（`Participation.objects.mine()`），
+       所以「站里看得见的」和「日历里有的」不会分家。那个谓词里还带着
+       `visible_to_participants()`，于是一场撤回发布的活动在**一次刷新之内**
+       就从所有订阅里消失 —— 这是订阅绕过登录之后唯一还拦得住它的东西。
+
+    🔴 **按活动去重。** 一个人可能在同一场活动里有两个角色（既报名听课又帮忙
+       翻译），那是两行 `Participation` —— 照着逐行摊开的话，他的日历里这门课
+       的每一讲**都是两条**。
+
+    ⚠️ 时间窗口过两道：查询上按活动的结束时间粗筛（省掉把这个人所有年份的报名
+       都取出来），拿到场次之后再按场次自己的时间精筛 —— 一门跨过截止线的课
+       会连早于截止线的那几讲一起交回来。
+    """
+    now = now or local_now()
+    cutoff = now - FEED_LOOKBACK
+    rows = (
+        Participation.objects.mine(contact)
+        .exclude(status__in=NOT_IN_A_CALENDAR)
+        .filter(event_role__event__end_time__gte=cutoff)
+        .select_related("event_role__event")
+        .prefetch_related("event_role__event__sessions")
+    )
+    found, seen = [], set()
+    for row in rows:
+        event = row.event_role.event
+        if event.pk in seen:
+            continue
+        seen.add(event.pk)
+        found.extend(calendar_occasions(
+            event, host=host, url_for=url_for,
+            meetings=my_meetings(event, contact)))
+    # ⚠️ 排序在这里，不在查询里：一门课的十二讲是算出来的，不是数据库给的顺序。
+    return sorted((one for one in found if one.end >= cutoff),
+                  key=lambda one: one.start)
 
 
 def _sequence(moment):

@@ -47,6 +47,95 @@ Alpine.data("themeToggle", () => ({
 }));
 
 // ---------------------------------------------------------------------------
+// siteShell —— 外壳那三个状态（2026-09-14 从 base.html 的内联 x-data 搬来）
+//
+// menu   左侧面板开着没有（滑出的那一档）
+// bar    首页顶栏浮出来没有
+// pinned 面板钉在页面上没有 —— 钉住时它收成一条只有图标的窄栏
+//
+// ⚠️ 这里**不负责首帧**。进来时钉没钉住由 `<head>` 里 `_menu_boot.html` 那段
+//    内联脚本决定，它必须在渲染之前跑完。这个文件是带 defer 的打包产物，
+//    等它跑起来页面已经画过一遍了。所以两处读写的是**同一个 key**，只是时机
+//    不同：引导脚本管「进来时是什么」，这里管「点了之后变成什么」。
+//    改一处必须改另一处 —— 分家的表现是刷新一下钉住状态就没了。
+//
+// 🔴 **用 `$watch` 把状态写回 class，不用 `x-bind:class`。**
+//    `x-bind:class` 只移除**它自己加过**的 class，而这一个是引导脚本直接写进
+//    `classList` 的；再加上 Alpine 的指令顺序里 `bind` 排在 `init` 之前，
+//    「先摘掉再让 bind 加回来」也是反的。这两条本轮在讲次表那个开关上各踩了
+//    一次，表现分别是「按了没反应」和「进来就是开着的」，而且**服务端测试
+//    区分不出来**。理由的长版本记在 06-roadmap 那一节。
+//
+// ⚠️ 不用 `x-effect`：它会把读到的所有东西都变成依赖，这个仓库为同一条理由
+//    已经写过两次。
+const PINNED_KEY = "menu:pinned";
+const PINNED_CLASS = "menu-pinned";
+
+// 🔴 **两个外壳，一份钉住的逻辑。** 这个菜单挂在两个顶层模板上（`base.html`
+//    和 `home.html`），而它们各有各的 x-data —— 首页多了 `past` / `hover` 两个
+//    给顶栏淡入用的。只给其中一个加 `pinned` 的表现是：**另一页上那颗钉住键
+//    整个报错**（Alpine 的 "pinned is not defined"），而页面看起来只是那颗键
+//    没有字。本轮在 `copyable` 上刚见过一次同样的形状。
+const pinning = () => ({
+  // 认下引导脚本已经画出来的那个状态，而不是另开一次 localStorage —— 读两次
+  // 就有两个答案的可能，而其中一个会是错的。
+  pinned: document.documentElement.classList.contains(PINNED_CLASS),
+
+  watchPinned() {
+    this.$watch("pinned", (on) => {
+      document.documentElement.classList.toggle(PINNED_CLASS, on);
+      try {
+        localStorage.setItem(PINNED_KEY, on ? "yes" : "no");
+      } catch (e) {
+        /* A blocked localStorage costs the memory of this choice, nothing more. */
+      }
+    });
+  },
+});
+
+Alpine.data("siteShell", () => ({
+  menu: false,
+  bar: false,
+  ...pinning(),
+  init() { this.watchPinned(); },
+}));
+
+// 首页那一个。⚠️ `past` / `hover` 是顶栏淡入用的，理由在 home.html 上。
+Alpine.data("homeShell", () => ({
+  menu: false,
+  bar: false,
+  past: false,
+  hover: false,
+  ...pinning(),
+  init() { this.watchPinned(); },
+}));
+
+// ---------------------------------------------------------------------------
+// copyable —— 把一个只读输入框里的字送进剪贴板（2026-09-14）
+//
+// ⚠️ 只有一个用处：订阅地址那一格。抽成组件而不是写在属性里，是因为它要 async
+//    和一个两秒后复位的定时器 —— 那两样写进 x-on 属性就是一行读不动的字。
+//
+// ⚠️ 失败时**不报错也不提示**，只是不变成 Copied。剪贴板在没有用户手势、
+//    非安全上下文、或者用户拒了权限的时候都会抛，而这三种情况下那个输入框
+//    仍然选得中 —— 人有路可走，弹一个错框只是吓他一跳。
+Alpine.data("copyable", () => ({
+  copied: false,
+
+  async copy() {
+    try {
+      await navigator.clipboard.writeText(this.$refs.address.textContent.trim());
+      this.copied = true;
+      // ⚠️ 复位，否则那颗键会永远写着 Copied —— 而人第二次来按的时候，
+      //    屏幕上没有任何东西告诉他这一次到底复制成功了没有。
+      setTimeout(() => { this.copied = false; }, 2000);
+    } catch (e) {
+      /* See the comment above: the read-only field is still selectable. */
+    }
+  },
+}));
+
+// ---------------------------------------------------------------------------
 // x-dialog —— 把一个 Alpine 布尔接到原生 <dialog> 上（2026-08-09）
 //
 // 用法：`<dialog x-dialog="open">`，`open` 是外层 x-data 里的布尔。

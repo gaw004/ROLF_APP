@@ -27,8 +27,18 @@ from org.permissions import (
 )
 
 
-def _link(label, url_name, query=""):
-    return {"label": label, "url": reverse(url_name) + query}
+def _link(label, url_name, icon, query=""):
+    """一个菜单项。
+
+    🔴 **`icon` 是必填的位置参数，而那是故意的。** 钉住之后这个菜单收成一条只有
+       图标的窄栏（2026-09-14），于是「有没有图标」不再是装饰问题 —— 漏一个就是
+       窄栏上一个**看不出是什么的空格**，而页面不报错。做成必填之后，加一条新
+       菜单项却忘了配图标的那一刻是一个 `TypeError`，不是一次走查。
+
+    ⚠️ 名字而不是一段 SVG：这里是**数据**，画在 `_menu_icons.html` 上。
+       把标记塞进 context processor 的话，改一个图形要动 Python。
+    """
+    return {"label": label, "url": reverse(url_name) + query, "icon": icon}
 
 
 def _menu_for(user, administered, foundation):
@@ -82,29 +92,29 @@ def _menu_for(user, administered, foundation):
     #    数着的那五个缺口讲的是**没有**入口，不是只有一个。
     if not user.is_authenticated:
         return [
-            _link("Events", "events:event_list"),
-            _link("Programs", "events:program_list"),
-            _link("Log In", "accounts:login"),
-            _link("Register", "accounts:register"),
+            _link("Events", "events:event_list", "events"),
+            _link("Programs", "events:program_list", "programs"),
+            _link("Log In", "accounts:login", "login"),
+            _link("Register", "accounts:register", "register"),
         ]
 
     menu = [
         # ⚠️ 第一条，因为它是登录之后的落脚点 —— 别的每一条都答一个他带着来的
         #    问题，只有这一条告诉他「有什么在等你」。
-        _link("Home", "home"),
-        _link("Events", "events:event_list"),
+        _link("Home", "home", "home"),
+        _link("Events", "events:event_list", "events"),
         # ⭐ 紧跟着 Events，因为它就是 Events 的一半（2026-09-14，决定 45）：
         #    两张列表页互斥，一门课**只**在这一格后面。没有这一条的话，
         #    Programs 那一页只有顶栏那一排进得去，而顶栏要先到得了 /events/ ——
         #    正是这个模块开头列的那五个缺口的形状。
-        _link("Programs", "events:program_list"),
+        _link("Programs", "events:program_list", "programs"),
         # ⚠️ Second, above My Signups, and the order is the argument. A notice is
         #    the one thing on this menu somebody might not know they need to
         #    read — everything else answers a question they arrived with. It is
         #    not first because Events is what most people came for.
-        _link("Notices", "notices:notice_list"),
-        _link("My Signups", "events:my_participations"),
-        _link("My Profile", "accounts:profile"),
+        _link("Notices", "notices:notice_list", "notices"),
+        _link("My Signups", "events:my_participations", "signups"),
+        _link("My Profile", "accounts:profile", "profile"),
     ]
 
     if administered:
@@ -118,7 +128,7 @@ def _menu_for(user, administered, foundation):
             #    it, the upload page is reachable only by typing its URL, which
             #    is precisely the shape of the five gaps this module exists to
             #    close.
-            _link("Memories Photos", "gallery:manage"),
+            _link("Memories Photos", "gallery:manage", "photos"),
         ]
 
     if foundation:
@@ -128,9 +138,9 @@ def _menu_for(user, administered, foundation):
         #    it is the same URL either way, and the page itself widens for the
         #    tier. Two entries pointing at one page reads as a bug.
         if not administered:
-            menu.append(_link("Memories Photos", "gallery:manage"))
+            menu.append(_link("Memories Photos", "gallery:manage", "photos"))
         if can_grant_ministry_admin(user):
-            menu.append(_link("Ministry Admins", "org:ministry_list"))
+            menu.append(_link("Ministry Admins", "org:ministry_list", "ministries"))
 
     if user.is_staff:
         # ⚠️ Its own section, and not folded into either tier above. `is_staff`
@@ -146,7 +156,10 @@ def _menu_for(user, administered, foundation):
         #    have been a POST. Every other entry is a page of this site, and
         #    opening those in new tabs would just accumulate them.
         menu += [{"heading": "Staff"},
-                 {"label": "Admin Site", "url": "/admin/", "new_tab": True}]
+                 {"label": "Admin Site", "url": "/admin/", "new_tab": True,
+                  # ⚠️ 这一条是手写的（它不走 `reverse()`），所以 `_link()` 那个
+                  #    必填参数管不到它 —— `SiteMenuIconsGuardTests` 兜住的正是它。
+                  "icon": "admin"}]
 
     return menu
 

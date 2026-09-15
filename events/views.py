@@ -23,6 +23,8 @@ Thin shells, every one of them. Three rules hold across the whole file:
    the templates (D18) — and there is a guard for that too.
 """
 
+import re
+
 from django.contrib import messages
 from django.contrib.auth.decorators import login_required
 from django.core.exceptions import PermissionDenied, ValidationError
@@ -33,6 +35,7 @@ from django.urls import reverse
 from django.utils import formats
 from django.utils.http import urlencode
 from django.utils.text import get_text_list, slugify
+from django.views.decorators.http import require_POST
 from django_ratelimit.decorators import ratelimit
 
 
@@ -69,6 +72,7 @@ from .forms import (
 )
 from .models import (
     SERVED_AS_EXPLANATIONS,
+    CalendarFeed,
     Event,
     EventNotification,
     EventRole,
@@ -120,9 +124,10 @@ from .services import (
     hours_received_total,
     mark_absent,
     ministry_report,
+    meeting_calendar_links,
     ministry_staff_participation,
+    my_calendar_occasions,
     my_meetings,
-    next_meeting,
     next_up,
     notify_event_change,
     record_hours,
@@ -918,7 +923,8 @@ def _detail(request, pk):
         #    文件下载那条路才装得下全部十二条。界面上把这句话说出来，不假装
         #    三颗键是等价的。
         **_calendar_links(request, event),
-        # 讲次表 —— **人人看得见**（2026-09-14 改）。
+        # 讲次表 —— **人人看得见**（2026-09-14 改）。每一行带着它自己的三个
+        # 日历去处（`meeting_calendar_links`）。
         #
         # ⚠️ 原来这一行写着「只在看得到记录的人那里取，因为它带着签到屏的入口，
         #    而那是管理动作；对报名者『这门课什么时候上』已经答在 When 那一行
@@ -929,7 +935,10 @@ def _detail(request, pk):
         #
         # 🔴 这是那句话被**一个新功能**推翻的例子，不是它当初写错了：一条理由
         #    会随着页面上多出来的东西失效，而失效的时候它读起来还是很有道理。
-        "sessions": event.sessions.all(),
+        "sessions": meeting_calendar_links(
+            event, list(event.sessions.all()),
+            host=request.get_host().split(":")[0],
+            url_for=request.build_absolute_uri),
         "mine": mine,
         # ⚠️ The property, not `status in OPEN_FOR_SIGNUP` (2026-08-19). It asks
         #    the clock as well, exactly as the `open_for_signup()` queryset
@@ -1270,8 +1279,87 @@ def _signups(request, *, past):
         **({} if past else {
             "next_up": next_up(contact),
             **_signups_footer(contact),
+            **_subscription(request, contact),
         }),
     })
+
+
+def _back_to_subscription():
+    """回到 My Signups，并且**把订阅那一块展开**。
+
+    🔴 少了这一下，人在那一块里按了「Create」，跳回来看到的是一个**又关上了**的
+       折叠 —— 他刚拿到的东西藏在里面。一句「地址好了」配一个空页面，读起来是
+       「好了，但在哪儿」。
+    """
+    return f"{reverse('events:my_participations')}?subscribed=1"
+
+
+def _subscription(request, contact):
+    """订阅那一块要的三样：有没有、地址是什么、以及 `webcal://` 那一条。
+
+    🔴 **没有就是没有，这里不 `get_or_create`。** 懒生成是 `CalendarFeed` 存在
+       的头一条理由：渲染这一页就顺手发一把钥匙的话，库里每一个打开过 My Signups
+       的人都被签发了一条**真的能用**的凭证，而绝大多数人从来不会去订阅。
+       所以这一页默认画的是一颗「Create」的键，按下去才有行。
+
+    ⚠️ `webcal://` 和 `https://` 两条都给。前者点一下直接交给系统日历，
+       但它要本机注册过这个协议；后者是**纯文本**，给 Apple 日历和 Outlook
+       那种「粘贴一个地址」的流程用。只给一颗按钮的话，没注册协议的人点下去
+       什么都不会发生，而他会以为功能坏了。
+    """
+    # ⚠️ 「刚动过」的标志走 query，不走 session：它只影响这一块展不展开，而一个
+    #    刷新之后就该忘掉的状态放进 session 是把一次性的东西存成了持久的。
+    just_changed = bool(request.GET.get("subscribed"))
+    feed = getattr(contact, "calendar_feed", None) if contact else None
+    if feed is None:
+        return {"calendar_feed": None, "calendar_just_changed": just_changed}
+    address = request.build_absolute_uri(
+        reverse("events:calendar_feed", args=[feed.token]))
+    return {
+        "calendar_feed": feed,
+        "calendar_just_changed": just_changed,
+        "calendar_feed_url": address,
+        # ⚠️ 只换协议头，不自己拼地址 —— 端口、子路径都由上面那一行负责。
+        "calendar_feed_webcal": re.sub(r"^https?://", "webcal://", address),
+    }
+
+
+@login_required
+@require_POST
+def calendar_feed_create(request):
+    """发一把钥匙。**POST**，因为它是一次写操作。
+
+    ⚠️ `get_or_create` 而不是 `create`：这颗键只在没有行的时候画得出来，但两个
+       标签页各按一次是真会发生的事，而那时第二次不该 500。
+    """
+    contact = _my_contact(request)
+    if contact is None:
+        raise Http404
+    CalendarFeed.objects.get_or_create(contact=contact)
+    messages.success(request, "Your subscription address is ready.")
+    return redirect(_back_to_subscription())
+
+
+@login_required
+def calendar_feed_reset(request):
+    """换一把钥匙，旧的当场作废。GET 是确认页，POST 才动手。
+
+    🔴 **这一下是不可逆的，而且它的后果是静默的**：所有已经订上旧地址的日历
+       从此再也收不到更新 —— 它们不会报错，只是停在原地，而人要过一阵子才会
+       发现自己的课表不动了。所以照 `participation_cancel` 那条先例走确认页。
+
+    ⚠️ 没有行的时候是 404，不是「顺手建一条再换掉」：那会让一颗本不该画出来的
+       键变成一条发钥匙的路。
+    """
+    contact = _my_contact(request)
+    feed = get_object_or_404(CalendarFeed, contact=contact) if contact else None
+    if request.method == "POST":
+        feed.rotate()
+        messages.success(
+            request, "That address is now a new one. Subscribe again to keep "
+                     "your calendar up to date.")
+        return redirect(_back_to_subscription())
+    return render(request, "events/calendar_feed_reset.html", {"feed": feed})
 
 
 def _signups_footer(contact):
@@ -1303,39 +1391,35 @@ def _signups_footer(contact):
 
 
 def _calendar_links(request, event):
-    """详情页上那颗「Add to calendar」要的三样东西。
+    """详情页顶上那颗「Add to calendar」要的东西。
 
-    🔴 **三个去处不是等价的，页面必须说得出差别**（实测下来的，2026-09-14）：
-       下载那一份带着稳定的 UID —— 活动改期之后再下一次，日历里是**那一条变了**；
-       而两条深链打开的是一张新建草稿，日历自己发一个新身份，**再点一次就是
-       第二条**。把三颗键并排画成一样，等于让人用一个会长出重复条目的东西去
-       更新日程。
+    🔴 **两条深链只画给单场活动**（2026-09-14 第二轮，用户判的）。
 
-    ⚠️ 深链只对**一场**成立，所以一门课取的是「还没到的第一讲」。取不到（课已经
-       上完、或者一场都没排）就一条深链都不画：一条指向过去某个晚上的「加进
-       日历」比没有更糟。
+       它们一次只加得了**一个事件**，而这一排的语境是「这门课」—— 一颗叫
+       Google 的键摆在「All meetings」旁边、按下去却只进去十二讲里的一讲，
+       是这一页上最容易误解的一格。第一版给它配了一行小字说明「只加下一讲」，
+       而用户的判断更干脆：**与其解释一个语境不符的动作，不如不摆它**。
+
+       讲次表每一行都有这两条，那里的语境正好是「这一讲」—— 一讲就是一个事件，
+       深链在那儿完全成立。所以规矩是一句话：**深链只出现在「这一格就是一个
+       事件」的地方。**
+
+    🔴 三个去处仍然不是等价的，页面仍然要说得出差别：下载那一份带着稳定的
+       UID —— 活动改期之后再下一次，日历里是**那一条变了**；而深链打开的是一张
+       新建草稿，日历自己发一个新身份，**再点一次就是第二条**。
     """
-    is_course = event.sessions.exists()
-    # ⚠️ 「下一讲是哪一讲」在服务层（D18：视图里不做日期运算），而那不只是分层
-    #    洁癖 —— 这一页说的「下一讲是周二」和按下去真正拿到的那一讲必须是同一个
-    #    答案，所以它们读同一个函数。
-    ahead = next_meeting(event)
-    if is_course and ahead is None:
-        return {"calendar_one": None, "calendar_is_part": True}
-    rows = calendar_occasions(
+    if event.sessions.exists():
+        # 一门课：只有「整期下载」那一条路。⚠️ `calendar_one` 为 None 正是模板
+        #    用来判断「画不画那两条深链」的开关。
+        return {"calendar_is_part": True, "calendar_one": None}
+    one = calendar_occasions(
         event, host=request.get_host().split(":")[0],
-        url_for=request.build_absolute_uri,
-        meetings=[ahead] if ahead else None)
-    # ⚠️ 一门课上面那一行按「只给下一讲」重算过，所以序号会从 1 起 —— 这里要的
-    #    只是它的起止和标题，而标题里的序号由下面的 label 另说，不从这里读。
-    one = rows[0]
+        url_for=request.build_absolute_uri)[0]
     return {
         "calendar_one": one,
         "calendar_google": ics.google_link(one),
         "calendar_outlook": ics.outlook_link(one),
-        # 「这条深链加的是整场，还是十二讲里的一讲」—— 界面据此改口。
-        "calendar_is_part": is_course,
-        "calendar_part_when": ahead.start_time if ahead else None,
+        "calendar_is_part": False,
     }
 
 
@@ -1400,6 +1484,49 @@ def _calendar_response(request, event, meetings):
     #    所以它绝不能进任何一层共享缓存。少了这一行，缓存可能把 A 的课表发给 B
     #    —— 而那读起来完全正常。
     response["Cache-Control"] = "private, no-store"
+    return response
+
+
+#: 这份日历在对方侧栏里显示的名字。
+#:
+#: ⚠️ **不带这个人的名字。** 它已经是他自己的日历了，写上去只多一处会跟着文件
+#:    走的身份信息 —— 同 `ics.py` 判掉 `ATTENDEE` 的那条理由。
+FEED_CALENDAR_NAME = "River of Life — my signups"
+
+
+def calendar_feed(request, token):
+    """一个人的订阅源。**没有 `@login_required`，而那正是这条路由的全部要点。**
+
+    ⭐ 抓取订阅源的是 Google / Apple / Outlook 的服务器，**它不带 cookie**。
+       挂上 `@login_required`，对方拿到的是登录页的 302 —— 订阅「成功」，日历里
+       一条都没有，而且不报错。所以这里的门不是登录态，是地址本身：一串 256 位
+       的随机（`CalendarFeed`），撤得掉，换得了。
+
+    🔴 **门换了，而门后的判断一个都没换。** 内容走 `my_calendar_occasions()`，
+       它读的是 `Participation.objects.mine()` —— 和 My Signups 同一个谓词，
+       连同里面那个 `visible_to_participants()`。于是一场撤回发布的活动在一次
+       刷新之内就从所有订阅里消失。**这是绕过登录之后唯一还拦得住它的东西**，
+       所以那一层判断绝不能在这里被绕开重写。
+
+    ⚠️ 令牌对不上是 **404，不是 403**：403 等于确认「这个形状的地址是真的」。
+
+    ⚠️ **没有 `Content-Disposition`** —— 这是订的，不是下的。带上 attachment，
+       一部分客户端会把它存成一个文件而不是订上它，于是又变回一份死拷贝。
+
+    ⚠️ `Cache-Control: private, no-store` 的理由比下载那条更重：这个地址就是
+       身份本身，而它在互联网上是公开可达的。`X-Robots-Tag` 同理 —— 这条地址
+       不该进任何一个索引。
+    """
+    feed = get_object_or_404(
+        CalendarFeed.objects.select_related("contact"), token=token)
+    host = request.get_host().split(":")[0]
+    text = ics.calendar_for(
+        my_calendar_occasions(feed.contact, host=host,
+                              url_for=request.build_absolute_uri),
+        prodid_host=host, updates=True, name=FEED_CALENDAR_NAME)
+    response = HttpResponse(text, content_type="text/calendar; charset=utf-8")
+    response["Cache-Control"] = "private, no-store"
+    response["X-Robots-Tag"] = "noindex, nofollow"
     return response
 
 

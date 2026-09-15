@@ -38,7 +38,12 @@ hx-headers 挂一次，所有 HTMX 请求都带上 CSRF —— 不要每个表�
 {% endcomment %}
 <body class="flex min-h-full flex-col bg-ink-50 text-ink-900 antialiased dark:bg-transparent dark:text-ink-100"
       hx-headers='{"X-CSRFToken": "{{ csrf_token }}"}'
-      x-data="{ menu: false, bar: false }"
+      {% comment %}
+      ⚠️ 2026-09-14 从内联的 `{ menu: false, bar: false }` 换成具名组件：多了一个
+         `pinned`，而它的初值要**从 `<html>` 上读**（引导脚本已经写好了），
+         再加一个 `$watch` 把它写回去 —— 那两样塞进属性里就是一行读不动的字。
+      {% endcomment %}
+      x-data="siteShell"
       x-on:keydown.escape.window="menu = false">
 
   {% comment %}

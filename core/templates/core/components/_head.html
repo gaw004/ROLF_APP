@@ -37,4 +37,10 @@
 <link rel="stylesheet" href="{% static 'css/app.css' %}">
 {% include "core/components/_appearance.html" %}
 {% if themed %}{% include "core/components/_theme_boot.html" %}{% endif %}
+{% comment %}
+⚠️ 钉住状态的首帧，理由和上面那条主题引导一样：都要在渲染之前跑完。
+   ⚠️ 它**不**受 `themed` 控制 —— 主题分首页 / 内页两档（D44），而菜单是
+      同一个菜单，两边都该记得钉没钉住。
+{% endcomment %}
+{% include "core/components/_menu_boot.html" %}
 <script defer src="{% static 'js/app.js' %}"></script>

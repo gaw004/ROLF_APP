@@ -299,39 +299,118 @@
   {% endcomment %}
   {% if sessions %}
     <h2 class="mb-3 mt-8 text-lg font-semibold">Sessions</h2>
-    <div class="table-wrap">
+    {% comment %}
+    ⚠️ `x-data` 挂在**外面这一层**而不是 `<table>` 上：收起 / 摊开是**整张表一件
+       事**，落点就是这一层上的一个 class，而那颗键在表头里 —— 两者的共同祖先
+       正是这里。（2026-09-14 第三轮之前，这里挂着的理由是「那颗键要够得着
+       tbody 里每一个 `<details>`」；那些 `<details>` 已经撤掉了，而结论没变。）
+
+    🔴 **`$watch` 而不是 `x-bind:class`，而这是两次实测换来的。**
+
+       ① `x-bind:class="open ? '' : '…collapsed'"` 不行：它**只移除自己加过的
+          class**，而这一个是引导脚本直接写进 `classList` 的 —— Alpine 见它已在
+          就不记账，于是 `open` 翻成 true 也删不掉。表现是**按一下键，字从 Show
+          变成 Hide，而十二行一个图标都没出来**。
+       ② 补一句 `x-init` 先摘掉它也不行：Alpine 的指令顺序里 **`bind` 排在
+          `init` 之前**，于是变成「bind 先看见它已在（不记账）→ init 再摘掉」，
+          净效果是**进来时就是摊开的**，而那颗键写着 Show。两次都不报错。
+
+       `$watch` 绕开整本账：`open` 是唯一的真相，class 由它派生，初始那一份由
+       引导脚本给（首帧之前，不闪），之后每次变化 `classList.toggle` 一次。
+
+       ⚠️ 用 `$watch` 不用 `x-effect`，理由这个仓库写过两次（`event_list.html`
+          和 `app.js` 里那两条）：`x-effect` 会把它读到的所有东西都变成依赖。
+
+    ⚠️ **没有任何服务端测试抓得到上面那两条**：三种写法发出去的 HTML 在断言
+       层面一模一样，差别只在浏览器里。是走查抓到的，记在 06-roadmap。
+    {% endcomment %}
+    <div class="table-wrap" x-data="{ open: false }"
+         x-init="$watch('open', shown =>
+                        $el.classList.toggle('meeting-calendars-collapsed', !shown))">
       <table>
         <thead>
           <tr>
             <th>#</th><th>When</th>
             {% if sees_every_role %}<th>Attended</th>{% endif %}
-            <th></th>
+            <th class="whitespace-nowrap text-right">
+              {% comment %}
+              🔴 **一颗键管整张表**（用户 2026-09-14，第三轮改成这样）。原来它做
+                 的是把十二个 `<details>` 逐个 `.open = true`；那些 `<details>`
+                 撤掉之后，它翻的是 wrapper 上的一个 class，一次到位。
+
+              ⚠️ `x-cloak`：**没有 JavaScript 时它不画**，而这一版里这一条比原来
+                 更硬 —— 没有脚本的那个人看见的是一张三个图标常开的表（收起那一下
+                 由脚本做，见表后面那段），所以这颗键对他不只是没反应，是多余。
+
+              🔴 **已知代价，写在这里免得以后当成 bug 修**：如果引导脚本跑了、而
+                 `app.js` 那个包**整个没起来**（404 / CSP / 脚本报错），表是收着
+                 的而这颗键不画 —— 那三条链接就够不着了。这个暴露面不是这里引进
+                 的：站里每一个 `x-cloak` 元素在 Alpine 没起来时都是永久
+                 `display: none`。认下它，是因为躲开它就得把收起那一下推迟到包加载
+                 之后，而那是每一页都看得见的一次闪动，换一个从没发生过的分支。
+
+              ⚠️ `aria-expanded` 跟着状态走：`x-text` 那句 Show / Hide 是给看得见
+                 的人的，读屏的人要从别处知道此刻是开着还是收着。
+                 （没有 `aria-controls`：它管的是十二行，指不到某一个区域上。）
+
+              ⚠️ Alpine 只碰 `open` 这一个布尔，业务判断一个都没有 ——
+                 `AlpineStaysUiOnlyGuardTests` 盯的正是这条界线。
+              {% endcomment %}
+              <button type="button" x-cloak
+                      class="prose-link text-xs font-normal"
+                      x-on:click="open = !open"
+                      x-bind:aria-expanded="open ? 'true' : 'false'"
+                      x-text="open ? 'Hide calendars' : 'Show calendars'"></button>
+            </th>
           </tr>
         </thead>
         <tbody>
           {% for row in sessions %}
+            {% comment %}
+            ⚠️ `row` 现在是 `services.meeting_calendar_links()` 的一格，不是一个
+               `Session` —— 讲次本身在 `row.meeting` 上。改成这样是因为每一行都要
+               带三个去处，而那三个是算出来的，不是模型上的字段。
+            {% endcomment %}
             <tr>
-              <td>{{ forloop.counter }}</td>
-              <td>{{ row.start_time }} &ndash; {{ row.end_time|time }}</td>
-              {% if sees_every_role %}<td>{{ row.attendances.count }}</td>{% endif %}
-              <td class="whitespace-nowrap">
+              <td>{{ row.ordinal }}</td>
+              <td>{{ row.meeting.start_time }} &ndash; {{ row.meeting.end_time|time }}</td>
+              {% if sees_every_role %}<td>{{ row.meeting.attendances.count }}</td>{% endif %}
+              <td class="whitespace-nowrap text-right">
                 {% if sees_every_role %}
-                  <a href="{% url 'events:session_checkin_display' row.pk %}"
+                  <a href="{% url 'events:session_checkin_display' row.meeting.pk %}"
                      class="prose-link">Check-in screen</a>
                 {% endif %}
-                {% comment %}
-                ⚠️ 「只下这一讲」（2026-09-14），一颗图标。整期那一份在上面那颗
-                   「Add to calendar」里 —— 两种下法都要有：临时调过课、或者只
-                   打算去其中几讲的人要的正是单讲这一条。
-                {% endcomment %}
-                {% url 'events:session_calendar' row.pk as meeting_cal_url %}
-                {% include "events/_calendar_icon_link.html" with href=meeting_cal_url label="Add meeting "|add:forloop.counter|stringformat:"s"|add:" to your calendar" %}
+                {% include "events/_meeting_calendar_links.html" %}
               </td>
             </tr>
           {% endfor %}
         </tbody>
       </table>
     </div>
+    {% comment %}
+    🔴 **收起是 JavaScript 才有的默认，所以它写在这里，不写在上面那个 class 串里。**
+
+       表头那颗键带 `x-cloak`，没有脚本时根本不画。把 `meeting-calendars-collapsed`
+       烤进模板，等于让这三条链接对**关掉 JavaScript 的人永远不存在** —— 而页面
+       一个字不差、不报错、别的测试全绿。D24 那条路必须自己走得通。
+       守卫：`CalendarDownloadTests.test_the_response_itself_never_ships_them_collapsed`。
+
+    ⚠️ 这一段贴在表**后面**，所以 `previousElementSibling` 就够得着那个 wrapper
+       —— 不必像 `_period_filter.html` 那样绕到 `<html>` 上（它写在 `<head>` 里，
+       那时要找的元素还没被解析出来）。解析时执行，首帧之前跑完，不闪。
+
+    ⚠️ 脚本里的注释写英文，不写中文 —— 它虽然不显示给人看，但它**进了发给浏览器
+       的 HTML**，而界面语言守卫（D23）的口径是「模板里注释块之外没有汉字」。
+    {% endcomment %}
+    <script>
+      (function () {
+        /* Collapsed is a JavaScript-only default: see the template comment
+           above for why it must not be baked into the markup. Runs during
+           parse, before the first paint, so nothing flashes open and shuts. */
+        document.currentScript.previousElementSibling
+                .classList.add("meeting-calendars-collapsed");
+      })();
+    </script>
   {% endif %}
 
   {% if mine %}

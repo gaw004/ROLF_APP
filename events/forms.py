@@ -1383,7 +1383,8 @@ class EventPeriodForm(forms.Form):
         required=False, label="Ministry", empty_label="All ministries",
     )
 
-    def __init__(self, *args, ministries=None, audience=NO_AUDIENCE, **kwargs):
+    def __init__(self, *args, ministries=None, audience=NO_AUDIENCE,
+                 noun="event", **kwargs):
         """`ministries` narrows the dropdown to a scope the page already has.
 
         `audience` (2026-09-08) is the person the "kind of role" box is judged
@@ -1432,9 +1433,15 @@ class EventPeriodForm(forms.Form):
             #
             # ⚠️ The empty option says "All events", not "Any kind": the box
             #    filters *events*, and an event is not a kind of anything.
+            # ⚠️ `noun` since 2026-09-14: this same form serves the Programs page,
+            #    where the thing being filtered is a **program**. It was found in
+            #    a walkthrough — the box sat there saying "All events" on a page
+            #    whose every row was a course. The word is passed in rather than
+            #    derived from anything here, because this form has no idea which
+            #    list it is on; `views.LIST_PAGES` is where it is written once.
             self.fields["nature"] = forms.ChoiceField(
                 required=False, label="Role kind",
-                choices=[("", "All events")] + [
+                choices=[("", f"All {noun}s")] + [
                     (value, f"{label} ({NATURE_INVITATIONS[value]})")
                     for value, label in ParticipationRole.Nature.choices],
             )

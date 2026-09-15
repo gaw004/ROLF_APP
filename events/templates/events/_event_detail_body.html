@@ -283,20 +283,42 @@
   ⭐ 每一行一个签到屏，而这正是「今天是哪一讲」不需要被猜的原因：老师开的是
      哪一讲的屏，扫出来就是哪一讲。一天排两讲也不冲突，那是两块屏。
   {% endcomment %}
-  {% if sees_every_role and sessions %}
+  {% comment %}
+  🔴 **这张表 2026-09-14 从「只给管理员」改成了人人看得见**，而**列是分的**：
+     「第几讲 / 什么时候 / 加进日历」人人看得见，「来了几个人 / 签到屏」只给
+     管理得了这场活动的人。
+
+     改的理由是加进日历那个功能：在它之前，报名者要问的是「这门课什么时候上」，
+     而那个问题**页顶那行 When 已经答了**（「每周一 8:29pm，共 12 讲」）——
+     所以当初不给他这张表是对的。之后他要问的变成了「**第七讲**是哪天，我想
+     单独把它放进日历」，而那一行答不了：它说的是整学期的节奏，不是某一次。
+
+  ⚠️ 拆列而不是拆成两张表：两张表会在下一次加一列时分叉，而它们说的是同一批行。
+  ⚠️ 「来了几个人」是别人的出勤情况，不是他自己的 —— 那一列留在管理侧，
+     和这一整批「谁看得见什么」的规矩一致。
+  {% endcomment %}
+  {% if sessions %}
     <h2 class="mb-3 mt-8 text-lg font-semibold">Sessions</h2>
     <div class="table-wrap">
       <table>
-        <thead><tr><th>#</th><th>When</th><th>Attended</th><th></th></tr></thead>
+        <thead>
+          <tr>
+            <th>#</th><th>When</th>
+            {% if sees_every_role %}<th>Attended</th>{% endif %}
+            <th></th>
+          </tr>
+        </thead>
         <tbody>
           {% for row in sessions %}
             <tr>
               <td>{{ forloop.counter }}</td>
               <td>{{ row.start_time }} &ndash; {{ row.end_time|time }}</td>
-              <td>{{ row.attendances.count }}</td>
+              {% if sees_every_role %}<td>{{ row.attendances.count }}</td>{% endif %}
               <td class="whitespace-nowrap">
-                <a href="{% url 'events:session_checkin_display' row.pk %}"
-                   class="prose-link">Check-in screen</a>
+                {% if sees_every_role %}
+                  <a href="{% url 'events:session_checkin_display' row.pk %}"
+                     class="prose-link">Check-in screen</a>
+                {% endif %}
                 {% comment %}
                 ⚠️ 「只下这一讲」（2026-09-14），一颗图标。整期那一份在上面那颗
                    「Add to calendar」里 —— 两种下法都要有：临时调过课、或者只

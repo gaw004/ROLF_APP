@@ -15040,9 +15040,11 @@ class CalendarDownloadTests(PageTestCase):
         self.assertIn("will not change", text.replace("\r\n ", ""))
 
     def test_the_detail_page_offers_both_ways_for_a_course(self):
-        """⚠️ Every meeting **and** just the next one — the pair the user asked
-           for on 2026-09-14. Two links, worded differently, because two links
-           worded the same would read as one thing done twice."""
+        """⚠️ 整期一条，单讲在**讲次表**上一讲一个（2026-09-14）。
+
+        那一排上原来还有一条 "Next meeting only"，同日删掉了：讲次表对所有人
+        开放之后，「下一讲」就成了「任意一讲」的一个硬编码特例。
+        """
         self.login(self.lisi)
         html = self.client.get(
             reverse("events:event_detail", args=[self.spring.pk])).content.decode()
@@ -15050,6 +15052,63 @@ class CalendarDownloadTests(PageTestCase):
         self.assertIn(
             reverse("events:session_calendar", args=[self.meetings[0].pk]), html)
         self.assertIn("All meetings", html)
+        self.assertNotIn("Next meeting only", html)
+
+    def test_a_learner_can_take_any_one_meeting_not_just_the_next(self):
+        """⭐ 2026-09-14：讲次表从「只给管理员」改成人人看得见。
+
+        在加进日历之前不给报名者这张表是对的 —— 他要问的「这门课什么时候上」
+        页顶那行 When 已经答了。之后他要问的变成「**第七讲**是哪天，我想单独把
+        它放进日历」，而那一行答不了：它说的是整学期的节奏，不是某一次。
+        """
+        self.login(self.lisi)
+        html = self.client.get(
+            reverse("events:event_detail", args=[self.spring.pk])).content.decode()
+        for meeting in self.meetings:
+            with self.subTest(meeting=meeting.pk):
+                self.assertIn(
+                    reverse("events:session_calendar", args=[meeting.pk]), html)
+
+    def test_the_managing_half_of_that_table_stays_managing(self):
+        """🔴 表开放了，**列是分的** —— 而这是「漏一处就静默泄露」的那一类。
+
+        「来了几个人」是别人的出勤情况，签到屏是一个管理动作。两样都留在
+        `sees_every_role` 后面；开放的只有「第几讲 / 什么时候 / 加进日历」。
+        """
+        self.login(self.lisi)
+        learner = self.client.get(
+            reverse("events:event_detail", args=[self.spring.pk])).content.decode()
+        self.assertNotIn("<th>Attended</th>", learner)
+        self.assertNotIn("checkin-qr", learner)
+
+        self.login(self.zhang)
+        admin = self.client.get(
+            reverse("events:event_detail", args=[self.spring.pk])).content.decode()
+        self.assertIn("<th>Attended</th>", admin)
+        self.assertIn("checkin-qr", admin)
+
+    def test_each_destination_is_marked_with_where_it_goes(self):
+        """⚠️ 用户 2026-09-14：「google 有 google calendar 的标志，outlook 有
+           outlook 的标志，download 应该有 download 的标志」。
+
+        图标在这里替那行小字说了一半：前两条是**下载**（进你自己的日历，再下
+        一次会更新它），后两条是**去别人的网站**（开一张新草稿，再点多一条）。
+        四条一模一样的蓝链接并排时，这个区别只剩底下那行小字在说。
+
+        ⚠️ 断言的是「四条各自带了一个图标、且两类分得开」，不是某一段 path 的
+           坐标 —— 后者会在任何一次描边微调时变红，而那不是它要守的东西。
+        """
+        self.login(self.lisi)
+        html = self.client.get(
+            reverse("events:event_detail", args=[self.spring.pk])).content.decode()
+        block = html.split("Add to calendar", 1)[1].split("</details>", 1)[0]
+        # 三条：整期下载 + Google + Outlook。单讲在下面那张讲次表上。
+        self.assertEqual(block.count("<svg"), 3)
+        # 两个品牌色，各出现一次：认得出它们是「别人家的东西」。
+        self.assertIn("#4285F4", block)      # Google 蓝
+        self.assertIn("#0F6CBD", block)      # Outlook 蓝
+        # 下载那个跟着文字走，不带自己的颜色。
+        self.assertEqual(block.count('stroke="currentColor"'), 1)
 
     def test_the_two_web_links_say_they_add_only_one_date(self):
         """🔴 Google and Outlook take one event per click, and clicking twice
@@ -15164,6 +15223,27 @@ class TwoListsTests(PageTestCase):
                             ("events:program_list", "<title>Programs")):
             with self.subTest(page=name):
                 self.assertIn(title, self.page(name))
+
+    def test_each_list_calls_its_rows_by_the_right_word(self):
+        """⚠️ 走查抓到的（2026-09-14）：Programs 那一页上有**三处**写着 "event"。
+
+        筛选框的「All events」、「1 event in this period.」、以及空状态那句
+        「No events for you…」—— 而第三处当天**没有被发现**，因为演示数据里恰好
+        有一门课，那句话没露出来。一个词写三遍的代价不是难看，是下一次只会改到
+        其中两处，所以那个词现在只写在 `views.LIST_PAGES` 里一份。
+
+        ⚠️ 这条把三处一起断言，包括那个空状态 —— 单独测前两处的话，漏掉的
+           仍然是同一处。
+        """
+        for name, word, other in (("events:event_list", "event", "program"),
+                                  ("events:program_list", "program", "event")):
+            with self.subTest(page=name):
+                page = self.page(name)
+                self.assertIn(f"All {word}s", page)
+                self.assertIn(f"{word} in this period", page)
+                self.assertNotIn(f"All {other}s", page)
+                empty = self.page(name, q="nothing-matches-this")
+                self.assertIn(f"No {word}s for you in this period", empty)
 
     def test_the_page_bar_offers_the_other_list(self):
         """The two cells are siblings, so each page points at the other."""

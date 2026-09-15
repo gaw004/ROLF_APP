@@ -27,22 +27,34 @@
     Add to calendar
   </summary>
 
+  {% comment %}
+  ⚠️ 每条链接都是 `inline-flex items-center gap-1.5`：图标和文字要**同一行基线**，
+     而 `prose-link` 那条下划线画在链接的盒子上 —— 图标因此也被划进去，正是想要的
+     （整块是一个可点区，不是「一个图标旁边有个链接」）。
+  {% endcomment %}
   <div class="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-sm">
-    <a class="prose-link" href="{% url 'events:event_calendar' event.pk %}">
+    <a class="prose-link inline-flex items-center gap-1.5"
+       href="{% url 'events:event_calendar' event.pk %}">
+      {% include "events/_calendar_destination_icons.html" with kind="download" %}
       {% comment %}
-      ⚠️ 一门课上明写「All meetings」，因为它旁边那条只加一讲 —— 两条并排而措辞
-         一样的话，人点了哪一条都以为自己拿到了整学期。
+      ⚠️ 一门课上明写「All meetings」，而**那句话的理由 2026-09-14 换了一个**：
+         原来是「旁边那条只加一讲」（Next meeting only，同日删掉了）；现在是
+         **下面那张讲次表**每一讲各有一个日历图标。两处都是「整期 vs 单讲」的
+         对照，所以这个词照旧要明说 —— 只是它现在对照的是一张表，不是一条链接。
       {% endcomment %}
       {% if calendar_is_part %}All meetings (.ics){% else %}Download (.ics){% endif %}
     </a>
-    {% if calendar_is_part and calendar_one %}
-      <a class="prose-link" href="{% url 'events:session_calendar' calendar_next_pk %}">
-        Next meeting only
-      </a>
-    {% endif %}
     {% if calendar_one %}
-      <a class="prose-link" href="{{ calendar_google }}" target="_blank" rel="noopener noreferrer">Google</a>
-      <a class="prose-link" href="{{ calendar_outlook }}" target="_blank" rel="noopener noreferrer">Outlook</a>
+      <a class="prose-link inline-flex items-center gap-1.5" href="{{ calendar_google }}"
+         target="_blank" rel="noopener noreferrer">
+        {% include "events/_calendar_destination_icons.html" with kind="google" %}
+        Google
+      </a>
+      <a class="prose-link inline-flex items-center gap-1.5" href="{{ calendar_outlook }}"
+         target="_blank" rel="noopener noreferrer">
+        {% include "events/_calendar_destination_icons.html" with kind="outlook" %}
+        Outlook
+      </a>
     {% endif %}
   </div>
 

@@ -330,7 +330,7 @@ def _my_contact(request):
     return getattr(request.user, "contact", None)
 
 
-def _volunteer_period(request):
+def _volunteer_period(request, noun="event"):
     """志愿者那三页共用的那一张筛选表（2026-09-08 抽出来）。
 
     🔴 **抽出来的理由不是少打字，是那三处必须一字不差。** 左边的列表、右边的
@@ -347,7 +347,8 @@ def _volunteer_period(request):
        都不会发生）。它们要答的是另一个问题，共用一个构造器只会让这个函数长出
        一串参数。
     """
-    return EventPeriodForm(request.GET or None, audience=_my_contact(request))
+    return EventPeriodForm(request.GET or None, audience=_my_contact(request),
+                           noun=noun)
 
 
 # --- B9: the volunteer's own pages --------------------------------------
@@ -362,14 +363,26 @@ def _volunteer_period(request):
 #:
 #: ⚠️ 路由在这里存的是**名字**，`reverse()` 留到请求里做：模块导入时 URLConf
 #:    还没装好。
+#:
+#: ⭐ `noun` 是**这一页上的东西叫什么**（单数小写），2026-09-14 走查加的：
+#:    在它之前 Programs 那一页上有三处写着 "event" —— 筛选框的「All events」、
+#:    「1 event in this period.」、以及空状态那句「No events for you…」。
+#:    一个词写三遍的代价不是难看，是**下一次只会改到其中两处**：那三处里有一处
+#:    （空状态）当天就没被发现，因为演示数据里恰好有一门课，那句话没露出来。
+#:
+#: ⚠️ 不从 `title` 派生（`title.lower().rstrip("s")`）：那对 "Events" 碰巧对，
+#:    而对任何一个不规则复数都不对，且错法是安静的。两个形式各写一次，
+#:    它们在同一个字典里挨着，走散不了。
 LIST_PAGES = {
     Event.Shape.SINGLE: {
         "title": "Events",
+        "noun": "event",
         "list": "events:event_list",
         "schedule": "events:event_schedule",
     },
     Event.Shape.PROGRAM: {
         "title": "Programs",
+        "noun": "program",
         "list": "events:program_list",
         "schedule": "events:program_schedule",
     },
@@ -388,6 +401,9 @@ def _list_page(shape):
     here = LIST_PAGES[shape]
     return {
         "page_title": here["title"],
+        # 「这一页上的东西叫什么」。⚠️ 模板里一律 `{{ list_noun }}{{ n|pluralize }}`，
+        #    不写死 —— 三处读它（计数、空状态那两句），而筛选框那一处由表单读。
+        "list_noun": here["noun"],
         "list_url": reverse(here["list"]),
         "schedule_url": reverse(here["schedule"]),
         "page_tabs": [
@@ -447,7 +463,7 @@ def program_list(request):
 def _list_of(request, shape):
     """一张列表页，喂进来的是哪一种活动由 `shape` 决定。"""
     contact = _my_contact(request)
-    period = _volunteer_period(request)
+    period = _volunteer_period(request, LIST_PAGES[shape]["noun"])
     return render(request, _template(
         request, "events/event_list.html", "events/_event_list_results.html"), {
         "period": period,
@@ -687,7 +703,7 @@ def program_schedule(request):
 
 def _schedule_of(request, shape):
     contact = _my_contact(request)
-    period = _volunteer_period(request)
+    period = _volunteer_period(request, LIST_PAGES[shape]["noun"])
     return render(request, "events/_schedule.html", {
         "period": period,
         **_list_page(shape),
@@ -902,9 +918,18 @@ def _detail(request, pk):
         #    文件下载那条路才装得下全部十二条。界面上把这句话说出来，不假装
         #    三颗键是等价的。
         **_calendar_links(request, event),
-        # 讲次表。⚠️ 只在看得到记录的人那里取 —— 它带着签到屏的入口，而那是
-        #    管理动作；对报名者「这门课什么时候上」已经答在 When 那一行上了。
-        "sessions": (event.sessions.all() if may_view_records else []),
+        # 讲次表 —— **人人看得见**（2026-09-14 改）。
+        #
+        # ⚠️ 原来这一行写着「只在看得到记录的人那里取，因为它带着签到屏的入口，
+        #    而那是管理动作；对报名者『这门课什么时候上』已经答在 When 那一行
+        #    上了」。前半句仍然成立（签到屏那一列照旧只画给管理员，见模板），
+        #    **后半句 2026-09-14 不成立了**：加进日历之后，报名者要问的不再只是
+        #    「这门课什么时候上」，而是「**第七讲**什么时候上，我想单独把它放进
+        #    日历」—— 那一行 When 答不了这个，它说的是整学期的节奏。
+        #
+        # 🔴 这是那句话被**一个新功能**推翻的例子，不是它当初写错了：一条理由
+        #    会随着页面上多出来的东西失效，而失效的时候它读起来还是很有道理。
+        "sessions": event.sessions.all(),
         "mine": mine,
         # ⚠️ The property, not `status in OPEN_FOR_SIGNUP` (2026-08-19). It asks
         #    the clock as well, exactly as the `open_for_signup()` queryset
@@ -960,7 +985,6 @@ def event_detail_panel(request, pk):
        真的 `<a href>`，指向整页详情：没有 JS 时点下去就是整页跳过去。
     """
     contact = _my_contact(request)
-    period = _volunteer_period(request)
     context = _detail(request, pk)
     # ⚠️ 先算页码，再取那一页 —— 两次都用 `_listing` 的同一份查询。
     #    算不出来（那一场不在左边的列表里）时 `page_number` 是 None，
@@ -972,6 +996,10 @@ def event_detail_panel(request, pk):
     #    开着这门课、左边却退回了活动列表的第一页 —— 两块在同一次响应里说了两件
     #    互相矛盾的事，而两块都渲染成功。
     shape = context["event"].shape
+    # ⚠️ 筛选卡也跟着这一场活动的形状走（2026-09-14）：这一次响应把**左边那一列**
+    #    整块送回去，里面就有那张卡 —— 用默认的 "event" 的话，从一门课的面板
+    #    回来的那张卡上会写着「All events」，而它筛的是课。
+    period = _volunteer_period(request, LIST_PAGES[shape]["noun"])
     context.update({"period": period, "in_panel": True})
 
     # 点击来自左边那一列时，不把列表送回去（2026-08-19）。
@@ -1308,10 +1336,6 @@ def _calendar_links(request, event):
         # 「这条深链加的是整场，还是十二讲里的一讲」—— 界面据此改口。
         "calendar_is_part": is_course,
         "calendar_part_when": ahead.start_time if ahead else None,
-        # 「只下这一讲」那条链接的目标。⚠️ 和上面那条深链指向**同一讲**，
-        #    从同一个 `ahead[0]` 来 —— 各取各的话，页面上那句「下一讲是周二」
-        #    会和按下去真正拿到的那一讲分家。
-        "calendar_next_pk": ahead.pk if ahead else None,
     }
 
 

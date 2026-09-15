@@ -12,8 +12,12 @@ event_list 的结果区。整页和 HTMX 片段渲染的是同一份 —— 视�
      句子里留着 open for signup 就是一个当场可以被右边那一列标签证伪的说法。
   {% endcomment %}
   <p class="mb-4 text-sm text-ink-600 dark:text-ink-300">
+    {% comment %}
+    ⚠️ 名词从视图来（`list_noun`，2026-09-14）：同一份模板画 Events 和 Programs
+       两页，写死 "event" 的话课程页上会说「1 event in this period」。
+    {% endcomment %}
     <span class="font-semibold text-ink-900 dark:text-ink-50">{{ total }}</span>
-    event{{ total|pluralize }} in this period.
+    {{ list_noun }}{{ total|pluralize }} in this period.
   </p>
 
   <ul class="space-y-3">
@@ -304,7 +308,11 @@ event_list 的结果区。整页和 HTMX 片段渲染的是同一份 —— 视�
          长得一样」。详情页的角色那一层早就为同一个问题做对了。
       {% endcomment %}
       <li>
-        {% include "core/components/empty.html" with message="No events for you in this period. Try a wider date range — some events are only open to certain groups." %}
+        {% comment %}
+        ⚠️ 同上。这一句在走查当天**没有被发现**，因为演示数据里恰好有一门课，
+           空状态没露出来 —— 一个词写三处，下一次只会改到其中两处。
+        {% endcomment %}
+        {% include "core/components/empty.html" with message="No "|add:list_noun|add:"s for you in this period. Try a wider date range — some are only open to certain groups." %}
       </li>
     {% endfor %}
   </ul>

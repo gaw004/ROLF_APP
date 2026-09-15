@@ -56,7 +56,7 @@
 
   {% if courses %}
     <h2 class="mb-3 text-xs font-semibold uppercase tracking-wide text-ink-600 dark:text-ink-300">
-      Programs in progress <span class="ml-1 font-normal">{{ courses|length }}</span>
+      {{ courses_heading }} <span class="ml-1 font-normal">{{ courses|length }}</span>
     </h2>
     <ul class="mb-8 space-y-4">
       {% for row, progress in courses %}
@@ -67,7 +67,7 @@
 
   {% if occasions %}
     <h2 class="mb-3 text-xs font-semibold uppercase tracking-wide text-ink-600 dark:text-ink-300">
-      Events coming up <span class="ml-1 font-normal">{{ occasions|length }}</span>
+      {{ occasions_heading }} <span class="ml-1 font-normal">{{ occasions|length }}</span>
     </h2>
     <div class="table-wrap mb-8">
       <table>

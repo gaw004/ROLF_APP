@@ -1201,6 +1201,14 @@ def _signups(request, *, past):
     here = SIGNUP_PAGES[1] if past else SIGNUP_PAGES[0]
     return render(request, "events/my_participations.html", {
         "page_title": here[0],
+        # 🔴 两段的小标题**跟着页面改口**（2026-09-14 走查抓到的）。写死成
+        #    「Programs in progress」「Events coming up」的话，历史页上那场
+        #    上个月就结束了的活动会挂在「Events coming up」底下 —— 一句当场被
+        #    它自己的日期证伪的话，而页面看起来完全正常。
+        # ⚠️ HTTP 那一遍没抓到它：那一遍问的是「两段在不在」，而这一条错在
+        #    **段落叫什么**。有些东西只有把页面画出来才看得见。
+        "courses_heading": "Programs attended" if past else "Programs in progress",
+        "occasions_heading": "Past events" if past else "Events coming up",
         # ⚠️ 那一排筛选画不画，问的是**筛之前**有没有两种东西。用筛完的结果去问
         #    的话，筛到「Programs」而一门课都没有的那一刻，这一排会连同结果一起
         #    消失 —— 于是他被关在一个空页面里，回不去。

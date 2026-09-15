@@ -1,5 +1,11 @@
 {% extends "core/base.html" %}
-{% block title %}Events{% endblock %}
+{% comment %}
+⚠️ 从上下文来，不写死（2026-09-14）。同一份模板服务 /events/ 和 /programs/
+   两页，而写死的话**浏览器标签、书签、历史记录里 Programs 那一页都叫 Events**。
+   🔴 页面正文一个字都不会错，所以这条只有在浏览器里才看得见 —— 走查当天
+      抓到的，HTTP 那一遍十三条全过、没有一条碰得到它。
+{% endcomment %}
+{% block title %}{{ page_title }}{% endblock %}
 
 {% comment %}
 版心比默认的 max-w-6xl 窄（2026-08-06）。⚠️ 这不是排版偏好 —— 深色模式下背景是

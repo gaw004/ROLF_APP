@@ -15153,6 +15153,18 @@ class TwoListsTests(PageTestCase):
         html = self.page("events:program_list")
         self.assertIn("3 sessions", html)
 
+    def test_each_list_names_itself_in_the_browser_tab(self):
+        """🔴 走查抓到的，而 HTTP 那一遍十三条全过、没有一条碰得到它。
+
+        同一份模板服务两页，而那个 title block 原来写死了 "Events" —— 于是
+        Programs 那一页在**浏览器标签、书签、历史记录**里都叫 Events。
+        页面正文一个字都不会错，所以这条只有把页面画出来才看得见。
+        """
+        for name, title in (("events:event_list", "<title>Events"),
+                            ("events:program_list", "<title>Programs")):
+            with self.subTest(page=name):
+                self.assertIn(title, self.page(name))
+
     def test_the_page_bar_offers_the_other_list(self):
         """The two cells are siblings, so each page points at the other."""
         for here, there in (("events:event_list", "events:program_list"),
@@ -15386,6 +15398,18 @@ class MySignupsTests(PageTestCase):
         self.assertEqual(
             hours_received_total(rows),
             sum(hours_received(row) or 0 for row in rows))
+
+    def test_each_section_heading_follows_the_page_it_is_on(self):
+        """🔴 走查抓到的第二条：历史页上那一段原来写着「Events coming up」。
+
+        底下挂的是一场**上个月就结束了**的活动 —— 一句被它自己旁边那个日期当场
+        证伪的话。两段的小标题因此跟着页面改口，而不是写死在模板里。
+        ⚠️ HTTP 那一遍问的是「两段在不在」，答案是「在」；错的是**段落叫什么**。
+        """
+        self.assertContains(self.page(), "Events coming up")
+        past = self.page("events:past_participations")
+        self.assertContains(past, "Past events")
+        self.assertNotContains(past, "Events coming up")
 
     def test_hours_and_attendance_columns_only_on_the_history_page(self):
         """⚠️ Two columns that can only be empty read as "we lost it"."""

@@ -2760,6 +2760,33 @@ def undo_series(series, *, undone_by)
 选的时候就摆出来了。⚠️ 而它带来一条必须写下来的话：
 **「工时」这个词从此在两张表上**，任何新写的汇总都要问一句「另一半算了吗」。
 
+> ### ✅ 2026-09-14 结清，而**欠的比这一节以为的多**
+>
+> 这一节把账记成「四个口径要改」，2026-09-08 那一轮又记了「`event_summary()`
+> 和 `/me/` 已修、`_top_participants()` / `_monthly_series()` 还没」。开工前照着
+> 核代码，发现**报表自己那四格一格都没动过** —— `ministry_report()` 的
+> `Recorded hours` 至今是 `Sum("hours")` 一张表。一个 ministry 这一季的工时要是
+> 全在课上（助教按讲次记），报表头条印的是 **0**，而它底下那句「from 0 records」
+> 还会替它作证。
+>
+> ⚠️ 记在这里是因为那句「已修」**指的是别的函数**：两轮记录都没说错，而合起来
+> 读出来的结论是错的。下一次遇到「某某已经修了」，值得再问一句「修的是哪一个」。
+>
+> 这一步实际改了六处：
+>
+> | 改的 | 为什么 |
+> |---|---|
+> | `hours` / `hours_records` | 两次聚合相加。不得跨 join `Sum`（按点名行数翻倍），也不得 `distinct=True`（两个 2.5 折成一个）—— 都静默、方向相反，第二个更糟因为它看起来像修好了 |
+> | `hours_missing` | 两半各减各的。课的助教报名行按设计**没有**工时，算成「缺一条记录」会让这个数跟着开课数一起涨 —— 和 2026-08-21 那次「来上课的人被算成缺工时」是同一个病换了一层 |
+> | `_top_participants()` | 🔴 **「取前十」必须在两半合并之后**。原来是一句 SQL 里排序加切片，照那样只把课的工时加上去，一个整学期只在课上当助教的人第一半是 0，**在切到前十之前就被扔掉** —— 一张标题写着「Most hours」的图，把工时最多的那个人漏在外面 |
+> | `_monthly_series()` 的分桶 | 🔴 课的工时按 `session.start_time` 归口，不按学期左端。否则十一月那四小时画在九月的柱子上：**每根柱子都错、合计却对**，没有任何东西会报错 |
+> | `_monthly_series()` 的横轴 | 那几个月还得**在轴上存在**。九月没有活动开始 → `by_month` 里没有九月 → 算对了的工时无处可画，连柱子一起从图上消失 |
+> | `hours_received` 上报表 | D43 那个反方向的数，自己一个标题、**没有合计**、为 None 时整格不画 |
+>
+> 守卫 `TwoLedgersAreNeverAddedGuardTests` 同步落地（本轮第八条），并做过双向验证：
+> 在 Python 和模板里各种一句相加，两处都被抓到，再撤掉。D43 第五节那条
+> 「没有守卫的缺口」就此结清 —— 它的重启条件写的正是「同屏打印两个数的那一刻」。
+
 ## L5.8 页面与路由
 
 > ### 2026-09-05：页面定了，见[又七条](#又七条2026-09-05页面安排)
@@ -2773,7 +2800,7 @@ def undo_series(series, *, undone_by)
 |---|---|
 | `/programs/` | Programs 的列表（`shape=program`），两档共用一页 |
 | `/programs/schedule/` | Programs 的日程，画**每一讲**，不画那条 111 天的横条 |
-| `/me/programs/` | 我在上的课。⚠️ 同时要把 program 的报名**从 `/me/participations/` 里拿走**，并在 `/me/` 上挂第二个入口 |
+| ~~`/me/programs/`~~ | ❌ **2026-09-14 作废**（决定 47）：不单开页，和 My Signups 共用一页、上下两段。见 [L5.8b](#l58b-参与者那一端的门2026-09-14-交付) |
 | ~~`/programs/<pk>/`~~ | ❌ 不新建视图。详情复用 `/events/<pk>/`，按 `shape` 换一块（讲次表走独立 partial，同 `_event_roles_panel.html` 那一级）。理由见决定 27 |
 
 > ### 2026-09-08：下面这三样**已经做了**，L5.8 剩下的是三张列表页
@@ -2837,7 +2864,7 @@ recurring events 那一档的路由照初版：`events/series/new/`、
 > | | 装什么 | 状态 |
 > |---|---|---|
 > | L5.8a | recurring events 的发布者入口：发布页第三档 + 系列页 | ✅ 2026-09-10 |
-> | L5.8b | Programs 的三张列表页（上面那张表） | 未做 |
+> | L5.8b | Programs 在参与者那一端的门 | ✅ 2026-09-14，见[下面那一节](#l58b-参与者那一端的门2026-09-14-交付) |
 
 ### L5.8a 发布者那一端的门（2026-09-10 交付）
 
@@ -2969,6 +2996,79 @@ staticfiles 走的是 finders，而 `static/` 就在 `STATICFILES_DIRS` 里。
 - [ ] 「即日停止」→ 未来那几场从 `/events/` 上消失，已发生的还在
 - [ ] **关掉 JavaScript** 重走一遍 → 单选旁边那个 Switch 按钮整页重渲，照样能发布，
       而且填了一半的东西还在（图片除外，浏览器不允许回填文件框）
+
+### L5.8b 参与者那一端的门（2026-09-14 交付）
+
+L5.8a 把发布者那一端做完了，而**参与者那一端一个入口都没有**：一门 ESL 春季班
+混在 `/events/` 里，那一行印着 `Aug 9, 4:05 p.m. – Nov 7, 3:05 p.m.`，报了名之后
+躺在 My Signups 的六列表格里，而那张表有一列 Hours，课的工时却在点名册上。
+
+> ### ⚠️ 这一节的设计是用户给的（2026-09-14，四张图），而它推翻了四条已落地的决定
+>
+> 核心那句话是用户自己的：**「Programs 这个页面是我们帮 user filter 出来的 events」**
+> —— 它不是另一种页面，它就是 Events 那一页，只是我们替人预先筛好了。
+> 「相当于是一式两份。这样应该减少代码量。」
+>
+> 这句话把这一步从「新写三张页面」变成了「给同一套东西喂两种形状」，
+> 而那两个谓词（`EventQuerySet.programs()` / `single_occasions()`）2026-09-09
+> 随 L5.3 就写好了，**在此之前一个调用方都没有**。
+
+#### 新定的八条
+
+| # | 问题 | 定案 |
+|---|---|---|
+| 44 | Programs 列表页的形状 | **和 `/events/` 同一套视图、同一套模板**，只换喂进去的集合 |
+| 45 | 两边的互斥 | 硬的：`/events/` 只有单场，`/programs/` 只有课，**日程也各画各的** |
+| 46 | 管理页 | 不拆，筛选卡上多一格 |
+| 47 | 「我在上的课」 | **不单开页**，和 My Signups 共用一页，上下两段 |
+| 48 | Past Signups | 新开一页，排版和 My Signups 一模一样 |
+| 49 | 顶栏 | 并排两格、**顺序固定**：`Events · Programs`、`My Signups · Past Signups` |
+| 50 | 筛选 | `All · Events · Programs`，两页都有，筛的是「显示哪一段」 |
+| 51 | 什么时候算 past | 活动**结束**就算，和 `ParticipationQuerySet.upcoming()` 同一把尺 |
+
+#### 推翻的四条，各带代价
+
+| 原来 | 现在 | 代价 |
+|---|---|---|
+| **决定 26**：`/me/programs/` 单开、`/me/` 上挂两个入口 | 共用 My Signups | 无代价。⚠️ 顺带发现那句话本来就落空了：`/me/` 2026-09-11 起已经是一条跳回首页的重定向 |
+| **决定 23 后半句**（2026-09-08 改的）：站点日程**按讲次**画 Programs | Programs 完全不进 `/events/schedule/` | 🔴 **有真代价**：既做志愿者又上课的人要看两个日程。换来的是当初那个 bug（111 天的墙）彻底没有入口。⚠️ `schedule.occurrences()` 一个字没动，它现在服务 `/programs/schedule/`；`SessionScheduleTests` 直接测 `schedule.columns()` 不经视图，所以这次覆盖**一条几何断言都没碰** |
+| **page_bar 2026-09-03 第四轮**：两格是「你在哪儿 + 从哪儿来」，**不是切换器** | 加第三种模式：并排兄弟 | ⚠️ 那条规矩的**理由活着**：它怕的是「按谁是当前页对调、字会横着挪」，而这一排顺序固定，换页时一个字不动。判断一条旧规矩适不适用，看的是它当初怕的那件事还成不成立，不是看新东西长得像不像它禁的那个词 |
+| **2026-08-17 删 past_events 时写的**：「结束了的活动仍然在 My Signups 上」 | 搬去 Past Signups | 无代价，但那段注释要跟着改，否则文档里留一句假话 |
+
+#### 实施时补的两条，都是走查代码核出来的
+
+| | 漏了什么 | 后果 |
+|---|---|---|
+| 1 | `_visible_events()` 没有 `prefetch_related("sessions")` | 列表行改读 `when_line()` 之后**每行一次查询**。不报错，只是慢 —— 和这个函数里已有的两条同款注释说的是同一件事。钉它的测试**数两次查询再比较**，不钉绝对值：一个每隔几周就要重钉一次的数字，很快就没人读了 |
+| 2 | `_back_link()` 只会回 Events | 🔴 **不是少一个标签，是回不去**：两页互斥之后，一门课的返回键指向一张**不含这门课**的列表。正是这个函数自己的历史里记着的那次事故（管理页收成一格之后「回不到 Events 界面」），换了一条路重演 |
+
+⚠️ 第 2 条的第一版写成了一个 `?from=programs` 标记，**当场作废了**：默认支既然可以读
+`event.shape`，那个标记就什么也没多做 —— 而标记只覆盖「带着标记来的」那一半，
+另一半（仪表盘那两张卡、邮件里的链接、转发给同事的那一条）照样回不去，
+**而那些人恰恰最没有上下文**。两个标记（`mine` / `manage`）留着，因为它们指向的是
+第三、第四张列表，那两件事活动自己答不出来。
+
+#### 落点
+
+| 文件 | 改什么 |
+|---|---|
+| `events/views.py` · `LIST_PAGES` / `_list_page()` | 两页各自的标题和两条路由，一张表。⚠️ 存的是**路由名**，`reverse()` 留到请求里 —— 模块导入时 URLConf 还没装好 |
+| `events/views.py` · `_of_shape()` | 互斥判据**只此一处**。三个地方要问同一个问题（列表、日程、「这一场排在第几页」），各写一遍的表现是同一页上列表和日程各答各的 |
+| `events/views.py` · `event_list` / `event_schedule` | 各拆成「一个核心函数 + 两个薄壳」，新增 `program_list` / `program_schedule` |
+| `events/views.py` · `event_detail_panel` | 左边那一列的形状**从活动自己身上读**：拿 Events 那一份去数「一门课排在第几页」永远数不到，于是面板右边开着课、左边退回活动列表第一页 |
+| `events/models.py` · `Event.when_line` | 新 property，详情页和列表行**共用一份**。🔴 它是 property 而不是各页各算，因为这句话已经错过一次：2026-09-08 只在详情页修好了，列表行上原样留到今天 |
+| `events/urls.py` | `programs/`、`programs/schedule/`。⚠️ 不挂在 `events/` 下面 —— 两页是并排的兄弟，`events/programs/` 读起来是「活动的一个子集的一个子页」 |
+| `core/templates/.../page_bar.html` | 第三种模式 `tabs` |
+| `core/context_processors.py` | 站点菜单里 Events 后面加一条 Programs |
+
+#### 验收（浏览器，待走）
+
+- [ ] `/events/` 上没有那门课；顶栏 `Events · Programs` 点得过去，字不横着挪
+- [ ] `/programs/` 上只有课，右边日程画的是**每周那一格**，不是 111 天的横条
+- [ ] 列表行上不再出现 `Aug 9, 4:05 p.m. – Nov 7, 3:05 p.m.`，改成日期区间 + 一句「每周二 …」
+- [ ] 从 `/programs/` 点进一门课再点返回 → 回到 `/programs/`，那一行还在
+- [ ] 从**仪表盘那张卡**点进同一门课再点返回 → 同样回到 `/programs/`（这条走的是没有标记的那条路）
+- [ ] 站点菜单里 Events 底下有 Programs
 
 ### L5.8c 「多久一次」从手打改成选（2026-09-11 交付）
 
@@ -3366,6 +3466,44 @@ admin 确认屏那颗提交键是 `{% if offerable %}`，而 **`offerable` 从�
 - [ ] admin 里选一条 → **先出确认页**，键按得下去 —— ⚠️ code review 之后那一页改成包站点的两份片段了，要重走
 - [ ] 已经停过的系列 → 页面上不再显示那颗键
 
+## L5.11 加进个人日历（2026-09-14，用户当轮追加）
+
+⚠️ **不在原计划里。** 它不属于 L1–L5 任何一层，记在这里是因为它和批三同一轮交付，
+而且它的形状由 L5 决定：一门课在别人日历里该是 N 条两小时的晚上，不是一条横跨
+三个月的全天事件 —— 那正是本轮从列表页上拆掉的同一句假话，换到了手机上。
+
+决策全文见 [D45](decisions/D45-add-to-calendar.md)。这里只记落点和三条走查：
+
+| | |
+|---|---|
+| 模块 | `events/ics.py`（纯函数，同 `recurrence.py` / `schedule.py` 一层）。⚠️ **不叫 `calendar.py`** —— `dashboard/calendar.py` 已经是侧栏那个小月历，同一个词指两样东西正是这个仓库反复在拆的 |
+| 路由 | `events/<pk>/calendar.ics`（整场 / 整期）、`events/sessions/<pk>/calendar.ics`（单讲）。两种下法都要有，是用户当天提的 |
+| 门 | 和详情页同一道（`_detail()`）。⚠️ 这条尤其要紧，因为它的产物**离开站点**：一份草稿活动的 ics 下到谁手里就再也收不回来 |
+| 界面 | `<details>`，无 JS 可用（D24）。三个去处**不画成等价的** |
+
+🔴 **三条只有实施才会撞上的：**
+
+1. **课的 `SEQUENCE` 要取 `max(Session, Event)` 两个时间戳。** 讲次给时间、父活动给
+   标题地点 —— 改课名不动讲次的 `updated_at`，于是 SEQUENCE 不涨，每一个已经收下
+   它的日历**永远显示旧名字**，而且**重新下载也没用**（客户端认为手上的已是最新）。
+2. **这份文件是私人的。** 挑过讲次的学员只拿到他挑的那几讲（决定 17/18 在点名册上的
+   直接后果）—— 同一个地址对不同的人给不同内容，所以 `Cache-Control: private, no-store`。
+   少了它，一层共享缓存能把 A 的课表发给 B，而那读起来完全正常。
+3. **每条 VEVENT 末尾自带一句「这份不会自己更新，以活动页为准」**，由模块追加、
+   调用方忘不了。⚠️ 这是用户当轮提的，而它是整份文件里最要紧的一行字：下载下来的
+   `.ics` 是活动时间地点的第二份副本，住在别人手机里，基金会一改期它就在**他唯一
+   会看的地方**静默地假。
+
+### 验收（浏览器，待走）
+
+- [ ] 单场活动 → 下载 → Apple 日历打得开；**再下一次不多出第二条**
+- [ ] 一门课 → 「Download every meeting」→ 日历里是十二条两小时的晚上，不是一条三个月的
+- [ ] 同一页 →「Download just the next meeting」→ 只有一条
+- [ ] 报名时挑了其中四讲的账号 → 下载 → 文件里**只有那四讲**
+- [ ] 改掉课名 → 重新下载 → 日历里那十二条**跟着改名**（而不是多出十二条）
+- [ ] 看不见这场活动的账号敲那个地址 → 404
+- [ ] Google / Outlook 两条 → 打开的是一张**只有下一讲**的新建草稿，页面上也这么写着
+
 ## L5.9 初版那份 `EventSeries` 哪些留下了、哪些作废
 
 | 初版写的 | 现在 |
@@ -3444,6 +3582,7 @@ admin（本轮唯一的门，所以是唯一测得到的门）：`SeriesThroughT
 | 4 | `GeneratedEventDeleteGuardTests` | 2026-09-10 随 L5.4–L5.6 落地：生成场次的那三个删除条件只出现在 `_drop_generated_after()`。信号是「函数体里同时出现 `Source.GENERATED` 和 `.delete(`」，白名单只有那一个名字 —— 照 D40 第一节那条不变量的写法，它盯的是**条件**而不是「这几个文件可以删」，所以 D36 代价 4 警告的那种「白名单越放越宽」在这里没有入口。守卫 6 在低一层上的同一条 |
 | 5 | `LocalDayInSqlGuardTests` | `TruncDate(` 只出现在 `on_the_books_exists()` 所在的文件，且那一行带 `tzinfo=` |
 | 6 | `RegisterDeleteGuardTests` | 2026-09-09 随 L5.3 加的第七条：点名行的删除只许出现在 `close_future_register()`。守卫 4 在低一层上的同一条，而这一层已经出过一次事故（删角色带走整学期的点名册） |
+| 7 | `TwoLedgersAreNeverAddedGuardTests` | 2026-09-14 随 L5.7 收尾加的第八条：**没有任何一处把「接受到的时数」和工时相加**。信号是同一行里同时出现 `hours_received` 和一个加法（Python 的 `+`、模板的 `\|add:`），扫我们自己的 Python 和模板，注释和 docstring 先剥掉。⚠️ D43 第五节把这条记成一个**没有守卫的缺口**，重启条件写的是「同屏打印两个数的那一刻」—— L5.7 正是那一刻。双向验证过：两处各种一句相加，都被抓到 |
 
 每一条都要做双向验证：故意写错一处，确认它真的红 —— 这是本项目对守卫的既有要求，
 而守卫一和守卫五都属于「不做反向验证就等于没写」的那一类。
@@ -3464,8 +3603,9 @@ admin（本轮唯一的门，所以是唯一测得到的门）：`SeriesThroughT
 | `events/models.py` | 一二三 | `nature`、`NOT_APPLICABLE`、新约束、第二个兜底工种、可见性的两个布尔 + 一张多对多（`Event` / `EventRole` 各一套）、`refuse_wider_than_event()`（⚠️ `Audience` 和 `AudienceQuerySetMixin` **2026-08-31 搬去了 `org/audience.py`**，留在这里的只有事件×角色那条含容规则，见 [D41 第四节](decisions/D41-notices-are-not-events.md)）、`Event.shape` + 两个谓词、`Session`（+ `duration`）、`SessionAttendance`（+ `records_hours` / `hours_received`）、`EventSeries`、`EventSeriesRole`、`Event.series` / `Event.source` |
 | `events/services.py` | 一二三 | `add_session()`（L5.1）、`add_attendance()` / `record_session_hours()` / `hours_received()`（L5.2）；`on_the_books_q()` / `on_the_books_exists()`、`default_served_as()`、`record_hours()`、`check_out()`、`create_participation_role()`、`ministry_report()`、`_people_served()`、`eligible()`（⚠️ `eligible_role_ids()` 判它不建，见 L2.4 那个补框）、`sign_up()`、系列的生成与撤销、⚠️ L5.7：工时的四个口径要 union `SessionAttendance` |
 | `events/forms.py` | 一二三 | `RoleChoiceField`、`SignUpForm`、`EventRoleForm`、`EventForm`、`EventPeriodForm`。⚠️ **「`EventForm` 加三档单选」和「新的 `EventSeriesForm`」这一轮都没做** —— 第三档是 L5.8 的事，进了缺口表 |
-| `events/views.py` | 一二三 | `_visible_events()`、`_schedule()`、`_detail()`、`event_signup`、`event_registrations`、`event_attendance`、系列的三个视图 |
-| `events/urls.py` | 三 | 系列的三条路由 |
+| `events/views.py` | 一二三 | `_visible_events()`、`_schedule()`、`_detail()`、`event_signup`、`event_registrations`、`event_attendance`、系列的三个视图。⚠️ L5.8b：`LIST_PAGES` / `_of_shape()` / `_list_of()` / `_schedule_of()` + `program_list` / `program_schedule`，`my_participations` 拆成两页，`_back_link()` 按形状分支；L5.11：两个 `.ics` 视图 |
+| `events/urls.py` | 三 | 系列的三条路由。⚠️ L5.8b 再加两条（`programs/`、`programs/schedule/`）、Past Signups 一条、日历两条（整期 / 单讲）|
+| `events/ics.py` | 三 | ⚠️ 原计划整张表都没列它（L5.11 不在原计划里）。新文件，纯函数：一段 iCalendar 文本。**不叫 `calendar.py`** —— `dashboard/calendar.py` 已经是侧栏那个小月历 |
 | `org/permissions.py` | 三 | ⚠️ 原计划列在「不动」里，L5.2 推翻了 —— `FOUNDATION_ADMIN_PERMISSIONS` 加 `events.view_session` / `events.view_sessionattendance`，否则注册了也在 admin 首页上看不见。⚠️ L5.4 再加两行（`view_eventseries` / `view_eventseriesrole`），同一条理由第二次（走查 4） |
 | `events/tokens.py` | 三 | ⚠️ 同样原计划列在「不动」里（理由是「收窄的是发现，不是已经拥有的行」—— 那句话对受众成立，对讲次不成立）。码从按活动改成按讲次，取消 `WINDOW_BEFORE`，见 [D28](decisions/D28-qr-checkin.md) |
 | `events/schedule.py` | 三 | 新的 `Occurrence` / `occurrences()` / `meeting_summary()` / `when_line()` —— 日程按讲次画，详情页那行 When |
@@ -3546,7 +3686,8 @@ grep 了一遍，它里面搜不到 `served_as`、`stop_at_needed_count`、`comp
 |---|---|
 | [`participants.md`](participants.md) | 第八节改口清单里 D38 那一行从「不改口」改成「加一档 `not_applicable`」；第十节加三批的执行记录；第十一节的验收逐条打勾 |
 | [D38](decisions/D38-served-as-volunteer-or-work.md) | 加 `not_applicable` 一档，写明它不是身份、永远不出现在表单上、且它换来了一条真正的约束。⚠️ L5.2 又就地补了一条：那条约束**到不了场次那一层**，因为这一档不往下搬 |
-| [D43](decisions/D43-hours-given-and-hours-received.md) | 新开（2026-09-08，随 L5.2）：给出去的时间和接受到的时间是两个方向相反的数，后者不存、用算的 |
+| [D43](decisions/D43-hours-given-and-hours-received.md) | 新开（2026-09-08，随 L5.2）：给出去的时间和接受到的时间是两个方向相反的数，后者不存、用算的。⚠️ 2026-09-14 就地结清第五节那条「没有守卫的缺口」—— 重启条件写的是「同屏打印两个数的那一刻」，而 L5.7 正是那一刻 |
+| [D45](decisions/D45-add-to-calendar.md) | 新开（2026-09-14，用户当轮追加）：加进个人日历走下载不走订阅，一门课整期 / 单讲两种下法，每条 VEVENT 自带一句「这份不会自己更新」 |
 | [D36](decisions/D36-two-hour-ledgers.md) | 就地补：有第三个数，方向相反，同样不许加进那两个账本 |
 | [D27](decisions/D27-ministry-report.md) | 指标拆成两组并排不相加；`hours_per_participant` 的分母改口；新增 People served |
 | [D19](decisions/D19-event-role.md) | `EventRole` 长出「谁报得上」那一组勾选（两个布尔 + 一张多对多）；并写明 L1 为什么落在 `ParticipationRole` 而不是这里 |

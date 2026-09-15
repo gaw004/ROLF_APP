@@ -187,6 +187,13 @@
     {% if event.description %}
       <p class="mt-4 text-sm text-ink-800 dark:text-ink-100">{{ event.description }}</p>
     {% endif %}
+    {% comment %}
+    ⭐ 「加进我的日历」（2026-09-14）。放在这一块的**末尾**，紧跟着「什么时候」和
+       「在哪」—— 它答的正是那两句话的后半：知道了之后要做的那一件事。
+    ⚠️ 不放在报名那颗键旁边：没报名、只是想记一笔的人同样要用它，而报名那颗键
+       对他可能根本不画（满了、或者那些位子不是给他的）。
+    {% endcomment %}
+    {% include "events/_add_to_calendar.html" %}
   </div>
 
   <h2 class="mb-3 mt-8 text-lg font-semibold">Roles</h2>
@@ -287,9 +294,16 @@
               <td>{{ forloop.counter }}</td>
               <td>{{ row.start_time }} &ndash; {{ row.end_time|time }}</td>
               <td>{{ row.attendances.count }}</td>
-              <td>
+              <td class="whitespace-nowrap">
                 <a href="{% url 'events:session_checkin_display' row.pk %}"
                    class="prose-link">Check-in screen</a>
+                {% comment %}
+                ⚠️ 「只下这一讲」（2026-09-14），一颗图标。整期那一份在上面那颗
+                   「Add to calendar」里 —— 两种下法都要有：临时调过课、或者只
+                   打算去其中几讲的人要的正是单讲这一条。
+                {% endcomment %}
+                {% url 'events:session_calendar' row.pk as meeting_cal_url %}
+                {% include "events/_calendar_icon_link.html" with href=meeting_cal_url label="Add meeting "|add:forloop.counter|stringformat:"s"|add:" to your calendar" %}
               </td>
             </tr>
           {% endfor %}

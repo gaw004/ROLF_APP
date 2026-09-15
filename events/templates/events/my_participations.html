@@ -1,35 +1,106 @@
 {% extends "core/base.html" %}
-{% block title %}My Signups{% endblock %}
+{% block title %}{{ page_title }}{% endblock %}
 {% comment %}
-版心和 Events / Past Events / 活动详情同一个值（2026-08-06）。
-⚠️ 代价如实说：这一页是一张六列表格，收窄到 896px 之后桌面上就可能开始横向滚动。
-   它包在 `.table-wrap` 里，所以滚的是表格自己，不会把整页撑宽 —— 那一条是
-   375px 那个 bug 留下的规矩。
+「我报过的」两页共用这一份（2026-09-14，L5.8b 重做）。
+
+⚠️ 版心和 Events / 活动详情同一个值（2026-08-06）。原来这里记着一条代价 ——
+   「这是一张六列表格，收窄到 896px 之后桌面上就可能开始横向滚动」。那条**现在
+   小得多**：课搬去了上面那一段卡片，下面那张表在未来那一页只剩四列。历史页仍然
+   是六列（多出工时和签到两列，理由见下），所以 `.table-wrap` 那一层留着。
+
+> ### 2026-09-14：这一页从「全部，最新的在前」变成了两页
+>
+> 结束了的搬去 `/me/participations/past/`（决定 48/51），底下那一条通向它。
+> ⚠️ 2026-08-17 删掉「站内所有结束了的活动」那一页时写过「志愿者自己结束了的
+>    活动**仍然在 My Signups 上**」—— 那句话从今天起不成立，它在
+>    `core/context_processors.py` 里的那一份已经就地改掉。
+> ⚠️ 这里故意不写出那一页当年的路由名：盯着它的是一次全文 grep（
+>    `PastEventsIsGoneTests`），在模板里提到那个名字就会被它当成一条残留链接。
 {% endcomment %}
 {% block main_width %}max-w-4xl{% endblock %}
 
-{% block content %}
-  <h1 class="mb-6 text-2xl font-semibold">My Signups</h1>
+{% block page_bar %}
+  {% comment %}
+  并排两格，顺序写死（My Signups 在左、Past Signups 在右），两页都一样 ——
+  按谁是当前页对调的话，字会在跳转的一瞬间横着挪。见 page_bar.html 那一段。
+  {% endcomment %}
+  {% include "core/components/page_bar.html" with tabs=page_tabs %}
+{% endblock %}
 
-  {% if participations %}
-    <div class="table-wrap">
+{% block content %}
+  <h1 class="mb-6 text-2xl font-semibold">{{ page_title }}</h1>
+
+  {% include "events/_next_up.html" %}
+
+  {% comment %}
+  ⚠️ 一排链接，不是一张表单 —— 这一页没有别的表单，而 `method="get"` 的表单在
+     提交时会把 action 上的查询串整个丢掉（`_period_filter.html` 记着那个坑）。
+     三条各自是完整地址，谁也不依赖谁。
+  ⚠️ 只有两段都有东西时才画：一个人只报过活动、从没上过课的时候，一排筛不出
+     任何差别的按钮只是噪音。
+  ⚠️ 判据是 `show_kinds`（视图在**筛之前**算的），不是这里的 `courses or occasions`
+     —— 用筛完的结果去问的话，筛到 Programs 而一门课都没有的那一刻，这一排会
+     连同结果一起消失，于是他被关在一个空页面里回不去。
+  {% endcomment %}
+  {% if show_kinds %}
+    <nav class="mb-6 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm"
+         aria-label="Filter by kind">
+      {% for value, label in kind_choices %}
+        {% if not forloop.first %}<span class="text-ink-300 dark:text-ink-600">·</span>{% endif %}
+        <a href="?kind={{ value }}"
+           class="rounded-md px-1 py-0.5 {% if value == kind %}font-semibold text-ink-900 dark:text-ink-50{% else %}text-ink-600 hover:text-ink-900 dark:text-ink-300 dark:hover:text-ink-50{% endif %}"
+           {% if value == kind %}aria-current="true"{% endif %}>{{ label }}</a>
+      {% endfor %}
+    </nav>
+  {% endif %}
+
+  {% if courses %}
+    <h2 class="mb-3 text-xs font-semibold uppercase tracking-wide text-ink-600 dark:text-ink-300">
+      Programs in progress <span class="ml-1 font-normal">{{ courses|length }}</span>
+    </h2>
+    <ul class="mb-8 space-y-4">
+      {% for row, progress in courses %}
+        {% include "events/_course_card.html" %}
+      {% endfor %}
+    </ul>
+  {% endif %}
+
+  {% if occasions %}
+    <h2 class="mb-3 text-xs font-semibold uppercase tracking-wide text-ink-600 dark:text-ink-300">
+      Events coming up <span class="ml-1 font-normal">{{ occasions|length }}</span>
+    </h2>
+    <div class="table-wrap mb-8">
       <table>
         <thead>
-          <tr><th>Event</th><th>Starts</th><th>Role</th><th>Status</th><th>Attendance</th><th>Hours</th><th></th></tr>
+          <tr>
+            <th>Event</th><th>When</th><th>Role</th><th>Status</th>
+            {% comment %}
+            🔴 **这两列画不画，问的是这一段里有没有东西可画**（`show_attendance`），
+               不是「这是哪一页」。按页分是第一版，而签到**发生在活动进行中** ——
+               进行中的活动按 `end_time` 算还在这一页上，于是那两列恰好在被填上的
+               那几个小时里是藏着的。
+            ⚠️ 保住的那半个理由没变：一整段谁都没签过到的行不长出两列空格 ——
+               两列永远空着读起来是「系统没记上」，而事实是「还没发生」（D27）。
+            {% endcomment %}
+            {% if show_attendance %}<th>Attendance</th><th>Hours</th>{% endif %}
+            <th></th>
+          </tr>
         </thead>
         <tbody>
-          {% for row in participations %}
+          {% for row in occasions %}
             <tr>
               <td>
                 <a href="{% url 'events:event_detail' row.event_role.event.pk %}?from=mine"
                    class="prose-link">{{ row.event_role.event.name }}</a>
+                {% if row.event_role.event.location %}
+                  <span class="block text-xs text-ink-600 dark:text-ink-300">{{ row.event_role.event.location }}</span>
+                {% endif %}
               </td>
               {% comment %}
-              ⚠️ 只显示开始时间，不显示起止两个。表格已经六列，两个完整时间会把
-                 窄屏挤到只剩横向滚动 —— 而「什么时候」这个问题，开始时间答得了
-                 九成，完整时段在详情页上。
+              ⚠️ 只显示开始时间，不显示起止两个。「什么时候」这个问题开始时间答得了
+                 九成，完整时段在详情页上 —— 而两个完整时间会把窄屏挤到只剩横向滚动。
               {% endcomment %}
-              <td class="whitespace-nowrap">{{ row.event_role.event.start_time }}</td>
+              <td class="whitespace-nowrap">{{ row.event_role.event.start_time|date:"D j M, H:i" }}</td>
               <td>
                 {{ row.event_role.role.name }}
                 {% comment %}
@@ -41,13 +112,12 @@
                    长得一模一样 —— 而这两件事在 FLSA 上不是一回事。
 
                 ⚠️ 空值不画。空表示「这一行早于这个字段」，把它画成任何一档
-                   都是替没人核实过的事作证（同旁边签到那一列的处理）。
-                {% endcomment %}
-                {% comment %}
+                   都是替没人核实过的事作证。
+
                 ⚠️ `records_hours` 那一半是 2026-08-21 加的：来参加的位置上，
                    这一列存的是 `not_applicable`，而那不是一档身份，是「这个问题
-                   在这一行上不成立」。照直画出来会在自己的报名页上印一句
-                   "Not applicable"，读起来像系统没认出他来。
+                   在这一行上不成立」。照直画出来会印一句 "Not applicable"，
+                   读起来像系统没认出他来。
                 {% endcomment %}
                 {% if row.served_as and row.records_hours %}
                   <span class="block text-xs text-ink-600 dark:text-ink-300">
@@ -64,40 +134,85 @@
                   {% include "core/components/badge.html" with label=row.get_status_display %}
                 {% endif %}
               </td>
-              {% comment %}
-              签到和签退**合成一列**（D28）。这张表已经六列，模板顶上那条宽度
-              警告说的就是它 —— 再加两列，桌面上也开始横向滚动。
-              ⚠️ 「两个时间两列」在这一页上已经被否决过一次（Starts / Ends），
-                 理由一模一样。这是第二次，所以写进了 D28 而不是只留在这里。
-              {% endcomment %}
-              <td class="whitespace-nowrap">
-                {% if row.checked_out_at %}
-                  {{ row.checked_in_at|time }} &rarr; {{ row.checked_out_at|time }}
-                {% elif row.checked_in_at %}
-                  In {{ row.checked_in_at|time }}
-                {% else %}
-                  —
-                {% endif %}
-              </td>
-              <td>{{ row.hours|default_if_none:"—" }}</td>
+              {% if show_attendance %}
+                {% comment %}
+                签到和签退**合成一列**（D28）—— 「两个时间两列」在这一页上被否决过
+                两次，理由一模一样，所以它写进了 D28 而不是只留在这里。
+                {% endcomment %}
+                <td class="whitespace-nowrap">
+                  {% if row.checked_out_at %}
+                    {{ row.checked_in_at|time }} &rarr; {{ row.checked_out_at|time }}
+                  {% elif row.checked_in_at %}
+                    In {{ row.checked_in_at|time }}
+                  {% else %}
+                    &mdash;
+                  {% endif %}
+                </td>
+                <td>{{ row.hours|default_if_none:"—" }}</td>
+              {% endif %}
               <td>
                 {% comment %}
                 取消走一个独立的确认页，不是这里一个带确认框的按钮 ——
                 那一页解释了「取消不会删除记录，你以后还能再报一次」，
                 而那句话正是这个动作最容易被误解的地方。
                 {% endcomment %}
-                {% if row.status == "registered" %}
-                  {% url 'events:participation_cancel' row.pk as cancel_url %}
-                  {% include "core/components/button.html" with label="Cancel" href=cancel_url variant="ghost" %}
-                {% endif %}
+                <span class="flex items-center justify-end gap-3 whitespace-nowrap">
+                  {% comment %}
+                  ⚠️ 一颗图标（用户 2026-09-14）。同课卡片那一格：行上只给下载
+                     那一条，三个去处的差别在详情页。
+                  ⚠️ 已经结束的活动上不画 —— 把上周六加进日历没有意义。
+                  {% endcomment %}
+                  {% if not is_past %}
+                    {% url 'events:event_calendar' row.event_role.event.pk as cal_url %}
+                    {% include "events/_calendar_icon_link.html" with href=cal_url label="Add "|add:row.event_role.event.name|add:" to your calendar" %}
+                  {% endif %}
+                  {% if row.status == "registered" %}
+                    {% url 'events:participation_cancel' row.pk as cancel_url %}
+                    {% include "core/components/button.html" with label="Cancel" href=cancel_url variant="ghost" %}
+                  {% endif %}
+                </span>
               </td>
             </tr>
           {% endfor %}
         </tbody>
       </table>
     </div>
-  {% else %}
-    {% url 'events:event_list' as browse_url %}
-    {% include "core/components/empty.html" with message="You have not signed up for anything yet." action_label="Browse events" action_href=browse_url %}
+  {% endif %}
+
+  {% if not courses and not occasions %}
+    {% comment %}
+    ⚠️ 空状态分三种说法，而不是一句「什么都没有」：筛掉的、历史是空的、
+       和真的还没报过名。三种要做的事完全不同，说成同一句就等于没说
+       （`empty.html` 那一段规矩）。
+    {% endcomment %}
+    {% if kind != "all" %}
+      {% include "core/components/empty.html" with message="Nothing of that kind here." action_label="Show everything" action_href="?kind=all" %}
+    {% elif is_past %}
+      {% include "core/components/empty.html" with message="Nothing has finished yet — everything you signed up for is still to come." %}
+    {% else %}
+      {% url 'events:event_list' as browse_url %}
+      {% include "core/components/empty.html" with message="You have not signed up for anything yet." action_label="Browse events" action_href=browse_url %}
+    {% endif %}
+  {% endif %}
+
+  {% comment %}
+  底下那一条 —— 只在未来那一页，因为它通向的正是历史页自己。
+
+  🔴 **两个数并排，中间永远没有加号**（D43 的不变量，D36 的第四次应用）：
+     一个是他给基金会的时间，一个是基金会花在他身上的时间，方向相反，
+     合计没有定义。⚠️ 接受到的那个数**没有的时候整段不画**，不写 0 ——
+     「一堂课都没上过」和「这个问题在他身上不成立」是两个答案。
+  {% endcomment %}
+  {% if not is_past and past_count %}
+    <div class="flex flex-wrap items-baseline justify-between gap-3 border-t border-ink-200 pt-4 text-sm text-ink-600 dark:border-ink-800 dark:text-ink-300">
+      <span>
+        {{ past_count }} past signup{{ past_count|pluralize }}
+        · {{ hours_given|floatformat:"-2" }} volunteer hours
+        {% if hours_received is not None %}
+          · {{ hours_received|floatformat:"-2" }} hours received
+        {% endif %}
+      </span>
+      <a href="{% url 'events:past_participations' %}" class="prose-link">View history &rarr;</a>
+    </div>
   {% endif %}
 {% endblock %}

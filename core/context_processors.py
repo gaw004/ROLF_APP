@@ -72,12 +72,18 @@ def _menu_for(user, administered, foundation):
     """
     # ⚠️ "Past Events" left this menu on 2026-08-17 along with the page itself.
     #    Events now starts at today rather than at "not started yet", so the
-    #    one entry covers what the two used to; a volunteer's own finished
-    #    events are on My Signups, and any period at all is on the management
-    #    list for the tier that has it.
+    #    one entry covers what the two used to; any period at all is on the
+    #    management list for the tier that has it.
+    #
+    # ⚠️ 那句话原来还有半句 ——「志愿者自己结束了的活动**在 My Signups 上**」——
+    #    2026-09-14 起不成立了：它们搬去了 `/me/participations/past/`（决定 48）。
+    #    这里**不加第七条菜单项**，去那一页的路是 My Signups 顶栏上并排的那一格，
+    #    外加它底下那条「9 past signups →」。一个东西一个入口，而这个模块开头
+    #    数着的那五个缺口讲的是**没有**入口，不是只有一个。
     if not user.is_authenticated:
         return [
             _link("Events", "events:event_list"),
+            _link("Programs", "events:program_list"),
             _link("Log In", "accounts:login"),
             _link("Register", "accounts:register"),
         ]
@@ -87,6 +93,11 @@ def _menu_for(user, administered, foundation):
         #    问题，只有这一条告诉他「有什么在等你」。
         _link("Home", "home"),
         _link("Events", "events:event_list"),
+        # ⭐ 紧跟着 Events，因为它就是 Events 的一半（2026-09-14，决定 45）：
+        #    两张列表页互斥，一门课**只**在这一格后面。没有这一条的话，
+        #    Programs 那一页只有顶栏那一排进得去，而顶栏要先到得了 /events/ ——
+        #    正是这个模块开头列的那五个缺口的形状。
+        _link("Programs", "events:program_list"),
         # ⚠️ Second, above My Signups, and the order is the argument. A notice is
         #    the one thing on this menu somebody might not know they need to
         #    read — everything else answers a question they arrived with. It is

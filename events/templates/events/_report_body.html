@@ -153,6 +153,31 @@
     </div>
   {% endif %}
   {% comment %}
+  🔴 **方向相反的第三个数（D43，L5.7）。和上面那几格工时并排，中间永远没有合计。**
+
+     上面每一格说的是**人给基金会**的时间（Recorded hours、Hours per helper）；
+     这一格说的是**基金会花在人身上**的时间。两者加起来是「我们收到的 ＋
+     我们发出的」，一个没有定义的量 —— 而它看起来完全合理，这正是 D36 那条
+     不变量的第四次应用。
+
+  ⚠️ **为 None 时整格不画**，而不是印 0 —— 和上面 Minors 那一格的规矩恰好相反，
+     因为两者答的不是同一种问题。那一个问「有没有出事」，0 是答案；这一个在一场
+     没有讲次的周六发放上根本**不成立**，印 0 说的是「我们什么都没给他」。
+     D27 那条「没有和没算不能长得一样」。
+
+  ⚠️ 它落在这里、不落在 Hours 那一组旁边，也是这个道理：并排是两组，不是一组
+     里多一格。
+  {% endcomment %}
+  {% if report.figures.hours_received is not None %}
+    <div>
+      <dt class="text-xs text-ink-600 dark:text-ink-300">Hours received</dt>
+      <dd class="text-xl font-semibold">{{ report.figures.hours_received|floatformat:2 }}</dd>
+      <dd class="text-xs text-ink-600 dark:text-ink-300">
+        service delivered, never added to the hours above
+      </dd>
+    </div>
+  {% endif %}
+  {% comment %}
   ⚠️ 这一格**为 0 时也画出来**，而且只有它是红的。整张表别的数字答的是
      「做得怎么样」，这一个答的是「有没有出事」—— 为 0 时藏起来的话，
      「没有」和「没算」在页面上长得一模一样（同 P6 那个「联系不上」组的规矩）。

@@ -27,12 +27,12 @@ from django.contrib import messages
 from django.contrib.auth.decorators import login_required
 from django.core.exceptions import PermissionDenied, ValidationError
 from django.db.models import Prefetch
-from django.http import Http404, JsonResponse
+from django.http import Http404, HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 from django.utils import formats
 from django.utils.http import urlencode
-from django.utils.text import get_text_list
+from django.utils.text import get_text_list, slugify
 from django_ratelimit.decorators import ratelimit
 
 
@@ -50,7 +50,7 @@ from org.permissions import (
     ministry_ids_administered_by,
 )
 
-from . import schedule, tokens
+from . import ics, schedule, tokens
 from .recurrence import has_an_ending
 from .forms import (
     SHARED_PUBLISH_FIELDS,
@@ -112,12 +112,18 @@ from .services import (
     check_in,
     check_out,
     clear_hours,
+    calendar_occasions,
     confirm_signup,
+    course_progress,
     default_message,
     event_summary,
+    hours_received_total,
     mark_absent,
     ministry_report,
     ministry_staff_participation,
+    my_meetings,
+    next_meeting,
+    next_up,
     notify_event_change,
     record_hours,
     reschedule,
@@ -207,7 +213,7 @@ def _list_state(request, page=None, panel=None):
     return f"?{urlencode(values)}" if values else ""
 
 
-def _back_link(request):
+def _back_link(request, event=None):
     """Where "back" goes from an event's page, and what it should be called.
 
     Decided by **where they came from**, not by who they are: a ministry admin
@@ -258,6 +264,23 @@ def _back_link(request):
             # not name one page two different things.
             label = "Events I Manage" if administers_any else "All Events"
             return reverse("events:event_manage_list") + state, label
+    # 🔴 2026-09-14（决定 45）。**没有这一支的后果不是少一个标签，是回不去**：
+    #    两张列表页从今天起互斥，所以一门课的返回键要是还写「← Events」，它指向
+    #    的那一页**不含这门课** —— 人点回去，看到的是一张没有他刚才那一行的列表。
+    #    这正是这个函数自己的历史里记着的那次事故（管理页收成一格之后「从 Events
+    #    点 manage 进去以后，回不到 Events 界面了」），只是这次在另一条路上。
+    #
+    # ⭐ **判据是这一场活动自己的形状，而不是一个 `?from=programs` 标记。**
+    #    第一版写的是标记，而标记只解决「带着标记来的」那一半；另一半是**没有
+    #    标记**的每一条路 —— 仪表盘那两张卡、邮件里的链接、粘贴来的地址、
+    #    转发给同事的那一条。那些人同样回不去，而他们恰恰是最没有上下文的一批。
+    #
+    # ⚠️ 上面两个标记留着，是因为它们指向的是**第三、第四张**列表（My Signups、
+    #    管理列表）—— 那两件事活动自己答不出来，只有「他从哪儿来」答得出。
+    #    而「这一场属于两张列表页里的哪一张」它自己就知道，再发一个标记去说同一
+    #    件事，就是这个仓库判过很多次的第二份真相。
+    if event is not None and event.shape == Event.Shape.PROGRAM:
+        return reverse("events:program_list") + state, "Programs"
     return reverse("events:event_list") + state, "Events"
 
 
@@ -330,9 +353,58 @@ def _volunteer_period(request):
 # --- B9: the volunteer's own pages --------------------------------------
 
 
+#: 两张列表页各自的那三格（2026-09-14，决定 44/45）。
+#:
+#: 🔴 **一张表，不是两份视图。** Programs 那一页和 Events 那一页共用查询、共用
+#:    模板、共用每一个部件 —— 它不是另一种页面，它是「我们替人预先筛好的那一份」。
+#:    两份视图的表现是两份筛选迟早走散，而走散之后两页**各自都渲染成功**，正是
+#:    `_visible_events()` 那句「单独一个函数」防的同一件事。
+#:
+#: ⚠️ 路由在这里存的是**名字**，`reverse()` 留到请求里做：模块导入时 URLConf
+#:    还没装好。
+LIST_PAGES = {
+    Event.Shape.SINGLE: {
+        "title": "Events",
+        "list": "events:event_list",
+        "schedule": "events:event_schedule",
+    },
+    Event.Shape.PROGRAM: {
+        "title": "Programs",
+        "list": "events:program_list",
+        "schedule": "events:program_schedule",
+    },
+}
+
+
+def _list_page(shape):
+    """这一页叫什么、两条路由、以及顶栏那一排（固定顺序）。
+
+    🔴 顶栏这一排是**并排的兄弟页**，2026-09-14 新加的第三种形状 ——
+       `page_bar.html` 原来只有「你在哪儿 + 从哪儿来」那一种。那条规矩当初写着
+       「顺序固定：外层在左、当前在右」，理由是「左右按谁是当前页对调的话，同一条
+       bar 上的字会在跳转的一瞬间横着挪」。**那个理由在这里仍然成立，而且被遵守
+       了**：Events 永远在左、Programs 永远在右，换页时一个字都不动。
+    """
+    here = LIST_PAGES[shape]
+    return {
+        "page_title": here["title"],
+        "list_url": reverse(here["list"]),
+        "schedule_url": reverse(here["schedule"]),
+        "page_tabs": [
+            {"label": page["title"], "url": reverse(page["list"]),
+             "is_here": page is here}
+            for page in LIST_PAGES.values()
+        ],
+    }
+
+
 @login_required
 def event_list(request):
-    """P3: what is on, from today forward.
+    """P3: what is on, from today forward — the one-off half of it.
+
+    ⚠️ Courses left this page on 2026-09-14 (decision 45): they have their own,
+       `program_list` below, and the two are **mutually exclusive**. Both are
+       this one function; what differs is the shape fed in. See `LIST_PAGES`.
 
     visible_to_participants() + from_today() (2026-08-17). It used to be
     open_for_signup().upcoming() — that predicate is gone now, deleted with
@@ -354,17 +426,38 @@ def event_list(request):
     event 404s there no matter how it is listed. What the row carries now is its
     status, so the page says which of the two it is instead of hiding one.
     """
+    return _list_of(request, Event.Shape.SINGLE)
+
+
+@login_required
+def program_list(request):
+    """The same page, fed the courses (2026-09-14, decision 44).
+
+    ⭐ **Not a second list page** — the same one. A course is an `Event`; what
+       makes this a separate address is that the filter is worth making for
+       somebody rather than leaving them to it, which is the user's own account
+       of why it exists: "Programs 这个页面是我们帮 user filter 出来的 events".
+
+    ⚠️ Everything about it comes from `LIST_PAGES`: the title and the two
+       routes. Nothing here is a copy of `event_list`.
+    """
+    return _list_of(request, Event.Shape.PROGRAM)
+
+
+def _list_of(request, shape):
+    """一张列表页，喂进来的是哪一种活动由 `shape` 决定。"""
     contact = _my_contact(request)
     period = _volunteer_period(request)
     return render(request, _template(
         request, "events/event_list.html", "events/_event_list_results.html"), {
         "period": period,
+        **_list_page(shape),
         # 右边那块面板开着没有、开的是哪一场（2026-09-09）。见 `_open_panel()`。
         **_open_panel(request),
-        **_listing(request, period, contact),
+        **_listing(request, period, contact, shape=shape),
         # 右边那块日程。⚠️ 它和上面那个 `events` 是**两个不同的集合**，故意的：
         #    列表是分页的二十条，日程是那几天的全部。两边共用的只有筛选。
-        **_schedule(request, period, contact),
+        **_schedule(request, period, contact, shape),
         # 筛选是 HTMX 换掉 `#event-results`，而日程在那块外面 —— 所以筛选那一次
         # 请求要把日程作为 out-of-band 的第二块一起带回去，否则右边还画着上一次
         # 筛选的结果，而它看起来完全正常。
@@ -434,7 +527,24 @@ def _open_panel(request):
     }
 
 
-def _visible_events(period, contact):
+def _of_shape(events, shape):
+    """决定 45 的那一格，写在一处：这一页列哪一种活动。
+
+    🔴 **两张列表页是互斥的，而互斥只许有一个实现。** 左边那一列、右边那块日程、
+       以及「这一场排在第几页」那一次计数，三处都要问同一个问题；各写一遍
+       `filter(shape=…)` 的表现是**同一页上列表和日程各答各的** —— 列表里没有、
+       日程上画着 —— 而那正是 `events/views.py` 这个文件已经记过一次的坑
+       （`_schedule()` 里那句「和左边那一列同一道门」）。
+
+    ⚠️ 用的是 `EventQuerySet` 上那两个谓词（models.py），不是在这里重写判据。
+       它们 2026-09-09 随 L5.3 写好，在此之前**一个调用方都没有**。
+    """
+    if shape == Event.Shape.PROGRAM:
+        return events.programs()
+    return events.single_occasions()
+
+
+def _visible_events(period, contact, shape=Event.Shape.SINGLE):
     """左边那一列列的是什么：筛完、排好，还没分页。
 
     ⚠️ `contact` 是 L3（2026-08-26 加）。**两道门，不是一道**：
@@ -445,9 +555,13 @@ def _visible_events(period, contact):
     ⚠️ 单独一个函数，因为「第几页」要问它两次（先数出那一场排在第几，再取那
        一页），而两次必须是**同一个查询** —— 各写一遍的话，两份筛选迟早不一样，
        于是「跳到那一页」偶尔跳到相邻的一页，看起来像随机失灵。
+
+    🔴 `shape` 是决定 45（2026-09-14）：两张列表页**互斥**，`/events/` 只有单场、
+       `/programs/` 只有整期的课。它是这个函数的一个参数、不是两份查询，理由和
+       上面那条一模一样 —— 两份筛选迟早走散，而走散之后两页各自都渲染成功。
     """
     return period.narrow(
-        Event.objects.visible_to_participants()
+        _of_shape(Event.objects.visible_to_participants(), shape)
         .for_audience(contact)
         .from_today()
         # ⚠️ 每一行都要问「满了没」来决定那枚标签画不画成链接（2026-08-19）。
@@ -462,19 +576,25 @@ def _visible_events(period, contact):
         #    a weekly rule makes fifty-two. Same reason `with_capacity()` above
         #    exists, one column further out.
         .select_related("ministry", "series")
+        # ⚠️ `sessions` 同理，2026-09-14 加（决定 44）：每一行的 When 现在走
+        #    `schedule.when_line()`，而它在没有传 meetings 时自己去读
+        #    `event.sessions.all()` —— 少了这个 prefetch 就是**每行一次查询**，
+        #    而且和上面两条一样：不报错，只是慢。`_schedule()` 早就有它。
+        .prefetch_related("sessions")
         .order_by("start_time")
     )
 
 
-def _listing(request, period, contact, page_number=None):
+def _listing(request, period, contact, page_number=None,
+             shape=Event.Shape.SINGLE):
     """左边那一列的上下文。event_list 和日程点开的那一次共用。
 
     ⚠️ 只返回**模板真的要用的**东西。未分页的那个查询集不在里面 —— 需要它的
        是 `page_holding`，而那是视图的事；塞进上下文就是把一个没人渲染的
        完整集合递给模板，正是本文件第一条规矩防的那件事。
     """
-    page = page_of(request, _visible_events(period, contact), EVENTS_PER_PAGE,
-                 number=page_number)
+    page = page_of(request, _visible_events(period, contact, shape),
+                   EVENTS_PER_PAGE, number=page_number)
     return {
         "events": page,
         "page": page,
@@ -489,7 +609,7 @@ def _listing(request, period, contact, page_number=None):
     }
 
 
-def _schedule(request, period, contact):
+def _schedule(request, period, contact, shape=Event.Shape.SINGLE):
     """右边那块日程的上下文。event_list 和 event_schedule 共用一份。
 
     ⚠️ 共用，不是各建各的 —— `_template` 那条注释写的是同一件事：两个分支各自
@@ -497,6 +617,24 @@ def _schedule(request, period, contact):
 
     ⚠️ 这里**只做取数和夹紧**，日期运算全在 events/schedule.py（本文件第三条
        规矩：视图里不算术）。
+
+    🔴 `shape` 走 `_of_shape()`，和左边那一列**同一个**（决定 45）。这一格漏掉的
+       表现正是这个函数下面那条注释写了的那种：「列表里没有、日程上画着」——
+       同一份筛选画出来的两个答案。
+
+    > ### 2026-09-14：这里推翻了 2026-09-08 改过的决定 23 后半句
+    >
+    > 那次判的是「站点日程**按讲次**画 Programs」，理由是「一门课的各讲就是这个月
+    > 要发生的事，站点日程不画它们，等于让一个志愿者看不到自己周二晚上有课」。
+    > 现在 Programs 有了自己那一页，两边**硬互斥**，于是这条日程只剩单场。
+    >
+    > ⚠️ 代价如实记着：既做志愿者又上课的人要看**两个**日程才知道自己这周几个
+    >    晚上有事。换来的是当初那个 bug（一门课在两端之间的每一列都画一个占满
+    >    全天的方块）彻底没有了入口。
+    >
+    > ⚠️ 按讲次展开那段代码（`schedule.occurrences()`）**一个字没动**，它现在
+    >    服务的是 `/programs/schedule/`。`SessionScheduleTests` 直接测
+    >    `schedule.columns()`，不经这个视图，所以这次覆盖一条几何断言都没碰。
     """
     filter_start, _ = period.bounds()
     floor = schedule.floor_day(filter_start)
@@ -514,7 +652,7 @@ def _schedule(request, period, contact):
     #    occurrences），而那要读每一场的 sessions。少了它是一场一次查询，
     #    在系统里最常打开的这一页上，且它不报错 —— 只是变慢。
     events = period.narrow(
-        Event.objects.visible_to_participants()
+        _of_shape(Event.objects.visible_to_participants(), shape)
         .for_audience(contact).select_related("ministry")
         .prefetch_related("sessions"))
     events = events.filter(start_time__lt=end, end_time__gte=start).order_by("start_time")
@@ -534,10 +672,25 @@ def event_schedule(request):
     ⚠️ 它是个**读**操作，所以按 D24 可以只有 HTMX 一条路 —— 但它偏偏也不需要：
        箭头是真的 `<a href>`，没有 JS 时点下去整页重来，日程停在新的窗口上。
     """
+    return _schedule_of(request, Event.Shape.SINGLE)
+
+
+@login_required
+def program_schedule(request):
+    """课程那一页的日程，画的是**每一讲**（2026-09-14，决定 23 前半句）。
+
+    ⚠️ 一门课在这里不是一条 111 天的横条 —— `schedule.occurrences()` 把它摊成
+       它实际占用的那些晚上。那段代码本来就在，这一步只是把它交给了这一页。
+    """
+    return _schedule_of(request, Event.Shape.PROGRAM)
+
+
+def _schedule_of(request, shape):
     contact = _my_contact(request)
     period = _volunteer_period(request)
     return render(request, "events/_schedule.html", {
         "period": period,
+        **_list_page(shape),
         # 箭头翻页要顺手把筛选卡里那个隐藏的 `from` 也改掉，否则下一次筛选会
         # 把窗口拽回起点 —— 见 _period_filter.html 里那一段。
         "schedule_partial": True,
@@ -548,7 +701,7 @@ def event_schedule(request):
         #    （它知道左边那一列真的停在第几页）。放进 `_schedule()` 就会有两份，
         #    而后铺开的那一份会盖掉带页码修正的那一份。
         "list_state": _list_state(request),
-        **_schedule(request, period, contact),
+        **_schedule(request, period, contact, shape),
     })
 
 
@@ -617,7 +770,9 @@ def _detail(request, pk):
     event = get_object_or_404(
         Event.objects.select_related("ministry").prefetch_related("sessions"),
         pk=pk)
-    when_headline, when_detail = schedule.when_line(event)
+    # ⚠️ 走 `Event.when_line`（2026-09-14），不再在这里调 `schedule.when_line()`：
+    #    列表行现在也要这句话，而它错过一次正是因为两处各写各的。
+    when_headline, when_detail = event.when_line
     contact = _my_contact(request)
     preview = event.status not in Event.VISIBLE_TO_PARTICIPANTS
     # L3 (2026-08-26): not for them is the same kind of answer as not published.
@@ -709,7 +864,7 @@ def _detail(request, pk):
         mine = Participation.objects.filter(
             event_role__event=event, contact=contact,
         ).select_related("event_role__role")
-    back_url, back_label = _back_link(request)
+    back_url, back_label = _back_link(request, event)
     # ⚠️ Read once. It is a **property, not a column** — `Event.is_full` inside
     #    it costs two queries on a row that carries no capacity annotation, and
     #    this one does not (the detail page fetches a single event, not a list).
@@ -739,6 +894,14 @@ def _detail(request, pk):
         #    学期，下面一行是从讲次推出来的节奏。
         "when_headline": when_headline,
         "when_detail": when_detail,
+        # 「加进我的日历」那颗键要的两条深链（2026-09-14）。
+        #
+        # ⚠️ **只画给下一次真的会发生的那一场**，而这不是偷懒：Google 和
+        #    Outlook 的深链一次只能加**一个**事件（它们打开的是一张新建草稿，
+        #    参数里就一对起止时间）。一门十二讲的课在那两家没有别的表达方式 ——
+        #    文件下载那条路才装得下全部十二条。界面上把这句话说出来，不假装
+        #    三颗键是等价的。
+        **_calendar_links(request, event),
         # 讲次表。⚠️ 只在看得到记录的人那里取 —— 它带着签到屏的入口，而那是
         #    管理动作；对报名者「这门课什么时候上」已经答在 When 那一行上了。
         "sessions": (event.sessions.all() if may_view_records else []),
@@ -803,6 +966,12 @@ def event_detail_panel(request, pk):
     #    算不出来（那一场不在左边的列表里）时 `page_number` 是 None，
     #    `_page` 就退回默认的第一页，而下面 `picked` 也不会指向任何一行。
     pk = context["event"].pk
+    # 🔴 左边那一列是**这一场所属的那张列表**（2026-09-14，决定 45）。形状从活动
+    #    自己身上读，不从请求里猜：两张列表页互斥之后，拿 Events 那一份去数
+    #    「一门课排在第几页」永远数不到，`page_holding` 返回 None，于是面板右边
+    #    开着这门课、左边却退回了活动列表的第一页 —— 两块在同一次响应里说了两件
+    #    互相矛盾的事，而两块都渲染成功。
+    shape = context["event"].shape
     context.update({"period": period, "in_panel": True})
 
     # 点击来自左边那一列时，不把列表送回去（2026-08-19）。
@@ -827,8 +996,10 @@ def event_detail_panel(request, pk):
         context["list_state"] = _list_state(request, panel=pk)
         return render(request, "events/_schedule_detail.html", context)
 
-    number = page_holding(_visible_events(period, contact), pk, EVENTS_PER_PAGE)
-    context.update(_listing(request, period, contact, page_number=number))
+    number = page_holding(_visible_events(period, contact, shape), pk,
+                          EVENTS_PER_PAGE)
+    context.update(_listing(request, period, contact, page_number=number,
+                            shape=shape))
     context.update({
         # 左边那一列作为 out-of-band 的第二块跟着回去。
         "results_oob": True,
@@ -953,9 +1124,27 @@ def event_signup(request, pk):
     })
 
 
+#: My Signups 那一排筛选（2026-09-14，决定 50）。两页共用。
+#:
+#: ⚠️ 值进查询串（`?kind=`），而**不进 `FILTER_PARAMS`**：那个常量是活动列表页
+#:    那张筛选卡的名单，`LIST_STATE` 从它来。混进去的话，管理列表页会长出一个
+#:    它根本没有的控件 —— `_open_panel()` 的 docstring 记着同一个坑。
+SIGNUP_KINDS = (
+    ("all", "All"),
+    ("events", "Events"),
+    ("programs", "Programs"),
+)
+
+#: 两页各自的标题和地址，同 `LIST_PAGES` 的写法。
+SIGNUP_PAGES = (
+    ("My Signups", "events:my_participations"),
+    ("Past Signups", "events:past_participations"),
+)
+
+
 @login_required
 def my_participations(request):
-    """Everything this person has signed up for, newest first.
+    """还没结束的那些：上面一段课，下面一段活动（2026-09-14 重做）。
 
     ⚠️ The predicate moved to `ParticipationQuerySet.mine()` on 2026-09-02,
        when the dashboard needed the same one. Its reasoning went with it —
@@ -963,16 +1152,223 @@ def my_participations(request):
        explained where it is not implemented is one that gets changed in one
        place and read in the other.
 
-    What stays here is this page's own half: **all of it, newest first**. The
-    dashboard asks the same question of the same method and then adds
-    `.upcoming()`, which is exactly the difference between the two pages.
+    > ### 2026-09-14：这一页不再是「全部，最新的在前」
+    >
+    > 结束了的搬去了 `past_participations`（决定 48/51），底下那一条通向它。
+    > ⚠️ 2026-08-17 删掉 past_events 那一页时写过一句「志愿者自己结束了的活动
+    >    **仍然在 My Signups 上**」—— 那句话从今天起不成立，`core/
+    >    context_processors.py` 里它的副本已经就地改掉。留一句和代码打架的
+    >    理由比没有理由更贵。
     """
-    rows = (
-        Participation.objects.mine(_my_contact(request))
-        .select_related("event_role__event__ministry", "event_role__role")
-        .order_by("-event_role__event__start_time")
-    )
-    return render(request, "events/my_participations.html", {"participations": rows})
+    return _signups(request, past=False)
+
+
+@login_required
+def past_participations(request):
+    """已经结束的那些。排版和上面那一页一模一样，少一条 Next up。
+
+    ⚠️ 它**不是** 2026-08-17 删掉的那个 `past_events`。那一页列的是「站里所有
+       结束了的活动」，这一页列的是「我报过的、已经结束的」—— 后者是当时把前者
+       删掉时说「这件事 My Signups 答得了」的那个答案，现在它自己有了地址。
+    """
+    return _signups(request, past=True)
+
+
+def _signups(request, *, past):
+    """两页共用的那一份。差别只有三处，全在这里。"""
+    contact = _my_contact(request)
+    kind = request.GET.get("kind", "all")
+    if kind not in dict(SIGNUP_KINDS):
+        # ⚠️ 看不懂的一律当没筛，不是 404：这个值会出现在分享出去的链接里，
+        #    而链接是会被人手改的（同 `schedule.parse_day()` 那条）。
+        kind = "all"
+    rows = Participation.objects.mine(contact)
+    rows = (rows.past() if past else rows.upcoming()).select_related(
+        "event_role__event__ministry", "event_role__role",
+    # ⚠️ 课那张卡上那句 When 走 `Event.when_line`，而它要读 `event.sessions` ——
+    #    少了这个 prefetch 就是**每张卡一次查询**。⚠️ 同一个坑本轮已经在
+    #    `_visible_events()` 上踩过一次（2026-09-14 同日），两处的表现一样：
+    #    页面一个字不差，只是慢。钉住它的两条测试都数两次查询再比较。
+    ).prefetch_related("event_role__event__sessions")
+
+    courses, occasions = [], []
+    for row in rows:
+        (courses if row.event_role.event.shape == Event.Shape.PROGRAM
+         else occasions).append(row)
+    # ⚠️ 点名册一次查完，和课的张数无关 —— 逐张卡去问是每张一次查询。
+    progress = course_progress(courses) if courses else {}
+
+    here = SIGNUP_PAGES[1] if past else SIGNUP_PAGES[0]
+    return render(request, "events/my_participations.html", {
+        "page_title": here[0],
+        # ⚠️ 那一排筛选画不画，问的是**筛之前**有没有两种东西。用筛完的结果去问
+        #    的话，筛到「Programs」而一门课都没有的那一刻，这一排会连同结果一起
+        #    消失 —— 于是他被关在一个空页面里，回不去。
+        "show_kinds": bool(courses and occasions),
+        "is_past": past,
+        "kind": kind,
+        "kind_choices": SIGNUP_KINDS,
+        # ⚠️ 顺序**写死**成 My Signups 在左、Past Signups 在右，两页都一样 ——
+        #    和 `_list_page()` 那一排同一条规矩：按谁是当前页对调的话，字会在
+        #    跳转的一瞬间横着挪。
+        "page_tabs": [
+            {"label": label, "url": reverse(name),
+             "is_here": (label, name) == here}
+            for label, name in SIGNUP_PAGES
+        ],
+        "courses": [(row, progress.get(row.pk)) for row in courses]
+                   if kind in ("all", "programs") else [],
+        "occasions": occasions if kind in ("all", "events") else [],
+        # 🔴 **签到和工时两列画不画，问的是「有没有东西可画」，不是「这是哪一页」。**
+        #    第一版按 `is_past` 分，而签到**发生在活动进行中** —— 而进行中的活动
+        #    按 `end_time` 算还在「未来」那一页上。于是那两列恰好在它们被填上的
+        #    那几个小时里是藏着的：一个人扫完码想看一眼自己几点签的到，页面上
+        #    没有那一列。一条老测试抓到的（`test_my_signups_shows_the_times_in_
+        #    one_column`），不是走查。
+        # ⚠️ 按内容判同时保住了原来那半个理由：一整段谁都没签过到的行不会长出
+        #    两列空格 —— 两列永远空着读起来是「系统没记上」，而事实是「还没发生」。
+        "show_attendance": any(
+            row.checked_in_at or row.hours is not None for row in occasions),
+        # ⚠️ Next up 和底下那一条都**只在未来那一页**。历史页上「接下来」没有
+        #    意义，而「9 past signups →」指向的正是历史页自己。
+        **({} if past else {
+            "next_up": next_up(contact),
+            **_signups_footer(contact),
+        }),
+    })
+
+
+def _signups_footer(contact):
+    """底下那一条：几笔历史、给出去多久、接受到多久。
+
+    🔴 **两个数并排，中间永远没有加号**（D43 的不变量，D36 的第四次应用）。
+       一个是他给基金会的时间，一个是基金会花在他身上的时间，方向相反，
+       合计没有定义。
+
+    ⚠️ 工时走 `volunteering()`，和仪表盘**同一个口径** —— 那个方法的 docstring
+       写着「这是本项目唯一允许打印的那个工时数的定义」。少了它，这一格会把
+       上班的工时一起加进去，于是同一个人的两个页面给出两个不一样的总数。
+
+    🔴 **两个数的范围和那个计数不一样，而这是被一条测试逼出来的。**
+       计数只数结束了的（它是那条链接后面有几行），两个工时数是**全部**。
+       第一版三样都只算结束了的，于是一个课上到一半的学员看到的是**空的** ——
+       而基金会已经在他身上花了四个小时，那正是 D43 那个数存在的理由
+       （成人教育按 contact hours 报，还有一道 12 小时的门槛）。
+       ⚠️ 给出去的那个数不受影响：还没发生的活动上 `hours` 是空的，加不进任何
+       东西 —— 所以扩大范围对它只是「不变」，对接受到的那个数才是「终于对了」。
+    """
+    mine = Participation.objects.mine(contact)
+    hours_given, _ = mine.volunteering().hours_given_and_within()
+    return {
+        "past_count": mine.past().count(),
+        "hours_given": hours_given,
+        "hours_received": hours_received_total(mine),
+    }
+
+
+def _calendar_links(request, event):
+    """详情页上那颗「Add to calendar」要的三样东西。
+
+    🔴 **三个去处不是等价的，页面必须说得出差别**（实测下来的，2026-09-14）：
+       下载那一份带着稳定的 UID —— 活动改期之后再下一次，日历里是**那一条变了**；
+       而两条深链打开的是一张新建草稿，日历自己发一个新身份，**再点一次就是
+       第二条**。把三颗键并排画成一样，等于让人用一个会长出重复条目的东西去
+       更新日程。
+
+    ⚠️ 深链只对**一场**成立，所以一门课取的是「还没到的第一讲」。取不到（课已经
+       上完、或者一场都没排）就一条深链都不画：一条指向过去某个晚上的「加进
+       日历」比没有更糟。
+    """
+    is_course = event.sessions.exists()
+    # ⚠️ 「下一讲是哪一讲」在服务层（D18：视图里不做日期运算），而那不只是分层
+    #    洁癖 —— 这一页说的「下一讲是周二」和按下去真正拿到的那一讲必须是同一个
+    #    答案，所以它们读同一个函数。
+    ahead = next_meeting(event)
+    if is_course and ahead is None:
+        return {"calendar_one": None, "calendar_is_part": True}
+    rows = calendar_occasions(
+        event, host=request.get_host().split(":")[0],
+        url_for=request.build_absolute_uri,
+        meetings=[ahead] if ahead else None)
+    # ⚠️ 一门课上面那一行按「只给下一讲」重算过，所以序号会从 1 起 —— 这里要的
+    #    只是它的起止和标题，而标题里的序号由下面的 label 另说，不从这里读。
+    one = rows[0]
+    return {
+        "calendar_one": one,
+        "calendar_google": ics.google_link(one),
+        "calendar_outlook": ics.outlook_link(one),
+        # 「这条深链加的是整场，还是十二讲里的一讲」—— 界面据此改口。
+        "calendar_is_part": is_course,
+        "calendar_part_when": ahead.start_time if ahead else None,
+        # 「只下这一讲」那条链接的目标。⚠️ 和上面那条深链指向**同一讲**，
+        #    从同一个 `ahead[0]` 来 —— 各取各的话，页面上那句「下一讲是周二」
+        #    会和按下去真正拿到的那一讲分家。
+        "calendar_next_pk": ahead.pk if ahead else None,
+    }
+
+
+@login_required
+def event_calendar(request, pk):
+    """这一场活动的 `.ics`，交给他自己的日历（2026-09-14）。
+
+    ⭐ **一门课出的是 N 条**（`calendar_occasions()` 按讲次摊开），所以一个学员
+       的日历里是十二个两小时的晚上，不是一条横跨三个月的全天事件。
+
+    🔴 **和详情页同一道门**：`_detail()` 里那两个谓词（发布了没有 / 是不是给他
+       看的）。新开的取数路径正是权限最容易漏掉的地方 —— 而这一条尤其危险，
+       因为它的产物**离开站点**：一份草稿活动的 ics 下到谁手里，就再也收不回来。
+
+    ⚠️ `Cache-Control: private, no-store`，而且不是随手加的：这个地址对不同的人
+       **给不同的内容**（挑过讲次的学员只拿到他挑的那几讲）。少了它，任何一层
+       共享缓存都可能把 A 的课表发给 B —— 而那读起来完全正常。
+
+    ⚠️ 文件名带上活动名。三份都叫 `calendar.ics` 的话，下载文件夹里认不出哪个
+       是哪个，而人下载它正是为了以后还找得到。
+    """
+    event = _detail(request, pk)["event"]
+    return _calendar_response(request, event, my_meetings(
+        event, _my_contact(request)))
+
+
+@login_required
+def session_calendar(request, pk):
+    """**一讲**的 `.ics`（2026-09-14，用户当天提的）。
+
+    ⭐ 一门课两种下法都要有：整期一次下完，和只下某一讲。整期那条在
+       `event_calendar` 上；这一条是「下周二那一讲我想单独放进日历」——
+       临时调一次课、或者只打算去其中几讲的人要的正是它。
+
+    ⚠️ 权限判的是**这一讲所属的那场活动**，走 `_detail()` 那同一道门。讲次自己
+       没有受众（`Session` 的 docstring 三条否定式里的第二条），所以这里不能、
+       也不该另发明一套判断。
+    """
+    meeting = get_object_or_404(Session, pk=pk)
+    event = _detail(request, meeting.event_id)["event"]
+    return _calendar_response(request, event, [meeting])
+
+
+def _calendar_response(request, event, meetings):
+    """把记录写成一份可下载的 `.ics`。两条路由共用。"""
+    host = request.get_host().split(":")[0]
+    text = ics.calendar_for(
+        calendar_occasions(event, host=host,
+                           url_for=request.build_absolute_uri,
+                           meetings=meetings),
+        prodid_host=host)
+    response = HttpResponse(text, content_type="text/calendar; charset=utf-8")
+    # ⚠️ 文件名带上活动名。三份都叫 `calendar.ics` 的话，下载文件夹里认不出
+    #    哪个是哪个，而人下载它正是为了以后还找得到。
+    # ⚠️ `meetings` 为 None 是「整场，它不是一门课」（`my_meetings()` 的约定），
+    #    不是「一讲都没有」。照 `len()` 敲会当场 500 —— 一条测试抓到的。
+    stem = slugify(event.name) or "event"
+    if meetings and len(meetings) == 1 and event.sessions.exists():
+        stem = f"{stem}-{meetings[0].start_time:%Y-%m-%d}"
+    response["Content-Disposition"] = f'attachment; filename="{stem}.ics"'
+    # 🔴 **这个地址对不同的人给不同的内容**（挑过讲次的学员只拿到他挑的那几讲），
+    #    所以它绝不能进任何一层共享缓存。少了这一行，缓存可能把 A 的课表发给 B
+    #    —— 而那读起来完全正常。
+    response["Cache-Control"] = "private, no-store"
+    return response
 
 
 @login_required

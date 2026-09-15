@@ -12,12 +12,14 @@ from pathlib import Path
 from dataclasses import dataclass
 from decimal import Decimal
 
+from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.core.files.base import ContentFile
 from django.db import transaction
 from django.db import models
 from django.db.models import Count, F, Q, Sum
 from django.db.models.functions import TruncMonth
+from django.urls import reverse
 from django.utils import timezone
 from django.utils.text import slugify
 from PIL import Image as PILImage
@@ -31,7 +33,7 @@ from core.timeutils import local_date_of, local_day, local_now, local_today
 from org.audience import Audience, on_the_books_exists, on_the_books_q
 from org.models import Assignment
 
-from . import schedule, tokens
+from . import ics, schedule, tokens
 from .recurrence import BATCH_CEILING, horizon_for, occasions
 from .models import (
     NOT_COMING,
@@ -1587,7 +1589,28 @@ def ministry_report(events):
         #    property this split exists to make visible.
         helpers=Count("contact_id", distinct=True),
     )
-    hours = recorded["hours_total"] or Decimal("0")
+    # 🔴 **工时从此在两张表上（决定 20），而这一段原来只问了一张。**
+    #
+    #    一个 ministry 这一季的工时要是全在课上（助教按讲次记，`Participation.
+    #    hours` 按设计是空的），这张报表的头条数字印的是 **0** —— 而下面那句
+    #    「from 0 records」还会替它作证。2026-09-08 那一轮修的是 `event_summary()`
+    #    和 `/me/` 那张卡，报表自己这四格一格没动，L5.7 那张表也只写了「要改」。
+    #
+    # ⚠️ **两次聚合相加，不是跨 join 的一个 `Sum`**：后者会按点名行数把报名那半
+    #    的工时翻倍；而 `distinct=True` 是对不同的**值**求和，两个 2.5 会折成
+    #    一个。两者都静默地错、方向相反，第二个更糟因为它看起来像是修好了。
+    #    全文在 `ParticipationQuerySet.hours_given_and_within()` 上。
+    on_meetings = SessionAttendance.objects.filter(
+        participation__in=helped).aggregate(
+        total=Sum("hours"),
+        records=Count("hours"),
+        # ⚠️ 分母那一半：出席过的点名行才「本该有工时」。还挂着 registered 的
+        #    那一讲既不是出席也不是缺席（同 `_session_attendance()`），把它算成
+        #    「缺一条工时」会让这个数字跟着未来的讲次一起涨。
+        marked=Count("pk", filter=Q(status=Participation.Status.ATTENDED)),
+    )
+    hours = ((recorded["hours_total"] or Decimal("0"))
+             + (on_meetings["total"] or Decimal("0")))
     participants = totals["participants"]
     helpers = recorded["helpers"]
 
@@ -1646,7 +1669,10 @@ def ministry_report(events):
         "signups": totals["signups"],
         "participants": participants,
         "hours": hours,
-        "hours_records": recorded["hours_records"],
+        # ⚠️ 两张表的记录条数相加：这一行印在总数底下，说的是「上面那个数建立在
+        #    多少条记录上」—— 只数一张表的话，一门课的二十四条工时记录会被说成
+        #    零条，而那正是这句话存在要防的事。
+        "hours_records": recorded["hours_records"] + on_meetings["records"],
         # ⚠️ Over the rows that record hours, not over every signup
         #    (2026-08-21). Before this, every learner in a class counted as
         #    "a signup with no hours recorded" — a figure printed as a data
@@ -1658,7 +1684,17 @@ def ministry_report(events):
         #    exceed the minuend — a stray attending row carrying hours counts
         #    as a record without counting as a signup — and "−1 signups with
         #    no hours" is a sentence the page would print without complaint.
-        "hours_missing": recorded["helping_signups"] - recorded["hours_records"],
+        # ⚠️ 两半各自减各自的（2026-09-14）。一门课的助教报名行按设计**没有**
+        #    工时（它们在点名册上），把它算成「缺一条工时记录」会让这个数字跟着
+        #    开课数一起涨 —— 和 2026-08-21 那次「来上课的人被算成缺工时」是同一
+        #    个病，换了一层。所以单场那半问报名，课那半问**出席过的点名行**。
+        # ⚠️ 两半都是「同一批行的两个聚合」，所以各自都不会变成负数 —— 上面那条
+        #    注释讲的同一个理由，现在要成立两次。
+        "hours_missing": (
+            (recorded["helping_signups"] - recorded["hours_records"])
+            - _helping_signups_on_runs(helped)
+            + (on_meetings["marked"] - on_meetings["records"])
+        ),
         "hours_per_participant": (hours / helpers) if helpers else None,
         "helpers": helpers,
         "repeat_participants": repeat,
@@ -1668,6 +1704,17 @@ def ministry_report(events):
         "fully_staffed_rate": _percent(fully_staffed, len(staffable)),
         "minors_without_consent": minors_without_consent,
         "people_served": _people_served(events, parts),
+        # 🔴 **方向相反的第三个数（D43），和上面那几格工时并排，永远不相加。**
+        #    上面每一格说的是**人给基金会**的时间；这一格说的是**基金会花在人
+        #    身上**的时间。两者加起来是「我们收到的 ＋ 我们发出的」，一个没有
+        #    定义的量 —— 而它看起来完全合理，这正是 D36 那条不变量的第四次应用。
+        #    页面上它自己一个标题，不进 Hours 那一组，更不出现任何合计。
+        #
+        # ⚠️ 没有讲次的那些活动上它是 **None 不是 0**：`hours_received_total()`
+        #    在一行都没有时返回 None，而这里原样传下去。一场周六发放上印一个
+        #    「接受到 0 小时」，说的是「我们什么都没给他」，而真话是「这个问题
+        #    在这里不成立」—— D27 那条「没有和没算不能长得一样」。
+        "hours_received": hours_received_total(parts),
         **absence,
         # ⚠️ Beside the event-level rate, never folded into it. They count two
         #    different things over two different populations — signups at
@@ -1677,6 +1724,17 @@ def ministry_report(events):
         **_session_attendance(events),
     }
     return {"figures": figures, "charts": _report_charts(events, parts=parts, helped=helped)}
+
+
+def _helping_signups_on_runs(helped):
+    """课上那些帮忙的报名行有几条 —— 它们**不该**算进「缺一条工时」。
+
+    ⚠️ 单独一个函数而不是一句内联的 `filter().count()`，因为它是一个**减项**，
+       而减项最容易被下一个人读成「多余的一次查询」删掉。删掉之后那个数字不会
+       报错，只会每开一门课就多涨一点，正是它要防的事。
+    """
+    return helped.filter(
+        event_role__event__shape=Event.Shape.PROGRAM).count()
 
 
 def _people_served(events, parts):
@@ -1956,15 +2014,45 @@ def _monthly_series(events, helped):
         .annotate(month=TruncMonth("event_role__event__start_time"))
         .values("month").annotate(total=Sum("hours"))
     }
+    # 🔴 **第三次查询：课的工时（决定 20），而它按哪个月份归口是这一段唯一的难点。**
+    #
+    #    一门九月开课、十二月结课的课，上面那半会把它的**每一小时都记在九月**
+    #    —— 因为那一半的月份取自 `event.start_time`，而那是学期的左端。
+    #    助教十一月那两个晚上的四小时于是出现在九月的柱子上，而九月和十一月
+    #    两根柱子同时错，合计还是对的：一张**每一个数都错、总和却对**的图，
+    #    没有任何东西会报错。
+    #
+    #    所以这一半的月份取 `session.start_time` —— 那一讲**真的发生**的那个月。
+    #
+    # ⚠️ 和上面两半一样不传 `tzinfo=`。三处必须用同一种分桶方式，否则跨月那几个
+    #    晚上会被两半分到不同的柱子上；真要改成本地时区，三处一起改。
+    #    （按日切那条守卫盯的是按**天**截断，管不到按月这一层。⚠️ 这句话
+    #    故意不写出那个函数名：那条守卫是一次全文 grep，提到它就会被它抓住。）
+    for row in (SessionAttendance.objects.filter(participation__in=helped)
+                .order_by()
+                .annotate(month=TruncMonth("session__start_time"))
+                .values("month").annotate(total=Sum("hours"))):
+        month = row["month"].date()
+        hours_by_month[month] = (hours_by_month.get(month, Decimal("0"))
+                                 + (row["total"] or Decimal("0")))
     if not by_month:
         return []
+    # 🔴 **横轴要盖住讲次那几个月，而不只是活动开始的那几个月。**
+    #    一门七月开课、九月结课的课只在七月贡献一个 `by_month` 键（它按
+    #    `start_time` 分桶）—— 于是九月那几晚的工时**算对了却无处可画**：
+    #    上面那个循环把它们放进了 `hours_by_month`，而这里的月份范围到七月为止，
+    #    它们连同那根柱子一起从图上消失。总数仍然对得上，图上少了一段。
+    # ⚠️ 只扩范围，不塞进 `by_month` —— 那一份数的是**活动场次**，九月没有活动
+    #    开始就是 0 场，说它有一场是另一句假话。空月份照旧由 `_months_between()`
+    #    补齐（那条规矩本来就写着「安静的月份必须看起来安静」）。
+    span = set(by_month) | set(hours_by_month)
     return [
         (
             month.strftime("%b %Y"),
             by_month.get(month, 0),
             hours_by_month.get(month, Decimal("0")),
         )
-        for month in _months_between(min(by_month), max(by_month))
+        for month in _months_between(min(span), max(span))
     ]
 
 
@@ -2032,12 +2120,38 @@ def _top_participants(helped, limit=10):
        `n` was never covered by that argument at all: over `parts` it counts a
        learner's seat towards the ranking of a chart titled "Most hours".
     """
-    rows = list(
-        helped.order_by()
-        .values("contact_id")
+    # 🔴 **两次聚合，而「取前十」必须发生在两半合起来之后。**
+    #    原来是一句 SQL 里排序加切片。照那样只把课的工时**加到结果上**，会漏掉
+    #    整整一类人：一个学期全在课上当助教、一场单场活动都没参加的人，第一半
+    #    给他的总数是 0 或者空 —— 他在切到前十之前就被扔掉了，而他很可能正是
+    #    这一季给出时间最多的那个人。一张标题写着「Most hours」的图，把工时最多
+    #    的那个人漏在外面，且不报错。
+    #
+    # ⚠️ 也**不能**改成跨 join 的一个 `Sum`：那会按点名行数把报名那半的工时翻倍；
+    #    而 `distinct=True` 是对不同的**值**求和，两个 2.5 折成一个。两者都静默地
+    #    错，方向相反，第二个更糟因为它看起来像是修好了。理由的全文在
+    #    `ParticipationQuerySet.hours_given_and_within()` 上。
+    given = {
+        row["contact_id"]: row
+        for row in helped.order_by().values("contact_id")
         .annotate(total=Sum("hours"), n=Count("pk"))
-        .order_by(F("total").desc(nulls_last=True), "-n")[:limit]
-    )
+    }
+    for row in (SessionAttendance.objects.filter(participation__in=helped)
+                .order_by().values("participation__contact_id")
+                .annotate(total=Sum("hours"))):
+        who = row["participation__contact_id"]
+        # ⚠️ 落在这里的人可能**不在** `given` 里（只在课上当过助教）。`setdefault`
+        #    那一格的 `n` 给 0：名次的第二把尺是「参加过几场」，而他的场次数由
+        #    上面那一半负责数，没有就是没有。
+        found = given.setdefault(who, {"contact_id": who, "total": None, "n": 0})
+        found["total"] = (found["total"] or Decimal("0")) + (row["total"] or Decimal("0"))
+    rows = sorted(
+        given.values(),
+        # ⚠️ `total is None` 排在最后，和原来那句 SQL 的 `nulls_last` 一个意思：
+        #    Postgres 在降序上把 NULL 排在最前，于是一个「没人填过工时」的人会
+        #    坐在一张叫「Most hours」的图的顶上 —— 它声称的恰好相反。
+        key=lambda row: (row["total"] is None, -(row["total"] or 0), -row["n"]),
+    )[:limit]
     people = Contact.objects.in_bulk([row["contact_id"] for row in rows])
     return _chart(
         "Most hours",
@@ -3109,6 +3223,315 @@ def hours_received(participation):
         ))["spent"]
     )
     return duration_hours(total or datetime.timedelta())
+
+
+def hours_received_total(participations):
+    """这些报名加起来，基金会在这个人身上花了多久 —— 或者 None（D43）。
+
+    🔴 **和 `hours_received()` 是同一条规则的第二个实现，而那是本项目判过的病。**
+       不合并成一个的理由是它们问的不是同一件事：那个答「这一行」，要 None / 0 /
+       数值三种答案；这个答「这一叠」，画在 My Signups 底下。合并的写法是逐行调
+       那一个再求和 —— 一页十门课就是十次查询，而这一条画在一个人最常打开的页上。
+       安全带是 `test_the_total_agrees_with_the_rows`：两个实现喂同一批数据，
+       必须给出同一个数。
+
+    ⚠️ 两个谓词和那一个逐字相同：只有**来接受服务**的位子算（助教坐在同一间教室
+       两小时，但没有任何东西被交付给他），而「这门课有没有讲次」由这张表自己兜住
+       —— 没有讲次就没有点名行，也就没有行可数。
+
+    🔴 **永远不和工时相加。** 方向相反的两个数，合计没有定义（D43 的不变量，
+       D36 的第四次应用）。调用方把两个数并排画，中间不许有加号。
+    """
+    total = (
+        SessionAttendance.objects
+        .filter(participation__in=participations,
+                participation__event_role__role__nature=(
+                    ParticipationRole.Nature.ATTENDING))
+        .attended()
+        .aggregate(spent=Sum(
+            F("session__end_time") - F("session__start_time"),
+            output_field=models.DurationField(),
+        ))["spent"]
+    )
+    # ⚠️ None 而不是 0：「一堂课都没上过」和「这个问题在这一叠上不成立」是两个
+    #    答案，而 0 只对得上第一个。D27 那条规矩，第三次用在这个数上。
+    return None if total is None else duration_hours(total)
+
+
+# --- 加进个人日历：把一场活动摊成 ICS 那一层要的记录 -------------------------
+
+
+def calendar_occasions(event, *, host, url_for, meetings=None):
+    """这一场（或这一门课的每一讲）→ 一串 `ics.Occasion`。
+
+    ⭐ **形状和日程那一层是同一条判据**：有讲次就摊成各讲，没有就是它自己
+       （同 `schedule.occurrences()`）。一门十二讲的课在别人日历里应该是**十二条**
+       两小时的日程，不是一条横跨三个月的全天事件 —— 后者正是本轮一直在拆的
+       那句假话，换到了别人的手机上。
+
+    🔴 **`sequence` 两张表一起算，而这是 `ics.py` 顶上那条契约点名要的。**
+       讲次的时间来自 `Session`，而标题、地点、说明来自**父 `Event`** ——
+       有人把课改名或者换了教室时，`Session` 那一行的 `updated_at` 一个字不动。
+       只看它的话 SEQUENCE 原地不动，所有已经收下这条日程的日历继续显示旧名字，
+       而且**重新下载也没用**：客户端认为自己手上的已经是最新的。
+
+    ⚠️ `url_for` 收一个函数（视图传 `request.build_absolute_uri`），而不是在这里
+       拼地址：绝对地址要带上这次请求真正的域名和协议，那是只有请求知道的事。
+    """
+    if meetings is None:
+        meetings = list(event.sessions.all())
+    link = url_for(reverse("events:event_detail", args=[event.pk]))
+    cancelled = event.status == Event.Status.CANCELLED
+    # ⚠️ 机构那一个地址，**不是**发布这场活动的那个人的。ORGANIZER 会跟着文件
+    #    走到每一个转发它的人手里，而 `Ministry` 没有自己的邮箱字段 —— 退而用
+    #    发布者本人的邮箱，就是把一个员工的私人地址印进一份会被转发的文件里，
+    #    和 `ics.py` 里判掉 ATTENDEE 的是同一条理由。
+    organizer = settings.DEFAULT_FROM_EMAIL
+    if not meetings:
+        return [ics.occasion(
+            uid=ics.uid_for("event", event.pk, host),
+            summary=event.name, start=event.start_time, end=event.end_time,
+            location=event.location, description=event.description, url=link,
+            sequence=_sequence(event.updated_at), cancelled=cancelled,
+            organizer=organizer,
+        )]
+    return [
+        ics.occasion(
+            uid=ics.uid_for("session", meeting.pk, host),
+            # ⚠️ 带上「第几讲」，因为日历里这十二条**否则一模一样** —— 人翻到
+            #    十一月那一条时，没有任何办法知道它是第几讲。序号取自整门课的
+            #    授课顺序，和站内每一处说的是同一个数。
+            summary=f"{event.name} · meeting {number}",
+            start=meeting.start_time, end=meeting.end_time,
+            location=event.location, description=event.description, url=link,
+            sequence=_sequence(max(meeting.updated_at, event.updated_at)),
+            cancelled=cancelled, organizer=organizer,
+        )
+        for number, meeting in enumerate(meetings, 1)
+    ]
+
+
+def next_meeting(event, *, now=None):
+    """这门课下一次聚会是哪一讲，或者 None（已经上完 / 还没排 / 它不是课）。
+
+    ⚠️ 在服务层，不在视图里 —— 视图里一行 `local_now()` 都不许有（D18，
+       `ViewsAreThinGuardTests` 盯着）。而这条规矩在这里不是形式：Google 和
+       Outlook 那两条深链**只加得了一个事件**，「哪一个」是一条业务判断，
+       它要和别处对同一个问题的回答保持一致。
+    """
+    now = now or local_now()
+    return next((one for one in event.sessions.all()
+                 if one.start_time > now), None)
+
+
+def my_meetings(event, contact):
+    """这个人下载这门课时，文件里该有哪几讲 —— 或者 None（整场，不是课）。
+
+    🔴 **挑过讲次的人拿到的是他挑的那几讲，不是这门课的全部。**
+       决定 17 让学员自己挑哪几个晚上，决定 18 让中途加入的人前几讲**根本不存在**
+       —— 而这两条的唯一落点都是点名册上**存在哪几行**。把整门课的讲次一股脑
+       写进他的日历，等于替他排上他没报、也没人等他去的晚上。
+
+    ⚠️ 这也是那份文件**必须按人缓存**的原因（视图上那句
+       `Cache-Control: private`）：同一个地址对不同的人给不同的内容。
+
+    ⚠️ 没有点名行的人（没报名、只是想记一笔的路人）拿到整门课 —— 那是对的：
+       他问的是「这门课什么时候上」，而答案就是全部十二讲。
+    """
+    if not event.sessions.exists():
+        return None
+    mine = list(
+        Session.objects.filter(
+            attendances__participation__contact=contact,
+            attendances__participation__event_role__event=event,
+        ).distinct().order_by("start_time", "id")
+    )
+    return mine or None
+
+
+def _sequence(moment):
+    """一个随时间单调增大的整数。
+
+    ⚠️ 取 epoch **秒**，不是毫秒：RFC 5545 没有规定上限，而实测有客户端把它当
+       32 位整数读，毫秒在 1970 年之后第 25 天就溢出了。秒到 2038 年才到边，
+       而那时这段代码大概率已经不在了 —— 写下来是因为「大概率」不等于「一定」。
+    """
+    return int(moment.timestamp())
+
+
+# --- L5.8b: My Signups 顶端那一条 ------------------------------------------
+
+
+#: 「Next up」画几格（2026-09-14）。三格是一行排得下、又答得完「这周我要去哪」的
+#: 数；不是一个可配置项，改它只要改这里。
+NEXT_UP = 3
+
+
+@dataclass(frozen=True)
+class Moment:
+    """他真的要到场的一次场合。
+
+    ⭐ **它不是一行报名，这正是这一条存在的理由。** 一门课报一次（决定 19），
+       而他这周要去的是**第 3 讲**；My Signups 上那张卡答的是「我报了什么」，
+       这一条答的是「我下一次几点到哪去」。两个问题，两种行。
+
+    ⚠️ 单场活动的 `ordinal` 是 None，同 `schedule.Card.ordinal` 的约定 ——
+       一场活动不是任何东西的第几次。
+    """
+
+    start_time: datetime.datetime
+    event: object
+    ordinal: int | None
+    location: str
+
+
+def next_up(contact, *, now=None, limit=NEXT_UP):
+    """他接下来要到场的那几次，最近的在前。
+
+    🔴 **一门课出的是「他自己名下还没到的那几讲」，不是这门课剩下的讲次。**
+       判据是点名册上**存在哪几行**（决定 18）：第五周才加入的人，前四讲对他
+       根本不存在。拿 `event.sessions` 去列的话，他的下一讲会显示成一堂他没有、
+       也没人期待他去的课。
+
+    ⚠️ 讲次的序号取自**整门课**的顺序，不是他自己那几行的顺序。同一件事大家嘴里
+       说的必须是同一个数：第五周才来的那位，第一次上课是「meeting 5」，
+       写成「meeting 1」的话他和同学对不上话，而页面看起来完全正常。
+
+    ⚠️ 三次查询，和人数、课数都无关 —— 报名、点名行、以及一次把序号查出来的
+       `values_list`。逐场去问 `event.sessions` 是每门课一次查询，而这一条画在
+       登录之后第一眼看到的那一页上。
+    """
+    now = now or local_now()
+    rows = list(
+        Participation.objects.mine(contact).notifiable().upcoming(now)
+        .select_related("event_role__event")
+    )
+    if not rows:
+        return []
+
+    moments = [
+        Moment(row.event_role.event.start_time, row.event_role.event,
+               None, row.event_role.event.location)
+        for row in rows
+        if row.event_role.event.shape != Event.Shape.PROGRAM
+    ]
+
+    courses = [row for row in rows
+               if row.event_role.event.shape == Event.Shape.PROGRAM]
+    if courses:
+        attendances = list(
+            SessionAttendance.objects
+            .filter(participation__in=courses, session__start_time__gt=now)
+            .exclude(status__in=NOT_COMING)
+            .select_related("session", "participation__event_role__event")
+        )
+        # ⚠️ 一次算出全部序号，**在循环外面**。写成在推导式里按行去求，就是每行
+        #    一次查询 —— 而上面那句 docstring 恰好承诺了不会发生这件事。
+        numbers = _meeting_numbers({row.session.event_id for row in attendances})
+        moments += [
+            Moment(row.session.start_time,
+                   row.participation.event_role.event,
+                   numbers[row.session_id],
+                   row.participation.event_role.event.location)
+            for row in attendances
+        ]
+    return sorted(moments, key=lambda moment: moment.start_time)[:limit]
+
+
+#: 进度方块的四种底色。⚠️ 「今天」**不在这里面**，它是叠在底色之上的一圈环 ——
+#: 一个人今天已经签到了，那一格既是「今天」又是「出席」，压进一个颜色就会丢掉
+#: 一个。同 D27 那条「没有和没算不能长得一样」。
+MEETING_STATES = ("attended", "missed", "unmarked", "ahead")
+
+
+@dataclass(frozen=True)
+class Meeting:
+    """他名下的一讲，以及它在那一排方块里长什么样。"""
+
+    ordinal: int
+    start_time: datetime.datetime
+    end_time: datetime.datetime
+    state: str
+    is_today: bool
+
+
+@dataclass(frozen=True)
+class Progress:
+    """一门课在 My Signups 那张卡上的全部动态部分。"""
+
+    meetings: list
+    attended: int
+    next_meeting: object
+
+
+def course_progress(participations, *, now=None):
+    """{participation_pk: Progress} —— 一次查完，和课数无关。
+
+    🔴 **四种状态，而第三种是走查这一步时才补上的。**
+       用户定的是「出席 / 缺席 / 未来」三种底色加一圈「今天」。照那样做，
+       **一讲已经过去、而没有任何人点过名**，只能画成缺席 —— 那是在替没人核实过
+       的事作证，凭空给他记一次没来。本仓库两处已经为同一条规矩写过字：
+       `_session_attendance()` 把 `registered` 的行从出勤率的分子分母里**双双**
+       拿掉，理由是「还没发生的聚会不是出席也不是缺席」；D27 那条是
+       「没有和没算不能长得一样」。所以 `unmarked` 是第四种，画成和缺席不同的样子。
+
+    ⚠️ 分母是**存在的那些行**（决定 18）。第五周才加入的人这一排是 8 格不是 12 格，
+       而没有任何一处在做减法 —— 那四讲对他根本没有行。
+    """
+    now = now or local_now()
+    today = local_date_of(now)
+    rows = list(
+        SessionAttendance.objects
+        .filter(participation__in=participations)
+        .select_related("session")
+        .order_by("session__start_time", "session_id")
+    )
+    numbers = _meeting_numbers({row.session.event_id for row in rows})
+    found = {}
+    for row in rows:
+        meeting = Meeting(
+            ordinal=numbers[row.session_id],
+            start_time=row.session.start_time,
+            end_time=row.session.end_time,
+            state=_meeting_state(row, now),
+            is_today=local_date_of(row.session.start_time) == today,
+        )
+        found.setdefault(row.participation_id, []).append(meeting)
+    return {
+        pk: Progress(
+            meetings=meetings,
+            attended=sum(1 for one in meetings if one.state == "attended"),
+            next_meeting=next(
+                (one for one in meetings if one.start_time > now), None),
+        )
+        for pk, meetings in found.items()
+    }
+
+
+def _meeting_state(row, now):
+    """这一格画成什么。⚠️ 判据的顺序有意义：点过名的以点名为准，没点过的才问时钟。"""
+    if row.status == Participation.Status.ATTENDED:
+        return "attended"
+    if row.status == Participation.Status.ABSENT:
+        return "missed"
+    return "ahead" if row.session.start_time > now else "unmarked"
+
+
+def _meeting_numbers(event_ids):
+    """{session_pk: 第几讲}，按每门课自己的授课顺序。
+
+    ⚠️ 一次查出来，因为序号是**整门课**的属性：逐行去问「我这一讲排第几」要么是
+       每行一次查询，要么答出的是他自己那几行里的序号 —— 而后者不报错，只是把
+       第五周才来的那位的第一堂课叫成 meeting 1。
+    """
+    numbers, seen = {}, {}
+    for event_id, session_id in (Session.objects
+                                 .filter(event_id__in=event_ids)
+                                 .order_by("event_id", "start_time", "id")
+                                 .values_list("event_id", "pk")):
+        seen[event_id] = seen.get(event_id, 0) + 1
+        numbers[session_id] = seen[event_id]
+    return numbers
 
 
 # --- L5.6: recurring events — generating, changing, undoing ----------------

@@ -32,11 +32,25 @@
       自己是标题**做到的。两个版本都只有一个 h1，而只有这一版两处都有字。
    （右面板里那份活动详情仍然是 `<h2>`，见 `_event_detail_body.html`。）
 
-参数：
-  title       必填，**这一页**叫什么（永远是当前格，永远在最右）
-  url         必填，这一页自己的地址
-  parent      选填，上一层那一页叫什么（画在左边，可点）
-  parent_url  选填，配 `parent` 用
+参数（**两种模式，二选一**）：
+
+  面包屑（原来那种）：
+    title       **这一页**叫什么（永远是当前格，永远在最右）
+    url         这一页自己的地址
+    parent      选填，上一层那一页叫什么（画在左边，可点）
+    parent_url  选填，配 `parent` 用
+
+  并排兄弟（2026-09-14 加的第三种形状）：
+    tabs        `[{label, url, is_here}]`，**按给的顺序画**，谁都不是谁的上一层
+
+🔴 **为什么可以有第二种模式，而下面那条「不是一个切换器」没有被推翻。**
+   那条规矩护的是一句具体的话：「左右按**谁是当前页**对调的话，同一条 bar 上的字
+   会在跳转的一瞬间横着挪」。`tabs` 的顺序由视图写死（`views.LIST_PAGES` 的顺序，
+   Events 永远在左、Programs 永远在右），当前页只换高亮、不换位置 —— 所以那句话
+   要防的事在这里不会发生。**规矩的理由活着，形状多了一种。**
+
+   ⚠️ 判断一条旧规矩适不适用，看的是它当初怕的那件事还成不成立，
+      不是看新东西长得像不像它禁的那个词。
 
 🔴 **这两格是「你在哪儿 + 从哪儿来」，不是一个切换器**（2026-09-03 第四轮）。
    所以它**不对称**：
@@ -81,9 +95,15 @@
 
     ⚠️ `parent` 在前、`title` 在后 —— 顺序写死在这里，不由调用方决定。
     {% endcomment %}
-    {% if parent %}
-      {% include "core/components/_page_bar_cell.html" with label=parent href=parent_url is_here=0 %}
+    {% if tabs %}
+      {% for tab in tabs %}
+        {% include "core/components/_page_bar_cell.html" with label=tab.label href=tab.url is_here=tab.is_here %}
+      {% endfor %}
+    {% else %}
+      {% if parent %}
+        {% include "core/components/_page_bar_cell.html" with label=parent href=parent_url is_here=0 %}
+      {% endif %}
+      {% include "core/components/_page_bar_cell.html" with label=title href=url is_here=1 %}
     {% endif %}
-    {% include "core/components/_page_bar_cell.html" with label=title href=url is_here=1 %}
   </nav>
 </div>

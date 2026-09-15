@@ -33,16 +33,18 @@
 {% endcomment %}
 {% block page_bar %}
   {% comment %}
-  ⚠️ 一格（2026-09-03 第三轮从两格收回来）。这一条写的就是这一页的名字；
-     通往管理页的那个入口挪到了下面标题行右端那颗 ⋮。
+  ⚠️ 2026-09-14 起是**并排的两格**（Events · Programs），由视图的 `page_tabs` 给，
+     顺序固定。2026-09-03 第三轮从两格收回一格的那次说的是另一件事 —— 那两格
+     当时是「你在哪儿 + 从哪儿来」，收掉的是通往管理页的那一格（它挪去了下面
+     标题行右端那颗 ⋮，今天还在那儿）。这一排是兄弟页之间的切换，不是面包屑。
 
-  ⚠️ `{% templatetag openblock %} url … as here_url {% templatetag closeblock %}` 必须写在 **block 里面**。子模板里
-     写在所有 block 之外的标签**不会被执行**（`{% templatetag openblock %} extends {% templatetag closeblock %}` 的模板只渲染
-     block 的内容），于是那个变量是空的 —— 表现是 `href=""`，一个点了会回到
-     站点根目录的链接，而模板本身一个错都不报。踩过一次，浏览器里看出来的。
+  ⚠️ 路由不在这里 `{% templatetag openblock %} url {% templatetag closeblock %}` 了 —— 同一份模板要服务两个地址
+     （决定 44），而模板里写死其中一个就是第二份真相。⚠️ 原来那条踩坑注释仍然
+     成立、仍然值得读：`{% templatetag openblock %} url … as x {% templatetag closeblock %}` 写在所有 block 之外
+     **不会被执行**，那个变量会是空的，表现是 `href=""` 而模板一个错都不报。
+     现在这些值由视图给，那个坑就没有入口了。
   {% endcomment %}
-  {% url 'events:event_list' as here_url %}
-  {% include "core/components/page_bar.html" with title="Events" url=here_url %}
+  {% include "core/components/page_bar.html" with tabs=page_tabs %}
 {% endblock %}
 
 {% block content %}
@@ -117,7 +119,11 @@
        而不是「这一页不归你」。
     {% endcomment %}
     <div class="mb-6 flex items-center justify-between gap-3">
-      <h1 class="text-2xl font-semibold">Events</h1>
+      {% comment %}
+      ⚠️ 标题从视图来（2026-09-14）：同一份模板画 Events 和 Programs 两页，
+         而这一格和顶栏那一排必须是同一个词 —— 一个页面不该有两个名字。
+      {% endcomment %}
+      <h1 class="text-2xl font-semibold">{{ page_title }}</h1>
       {% if can_see_all_events %}
         {% url 'events:event_manage_list' as manage_url %}
         {% include "core/components/manage_link.html" with href=manage_url label="Manage events" %}
@@ -126,8 +132,7 @@
 
     <div class="events-row">
       <div class="events-col">
-        {% url 'events:event_list' as here %}
-        {% include "events/_period_filter.html" with action=here schedule_button=1 %}
+        {% include "events/_period_filter.html" with action=list_url schedule_button=1 %}
         {% include "events/_event_list_results.html" %}
       </div>
 

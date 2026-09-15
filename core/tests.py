@@ -1124,6 +1124,71 @@ class GeneratedEventDeleteGuardTests(TestCase):
         )
 
 
+class TwoLedgersAreNeverAddedGuardTests(TestCase):
+    """Lint-as-test: nothing anywhere adds hours received to hours given.
+
+    🔴 **The two point in opposite directions, so their sum has no definition**
+       — one is time people gave the foundation, the other is time the
+       foundation spent on people (D43's invariant, D36's applied a fourth
+       time). The failure it guards is not a crash: it is a plausible-looking
+       larger number on a report, and nobody can tell by looking that it is
+       meaningless.
+
+    ⚠️ This guard was **written down as an unguarded gap** in D43 §5, with its
+       own restart condition: "the moment two of these numbers are printed on
+       one screen". L5.7 is that moment — the ministry report now prints both,
+       and so does My Signups — so the gap closes here rather than staying on
+       the list.
+
+    ⚠️ The signal is `hours_received` **with an addition on the same line**,
+       across our Python and our templates. Deliberately broad: a sum is a sum
+       whether it is spelled `+`, `sum(`, or Django's `|add:`, and the one
+       shape it must catch is somebody quietly making a total.
+    """
+
+    #: A line that names the received figure and adds something on the same
+    #: line. `|add:` is the template spelling, `+` the Python one.
+    ADDITION = re.compile(r"hours_received[^\n]*(\|\s*add:|\+)|(\|\s*add:|\+)[^\n]*hours_received")
+
+    #: Comments and docstrings explain this rule constantly and must not trip
+    #: it — the roadmap records a guard a comment could satisfy, and this is the
+    #: same lesson from the other side: a guard a comment can *break* gets
+    #: deleted by the next person who trips it innocently.
+    def _code_lines(self, text, hashes=True):
+        for number, line in enumerate(text.splitlines(), 1):
+            stripped = line.strip()
+            if hashes and stripped.startswith("#"):
+                continue
+            yield number, line
+
+    def test_nothing_adds_the_two_hour_figures_together(self):
+        hits = []
+        for relative, source in project_python_files():
+            if relative.name == "tests.py":
+                continue
+            # ⚠️ Docstrings stripped the same way the other body-scanning
+            #    guards do it: this file's own prose says "never added to" more
+            #    than once, and prose is not an addition.
+            body = re.sub(r'"""(?:.|\n)*?"""', "", source)
+            for number, line in self._code_lines(body):
+                if self.ADDITION.search(line):
+                    hits.append(f"{relative}:{number}: {line.strip()}")
+        for relative, markup in project_template_files():
+            # `{% comment %}` blocks carry the reasoning on both pages that
+            # print the pair.
+            body = re.sub(r"{% comment %}(?:.|\n)*?{% endcomment %}", "", markup)
+            for number, line in self._code_lines(body, hashes=False):
+                if self.ADDITION.search(line):
+                    hits.append(f"{relative}:{number}: {line.strip()}")
+        self.assertEqual(
+            hits,
+            [],
+            "Hours given and hours received are two ledgers pointing opposite "
+            "ways; their total is undefined (D43, D36). Print them side by "
+            "side:\n" + "\n".join(hits),
+        )
+
+
 class AdminActionsDeclarePermissionsGuardTests(TestCase):
     """Lint-as-test: every admin action says which permission it needs.
 
@@ -4993,9 +5058,13 @@ class SiteMenuTests(TestCase):
 
     def test_a_stranger_sees_only_the_public_entries(self):
         # ⚠️ "Past Events" was between Events and Log In until 2026-08-17.
+        # ⚠️ Programs joined on 2026-09-14 (L5.8b): courses are half of what is
+        #    on, and a stranger who cannot see they exist cannot decide to join
+        #    one. Same treatment as Events — both lead to the login page, which
+        #    is why neither is a disclosure.
         self.assertEqual(
             self.labels(self.menu()),
-            ["Events", "Log In", "Register"])
+            ["Events", "Programs", "Log In", "Register"])
 
     def test_an_ordinary_volunteer_gets_no_admin_heading(self):
         # ⭐ The one that matters most: a heading called "Ministry admin" drawn

@@ -14,7 +14,8 @@
   report_button   真值 → 多一个「Generate report」按钮（只有管理列表用）
   schedule_button 真值 → 多一个「Schedule」按钮（**只负责打开**，关掉归日程面板
                   右上角那颗 ×），外加一个隐藏的 `from`（日程翻到了哪一天）。
-                  只有 Events 页用。
+                  Events 和 Programs 两页用（2026-09-14 起两页共用这一整套，
+                  见 views.LIST_PAGES）。
   schedule_from   配 schedule_button 用，当前日程窗口的第一天
 
 🔴 **`scope` 这个参数 2026-09-03 没有了** —— 管理页从「两种模式」改成了

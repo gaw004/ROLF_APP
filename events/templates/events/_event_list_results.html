@@ -192,7 +192,24 @@ event_list 的结果区。整页和 HTMX 片段渲染的是同一份 —— 视�
             </span>
           </div>
           <p class="mt-2 text-sm text-ink-600 dark:text-ink-300">
-            {{ event.start_time }} &ndash; {{ event.end_time }}
+            {% comment %}
+            🔴 走 `Event.when_line`（2026-09-14）。这一行原来是 `start_time – end_time`
+               两个时间戳直接印出来，而对一门课那两列是**学期的两端** ——
+               「Aug 9, 4:05 p.m. – Nov 7, 3:05 p.m.」读起来像一场开了三个月的活动。
+               详情页上这句假话 2026-09-08 就修掉了，**这一行上原样留到今天**：
+               同一句话两个地方，只修了一个。判据在那个 property 上，不在这里。
+            {% endcomment %}
+            {% comment %}
+            ⚠️ `{% templatetag openblock %} with {% templatetag closeblock %}` 而不是写三遍 `event.when_line` ——
+               那是一个 property，每写一次就重算一次那句话（讲次本身有 prefetch
+               兜着，不会多查询，但重算三遍没有理由）。
+            {% endcomment %}
+            {% with when=event.when_line %}
+              {{ when.0 }}
+              {% if when.1 %}
+                <br><span class="text-xs">{{ when.1 }}</span>
+              {% endif %}
+            {% endwith %}
             {% comment %}
             ⚠️ 没填地点也**照样占一行**。留空的话这张卡矮一行，而行高是定死的 ——
                矮下来的是文字、不是卡片，看起来就是下面空一块。说一句真话比留白好，

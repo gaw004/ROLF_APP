@@ -1224,6 +1224,25 @@ class Event(Audience, ConstraintErrorFieldMixin, TimeStampedModel):
         return self.end_time - self.start_time
 
     @property
+    def when_line(self):
+        """(headline, detail) — 「什么时候」这一行，两处共用一份。
+
+        🔴 **它是一个 property 而不是各页各算，因为这句话已经错过一次。**
+           2026-09-08 走查在详情页顶上抓到的那句假话 ——
+           「Aug. 9, 2026, 4:05 p.m. — Nov. 7, 2026, 3:05 p.m.」——
+           当时只在详情页修好了，而**列表页上那一行原样留着**（它直接印两个
+           时间戳）。同一句假话，两个地方，只修了一个；这个 property 是为了
+           让下一处要显示「什么时候」的页面无处可以再写一份。
+
+        ⚠️ 算术全在 `events/schedule.py`（视图和模型都不做日期运算）。这里只是
+           把那个纯函数接到行上。
+        ⚠️ 它会读 `self.sessions` —— 列表页那一份查询因此带着
+           `prefetch_related("sessions")`，少了就是每行一次查询。
+        """
+        from . import schedule
+        return schedule.when_line(self)
+
+    @property
     def is_over(self):
         """Has it finished? Read off the clock, never off `status`.
 
@@ -1749,6 +1768,28 @@ class ParticipationQuerySet(models.QuerySet):
         return self.filter(
             event_role__event__end_time__gt=now or local_now(),
         ).order_by("event_role__event__start_time")
+
+    def past(self, now=None):
+        """Over and done, most recent first — what Past Signups holds.
+
+        🔴 **`upcoming()` 的严格镜像，而「严格」是这里唯一要守的东西**（决定 51）。
+           两个方法合起来必须**不重不漏**地盖住每一行：漏了的那一行在两页上都
+           不出现（一个人报过的名字凭空消失），重了的那一行两页都印（他以为自己
+           报了两次）。两种都不报错。钉住它的是
+           `test_upcoming_and_past_split_every_signup_between_them`。
+           所以这里是 `__lte`，对面是 `__gt`，同一列、同一个 `now`。
+
+        ⚠️ 判据**只有时钟**，不看状态。一场还没开始就取消掉的报名仍然留在
+           My Signups 上、带着它自己的状态徽章 —— 「我退掉的那一场是哪天来着」
+           是在那一页上问的问题，而不是在历史里。这一条是当面定的（2026-09-14），
+           否决的是「取消/退出的立刻进历史」。
+
+        ⚠️ 倒序，和 `upcoming()` 的正序相反：将要发生的事从最近的一件读起，
+           已经发生的事从最新的一件读起。两页各自都是「离今天最近的排最前」。
+        """
+        return self.filter(
+            event_role__event__end_time__lte=now or local_now(),
+        ).order_by("-event_role__event__start_time")
 
 
 class Participation(ConstraintErrorFieldMixin, TimeStampedModel):

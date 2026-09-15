@@ -1,0 +1,63 @@
+{% comment %}
+「Add to calendar」（2026-09-14）。
+
+⚠️ **一排图标，不是一段说明**（用户当天定的：「只能是一个小图标，不要在页面上
+   写着很长一串字」）。⚠️ 但**那两句代价留着**，只是收成一行小字 ——
+   它们不是客套话：
+
+   🔴 下载的那一份带着稳定的 UID，再下一次是**更新**已有那一条；两条深链打开的是
+      一张新建草稿，日历自己发身份，**再点一次就多一条**。三颗键画成一样，等于
+      请人用一个会长出重复条目的东西去更新自己的日程。
+
+   一门课还多一层不对称：下载装得下全部讲次，深链一次只加一个事件。
+
+⚠️ `<details>` 而不是 JS 下拉（D24）：没有 JavaScript 时照样展得开。三个去处是三条
+   **链接**，不是要脚本才活的按钮。
+
+参数全部由 `views._calendar_links()` 给。
+{% endcomment %}
+<details class="mt-4">
+  <summary class="inline-flex cursor-pointer items-center gap-1.5 text-sm text-ink-700 hover:text-ink-900 dark:text-ink-200 dark:hover:text-ink-50">
+    <svg width="16" height="16" viewBox="0 0 20 20" fill="none" stroke="currentColor"
+         stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <rect x="3" y="4.5" width="14" height="12.5" rx="2"/>
+      <path d="M3 8.5h14"/><path d="M7 2.5v3M13 2.5v3"/>
+      <path d="M10 11v3.5M8.25 12.75h3.5"/>
+    </svg>
+    Add to calendar
+  </summary>
+
+  <div class="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-sm">
+    <a class="prose-link" href="{% url 'events:event_calendar' event.pk %}">
+      {% comment %}
+      ⚠️ 一门课上明写「All meetings」，因为它旁边那条只加一讲 —— 两条并排而措辞
+         一样的话，人点了哪一条都以为自己拿到了整学期。
+      {% endcomment %}
+      {% if calendar_is_part %}All meetings (.ics){% else %}Download (.ics){% endif %}
+    </a>
+    {% if calendar_is_part and calendar_one %}
+      <a class="prose-link" href="{% url 'events:session_calendar' calendar_next_pk %}">
+        Next meeting only
+      </a>
+    {% endif %}
+    {% if calendar_one %}
+      <a class="prose-link" href="{{ calendar_google }}" target="_blank" rel="noopener noreferrer">Google</a>
+      <a class="prose-link" href="{{ calendar_outlook }}" target="_blank" rel="noopener noreferrer">Outlook</a>
+    {% endif %}
+  </div>
+
+  {% comment %}
+  🔴 这一行是上面那几条链接的**代价**，不能省。少了它：一个上课的人以为自己把整
+     学期加进去了，而 Google 日历里只有一个晚上；而任何人重新点一次深链都会多出
+     一条重复的日程，还以为自己更新了原来那条。
+  ⚠️ 一行小字，不是一段 —— 这是「说清楚」和「不要一长串字」之间的那条线。
+  {% endcomment %}
+  <p class="mt-1.5 text-xs text-ink-600 dark:text-ink-300">
+    The file updates what you already have.
+    {% if calendar_one %}
+      Google and Outlook add one date{% if calendar_is_part %}
+      ({{ calendar_part_when|date:"D j M" }}){% endif %} and make a second entry
+      each time.
+    {% endif %}
+  </p>
+</details>

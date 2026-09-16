@@ -1499,6 +1499,19 @@ class DeletesInServicesAreEnumeratedGuardTests(TestCase):
         # Picture files, once the thing that owns them is over.
         "purge_event_image",
         "purge_series_image",
+        # 一门课上排错了的一讲（2026-09-16，D49）。
+        # 🔴 **签这一笔字的理由，写在这里而不只是在那个函数里**，因为这份名单
+        #    的整个价值就是「加一个名字的那一刻，有人得说清在毁掉什么」：
+        #      · 毁掉的是一条**安排**，不是一件发生过的事 —— 一个排错了的晚上
+        #        不是历史，它只是一行写错的日程；
+        #      · 真发生过的那一半**删不动**：`remove_session()` 先问
+        #        `register_kept_at()`，只要有人点过到或记过工时就当场拒绝。
+        #        ⚠️ 用的是那一个函数，不是另写一个判据 —— Django admin 的删除
+        #           权限问的也是它（`SessionAdmin.has_delete_permission`）。
+        #           两扇门，一条判据。
+        #      · 这也是这个项目里少数几处**真删行**而不是记结束日期的地方，
+        #        差别就在上面那一条：结束日期是给「发生过、现在停了」的东西的。
+        "remove_session",
     }
 
     def test_every_delete_in_the_service_layer_is_named(self):

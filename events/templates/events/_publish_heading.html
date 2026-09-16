@@ -1,0 +1,27 @@
+{% comment %}
+发布页的标题 —— **只有两个**（用户 2026-09-16 定的）：
+`Publish an Event` / `Publish a Program`。
+
+🔴 **它要画两遍，而两遍必须一字不差**：一遍在 `event_form.html` 上（整页请求），
+   一遍带着 `hx-swap-oob` 跟在 `_publish_when.html` 后面（点那三档单选那条路）。
+   ⚠️ 少了第②遍是一个看得见却想不到的 bug：这个 `<h1>` 在 `#when-block`
+      **外面**，而那次 HTMX 只换块内 —— 点「A course or program」，下面的格子
+      全换成了重复选择器，而标题一动不动。
+   ⚠️ 理由和 `_filter_summary.html` / `_event_count.html` 顶上那两段完全一样，
+      这是同一个形状的第四次。
+
+⚠️ **第三档（Every week）也叫 `Publish an Event`**，这是用户拍的板。
+   代价如实记：那一档建的是 `EventSeries`，不是 `Event` —— 所以这句标题在那一档
+   上说的是「你在发活动」这件事，而不是「这一页会存出一行 Event」。
+   两个标题比三个好记，而人来这一页要办的事确实只有两件：办一场（或一系列）
+   活动，或者开一门课。
+
+⚠️ `id` 必须和外面那一份一字不差，否则 OOB **静默失败**（htmx 不报错，
+   标题就是不变）。
+
+参数：building_a_program —— 真值则写 Program；oob —— 真值则带 `hx-swap-oob`。
+{% endcomment %}
+<h1 id="publish-heading" {% if oob %}hx-swap-oob="true"{% endif %}
+    class="text-2xl font-semibold">
+  {% if building_a_program %}Publish a Program{% else %}Publish an Event{% endif %}
+</h1>

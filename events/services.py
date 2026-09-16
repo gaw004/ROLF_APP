@@ -2857,10 +2857,15 @@ def add_session(event, *, start_time, end_time, source=Source.MANUAL):
     actually get called on a path that is not a ModelForm — D14's point being
     that a rule nothing calls is a rule nothing enforces.
 
-    ⚠️ Until L5.6 its only callers are tests. Said plainly rather than left to
-       be discovered: the generator that will schedule a whole course is the
-       reader this exists for, and it is three steps away. The admin does not
-       need it — a ModelForm calls `full_clean()` on its own.
+    ⚠️ **那句「Until L5.6 its only callers are tests」2026-09-16 作废了**
+       （D49）。它原来写着「the generator that will schedule a whole course is
+       the reader this exists for, and it is three steps away」—— 那个读者就是
+       `publish_program()`，而手工补一讲的那一页（`/events/<pk>/meetings/`）
+       是第二个。留着那句话比没有更糟：它说的那个「三步之外」已经到了。
+
+    ⚠️ The admin does not need it — a ModelForm calls `full_clean()` on its own
+       （见 `forms.SessionForm`，那是 admin 的门；站点那一侧走
+       `forms.MeetingForm` → 这里）。
     """
     session = Session(
         event=event, start_time=start_time, end_time=end_time, source=source)
@@ -2872,6 +2877,93 @@ def add_session(event, *, start_time, end_time, source=Source.MANUAL):
     # simply empty on the day, with nothing raising anywhere.
     open_registers_for(session.event, sessions=[session])
     return session
+
+
+@transaction.atomic
+def publish_program(event, *, moments, duration):
+    """一门课和它的全部讲次，一次落库。返回建好的那些 `Session`。D49。
+
+    ⭐ **这是 `add_session()` 等了三步的那个读者。** 那个函数的 docstring 从
+       L5.6 起写着「⚠️ Until L5.6 its only callers are tests… the generator that
+       will schedule a whole course is the reader this exists for」——
+       2026-09-16 起就是这里。
+
+    🔴 **顺序是死的：先把学期的两端写到活动上，再落讲次。**
+       `Session.clean()` 要求每一讲落在**它挂着的那场活动自己的两端之内**，
+       而一场刚建出来的课还没有两端 —— 倒过来做，第一讲当场被拒。
+
+    🔴 **两端是推出来的，不是问来的**（第一讲的开始、最后一讲的结束）。
+       问一遍就是同一件事有两个来源：有人把结束日期填在最后一讲之前，于是
+       `Session.clean()` 拒掉末尾几讲 —— 一个「我填了 12 次、只排出来 9 次」
+       的页面，而它不报错。
+
+    ⚠️ 每一讲的结束时刻按 **UTC 相加**，不在墙钟上加。逐字同
+       `generate_occasions()` 那一段：`moment + duration` 在一个带时区的
+       datetime 上保留 tzinfo 且不重新归一化，于是夏令时那天一场两小时的活动
+       会算成一小时 —— 而 `duration` 说的是「持续多久」，墙钟只决定它什么时候
+       开始。
+
+    ⚠️ **一个事务。** 半生成的课是一个有起止日期、只排了三讲的壳，
+       而它在每一页上都看起来正常。
+
+    ⚠️ 逐个走 `add_session()`，**不 `bulk_create`**：绕过去就绕过了
+       `full_clean()`，也就绕过了 `Session.clean()` 那三条规则（D14 的原话是
+       「一条没人调的规则就是一条没在执行的规则」）。
+       ⚠️ 它顺带调的 `open_registers_for()` 在这里是空转 —— 一门刚发布的课
+       还没有人报名。无害，而且**必须留着**：手工补一讲走的是同一个函数，
+       那时它就不是空转了。
+
+    ⚠️ 不碰 `rule`。课上没有那一列，而这是有意的：规则在这里用一次就扔，
+       之后没有第二个读者（D49）。
+    """
+    event.start_time = moments[0]
+    # ⚠️ `astimezone(utc)` 之后再加，见上面那段。
+    event.end_time = (
+        moments[-1].astimezone(datetime.timezone.utc) + duration)
+    event.full_clean()
+    event.save()
+    return [
+        add_session(
+            event,
+            start_time=moment,
+            end_time=moment.astimezone(datetime.timezone.utc) + duration,
+            # ⚠️ `GENERATED`，不是 `MANUAL`：这些讲次是一条规则铺出来的，
+            #    而「谁排的」是 Meetings 页要显示的东西 —— 手工补的那一讲
+            #    在那一页上该看得出是手工补的。
+            source=Source.GENERATED,
+        )
+        for moment in moments
+    ]
+
+
+def remove_session(session):
+    """把一讲从课上去掉 —— 除非它上面有人来过。D49。
+
+    🔴 **拒绝的判据是现成的 `register_kept_at()`，这里不另写一个。**
+       它的 docstring 记着上一版（`hours_recorded_at`）为什么不够：一个人
+       **来了但不记工时**的场合（决定 20 / `ParticipationRole.Nature` 的
+       `attending` 那一半）它完全看不见，于是一门十二个学生全部点到的课，
+       那个函数报 `""`，删除键是亮的 —— 按下去带走整个点名册。
+       ⚠️ 那一处是 Django admin 的删除权限，这一处是站点上的按钮。
+          **两扇门，一条判据** —— 各写一份的话，迟早只有一扇挡得住。
+
+    ⚠️ **真删行，不是记一个结束日期。** 这一条和这个项目「结束是一个日期，
+       不是一次删除」的通则**不一样**，而差别是真的：一个排错了的晚上不是
+       一件发生过的事，它只是一条写错的安排。真发生过的（有人点到、有人记了
+       工时）正是上面那条拒绝拦着的东西。
+
+    ⚠️ **不动课本身的两端。** 删掉最后一讲之后，学期的结束日期照旧停在原处 ——
+       那是这门课**招生时说的**日期，不是「最后一次上课」的同义词。要改它走
+       编辑页，而那条路会把人送到通知页（报名的人需要知道）。
+
+    抛 `ValidationError`，由调用方决定怎么说。
+    """
+    kept = register_kept_at(session)
+    if kept:
+        raise ValidationError(
+            f"That meeting has {kept} on it. Clear the register first — "
+            "removing it would take the attendance with it.")
+    session.delete()
 
 
 #: The signup statuses whose holder is still expected at the meetings ahead.

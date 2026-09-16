@@ -8,6 +8,7 @@ reaching into a request. Phase C's views construct the same classes unchanged.
 import datetime
 
 from django import forms
+from django.forms.forms import DeclarativeFieldsMetaclass
 from django.utils.text import get_text_list
 from django.core.exceptions import ValidationError
 from django.conf import settings
@@ -15,7 +16,7 @@ from django.db.models import Q
 
 from contact.models import Contact, EmergencyContact, RelationshipType
 from core.images import decode_complaint_for, is_new_upload
-from core.limits import LONG_TEXT, PHONE, SEARCH
+from core.limits import LONG_TEXT, PHONE, SEARCH, SHORT_TEXT
 from core.timeutils import day_start
 from django.utils.timezone import localtime
 from org.audience import Audience
@@ -28,6 +29,7 @@ from . import schedule
 #    rather than spelling RRULE here: that module owns the syntax, and a
 #    second speller of it is how the preview and the save start disagreeing.
 from .recurrence import (
+    BATCH_CEILING,
     MAX_INTERVAL,
     MONTHLY,
     ORDINALS,
@@ -35,6 +37,7 @@ from .recurrence import (
     WEEKLY,
     compose,
     decompose,
+    occasions,
 )
 from .models import (
     NARROWING_MESSAGE,
@@ -1039,50 +1042,39 @@ class DurationBoxes(forms.MultiWidget):
             return ":".join(str(part or "") for part in (hours, minutes, seconds))
 
 
-class EventSeriesForm(PublishFormMixin, forms.ModelForm):
-    """Publish a repeat rule — the third of the three shapes. L5.8a.
+class RecurrencePickerMixin(metaclass=DeclarativeFieldsMetaclass):
+    """「多久一次」那一块 —— 九个控件写一条 RRULE（2026-09-16 抽出来）。
 
-    ⭐ The same screen as `EventForm` and deliberately so (decision 32): a
-       publisher answers one question — "what am I putting on?" — and there are
-       three answers. Ten of the eleven things this asks are identical to the
-       other two shapes and come from `PublishFormMixin`; only the block below
-       differs, because only *when* differs.
+    🔴 **那个 `metaclass=` 不是装饰，少了它这九格会被整个丢掉。**
+       Django 收集表单字段时，只从「自己的类体」和**带 `declared_fields` 的
+       基类**里取 —— 一个普通 mixin 两样都不是，于是它身上的
+       `forms.ChoiceField(...)` 只是一个普通的类属性，`self.fields` 里一个都没有。
+       ⚠️ 这一条是抽取当天实测撞上的：62 条测试同时红在
+          `ValueError: 'EventSeriesForm' has no field named 'repeat_weekdays'`。
+          **而它之所以吵，纯属运气** —— `clean()` 里恰好有一句
+          `add_error("repeat_weekdays", …)`，Django 对着一个不存在的字段名会抛。
+          没有那一句的话，这九格会安安静静地不出现在页面上，也不参与校验。
+       ⚠️ 旁边的 `PublishFormMixin` **不需要**这个，因为它一个字段都不声明 ——
+          它只有方法。差别在这里，不在「谁是 mixin」。
 
-    ⚠️ The two forms are never both constructed for one request. The view reads
-       `publish_as` and builds one of them from the same POST, so `start_time`
-       meaning a `datetime` on one and a `time` on the other cannot collide —
-       said out loud because it reads like a trap.
+    ⭐ **两张表单共用，而它们存的东西完全不同。** `EventSeriesForm` 把这条规则
+       存进 `EventSeries.rule` 一列，往后每年滚着生成场次；`ProgramForm` 用它
+       **一次**就扔 —— 一门课把规则展开成一串 `Session` 之后，那个字符串就没有
+       第二个读者了（D48b / D49）。共用的是「怎么问」，不是「存不存」。
 
-    ⚠️ No `end_time`, and that is the whole shape of the difference: a rule does
-       not happen at a moment, it happens repeatedly for a length. `duration` is
-       how long each occasion lasts; `Event.end_time` is worked out from it when
-       an occasion is generated (in absolute time — see
-       `services.generate_occasions`).
+    ⚠️ **整块是搬过来的，不是重写的**（原本长在 `EventSeriesForm` 上）。写下来
+       是因为「抽出去之后悄悄改变了原来那张表单」是最贵的那种重构 ——
+       `PublishFormMixin` 自己的 docstring 为同一件事写过一段。
+       验收方式是那一次提交里 `events/tests.py` 关于系列的断言一条都没改。
+
+    ⚠️ 用它的表单必须有 `rule` / `starts_on` / `start_time` / `duration` 四格。
+       `rule` **故意不在这里声明**：`EventSeriesForm` 的那一格从 `Meta.fields`
+       来（带着模型的 `max_length` 和 `help_text`），而 Django 里**声明字段压过
+       Meta** —— 在这里声明一个 `rule` 会把它悄悄换掉。
     """
 
-    # ⚠️ The same field object as `EventForm`'s, taken rather than retyped:
-    #    the three choices and their wording are one list, and a publisher who
-    #    submits a bad rule comes back to a page where "every week" is still
-    #    the selected option.
-    publish_as = EventForm.base_fields["publish_as"]
-
-    #: ⚠️ `start_time` is on both lists and is **not** the same field: a moment
-    #:    on `EventForm`, a time of day here. Harmless because the two forms are
-    #:    never both built for one request — written down because it reads like
-    #:    a trap.
-    WHEN_FIELDS = (
-        "repeat_mode", "repeat_every", "repeat_weekdays",
-        "repeat_ordinals", "repeat_weekday",
-        "ends_kind", "ends_after", "ends_on",
-        "use_advanced", "rule",
-        "starts_on", "start_time", "duration",
-    )
-
-    #: ⭐ True, unlike `EventForm`'s. The picker below is a **block** — which
-    #:    boxes to ask depends on the mode — so it has to be hand-drawn on the
-    #:    rule's own page as well as on the publish page. `EventForm`'s two
-    #:    moments are flat fields and stay flat when editing.
-    WHEN_BLOCK_ON_EDIT = True
+    #: 那一格底下那句话。⚠️ 子类必须给，因为名词不一样（场次／讲）。
+    START_TIME_HELP = ""
 
     # --- the picker (2026-09-11) -------------------------------------------
     #
@@ -1159,15 +1151,24 @@ class EventSeriesForm(PublishFormMixin, forms.ModelForm):
         #    on the two publisher pages without a migration for a sentence.
         #    The admin does not show it, and that is the right audience: this
         #    is advice about the picker, and the admin has no picker.
-        self.fields["start_time"].help_text = (
-            "Every occasion starts at this time, and runs for the same length. "
-            "Tuesdays at 19:00 and Thursdays at 10:00 is two rules, not one."
-        )
+        # ⚠️ 措辞由子类给（`START_TIME_HELP`）：一条规则排的是「每一场」，
+        #    一门课排的是「每一讲」，而这句话是写给正在填那一格的人看的。
+        #    ⚠️ 中间那半句（几点开始 + 开多久 + 多个星期几是两条规则）两边一字
+        #       不差，所以它在这里只有一份 —— 分成两份的话，哪天改了措辞，
+        #       只有其中一页会改。
+        self.fields["start_time"].help_text = self.START_TIME_HELP
         # ⚠️ 模型上那句说明写的是「written hours:minutes:seconds — 2:00:00 for
         #    two hours」，而它描述的是一格**已经不存在**的输入框。三个格子之后
         #    那句话不再需要，留着它比没有更糟 —— 页面上找不到它说的那个东西。
         self.fields["duration"].help_text = ""
-        self._fill_the_picker_from(self.initial.get("rule") or self.instance.rule)
+        # ⚠️ `getattr`，因为 `rule` **只有 `EventSeries` 是一列**（2026-09-16
+        #    抽 mixin 时撞上的）。课那一侧它是表单自己的一格，实例上没有它 ——
+        #    写死 `self.instance.rule` 会在构造 `ProgramForm` 时当场
+        #    `AttributeError`。⚠️ 默认给 `""` 而不是 `None`：下面那句
+        #    `if ... or not rule` 对两者都成立，但空串说的是「没有存着的规则」，
+        #    而 `None` 读起来像「不知道」。
+        self._fill_the_picker_from(
+            self.initial.get("rule") or getattr(self.instance, "rule", ""))
 
     def _fill_the_picker_from(self, rule):
         """Set the picker's controls from an existing rule string.
@@ -1257,7 +1258,7 @@ class EventSeriesForm(PublishFormMixin, forms.ModelForm):
             picker_is_answered = False
 
         if picker_is_answered:
-            cleaned["rule"] = self._rule_for(compose(
+            cleaned["rule"] = self.rule_to_store(compose(
                 mode=mode, every=cleaned.get("repeat_every") or 1,
                 weekdays=cleaned.get("repeat_weekdays") or [],
                 ordinals=cleaned.get("repeat_ordinals") or [],
@@ -1265,8 +1266,229 @@ class EventSeriesForm(PublishFormMixin, forms.ModelForm):
                 count=count, until=until))
         return cleaned
 
-    def _rule_for(self, composed):
+    def rule_to_store(self, composed):
+        """拼好的规则最终写成什么 —— 默认就是它本身。
+
+        ⭐ 这是一个**钩子**，存在的唯一理由是 `EventSeriesForm` 要覆写它：
+           那张表单上 `rule` 是一**列**，而列一变就会撞上
+           `_refuse_rewriting_the_rule()`。一门课没有那一列，所以拼出来的
+           字符串直接就是答案。
+        """
+        return composed
+
+
+class MeetingForm(forms.ModelForm):
+    """手工补一讲 —— Meetings 页上那张小表单。D49。
+
+    ⚠️ **不是下面那个 `SessionForm`**，而两张并存是有意的（2026-09-16 撞了一次
+       重名才写下来）：那一张是 **admin 的门**，带着 `event` 和 `source` 两格，
+       并且在 `save()` 里自己开点名册 —— 因为 `ModelAdmin` 那条路不经过
+       `services.add_session()`。这一张是**站点的门**，它把活儿交给
+       `add_session()`，于是那两格在这里没有位置：
+         · 「哪一门课」由地址决定（`/events/<pk>/meetings/`）——
+           一个能指向别的课的下拉，就是一条要在视图里再判一次权限的路，
+           而那一处判断迟早和页面那一处走散（同 D27 那条不变量）；
+         · 「谁排的」由这条路本身回答：从这一页来的一律是 `MANUAL`。
+
+    ⚠️ 落在学期之外的拒绝**不写在这里**：那是 `Session.clean()` 的规矩
+       （「This run ends on …，所以一讲不能超过它」），而 `_post_clean()` 会
+       原样把它搬到这张表单上。在这里再写一句，就是同一条规则有两种说法。
+    """
+
+    class Meta:
+        model = Session
+        fields = ["start_time", "end_time"]
+        widgets = {
+            "start_time": forms.DateTimeInput(attrs={"type": "datetime-local"}),
+            "end_time": forms.DateTimeInput(attrs={"type": "datetime-local"}),
+        }
+
+
+class ProgramForm(RecurrencePickerMixin, EventForm):
+    """发布一门课 —— 三档里的第二档，2026-09-16 才真的能排时间（D49）。
+
+    🔴 **它和 `EventSeriesForm` 用同一个选择器，产出的东西却完全不同**，
+       而这正是决定 16 那张表的第四格：
+
+         · 一条 series 产出 **N 个互相独立的 `Event`**，每一场各自报名；
+         · 一门课是 **一个 `Event` + N 个 `Session`**，报一次管一学期。
+
+       所以这里**不存 `rule`**：规则在发布那一下展开成一串讲次，之后就没有第二
+       个读者了（不滚动生成、不续排）。存下来就是「这门课什么时候上」有两个
+       答案，而 D14 的整个要点是它只许有一个。
+
+    🔴 **学期的两端不问，从生成出来的第一讲和最后一讲推**（见
+       `services.publish_program()`）。问了就是同一件事有两个来源：有人把结束
+       日期填到最后一讲之前，而 `Session.clean()` 会拒掉最后那几讲 —— 一个
+       「我明明填了 12 次，只排出来 9 次」的页面。
+
+    ⚠️ `start_time` 在这张表单上是一个**时刻**（每讲几点开始），在 `EventForm`
+       上是一个**瞬间**。和 `EventSeriesForm` 撞的是同一个名字、同一个理由：
+       视图读 `publish_as` 只建其中一张，两张永不同时构造。
+    """
+
+    #: ⚠️ 名词跟着页面走：这一页排的是「每一讲」。中间那半句和系列页一字不差，
+    #:    而那一半只写在 `RecurrencePickerMixin` 上（见它的注释）。
+    START_TIME_HELP = (
+        "Every meeting starts at this time, and runs for the same length. "
+        "Tuesdays at 19:00 and Thursdays at 10:00 is two courses, not one."
+    )
+
+    class Meta(EventForm.Meta):
+        #: ⚠️ **减掉那两格**（`start_time` / `end_time`），因为它们是推出来的。
+        #:    从 `EventForm.Meta.fields` 里减，不重抄一份 —— 重抄的话，
+        #:    以后给发布页加一格，只有两张表单里的一张会长出来。
+        fields = [f for f in EventForm.Meta.fields
+                  if f not in {"start_time", "end_time"}]
+        #: ⚠️ 跟着减掉那两个 widget，否则 Django 会为一个不在 `fields` 里的
+        #:    名字准备 `datetime-local`，而这一页的 `start_time` 是时刻。
+        widgets = {k: v for k, v in EventForm.Meta.widgets.items()
+                   if k not in {"start_time", "end_time"}}
+
+    #: 这一块由发布页自己画（`_publish_when.html` 的第三支）。
+    #: ⚠️ 和模板必须逐字对上：多列一个名字那一格**消失**，少列一个它被画
+    #:    **两遍**（后一个空输入覆盖前一个）。`NoFieldIsDrawnTwiceTests` 盯着。
+    WHEN_FIELDS = (
+        "repeat_mode", "repeat_every", "repeat_weekdays",
+        "repeat_ordinals", "repeat_weekday",
+        "ends_kind", "ends_after", "ends_on",
+        "use_advanced", "rule",
+        "starts_on", "start_time", "duration",
+        "people_pick_meetings",
+    )
+
+    #: ⚠️ `rule` 在这里**是表单自己的一格**，不是列。`RecurrencePickerMixin`
+    #:    故意不声明它（那会把 `EventSeriesForm` 从 `Meta` 来的那一格悄悄换掉），
+    #:    所以两张表单各自提供。
+    rule = forms.CharField(
+        required=False, max_length=SHORT_TEXT,
+        label="Repeat rule",
+        help_text="RRULE syntax, e.g. FREQ=WEEKLY;BYDAY=WE;COUNT=12")
+    starts_on = forms.DateField(
+        widget=forms.DateInput(attrs={"type": "date"}),
+        label="First meeting")
+    #: ⚠️ 覆盖 `EventForm` 那一格（它是 `datetime-local` 的瞬间）。这里只问
+    #:    钟点 —— 哪一天由 `starts_on` 和规则决定。
+    start_time = forms.TimeField(
+        widget=forms.TimeInput(attrs={"type": "time"}),
+        label="Each meeting starts at")
+    #: ⚠️ 走 `DurationBoxes`（时:分:秒三格），连那条「`2` 被 `DurationField`
+    #:    读成两秒」的陷阱一起躲掉 —— 理由整段写在那个 widget 上。
+    duration = forms.DurationField(
+        widget=DurationBoxes, label="Each meeting lasts")
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # 🔴 **「不结束」那一档在课上不存在，而理由是硬的**：`Event.end_time`
+        #    是 `NOT NULL`，而它由**最后一讲**推出来 —— 一条不结束的规则没有
+        #    最后一讲。不是「对课没意义」，是存不下来。
+        # ⚠️ 改 `choices` 而不是另写一个字段：`_recurrence_picker.html` 里那句
+        #    `{% for option in form.ends_kind %}` 因此自动只画两档，模板一个字
+        #    不用改，而伪造一个 `ends_kind=never` 会被 `ChoiceField` 当场拒掉。
+        self.fields["ends_kind"].choices = [
+            (value, label) for value, label in self.fields["ends_kind"].choices
+            if value != "never"]
+
+    def clean(self):
+        """把规则**当场展开一次**，而这一次就是保存要用的那一份。
+
+        🔴 **不许另算第二遍。** 页面上那份预览、这里的校验、和
+           `services.publish_program()` 真正落库的那一串，必须是同一个列表 ——
+           各算一遍的结果是「页面说 12 讲，按下去排了 13 讲」，而两边各自都
+           渲染正常。所以展开的结果留在 `cleaned_data["moments"]` 里交出去。
+
+        ⚠️ 「写规则我自己来」那一档的校验**就是这次展开**。系列那边靠
+           `EventSeries.clean()`（`rule` 在那儿是一列，模型判得了它）；
+           课没有那张表，所以这里是它唯一的把关处。
+        """
+        cleaned = super().clean()
+        rule = cleaned.get("rule")
+        starts_on = cleaned.get("starts_on")
+        start_time = cleaned.get("start_time")
+        # ⚠️ 三格缺一就不展开，而**不报第二遍错**：缺的那一格自己已经说了
+        #    「这一格是必填的」，在这里再说一句是同一件事的两种说法。
+        if not (rule and starts_on and start_time):
+            return cleaned
+        try:
+            moments = occasions(rule, starts_on=starts_on, start_time=start_time,
+                                limit=BATCH_CEILING + 1)
+        except (ValidationError, ValueError) as complaint:
+            # ⚠️ 落在 `rule` 上：那是唯一可能写错的那一格（选择器拼出来的
+            #    字符串走不到这里 —— 它拼得出来就一定展得开）。
+            self.add_error("rule", f"That rule cannot be read: {complaint}")
+            return cleaned
+        if not moments:
+            self.add_error("rule", "That rule does not fall on any date.")
+            return cleaned
+        if len(moments) > BATCH_CEILING:
+            # ⚠️ 措辞照 `services.generate_occasions()` 那一句，因为它拦的是
+            #    同一件事的同一个上限。
+            self.add_error("ends_after", (
+                f"That is more than {BATCH_CEILING} meetings. Nothing was "
+                "scheduled — shorten the course and try again."))
+            return cleaned
+        cleaned["moments"] = moments
+        return cleaned
+
+
+class EventSeriesForm(RecurrencePickerMixin, PublishFormMixin, forms.ModelForm):
+    """Publish a repeat rule — the third of the three shapes. L5.8a.
+
+    ⭐ The same screen as `EventForm` and deliberately so (decision 32): a
+       publisher answers one question — "what am I putting on?" — and there are
+       three answers. Ten of the eleven things this asks are identical to the
+       other two shapes and come from `PublishFormMixin`; only the block below
+       differs, because only *when* differs.
+
+    ⚠️ The two forms are never both constructed for one request. The view reads
+       `publish_as` and builds one of them from the same POST, so `start_time`
+       meaning a `datetime` on one and a `time` on the other cannot collide —
+       said out loud because it reads like a trap.
+
+    ⚠️ No `end_time`, and that is the whole shape of the difference: a rule does
+       not happen at a moment, it happens repeatedly for a length. `duration` is
+       how long each occasion lasts; `Event.end_time` is worked out from it when
+       an occasion is generated (in absolute time — see
+       `services.generate_occasions`).
+    """
+
+    # ⚠️ The same field object as `EventForm`'s, taken rather than retyped:
+    #    the three choices and their wording are one list, and a publisher who
+    #    submits a bad rule comes back to a page where "every week" is still
+    #    the selected option.
+    publish_as = EventForm.base_fields["publish_as"]
+
+    #: ⚠️ 逐字保留 2026-09-11 那句 —— 一条规则排的是「每一场」。
+    START_TIME_HELP = (
+        "Every occasion starts at this time, and runs for the same length. "
+        "Tuesdays at 19:00 and Thursdays at 10:00 is two rules, not one."
+    )
+
+    #: ⚠️ `start_time` is on both lists and is **not** the same field: a moment
+    #:    on `EventForm`, a time of day here. Harmless because the two forms are
+    #:    never both built for one request — written down because it reads like
+    #:    a trap.
+    WHEN_FIELDS = (
+        "repeat_mode", "repeat_every", "repeat_weekdays",
+        "repeat_ordinals", "repeat_weekday",
+        "ends_kind", "ends_after", "ends_on",
+        "use_advanced", "rule",
+        "starts_on", "start_time", "duration",
+    )
+
+    #: ⭐ True, unlike `EventForm`'s. The picker below is a **block** — which
+    #:    boxes to ask depends on the mode — so it has to be hand-drawn on the
+    #:    rule's own page as well as on the publish page. `EventForm`'s two
+    #:    moments are flat fields and stay flat when editing.
+    WHEN_BLOCK_ON_EDIT = True
+
+
+    def rule_to_store(self, composed):
         """The composed rule — or the stored one, when they mean the same thing.
+
+        ⚠️ 2026-09-16 起这是 `RecurrencePickerMixin.rule_to_store()` 的覆写
+           （原名 `_rule_for`）。**只有这张表单需要它**，理由就是下面这一段：
+           `rule` 在这里是一**列**。
 
         🔴 **Without this, opening a series and saving anything at all can lock
            the publisher out of it.** `compose()` writes one canonical spelling,

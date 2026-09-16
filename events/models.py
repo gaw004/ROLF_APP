@@ -897,15 +897,14 @@ class Event(PostalAddressMixin, Audience, ConstraintErrorFieldMixin, TimeStamped
            fourth cell of decision 16's table: an event you click in week three
            and find you have signed up for all twelve.
 
-           🔴 **And it is not on the publish form yet.** Decision 21 asks for a
-              three-way radio there; L5.4 built the generator and the admin
-              door, and never went back to `EventForm`. So the foundation's own
-              sentence — "可以让 admin **选**…", a choice offered to a
-              publisher — is not offered to any publisher today: building a
-              series is superuser-only, through the admin. Written down as a
-              gap in participants.md §9 with L5.8 as its restart condition,
-              because this docstring claimed the opposite for a day and a
-              requirements review caught it.
+           ⚠️ **这一段 2026-09-11（L5.8a）和 2026-09-16（D49）两次作废了。**
+              它原来写着「And it is not on the publish form yet」—— 那时三档
+              单选只有前两档能真的用，建一条规则是超级用户在 admin 里的事。
+              现在：第三档 L5.8a 起在发布页上（`EventSeriesForm`），
+              而**第二档（课）D49 起才真的排得出讲次** —— 在那之前它发得出
+              一个有起止日期、一讲都没有的壳。
+              ⚠️ 留着原话比没有更糟：它描述的是一个已经不存在的缺口，而读它的
+                 人会去找一个不需要再补的洞。
 
         ⚠️ Why a column at all, rather than asking `sessions.exists()`. Two
            reasons, and they answer **classification**, which is a different

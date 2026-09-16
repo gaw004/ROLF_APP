@@ -36,6 +36,16 @@
   {% if can_manage %}
     {% include "events/_event_nav_link.html" with label="Edit &amp; Roles" to="events:event_update" name="edit" %}
   {% endif %}
+  {% comment %}
+  ⚠️ Meetings 只对**课**画，而且只给管得了这场活动的人（2026-09-16，D49）。
+     两个条件都不能少：那一页对一场单场活动答 404，对管不了的人 403 ——
+     两种情况下画出来的都是一个拒绝点它的人的链接，读起来是「站坏了」
+     而不是「这一页不归你」。上面 Edit / Notify 那两格跟的是同一条。
+  ⚠️ 排在 Signups 前面：排课表是「这门课长什么样」，而报名是它的后果。
+  {% endcomment %}
+  {% if can_manage and event.shape == "program" %}
+    {% include "events/_event_nav_link.html" with label="Meetings" to="events:event_meetings" name="meetings" %}
+  {% endif %}
   {% include "events/_event_nav_link.html" with label="Signups" to="events:event_registrations" name="registrations" %}
   {% include "events/_event_nav_link.html" with label="Attendance" to="events:event_attendance" name="attendance" %}
   {% include "events/_event_nav_link.html" with label="Report" to="events:event_report" name="report" %}

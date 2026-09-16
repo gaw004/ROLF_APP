@@ -218,6 +218,7 @@ def a_weekday(weekday, *, near):
 
 
 TUESDAY = 1
+WEDNESDAY = 2
 THURSDAY = 3
 
 
@@ -23049,3 +23050,405 @@ class ShapeFilterTests(PageTestCase):
     def test_the_report_sentence_is_untouched(self):
         """🔴 报表页不传 `by_shape`，所以那句印在正文上的话一个字没变。"""
         self.assertNotIn("kind", EventPeriodForm().fields)
+
+
+class ProgramPublishTests(PageTestCase):
+    """发布一门课，连讲次一起排出来（2026-09-16，D49）。
+
+    ⭐ **在这之前这一档是半个功能**：发布页给得出「A course or program —
+       sign up once」，而全站**没有一条 URL 到得了 `services.add_session()`**
+       —— 那个函数的 docstring 自己写着「⚠️ Until L5.6 its only callers are
+       tests」。发出来的是一个有起止日期、一讲都没有的壳。
+
+    ⚠️ 这一组和 `RecurrencePickerTests` 共用同一个选择器，但断言的是**另一件
+       事**：那边验「这九格拼出什么规则」，这边验「那条规则铺出什么讲次」。
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.login(self.zhang)
+        self.next_wednesday = a_weekday(
+            WEDNESDAY, near=local_today() + datetime.timedelta(days=7))
+
+    def payload(self, **overrides):
+        return {
+            "publish_as": Event.Shape.PROGRAM,
+            "name": "Spring ESL", "ministry": self.pantry.pk,
+            "repeat_mode": "weekly", "repeat_every": "1",
+            "repeat_weekdays": ["WE"],
+            "ends_kind": "count", "ends_after": "12",
+            "starts_on": self.next_wednesday.isoformat(),
+            "start_time": "19:00",
+            "duration_0": "2", "duration_1": "0", "duration_2": "0",
+            "status": Event.Status.OPEN, "visible_to_outsiders": True,
+            **overrides,
+        }
+
+    def published(self):
+        return Event.objects.get(name="Spring ESL")
+
+    # --- 它排出来的东西 ----------------------------------------------------
+
+    def test_one_event_and_twelve_meetings(self):
+        """⭐ 这一条就是这一批要的东西本身。"""
+        response = self.client.post(reverse("events:event_create"), self.payload())
+        self.assertEqual(response.status_code, 302)
+        course = self.published()
+        self.assertEqual(course.shape, Event.Shape.PROGRAM)
+        self.assertEqual(course.sessions.count(), 12)
+
+    def test_the_meetings_are_a_week_apart_at_the_time_that_was_asked_for(self):
+        self.client.post(reverse("events:event_create"), self.payload())
+        meetings = list(self.published().sessions.all())
+        for earlier, later in zip(meetings, meetings[1:]):
+            self.assertEqual(local_date_of(later.start_time)
+                             - local_date_of(earlier.start_time),
+                             datetime.timedelta(days=7))
+        self.assertEqual(
+            {timezone.localtime(m.start_time).strftime("%H:%M") for m in meetings},
+            {"19:00"})
+
+    def test_the_term_is_derived_from_the_first_and_last_meeting(self):
+        """🔴 学期的两端**不问**，从排出来的讲次推。
+
+        问一遍就是同一件事有两个来源：有人把结束日期填在最后一讲之前，于是
+        `Session.clean()` 拒掉末尾几讲 —— 一个「我填了 12 次、只排出来 9 次」
+        的页面，而它不报错。
+        """
+        self.client.post(reverse("events:event_create"), self.payload())
+        course = self.published()
+        meetings = list(course.sessions.all())
+        self.assertEqual(course.start_time, meetings[0].start_time)
+        self.assertEqual(course.end_time, meetings[-1].end_time)
+
+    def test_the_form_does_not_even_ask_for_the_term(self):
+        """⚠️ 上面那一条钉的是结果，这一条钉的是**没有那两格可填** ——
+           少了它，哪天有人把那两格加回来，上面那条仍然绿（它只比对推出来的值）。
+        """
+        page = self.client.get(
+            reverse("events:event_create") + f"?publish_as={Event.Shape.PROGRAM}")
+        self.assertNotIn("end_time", page.context["form"].fields)
+
+    def test_every_meeting_lasts_what_was_asked_for(self):
+        """⚠️ 结束时刻按 UTC 相加，不在墙钟上加 —— 夏令时那天两者差一小时，
+           而 `duration` 说的是「持续多久」。同 `generate_occasions()` 那一段。
+        """
+        self.client.post(reverse("events:event_create"), self.payload())
+        for meeting in self.published().sessions.all():
+            self.assertEqual(meeting.duration, datetime.timedelta(hours=2))
+
+    def test_the_register_is_opened_for_each_meeting_later(self):
+        """⚠️ 走 `add_session()` 而不是 `bulk_create`，所以 `Session.clean()`
+           那三条规则照常生效。这一条验的是那条路真的走了：每一讲都落在学期
+           之内（那是 `clean()` 里的规矩，`bulk_create` 会绕过它）。
+        """
+        self.client.post(reverse("events:event_create"), self.payload())
+        course = self.published()
+        for meeting in course.sessions.all():
+            self.assertGreaterEqual(meeting.start_time, course.start_time)
+            self.assertLessEqual(meeting.end_time, course.end_time)
+
+    # --- 说出来的数字和排出来的数字是同一个 --------------------------------
+
+    def test_the_message_says_how_many_meetings(self):
+        """⚠️ 人填的是一条规则，而规则和它铺出来的东西之间隔着一次展开 ——
+           那个数字是他唯一能当场核对的凭据。
+        """
+        response = self.client.post(
+            reverse("events:event_create"), self.payload(), follow=True)
+        self.assertContains(response, "12 meetings")
+
+    def test_the_preview_and_the_save_agree(self):
+        """🔴 **页面说几讲，按下去就是几讲。**
+
+        预览和保存各算一遍的结果是「页面说 12 讲、按下去排了 13 讲」，
+        而两边各自都渲染正常。所以展开只有一处（`ProgramForm.clean()`），
+        这一条用**同一份 POST** 比两边的数。
+        """
+        body = self.payload()
+        preview = self.client.post(reverse("events:program_preview"), body)
+        shown = len(preview.context["moments"])
+        self.client.post(reverse("events:event_create"), body)
+        self.assertEqual(shown, self.published().sessions.count())
+
+    # --- 「不结束」那一档在课上不存在 --------------------------------------
+
+    def test_never_is_not_offered(self):
+        """🔴 理由是硬的：`Event.end_time` 是 `NOT NULL`，而它由最后一讲推出来
+           —— 一条不结束的规则没有最后一讲。不是「对课没意义」，是存不下来。
+        """
+        page = self.client.get(
+            reverse("events:event_create") + f"?publish_as={Event.Shape.PROGRAM}")
+        offered = [value for value, _ in
+                   page.context["form"].fields["ends_kind"].choices]
+        self.assertEqual(offered, ["count", "on"])
+
+    def test_a_forged_never_is_refused(self):
+        """⚠️ 收窄下拉是界面，拒掉提交才是门 —— 两件事，都要有。"""
+        self.client.post(reverse("events:event_create"),
+                         self.payload(ends_kind="never", ends_after=""))
+        self.assertFalse(Event.objects.filter(name="Spring ESL").exists())
+
+    def test_the_series_still_offers_never(self):
+        """⚠️ 收窄的只有课那一档。少了这一条，上面两条用一句「谁都没有 never」
+           也能满足 —— 而系列那一边 2026-09-11 特地加了它（L5.9）。
+        """
+        page = self.client.get(reverse("events:event_create") + "?publish_as=series")
+        offered = [value for value, _ in
+                   page.context["form"].fields["ends_kind"].choices]
+        self.assertIn("never", offered)
+
+    # --- 拒绝 --------------------------------------------------------------
+
+    def test_a_rule_that_cannot_be_read_lands_on_the_rule_box(self):
+        """⚠️ 「写规则我自己来」那一档的校验**就是那次展开**：系列那边靠
+           `EventSeries.clean()`（`rule` 在那儿是一列），课没有那张表。
+        """
+        response = self.client.post(reverse("events:event_create"), self.payload(
+            use_advanced=True, rule="this is not a rule"))
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("rule", response.context["form"].errors)
+        self.assertFalse(Event.objects.filter(name="Spring ESL").exists())
+
+    def test_too_many_meetings_is_refused_and_nothing_is_written(self):
+        """⚠️ 一个事务：半生成的课是一个有起止日期、只排了三讲的壳，
+           而它在每一页上都看起来正常。
+        """
+        response = self.client.post(reverse("events:event_create"),
+                                    self.payload(ends_after=str(BATCH_CEILING + 5)))
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(Event.objects.filter(name="Spring ESL").exists())
+        self.assertEqual(Session.objects.filter(event__name="Spring ESL").count(), 0)
+
+    # --- 标题 --------------------------------------------------------------
+
+    def test_the_page_is_called_publish_a_program(self):
+        page = self.client.get(
+            reverse("events:event_create") + f"?publish_as={Event.Shape.PROGRAM}")
+        self.assertContains(page, "Publish a Program")
+
+    def test_switching_to_a_course_swaps_the_heading_too(self):
+        """🔴 那个 `<h1>` 在 `#when-block` **外面**，而换档那一趟 HTMX 只换块内
+           —— 少了那份 `hx-swap-oob`，点「A course or program」之后下面的格子
+           全换成了重复选择器，而标题一动不动。
+        """
+        html = self.client.post(
+            reverse("events:publish_when"),
+            {"publish_as": Event.Shape.PROGRAM}).content.decode()
+        self.assertIn('id="publish-heading"', html)
+        self.assertIn("hx-swap-oob", html)
+        self.assertIn("Publish a Program", html)
+
+    def test_every_week_is_still_called_publish_an_event(self):
+        """⚠️ 用户拍的板：只有两个标题。第三档建的是 `EventSeries`，而它在这一页
+           上仍然叫 Publish an Event —— 代价写在 `_publish_heading.html` 里。
+        """
+        page = self.client.get(reverse("events:event_create") + "?publish_as=series")
+        self.assertContains(page, "Publish an Event")
+        self.assertNotContains(page, "Publish a Program")
+
+    # --- 这一块三页共用，所以名词和路由都得跟着页面走 ----------------------
+
+    def test_the_preview_counts_meetings_not_occasions(self):
+        """🔴 **浏览器走查抓到的**（2026-09-16）：那一行说的是
+           「This makes 12 occasions」—— 每个字都对，名词是错的。
+
+        一门课排的是「讲」。这个分支已经为同一种错修过好几次
+        （「课程页上三处写着 event」）。
+        """
+        preview = self.client.post(reverse("events:program_preview"), self.payload())
+        self.assertContains(preview, "12 meetings")
+        self.assertNotContains(preview, "occasions")
+
+    def test_the_series_preview_still_says_occasions(self):
+        """⚠️ 改的只有课那一支。少了这一条，上面那条用「把 occasion 全局换成
+           meeting」也能满足 —— 而系列那两页排的确实是场次。
+        """
+        preview = self.client.post(reverse("events:series_preview"), {
+            "publish_as": "series",
+            "name": "Weekly", "ministry": self.pantry.pk,
+            "repeat_mode": "weekly", "repeat_every": "1",
+            "repeat_weekdays": ["WE"],
+            "ends_kind": "count", "ends_after": "12",
+            "starts_on": self.next_wednesday.isoformat(),
+            "start_time": "19:00",
+            "duration_0": "2", "duration_1": "0", "duration_2": "0",
+        })
+        self.assertContains(preview, "12 occasions")
+
+    def test_the_month_pager_posts_back_to_the_program_preview(self):
+        """🔴 那个翻页器原来写死了 `series_preview`。
+
+        在这一页上翻一个月，会把一份**课**的表单打到**系列**的预览视图上 ——
+        它按 `EventSeriesForm` 读，说的是「occasions」，算的可能是另一批日期，
+        而整件事**不报任何错**。
+        ⚠️ 要够到翻页器得先有第二页月历，所以这里排满一年。
+        """
+        preview = self.client.post(
+            reverse("events:program_preview"), self.payload(ends_after="52"))
+        html = preview.content.decode()
+        self.assertIn(reverse("events:program_preview"), html)
+        self.assertNotIn(reverse("events:series_preview"), html)
+
+class MeetingsPageTests(PageTestCase):
+    """排课表：补一讲、去掉一讲（2026-09-16，D49）。
+
+    ⭐ **`services.add_session()` 等了三步的那扇门。** 它的 docstring 写着
+       「⚠️ Until L5.6 its only callers are tests」—— 在这一页之前，全站唯一能
+       补一讲的地方是 Django admin，而 ministry admin 被中间件挡在外面。
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.course = make_run(
+            ministry=self.pantry, owner=self.zhang.contact, name="Spring ESL",
+            start_time=day_start(local_today() + datetime.timedelta(days=7)) + 19 * HOUR,
+            end_time=day_start(local_today() + datetime.timedelta(days=70)) + 21 * HOUR,
+        )
+        self.role = make_role(self.course, "greeting")
+        self.first = add_session(
+            self.course,
+            start_time=self.course.start_time,
+            end_time=self.course.start_time + 2 * HOUR)
+        self.login(self.zhang)
+
+    def url(self):
+        return reverse("events:event_meetings", args=[self.course.pk])
+
+    # --- 它在不在 ----------------------------------------------------------
+
+    def test_a_one_off_occasion_has_no_such_page(self):
+        """⚠️ 404 而不是 403：这个地址对一场单场活动**不存在**，
+           不是「存在但不给你」。`Session.clean()` 那句「it is the occasion」
+           写的是同一件事。
+        """
+        self.assertEqual(
+            self.client.get(
+                reverse("events:event_meetings", args=[self.event.pk])).status_code,
+            404)
+
+    def test_the_nav_offers_it_on_a_course_and_not_on_an_event(self):
+        """⚠️ 第八次了：这个项目建过的页面里，没有入口的那几个和不存在没区别。"""
+        page = self.client.get(
+            reverse("events:event_update", args=[self.course.pk])).content.decode()
+        self.assertIn(self.url(), page)
+        one_off = self.client.get(
+            reverse("events:event_update", args=[self.event.pk])).content.decode()
+        self.assertNotIn(
+            reverse("events:event_meetings", args=[self.event.pk]), one_off)
+
+    def test_somebody_elses_course_is_refused(self):
+        self.login(self.lisi)
+        self.assertEqual(self.client.get(self.url()).status_code, 403)
+
+    # --- 补一讲 ------------------------------------------------------------
+
+    def test_adding_a_meeting_inside_the_term_works(self):
+        when = self.course.start_time + datetime.timedelta(days=7)
+        self.client.post(self.url(), {
+            "start_time": localtime(when).strftime("%Y-%m-%dT%H:%M"),
+            "end_time": localtime(when + 2 * HOUR).strftime("%Y-%m-%dT%H:%M"),
+        })
+        self.assertEqual(self.course.sessions.count(), 2)
+
+    def test_a_meeting_past_the_end_of_the_term_is_refused_and_says_which_end(self):
+        """🔴 拒绝的措辞**不在这一页上写第二遍** —— 它是 `Session.clean()` 的
+           那一句，`_post_clean()` 原样搬到表单上。在这里另写一句，就是同一条
+           规则有两种说法。
+        """
+        when = self.course.end_time + datetime.timedelta(days=7)
+        response = self.client.post(self.url(), {
+            "start_time": localtime(when).strftime("%Y-%m-%dT%H:%M"),
+            "end_time": localtime(when + 2 * HOUR).strftime("%Y-%m-%dT%H:%M"),
+        })
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.course.sessions.count(), 1)
+        self.assertContains(response, "cannot run past it")
+
+    def test_the_term_itself_is_not_quietly_widened(self):
+        """⚠️ 本轮**不自动放宽学期的两端**：那会悄悄改一件已经通知过报名者的
+           事。那句拒绝旁边画了一条到编辑页的链接，让人自己决定。
+        """
+        ends_at = self.course.end_time
+        when = ends_at + datetime.timedelta(days=7)
+        self.client.post(self.url(), {
+            "start_time": localtime(when).strftime("%Y-%m-%dT%H:%M"),
+            "end_time": localtime(when + 2 * HOUR).strftime("%Y-%m-%dT%H:%M"),
+        })
+        self.course.refresh_from_db()
+        self.assertEqual(self.course.end_time, ends_at)
+
+    def test_a_hand_added_meeting_says_so(self):
+        """⚠️ 「谁排的」看得见：一条规则铺出来的那一批和手工补的那一讲，
+           在这一页上要分得出来。
+        """
+        when = self.course.start_time + datetime.timedelta(days=7)
+        self.client.post(self.url(), {
+            "start_time": localtime(when).strftime("%Y-%m-%dT%H:%M"),
+            "end_time": localtime(when + 2 * HOUR).strftime("%Y-%m-%dT%H:%M"),
+        })
+        added = self.course.sessions.order_by("-start_time").first()
+        self.assertEqual(added.source, Source.MANUAL)
+        self.assertContains(self.client.get(self.url()), "By hand")
+
+    # --- 去掉一讲 ----------------------------------------------------------
+
+    def test_removing_a_meeting_nobody_attended_works(self):
+        self.client.post(self.url(), {"remove": self.first.pk})
+        self.assertEqual(self.course.sessions.count(), 0)
+
+    def test_a_meeting_somebody_attended_is_kept(self):
+        """🔴 判据是现成的 `register_kept_at()`，**不另写一个**。
+
+        它的 docstring 记着上一版为什么不够：一个人**来了但不记工时**的场合
+        （决定 20）那个函数完全看不见，于是一门十二个学生全部点到的课，
+        删除键是亮的 —— 按下去带走整个点名册。
+        ⚠️ 那一处是 Django admin 的删除权限，这一处是站点上的按钮：
+           两扇门，一条判据。
+        """
+        signup = Participation.objects.create(
+            contact=self.lisi.contact, event_role=self.role)
+        SessionAttendance.objects.create(
+            participation=signup, session=self.first,
+            status=Participation.Status.ATTENDED)
+        response = self.client.post(self.url(), {"remove": self.first.pk}, follow=True)
+        self.assertEqual(self.course.sessions.count(), 1)
+        self.assertContains(response, "on the register")
+
+    def test_a_refusal_is_shown_rather_than_swallowed(self):
+        """⚠️ 一颗按下去悄悄什么都不做的键读起来是「站坏了」—— 人会再点一次，
+           然后去别处找那一行。同 No-show 页那一条。
+        """
+        signup = Participation.objects.create(
+            contact=self.lisi.contact, event_role=self.role)
+        SessionAttendance.objects.create(
+            participation=signup, session=self.first,
+            status=Participation.Status.ATTENDED)
+        response = self.client.post(self.url(), {"remove": self.first.pk}, follow=True)
+        self.assertContains(response, "Clear the register first")
+
+    def test_a_meeting_of_another_course_cannot_be_removed_from_here(self):
+        """⚠️ 收窄到 `event.sessions`，于是别的课的 pk 是 404 而不是一次越权删除。"""
+        other = make_run(ministry=self.pantry, owner=self.zhang.contact,
+                         name="Autumn ESL")
+        theirs = add_session(other, start_time=other.start_time,
+                             end_time=other.start_time + HOUR)
+        self.assertEqual(
+            self.client.post(self.url(), {"remove": theirs.pk}).status_code, 404)
+        self.assertTrue(Session.objects.filter(pk=theirs.pk).exists())
+
+    # --- 序号 --------------------------------------------------------------
+
+    def test_the_numbering_is_the_one_the_rest_of_the_site_uses(self):
+        """🔴 「第几讲」全站只有一个算法（`schedule.occurrences()`）。
+
+        另数一遍的表现是同一讲在报名页上是「Session 7」、在这一页上是第 6 讲,
+        而两页各自都渲染正常。
+        """
+        for week in range(1, 4):
+            when = self.course.start_time + datetime.timedelta(days=7 * week)
+            add_session(self.course, start_time=when, end_time=when + 2 * HOUR)
+        rows = self.client.get(self.url()).context["meetings"]
+        self.assertEqual([row.ordinal for row in rows], [1, 2, 3, 4])
+        self.assertEqual([row.session.pk for row in rows],
+                         list(self.course.sessions.values_list("pk", flat=True)))

@@ -31,6 +31,48 @@
          hx-target="#series-dates" hx-swap="outerHTML">
       {% include "events/_series_dates.html" %}
     </div>
+  {% elif building_a_program %}
+    {% comment %}
+    第三支（2026-09-16，D49）—— 一门课排讲次。
+
+    🔴 **和上面那一支共用同一个选择器片段**，而它们存的东西完全不同：
+       一条规则存进 `EventSeries.rule` 一列、往后每年滚着生成场次；
+       一门课把规则**展开一次**成十二个 `Session`，那个字符串之后就没有读者了。
+       共用的是「怎么问」，不是「存不存」—— 整段理由在 `ProgramForm` 上。
+
+    🔴 **这里没有起止时间那两格，而那不是漏画的。** 学期的两端由排出来的第一讲
+       和最后一讲推（`services.publish_program()`）。问一遍就是同一件事有两个
+       来源：有人把结束日期填在最后一讲之前，于是 `Session.clean()` 拒掉末尾
+       几讲 —— 一个「我填了 12 次、只排出来 9 次」的页面，而它不报错。
+
+    ⚠️ 「人自己挑来哪几讲」摆在这一块里，因为它只有一门课答得上；
+       `ProgramForm.WHEN_FIELDS` 里也列着它，两处必须一致（多画一遍是静默的，
+       少画一遍那一格直接消失 —— `NoFieldIsDrawnTwiceTests` 盯着）。
+    {% endcomment %}
+    {% include "events/_recurrence_picker.html" %}
+    <div class="mt-5">
+      {% include "core/components/field.html" with field=form.starts_on %}
+      {% include "core/components/field.html" with field=form.start_time %}
+      {% include "core/components/field.html" with field=form.duration %}
+      {% include "core/components/field.html" with field=form.people_pick_meetings %}
+    </div>
+    {% comment %}
+    ⚠️ 打到 `program_preview`，不是 `series_preview`：两边判规则的地方不一样
+       （那边是 `EventSeries.clean()`，这边是 `ProgramForm.clean()`），而画出来
+       的那一块是同一个片段。
+    {% endcomment %}
+    {% url 'events:program_preview' as program_preview_url %}
+    <div hx-post="{{ program_preview_url }}"
+         hx-trigger="change from:#when-block, keyup changed delay:400ms from:#when-block"
+         hx-include="closest form"
+         hx-target="#series-dates" hx-swap="outerHTML">
+      {% comment %}
+      ⚠️ `preview_url` 和 `noun` 一起传下去：月历的翻页键要打到**这一条**路由，
+         而那一行摘要说的是「讲」不是「场次」。两处漏掉都不报错 —— 前者把课的
+         表单打到系列的预览上，后者只是名词是错的。
+      {% endcomment %}
+      {% include "events/_series_dates.html" with preview_url=program_preview_url noun="meeting" %}
+    </div>
   {% else %}
     {% include "core/components/field.html" with field=form.start_time %}
     {% include "core/components/field.html" with field=form.end_time %}
@@ -39,3 +81,16 @@
     {% endif %}
   {% endif %}
 </div>
+{% if heading_oob %}
+  {% comment %}
+  🔴 **标题跟着这一块一起换**（2026-09-16，D49）。它在 `#when-block` 外面，
+     而这次 HTMX 只换块内 —— 少了这一句，点「A course or program」之后下面
+     全换了，标题还写着 Publish an Event。
+  ⚠️ 写在 `#when-block` 那个 div **外面**：`hx-swap-oob` 的元素必须是响应的
+     顶层兄弟，塞进被换掉的那个 div 里不报错，它会被当成普通内容贴进去。
+  ⚠️ 只有 `publish_when` 那一趟给 `heading_oob` —— 整页那一次
+     `event_form.html` 已经画过一遍，两份同名 id 会让 OOB 的落点变成
+     不确定的那一个。
+  {% endcomment %}
+  {% include "events/_publish_heading.html" with oob=1 %}
+{% endif %}

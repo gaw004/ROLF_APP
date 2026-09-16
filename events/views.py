@@ -72,6 +72,8 @@ from .forms import (
     EventSeriesForm,
     EventSeriesRoleForm,
     EventGrantForm,
+    MeetingForm,
+    ProgramForm,
     EventStatusForm,
     HoursForm,
     NotifyForm,
@@ -87,6 +89,7 @@ from .models import (
     EventSeriesRole,
     Participation,
     Session,
+    Source,
     askable_served_as,
 )
 from .tokens import (
@@ -100,6 +103,9 @@ from .tokens import (
 )
 from .services import (
     SPLITTABLE_FIELDS,
+    add_session,
+    publish_program,
+    remove_session,
     generated_through,
     is_running_low,
     resumes_on_after_split,
@@ -2153,7 +2159,15 @@ def event_create(request):
     chosen = (request.POST.get("publish_as") if request.method == "POST"
               else request.GET.get("publish_as"))
     building_a_series = chosen == PUBLISH_AS_SERIES
-    form_class = EventSeriesForm if building_a_series else EventForm
+    # 🔴 **第三张表单，2026-09-16（D49）。** 在此之前「课」那一档走的是
+    #    `EventForm` —— 两个 datetime 框，问的是学期的两端，而**没有任何地方
+    #    能排出它的讲次**：发出来的是一个有起止日期、一讲都没有的壳。
+    #    现在它和「每周」那一档共用同一个重复选择器，学期的两端反过来由排出来
+    #    的第一讲和最后一讲推（`services.publish_program()`）。
+    building_a_program = chosen == Event.Shape.PROGRAM
+    form_class = (EventSeriesForm if building_a_series
+                  else ProgramForm if building_a_program
+                  else EventForm)
 
     # D24. The radio swaps the "when" block over HTMX; this is the same move
     # without JavaScript — a plain submit that comes back as the other form.
@@ -2183,7 +2197,19 @@ def event_create(request):
         if not building_a_series:
             # The two Event shapes: the radio is the column, for those two.
             published.shape = form.cleaned_data.get("publish_as") or Event.Shape.SINGLE
-        published.save()
+        if building_a_program:
+            # 🔴 **不是 `published.save()`。** 一门课这时候**还没有两端** ——
+            #    `ProgramForm` 根本不问它们（见那张表单的 docstring），而
+            #    `Event.start_time` / `end_time` 是 `NOT NULL`。落库、推两端、
+            #    排讲次是一件事，一个事务，写在服务层。
+            # ⚠️ `moments` 是表单 `clean()` 里展开的**那一份**，不是在这里重算
+            #    的 —— 重算一遍就是「页面说 12 讲、按下去排了 13 讲」。
+            meetings = publish_program(
+                published,
+                moments=form.cleaned_data["moments"],
+                duration=form.cleaned_data["duration"])
+        else:
+            published.save()
         # ⚠️ **Not optional**, for the same reason request.FILES above is not:
         #    without it the tick is silently dropped. `commit=False` defers the
         #    many-to-many, and `visible_to_ministries` is the only part of an
@@ -2202,11 +2228,23 @@ def event_create(request):
                 request, "Series created. Next, open the roles it needs — "
                          "then generate the occasions.")
             return redirect("events:series_detail", pk=published.pk)
+        if building_a_program:
+            # ⚠️ 说出排了几讲，而不是只说「建好了」：这一页上人填的是一条
+            #    规则，而规则和它铺出来的东西之间隔着一次展开 —— 那个数字是
+            #    他唯一能当场核对的凭据。预览里写的是同一个数。
+            messages.success(
+                request,
+                f"Program created with {len(meetings)} meeting"
+                f"{'' if len(meetings) == 1 else 's'}. "
+                "Next, open the roles it needs.")
+            return redirect("events:event_update", pk=published.pk)
         messages.success(request, "Event created. Next, open the roles it needs.")
         return redirect("events:event_update", pk=published.pk)
 
     return render(request, "events/event_form.html", {
-        "form": form, "event": None, "building_a_series": building_a_series,
+        "form": form, "event": None,
+        "building_a_series": building_a_series,
+        "building_a_program": building_a_program,
     })
 
 
@@ -2619,10 +2657,21 @@ def publish_when(request):
         raise PermissionDenied(SCOPED_DENIAL)
     chosen = request.POST.get("publish_as")
     building_a_series = chosen == PUBLISH_AS_SERIES
-    form_class = EventSeriesForm if building_a_series else EventForm
+    building_a_program = chosen == Event.Shape.PROGRAM
+    # ⚠️ 三岔，和 `event_create` 那一处**必须一致**。写两遍是有代价的，而这两处
+    #    分家的表现是：换到「课」那一档，块里换成了选择器、按下发布走的却是
+    #    另一张表单 —— 于是那几格的值全部落地无声。
+    form_class = (EventSeriesForm if building_a_series
+                  else ProgramForm if building_a_program
+                  else EventForm)
     return render(request, "events/_publish_when.html", {
         "form": form_class(user=request.user, initial={"publish_as": chosen}),
         "building_a_series": building_a_series,
+        "building_a_program": building_a_program,
+        # ⚠️ 只有 HTMX 那一趟要那份带 `hx-swap-oob` 的标题（整页那一次
+        #    `event_form.html` 已经画过一遍了）—— 两份同名 id 在 DOM 里，
+        #    OOB 的落点从此是不确定的那一个。
+        "heading_oob": True,
     })
 
 
@@ -2652,6 +2701,49 @@ def series_preview(request):
             series_moments(form.instance) if _rule_is_usable(form) else [],
             page=_month_page_asked_for(request), rule=form.instance.rule),
         "complaint": _rule_complaint(form),
+    })
+
+
+@login_required
+def program_preview(request):
+    """一门课会排在哪几天，趁人还在填的时候就画出来。D49。
+
+    ⭐ 和 `series_preview` 是同一件事的两半，而**差别只有一处**：那边把值灌进
+       一个没保存的 `EventSeries`，让 `full_clean()` 来判这条规则；课没有那张
+       表，所以规则的把关写在 `ProgramForm.clean()` 里，而它展开出来的那一串
+       就存在 `cleaned_data["moments"]`。
+
+    🔴 **这里读的正是保存会用的那一份**，不是在这里重算一遍。页面上的数字和
+       按下去真正排出来的讲数必须是同一个来源 —— 各算一遍的结果是「页面说
+       12 讲，按下去排了 13 讲」，而两边各自都渲染正常。
+
+    ⚠️ 版式、月历分页、那句摘要全部复用 `_series_dates.html` 和
+       `_dates_context()`：两块长得不一样没有任何理由，而它们回答的是同一个
+       问题（「按下去会排哪几天」）。
+    """
+    if not can_reach_publish_page(request.user):
+        raise PermissionDenied(SCOPED_DENIAL)
+    form = ProgramForm(request.POST, user=request.user)
+    # ⚠️ 和兄弟那一处同一条理由：这一趟是在人还在打字的时候发的，表单其余部分
+    #    十有八九是半填的，而那些错误不归这一块管。
+    form.is_valid()
+    # ⚠️ `cleaned_data` 一定在：这张表单永远是 bound 的（上面用 `request.POST`
+    #    构造），而 Django 在跑 `clean()` **之前**就把它建好了 —— 校验失败只是
+    #    让某些键缺席，不会让这个字典不存在。
+    moments = form.cleaned_data.get("moments") or []
+    return render(request, "events/_series_dates.html", {
+        **_dates_context(moments, page=_month_page_asked_for(request),
+                         rule=form.cleaned_data.get("rule") or ""),
+        "complaint": _rule_complaint(form),
+        # 🔴 一门课排的是**讲**，不是场次（2026-09-16，浏览器走查抓到的）。
+        #    这一块三页共用，而默认那个词是给系列的 —— 不传的话，发布一门课时
+        #    这一行说「This makes 12 occasions」：每个字都对，名词是错的。
+        "noun": "meeting",
+        # 🔴 月历的翻页键打到**这一条**路由，不是系列那一条。少了它，在这一页
+        #    上翻一个月会把一份课的表单打到 `series_preview` —— 它按
+        #    `EventSeriesForm` 读，说的是「occasions」，算的可能是另一批日期，
+        #    而整件事不报任何错。
+        "preview_url": reverse("events:program_preview"),
     })
 
 
@@ -2887,6 +2979,69 @@ def role_delete(request, pk):
             return render(request, "events/_event_roles_swap.html",
                           _edit_page_context(role.event, user=request.user))
     return redirect("events:event_update", pk=role.event_id)
+
+
+@login_required
+def event_meetings(request, pk):
+    """一门课的讲次：列出来、补一讲、去掉一讲。D49。
+
+    ⭐ **`services.add_session()` 等的那扇门。** 它的 docstring 从 L5.6 起写着
+       「⚠️ Until L5.6 its only callers are tests」—— 在这一页之前，全站唯一能
+       补一讲的地方是 Django admin，而 ministry admin 被
+       `StaffOnlyAdminMiddleware` 挡在 `/admin/` 外面。发布时铺出来的那一批是
+       对的，而现实里总有一周要挪、一周要加。
+
+    ⚠️ **写权限问的是 `can_manage_event()`，和编辑页同一个**（不是
+       `can_view_event_records()`）：排课表是办这场活动的一部分。
+       `_managed_event()` 一处判完，这里不再判第二次。
+
+    ⚠️ **只对课开。** 一场单场活动没有「讲次」可言 —— `Session.clean()` 那条
+       「it is the occasion」写的就是这件事。不是 404 而是 404：这个地址对一场
+       单场活动**不存在**，而不是「存在但不给你」。
+    """
+    event = _managed_event(request, pk)
+    if event.shape != Event.Shape.PROGRAM:
+        raise Http404("Only a course has meetings.")
+
+    form = MeetingForm(request.POST or None)
+    if request.method == "POST":
+        if "remove" in request.POST:
+            # ⚠️ 用 `event.sessions`，不是 `Session.objects` —— 收窄到这一门课
+            #    上，于是一个别的课的 pk 是 404 而不是一次越权删除。
+            meeting = get_object_or_404(event.sessions, pk=request.POST["remove"])
+            try:
+                remove_session(meeting)
+            except ValidationError as refusal:
+                # ⚠️ 说出来而不是吞掉：一颗按下去悄悄什么都不做的键，读起来是
+                #    「站坏了」—— 人会再点一次，然后去别处找那一行。
+                messages.error(request, refusal.messages[0])
+            else:
+                messages.success(request, "That meeting was removed.")
+            return redirect("events:event_meetings", pk=event.pk)
+        # ⚠️ `instance.event` 在校验**之前**就要挂上：`Session.clean()` 要拿
+        #    这门课的两端来比，而没有它那一句会静静地提前 return（它对
+        #    `event_id is None` 是放行的），于是一讲排到学期之外也能存进去。
+        form.instance.event = event
+        if form.is_valid():
+            add_session(event,
+                        start_time=form.cleaned_data["start_time"],
+                        end_time=form.cleaned_data["end_time"],
+                        source=Source.MANUAL)
+            messages.success(request, "That meeting was added.")
+            return redirect("events:event_meetings", pk=event.pk)
+
+    return render(request, "events/event_meetings.html", {
+        "event": event,
+        "form": form,
+        "can_manage": True,
+        "can_grant": can_grant_event_admin(request.user, event),
+        # ⭐ 序号走 `schedule.occurrences()`，**不在模板里数** —— 「第几讲」
+        #    全站只有一个算法，而报名页和日历读的也是它。
+        # ⚠️ 每一行的时刻（`7pm`）由 `Occurrence.starts_at` 给 —— 走的是
+        #    `schedule.clock()`，全站同一个写法。模板里一句 `date:"g:ia"`
+        #    给的是 `7:00p.m.`，而那是 2026-09-16 走查当场看见的样子。
+        "meetings": schedule.occurrences([event]),
+    })
 
 
 @login_required

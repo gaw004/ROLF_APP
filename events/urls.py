@@ -68,6 +68,10 @@ urlpatterns = [
     #    two that are not series at all.
     path("events/publish/when/", views.publish_when, name="publish_when"),
     path("events/series/preview/", views.series_preview, name="series_preview"),
+    # ⚠️ 兄弟路由，D49。两条各自一个视图，因为两边的规则**存不存**不一样
+    #    （系列存进一列、课用一次就扔），而那是判这条规则时唯一的差别。
+    path("events/programs/preview/", views.program_preview,
+         name="program_preview"),
     path("events/series/roles/<int:pk>/delete/",
          views.series_role_delete, name="series_role_delete"),
     path("events/series/<int:pk>/", views.series_detail, name="series_detail"),
@@ -93,6 +97,10 @@ urlpatterns = [
         views.event_registrations,
         name="event_registrations",
     ),
+    # ⚠️ 只对课有意义，而视图对一场单场活动答 404 —— 这个地址在那里
+    #    **不存在**，不是「存在但不给你」。D49。
+    path("events/<int:pk>/meetings/", views.event_meetings,
+         name="event_meetings"),
     path("events/<int:pk>/attendance/", views.event_attendance, name="event_attendance"),
     # D28 — the iPad page and the endpoint that feeds it. ⚠️ The token endpoint
     # is gated on can_manage_event; without that check the whole rotating-code

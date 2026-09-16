@@ -66,12 +66,16 @@
   <td class="font-medium">{{ row.hours|default_if_none:"—" }}</td>
   <td>
     {% comment %}
-    ⚠️ 只读身份（foundation tier）这里什么都不画。**但藏起来不是权限** ——
-       视图对它的 POST 直接 403，那才是边界。这里只是不给一个按不动的按钮。
+    🔴 **2026-09-16（D48）：这里不再分支。**
+       此前 `{% templatetag openblock %} if not can_manage {% templatetag closeblock %}` 画一行「Read only」，给的是 foundation
+       tier —— 它读得了这一页、改不了这一页。那一档现在没有人属于了（它拿到了
+       全部 ministry 的写权限），而**能走到这一页的三种人今天都签得了到**：
+       这个 ministry 的 admin、被指名管这一场的人、foundation tier。
+       ⚠️ 留着那一支就是留一句只有在一个不存在的身份上才会出现的「Read only」。
+
+    ⚠️ 「藏起来不是权限」那条**没有过期**，只是这里不再需要它：视图对没有
+       `can_manage_event()` 的 POST 照旧 403，那一句一个字没动，它才是边界。
     {% endcomment %}
-    {% if not can_manage %}
-      <span class="text-xs text-ink-600 dark:text-ink-300">Read only</span>
-    {% else %}
     {% comment %}
     ⭐ 两张**完整的服务端表单**，hx-post 只是它们的快路。
        关掉 JavaScript，签到签退和补工时全部照样能走完 —— D24 的口径。
@@ -177,6 +181,5 @@
       {% endif %}
       {% endif %}
     </form>
-    {% endif %}
   </td>
 </tr>

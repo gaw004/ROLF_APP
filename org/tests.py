@@ -30,6 +30,7 @@ from .permissions import (
     can_publish_event,
     can_view_event_records,
     foundation_admin_group,
+    in_foundation_tier,
     ministry_ids_administered_by,
     unresolved_permissions,
 )
@@ -903,6 +904,25 @@ class FoundationAdminGroupTests(TestCase):
        库上，往清单里加一条权限都不会生效** —— 清单是对的，组是旧的，没有任何东西
        报告这个差别。症状是 admin 首页少一个模块，看起来像「页面没做」。
     """
+
+    def test_an_unsaved_account_is_answered_not_raised(self):
+        """🔴 `is_authenticated` **拦不住一个没存过的 User**。
+
+        Django 的 `AbstractBaseUser.is_authenticated` 是一个硬编码的 `True`，
+        所以 `in_foundation_tier(User())` 走得到 `user.groups` —— 而那个关系对
+        一个没有主键的实例直接抛 `ValueError`，也就是一个 500 而不是一句「不是」。
+
+        ⚠️ 这不是编出来的输入：2026-09-16 `PublishFormMixin.__init__` 开始问这个
+           问题之后，`core.tests.TextLengthLimitTests` 那两条（用一个空 `User()`
+           构造 `EventForm`，只为了验一个字数上限）当场变成 ERROR。
+
+        ⚠️ 它的兄弟 `ministry_ids_administered_by()` 早就兜住了同一种输入。
+           两个并排的谓词对同一个输入一个答 False、一个 500，是这个模块最不该
+           有的那种不一致 —— 这一条钉的是它们答得一样。
+        """
+        nobody = get_user_model()()
+        self.assertFalse(in_foundation_tier(nobody))
+        self.assertEqual(ministry_ids_administered_by(nobody), set())
 
     def test_the_group_grants_what_the_list_says(self):
         group = foundation_admin_group()

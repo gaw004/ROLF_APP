@@ -47,14 +47,13 @@ from org.models import Ministry
 from org.permissions import (
     SCOPED_DENIAL,
     in_foundation_tier,
-    administers_one_of,
     can_grant_event_admin,
     can_manage_event,
     can_revoke_event_grant,
     event_ids_granted_to,
-    holds_grant_on,
     can_manage_series,
     can_publish_event,
+    can_reach_publish_page,
     event_access,
     ministry_ids_administered_by,
 )
@@ -62,6 +61,7 @@ from org.permissions import (
 from . import ics, schedule, tokens
 from .recurrence import has_an_ending
 from .forms import (
+    SHAPE_KINDS,
     SHARED_PUBLISH_FIELDS,
     WHEN_ANSWERS,
     FILTER_PARAMS,
@@ -1312,13 +1312,21 @@ def event_signup(request, pk):
 
 #: My Signups 那一排筛选（2026-09-14，决定 50）。两页共用。
 #:
-#: ⚠️ 值进查询串（`?kind=`），而**不进 `FILTER_PARAMS`**：那个常量是活动列表页
-#:    那张筛选卡的名单，`LIST_STATE` 从它来。混进去的话，管理列表页会长出一个
-#:    它根本没有的控件 —— `_open_panel()` 的 docstring 记着同一个坑。
+#: 🔴 **两种形状怎么称呼，从 `forms.SHAPE_KINDS` 来，这里不敲第二遍**
+#:    （2026-09-16）。管理列表那一格问的是同一个问题，而两份各写的后果是同一门课
+#:    在两页上叫不同的名字 —— 每处都渲染正常，只有把两页并排才看得见。
+#:
+#: ⚠️ **2026-09-16 改口的半句。** 这里原本写着「值进查询串而**不进
+#:    `FILTER_PARAMS`**：混进去的话，管理列表页会长出一个它根本没有的控件」。
+#:    管理列表现在**有**那个控件了（用户当天提的），所以那句话的前提没了 ——
+#:    `kind` 已经在 `FILTER_PARAMS` 里，跟着 `LIST_STATE` 走。
+#:    ⚠️ 两页的**「不筛」那一档仍然是两个东西**，而那才是这条注释真正该守的：
+#:       这里是一个哨兵值 `all`（三颗按钮必有一颗按下去），那边是空串（和
+#:       `ministry` / `nature` 一样「没填就是没筛」）。所以 `all` 那一行留在
+#:       这里，没有搬进 `SHAPE_KINDS`。
 SIGNUP_KINDS = (
     ("all", "All"),
-    ("events", "Events"),
-    ("programs", "Programs"),
+    *SHAPE_KINDS,
 )
 
 #: 两页各自的标题和地址，同 `LIST_PAGES` 的写法。
@@ -1774,6 +1782,14 @@ def _scoped_events(request):
        *change* is decided per row (see `event_manage_list`). The mode switch
        had nothing left to do and went with it.
 
+       🔴 **那句引文的后半句 2026-09-16 被用户自己改口了**（D48）：
+          「只有 Food Pantry 他可以改」不再成立 —— 他改得了全部。
+          ⚠️ **前半句才是这一段真正在记的事，而它一个字没变**：
+             这一页不再有两种模式，它列全部，而不是靠 `?scope=all` 切换。
+             那次合并买到的东西（一条代码路径、报表不会宽过它画在的那一页）
+             和「谁能改」无关，所以 9-16 那次改口没有动它。
+          ⚠️ 引文原样留着，不改写成新结论 —— 它是当时说过的话。改口写在这里。
+
        ⭐ Notices has worked this way since it was written — `_mine_to_manage()`
           hands the foundation tier `Notice.objects.all()`. Events was the last
           place in the project with two modes.
@@ -1943,8 +1959,12 @@ def event_manage_list(request):
             return redirect(request.get_full_path())
         wrote = True
 
+    # ⚠️ `by_shape=True` 只有这一页传（2026-09-16）。它列的是
+    #    `Event.objects.all()` —— 单场、课、以及一条规则生成出来的那些，全在
+    #    一张表里，所以「哪一种」在这里是一个真问题。浏览那两页是**互斥**的
+    #    （决定 45），地址本身已经答了它。
     period = EventPeriodForm(
-        request.GET or None,
+        request.GET or None, by_shape=True,
         ministries=_offered_ministries(administered, showing_all=foundation,
                                        granted=granted))
     events = period.narrow(events)
@@ -1966,25 +1986,23 @@ def event_manage_list(request):
     #    翻不到的那几百场也各算一遍。
     for event in page:
         event.when_start, event.when_end = schedule.when_labels(event)
-        # 🔴 **逐行的「你能不能改这一行」**（2026-09-03）。
-        #
-        #    这一页现在一张列表列全部（见 `_scoped_events`），所以「可不可改」
-        #    不再是整页的属性。它决定这一行画状态下拉还是一枚标签，
-        #    以及 Go to 那一格画三个链接还是六个。
-        #
-        # ⚠️ **一次集合判断，不是每行一次 `administers()` 查询** ——
-        #    `administered` 是上面那一次查询的结果（一个 id 集合）。
-        #    每行各问一次的话，50 行就是 50 次查询，而答案完全相同。
-        #
-        # 🔴 **这只决定「画什么」，不决定「准不准」。** 每一个写操作仍然走
-        #    `_managed_event()` → `can_manage_event()`，问的是真实账号和真实
-        #    活动。藏起一颗按钮挡不住任何人，真正的拒绝在视图里 ——
-        #    `button.html` 的 `disabled` 那段注释写的是同一条。
-        # ⚠️ 两个集合，一次查询各出一个 —— 而这是 `can_manage_event()` 的列表版
-        #    （D47 之后它有两条路，这里必须跟着有两条）。
-        #    `administers_one_of()` 自己的注释写着「Change one, change the other」。
-        event.can_manage = (administers_one_of(event.ministry_id, administered)
-                            or holds_grant_on(event, granted))
+    # 🔴 **2026-09-16（D48）：`event.can_manage` 这一行删掉了，而它不是被忘了。**
+    #
+    #    2026-09-03 到 9-16 之间它是逐行算的「你能不能改这一行」，决定这一行画
+    #    状态下拉还是一枚标签、Go to 那一格画三个链接还是六个。它当时有事可做，
+    #    因为 foundation tier 读得了每一场、改不了别人那几场。
+    #
+    #    现在它**只有一个答案**：这一页的行只有三个来源（`_scoped_events()` 里
+    #    那三支 —— 自己管的、被指名管的、foundation tier 看到的全部），而这三种
+    #    今天都改得动。一个恒为真的旗子加上两处永远不走的分支，是这个仓库反复
+    #    判刑的那种东西：读它的人会以为这一页上有改不了的行。
+    #
+    # ⚠️ **判断一处都没少。** 每一个写操作照旧走 `_managed_event()` →
+    #    `can_manage_event()`，问的是真实账号和真实活动。这里删掉的是「画什么」
+    #    那一半，不是「准不准」那一半 —— 后者从来就不在这里。
+    #
+    # ⚠️ 要是哪天这一页再长出一档读得了改不了的身份，回到这里把它算回来，
+    #    形状照旧是「一次集合判断，不是每行一次 `administers()` 查询」。
     return render(request, _template(
         request, "events/event_manage_list.html",
         "events/_event_manage_results.html"), {
@@ -2006,7 +2024,12 @@ def event_manage_list(request):
         #
         #    而「这一行能不能改」是第三个问题，答案挂在每一行上（见上面循环）。
         "showing_all": foundation,
-        "can_publish": bool(administered),
+        # 🔴 **不是 `bool(administered)`**（2026-09-16，D48）。放开了发布权却
+        #    不改这一行，就是「权限对、页面在、没有任何东西指向它」——
+        #    这个仓库记过五次的那种缺口，而这一次会是第六次。
+        #    ⚠️ 判据自成一问（`can_reach_publish_page`），不在这里拼 ——
+        #       拼一遍就是同一条规矩有两个答案。
+        "can_publish": can_reach_publish_page(request.user),
         # 撤销刚才那次状态修改。⚠️ `pop` 而不是 `get`：它是一次性的 ——
         #    留着的话，下一次打开这一页还会看到一颗撤销上上次的按钮，
         #    而那时人已经不记得上上次是什么了。
@@ -2115,7 +2138,7 @@ def _typed_so_far(post):
 @login_required
 def event_create(request):
     """P2: publish an event, for a ministry this person actually runs."""
-    if not ministry_ids_administered_by(request.user):
+    if not can_reach_publish_page(request.user):
         raise PermissionDenied(SCOPED_DENIAL)
 
     # ⭐ Decision 32: one screen, three answers. Two of them build an `Event`
@@ -2592,7 +2615,7 @@ def publish_when(request):
        form, and putting that in a query string would scatter a draft event
        through the server logs.
     """
-    if not ministry_ids_administered_by(request.user):
+    if not can_reach_publish_page(request.user):
         raise PermissionDenied(SCOPED_DENIAL)
     chosen = request.POST.get("publish_as")
     building_a_series = chosen == PUBLISH_AS_SERIES
@@ -2617,7 +2640,7 @@ def series_preview(request):
        here and the sentence shown on save are the same sentence, and a rule
        added to `clean()` tomorrow reaches this page for free.
     """
-    if not ministry_ids_administered_by(request.user):
+    if not can_reach_publish_page(request.user):
         raise PermissionDenied(SCOPED_DENIAL)
     form = EventSeriesForm(request.POST, user=request.user)
     # ⚠️ Only the four that decide *when*. The rest of the form is very likely

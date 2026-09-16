@@ -61,12 +61,18 @@
   管理侧唯一的入口页。草稿和已结束的都在：报表恰恰是活动结束之后才要看的，
   而草稿在志愿者那一侧按设计是不可见的（Event.VISIBLE_TO_PARTICIPANTS 不含 draft）。
 
-  两种身份共用这一页（2026-08-05；2026-09-03 收成一张列表）：
-    · ministry admin —— 自己那几个 ministry 的活动，可改状态、可进 Edit / Notify；
-    · foundation tier —— **全部** ministry 的活动；自己管的那几个照样可改，
-      其余只读。
-  🔴 **可不可改是逐行的**（`event.can_manage`，视图算好），不是整页的 ——
-     两顶帽子的人在同一张表上同时有两种行。模板不自己判权限。
+  三种身份共用这一页（2026-08-05；2026-09-03 收成一张列表；2026-09-16 第三种）：
+    · ministry admin —— 自己那几个 ministry 的活动；
+    · 被指名管某一场的人（D47）—— **只有那一场**；
+    · foundation tier —— **全部** ministry 的活动。
+  🔴 **2026-09-16（D48）起，列出来的每一行都改得动。**
+     此前这里写着「foundation tier 自己管的那几个照样可改，其余只读」，并由
+     逐行的 `event.can_manage` 落地。foundation tier 现在拿到了全部 ministry 的
+     写权限，于是上面三种身份看到的每一行都是自己改得动的 —— 那个逐行判断
+     没有第二个答案可给，连同它在这一页上的两处分支一起清掉了。
+     ⚠️ 「可不可改是逐行的、模板不自己判权限」这条**道理**没有过期，过期的是
+        它此刻有没有事可做。这一页要是哪天再长出一档读得了改不了的身份，
+        回到 `views.event_manage_list` 把那一行算回来。
 
   ⭐ 报表也共用这一条路径：它拿到的是**这一页已经筛过的那个 queryset**，
      所以 ministry admin 得到的是自己那几个 ministry 的报表，foundation admin
@@ -76,8 +82,10 @@
   ⚠️ 标题左、按钮右，同一行 —— 和 2026-09-03 之前逐像素相同。这个 `<h1>` 是整页
      唯一的一个：页头条那两格是 `<nav>` 里的链接。
 
-  ⚠️ 标题跟着身份变，按钮只画给能发布的人：只读身份看到的是一个标题独占的一行，
-     而不是一行里剩一个洞。
+  ⚠️ 标题跟着身份变，按钮只画给能发布的人：发不了的人看到的是一个标题独占的
+     一行，而不是一行里剩一个洞。
+     ⚠️ 2026-09-16 起「发不了的人」在这一页上只剩**纯被授权人**（D47）——
+        foundation tier 现在发得了（D48）。
   {% endcomment %}
   {% comment %}
   ⭐ **这一页叫什么，由 `manage_list_name` 一处决定**（2026-09-03）。
@@ -97,25 +105,31 @@
   </div>
 
   {% comment %}
-  🔴 **这段横幅 2026-09-03 重写了，因为原来那句话变成了假话。**
+  🔴 **这段横幅被改写过两次，两次都是因为它变成了假话。**
 
-     原文是「Every ministry's events, read only」—— 一句关于**整页**的断言。
-     而这一页现在一张列表列全部 ministry，可不可改是**逐行**的：两顶帽子的人
-     在自己那几个 ministry 的行上照样能改。对他来说原来那句话是错的。
+     ① 2026-09-03：原文「Every ministry's events, read only」是一句关于**整页**
+        的断言，而那天起可不可改是**逐行**的 —— 两顶帽子的人在自己那几个
+        ministry 的行上照样能改。
+     ② 2026-09-16（D48）：上一版写的是「publishing, editing and notifying stay
+        with each ministry's own admins」。**那句话当天被用户自己推翻了** ——
+        他现在发得了、改得了、通知得了，每一个 ministry 的每一行。
+        ⚠️ 这一句是浏览器走查抓到的，而不是 grep：我搜的是「read only / 只读」，
+           而它一个字都没写。**一句假话不会用关键词标注自己。**
 
   ⚠️ 只对 `showing_all` 画（也就是 foundation tier）。纯 ministry admin 看到的
-     本来就只有自己的行，全都能改 —— 给他画一句解释「哪些行你改不了」，
+     本来就只有自己那几个 ministry 的行 —— 给他解释「你为什么看得到别人的」，
      是在回答一个他不会问的问题。
 
-  ⚠️ 原来那一句「你自己那几个 ministry 的可管理视图在菜单里」一并删掉：
-     那一格没了，而且它们现在就在同一页上 —— 这正是这一批要解决的事。
+  ⚠️ 现在这段话的差事变了：9-03 那一版是在解释「哪些行你改不了」，那件事没了。
+     它现在答的是「我为什么看得到别人 ministry 的活动」，外加一句**值得知道的
+     事实** —— 你在这里的每一次改动落在的是别人的 ministry 上。
   {% endcomment %}
   {% if showing_all %}
     <div class="card mb-6 border border-info-fg/30 bg-info-bg dark:border-info-fg-dark/30 dark:bg-info-bg-dark">
       <p class="text-sm text-info-fg dark:text-info-fg-dark">
-        Every ministry's events. Signups, attendance and reports are open to you
-        on all of them; publishing, editing and notifying stay with each
-        ministry's own admins — including yours, which stay editable here.
+        Every ministry's events, and all of them are yours to change — publish,
+        edit, notify, check people in. Changes you make here land on that
+        ministry's own events, so their admins will see them.
       </p>
     </div>
   {% endif %}

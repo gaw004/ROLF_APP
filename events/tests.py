@@ -90,6 +90,7 @@ from . import schedule, tokens, views
 from .schedule import PREVIEW_MONTHS, month_grids, month_page
 from .forms import (
     FILTER_PARAMS,
+    SHAPE_KINDS,
     AudienceAdminForm,
     EventForm,
     EventPeriodForm,
@@ -98,7 +99,7 @@ from .forms import (
     EventSeriesForm,
     SignUpForm,
 )
-from .views import EVENTS_PER_PAGE, LIST_STATE
+from .views import EVENTS_PER_PAGE, LIST_STATE, SIGNUP_KINDS
 from org.audience import Audience
 from org.forms import AudienceFormMixin
 from .models import (
@@ -9935,14 +9936,18 @@ class DraftPreviewTests(PageTestCase):
         response = self.client.get(self.url)
         self.assertContains(response, reverse("events:event_update", args=[self.draft.pk]))
 
-    def test_the_read_only_tier_is_not_offered_the_edit_link(self):
-        # ⚠️ Edit is a 403 for this tier. A link that refuses whoever clicks it
-        #    reads as a broken site, not as a page that is not for them — the
-        #    same rule _event_nav.html follows.
+    def test_the_foundation_tier_is_offered_the_edit_link(self):
+        """🔴 **2026-09-16（D48）反过来了，而理由一个字没变。**
+
+        它原来叫 `test_the_read_only_tier_is_not_offered_the_edit_link`：
+        Edit 对这一层是 403，而一个拒绝点它的人的链接读起来是「站坏了」，
+        不是「这一页不归你」—— `_event_nav.html` 跟的是同一条。
+        现在这一层改得动，所以那条链接该画。规矩没变，成员变了。
+        """
         self.login(self.foundation_account())
         response = self.client.get(self.url)
         self.assertContains(response, "Preview — not published")
-        self.assertNotContains(
+        self.assertContains(
             response, reverse("events:event_update", args=[self.draft.pk]))
 
     # --- the signup button --------------------------------------------------
@@ -13153,16 +13158,24 @@ class NoShowPageTests(PageTestCase):
         self.row.refresh_from_db()
         self.assertEqual(self.row.status, Participation.Status.ABSENT)
 
-    def test_the_read_only_tier_is_refused(self):
-        # ⚠️ Not drawing the button is interface. This is the boundary — a form
-        #    posted from anywhere at all arrives at the view the same shape.
+    def test_the_foundation_tier_may_mark_a_no_show(self):
+        """🔴 **2026-09-16（D48）反过来了。**
+
+        它原来叫 `test_the_read_only_tier_is_refused`，钉的是这一层读得了这一页、
+        按不动这颗键。用户 9-16 把那一档撤了。
+
+        ⚠️ **手法没反**：断言仍然落在 POST 上，而不是落在页面上有没有那颗键 ——
+           画不画一颗按钮是界面，一张从任何地方提交过来的表单，到视图那里长得
+           一模一样。所以这一条验的是**视图放行了**。
+        ⚠️ 志愿者那一侧的拒绝另有一条，没有动。
+        """
         admin = self.account("fadmin2", "方", birth_date=datetime.date(1980, 1, 1))
         admin.groups.add(foundation_admin_group())
         self.login(admin)
-        self.assertNotContains(self.client.get(self.url()), 'value="absent"')
-        self.assertEqual(self.post().status_code, 403)
+        self.assertContains(self.client.get(self.url()), 'value="absent"')
+        self.assertEqual(self.post().status_code, 302)
         self.row.refresh_from_db()
-        self.assertEqual(self.row.status, Participation.Status.REGISTERED)
+        self.assertEqual(self.row.status, Participation.Status.ABSENT)
 
     def test_a_refusal_is_shown_rather_than_swallowed(self):
         # A button that quietly does nothing reads as a broken page: the person
@@ -13436,20 +13449,23 @@ class UndoFromThePageTests(PageTestCase):
         self.row.refresh_from_db()
         self.assertIsNone(self.row.hours)
 
-    def test_the_read_only_tier_is_refused_both(self):
-        """⚠️ Not drawing the buttons is interface. This is the boundary — a
-        form posted from anywhere at all arrives at the view the same shape."""
+    def test_the_foundation_tier_may_do_both(self):
+        """🔴 **2026-09-16（D48）反过来了。**
+
+        它原来叫 `test_the_read_only_tier_is_refused_both`。同 No-show 页那一条：
+        撤的是「读得了改不了」那一档，**不是**「画不画按钮不是权限」那条道理 ——
+        所以断言仍然走 POST。
+        ⚠️ `test_a_volunteer_cannot_undo_their_own_row` 一个字没动，边界还在。
+        """
         check_in(self.row)
         admin = self.account("fadmin3", "方", birth_date=datetime.date(1980, 1, 1))
         admin.groups.add(foundation_admin_group())
         self.login(admin)
         page = self.client.get(self.url()).content.decode()
-        self.assertNotIn('value="undo"', page)
-        for action in ("undo", "clear_hours"):
-            with self.subTest(action=action):
-                self.assertEqual(self.post(action).status_code, 403)
+        self.assertIn('value="undo"', page)
+        self.assertEqual(self.post("undo").status_code, 302)
         self.row.refresh_from_db()
-        self.assertIsNotNone(self.row.checked_in_at)
+        self.assertIsNone(self.row.checked_in_at)
 
     def test_a_volunteer_cannot_undo_their_own_row(self):
         check_in(self.row)
@@ -13923,13 +13939,26 @@ class PerEventMinorRuleTests(TestCase):
         self.assertIn("requires_guardian_consent", EventForm.Meta.fields)
 
 
-class FoundationTierReadOnlyTests(PageTestCase):
-    """2026-08-05 feedback: the foundation tier reads any event, changes none.
+class FoundationTierReachTests(PageTestCase):
+    """基金会那一层在活动上能做什么。
 
-    ⭐ The assertion that matters is the POST one. Not drawing a button keeps
-       nobody out — a form posted from anywhere at all arrives at the view with
-       the same shape — so every one of these pages is checked by sending the
-       write, not by reading the HTML.
+    🔴 **这个类 2026-09-16 整个改口了（D48），连名字一起。** 它原来叫
+       `FoundationTierReadOnlyTests`，docstring 写着 2026-08-05 的那条反馈：
+       「the foundation tier reads any event, changes none」。**那条规矩被用户
+       自己推翻了** —— 同一天他放开了发布权，而「发得出、下一秒 403」不是一个
+       权限设计，是一个陷阱：发出来的活动开不了工种、发不了通知，谁也报不了名。
+
+       ⚠️ 下面**没有一条断言是删掉的**，全部是原来那一条反过来钉：
+          「不能签到」→「能签到」，「三个写页面关着」→「开着」，
+          「别人的行是只读」→「别人的行他也改得动」。一条规矩被撤销时，
+          把守着它的测试删掉，等于连「这件事曾经是反过来的」也一起删掉。
+
+    ⭐ **要紧的那条断言仍然是 POST 那一条，方向没变。** 画不画一颗按钮挡不住
+       任何人 —— 一张从任何地方提交过来的表单，到视图那里长得一模一样 ——
+       所以每一页都是靠**发出那次写**来验的，不是靠读 HTML。
+
+    ⚠️ 仍然关着的那一样：把一场活动**转授**给第三个人（`can_grant_event_admin`）。
+       那是「这一场交给谁办」，而 D47 判它属于这个 ministry 自己。
     """
 
     def setUp(self):
@@ -13966,67 +13995,85 @@ class FoundationTierReadOnlyTests(PageTestCase):
         self.assertContains(response, self.event.name)
         self.assertContains(response, "All Events")
         # ⚠️ 2026-09-03：页面级那个 `can_manage` 拆成了两个，因为它一直在同时
-        #    回答两个问题。这一层列的是全部（`showing_all`），而它自己没有
-        #    任何 ministry 的发布权（`can_publish`）。
+        #    回答两个问题。这一层列的是全部（`showing_all`）。
         self.assertTrue(response.context["showing_all"])
-        self.assertFalse(response.context["can_publish"])
+        # 🔴 **2026-09-16 改口（D48）**：这一行原来断言的是 `assertFalse` ——
+        #    它持不了 `MinistryRole`，于是一个活动都发不了。现在它发得了，
+        #    替任何一个 ministry。
+        self.assertTrue(response.context["can_publish"])
 
-    # --- may not write, anywhere -------------------------------------------
+    # --- 写：2026-09-16 起全部放开（D48）------------------------------------
 
-    def test_it_cannot_check_anybody_in(self):
-        """⭐ The boundary. Buttons are hidden too, but that is not why."""
+    def test_it_can_check_anybody_in(self):
+        """⭐ 边界那一条，方向反过来了。走 POST，不读 HTML。"""
         self.login(self.boss)
         response = self.client.post(
             reverse("events:event_attendance", args=[self.event.pk]),
             {"participation": self.participation.pk, "action": "check_in"})
-        self.assertEqual(response.status_code, 403)
+        # ⚠️ 302 而不是 200：签到那条路是 POST → redirect → GET（没有 JS 的那
+        #    一半靠它）。这一条要验的是**写成功了**，所以真正的断言在下面两行。
+        self.assertEqual(response.status_code, 302)
         self.participation.refresh_from_db()
-        self.assertIsNone(self.participation.checked_in_at)
+        self.assertIsNotNone(self.participation.checked_in_at)
 
-    def test_it_cannot_enter_hours(self):
+    def test_it_can_enter_hours(self):
         self.login(self.boss)
         self.client.post(
             reverse("events:event_attendance", args=[self.event.pk]),
             {"participation": self.participation.pk, "action": "hours", "hours": "5"})
         self.participation.refresh_from_db()
-        self.assertIsNone(self.participation.hours)
+        self.assertEqual(self.participation.hours, Decimal("5"))
 
-    def test_the_three_write_pages_stay_shut(self):
+    def test_the_three_write_pages_open(self):
         self.login(self.boss)
         for name in ["event_update", "event_notify"]:
             with self.subTest(page=name):
                 self.assertEqual(
                     self.client.get(reverse(f"events:{name}", args=[self.event.pk])).status_code,
-                    403)
+                    200)
         self.assertEqual(
-            self.client.get(reverse("events:event_create")).status_code, 403)
+            self.client.get(reverse("events:event_create")).status_code, 200)
 
-    def test_it_cannot_change_an_events_status_from_the_hub(self):
+    def test_it_can_change_an_events_status_from_the_hub(self):
         self.login(self.boss)
         response = self.client.post(reverse("events:event_manage_list"), {
-            "event": self.event.pk, "status": Event.Status.CANCELLED})
-        self.assertEqual(response.status_code, 403)
+            "event": self.event.pk, "status": Event.Status.CANCELLED}, follow=True)
+        self.assertEqual(response.status_code, 200)
         self.event.refresh_from_db()
-        self.assertNotEqual(self.event.status, Event.Status.CANCELLED)
+        self.assertEqual(self.event.status, Event.Status.CANCELLED)
 
-    def test_it_cannot_add_or_delete_a_role(self):
+    def test_it_can_add_and_delete_a_role(self):
         self.login(self.boss)
+        spare = ParticipationRole.objects.create(
+            code="spare-hands", name="Spare hands",
+            nature=ParticipationRole.Nature.HELPING)
+        # ⚠️ `visible_to_outsiders` 不能少：一个工种不许比它挂着的活动更宽，
+        #    所以每一份写得好的 POST 都带着一个受众。少了它这次提交会因为一个
+        #    和本条测试无关的理由被拒 —— 而它返回 200 + 表单错误，看起来像
+        #    权限没放开。
         self.assertEqual(
             self.client.post(reverse("events:event_roles", args=[self.event.pk]),
-                             {"role": self.role.role.pk, "needed_count": 1}).status_code,
-            403)
+                             {"role": spare.pk, "needed_count": 1,
+                              "visible_to_outsiders": True}).status_code,
+            302)
+        self.assertTrue(self.event.roles.filter(role=spare).exists())
         self.assertEqual(
             self.client.post(reverse("events:role_delete", args=[self.role.pk])).status_code,
-            403)
+            302)
 
     # --- the interface agrees with the permission --------------------------
 
-    def test_no_edit_or_notify_links_are_drawn_for_it(self):
+    def test_the_edit_and_notify_links_are_drawn_for_it(self):
+        """🔴 2026-09-16 反过来了，而**理由没变**：不画一个点下去是 403 的链接。
+
+        在此之前这一条钉的是「不画」—— 因为当时点下去确实是 403。规矩一直是
+        「画出来的链接必须点得动」；变的是哪些链接点得动。
+        """
         self.login(self.boss)
         page = self.client.get(
             reverse("events:event_report", args=[self.event.pk])).content.decode()
-        self.assertNotIn(reverse("events:event_update", args=[self.event.pk]), page)
-        self.assertNotIn(reverse("events:event_notify", args=[self.event.pk]), page)
+        self.assertIn(reverse("events:event_update", args=[self.event.pk]), page)
+        self.assertIn(reverse("events:event_notify", args=[self.event.pk]), page)
         self.assertIn(reverse("events:event_attendance", args=[self.event.pk]), page)
 
     def test_a_ministry_admin_who_is_also_foundation_keeps_managing(self):
@@ -14036,8 +14083,9 @@ class FoundationTierReadOnlyTests(PageTestCase):
            ministry 的**可管理视图**」—— 那是当时的实现，而它要保护的东西是
            「不因为升职而失去发布权」。
 
-           现在一张列表列全部、权限逐行判：他既没失去任何写，还多看到了别人的。
-           所以这里钉的换成那件**真正要保护的事**：发布权还在，自己的行还能改。
+        ⚠️ 2026-09-16（D48）：`event.can_manage` 那个逐行旗子删掉了（它只剩
+           一个答案），所以这里改钉**页面上真的画出了那颗按钮和那条链接** ——
+           比一个内部旗子更靠近这条测试要保护的那件事。
         """
         self.zhang.groups.add(foundation_admin_group())
         self.login(type(self.zhang).objects.get(pk=self.zhang.pk))
@@ -14045,9 +14093,22 @@ class FoundationTierReadOnlyTests(PageTestCase):
 
         self.assertTrue(response.context["can_publish"], "发布权没了")
         self.assertContains(response, "Publish a new event")
-        # 自己那几个 ministry 的行照样可改 —— 逐行标记为真。
-        mine = next(e for e in response.context["events"] if e.pk == self.event.pk)
-        self.assertTrue(mine.can_manage)
+        self.assertContains(response, reverse("events:event_update", args=[self.event.pk]))
+
+    def test_the_banner_does_not_still_promise_the_old_rule(self):
+        """🔴 **这一页顶上那段横幅被改写过两次，两次都是因为它变成了假话。**
+
+        9-03 到 9-16 之间它写着「publishing, editing and notifying stay with
+        each ministry's own admins」。D48 之后那是假的。
+
+        ⚠️ **这一条是浏览器走查抓到的，不是 grep 抓到的** —— 我搜的是
+           「read only / 只读」，而这句话一个字都没写。一句假话不会用关键词
+           标注自己，所以这里钉的是**那句话的原文不再出现**，外加新说法在场。
+        """
+        self.login(self.boss)
+        page = self.client.get(reverse("events:event_manage_list")).content.decode()
+        self.assertNotIn("stay with each", page)
+        self.assertIn("yours to change", page)
 
     def test_the_navigation_actually_offers_the_page(self):
         """⚠️ The seventh time this project has built a page nothing linked to.
@@ -14062,15 +14123,74 @@ class FoundationTierReadOnlyTests(PageTestCase):
         ⚠️ 2026-09-03：入口从页头条那一格换成了标题行右端那颗 ⋮（站点菜单里
            那几格同日撤走了）。这条守卫因此改钉 ⋮ —— 它钉的从来是
            「**有东西指向那一页**」，不是某一版入口长什么样。
-           ⚠️ 「All Events」这几个字不再出现在这一页上，那是要的：那是
-              **另一页**的名字，而这条 bar 上的两格是「你在哪儿 + 从哪儿来」。
         """
         self.login(self.boss)
         page = self.client.get(reverse("events:event_list")).content.decode()
         self.assertIn(reverse("events:event_manage_list"), page)
         self.assertIn("manage-link", page, "这一层看不到通往管理页的 ⋮")
 
-    # --- 两顶帽子：一张列表，权限逐行（2026-09-03 起）-------------------------
+    # --- 发布：2026-09-16 新开的那一档（D48）---------------------------------
+
+    def test_the_ministry_dropdown_offers_every_active_one(self):
+        """🔴 收下拉框和拒 POST 是两件事，这一条钉前者。
+
+        ⚠️ 少了它，这一层打得开发布页而那一格里**一个 ministry 都没有** ——
+           一张永远提交不了的表单，页面上没有任何东西说得出为什么。
+        """
+        self.login(self.boss)
+        offered = self.client.get(
+            reverse("events:event_create")).context["form"].fields["ministry"].queryset
+        self.assertIn(self.pantry, offered)
+        self.assertIn(self.tax, offered, "它自己不管的 ministry 也该在里面")
+
+    def test_a_stopped_ministry_is_not_offered(self):
+        """⚠️ 停办的 ministry 不该再收到新活动。"""
+        self.tax.is_active = False
+        self.tax.save(update_fields=["is_active"])
+        self.login(self.boss)
+        offered = self.client.get(
+            reverse("events:event_create")).context["form"].fields["ministry"].queryset
+        self.assertNotIn(self.tax, offered)
+
+    def test_it_publishes_for_a_ministry_it_does_not_administer(self):
+        """⭐ 用户拍板的那一条本身：替任何一个 ministry 发得了。"""
+        self.login(self.boss)
+        response = self.client.post(reverse("events:event_create"), {
+            "name": "Foundation-wide open day", "ministry": self.tax.pk,
+            "start_time": "2026-10-01T09:00", "end_time": "2026-10-01T12:00",
+            "status": Event.Status.OPEN, "shape": Event.Shape.SINGLE,
+            # ⚠️ L2.1 rule 1：表单拒绝一个谁都不在的受众，所以每一份写得好的
+            #    POST 都带着一个。公开 —— 这条测试不是关于受众的。
+            "visible_to_outsiders": True,
+        })
+        self.assertEqual(response.status_code, 302)
+        made = Event.objects.get(name="Foundation-wide open day")
+        self.assertEqual(made.ministry, self.tax)
+
+    def test_and_then_it_can_open_the_roles(self):
+        """🔴 **D48 存在的全部理由。**
+
+        发布成功之后 `event_create` 重定向到编辑页。这一层在 9-16 之前走到那里
+        就是 403 —— 发出来的是一个开不了工种、发不了通知、谁也报不了名的壳。
+        所以这条测试跟的是**那次重定向本身**，不是另起一个请求。
+        """
+        self.login(self.boss)
+        response = self.client.post(reverse("events:event_create"), {
+            "name": "Open day two", "ministry": self.tax.pk,
+            "start_time": "2026-10-02T09:00", "end_time": "2026-10-02T12:00",
+            "status": Event.Status.OPEN, "shape": Event.Shape.SINGLE,
+            "visible_to_outsiders": True,
+        }, follow=True)
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Roles for this event")
+
+    def test_a_plain_volunteer_still_cannot_publish(self):
+        """⚠️ 放宽的只有这一层。少了这一条，上面几条用「谁都能发」也能满足。"""
+        self.login(self.lisi)
+        self.assertEqual(
+            self.client.get(reverse("events:event_create")).status_code, 403)
+
+    # --- 两顶帽子：一张列表（2026-09-03 起）----------------------------------
     #
     # 🔴 这一组此前钉的是 `?scope=all`：管理页有两种模式，而两顶帽子的人默认
     #    落在窄的那一种，靠站点菜单里一格带参数的链接切到宽的那一种。
@@ -14079,8 +14199,9 @@ class FoundationTierReadOnlyTests(PageTestCase):
     #    搞成了两件事：「既然老张有权看，那就给他啊。他的页面就该显示所有的
     #    ministries，然后在所有的 events 里，只有 Food Pantry 他可以改。」
     #
-    #    于是模式没有了，参数也没有了 —— 下面钉的是同样那几件事在新设计下的
-    #    说法：**看得见的更多了，能改的一个没多。**
+    #    ⚠️ **那句引文的后半句 2026-09-16 又被他自己改口了（D48）** ——
+    #       他现在全部都可以改。前半句（一张列表、不分模式）一个字没变，
+    #       而下面这几条钉的正是前半句。
 
     def both_hats(self):
         """zhang administers the pantry **and** is in the foundation group."""
@@ -14107,29 +14228,40 @@ class FoundationTierReadOnlyTests(PageTestCase):
         self.assertContains(response, self.event.name, msg_prefix="自己的行不见了")
         self.assertTrue(response.context["showing_all"])
 
-    def test_the_rows_he_does_not_run_are_read_only(self):
-        """🔴 逐行 —— 这一批的核心。同一张表上两种行。"""
+    def test_the_rows_he_does_not_run_are_his_to_change_too(self):
+        """🔴 **2026-09-16 反过来了（D48），而这一条是那次改口的正文。**
+
+        它原来叫 `test_the_rows_he_does_not_run_are_read_only`，钉的是同一张表
+        上有两种行。现在只有一种 —— 所以钉的换成**那件事的结果**：
+        别人那一行上，状态下拉和六个链接都在。
+        ⚠️ 读的是真的 HTML，不是那个已经删掉的逐行旗子。
+        """
         theirs = self.someone_elses_event()
         self.both_hats()
-        rows = {e.pk: e for e in
-                self.client.get(reverse("events:event_manage_list")).context["events"]}
-        self.assertTrue(rows[self.event.pk].can_manage, "自己的行该能改")
-        self.assertFalse(rows[theirs.pk].can_manage, "别人的行不该能改")
+        page = self.client.get(
+            reverse("events:event_manage_list")).content.decode()
+        self.assertIn(reverse("events:event_update", args=[theirs.pk]), page)
+        self.assertIn(reverse("events:event_notify", args=[theirs.pk]), page)
+        self.assertIn(f'value="{theirs.pk}"', page, "别人那一行没有状态表单")
 
-    def test_seeing_more_hands_over_no_write_at_all(self):
-        """🔴 **这一组里最要紧的一条。** 看得见的多了，能改的一个没多。
+    def test_seeing_more_now_means_changing_more(self):
+        """🔴 **这一组里最要紧的一条，2026-09-16 整个反过来（D48）。**
 
-        ⚠️ 它走的是 POST，不是读 HTML：藏起一个下拉挡不住任何人 ——
-           一张从任何地方提交过来的表单，到视图那里长得一模一样。
+        它原来叫 `test_seeing_more_hands_over_no_write_at_all`，钉的是
+        「看得见的多了，能改的一个没多」。用户 9-16 拍板把那条撤了。
+
+        ⚠️ 方向反了，**手法没反**：仍然走 POST 而不是读 HTML —— 画不画一个
+           下拉挡不住任何人，一张从任何地方提交过来的表单到视图那里长得一样。
+           所以这一条真正验的是**视图放行了**，不是页面画了个下拉。
         """
         theirs = self.someone_elses_event()
         self.both_hats()
         response = self.client.post(
             reverse("events:event_manage_list"),
-            {"event": theirs.pk, "status": Event.Status.CANCELLED})
-        self.assertEqual(response.status_code, 403)
+            {"event": theirs.pk, "status": Event.Status.CANCELLED}, follow=True)
+        self.assertEqual(response.status_code, 200)
         theirs.refresh_from_db()
-        self.assertNotEqual(theirs.status, Event.Status.CANCELLED)
+        self.assertEqual(theirs.status, Event.Status.CANCELLED)
 
     def test_a_plain_ministry_admin_still_sees_only_their_own(self):
         """⚠️ 放宽的只有 foundation tier 那一层。少了这一条，
@@ -14141,6 +14273,21 @@ class FoundationTierReadOnlyTests(PageTestCase):
         self.assertNotContains(response, theirs.name)
         self.assertFalse(response.context["showing_all"])
         self.assertTrue(response.context["can_publish"])
+
+    def test_a_plain_ministry_admin_still_cannot_touch_someone_elses(self):
+        """🔴 **D48 放宽的是 foundation tier，不是所有人。**
+
+        少了这一条，上面那条 `test_seeing_more_now_means_changing_more` 用一句
+        「谁都改得了任何一场」也能满足 —— 而那会是一个静默的越权。
+        """
+        theirs = self.someone_elses_event()
+        self.login(self.zhang)
+        response = self.client.post(
+            reverse("events:event_manage_list"),
+            {"event": theirs.pk, "status": Event.Status.CANCELLED})
+        self.assertEqual(response.status_code, 403)
+        theirs.refresh_from_db()
+        self.assertNotEqual(theirs.status, Event.Status.CANCELLED)
 
     def test_the_filter_offers_every_ministry_it_is_showing(self):
         """⚠️ 这一条替换掉的那一条钉的是「`scope` 要有隐藏字段，否则一按筛选就
@@ -18003,9 +18150,19 @@ class CheckInDisplayTests(PageTestCase):
         page = reverse("events:event_attendance", args=[self.event.pk])
         self.assertNotContains(self.client.get(page), "self check-in")
 
-    def test_the_management_list_shows_the_link_only_to_who_may_use_it(self):
-        # Same rule as Edit and Notify on that row: a link that refuses the
-        # person who clicked it reads as a broken site.
+    def test_the_management_list_shows_the_link_to_who_may_use_it(self):
+        """Same rule as Edit and Notify on that row: a link that refuses the
+        person who clicked it reads as a broken site.
+
+        🔴 **2026-09-16（D48）：这一条的后半截反过来了。** 它原来叫
+           `..._only_to_who_may_use_it`，第二段断言 foundation tier 看**不到**
+           这个链接 —— 因为当时它点下去是 403。现在它点得动，所以画出来是对的。
+           ⚠️ 规矩一个字没变（「画出来的链接必须点得动」），变的是谁点得动。
+
+        ⚠️ **真正的边界不在这一条上，而且它还在**：
+           `test_a_volunteer_cannot_fetch_a_code_from_their_sofa` 那一条钉的是
+           发码那个端点本身对志愿者的拒绝 —— 画不画一个链接从来不是权限。
+        """
         qr_link = reverse("events:checkin_display", args=[self.event.pk])
         self.login(self.zhang)
         self.assertContains(
@@ -18015,7 +18172,7 @@ class CheckInDisplayTests(PageTestCase):
         self.lisi.save()
         foundation_admin_group().user_set.add(self.lisi)
         self.login(self.lisi)
-        self.assertNotContains(
+        self.assertContains(
             self.client.get(reverse("events:event_manage_list")), qr_link)
 
 
@@ -19140,7 +19297,12 @@ class RoleKindFilterTests(PageTestCase):
         而这一批自己就漏过一次的机会摆在那里。失败是**静默**的：新那一格点进
         活动再返回时自己没了，页面看起来完全正常。
         """
-        drawn = EventPeriodForm(audience=self.lisi.contact).fields
+        # 🔴 **每一个「会长出一格」的关键字都要传**（2026-09-16 加 `by_shape`）。
+        #    这张表单有两格是**按需**才存在的（`nature` 要 `audience`、
+        #    `kind` 要 `by_shape`），而漏传一个的表现正是这条守卫在防的东西的
+        #    反面：它会说 `FILTER_PARAMS` 多了一个名字，而其实是这一行少问了
+        #    一个问题。⚠️ 以后再加按需的格子，先改这一行。
+        drawn = EventPeriodForm(audience=self.lisi.contact, by_shape=True).fields
         self.assertEqual(set(FILTER_PARAMS), set(drawn))
 
     def test_the_box_speaks_to_the_person_choosing(self):
@@ -22740,3 +22902,150 @@ class MinistryFilterTests(PageTestCase):
         """🔴 那句话印在报表正文上，被人当口径读 —— 一个字都不许变。"""
         single = EventPeriodForm(QueryDict(f"ministry={self.pantry.pk}"))
         self.assertTrue(single.description().startswith("Food Pantry ·"))
+
+
+class ShapeFilterTests(PageTestCase):
+    """「活动还是课」那一格（2026-09-16，用户提的）。
+
+    ⭐ 只有管理列表有它。那一页列的是 `Event.objects.all()` —— 单场、整期的课、
+       以及一条规则生成出来的那些，全在一张表里，所以「哪一种」在那里是一个真
+       问题。浏览那两页（`/events/`、`/programs/`）**互斥**（决定 45），
+       地址本身就是答案。
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.course = make_run(
+            ministry=self.pantry, owner=self.zhang.contact, name="Spring ESL")
+        make_role(self.course, "greeting")
+        self.login(self.zhang)
+
+    def managed(self, query=""):
+        page = self.client.get(reverse("events:event_manage_list") + query)
+        return {e.name for e in page.context["events"]}
+
+    # --- 筛出来的东西 ------------------------------------------------------
+
+    def test_programs_leaves_only_the_courses(self):
+        found = self.managed("?kind=programs")
+        self.assertEqual(found, {self.course.name})
+
+    def test_events_leaves_only_the_one_off_occasions(self):
+        found = self.managed("?kind=events")
+        self.assertIn(self.event.name, found)
+        self.assertNotIn(self.course.name, found)
+
+    def test_nothing_picked_is_no_filter(self):
+        """⚠️ 「没填」是空串，和 `ministry` / `q` 一样 —— 这一格没有 `all` 哨兵。
+
+        `views.SIGNUP_KINDS` 那边有一个（三颗按钮必有一颗按下去），而那是
+        **另一页的另一个问题**。两者共用的只有 `SHAPE_KINDS` 里那两个词。
+        """
+        found = self.managed()
+        self.assertIn(self.event.name, found)
+        self.assertIn(self.course.name, found)
+
+    def test_a_word_it_does_not_know_filters_nothing(self):
+        """⚠️ 这个值会出现在人手改过的链接里。看不懂就当没筛，不是 500。"""
+        found = self.managed("?kind=lectures")
+        self.assertIn(self.event.name, found)
+        self.assertIn(self.course.name, found)
+
+    # --- 🔴 那几条会静默失败的 ---------------------------------------------
+
+    def test_it_is_on_the_list_of_names_a_link_carries(self):
+        """🔴 少了 `FILTER_PARAMS` 里那一行，这一格在带状态的链接上**自己没了**，
+           而页面看起来完全正常 —— `nature` 当初踩的就是这个坑。
+
+        ⚠️ 验在浏览页上，因为 `list_state` 是**那两页**的上下文键（管理列表走
+           的是 `{% querystring %}`，见下一条）。`_list_state()` 是一张按名字
+           取值的白名单，名字不在 `LIST_STATE` 里就取不到 —— 这一条验的正是
+           那张名单收了它。
+        """
+        self.assertIn("kind", LIST_STATE)
+        self.login(self.lisi)
+        page = self.client.get(reverse("events:event_list") + "?kind=programs")
+        self.assertIn("kind=programs", page.context["list_state"])
+
+    def test_changing_a_status_does_not_drop_the_filter(self):
+        """🔴 管理列表上「不丢掉你在看哪一份」走的是 `{% querystring %}`。
+
+        那颗状态下拉一改就 POST，而回来的是整块 `#event-results` —— 表单的
+        `action` 不带当前筛选的话，改一个状态就把人送回「没筛选的第一页」，
+        **而那一页看起来完全正常**，只是不是他刚才在看的那一页。
+        """
+        html = self.client.get(
+            reverse("events:event_manage_list") + "?kind=programs").content.decode()
+        self.assertIn("kind=programs", html)
+
+    def test_the_summary_line_and_clear_come_back_over_htmx(self):
+        """🔴 **用户报上来的那件事本身。**
+
+        那行 `Filtered by … / Clear` 在筛选表单里，也就是 `#event-results`
+        **外面**，而 HTMX 只换那一块。少了结果片段里那份 `hx-swap-oob`，
+        动一下筛选 —— 列表变了，而这一行**永远不出现**，于是 Clear 永远点不到。
+        ⚠️ 整页加载时它是好的，所以 curl 验不出来。这一条发的是 HTMX 那一趟。
+        """
+        html = self.client.get(
+            reverse("events:event_manage_list") + "?kind=programs",
+            headers={"HX-Request": "true"}).content.decode()
+        self.assertIn('id="filter-summary"', html)
+        self.assertIn('hx-swap-oob', html)
+        self.assertIn("Clear", html)
+
+    def test_the_date_chip_comes_back_too(self):
+        """⚠️ 同一个洞的第二半：Dates 那颗按钮上的字也在那一块外面。"""
+        html = self.client.get(
+            reverse("events:event_manage_list") + "?start=2026-09-01",
+            headers={"HX-Request": "true"}).content.decode()
+        self.assertIn('id="date-chip-label"', html)
+
+    def test_no_second_count_is_sent_out_of_band(self):
+        """🔴 **`_event_count.html` 不该出现在这一页的片段里。**
+
+        这一页的计数印在 `#event-results` **里面**，跟着一起换 —— 再补一份 OOB
+        就是 DOM 里两个 `id="event-count"`，而 OOB 的落点从此是不确定的那一个。
+        ⚠️ 重复 id 不报错，页面看起来也完全正常，只能靠数出来发现。
+        """
+        html = self.client.get(
+            reverse("events:event_manage_list"),
+            headers={"HX-Request": "true"}).content.decode()
+        self.assertNotIn('id="event-count"', html)
+
+    # --- 这一格只在该有的那一页上 ------------------------------------------
+
+    def test_the_browse_list_has_no_such_box_and_ignores_the_parameter(self):
+        """⚠️ 没有这一格的页面上，一个伪造的 `?kind=` 什么都不筛 —— 而不是
+           筛掉一半、屏幕上却没有任何控件说明为什么。同 `nature` 那一条。
+        """
+        self.login(self.lisi)
+        page = self.client.get(reverse("events:event_list") + "?kind=programs")
+        self.assertFalse(page.context["period"].by_shape)
+        self.assertNotIn("kind", page.context["period"].fields)
+        self.assertIn(self.event.name, {e.name for e in page.context["events"]})
+
+    def test_the_management_list_has_the_box(self):
+        page = self.client.get(reverse("events:event_manage_list"))
+        self.assertTrue(page.context["period"].by_shape)
+
+    # --- 措辞只有一份 ------------------------------------------------------
+
+    def test_the_two_words_are_declared_once(self):
+        """🔴 My Signups 那一排和这一格问的是同一个问题。
+
+        两份各写的后果是同一门课在两页上叫不同的名字 —— 每处都渲染正常，
+        只有把两页并排才看得见。
+        """
+        self.assertEqual(
+            [pair for pair in SIGNUP_KINDS if pair[0] != "all"],
+            list(SHAPE_KINDS))
+
+    def test_the_summary_names_this_box_too(self):
+        """⚠️ 底下那行说不出它的话，筛了 kind 之后 Clear 整行都不画。"""
+        page = self.client.get(
+            reverse("events:event_manage_list") + "?kind=programs")
+        self.assertIn("kind", page.context["period"].filtered_by)
+
+    def test_the_report_sentence_is_untouched(self):
+        """🔴 报表页不传 `by_shape`，所以那句印在正文上的话一个字没变。"""
+        self.assertNotIn("kind", EventPeriodForm().fields)

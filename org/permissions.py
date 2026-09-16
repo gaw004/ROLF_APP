@@ -92,27 +92,22 @@ def administers(user, ministry, on=None) -> bool:
     return ministry_id in ministry_ids_administered_by(user, on=on)
 
 
-def administers_one_of(ministry, administered) -> bool:
-    """`administers()` for a page of rows: the same rule, asked with no query.
-
-    ⚠️ **The second implementation of one rule, and it lives here beside the
-       first for that reason** — the same arrangement core/querysets.py uses for
-       active()/is_currently_active and events/models.py for
-       recording_hours()/records_hours. Change one, change the other.
-
-    It was inlined in events/views.py until 2026-09-08 (`event.ministry_id in
-    administered`), which is this function's body written somewhere the grep
-    guard cannot see it: PermissionGuardTests looks for MinistryRole.objects,
-    and a set membership test names nothing it recognises. The rule that views
-    make exactly one call into this module was being broken by the only spelling
-    that could not be caught.
-
-    ⚠️ `administered` is the caller's already-fetched set of ids — one query for
-       a page rather than one per row, which is why the pair exists at all. It
-       decides **what to draw**; every write still goes through the real check.
-    """
-    ministry_id = getattr(ministry, "pk", ministry)
-    return ministry_id in administered
+#: 🔴 **`administers_one_of()` 和 `holds_grant_on()` 2026-09-16 删掉了（D48）。**
+#:
+#:    两个都是「同一条规则的集合版」，给管理列表逐行判「这一行能不能改」用的，
+#:    唯一的调用方是 `events.views.event_manage_list`。D48 把 foundation tier 的
+#:    写权限放开之后，那一页上**每一行都改得动** —— 那个逐行判断只剩一个答案，
+#:    连同这两个函数一起清掉了（phase-d 的判据 2：它没有读者）。
+#:
+#:    ⚠️ 它们解决的问题**没有消失**：一页 50 行要判权限时，逐行 `administers()`
+#:       就是 50 次查询。哪天再需要，形状照旧是「调用方先取一次 id 集合，
+#:       这里只做集合判断」，而且要**紧挨着** `administers()` / `event_ids_granted_to()`
+#:       放 —— 同一条规则的两份实现分开放，是它们走散的开始。
+#:    ⚠️ 还有一条当时写下的理由值得留着：把 `event.ministry_id in administered`
+#:       直接内联进 `views.py`，等于把这个函数的函数体写在 grep 守卫看不见的
+#:       地方（`PermissionGuardTests` 找的是 `MinistryRole.objects`，一个集合
+#:       判断它一个字都认不出来）。所以那一天真要回来，是回来**一个函数**，
+#:       不是回来一行内联。
 
 
 def _any_management_tier(user) -> bool:
@@ -137,8 +132,26 @@ def _any_management_tier(user) -> bool:
 
 
 def can_publish_event(user, ministry) -> bool:
-    """P2: publish an event for this ministry, and say how many each role needs."""
-    return administers(user, ministry)
+    """P2: publish an event for this ministry, and say how many each role needs.
+
+    ⭐ **foundation tier 也算，替任何一个 ministry**（2026-09-16，用户拍板，D48）。
+       在此之前它一个活动都发不了 —— 它持不了 `MinistryRole`，而这是唯一的判据。
+    """
+    return administers(user, ministry) or in_foundation_tier(user)
+
+
+def can_reach_publish_page(user) -> bool:
+    """能不能打开发布页 —— 替**任意一个** ministry 发得了就算（2026-09-16）。
+
+    ⚠️ 自成一问，同 `can_reach_staff_roster()`：「你还没被授权管任何 ministry」
+       和「这一页不是给你的」不能长一个样（D27）。上面那个函数问的是一个具体
+       的 ministry，而开页面的那一刻还没有具体的 ministry 可问。
+
+    ⚠️ 它同时决定管理列表上那颗 `Publish a new event` 画不画。少了那一处，
+       权限放开了而**没有任何东西指向它** —— `phase-d.md` 第四节点名三次、
+       `core/context_processors.py` 开头列了五个的同一种缺口。
+    """
+    return bool(ministry_ids_administered_by(user)) or in_foundation_tier(user)
 
 
 def can_manage_series(user, series) -> bool:
@@ -148,13 +161,23 @@ def can_manage_series(user, series) -> bool:
     series belongs to a ministry, and running that ministry is what entitles
     somebody to schedule its evenings.
 
+    ⭐ **foundation tier 也算**（2026-09-16，D48）。在此之前这里只认
+       `MinistryRole`，而那条路和发布是同一个洞：放开发布之后，一个 foundation
+       admin 发得出一条规则、发完**立刻进不去它自己的详情页** —— 开不了工种、
+       排不了场次，也就是说那条规则发出来就是死的。
+
+    ⚠️ **下面那段讲 `view_eventseries` 的话仍然成立，而它说的是另一扇门。**
+       Django admin 那一侧照旧只读（那是 `FOUNDATION_ADMIN_PERMISSIONS` 的事）；
+       站点这一侧的写权限由这个函数判。两处不冲突，写在一起是因为它们读起来像
+       一回事。
+
     ⚠️ Not the `view_eventseries` grant in FOUNDATION_ADMIN_PERMISSIONS. That
        one is the **admin's** door and is deliberately read-only (D20: building
        a batch is an act on one ministry's events, so it belongs to the
        ministry tier). This is that tier's door, and L5.4's note beside those
        two lines predicted it.
     """
-    return administers(user, series.ministry)
+    return administers(user, series.ministry) or in_foundation_tier(user)
 
 
 def event_ids_granted_to(user, on=None) -> set[int]:
@@ -202,16 +225,22 @@ def event_ids_granted_to(user, on=None) -> set[int]:
     )
 
 
-def holds_grant_on(event, granted) -> bool:
-    """`event_ids_granted_to()` 的集合版：一页行用一次查询答完。
-
-    ⚠️ **同一条规则的第二份实现，而它就放在第一份旁边** —— 同
-       `administers_one_of()` 的那一段（「Change one, change the other」）。
-       管理列表要为每一行判「这一行能不能改」，逐行去问就是 50 行 50 次查询。
-
-    ⚠️ 它决定**画什么**；每一个写操作照旧走 `can_manage_event()` 的真检查。
-    """
-    return getattr(event, "pk", event) in granted
+#: 🔴 **`administers_one_of()` 和 `holds_grant_on()` 2026-09-16 删掉了（D48）。**
+#:
+#:    两个都是「同一条规则的集合版」，给管理列表逐行判「这一行能不能改」用的，
+#:    唯一的调用方是 `events.views.event_manage_list`。D48 把 foundation tier 的
+#:    写权限放开之后，那一页上**每一行都改得动** —— 那个逐行判断只剩一个答案，
+#:    连同这两个函数一起清掉了（phase-d 的判据 2：它没有读者）。
+#:
+#:    ⚠️ 它们解决的问题**没有消失**：一页 50 行要判权限时，逐行 `administers()`
+#:       就是 50 次查询。哪天再需要，形状照旧是「调用方先取一次 id 集合，
+#:       这里只做集合判断」，而且要**紧挨着** `administers()` / `event_ids_granted_to()`
+#:       放 —— 同一条规则的两份实现分开放，是它们走散的开始。
+#:    ⚠️ 还有一条当时写下的理由值得留着：把 `event.ministry_id in administered`
+#:       直接内联进 `views.py`，等于把这个函数的函数体写在 grep 守卫看不见的
+#:       地方（`PermissionGuardTests` 找的是 `MinistryRole.objects`，一个集合
+#:       判断它一个字都认不出来）。所以那一天真要回来，是回来**一个函数**，
+#:       不是回来一行内联。
 
 
 def can_manage_event(user, event) -> bool:
@@ -229,13 +258,25 @@ def can_manage_event(user, event) -> bool:
        ⚠️ 如果当初那些检查散在各个 view 里，这个功能就是二十处修改 ——
           **而漏掉的那一处是静默的**。这是 D20「判断只有一处」买到的东西。
 
-    ⚠️ **被授权人拿不到的三样**，各自有自己的判断，一个字没改：
-       发布新活动（`can_publish_event`）、管理系列（`can_manage_series`）、
-       以及再把这一场授权给第三个人（`can_grant_event_admin`）。
+    ⚠️ **被授权人拿不到的一样**：再把这一场授权给第三个人
+       （`can_grant_event_admin`）。⚠️ 2026-09-16 前这里写的是「三样」，
+       另外两样是发布新活动和管理系列 —— 那两条现在对 foundation tier 开了，
+       但对**被授权人**仍然关着，所以这句话的主语要跟着收窄。
+
+    🔴 **第三条路 2026-09-16 加：foundation tier，对任何一场**（D48，用户拍板）。
+       ⚠️ 这**推翻了 2026-08-05 定下、9-03 重申的「它读得了每一场、改不了任何
+          一场」** —— 不是绕过它，是明说换掉。触发它的是同一天放开的发布权：
+          一个 foundation admin 发得出活动、发完立刻 403，开不了工种、发不了
+          通知，于是发出来的是一个谁也报不了名的壳。
+       ⚠️ 代价如实记：`can_view_event_records()` 和这个函数从此**对每一类人
+          答案相同**（见那个函数自己的注释），而「只读身份」那一档在这个系统里
+          不再有人属于。为它写的六处分支和一个测试类跟着这次改动一起清掉了 ——
+          留着它们就是留一套描述着一个不存在的区别的代码。
     """
     if event is None:
         return False
     return (administers(user, event.ministry_id)
+            or in_foundation_tier(user)
             or event.pk in event_ids_granted_to(user))
 
 
@@ -345,6 +386,17 @@ def in_foundation_tier(user) -> bool:
     """
     if user is None or not getattr(user, "is_authenticated", False):
         return False
+    # 🔴 **`pk` 那一半不是多余的**（2026-09-16 撞上的）。Django 的
+    #    `AbstractBaseUser.is_authenticated` 是一个**硬编码的 True**，所以上面
+    #    那一句拦不住一个**没存过**的 `User()` —— 而 `user.groups` 对一个没有
+    #    主键的实例直接抛 `ValueError`，也就是一个 500，而不是一句「不是」。
+    #    ⚠️ 它的兄弟 `ministry_ids_administered_by()` 早就兜住了同一种输入
+    #       （`_contact_of()` 拿不到 Contact 就返回空集）。两个并排的谓词对同一个
+    #       输入一个答 False、一个 500，是这个模块最不该有的那种不一致。
+    #    ⚠️ 答 False 而不是抛：一个没存过的账号**不是**基金会那一层的人，
+    #       这是这个问句唯一诚实的答案，也是安全的那个方向。
+    if user.pk is None:
+        return False
     return user.groups.filter(name=FOUNDATION_ADMIN_GROUP).exists()
 
 
@@ -359,12 +411,24 @@ def can_grant_ministry_admin(user) -> bool:
 
 
 def can_view_event_records(user, event) -> bool:
-    """Read one event's signups, attendance and report. **Read only.**
+    """Read one event's signups, attendance and report.
 
-    Two ways in, and they are not the same authority (2026-08-05):
+    🔴 **2026-09-16（D48）起，这个函数和 `can_manage_event()` 对每一类人答案
+       相同**，而它仍然存在、仍然被四处调用。说清为什么，因为「两个名字一个
+       答案」读起来像是漏删了一个：
 
-      · the ministry's own admin, who may also change these things;
-      · the foundation tier, who may only look.
+         · 它们是**两个问题**（「看得见吗」／「改得动吗」），而这个仓库已经
+           付过一次「两个问题共用一个判断」的钱；
+         · 成员集合**分开过、而且是往两个方向分的**：8-05 到 9-16 之间
+           foundation tier 只在这一边；D47 的被授权人至今只在**另一**边
+           （他管得了这一场，却持不了 `MinistryRole`，走不到这个函数的前两项）。
+           —— 所以今天相等是一个巧合，不是一条规律。
+       ⚠️ 这里**不许**改写成 `return can_manage_event(user, event)`：那会把
+          「今天相等」固化成「永远相等」，而下一次分家将无声无息。
+
+    ⚠️ 原来这里写着「**Read only**」和「the foundation tier, who may only
+       look」。**那两句 2026-09-16 起是假的**，已经删掉 —— 一条描述着一个不存在
+       的保护的注释，是这个仓库反复判刑的那一种。
 
     ⚠️ Nothing that writes may be gated on this. The attendance page in
        particular is a write page — check-in, check-out, hours — so it asks
@@ -397,6 +461,12 @@ def event_access(user, event) -> tuple[bool, bool]:
        foundation-tier check is only reached by somebody who does not manage
        this ministry. That is the containment can_view_event_records() states,
        not a shortcut on top of it.
+
+    🔴 **2026-09-16（D48）起两个元素永远相等**，而这个函数保持原样，理由逐字
+       同 `can_view_event_records()` 那段：它们是两个问题，而成员集合分开过、
+       还是往两个方向分的。调用方照旧解成两个名字 —— 把它们合并成一个返回值，
+       等于把「今天相等」写成「永远相等」，而下一次分家时每一个调用方都得重新
+       想一遍自己当初问的是哪一个。
     """
     manages = can_manage_event(user, event)
     return manages, manages or (event is not None and in_foundation_tier(user))

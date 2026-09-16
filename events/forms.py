@@ -21,7 +21,7 @@ from django.utils.timezone import localtime
 from org.audience import Audience
 from org.forms import AudienceFormMixin
 from org.models import Ministry
-from org.permissions import ministry_ids_administered_by
+from org.permissions import in_foundation_tier, ministry_ids_administered_by
 
 from . import schedule
 # ⚠️ The picker below asks `recurrence` to build and read the rule string
@@ -729,7 +729,19 @@ class PublishFormMixin(EventAudienceFormMixin):
     def __init__(self, *args, user, **kwargs):
         super().__init__(*args, **kwargs)
         administered = ministry_ids_administered_by(user)
-        self.fields["ministry"].queryset = Ministry.objects.filter(id__in=administered)
+        # 🔴 **foundation tier 拿全部**（2026-09-16，D48）。它持不了
+        #    `MinistryRole`，所以 `administered` 对它是空集 —— 不分这一支的话，
+        #    它打得开发布页、而那一格里**一个 ministry 都没有**：一张永远提交
+        #    不了的表单，页面上没有任何东西说得出为什么。
+        # ⚠️ `is_active=True`：停办的 ministry 不该再收到新活动。ministry admin
+        #    那一档不用这个条件 —— 他的 `MinistryRole` 本来就挂在一个在办的
+        #    ministry 上。
+        # ⚠️ 这里收窄的是**下拉框**，而它防的是手滑；防越权的是视图里对提交值
+        #    再判一次 `can_publish_event()`。两件事，都要有（见类的 docstring）。
+        self.fields["ministry"].queryset = (
+            Ministry.objects.filter(is_active=True).order_by("name")
+            if in_foundation_tier(user)
+            else Ministry.objects.filter(id__in=administered))
 
         # ⭐ Nothing else is pre-ticked, and that is the expensive decision of
         #    this form. Defaulting to everyone would match today's behaviour and
@@ -923,7 +935,27 @@ NO_AUDIENCE = object()
 #:    files to add `nature`. The failure is silent: the new box simply stops
 #:    surviving a click into an event and back.
 #:    守卫：events.tests.RoleKindFilterTests.test_the_filter_names_are_declared_once
-FILTER_PARAMS = ("q", "ministry", "nature", "start", "end")
+FILTER_PARAMS = ("q", "ministry", "nature", "kind", "start", "end")
+
+
+#: 两种形状在用户面前怎么称呼 —— **一份**（2026-09-16）。
+#:
+#: 🔴 **`views.SIGNUP_KINDS` 从这里拼，不另敲一遍。** My Signups 那一排
+#:    （决定 50）和管理列表那一格问的是同一个问题，而两份各写的后果是同一门课
+#:    在两页上叫不同的名字 —— 一个每处都渲染正常、只有把两页并排才看得见的错。
+#:
+#: ⚠️ **「不筛」那一档不在这里**，而这不是遗漏：那一格在两页上是两个不同的东西。
+#:    My Signups 上它是一个真的哨兵值（`?kind=all`，三颗按钮里必有一颗按下去）；
+#:    这张表单上「没填」就是空串，和 `ministry` / `nature` / `q` 完全一样 ——
+#:    于是 `filtered_by`、`_list_state`、Clear 一路都不用为它开特例。
+#:
+#: ⚠️ 值是 `events` / `programs`，**不是** `Event.Shape` 的 `single` / `program`。
+#:    这两个词会进查询串、会被人从链接里读到，而 `single` 对着一门「课」是一个
+#:    只有读过模型的人才懂的词。落到 queryset 那一步由 `narrow()` 翻译。
+SHAPE_KINDS = (
+    ("events", "Events"),
+    ("programs", "Programs"),
+)
 
 
 #: 决定「什么时候」的那几格 —— 日期预览只看它们的错误。
@@ -1421,8 +1453,15 @@ class EventPeriodForm(forms.Form):
     )
 
     def __init__(self, *args, ministries=None, audience=NO_AUDIENCE,
-                 noun="event", multi_ministry=False, **kwargs):
+                 noun="event", multi_ministry=False, by_shape=False, **kwargs):
         """`ministries` narrows the dropdown to a scope the page already has.
+
+        `by_shape` (2026-09-16) 决定这张表单**有没有**「活动还是课」那一格。
+        和 `audience` 同一条写法、同一条理由：不传的页面上根本没有这个字段，
+        于是一个伪造的 `?kind=programs` **什么都不筛**，而不是筛掉一半、
+        屏幕上却没有任何控件说明为什么。
+        ⚠️ 只有管理列表传它。浏览那两页（`/events/` `/programs/`）是**互斥**的
+           —— 那里「哪一种」由地址本身回答，再给一格只会问一个已经答过的问题。
 
         `audience` (2026-09-08) is the person the "kind of role" box is judged
         for. Passing it is what **creates** that box: pages that do not pass it
@@ -1468,6 +1507,20 @@ class EventPeriodForm(forms.Form):
                 queryset=self.fields["ministry"].queryset,
                 required=False, label="Ministry", empty_label="Ministry")
         self._multi_ministry = multi_ministry
+        self._by_shape = by_shape
+        if by_shape:
+            # ⚠️ 空选项说的是**这一格管什么**（"Kind"），不是「当前没筛」——
+            #    逐字照旁边 `ministry` 的 `empty_label="Ministry"` 和 `nature`
+            #    那一格 2026-09-15 的改口。一条式的版式里标签是 `sr-only`，
+            #    所以框里那个词是看得见的人唯一读得到的说明。
+            #
+            # 🔴 **画成原生 `<select>`（走 `_filter_select.html`），不是 Role 那种
+            #    弹层。** 判据写在 `_role_filter.html` 顶上：「选项需不需要一句
+            #    解释」。Events / Programs 已经是全站主导航上那两格的名字、
+            #    在那里也不带解释 —— 再在这里补一句，就是同一对词有两套说法。
+            self.fields["kind"] = forms.ChoiceField(
+                required=False, label="Kind",
+                choices=[("", "Kind"), *SHAPE_KINDS])
         self._audience = audience
         if audience is not NO_AUDIENCE:
             # L1's axis, finally askable (2026-09-08). Until now `nature` was
@@ -1528,7 +1581,17 @@ class EventPeriodForm(forms.Form):
         #    kind of thing am I looking at", and the dates answer "when". A name
         #    absent from the list is simply left where it was declared, so this
         #    stays correct on the pages that have no `nature` field at all.
-        self.order_fields(["q", "ministry", "nature", "start", "end"])
+        self.order_fields(["q", "ministry", "kind", "nature", "start", "end"])
+
+    @property
+    def by_shape(self):
+        """这张表单被要求问「活动还是课」了吗。
+
+        ⚠️ 模板问**这个**，不问 `{% if period.kind %}` —— 逐字同下面那条：
+           缺字段时 `Form.__getitem__` 抛的 `KeyError` 会被模板引擎吞掉变成
+           空串，于是那是一条失败路径在冒充一个问句。
+        """
+        return self._by_shape
 
     @property
     def by_role_kind(self):
@@ -1701,6 +1764,8 @@ class EventPeriodForm(forms.Form):
             named.append("ministry")
         if self.cleaned_data.get("nature"):
             named.append("role")
+        if self.cleaned_data.get("kind"):
+            named.append("kind")
         if self.cleaned_data.get("start") or self.cleaned_data.get("end"):
             named.append("dates")
         # ⚠️ `get_text_list` 而不是 `", ".join` —— 它给的是「a, b and c」，
@@ -1798,6 +1863,20 @@ class EventPeriodForm(forms.Form):
             #    M2M —— `for_audience()` 专门用 `Exists` 躲的正是那件事）。
             events = events.filter(
                 ministry__in=ministry if self._multi_ministry else [ministry])
+        kind = self.cleaned_data.get("kind") if self.is_valid() else ""
+        if kind:
+            # 🔴 **用 `EventQuerySet` 上现成的两个谓词，不在这里重写判据。**
+            #    `views._of_shape()`（决定 45，那两张互斥的浏览页）调的是同一对
+            #    方法，而它自己的注释写着「用的是 `EventQuerySet` 上那两个谓词
+            #    （models.py），不是在这里重写判据」。两个调用方，一份判据 ——
+            #    各写一遍 `filter(shape=…)` 的表现是同一门课在浏览页上是课、
+            #    在管理列表上不是。
+            #
+            # ⚠️ 这里**不**收 `_of_shape()` 当函数用：那个函数是二选一，没有
+            #    「两种都要」这一档，而这一格的默认就是那一档。把第三档加进它
+            #    会让那两页多出一个它们不许有的状态。
+            events = (events.programs() if kind == "programs"
+                      else events.single_occasions())
         search = (self.cleaned_data.get("q") or "").strip() if self.is_valid() else ""
         if search:
             # ⚠️ `.strip()` above, and it matters more than it looks: a trailing

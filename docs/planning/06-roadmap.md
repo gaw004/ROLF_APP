@@ -2600,6 +2600,18 @@ recurring events 生成 `Event`（唯一在跑的那个）、Program 按规则�
 以及 D2a 的 `WorkPattern` 生成 `Shift`。后两个**没有任何一步在做** ——
 排讲次至今是 admin 一条一条敲。写进 docstring，做那两步时调这里，别再写一个。
 
+> #### ✅ 2026-09-16：第二个调用方到了（[D49](decisions/D49-program-meetings.md)）
+>
+> 「Program 按规则一次排完十二讲」落地了 —— `services.publish_program()` 调的
+> 正是这里的 `occasions()`，**没有第二个展开器**。上面那句「排讲次至今是 admin
+> 一条一条敲」因此作废：站点上现在有两条路（发布时一次排完，和
+> `/events/<pk>/meetings/` 手工补一讲）。
+>
+> ⚠️ 第三个（`WorkPattern` → `Shift`）仍然没有任何一步在做，所以这段话留着。
+> ⚠️ 而这条「写进 docstring，做那两步时调这里」的嘱咐**兑现了**：D49 那一批
+> 没有新写展开器，新写的是一个 mixin（`RecurrencePickerMixin`）——
+> 因为要共用的不止是展开器，还有问法。
+
 用 `dateutil.rrule.rrulestr()`。`python-dateutil` 已经在 `requirements.txt` 里，
 **不引入任何新依赖**（核对过）。不用 `django-recurrence`：它多给的是一个字段类型
 和一个 widget，而按 D18 的落点规矩，生成器本来就该是这里的纯函数。

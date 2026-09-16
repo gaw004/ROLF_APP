@@ -1,3 +1,165 @@
+## 七十二、2026-09-16：地址在录入的那一刻就校验 —— 而拍板不做的那一半，理由比做了的那一半长
+
+用户要的是「输入的时候就对，这样不容易错」，并且问了能不能接地图自动补全。
+地图那一半**不做**（[D50](decisions/D50-address-input.md) / `deferred.md`），
+零依赖那一半全做：五十州的真下拉、localflavor 的邮编格式、四格去空白。
+
+### 为什么这四格值得校验，而别的自由文本不值得
+
+它们的**唯一去处**是「在地图里打开这个地方」。而一个地图打不开的地址
+**不报错，只是打不开** —— 没有测试、没有 `full_clean()`、没有页面会说它坏了。
+发现它的是那天开车去的人。
+
+### 州为什么不走那段现成的 JS
+
+`contact` 那边早有一套（`address_state_toggle.js` 在界面上换控件）。
+活动这边不走它：它要 JavaScript，而 D24 说功能不挂在脚本上；
+**而且活动这边不需要它** —— 那段 JS 存在的理由是 `Contact` 有
+`address_country`，州是一条「US 时是五十州、否则自由文本」的**有条件**规则。
+`Event` 没有那一列，而那是有意的。没有条件，就不需要在运行时换控件。
+
+⚠️ 于是「不加 `address_country`」和「校验成美国州」不是矛盾，是同一个前提的两面。
+
+### ⚠️ 只做了一半的事，要在代码里说出另一半
+
+`contact` 那一侧本轮**没动**（它的州仍然是自由文本）。这一段写进了
+`core/address.py` 的模块注释，而不是留给人去发现 ——
+**一条只说一半的注释比没有更糟**：下一个读到「地址已经校验了」的人，
+会以为两边都校验了。
+
+### 最不起眼也最值钱的那一条
+
+去空白。`"NY "` 和 `"NY"` 在地图查询和将来任何一次去重上都是两个值，
+而**屏幕上一模一样**。同一个坑的另一半这个仓库已经记过：`narrow()` 里那句
+`.strip()` —— 搜索框里一个尾随空格会让 `icontains` 一条都匹不上。
+
+### 看着截图才发现的一处不一致，是我自己引入的
+
+改完之后四格并排是「Address street / Address city / State / ZIP code」——
+两种命名法。统一成 Street / City / State / ZIP code，并加了一条测试。
+🔴 改的是**表单**的标签，不是模型的 `verbose_name`：那两列 `contact.Contact`
+上也有，一字不差是有意的。
+
+---
+
+## 七十一、2026-09-16：发布一门课得到的是一个一讲都没有的壳 —— 而排讲次要的三样东西从 L5 起就全在库里
+
+发布页给得出「A course or program — sign up once」，却没有任何地方能排它的讲次
+（[D49](decisions/D49-program-meetings.md)）。
+
+### 它补的是一个「半个功能」
+
+`Session` 这张表、`Session.clean()` 那三条规则、`services.add_session()` ——
+从 L5 起就都在。缺的是**门**：全站没有一条 URL 到得了 `add_session()`，
+只有 Django admin 能加，而 ministry admin 被中间件挡在 `/admin/` 外面。
+那个函数的 docstring 自己写着「⚠️ Until L5.6 its only callers are tests…
+the generator that will schedule a whole course is the reader this exists for,
+and it is three steps away」。这一批就是那三步。
+
+### 共用的是「怎么问」，不是「存不存」
+
+和「每周」那一档共用同一个重复选择器（抽成 `RecurrencePickerMixin`），
+但产出完全不同：一条 series 是 N 个互相独立的 `Event`，一门课是一个 `Event`
++ N 个 `Session`。**课不存那条规则** —— 它没有第二个读者。
+
+⚠️ 抽取的验收标准是**那一次 `events/tests.py` 一条都没改**：「抽出去之后悄悄
+改变了原来那张表单」是最贵的那种重构。1649 条绿、diff 为空。
+
+### 学期的两端是推出来的
+
+问一遍就是同一件事有两个来源：有人把结束日期填在最后一讲之前，于是
+`Session.clean()` 拒掉末尾几讲 —— 一个「我填了 12 次、只排出来 9 次」的页面，
+**而它不报错**。
+
+🔴 「不结束」那一档在课上不存在，而理由是**硬的**：`end_time` 是 `NOT NULL`。
+不是「对课没意义」—— 写成后者的话，下一个人会觉得这是个可以商量的产品判断。
+
+### 🔴 一个之所以吵起来纯属运气的失败
+
+**纯 mixin 上声明的表单字段会被 Django 整个丢掉**（它只从自己的类体和带
+`declared_fields` 的基类收集）。62 条测试同时红在
+`has no field named 'repeat_weekdays'` —— 而它之所以**吵**，是因为 `clean()`
+里恰好有一句 `add_error()` 指着那个名字。没有那一句的话，这九格会安安静静地
+不出现在页面上，也不参与校验。
+
+### 三件浏览器才看得见的事
+
+① 预览那一行说的是「This makes 12 **occasions**」—— 每个字都对，名词是错的。
+② 那块月历的**翻页键写死了 `series_preview`**：在课的页面上翻一个月，会把一份
+课的表单打到系列的预览视图上 —— 它按 `EventSeriesForm` 读，说的是 occasions，
+算的可能是另一批日期，**而整件事不报任何错**。
+③ 那一页的时刻写成了 `date:"g:ia"` → `7:00p.m.`，而全站是 `7pm`。
+`when_labels()` 的注释早写着「时刻走 `clock()`，不自己拼」。
+
+⚠️ ①② 都是**先在浏览器里看见错的输出**才写的测试，所以反向已验。
+⚠️ ③ 改成了 `Occurrence.starts_at` 两个属性 —— 下一个画讲次的页面白拿。
+
+### ⚠️ 一次重名
+
+`SessionForm` 这个名字**已经有人用了**（admin 的那张，带 `event` / `source`
+两格）。后定义的悄悄盖掉先定义的，而症状是「表单多了两格必填」。
+改名 `MeetingForm`，并把「为什么有两张」写在了它上面。
+
+---
+
+## 七十、2026-09-16：管理列表缺的那两份 OOB —— 而查它花掉的时间全在一个别的项目留下的 service worker 上
+
+三件事：「Events I Manage」加一格 kind 筛选、补上那一页缺的两份 OOB、
+foundation tier 拿到全部 ministry 的发布权和管理权
+（[D48](decisions/D48-foundation-tier-writes.md)）。
+
+### 用户报的那件事：「也没有 clear 在下面」
+
+那行 `Filtered by … / Clear` 和 Dates 按钮上的字都在 `#event-results` **外面**，
+而 HTMX 只换那一块 —— 动一下筛选，列表变了而那一行**永远不出现**。
+兄弟页 9-15 已经为同一件事画了五份，这一页是当时唯一漏掉的。
+
+⚠️ **只补两份，另外三份不画**：计数印在那一块**里面**跟着换；ministry chip 是
+给多选那颗按钮的，而这一页是单选、走原生 `<select>`；role chip 这一页没有那一格。
+落点不在 DOM 里时 OOB **静默失败**，多画一份不是保险，是往响应里塞一块谁都不
+知道去了哪的 HTML。
+
+### 🔴 只放开发布是一个陷阱
+
+用户只提了半句「foundation admin 也有发布 event/programs 的权力」。
+而 `event_create` 发布成功后重定向到编辑页，`can_manage_event()` **故意不含**
+foundation tier（9-03 他自己定的「只有 Food Pantry 他可以改」）——
+于是他发得出一个活动、**下一秒 403**，开不了工种、发不了通知。
+发出来的是一个谁也报不了名的壳。
+
+⚠️ 代价**先量过再拍的板**：实测会打红 11 条，其中 7 条属于一个专门为这件事写
+的类。因为「拆掉一个带测试的既有设计」和「加一个功能」是两件事，
+只有前者需要一次明确的授权。
+
+🔴 **一条断言都没删** —— 整个类改名反过来钉。一条规矩被撤销时把守着它的测试
+删掉，等于连「这件事曾经是反过来的」也一起删掉。
+⚠️ **手法一处没反**：这些断言仍然走 POST 而不是读 HTML。
+
+### 🔴 一句只有浏览器走查才抓得到的假话
+
+管理页顶上那段横幅写着「publishing, editing and notifying stay with each
+ministry's own admins」。我 grep 的是「read only / 只读」，而它一个字都没写 ——
+**一句假话不会用关键词标注自己**。
+
+### 🔴 而这一轮最贵的时间，花在一件和代码无关的事上
+
+浏览器里 Alpine 全部组件 undefined、筛选栏版式塌掉、Clear 变成整页跳转。
+三层叠在一起的过期静态文件，而**只有最后一层是真凶**：
+
+- `staticfiles/` 里是一次旧的 `collectstatic`（WhiteNoise 在 `base.py` 里，
+  所以开发环境也走 `STATIC_ROOT`，而它在**进程启动时**扫一次）；
+- `staticfiles/js/app.js.br` / `.gz` 停在 **2026-08-12** —— WhiteNoise 对任何
+  声明 br 的浏览器发那份。**所以 curl 拿到的是对的、浏览器拿到的是五周前的**，
+  而「curl 验不出来」这句话在这个仓库里已经出现过好几次；
+- 真凶：一个叫 **`lab-8-starter`** 的 service worker，是**别的项目**留在
+  `localhost:8000` 上的。SW 按**源**隔离，不认端口上跑的是哪个应用 ——
+  它劫持了 `/static/*`。ROLF 自己一个 service worker 都没有。
+
+⚠️ **结论对以后有用：这台机器上此前的每一次浏览器走查，看到的都可能不是刚写的
+代码。** 走查之前先确认 `navigator.serviceWorker.getRegistrations()` 是空的。
+
+---
+
 ## 六十九、2026-09-15：Ministry 筛选改多选 —— 而真正花时间的是两个既有 bug 和一次自己造的假象
 
 基金会要的是「filter 的 ministry 可以是多选，而且手画（要好看）」。

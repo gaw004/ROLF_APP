@@ -33,6 +33,8 @@ from core.timeutils import local_date_of, local_day, local_now, local_today
 from org.audience import Audience, on_the_books_exists, on_the_books_q
 from org.models import Assignment
 
+from .schedule import occurrences
+
 from . import ics, schedule, tokens
 from .recurrence import BATCH_CEILING, horizon_for, occasions
 from .models import (
@@ -40,6 +42,7 @@ from .models import (
     roles_narrower_than_event,
     refuse_bad_audience,
     Event,
+    EventGrant,
     EventNotification,
     EventRole,
     EventSeries,
@@ -4915,3 +4918,341 @@ def notify_event_change(event, *, reason, message, sent_by, backend=None):
         notification.failed.set(
             [r.participation for r, ok in zip(recipients, accepted) if not ok])
     return notification
+
+
+# --- 报名时间冲突（[D39](../docs/planning/decisions/D39-scheduling-conflicts.md) 第 ④ 类） ---
+#
+# ⭐ **本轮只做第 ④ 类：活动撞活动。** D39 定了四类（班次撞活动 · 班次撞假期 ·
+#    指派撞假期或离职 · 活动撞活动），而前三类要 `Shift` 和 `Leave` —— 两张表
+#    都还不存在（Phase D 的 D2a / D2b）。D39 自己写了这个形状：
+#    「真加的时候是这个函数多一个 queryset，调用方一个字不改」。
+#
+# 🔴 **落点是 `events`，而 D39 写的是 `org/services.py`（2026-09-15 改口）。**
+#    D39 那一节讲的是 D18 的落点规矩（逻辑进 services），**没有给「为什么是 org」
+#    的理由** —— 它写于 Phase D，那一轮的东西恰好全是 org 的。而：
+#
+#      · 第 ④ 类**全部是 events 的词汇**（Event / Session / Participation），
+#        org 里一个字都没有；
+#      · `events/services.py` 已经 import `org.models` / `org.audience` ——
+#        events → org 是既定的、允许的方向（D17）。反过来从来没有过，而
+#        `org/audience.py` 的 docstring 专门论证过这件事：受众轴搬进 org，
+#        理由正是「它是用 Ministry / Position / Assignment 这些词写成的」；
+#      · ⚠️ **这不只是今天的账**：将来 `Shift` / `Leave`（org）落地时，这个函数
+#        同时要 `Participation`（events）。放在 events 里两边都是允许方向；
+#        放在 org 里要一个**永久的**反向 import。
+#
+#    ⭐ 行业里这类「跨域的检查」收敛在同一处：**它属于排程那一域，而那一域在依赖
+#       链下游**（日历的 free/busy 由日历服务出，各来源往里投忙碌块；Planning
+#       Center 放在 Scheduling 域；Workday 放在 Time & Scheduling）。而这个仓库里
+#       「一个人的时间怎么摆开」**已经住在 events 了** —— `events/schedule.py`
+#       就是那个模块。
+#
+#    ⚠️ **逃生口写在这里，免得下一个人重新想一遍**：真长到要读四个域、而
+#       `events` 开始因此变胖时，搬去一个**依赖链末端的协调模块** —— 这个仓库
+#       已经建过一个（`dashboard`，D42：一个**没有 models** 的 app，理由一字不差
+#       就是 D17 不许反向 import）。那时调用方跟着改一行 import。
+#
+# ⚠️ D39 真正的不变量是**「只有一处」**，而它一个字没动：全项目只有这里把两段
+#    时间窗拿来比。守卫：`core.tests.ConflictDetectionGuardTests`。
+
+
+@dataclass(frozen=True)
+class Clash:
+    """和**某一场**活动的全部撞车 —— 一场一条，不是一次重叠一条。
+
+    🔴 **按对手方收拢，而这是 D39 没遇到过的形状。** D39 写于 2026-08-15，
+       早于 Programs / `Session`（L5，八月底）。一门每周三的十二周课撞上另一门
+       每周三的课，逐次列就是**十二行几乎一模一样的黄框** —— 而那正是提示最怕的
+       结局：人直接跳过不读。
+
+    ⚠️ `times` 里**留着每一次**，模板只画前三条加一句「另有 N 次」（用户定的）。
+       不在这里截断：截断之后 `len(times)` 就说不出总数了，而那个数正是「撞得有
+       多厉害」的全部信息。
+    """
+
+    event: object
+    times: list
+
+
+@dataclass(frozen=True)
+class ClashTime:
+    """一次具体的重叠：对方那一次的窗口，以及两边各是第几讲。
+
+    ⚠️ 画的是**对方**那一次的起止，不是重叠的那一段。D39 第三节要的是「撞的是
+       什么 · 撞在哪一段时间」，而人要判断的是「那件事占了我几点到几点」——
+       一个交集区间（比如 09:00–09:30）说不出对方其实要到 11 点。
+    """
+
+    start: object
+    end: object
+    #: 对方是它那门课的第几讲；单场活动是 None。
+    ordinal: int | None = None
+    #: **我这边**是第几讲；两门课对撞时，少了它就说不出是我的哪一讲被占了。
+    mine_ordinal: int | None = None
+
+
+def _busy_windows(participation):
+    """这条报名实际占住的那些时段。
+
+    ⭐ **课按他真正报了的那几讲算，不是按这门课开了几讲算。**
+       `people_pick_meetings` 开着时，他可能只报了十二讲里的三讲 ——
+       点名行（`SessionAttendance`）就是「他报了哪几讲」的答案，而
+       `services.open_registers_for()` 在报名那一刻写下它们。
+       按整门课算会凭空多报九次撞车。
+
+    ⚠️ 没有点名行时退回这门课的全部讲次：那是**报名之前**的状态（报名页上还没有
+       这条 `Participation`），以及这一列到来之前的老行。
+    """
+    event = participation.event_role.event
+    meetings = [row.session for row in participation.attendances.all()]
+    if meetings:
+        meetings.sort(key=lambda session: session.start_time)
+        return [
+            ClashTime(start=meeting.start_time, end=meeting.end_time, ordinal=number)
+            for number, meeting in enumerate(meetings, 1)
+        ]
+    return _event_windows(event)
+
+
+def _event_windows(event):
+    """一场活动占住的那些时段 —— 单场是它自己，一门课是它的每一讲。
+
+    ⚠️ 走 `schedule.occurrences()`，**不在这里写第二份展开逻辑**：那个函数算的正好
+       是这件事（连「第几讲」那个序号都有），而它是日程面板每天在用的那一份。
+       第二份的分歧会是「日程上画着两块、而冲突检测只看见一块」。
+
+    🔴 **这正是 D39 没有覆盖到的那个洞。** 一门课是**一个** `Event`，
+       `start_time` 三月、`end_time` 六月 —— 按 `Event` 的时间窗去比，四月里
+       **每一场**活动都会报「和 ESL 课冲突」。技术上没错，对人是胡说，
+       而且它会通过所有只用单场活动写的测试。
+    """
+    return [
+        ClashTime(start=spot.start_time, end=spot.end_time, ordinal=spot.ordinal)
+        for spot in occurrences([event])
+    ]
+
+
+def _overlap(mine, theirs):
+    """两个时段撞不撞。**半开区间 [start, end)。**
+
+    ⚠️ 一场 10:00 结束、另一场 10:00 开始 —— **不算撞**（用户 2026-09-15 定的）。
+       连着参加两场是基金会安排活动的常态，报它只会让人开始忽略提示。
+       半开也和这个仓库别处的时间窗口径一致（`EventPeriodForm.bounds()`、
+       `EventQuerySet.in_period()`）。
+    """
+    return mine.start < theirs.end and theirs.start < mine.end
+
+
+def _clashes(mine, busy_by_event):
+    """`mine` 这些时段撞上了谁 —— 按对手方那一场收拢。
+
+    ⚠️ 纯函数，不碰数据库：两个调用方各自把行取好再进来，于是「取多少行」和
+       「怎么比」是两件可以分别读、分别测的事。
+    """
+    found = []
+    for event, windows in busy_by_event:
+        hits = [
+            ClashTime(start=theirs.start, end=theirs.end,
+                      ordinal=theirs.ordinal, mine_ordinal=slot.ordinal)
+            for slot in mine for theirs in windows if _overlap(slot, theirs)
+        ]
+        if hits:
+            found.append(Clash(event=event, times=hits))
+    # ⚠️ 撞得最多的排最前 —— 一屏上先说要紧的那个。次序相同时按时间，
+    #    好让同一份数据每次画出来的顺序一样（否则页面会无缘无故地重排）。
+    found.sort(key=lambda clash: (-len(clash.times), clash.times[0].start))
+    return found
+
+
+def _busy_rows(contact, *, now=None, exclude_event=None):
+    """他还没结束的那些报名，按活动去重 —— 冲突检测的另一半。
+
+    ⚠️ **同一场活动上的两条报名不算撞。** 一人一活动多角色是这个系统明确支持的
+       （phase-b「一人一活动多角色」），而那是同一件事，不是分身乏术。
+       按活动去重就答完了这件事。
+
+    ⚠️ **已取消的活动不占时间。** `mine()` 走 `visible_to_participants()`，
+       而取消的活动**故意**留在那里面（报了名的人正需要看到它取消了）——
+       不排掉的话，一场取消了的活动会一直报冲突。
+
+    ⚠️ `CANCELLED` / `WITHDREW` 两档报名同样不占：同
+       `06-roadmap.md` 那条「两种形状用同一条规矩」。
+    """
+    rows = (
+        Participation.objects.mine(contact)
+        .upcoming(now)
+        .exclude(status__in=[Participation.Status.CANCELLED,
+                             Participation.Status.WITHDREW])
+        .exclude(event_role__event__status=Event.Status.CANCELLED)
+        .select_related("event_role__event")
+        # ⚠️ 两个 prefetch 都要：没有 sessions 就是每门课一次查询，
+        #    没有 attendances 就是每条报名一次 —— 而两种都只是**慢**，不报错。
+        .prefetch_related("event_role__event__sessions", "attendances__session")
+    )
+    if exclude_event is not None:
+        rows = rows.exclude(event_role__event=exclude_event)
+
+    by_event = {}
+    for row in rows:
+        by_event.setdefault(row.event_role.event_id, (row.event_role.event, row))
+    return [(event, _busy_windows(row)) for event, row in by_event.values()]
+
+
+def conflicts_for(contact, event, *, now=None):
+    """报这一场的话，会和他已经报的哪几场撞 —— 报名页上那几个黄框。
+
+    ⚠️ **提示，不是闸**（D39 的唯一不变量）：调用方照常让他报，一个字都不拦。
+       挡住它只会挡住真实存在的合法情况（他知道、他愿意、他能两头跑），
+       而被挡住的人会去绕过系统。
+
+    ⚠️ `contact` 为 `None`（没有 Contact 的账号）交空列表，不抛 —— 同
+       `org/permissions.py` 那条口径：那是一个正常状态，不是错误。
+    """
+    if contact is None:
+        return []
+    return _clashes(
+        _event_windows(event),
+        _busy_rows(contact, now=now, exclude_event=event))
+
+
+def conflicts_among(rows):
+    """`{participation_pk: [Clash]}` —— My Signups 上那一批，**一次查完**。
+
+    ⚠️ 形状照 `course_progress()`：收已经取回来的行，回一个按 pk 索引的 dict，
+       于是模板逐行问它是零查询。逐行去调 `conflicts_for()` 是每行一次查询。
+
+    ⭐ **两条撞在一起的报名，两条都标，各自指向对方**（用户 2026-09-15 定的）。
+       只标后报的那一条更省，但人很少记得自己先报的是哪个 —— 只看到一边有标记
+       会以为另一边没事。
+
+    ⚠️ 同一场活动上的多条报名互相不算撞（见 `_busy_rows()` 的同一条），
+       所以这里按活动分组之后再两两比。
+    """
+    live = [
+        row for row in rows
+        if row.status not in (Participation.Status.CANCELLED,
+                              Participation.Status.WITHDREW)
+        and row.event_role.event.status != Event.Status.CANCELLED
+    ]
+    by_event = {}
+    for row in live:
+        by_event.setdefault(row.event_role.event_id, []).append(row)
+
+    windows = {event_id: _busy_windows(group[0])
+               for event_id, group in by_event.items()}
+    found = {}
+    for event_id, group in by_event.items():
+        others = [(by_event[other][0].event_role.event, windows[other])
+                  for other in by_event if other != event_id]
+        clashes = _clashes(windows[event_id], others)
+        if clashes:
+            # ⚠️ 同一场活动上的每一条报名都拿到同一份结果 —— 他在一场活动上开了
+            #    两个工种时，两行都该带标记，而它们撞的是同一批东西。
+            for row in group:
+                found[row.pk] = clashes
+    return found
+
+
+# --- 单场活动的管理授权（D47，2026-09-15） ----------------------------------
+
+
+def event_grants(event):
+    """这场活动上的每一条授权，含已经结束的。
+
+    ⚠️ 含已结束的，同 `org.services.ministry_admins()`：撤销是记一个结束日期、
+       不删行，而那条记录留着正是为了答「去年三月谁能看这场活动的报名」。
+       页面上靠 `is_currently_active` 区分两者。
+    """
+    return (
+        EventGrant.objects.filter(event=event)
+        .select_related("contact", "contact__user", "granted_by")
+        .order_by("-start_date")
+    )
+
+
+def find_event_grant(event, pk):
+    """这场活动上的一条授权，或者 None。
+
+    ⚠️ **按活动收窄**，同 `org.services.find_grant()`：一个来自表单的 pk 不许
+       够得着别的活动的行。
+    """
+    return EventGrant.objects.filter(event=event, pk=pk).first()
+
+
+def grant_event_admin(*, contact, event, granted_by, start_date=None):
+    """把这一场活动交给某个人管。
+
+    ⚠️ `granted_by` 由调用方从 session 里取，**永远不是表单上的一个格子** ——
+       一个能填的格子就是一个能撒谎的格子（同 `grant_ministry_admin()`）。
+    """
+    return EventGrant.objects.create(
+        contact=contact, event=event, start_date=start_date, granted_by=granted_by)
+
+
+def revoke_event_grant(grant, *, on=None):
+    """收回授权：**记一个结束日期，永远不删行。**
+
+    一字一理由照 `org.services.revoke_ministry_role()`：删掉的授权留不下
+    「去年三月谁能看这场活动的报名」的答案，而这张表带 simple-history 正是
+    因为这个问题会被问。
+    """
+    grant.end_date = on or local_today()
+    grant.save(update_fields=["end_date", "updated_at"])
+    return grant
+
+
+def tell_them_they_can_manage(grant, *, backend=None):
+    """告诉被授权的人他现在管着这一场活动。
+
+    ⭐ **不发的话，这个功能是半个**（用户 2026-09-15 定的）：授权之后系统里
+       什么都不会发生，他要么永远不知道、要么靠口头告知。
+
+    ⚠️ 这一条**不在** deferred 里那条「周期性通知」的推迟范围里，而两者的分界
+       正是那一行自己写的：那条被否掉是因为「每周发给每个人，而绝大多数周它
+       什么都没变」。这一条是低频的、而且**直接关于他本人**的一次变化 ——
+       phase-d.md 补上的那一条写的是「只通知与本人有关的变化」。
+
+    ⚠️ 返回 DeliveryResults，调用方可以不管 —— 一条发不出去的通知绝不能把一次
+       已经生效的授权撤回来。行是记录，这是记录之上的一份礼貌
+       （同 `confirm_signup()` 的第一段）。
+
+    ⚠️ 正文里**只有地址，没有名字**，同 `default_message()` 那条规矩：
+       离开这个库的是一句通告和一个地址。
+    """
+    contact = grant.contact
+    event = grant.event
+    to = []
+    for channel in _preferred_channels(contact):
+        address = _address_for(contact, channel)
+        if address:
+            to.append((address, channel))
+            break
+    if not to:
+        # 联系不上不是错误：授权已经生效，而他登录之后在仪表盘上看得到
+        # （dashboard 那一条）。交空列表而不是抛，是为了让这句话成立。
+        return []
+
+    body = "\n".join([
+        f"You can now manage “{event.name}” ({event.ministry.name}).",
+        "",
+        # 🔴 `_when_sentence()`，**不是自己拼起止两个时刻**（2026-09-15 在浏览器里
+        #    看到这封信之后改的）。初版照抄了 `confirm_signup()` 的单场写法，
+        #    而一门课是**一个** `Event`（学期两端），于是那句话印出来是
+        #    「2026-08-12 00:28 — 00:28」—— 把一个学期说成一次零长度的聚会。
+        #    ⚠️ `_when_sentence()` 走 `schedule.when_line()`，和活动页、和
+        #       `default_message()` 是同一句话：一门课说「每周二 17:28–19:28」，
+        #       单场说它自己那一次。
+        f"When: {_when_sentence(event)}",
+        *([f"Where: {event.location}"] if event.location else []),
+        "",
+        "That means the signup list, attendance, hours and notifications for "
+        "this one event — the same as its ministry's own admins.",
+        "Open “Events I manage” to find it.",
+    ])
+    backend = backend or get_backend()
+    return backend.send([
+        Message(to=address, channel=channel,
+                subject=f"[{event.ministry.name}] You can manage {event.name}",
+                body=body)
+        for address, channel in to
+    ])

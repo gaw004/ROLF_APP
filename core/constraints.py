@@ -55,6 +55,11 @@ CONSTRAINT_FIELD = {
     # ⚠️ On "start_time" rather than on "series": the moment is what collides,
     #    and nobody picks the series by hand — the generator sets it.
     "event_series_moment_taken": "start_time",
+    # events.EventGrant
+    # ⚠️ 和 `ministryrole_duplicate_grant` 落在同一格上（`start_date`），因为
+    #    两条约束是同一个形状：同一个人、同一个东西、同一天，重复的是日期那一格。
+    "eventgrant_duplicate_grant": "start_date",
+    "eventgrant_end_before_start": "end_date",
     # events.EventRole
     "eventrole_duplicate": "role",
     "eventrole_needed_count_not_positive": "needed_count",

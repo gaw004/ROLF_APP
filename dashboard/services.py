@@ -17,8 +17,13 @@ from core.timeutils import (
 )
 from events.models import Event, EventRole, Participation
 from notices.models import Notice
-from org.models import Assignment
-from org.permissions import ministry_ids_administered_by
+from org.models import Assignment, Position
+from org.permissions import (
+    event_ids_granted_to,
+    in_foundation_tier,
+    ministry_ids_administered_by,
+)
+from org.services import positions_awaiting_review
 
 from . import calendar as month
 
@@ -95,9 +100,22 @@ def _posts(contact):
     return posts
 
 
+#: 通栏那一块画得出的每一组，**名单只在这里写一次**（2026-09-15 加第四组时抽的）。
+#: `_counted()` 数它、模板按它画。在此之前那三个名字在服务层和模板里各写一遍，
+#: 而加第四组时漏掉其中一处的表现是：那一组的行画出来了，标题上的数字却不算它。
+NEEDS_YOU_GROUPS = ("to_verify", "handed_to_me", "short", "unfinished", "open")
+
+
 def _counted(rows):
-    """三个列表加一个总数 —— 通栏那一块的标题要印「2 items」。"""
-    rows["count"] = len(rows["short"]) + len(rows["unfinished"]) + len(rows["open"])
+    """每一组各若干行，加一个总数 —— 通栏那一块的标题要印「2 items」。
+
+    ⚠️ 没给的组补成空列表，**不是让模板去判断某个键在不在**：一块地方几种形态，
+       模板问的始终是「这几个列表里有什么」。少一个键就要模板去判断「我是哪一种
+       人」，而那正是 D24 明令不许落在 x- 属性和模板里的东西。
+    """
+    for name in NEEDS_YOU_GROUPS:
+        rows.setdefault(name, [])
+    rows["count"] = sum(len(rows[name]) for name in NEEDS_YOU_GROUPS)
     return rows
 
 
@@ -129,8 +147,13 @@ def _open_to_me(contact, mine, now):
     )
 
 
-def _needs_you(ministry_ids, now, open_to_me):
-    """还等着人的那些事 —— 而「等着谁」有两种答案（D44）。
+def _needs_you(ministry_ids, now, open_to_me, foundation=False, handed=()):
+    """还等着人的那些事 —— 而「等着谁」有三种答案（D44，2026-09-15 加第三种）。
+
+    ⭐ **待核验的岗位排在最前，而且不和别的组抢名额**（用户要的「一定要让
+       foundation admin 积极做 review」）。理由是这一块问的是「什么在等**你**」：
+       缺人的活动和没收尾的出勤，别的 admin 也做得了；而核验岗位的编制条件
+       **只有 foundation tier 做得了**，谁都替不了他。
 
     ⚠️ 两类都用**已有的口径**，一个新的都不造：
 
@@ -143,6 +166,28 @@ def _needs_you(ministry_ids, now, open_to_me):
     ⚠️ 不合并成一个列表再排序：它们是两种不同的欠账（一个在未来、一个在过去），
        模板分两组画，而合在一起排完序之后没有任何东西说得出某一行属于哪一种。
     """
+    # ⚠️ 算在最前面，**而且 foundation tier 是不是同时还管着某个 ministry 都一样**
+    #    —— 这两件事正交，而下面那个 `if` 是按「管不管 ministry」分岔的。
+    #    塞进任何一支都会让另一支的 foundation tier 看不到自己的待办。
+    # ⚠️ 收 `Position.objects.all()`，因为 foundation tier 看得见全部 ——
+    #    那个函数按 D27 的不变量收 queryset 不收 id（权限由调用方判，它只筛）。
+    to_verify = list(
+        positions_awaiting_review(Position.objects.all())[:BAND_ITEMS]
+    ) if foundation else []
+
+    # ⭐ 别人交到他手上的那几场活动（D47，2026-09-15）—— 用户要的两个通知落点
+    #    里的第二个（另一个是授权当时那封信）。
+    #
+    # ⚠️ **不发信不等于不告诉他**：一封信会被错过、会被归档，而这一条在他每次
+    #    登录时都在。反过来也一样 —— 只有这一条的话，一个不常登录的人会在活动
+    #    前一天才发现自己该办它。两个都要，理由是它们错过的方式不一样。
+    #
+    # ⚠️ 只列**还没结束**的：一场已经办完的活动不是「在等你」。
+    handed_to_me = list(
+        Event.objects.filter(pk__in=handed, end_time__gt=now)
+        .select_related("ministry").order_by("start_time")[:BAND_ITEMS]
+    ) if handed else []
+
     if not ministry_ids:
         # ⚠️ 不是管理员的人在同一块地方读到的是另一句话：**还缺人、他看得见、
         #    他还没报名**的活动。三个条件都借既有的口径，一个新的都不造 ——
@@ -157,16 +202,19 @@ def _needs_you(ministry_ids, now, open_to_me):
         #    「short 有几条」和「一共有几条」两句话，而它们只在管理员身上相等。
         # ⚠️ 行是 `_open_to_me()` 已经取回来的，这里只挑 —— 挑的条件就是
         #    `needs_people`（报名页那个 short 徽章读的同一个 annotation）。
-        return _counted({"short": [], "unfinished": [], "open": [
-            event for event in open_to_me if event.needs_people
-        ][:BAND_ITEMS]})
+        used = len(to_verify) + len(handed_to_me)
+        return _counted({
+            "to_verify": to_verify, "handed_to_me": handed_to_me,
+            "open": [event for event in open_to_me if event.needs_people
+                     ][:max(0, BAND_ITEMS - used)]})
     short = list(
         EventRole.objects.understaffed()
         .filter(event__ministry_id__in=ministry_ids,
                 event__status=Event.Status.OPEN,
                 event__end_time__gt=now)
         .select_related("event", "role")
-        .order_by("event__start_time")[:BAND_ITEMS]
+        .order_by("event__start_time")[
+            :max(0, BAND_ITEMS - len(to_verify) - len(handed_to_me))]
     )
     # 🔴 **两组加起来** 不超过 ROWS_PER_CARD，不是各自不超过。
     #
@@ -182,12 +230,13 @@ def _needs_you(ministry_ids, now, open_to_me):
         Event.objects.filter(ministry_id__in=ministry_ids, end_time__lte=now)
         .exclude(status__in=[Event.Status.COMPLETED, Event.Status.CANCELLED,
                              Event.Status.DRAFT])
-        .order_by("-end_time")[:max(0, BAND_ITEMS - len(short))]
+        .order_by("-end_time")[
+            :max(0, BAND_ITEMS - len(to_verify) - len(handed_to_me) - len(short))]
     )
-    # ⚠️ `open` 恒为空，而不是这个键不存在：一块地方两种形态，模板问的是
-    #    「这三个列表里有什么」。少一个键就要模板去判断「我是哪一种人」，
-    #    而那正是 D24 明令不许落在 x- 属性和模板里的东西。
-    return _counted({"short": short, "unfinished": unfinished, "open": []})
+    # ⚠️ 没给的组由 `_counted()` 补成空列表 —— 一块地方几种形态，而模板问的始终是
+    #    「这几个列表里有什么」，不是「我是哪一种人」。
+    return _counted({"to_verify": to_verify, "handed_to_me": handed_to_me,
+                     "short": short, "unfinished": unfinished})
 
 
 def _this_month(mine, today):
@@ -235,7 +284,12 @@ def dashboard_for(user, now=None):
 
     mine = Participation.objects.mine(contact)
     open_to_me = _open_to_me(contact, mine, now)
-    needs_you = _needs_you(ministry_ids, now, open_to_me)
+    needs_you = _needs_you(ministry_ids, now, open_to_me,
+                           foundation=in_foundation_tier(user),
+                           # ⚠️ 一次查询，而它和上面那个 `ministry_ids` 是**两个
+                           #    正交的身份** —— 一个人可能两者都有，也可能只有后者
+                           #    （一个被交了一场活动的普通志愿者）。
+                           handed=event_ids_granted_to(user))
     # ⚠️ 累计和本年度**一次问出来**，理由和口径都在
     #    `ParticipationQuerySet.hours_given_and_within()` 里 —— 尤其是
     #    「两半各按自己的日期算」那一条，别在这里重述第二份。

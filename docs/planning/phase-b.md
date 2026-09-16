@@ -20,7 +20,7 @@
 | 模型 | app | 字段要点 |
 |------|-----|---------|
 | ✅ `Ministry` | `org` | **不是纯字典表** —— 基金会的服务单元（食物银行、报税志愿、ESL…）。字段：`code`（唯一·不可改，见 D5）/ `name` / `description` / `is_active` / 成立日期（可空）。行政职能（财务、行政）也是这张表里的行，不另建 `Department` —— 一个组织没必要拆两套单元。**不挂 simple-history**（已确认：改动频率极低，不值得一张历史表）。<br>**这张表不能推迟**，理由见下面「Ministry 视图」 |
-| ✅ `Position` | `org` | 编制表 —— 组织架构的骨架，与人无关（见 D11 第二次修订）。`code`（唯一·不可改，见 D5）/ `name`（职务名，给人看）/ `kind`（`TextChoices`：employee·volunteer·board）/ `ministry`(FK，**可空** —— 理事席位没有)/ `reports_to`(自引用 FK → `Position`，可空)/ `is_leader`（布尔，**给代码查**）/ `is_active` / `description`。**挂 simple-history**（组织架构变更必须留痕）。**一个 `Position` 可以有多个在职 `Assignment`** —— 它是编制类型不是座位，所以这张表是几十行量级 |
+| ✅ `Position` | `org` | 编制表 —— 组织架构的骨架，与人无关（见 D11 第二次修订）。`code`（**可空，默认为空**；设了才唯一、才不可改 —— 2026-09-15 改口，见 [D46](decisions/D46-position-code-is-an-optional-anchor.md)）/ `name`（职务名，给人看）/ `kind`（`TextChoices`：employee·volunteer·board）/ `ministry`(FK，**可空** —— 理事席位没有)/ `reports_to`(自引用 FK → `Position`，可空)/ `is_leader`（布尔，**给代码查**）/ `is_active` / `description`。**挂 simple-history**（组织架构变更必须留痕）。**一个 `Position` 可以有多个在职 `Assignment`** —— 它是编制类型不是座位，所以这张表是几十行量级 |
 | ✅ `Assignment` | `org` | 任职表 —— 谁在什么时候占了哪个编制。 `contact`(FK) / `position`(FK → `Position`) / `employment_type`(FK，**可空**) / **`status`（`TextChoices`：active·on_leave·suspended，默认 active）** / `start_date` / `end_date`。**没有 `kind` / `title` / `ministry` / `is_leader` / `reports_to`** —— 全部搬去 `Position` 了。**不加 `is_active`**，但**有 `status`** —— 状态和任期是正交的两个维度，见下面「`Assignment.status`」。**挂 simple-history** |
 | ✅ `EmploymentType` | `org` | 字典表：`code`（唯一·不可改）/ `name` / `is_active`。**取值基金会还没定**（全职 / 兼职 / 合同 / 实习只是我们猜的），所以做成字典表而不是 `TextChoices` —— 以后加一行就行，不改代码不写迁移。符合 D5 的判定规则：目前没有任何代码按它分支 |
 | ~~`EventType`~~ | `events` | ~~字典表：`code`（唯一·不可改）/ `name` / `is_active`~~<br>**2026-09-04 删除** —— 说不出谁读它（[06-roadmap L2.6](06-roadmap.md#l26-eventtype-上页面)）：那一列必填、而前台模板命中 0 次 |
@@ -150,7 +150,7 @@ A7 的原话是"等表里有了真数据再加，就得先清洗存量数据"。
 | `Assignment` | `end_date >= start_date` | 凡是带起止日期的表都必须有这条，新表漏掉就不一致了 |
 | `Assignment` | `UniqueConstraint(contact, position, start_date)`，**带 `nulls_distinct=False`** | 见下面「`Assignment` 的唯一约束」 |
 | `Position` | `reports_to` 不能指向自己那一行（`CheckConstraint`） | 见下面「汇报线的环」 |
-| `Position` | `UniqueConstraint(Lower("code"))`（**不是**字段上的 `unique=True`） | 同下面字典表那条。`Position` 不是字典表，但 `code` 的作用一样：代码只认 `code`，不认 `name` |
+| `Position` | `UniqueConstraint(Lower("code"))`（**不是**字段上的 `unique=True`） | 同下面字典表那条。~~`Position` 不是字典表，但 `code` 的作用一样：代码只认 `code`，不认 `name`~~ **2026-09-15 改口，见 [D46](decisions/D46-position-code-is-an-optional-anchor.md)**：这一列改成**可空、默认为空**。约束一个字没动（Postgres 认多个 NULL 互不相等），变的是「有值」的含义 —— 从「每个岗位都有一个锚点」变成「有人**特意**给这个岗位设过一个锚点」 |
 | `Event` | `end_time >= start_time` | 同上 |
 | ~~`Event`~~ | ~~`capacity IS NULL OR capacity > 0`~~ | **2026-07-29 删除** —— `capacity` 字段本身没了，被 `EventRole.needed_count` 取代（D19） |
 | `EmergencyContact` | `UniqueConstraint(person, Lower(Trim(name)), phone)` | 同一个人身上把同一个紧急联系人录两遍。归一化写进表达式，不靠 `save()` —— D9 归一化通则 |
@@ -186,6 +186,12 @@ Postgres 默认 `NULL != NULL`，不加就形同虚设 —— 同 A7 的教训�
 但现在只需要在**几十行的编制表**上做一次，而不是在每一行任职记录上做。
 `Position` 的代码锚点是 `code` 不是 `name`，所以 `name` **不加**唯一约束 ——
 两个 ministry 各有一个"协调员"是合法的，靠 `__str__` 带上 ministry 消歧（同 `Contact` 重名的口径）。
+
+> **2026-09-15 改口的半句**（[D46](decisions/D46-position-code-is-an-optional-anchor.md)）：
+> 「`name` 不加唯一约束」**不变**，两个协调员仍然合法。变的是上半句 ——
+> `code` 现在**可空且默认为空**，所以绝大多数岗位**没有**代码锚点，
+> 代码要指向某一个岗位时用 `pk`。只有真的被外部系统引用的那几个岗位才手设一个
+> （`seed_demo` 那五个就是），而那时它照旧不可改。
 
 ##### 空缺编制：这次修订的验收点
 

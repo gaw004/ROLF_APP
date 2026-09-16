@@ -1,8 +1,12 @@
 # D39 · 调度冲突：四类，一处实现，一律提示不拦截（2026-08-15）
 
 结论：在**人做决定的那一刻**检测调度冲突 —— 时间重叠、已批准的假期、
-任职已结束、已经拒绝过。四类走同一个函数
-`org/services.py::conflicts_for()`，⚠️ **一类都不阻止写入**。
+任职已结束、已经拒绝过。四类走同一个函数 `conflicts_for()`，
+⚠️ **一类都不阻止写入**。
+
+> ⚠️ 落点 2026-09-15 从 `org/services.py` 改成了 `events/services.py`，
+> 理由和行业对照写在[第二节那个框](#二四类冲突一个函数)里。**「只有一处」
+> 这条不变量一个字没动。**
 
 > 本条**推翻了 [D33 第十节](D33-work-schedule.md) 那条推迟**，
 > 并**扩大了 [D38 第八节](D38-served-as-volunteer-or-work.md) 那两条 FLSA 提示的触发范围**。
@@ -62,9 +66,59 @@ D2a 给在编人员建了班表，D3 给 admin 建了指派入口，两条路径
 ## 二、四类冲突，一个函数
 
 ```python
-org/services.py::conflicts_for(contact, on, start=None, end=None) -> list[Conflict]
-    # 唯一的一处。on 是日期，start/end 是墙钟时刻（同 Shift，见 D33 第二节）
+events/services.py::conflicts_for(contact, event)      -> list[Clash]   # 报名页
+events/services.py::conflicts_among(rows)              -> {pk: [Clash]} # My Signups
 ```
+
+> ### 2026-09-15 落地时改了三处，都在这里就地记下
+>
+> ① 落点从 `org/services.py` **改成 `events/services.py`**。
+> 本条原文（下面第五节）写的是 org，**而它没有给「为什么是 org」的理由** ——
+> 那一节讲的是 [D18](D18-admin-boundary.md) 的落点规矩（逻辑进 services），
+> 而本条写于 Phase D，那一轮的东西恰好全是 org 的。改口的理由有三条：
+>
+> - 落地的第 ④ 类**全部是 events 的词汇**（`Event` / `Session` /
+>   `Participation`），org 里一个字都没有；
+> - `events/services.py` 已经 import `org.models` / `org.audience` ——
+>   events → org 是既定的、允许的方向（[D17](D17-app-layout.md)）。反过来从来
+>   没有过，而 [`org/audience.py`](../../../org/audience.py) 的 docstring
+>   专门论证过这件事：受众轴搬进 org，理由正是「它是用 Ministry / Position /
+>   Assignment 这些词写成的」；
+> - ⚠️ **这不只是今天的账**：将来 `Shift` / `Leave`（org）落地时，这个函数同时
+>   要 `Participation`（events）。放在 events 里两边都是允许方向；放在 org 里
+>   要一个**永久的**反向 import。
+>
+> ⭐ 行业里这类跨域检查收敛在同一处：**它属于排程那一域，而那一域在依赖链
+> 下游**（日历的 free/busy 由日历服务出、各来源往里投忙碌块；Planning Center
+> 放在 Scheduling 域；Workday 放在 Time & Scheduling）。而这个仓库里「一个人的
+> 时间怎么摆开」**已经住在 events 了** —— `events/schedule.py` 就是那个模块，
+> 本函数用的正是它的 `occurrences()`。
+>
+> ⚠️ **逃生口**：真长到要读四个域、而 `events` 开始因此变胖时，搬去一个**依赖链
+> 末端的协调模块** —— 这个仓库已经建过一个（`dashboard`，
+> [D42](D42-signed-in-landing-page.md)：一个**没有 models** 的 app，理由一字不差
+> 就是 D17 不许反向 import）。那时调用方跟着改一行 import。
+>
+> ⚠️ 本条真正的不变量是**「只有一处」**，而它一个字没动。
+>
+> **② 签名不是 `(contact, on, start, end)`。** 原文那个形状假设一次只问一个时间
+> 窗，而**一门课占的是十二个窗**（见下面第 ③ 条）。改成收「要比的那个东西」，
+> 由函数自己展开成若干个窗。
+>
+> ③ 🔴 本条**有一个洞**，因为它写于 Programs 之前。
+> 本条写于 2026-08-15，而 Programs / `Session` 是八月底（L5）。**一门课是一个
+> `Event`**，`start_time` 三月、`end_time` 六月 —— 按 `Event` 的时间窗去比，
+> 四月里**每一场**活动都会报「和这门课冲突」。技术上没错，对人是胡说，
+> 而且**它会通过所有只用单场活动写的测试**。
+>
+> 比较单位因此是 **occurrence**：单场用它自己的窗口，课用**每一讲**的窗口。
+> 展开走 `events/schedule.py::occurrences()`（日程面板每天在用的那一份），
+> 不写第二份 —— 第二份的分歧会是「日程上画着两块、而冲突检测只看见一块」。
+> 钉住它的是 `SignupConflictTests.test_a_course_only_clashes_on_the_meetings_it_holds`。
+>
+> **④ 本轮只实现第 ④ 类。** ①②③ 要 `Shift` 和 `Leave`，两张表都还不存在。
+> 而本条第七节自己写了这个形状：「真加的时候是这个函数多一个 queryset，
+> 调用方一个字不改」。
 
 | # | 类 | 判断 | 谁问它 |
 |---|---|---|---|
@@ -141,6 +195,20 @@ org/services.py::conflicts_for(contact, on, start=None, end=None) -> list[Confli
 [`../05-roadmap.md` 守卫四](../05-roadmap.md#本轮新增的守卫测试)的理由：
 `org/services.py` 本来就同时 import 两张表，按文件扫的守卫要么永远绿、要么天天红，
 而**一条扫不准的守卫比没有守卫更糟**。
+
+> #### 2026-09-15：守卫落成了另一个形状，而守的东西一个字没变
+>
+> 落地时 `Shift` 还不存在，所以「同时查 Shift 和 Participation」这个信号
+> **今天扫不出任何东西** —— 那正是上面这段警告的「永远绿」。
+>
+> 换成的信号是**重叠判断本身**：两个不同对象的 start / end 相比。
+> 全项目只有 `events/services.py` 里那一行，而它正是「撞没撞」的唯一答案。
+> 守卫：`core.tests.ConflictDetectionGuardTests`。
+>
+> 🔴 **它写完之后当场就红了一次，而抓到的是它自己的注释** —— 我在注释里举了
+> 一个例子。`core/tests.py` 开头那条规矩（「never spell a forbidden pattern out
+> in a comment — that has caught four of them so far」）的**第五次**应验，
+> 顺带白拿了一次「它确实会红」的反向验证。
 
 ## 六、代价（如实记）
 

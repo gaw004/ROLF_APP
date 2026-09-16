@@ -31,6 +31,10 @@ urlpatterns = [
     # 上下文、同一道权限，只是外面少了一层页面 —— 见 views.event_detail_panel。
     path("events/<int:pk>/panel/", views.event_detail_panel, name="event_detail_panel"),
     path("events/<int:pk>/signup/", views.event_signup, name="event_signup"),
+    # D47 —— 把这一场活动交给别人管。⚠️ 词形的段在 `<int:pk>` 之后是安全的
+    # （`<int:pk>` 只吃数字），而它挂在这里是因为它属于「这一场活动的某一面」，
+    # 同 registrations / attendance / report / notify 那一排。
+    path("events/<int:pk>/admins/", views.event_admins, name="event_admins"),
     path("me/participations/", views.my_participations, name="my_participations"),
     # L5.8b（2026-09-14，决定 48）。⚠️ 上面那条**保持原样**不改名：它已经进过
     #    六处登录后跳转、站点菜单和别人的书签，而改地址换来的只是对称。

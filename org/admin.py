@@ -97,6 +97,11 @@ class PositionAdmin(SimpleHistoryAdmin):
     ]
     list_filter = [
         "ministry", "kind", "compensation", "is_leader", "is_active", StaffingFilter,
+        # ⚠️ 只进 list_filter，**不进 list_display**：那一列已经八格宽了，而这一格
+        #    要回答的是「哪几个在等人确认」——那是一次筛选，不是每一行都要读的事实。
+        #    真正的待办清单在 `/org/staff/` 名册页顶上那一块；这里是 superuser 的
+        #    同一个问题换个门（D18：admin 是脚手架）。
+        "needs_foundation_review",
     ]
     # Needed by the autocomplete on Position.reports_to, and by the one on
     # Assignment.position.
@@ -107,7 +112,12 @@ class PositionAdmin(SimpleHistoryAdmin):
     list_select_related = ["ministry", "reports_to"]
 
     def get_readonly_fields(self, request, obj=None):
-        return ["code"] if obj else []
+        # ⚠️ `obj.code` 而不是 `obj`（2026-09-15）：这一列现在可空，而**空是常态**。
+        #    按 `obj` 冻的话，一个还没有锚点的岗位永远设不了一个 —— 而设锚点正是
+        #    这一格在 admin 里存在的全部理由（网页表单上根本没有它，见
+        #    `Position.code`）。不可改保护的是已经有人在引用的那个值；
+        #    还没有值就没有东西要保护。
+        return ["code"] if obj and obj.code else []
 
     def get_list_display(self, request):
         """Appends the headcount column, counted by the database in one query.

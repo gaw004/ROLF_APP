@@ -22,6 +22,35 @@
 
   {% if needs_you.count %}
     <div class="band-tiles">
+      {% comment %}
+      ⭐ **待核验的岗位排在最前**（2026-09-15，用户要的「一定要让 foundation admin
+         积极做 review」）。理由是这一块问的是「什么在等**你**」：缺人的活动和
+         没收尾的出勤，别的 admin 也做得了；而核验岗位的编制条件**只有
+         foundation tier 做得了**，谁都替不了他。
+      ⚠️ 它和别的组不抢名额，budget 在 services 里算（`_needs_you()`）。
+      {% endcomment %}
+      {% for position in needs_you.to_verify %}
+        <a class="band-tile" href="{% url 'org:position_detail' position.pk %}">
+          <span class="band-when">{{ position.ministry.name|default:"Foundation-wide" }}</span>
+          <span class="band-what">{{ position.name }}</span>
+          <span class="band-note">Pay and reporting line not verified</span>
+        </a>
+      {% endfor %}
+
+      {% comment %}
+      ⭐ 别人交到他手上的那几场活动（D47，2026-09-15）。排在待核验之后、缺人之前：
+         它是**别人指名要他办的**，比「还缺人」更直接地在等他。
+      ⚠️ 链到管理列表而不是活动详情：他要做的是办这场活动，而那一排页面
+         （名单 / 签到 / 通知）都从那里进。
+      {% endcomment %}
+      {% for event in needs_you.handed_to_me %}
+        <a class="band-tile" href="{% url 'events:event_registrations' event.pk %}">
+          <span class="band-when">{{ event.start_time|date:"D j M" }} · {{ event.start_time|date:"H:i" }}</span>
+          <span class="band-what">{{ event.name }}</span>
+          <span class="band-note">Handed to you to run</span>
+        </a>
+      {% endfor %}
+
       {% for role in needs_you.short %}
         <a class="band-tile" href="{% url 'events:event_registrations' role.event.pk %}">
           <span class="band-when">{{ role.event.start_time|date:"D j M" }} · {{ role.event.start_time|date:"H:i" }}</span>
@@ -56,6 +85,13 @@
       {% endfor %}
 
       <div class="band-tile band-tile--exits">
+        {% comment %}
+        ⚠️ 出口跟着**这一块画了什么**走，不是跟着「他是谁」走：有待核验的岗位才画
+           名册那条出口。一个空手的出口（点过去发现没有事做）比没有出口更差。
+        {% endcomment %}
+        {% if needs_you.to_verify %}
+          <a class="band-exit" href="{% url 'org:staff_roster' %}">Staff roster →</a>
+        {% endif %}
         {% if is_ministry_admin %}
           <a class="band-exit" href="{% url 'events:event_manage_list' %}">Events I manage →</a>
         {% endif %}

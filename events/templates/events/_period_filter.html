@@ -180,7 +180,18 @@
     </div>
 
     <div class="filter-bar-controls">
-      {% include "events/_filter_select.html" with field=period.ministry %}
+      {% comment %}
+      ⚠️ 条件是 `period.by_many_ministries`，同隔壁那一格的理由：模板问一个**存在
+         的** property，而不是靠「字段不在 → 模板吞掉 KeyError → 取到空串」那条
+         失败路径。
+      ⚠️ 两页多选（`/events/`、`/programs/`），管理列表和报表页仍然是单选 ——
+         那句印在报表正文上的 `description()` 说的是「一个 ministry」。
+      {% endcomment %}
+      {% if period.by_many_ministries %}
+        {% include "events/_ministry_filter.html" %}
+      {% else %}
+        {% include "events/_filter_select.html" with field=period.ministry %}
+      {% endif %}
       {% comment %}
       「来帮忙的位置 / 来接受服务的位置」（2026-09-08）。
 

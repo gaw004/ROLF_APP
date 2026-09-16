@@ -1,0 +1,12 @@
+{% comment %}
+Role 那一格收起时按钮上的字（2026-09-15）。同 `_ministry_chip_label.html` 和
+`_date_chip_label.html`，三块一个形状。
+
+🔴 **这一份补的是一个既有的缺口**：Role 那一格 2026-09-15 早些时候落地时，
+   `nature_label` 只在整页加载时画得对 —— 用 HTMX 选一个角色种类，列表变了、
+   底下那行 `Filtered by role` 也变了，**而按钮上仍然写着「Role」**。
+   ⚠️ 是 Ministry 改多选时在浏览器里撞上的：两格是同一个形状，所以同一个毛病。
+
+参数：oob —— 真值则带上 `hx-swap-oob`。
+{% endcomment %}
+<span id="role-chip-label" {% if oob %}hx-swap-oob="true"{% endif %}>{{ period.nature_label }}</span>

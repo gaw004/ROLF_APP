@@ -56,15 +56,25 @@ def ministry_ids_administered_by(user, on=None) -> set[int]:
     Ministry.objects.filter(id__in=...) themselves.
 
     ⚠️ Three filters, none of them optional:
-       active(on)          — an expired grant must stop conferring anything;
+       in_force(on)        — an expired **or just-revoked** grant must stop
+                             conferring anything;
        ministry__is_active — authority over a retired ministry is not authority;
        a Contact           — see the module docstring.
+
+    🔴 **`in_force()` 而不是 `active()`（2026-09-15，用户拍板）。**
+       `active()` 的 `end_date` 是右闭的 —— 撤销把它填成今天，于是被撤销的人
+       **今天剩下的时间里照旧管着这个 ministry**，明天才失效。按钮说「撤销」，
+       发生的是「明天起撤销」，而页面上没有任何地方说这件事。
+       ⚠️ 这是一个**既有的**行为，不是这一轮引入的 —— 它没有任何测试钉着，
+          是 D47 落地时撞上的。整段理由在 `core.querysets.not_revoked_by()`。
+       ⚠️ 报表和记录那一侧**照旧走 `active()`**：那一行诚实地写着「有效期到
+          今天」，因为那是事实。变的只是权限判断。
     """
     contact = _contact_of(user)
     if contact is None:
         return set()
     return set(
-        MinistryRole.objects.active(on=on)
+        MinistryRole.objects.in_force(on=on)
         .filter(
             contact=contact,
             role=MinistryRole.Role.ADMIN,
@@ -105,6 +115,27 @@ def administers_one_of(ministry, administered) -> bool:
     return ministry_id in administered
 
 
+def _any_management_tier(user) -> bool:
+    """「这个账号是不是某种管理员」—— 一扇门该问的那个宽问题，实现只有一处。
+
+    ⭐ **抽出来是因为它被抄到了第三遍**（2026-09-15，员工名册）。
+       `can_reach_notice_manage()` 和 `can_reach_gallery_manage()` 从各自落地起
+       就是同一行判断的两份拷贝（连 `or` 两边的顺序都不一样，而那个不同毫无意义）。
+       `in_foundation_tier()` 自己的注释早就把理由写好了：「giving each of those
+       its own copy of `groups.filter(...)` is how two checks end up disagreeing
+       about who is in the tier」。
+
+    ⚠️ **三个 `can_reach_*` 各自保留自己的名字，不许合并成一个。** 它们今天答案
+       相同，是三件事碰巧同时成立，不是一条规则 —— 同 `can_publish_notice()` 和
+       `can_manage_notice()` 那一对为什么没合并。哪天照片墙收窄了，改的是那一个
+       函数的函数体，另外两个一个字不动。
+
+    ⚠️ 私有（前缀下划线）：它不是一个可以拿去守门的问题。门要问的是三个具名函数
+       里的一个 —— 一个视图直接问这个原语，等于又把「这一页归谁」写回了视图里。
+    """
+    return bool(ministry_ids_administered_by(user)) or in_foundation_tier(user)
+
+
 def can_publish_event(user, ministry) -> bool:
     """P2: publish an event for this ministry, and say how many each role needs."""
     return administers(user, ministry)
@@ -126,14 +157,117 @@ def can_manage_series(user, series) -> bool:
     return administers(user, series.ministry)
 
 
+def event_ids_granted_to(user, on=None) -> set[int]:
+    """Which single events this person was handed, on `on`（D47，2026-09-15）。
+
+    ⚠️ 三个 filter，一个都不能少 —— 逐条对着
+       `ministry_ids_administered_by()` 那三条写的，因为它们防的是同一批事：
+         active(on)          一条过期的授权必须不再授予任何东西；
+         event__ministry__is_active   一个已停用的 ministry 的活动，权限不再成立；
+         一个 Contact        账号没有 Contact 是正常状态，见本模块开头。
+
+    ⚠️ 名字说的是它返回什么 —— id，不是对象。要对象的调用方自己
+       `Event.objects.filter(id__in=...)`，同 `ministry_ids_administered_by()`。
+    """
+    contact = _contact_of(user)
+    if contact is None:
+        return set()
+    # 延迟 import：`events.models` import `org.models`，模块级会成环。
+    # ⚠️ 这不是把 D17 的依赖方向反过来 —— `org/permissions.py` 是**判断层**，
+    #    它按定义要认识每一张带权限的表（它已经认识 `MinistryRole`）。
+    #    真正不许反向的是业务逻辑，而那条线在 `org/services.py` 上（见 D39 的
+    #    落点改口）。
+    from events.models import Event, EventGrant
+
+    return set(
+        # ⚠️ `in_force()`，不是 `active()`：撤销当场生效，而不是明天
+        #    （`core.querysets._ended_on_or_before()`）。
+        EventGrant.objects.in_force(on=on)
+        .filter(contact=contact, event__ministry__is_active=True)
+        # ⭐ **管到这场活动收尾为止**（2026-09-15，用户拍板）。授权的表单上没有
+        #    截止日期那一格，因为一条单场授权的自然寿命就是这场活动本身 ——
+        #    而 `Event.Status.COMPLETED` 的标签**正好就是 "Wrapped up"**，
+        #    它的含义写在 `Event.Status` 上：出勤记了、工时记了、跟进做完了。
+        #
+        #    ⚠️ 这不只是省一个表单格子，它是一条真的安全性质：**授权会自己到期**，
+        #       于是不会攒下一批永远看得见未成年人紧急联系电话的人。
+        #
+        #    ⚠️ 排掉的只有 `COMPLETED` 一档，**不含 `CANCELLED`**：一场取消了的
+        #       活动正是最需要有人去通知报名者的时候，而那是这条授权的本职。
+        #
+        #    ⚠️ 收尾之后那一行**不删也不改** —— 「去年三月谁能看这场活动的报名」
+        #       仍然答得出来。到期的是权限，不是记录。
+        .exclude(event__status=Event.Status.COMPLETED)
+        .values_list("event_id", flat=True)
+    )
+
+
+def holds_grant_on(event, granted) -> bool:
+    """`event_ids_granted_to()` 的集合版：一页行用一次查询答完。
+
+    ⚠️ **同一条规则的第二份实现，而它就放在第一份旁边** —— 同
+       `administers_one_of()` 的那一段（「Change one, change the other」）。
+       管理列表要为每一行判「这一行能不能改」，逐行去问就是 50 行 50 次查询。
+
+    ⚠️ 它决定**画什么**；每一个写操作照旧走 `can_manage_event()` 的真检查。
+    """
+    return getattr(event, "pk", event) in granted
+
+
 def can_manage_event(user, event) -> bool:
     """Edit it, open roles on it, check people in, notify the people signed up.
 
     The write side. Sending a notification belongs here rather than with the
     read side: it puts a message in front of everybody who signed up, which is
     not something "may look at the list" should carry.
+
+    ⭐ **两条路，而第二条 2026-09-15 才有**（D47）：这个 ministry 的 admin，
+       或者**被指名管理这一场**的人。两者对这一场的权限**完全一致** ——
+       用户定的，而「一致」正是它几乎免费的原因：这个函数是全项目唯一的写判断
+       （编辑 / 开工种 / 签到 / 出勤 / 记工时 / 群发通知都走它），改这一处，
+       那些页面一个字不用动。
+       ⚠️ 如果当初那些检查散在各个 view 里，这个功能就是二十处修改 ——
+          **而漏掉的那一处是静默的**。这是 D20「判断只有一处」买到的东西。
+
+    ⚠️ **被授权人拿不到的三样**，各自有自己的判断，一个字没改：
+       发布新活动（`can_publish_event`）、管理系列（`can_manage_series`）、
+       以及再把这一场授权给第三个人（`can_grant_event_admin`）。
+    """
+    if event is None:
+        return False
+    return (administers(user, event.ministry_id)
+            or event.pk in event_ids_granted_to(user))
+
+
+def can_grant_event_admin(user, event) -> bool:
+    """把**这一场**活动交给别人管。D47。
+
+    🔴 **只读 `MinistryRole`，不看 `EventGrant`** —— 被授权人转授不了。
+       同 `can_grant_ministry_admin()` 不看 `MinistryRole` 的理由：一个能自我
+       繁殖的权限，没有人数得清最后有多少人能看未成年人的紧急联系人。
+
+    ⚠️ **foundation tier 也不行**，而这是有意的：这一场活动交给谁办，是**这个
+       ministry 的事**。D20 的判据（句子里有没有「某个 ministry 的」）在这里
+       指向 ministry 那一档 —— 而 foundation tier 本来就读得到这场活动的一切，
+       它缺的不是知情权。
+       ⚠️ 收**回**授权是另一回事，见 `can_revoke_event_grant()`。
     """
     return event is not None and administers(user, event.ministry_id)
+
+
+def can_revoke_event_grant(user, event) -> bool:
+    """收回**这一场**活动的授权。**比授出去宽。**
+
+    ⭐ 形状和理由都照 `can_publish_notice()` / `can_manage_notice()` 那一对
+       （用户 2026-09-15 定的）：**发布窄、收回宽**。
+       那一对的原话是「taking down a wrong or harmful notice cannot wait for the
+       admin who wrote it to answer the phone」—— 一条不该再有的权限同样等不了。
+
+    ⚠️ 和 `can_grant_event_admin()` **分成两个函数**，即使它们只差一个 `or`：
+       两者今天不同，而将来可能各自再动（授权哪天放宽给 foundation tier 的话，
+       收回必须仍然更宽）。同那一对当初没有合并的理由。
+    """
+    return can_grant_event_admin(user, event) or in_foundation_tier(user)
 
 
 def can_publish_notice(user, ministry) -> bool:
@@ -192,8 +326,12 @@ def can_reach_notice_manage(user) -> bool:
        "you have not written one yet" and "this page is not for you" must not
        look the same (D27). A ministry admin on their first day gets an empty
        page and a button, not a 403.
+
+    ⚠️ 2026-09-15：函数体换成了 `_any_management_tier()`，**这个问题本身一个字
+       没改**。理由是它当时和 `can_reach_gallery_manage()` 是同一行判断的两份
+       拷贝，而员工名册会是第三份 —— 见那个原语自己的注释。
     """
-    return bool(ministry_ids_administered_by(user)) or in_foundation_tier(user)
+    return _any_management_tier(user)
 
 
 def in_foundation_tier(user) -> bool:
@@ -314,8 +452,60 @@ def can_reach_gallery_manage(user) -> bool:
        ministry_ids_administered_by(...)` in a view was fine; two copies is a
        permission rule living in views.py, and the second copy is the one that
        gets forgotten when the rule changes.
+
+    ⚠️ 2026-09-15：函数体换成了 `_any_management_tier()`。上面那段话说的是
+       「一条规则不许有两份拷贝」，而这个函数自己曾经就是第二份 —— 现在三个
+       问题各留各的名字，实现只有一处。
     """
-    return in_foundation_tier(user) or bool(ministry_ids_administered_by(user))
+    return _any_management_tier(user)
+
+
+def can_reach_staff_roster(user) -> bool:
+    """May this account open `/org/staff/` at all, with nothing on it yet?
+
+    ⚠️ 自成一问，同 `can_reach_notice_manage()`：「这个 ministry 还没建过岗位」
+       和「这一页不归你」不能长一个样（D27）。一个刚上任的 ministry admin 该看到
+       一个空名册和一颗「新建岗位」，不是 403。
+    """
+    return _any_management_tier(user)
+
+
+def can_manage_staff_roster(user, ministry) -> bool:
+    """在这一个 ministry 里建岗位、把人放进去、结束一段任职。
+
+    ⭐ `ministry` 为 `None` 指的是**基金会级的岗位**（`Position.ministry` 可空，
+       "Executive Director" 之类），而**只有 foundation tier 过得去** ——
+       和 `can_upload_gallery_photo()` 里 `ministry is None` 那一支一个形状、
+       一个理由：一个不属于任何 ministry 的东西，按 D20 的判据（句子里有没有
+       「某个 ministry 的」）就是全局那一档的事。ministry admin 管自己的部门，
+       他不给基金会设岗。
+
+    ⚠️ foundation tier 在**每一个** ministry 里都过得去，同
+       `can_publish_notice()`：他要能替一个还没有 admin 的新 ministry 把第一批
+       人录进去，否则一个新 ministry 永远没有第一个员工。
+    """
+    if ministry is None:
+        return in_foundation_tier(user)
+    return administers(user, ministry) or in_foundation_tier(user)
+
+
+def can_define_position_terms(user) -> bool:
+    """填得了一个岗位的**薪酬档和汇报线**吗（`compensation` / `reports_to`）。
+
+    ⭐ 这是本轮唯一一条比 `can_manage_staff_roster()` 窄的判断，而它窄在两件
+       ministry admin 不该说了算的事上：这个岗位拿不拿钱、它挂在组织架构的哪里。
+       其余的（名字、说明、是不是组长、谁在这个岗位上）他最清楚，收给上面一档
+       会让他做不了自己的事 —— `phase-d.md` 第五节判过这个分法。
+
+    🔴 **模板和表单都只问这一个布尔，别在别处重判。** 表单按它**删掉字段**
+       （不是 `disabled`）—— 见 `org.forms.PositionForm`：`disabled` 是展示，
+       删字段才挡得住伪造的 POST。
+
+    ⚠️ 它答 False 的时候，建出来的岗位带上 `Position.needs_foundation_review`，
+       否则那两列会以默认值的样子躺在那里，看起来像有人填过。落值在
+       `org.services.create_position()`。
+    """
+    return in_foundation_tier(user)
 
 
 #: What the global tier may do, as app_label.codename. Global permissions are
@@ -391,6 +581,18 @@ FOUNDATION_ADMIN_PERMISSIONS = [
     #    L5.2 lost two days on 2026-09-08.
     "events.view_eventseries",
     "events.view_eventseriesrole",
+    # D47 的那张表：谁被指名管理某一场活动。
+    #
+    # ⚠️ **只读**，同上面那几张。而这一档和它在站点上的权限是一致的：
+    #    foundation tier **收得回**一条授权（`can_revoke_event_grant()`），
+    #    但**授不出去** —— 一场活动交给谁办是那个 ministry 的事。
+    #    收回那条路在站点的授权页上，不在这里。
+    #
+    # 🔴 而它在这张名单上，是因为「在 admin.py 里注册」**不等于**够得着：
+    #    没有这条权限，这张表对每一个非超级用户在 admin 首页上整个不出现，
+    #    看起来和「这一页没人建」一模一样。上面 add_ministry 和 L5.2 那两段
+    #    记的是同样的经过 —— 这是第四次，而这一次是守卫当场拦下的。
+    "events.view_eventgrant",
     # Ministries themselves. A production database comes up with none, and
     # nothing else in the interface can create one — so without these the
     # foundation cannot get started at all. Django hides a model from the admin

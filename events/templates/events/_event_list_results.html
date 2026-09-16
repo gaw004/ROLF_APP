@@ -37,6 +37,19 @@ event_list 的结果区。整页和 HTMX 片段渲染的是同一份 —— 视�
     {% include "events/_event_count.html" with oob=1 %}
     {% include "events/_filter_summary.html" with oob=1 %}
     {% include "events/_date_chip_label.html" with oob=1 %}
+    {% comment %}
+    ⚠️ 另外两颗按钮上的字，同一个形状（2026-09-15）。`_ministry_chip_label`
+       那一份是新加的多选要的；`_role_chip_label` 补的是一个**既有**缺口 ——
+       Role 那颗按钮此前只在整页加载时画得对。
+    ⚠️ 两个片段里那两个 `id` 必须和按钮里的一字不差，否则 OOB **静默失败**
+       —— 上面那段注释记着同一件事。
+    {% endcomment %}
+    {% if period.by_many_ministries %}
+      {% include "events/_ministry_chip_label.html" with oob=1 %}
+    {% endif %}
+    {% if period.by_role_kind %}
+      {% include "events/_role_chip_label.html" with oob=1 %}
+    {% endif %}
   {% endif %}
 
   <ul class="space-y-3">

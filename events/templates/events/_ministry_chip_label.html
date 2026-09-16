@@ -1,0 +1,16 @@
+{% comment %}
+Ministry 那一格收起时按钮上的字（2026-09-15）。**和 `_date_chip_label.html`
+是同一件事的第三份** —— 那三块都在筛选表单里、也就是 `#event-results`
+**外面**，所以要画两遍：一遍在按钮上，一遍带着 `hx-swap-oob` 跟在结果片段里。
+
+⚠️ 少了 OOB 那一遍：勾完 ministry 列表变了，而按钮还写着「Ministry」——
+   我在浏览器里正是这么撞上的（勾了两个，按钮一个字没动）。
+   ⚠️ 而 curl 抓不到它：整页加载时那个字是对的。
+
+⚠️ 字由服务端给（`EventPeriodForm.ministry_label`），不在 JS 里算 ——
+   「一个名字 / 第一个名字 +N / 字段标签」那三个分支已经写在表单上了，
+   再写一份 JS 的就是同一条措辞规则的第二个真相。
+
+参数：oob —— 真值则带上 `hx-swap-oob`。
+{% endcomment %}
+<span id="ministry-chip-label" {% if oob %}hx-swap-oob="true"{% endif %}>{{ period.ministry_label }}</span>

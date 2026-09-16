@@ -869,6 +869,15 @@
   .filter-menu-row:hover { background-color: var(--color-ink-100); }
   .dark .filter-menu-row:hover { background-color: var(--color-ink-800); }
 
+  /* ⚠️ `flex-start` 是给 Role 那一格的（一个词底下带一句解释，勾要和**第一行**
+   *    对齐）。Ministry 那一格只有一个名字，没有第二行 —— 那里 `flex-start`
+   *    会让勾比名字高出半个像素，在一列里看得出来。
+   *    判据是**这一行有没有第二行**，所以用 `:not(:has(...))` 而不是再加一个类：
+   *    加类要两处保持一致，而这一条从结构上就对。 */
+  .filter-menu-row:not(:has(.filter-menu-gloss)) {
+    align-items: center;
+  }
+
   /* ⚠️ 一个词一行、解释在它下面 —— 这就是这一格存在的全部理由。 */
   .filter-menu-word {
     display: block;
@@ -3446,6 +3455,8 @@
     /* 图标在左、文字在右，同一条基线上（2026-09-14 加图标之后）。 */
     display: flex;
     align-items: center;
+    /* 计数徽章要钉在这一格的右上角（2026-09-15）—— 它绝对定位，得有个参照。 */
+    position: relative;
     gap: 0.75rem;
     opacity: 0;
     transform: translateY(12px);
@@ -3456,6 +3467,66 @@
    *    把 20px 的图标压成 17px，而一排图标里只有一个小一号是看得出来的。 */
   .menu-icon {
     flex: none;
+  }
+
+  /* 右上角那颗红色计数徽章（2026-09-15，待核验的岗位）—— 用户要的形状是
+   * 「像 app 的未读消息一样，红色数字在右上角」。
+   *
+   * 🔴 **红色在这里是一次有意的例外，别顺手改成 warning。** 这个系统里红色的
+   *    意思是「出事了」（[D27] 的未成年无同意记录是红的，那是"有没有出事"），
+   *    而名册页上那块待办面板、和那一列 Vacant 徽章走的都是警示黄。
+   *    这一颗不一样：它是一个**通知计数**，而通知计数在所有人的手机上都是红的
+   *    —— 换成黄的它就不再读作"有 N 件事没处理"。
+   *    ⚠️ 判据是**这个东西属于哪一套视觉惯例**，不是"红色在本仓库里代表什么"。
+   *       所以这条例外**限定在这一颗徽章上**（`.home-menu-badge`），
+   *       数据里表达严重程度仍然走 badge.html 那六档。
+   *
+   * ⚠️ 实心红配白字，不是 `--color-danger-bg` 那个浅红底 —— 那一档是给警示框用
+   *    的，缩到 18px 的圆点上几乎看不出是红的。
+   *
+   * ⚠️ 绝对定位到右上角，而不是 `margin-left: auto` 推到行尾：后者在钉住之后那条
+   *    竖排的窄栏里会被顶到整格的**底部**，离它说明的那个图标很远。绝对定位两种
+   *    版式下都落在同一个地方。
+   *
+   * ⚠️ `pointer-events: none`：它压在一个 `<a>` 上，而点到数字上必须照样是点那条
+   *    链接。 */
+  /* ⚠️ **一个类，两个地方**：站内菜单那一格，和名册索引页上每张 ministry 卡片。
+   *    同一个意思（「这里有 N 件事等你」）在一屏之内必须长得一模一样，而两套
+   *    样式迟早会在圆角或字号上分家。
+   * ⚠️ 绝对定位 —— 用它的容器必须自己 `position: relative`。 */
+  .count-badge {
+    position: absolute;
+    top: 0.375rem;
+    right: 0;
+    pointer-events: none;
+    min-width: 1.125rem;
+    border-radius: 999px;
+    padding: 0 0.3125rem;
+    background-color: #dc2626;
+    color: #fff;
+    font-size: 0.6875rem;
+    font-weight: 700;
+    line-height: 1.125rem;
+    text-align: center;
+  }
+
+  /* 钉住之后那条 4.5rem 的窄栏：图标在上、文字在下，所以徽章往里收一点，
+   * 正好落在图标的右上角 —— 手机上一个 app 图标带角标的那个位置。 */
+  .menu-pinned .count-badge {
+    top: 0.125rem;
+    right: 0.5rem;
+  }
+
+  /* 名册索引页上那一张张 ministry 卡片 —— 徽章要钉在它的右上角，所以它得是
+   * 定位的祖先。⚠️ 整张卡是一个链接，所以徽章的 `pointer-events: none`
+   * （上面那条）在这里同样承重：点到数字上必须照样是点进那个 ministry。 */
+  .roster-card {
+    position: relative;
+  }
+
+  .roster-card .count-badge {
+    top: 0.75rem;
+    right: 0.75rem;
   }
 
   /* 面板顶上那一排：Close 在左，钉住那颗在右。 */

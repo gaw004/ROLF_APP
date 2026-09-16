@@ -1,0 +1,142 @@
+{% extends "core/base.html" %}
+{% block title %}{% if ministry %}{{ ministry.name }}{% else %}Foundation-wide{% endif %} — Staff{% endblock %}
+
+{% comment %}
+一个 ministry 的名册（2026-09-15 用户定的版式：先选，点进去只看这一个）。
+
+⚠️ 分组、计数、待核验三份数据全在 `org/services.py` 里算好了，这里只画。
+{% endcomment %}
+
+{% block content %}
+  <p class="mb-4 text-sm">
+    <a href="{% url 'org:staff_roster' %}" class="prose-link">&larr; Staff Roster</a>
+  </p>
+
+  <div class="flex flex-wrap items-center justify-between gap-3">
+    <div>
+      <h1 class="text-2xl font-semibold">
+        {% if ministry %}{{ ministry.name }}{% else %}Foundation-wide{% endif %}
+      </h1>
+      <p class="mt-1 text-sm text-ink-600 dark:text-ink-300">
+        {% if ministry %}
+          The posts on the chart, and who holds them today
+        {% else %}
+          {% comment %}
+          ⚠️ 这一段的说明不一样，而那不是多写一句话 —— 「不属于任何 ministry」
+             是这批岗位的**定义**（`Position.ministry` 可空），不说清楚的话它读起来
+             像一批漏填了部门的数据。
+          {% endcomment %}
+          Posts that belong to no single ministry — Executive Director and the like
+        {% endif %}
+      </p>
+    </div>
+    {% url 'org:position_create' as new_post_url %}
+    {% include "core/components/button.html" with label="New post" href=new_post_url|add:new_post_query variant="primary" %}
+  </div>
+
+  {% if awaiting %}
+    {% comment %}
+    🔴 **只画给 foundation tier**（视图里 `awaiting` 对别人是 None）。核验那件事
+       只有他做得了，画给 ministry admin 就是一张他做不了的待办。
+
+    ⚠️ 走 `warning` 那一档而**不是** `danger`：红色在这个系统里的意思是「出事了」
+       （D27 的未成年无同意记录）。这里是「有件事等着你看一眼」。
+       ⚠️ 索引页上那颗角标是红的，而那是**另一套惯例**（通知计数），
+          理由写在 app.css 的 `.count-badge` 上。
+    {% endcomment %}
+    <div class="card mt-6 border border-warning-fg/30 bg-warning-bg dark:border-warning-fg-dark/30 dark:bg-warning-bg-dark">
+      <h2 class="text-sm font-semibold text-warning-fg dark:text-warning-fg-dark">
+        {{ awaiting|length }} post{{ awaiting|length|pluralize }} waiting for you
+      </h2>
+      <p class="mt-1 text-xs text-warning-fg dark:text-warning-fg-dark">
+        A ministry admin set the pay and reporting line on
+        {{ awaiting|length|pluralize:"this one,these" }}. Open
+        {{ awaiting|length|pluralize:"it,each" }} and verify — correcting a field
+        and saving counts as verifying it.
+      </p>
+      <ul class="mt-3 space-y-1 text-sm">
+        {% for position in awaiting %}
+          <li>
+            <a href="{% url 'org:position_detail' pk=position.pk %}" class="prose-link">
+              {{ position.name }}</a>
+            {% if not position.is_active %}
+              <span class="text-ink-600 dark:text-ink-300">— retired</span>
+            {% endif %}
+          </li>
+        {% endfor %}
+      </ul>
+    </div>
+  {% endif %}
+
+  {% if section %}
+    <p class="mt-6 text-xs text-ink-600 dark:text-ink-300">
+      {{ section.posts }} post{{ section.posts|pluralize }} ·
+      {{ section.holders }} in post{% if section.serving != section.holders %}
+        ({{ section.serving }} available today){% endif %}
+    </p>
+
+    {% comment %}
+    🔴 **分组写在每一行上，不是一条横跨表格的分隔行**（2026-09-15，用户在浏览器里
+       看过之后定的：那几条分隔行难看）。中间那一版是分隔行 —— 比最初的
+       「一组一张表」好（列终于对齐了），但它把一张表切成了四截，而一行的**身份**
+       还要抬头去找它属于哪一段才知道。
+
+    ⚠️ 顺带合并掉了一列：分组名进每一行之后，原来那个 `Pay` 列就是同一件事说
+       两遍（`Staff — paid` 旁边写 `Paid`）。⚠️ 而**合并是有损的** ——
+       `Leaders` / `Board` / `Vacant` 三组不说拿不拿钱，所以那几行现在看不到
+       薪酬档了。可以接受：拿不拿钱在岗位详情页上，而名册要答的是
+       「谁在这个组织里、什么身份」。
+
+    ⚠️ 顺序仍然由 `ROSTER_GROUPS` 定（空缺在最前），所以同组的行仍然挨在一起，
+       只是不再有一条横跨的标题。
+    {% endcomment %}
+    <div class="table-wrap mt-2">
+      <table>
+        <thead>
+          <tr><th>Post</th><th>Who</th><th class="text-right">Standing</th></tr>
+        </thead>
+        <tbody>
+          {% for group, rows in section.groups %}
+            {% for row in rows %}
+              <tr>
+                <td class="font-medium">
+                  <a href="{% url 'org:position_detail' pk=row.position.pk %}" class="prose-link">
+                    {{ row.position.name }}</a>
+                  {% if row.position.needs_foundation_review %}
+                    {% include "core/components/badge.html" with label="Needs review" tone="warning" %}
+                  {% endif %}
+                </td>
+                <td>
+                  {% comment %}
+                  ⚠️ 空缺那几行这里是空的，而那是**这张表的正常状态**，不是缺数据
+                     —— `Position` 当初从 `Assignment` 里拆出来的第一个理由就是
+                     「空缺是一行不存在，而不存在是 Assignment 答不出来的」。
+                  {% endcomment %}
+                  {% for holder in row.holders %}
+                    {{ holder.contact }}{% if not forloop.last %}, {% endif %}
+                  {% empty %}
+                    <span class="text-ink-500 dark:text-ink-400">Nobody yet</span>
+                  {% endfor %}
+                </td>
+                <td class="text-right">
+                  {% comment %}
+                  ⚠️ 只有空缺上色（`warning`），其余四组走中性那一档。红色在这个
+                     系统里是「出事了」（D27），而一个空缺是「有件事等着人做」；
+                     剩下四组是中性事实，各给一个颜色只会把这一列变成一片色块。
+                  {% endcomment %}
+                  {% if group == "Vacant" %}
+                    {% include "core/components/badge.html" with label=group tone="warning" %}
+                  {% else %}
+                    {% include "core/components/badge.html" with label=group %}
+                  {% endif %}
+                </td>
+              </tr>
+            {% endfor %}
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% else %}
+    {% include "core/components/empty.html" with message="No posts on the chart for this ministry yet. A post is a box on the org chart — it exists whether or not anybody is in it, and it is what lets somebody count as this ministry's staff." %}
+  {% endif %}
+{% endblock %}

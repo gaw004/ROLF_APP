@@ -816,12 +816,75 @@ class OrgTreeGuardTests(TestCase):
         )
 
 
+class ConflictDetectionGuardTests(TestCase):
+    """Lint-as-test: 两段时间撞没撞，全项目只有一处答得出来（D39）。
+
+    D39 的唯一不变量是**「只有一处」**，而它点名的失败是：
+    「报名页和指派页各写一套重叠判断，两边算出来的『撞没撞』不一样，
+    而两边都不报错」。
+
+    ⚠️ **落点 2026-09-15 从 `org/services.py` 改成了 `events/services.py`**，
+       而这条守卫守的东西一个字没变。改口的理由写在那个函数上面：第 ④ 类全部是
+       events 的词汇，而 events → org 是允许方向、反过来不是（D17）。
+
+    🔴 **这条守卫写完之后在旧代码上验过会红**（往别的文件里放一行同样形状的比较，
+       它当场变红）。这个仓库已经两次差点写出永远绿的守卫，而一条扫不准的守卫
+       比没有守卫更糟。
+    """
+
+    # 两个**不同对象**的 start/end 相比 —— 那就是一次区间重叠判断。
+    #
+    # ⚠️ 写成转义的正则、而且只写在这里，所以这个文件本身不含它要找的字面文本，
+    #    守卫因此扫得到自己（同这一份里另外十几条）。
+    # ⚠️ 只认**对象属性**那种写法，不认 ORM 的 `end_time__gte=F(...)` ——
+    #    后者是同一行上的一条约束，不是两段区间在比。
+    #
+    # 🔴 **不要在注释里把那个形状写出来。** 第一版写了一个例子，而这条守卫
+    #    **当场抓到了它自己** —— 这个文件开头那条规矩（「never spell a forbidden
+    #    pattern out in a comment」）的第五次应验。
+    #    ⚠️ 顺带白拿了一次反向验证：它确实会红。
+    OVERLAP = r"\.start\w*\s*<\s*\w+\.end|\.end\w*\s*>\s*\w+\.start"
+
+    def test_only_one_place_decides_whether_two_windows_overlap(self):
+        hits = offending_lines(self.OVERLAP, skip=["events/services.py"])
+        self.assertEqual(
+            hits,
+            [],
+            "Ask events.services.conflicts_for() / conflicts_among():\n"
+            + "\n".join(hits),
+        )
+
+
 class PermissionGuardTests(TestCase):
     """Lint-as-test: ministry-scoped authority is judged in exactly one place."""
 
     # Written escaped and only here, so this file never contains the literal
     # text it hunts for and the guard can scan itself.
     DIRECT_QUERY = r"MinistryRole\.objects"
+    # 同一条规矩，第二张授权表（D47，2026-09-15）。
+    #
+    # ⚠️ **不是同一个 pattern 加一个 `|`**：两张表的豁免名单不一样 ——
+    #    `MinistryRole` 的写入在 `org/services.py`，而这一张的在
+    #    `events/services.py`（表的主语是一场活动，D17）。合成一条的话，
+    #    豁免必须取两者的并集，于是 `org/services.py` 里一句直接查 EventGrant
+    #    的代码会被放过。
+    GRANT_QUERY = r"EventGrant\.objects"
+
+    def test_only_permissions_py_queries_eventgrant(self):
+        """D47 的那张表，和 `MinistryRole` 同一条规矩：判断在 permissions.py，
+        写入在 services.py，视图只调其中之一。
+
+        ⚠️ 豁免的是 `events/services.py`（授权在那里建和撤），而**不是**
+           `org/services.py` —— 见上面那条注释。
+        """
+        hits = offending_lines(
+            self.GRANT_QUERY, only_filenames={"views.py", "admin.py", "forms.py"})
+        self.assertEqual(
+            hits,
+            [],
+            "Ask org.permissions to judge, events.services to write:\n"
+            + "\n".join(hits),
+        )
 
     def test_only_permissions_py_queries_ministryrole(self):
         """views.py / admin.py / forms.py never touch the grant table themselves.

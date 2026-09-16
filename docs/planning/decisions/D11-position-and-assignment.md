@@ -96,7 +96,10 @@
 
 ```python
 Position(                                # 编制：组织结构里的一个格子，与人无关
-    code,                                # 唯一·不可改（D5 通则）
+    code,                                # ⚠️ 可空，默认为空；设了才唯一、才不可改
+                                         #    （2026-09-15 改口，见 D46 —— 原文写的是
+                                         #    「唯一·不可改（D5 通则）」，而 D5 的通则
+                                         #    是给字典表写的，Position 不是字典表）
     name,                                # "项目总监"
     kind         = employee | volunteer | board,
     ministry     → Ministry (可空),       # 服务单元；理事不属于任何 ministry

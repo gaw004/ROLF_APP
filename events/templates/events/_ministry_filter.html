@@ -1,0 +1,55 @@
+{% comment %}
+Ministry 那一格，**多选**（2026-09-15，用户定的）。
+
+🔴 **为什么这一格从原生 `<select>` 改成了自绘。**
+   `_filter_select.html` 上写着 Ministry 保持原生下拉的理由：「选项会变多，而
+   原生下拉在手机上调起系统选择器，选项一多那比任何自绘的列都好用」。
+   那句话对**单选**成立，对多选不成立 —— 原生多选（`<select multiple>`）在桌面上
+   要按住 Cmd 点，在手机上是一个谁都认不出的滚动块。**多选没有好用的原生控件。**
+
+   ⚠️ 代价如实记：手机上这一列的滚动和触摸目标现在要自己管，而原来是系统管的。
+
+🔴 **而这仍然不是「用 div 拼一个假下拉」那笔账**（`_filter_select.html` 分得很清）：
+   `popovertarget` 是**声明式的 HTML**，开合不需要脚本；里面是真的
+   `<input type="checkbox">`，跟着表单提交、键盘原生可走、读屏念得出
+   `fieldset`/`legend`。所以**没有 JavaScript 也完整可用**，而且不是靠降级。
+
+⚠️ 选中之后弹层**不自动关** —— 这一格尤其要如此：多选本来就是要连点几下。
+   同 `_role_filter.html` 那条（关它要脚本，而为此引一段脚本等于把无 JS 那条路
+   挂在脚本上）。
+
+⚠️ `name="ministry"` 和表单字段同名 —— 这些 checkbox **就是**那个字段，不是它的
+   影子。HTMX 那条 `hx-trigger="input delay:400ms"` 挂在 `<form>` 上，
+   checkbox 的 `input` 事件照常冒泡上去。
+
+⚠️ 一个都不勾就是没筛 —— 所以这里**没有**「All ministries」那一行。
+   状态由收起时按钮上的字（`ministry_label`）和底下那行 `Filtered by …` 说。
+{% endcomment %}
+<div class="filter-select">
+  <button type="button" class="filter-trigger" popovertarget="ministry-filter">
+    {% include "events/_ministry_chip_label.html" %}
+    <svg width="14" height="14" viewBox="0 0 20 20" fill="none" stroke="currentColor"
+         stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M5 8l5 5 5-5"/>
+    </svg>
+  </button>
+
+  <div id="ministry-filter" popover class="filter-menu">
+    <fieldset>
+      <legend class="sr-only">{{ period.ministry.label }}</legend>
+      {% for value, name, chosen in period.ministry_options %}
+        <label class="filter-menu-row">
+          <input type="checkbox" name="ministry" value="{{ value }}"
+                 {% if chosen %}checked{% endif %}>
+          <span class="filter-menu-word">{{ name }}</span>
+        </label>
+      {% empty %}
+        {% comment %}
+        ⚠️ 一个 ministry 都没有时说一句话，而不是画一个空弹层 —— 一个点开是空的
+           控件读起来是「坏了」（D27 那条「没有和没算不能长得一样」的同一面）。
+        {% endcomment %}
+        <p class="filter-menu-row filter-menu-gloss">No ministries yet</p>
+      {% endfor %}
+    </fieldset>
+  </div>
+</div>

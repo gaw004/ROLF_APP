@@ -13,7 +13,7 @@ from django.core.exceptions import ValidationError
 from django.conf import settings
 from django.db.models import Q
 
-from contact.models import EmergencyContact, RelationshipType
+from contact.models import Contact, EmergencyContact, RelationshipType
 from core.images import decode_complaint_for, is_new_upload
 from core.limits import LONG_TEXT, PHONE, SEARCH
 from core.timeutils import day_start
@@ -1398,17 +1398,30 @@ class EventPeriodForm(forms.Form):
     #    somebody picks a ministry and watches it vanish from the dropdown it
     #    was just chosen from — the options would then depend on the filter
     #    they are part of.
-    ministry = forms.ModelChoiceField(
+    # 🔴 **多选**（2026-09-15，用户定的）。「食物银行**和**报税援助」是一个真实
+    #    的筛选，而单选说不出它 —— 同 `Audience` 那三个勾当初不做成一个三值枚举
+    #    的理由（「那一句是一个 enum 说不出来的」）。
+    #
+    # ⚠️ **只有浏览那两页多选**（`/events/`、`/programs/`），管理列表和报表页
+    #    仍然是单选 —— 见 `__init__` 的 `multi_ministry`。
+    #
+    # ⚠️ `ModelMultipleChoiceField` 交回来的是一个 **queryset**，不是一个对象。
+    #    `description()` 和 `narrow()` 各自为此分了支，两处都写了理由。
+    ministry = forms.ModelMultipleChoiceField(
         queryset=Ministry.objects.filter(is_active=True).order_by("name"),
-        # ⚠️ 空选项从「All ministries」改成「Ministry」（2026-09-15，跟着新版式）。
-        #    **代价如实说**：原来那句说的是「当前没筛」，新的说的是「这一格管什么」。
-        #    可接受，是因为「筛了什么」现在由底下那行 `Filtered by …` 承担 ——
-        #    在此之前没有那一行，所以那时选「All ministries」是唯一说得出状态的地方。
-        required=False, label="Ministry", empty_label="Ministry",
+        widget=forms.CheckboxSelectMultiple,
+        # ⚠️ 多选这一档**没有 `empty_label`** —— `ModelMultipleChoiceField` 不收它
+        #    （多选里没有「空选项」这回事，一个都不勾就是没筛）。
+        #    那句「这一格管什么」由收起时按钮上的字承担，见 `ministry_label`。
+        #    ⚠️ 单选那一档的 `empty_label="Ministry"` 在 `__init__` 里重建时给，
+        #       连同它当初那条改口的理由：原来写的是「All ministries」（说的是
+        #       「当前没筛」），改成「Ministry」（说的是「这一格管什么」），
+        #       而「筛了什么」由底下那行 `Filtered by …` 承担。
+        required=False, label="Ministry",
     )
 
     def __init__(self, *args, ministries=None, audience=NO_AUDIENCE,
-                 noun="event", **kwargs):
+                 noun="event", multi_ministry=False, **kwargs):
         """`ministries` narrows the dropdown to a scope the page already has.
 
         `audience` (2026-09-08) is the person the "kind of role" box is judged
@@ -1441,6 +1454,20 @@ class EventPeriodForm(forms.Form):
             f"Search {noun}s or locations")
         if ministries is not None:
             self.fields["ministry"].queryset = ministries
+        # 🔴 **单选那一档换回 `ModelChoiceField`**（2026-09-15）。
+        #    多选只给浏览那两页；管理列表和报表页仍然是单选，因为 `description()`
+        #    —— 那句印在**报表正文**上、被人当口径读的话 —— 说的是「一个
+        #    ministry」，而让它说得出 N 个名字是另一件事（用户当时判的「只改浏览
+        #    列表」）。
+        #
+        #    ⚠️ **字段名一个字没改**（仍然是 `ministry`），所以
+        #       `test_the_filter_names_are_declared_once` 那条守卫照旧成立 ——
+        #       `FILTER_PARAMS` 和 `LIST_STATE` 都不用动。
+        if not multi_ministry:
+            self.fields["ministry"] = forms.ModelChoiceField(
+                queryset=self.fields["ministry"].queryset,
+                required=False, label="Ministry", empty_label="Ministry")
+        self._multi_ministry = multi_ministry
         self._audience = audience
         if audience is not NO_AUDIENCE:
             # L1's axis, finally askable (2026-09-08). Until now `nature` was
@@ -1539,6 +1566,62 @@ class EventPeriodForm(forms.Form):
             day_start(start) if start else None,
             day_start(end + datetime.timedelta(days=1)) if end else None,
         )
+
+    @property
+    def by_many_ministries(self):
+        """这一格是不是多选的 —— 模板问这个，决定画哪一份。
+
+        ⚠️ 模板问**这个**，不是 `{% if period.multi_ministry %}` 之类 ——
+           同 `by_role_kind` 那一条：一个不存在的属性在模板里会被吞掉变成空串，
+           那是一条失败路径冒充一个问题。
+        """
+        return self._multi_ministry
+
+    @property
+    def ministry_options(self):
+        """Ministry 那一格展开时的每一行：`(值, 名字, 选没选中)`。
+
+        🔴 **从字段派生，不自己拼**（同 `nature_options`，而那一条的注释写着
+           不这么做会怎样）：显示那份和把关那份分家之后，人选了一个菜单里明明
+           画着的选项 → 校验判它无效 → 筛选什么都没筛 → 列出**全部** ——
+           **全程没有任何报错**。
+           守卫：`MinistryFilterTests.test_the_options_come_from_the_field`。
+
+        ⚠️ 选中与否也在这里算：模板里判 `{% if value in period.ministry.value %}`
+           要靠字符串和整数的隐式比较，而那件事在 Django 模板里既看不出来也测不了。
+        """
+        field = self.fields.get("ministry")
+        if field is None or not self._multi_ministry:
+            return []
+        chosen = {str(v) for v in (self.data.getlist("ministry")
+                                   if hasattr(self.data, "getlist") else [])}
+        return [(value, label, str(value) in chosen)
+                for value, label in field.choices]
+
+    @property
+    def ministry_label(self):
+        """收起时那一格上写的字：`Ministry` / `Food Pantry` / `Food Pantry +1`。
+
+        ⚠️ 用户 2026-09-15 定的三种形态。和 `nature_label` 同一条规矩：选了就
+           显示那个词，没选就是字段自己的标签 —— 收起状态下也看得出筛着什么。
+
+        ⚠️ 和 `ministry_options` **同一个来源**（那个 property）：在此之前
+           `nature_label` 和 `nature_options` 各推一遍，而改措辞时只改一处的表现是
+           「收起时按钮上的词和展开后第一行的词对不上」。
+        """
+        field = self.fields.get("ministry")
+        if field is None:
+            return ""
+        if not self._multi_ministry:
+            chosen = self.cleaned_data.get("ministry") if self.is_valid() else None
+            return chosen.name if chosen else field.label
+        picked = [label for _value, label, is_on in self.ministry_options if is_on]
+        if not picked:
+            return field.label
+        # ⚠️ 「第一个名字 +N」而不是「2 ministries」（用户定的）：一个数字说不出
+        #    是哪几个，而这一条筛选栏上一个多余的年份就能把那一格挤宽 ——
+        #    所以只带第一个名字。
+        return picked[0] if len(picked) == 1 else f"{picked[0]} +{len(picked) - 1}"
 
     @property
     def nature_options(self):
@@ -1657,7 +1740,15 @@ class EventPeriodForm(forms.Form):
             return "All ministries · all dates"
         ministry = self.cleaned_data.get("ministry")
         start, end = self.cleaned_data.get("start"), self.cleaned_data.get("end")
-        who = ministry.name if ministry else "All ministries"
+        # ⚠️ 单选那一档**一个字没动** —— 这句话印在报表正文上，被人当口径读。
+        #    多选那一档今天没有读者（报表页是单选），写在这里是因为
+        #    `ministry` 在那一档是 queryset，而 `.name` 会当场 `AttributeError`。
+        if not ministry:
+            who = "All ministries"
+        elif self._multi_ministry:
+            who = get_text_list([m.name for m in ministry], "and")
+        else:
+            who = ministry.name
         if start and end:
             when = f"{start:%d %b %Y} – {end:%d %b %Y}"
         elif start:
@@ -1699,8 +1790,14 @@ class EventPeriodForm(forms.Form):
         if end is not None:
             events = events.filter(start_time__lt=end)
         ministry = self.cleaned_data.get("ministry") if self.is_valid() else None
-        if ministry is not None:
-            events = events.filter(ministry=ministry)
+        if ministry:
+            # ⚠️ 多选那一档交回来的是 queryset，单选是一个对象 —— 两种都在这里
+            #    落地，而**不是**在调用方分支：`narrow()` 是全项目唯一落筛选的
+            #    地方，分支挪出去就变成两份。
+            # ⚠️ `ministry__in` 对一个 FK **不会**造成 join 重复行（不同于受众那个
+            #    M2M —— `for_audience()` 专门用 `Exists` 躲的正是那件事）。
+            events = events.filter(
+                ministry__in=ministry if self._multi_ministry else [ministry])
         search = (self.cleaned_data.get("q") or "").strip() if self.is_valid() else ""
         if search:
             # ⚠️ `.strip()` above, and it matters more than it looks: a trailing
@@ -2094,3 +2191,31 @@ class SessionForm(forms.ModelForm):
 
         self.save_m2m = save_m2m
         return session
+
+
+class EventGrantForm(forms.Form):
+    """把这一场活动交给某个人管。D47。
+
+    A plain Form，不是 ModelForm：`granted_by` 从 session 来、`event` 从地址栏来，
+    两个都不许是表单上的格子 —— 一个能填的格子就是一个能撒谎的格子
+    （同 `org.forms.GrantForm`）。
+
+    🔴 **只列有登录账号的人**（用户 2026-09-15 定的）。授权一个登不进来的人，
+       那一行是死的 —— 而页面上没有任何东西会说它是死的。
+       ⚠️ 账号就是邮箱（D12/D30），所以「没有邮箱的人」天然不在这张名单里。
+    """
+
+    contact = forms.ModelChoiceField(queryset=None, label="Who")
+    start_date = forms.DateField(
+        required=False, label="Starting on",
+        widget=forms.DateInput(attrs={"type": "date"}))
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields["contact"].queryset = Contact.objects.filter(
+            is_active=True,
+            contact_type=Contact.ContactType.INDIVIDUAL,
+            # ⚠️ `user` 是 `accounts.User.contact` 的反向名（OneToOne），
+            #    所以这一句读作「有账号的人」。
+            user__isnull=False,
+        ).order_by("legal_last_name", "legal_first_name")

@@ -1,0 +1,32 @@
+{% extends "core/base.html" %}
+{% block title %}New post{% endblock %}
+
+{% comment %}
+建一个岗位。
+
+⚠️ 表单上**没有 code 这一格**，而那不是漏了：它建了就改不了
+   （`ImmutableCodeMixin`），由 `org.services.create_position()` 从名字生成。
+   理由写在 `_free_position_code()` 上。
+⚠️ 薪酬档 / 汇报线 / 类型三格只对 foundation tier 出现，而它们是被
+   **删掉**的不是禁用的 —— 见 `org.forms.PositionForm` 的第一段。
+{% endcomment %}
+
+{% block content %}
+  <p class="mb-4 text-sm">
+    <a href="{% url 'org:staff_roster' %}" class="prose-link">&larr; Staff Roster</a>
+  </p>
+
+  <h1 class="text-2xl font-semibold">New post</h1>
+  <p class="mt-1 text-sm text-ink-600 dark:text-ink-300">
+    A post is a box on the org chart, not a person — it exists whether or not
+    anybody is in it. Add the people afterwards.
+  </p>
+
+  <form method="post" class="card mt-6">
+    {% csrf_token %}
+    {% include "core/components/form_fields.html" %}
+    <div class="mt-6">
+      {% include "core/components/button.html" with label="Create" variant="primary" %}
+    </div>
+  </form>
+{% endblock %}

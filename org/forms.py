@@ -19,6 +19,9 @@ from org.audience import (
     refuse_empty_audience,
     refuse_redundant_audience,
 )
+from org.models import Assignment, Ministry, Position
+from org.permissions import can_define_position_terms, ministry_ids_administered_by
+from org.services import refuse_a_second_live_tenure, refuse_retiring_a_held_post
 
 
 class GrantForm(forms.Form):
@@ -367,3 +370,171 @@ class AudienceFormMixin:
             #    about in order to not get it wrong.
             self.instance.submitted_audience = spec
         return None if empty else spec
+
+
+class PositionForm(forms.ModelForm):
+    """建 / 改一个岗位。**这个账号填得了哪几格，由权限决定。**
+
+    🔴 **两档的差别是「删字段」，不是 `disabled`**，而这是这张表单唯一一处真正
+       承重的设计。`disabled=True` 会让 Django 忽略提交上来的值、改用 initial ——
+       对**改**是安全的，对**建**不是：新建时 initial 是字段默认值，而
+       `Position.compensation` 的默认值是 `unpaid`，于是伪造一个
+       `compensation=paid` 的 POST 不会被拒绝，只是被悄悄换成 `unpaid`——
+       看起来像挡住了。删掉字段之后，那个值连进 `cleaned_data` 的机会都没有。
+
+       ⚠️ 同 `events.forms.SignUpForm` 对 `served_as` 的做法（问不到那个人的时候
+          整个删掉那一格），理由一字不差。
+
+    ⚠️ `code` **这张表单上永远没有**（2026-09-15 用户拍板）：它建了就改不了，
+       而让一个非技术的人敲一个永久性的 slug，敲错之后没有任何一条路能改。
+       由 `org.services.create_position()` 从名字生成，理由写在
+       `_free_position_code()` 上。
+
+    ⚠️ `is_active` 只在**改**的时候出现：一个刚建出来的岗位当然是存在的，
+       而一颗建的时候就能勾掉的「这个岗位已撤销」是一个没有意义的状态。
+    """
+
+    #: 🔴 **只有 foundation tier 填得了的那一格。** 名单只在这里写一次 ——
+    #: 视图、模板和测试都读它。
+    #:
+    #: ⭐ **2026-09-15 当天从三格收到一格**，用户改的主意：薪酬档和汇报线**还给
+    #:    ministry admin 填**，foundation tier 的角色从「替他填两格」变成
+    #:    「核验他填的对不对」。这更好，而且治掉了原方案一个真问题 —— 那两格原来
+    #:    留着默认值 `unpaid` / 空，**没有任何人声明过它们**；现在是他声明、
+    #:    另一个人签字，每一格都有人负责。核验流程见
+    #:    `Position.needs_foundation_review`。
+    #:
+    #: ⚠️ `kind` **留在这里**，而它不是漏收的那一格：理事席位是基金会的事，
+    #:    不是某个部门的（D32：「board seats are the rare, deliberate ones」）。
+    #:    对 ministry admin 它恒为 `STAFF` —— 而那不是一个没人声明过的猜测，
+    #:    是一句真话：他建的就是本部门的员工岗。
+    #:    ⚠️ 顺带挡住一个不显眼的后果：`kind=board` 的人**不算在编**
+    #:       （`org.audience.on_the_books_q()` 只认 `STAFF`），选错一格，
+    #:       那个人会静默地看不见发给员工的活动。
+    FOUNDATION_ONLY_FIELDS = ("kind",)
+
+    class Meta:
+        model = Position
+        fields = [
+            "ministry", "name", "kind", "compensation", "reports_to",
+            "is_leader", "description", "is_active",
+        ]
+
+    def __init__(self, *args, user=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        editing = self.instance.pk is not None
+        foundation = can_define_position_terms(user)
+
+        if not editing:
+            del self.fields["is_active"]
+
+        if not foundation:
+            # ⚠️ 算一次，下面两处共用 —— `ministry_ids_administered_by()` 是这个
+            #    项目跑得最频繁的一条查询（每一次权限判断都要问它），而这张表单
+            #    上要问两遍：ministry 的下拉、以及汇报线的下拉。
+            administered = ministry_ids_administered_by(user)
+            for name in self.FOUNDATION_ONLY_FIELDS:
+                del self.fields[name]
+            # ⚠️ 薪酬档和汇报线**不在这里删**（2026-09-15 起）—— 他填得了，
+            #    而 foundation tier 事后核验。两格都带上一句说明，因为他是
+            #    第一次被要求回答它们。
+            self.fields["compensation"].help_text = (
+                "Whether this post is paid. The foundation checks this afterwards — "
+                "there are no amounts anywhere in this system.")
+            self.fields["reports_to"].queryset = Position.objects.filter(
+                is_active=True, ministry_id__in=administered
+            ).select_related("ministry")
+            if editing:
+                # ⚠️ 自己不能向自己汇报。约束 `position_reports_to_is_not_self`
+                #    拦得住它，下拉里不列只是让人不必撞那堵墙（D14 的分工：
+                #    约束强制，界面负责好用）。**环**（A→B→A）仍然由
+                #    `Position.clean()` → `creates_a_reporting_cycle()` 判。
+                self.fields["reports_to"].queryset = (
+                    self.fields["reports_to"].queryset.exclude(pk=self.instance.pk))
+            self.fields["reports_to"].help_text = (
+                "Who this post answers to. Only posts in your own ministries are "
+                "listed — leave it empty if it answers to somebody outside them.")
+            # 🔴 **必填，而这一格是一道真的门。** `Position.ministry` 可空，
+            #    空的意思是「基金会级岗位」—— 而
+            #    `org.permissions.can_manage_staff_roster(user, None)` 说那只有
+            #    foundation tier 做得了。不把它设成必填的话，ministry admin 留空
+            #    提交就建出了一个他没有权限建的东西，而表单不会有任何意见。
+            self.fields["ministry"].required = True
+            self.fields["ministry"].empty_label = None
+            # 🔴 **模型的 help_text 对他是一句假话**（2026-09-15，在浏览器里看到的）。
+            #    那句话写着「Leave empty for foundation-wide posts such as Executive
+            #    Director」—— 而上一行刚把这一格设成必填，他留空会被拒绝。
+            #    ⚠️ 这一格是 `Position.ministry` 的 help_text，对 foundation tier
+            #       完全成立，所以不能去改模型上那句；要改的是**这一档看到的那句**。
+            #    ⚠️ curl 抓不到这种东西：HTML 一个字不差，错的是那句话和这张表单的
+            #       关系。同 revisions.md 六十五记的那三个 bug。
+            self.fields["ministry"].help_text = "Which of your ministries this post belongs to."
+            self.fields["ministry"].queryset = Ministry.objects.filter(
+                id__in=administered).order_by("name")
+        else:
+            self.fields["ministry"].queryset = Ministry.objects.filter(
+                is_active=True).order_by("name")
+            self.fields["ministry"].empty_label = "Foundation-wide (no ministry)"
+            # ⚠️ 自己不能向自己汇报。约束（`position_reports_to_is_not_self`）拦得住
+            #    这一条，而下拉里根本不列它是让人不必撞那堵墙 —— D14 的分工：
+            #    约束强制，界面只负责好用。**环**（A→B→A）仍然由
+            #    `Position.clean()` → `creates_a_reporting_cycle()` 判。
+            reports_to = Position.objects.filter(is_active=True)
+            if editing:
+                reports_to = reports_to.exclude(pk=self.instance.pk)
+            self.fields["reports_to"].queryset = reports_to.select_related("ministry")
+
+    def clean(self):
+        """撤销一个还有人在任的岗位 —— 让 `is_active` 那一格变红。
+
+        ⚠️ 规则本身在 `org.services.refuse_retiring_a_held_post()`，这里只是把它
+           请过来。两处一个函数，不是两份判断 —— 那个函数的注释写着为什么它不能
+           是一条数据库约束（跨两张表，CheckConstraint 看不见）。
+        """
+        cleaned = super().clean()
+        # ⚠️ `self.instance.pk` 才问：新建的岗位不可能有人在任。
+        if self.instance.pk and cleaned.get("is_active") is False:
+            refuse_retiring_a_held_post(self.instance)
+        return cleaned
+
+
+class AssignmentForm(forms.ModelForm):
+    """把一个人放进一个岗位。**岗位不在表单上 —— 它来自地址栏。**
+
+    ⚠️ `position` 不是一个字段，而这不是省事：这张表单开在
+       `/org/staff/positions/<pk>/assign/` 上，岗位由那个 pk 定，而视图已经把那个
+       pk 按权限收窄过了（`_scoped_positions()`）。做成一个字段就等于要在表单里
+       **再判一次权限** —— 而那一处判断迟早和页面那一处走散（D27 的不变量）。
+
+    ⚠️ 没有 `status` 这一格：新入职的人当然是 `ACTIVE`（字段默认值），而休假/停职
+       是**以后**发生的事，属于改而不属于建。
+    ⚠️ 也没有 `end_date`：结束一段任职走 `org.services.end_assignment()`，
+       它记的是「今天结束」而不是一个手填的日期。
+    """
+
+    class Meta:
+        model = Assignment
+        fields = ["contact", "employment_type", "start_date"]
+        widgets = {"start_date": forms.DateInput(attrs={"type": "date"})}
+
+    def __init__(self, *args, position=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        if position is not None:
+            self.instance.position = position
+        self.fields["contact"].queryset = Contact.objects.filter(
+            is_active=True, contact_type=Contact.ContactType.INDIVIDUAL
+        ).order_by("legal_last_name", "legal_first_name")
+        self.fields["contact"].label = "Who"
+        self.fields["start_date"].label = "Starting on"
+
+    def clean(self):
+        """同一个人在这个岗位上已经有一段没结束的任职 —— 让 `contact` 那一格变红。
+
+        ⚠️ 规则在 `org.services.refuse_a_second_live_tenure()`，这里只是请过来 ——
+           同 `PositionForm.clean()`。那个函数写着它和
+           `assignment_unique_tenure` 那条约束管的**不是同一件事**。
+        """
+        cleaned = super().clean()
+        refuse_a_second_live_tenure(
+            contact=cleaned.get("contact"), position=self.instance.position_id)
+        return cleaned

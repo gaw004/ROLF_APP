@@ -2,7 +2,7 @@ import json
 
 from django import forms
 from django.core.exceptions import ValidationError
-from localflavor.us.us_states import STATE_CHOICES
+from core.address import US_STATE_CHOICES
 
 from .models import Contact
 
@@ -14,8 +14,15 @@ def us_state_choices_json():
     form and accounts.ProfileForm. Written out in either of them would be two
     copies of a list that has to agree — and the copy nobody is looking at is
     the one that goes stale when localflavor adds a territory.
+
+    ⚠️ 2026-09-16（D50）起名单从 `core.address.US_STATE_CHOICES` 来，不再自己
+       import `STATE_CHOICES` —— 活动那一侧的下拉读的是同一份。上面那句
+       「两份得一致的名单，没人看的那一份会过期」自此管的是**三处**。
+    ⚠️ 去掉开头那个空项：这一份喂的是一段 JS，它自己会在最前面放一个
+       「选一个」—— 留着就是两个空项叠在一起。
     """
-    return json.dumps([[code, str(name)] for code, name in STATE_CHOICES])
+    return json.dumps([[code, str(name)]
+                       for code, name in US_STATE_CHOICES if code])
 
 
 class ContactAdminForm(forms.ModelForm):

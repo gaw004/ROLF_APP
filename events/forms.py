@@ -16,6 +16,7 @@ from django.db.models import Q
 
 from contact.models import Contact, EmergencyContact, RelationshipType
 from core.images import decode_complaint_for, is_new_upload
+from core.address import postal_code_field, state_field, strip_text
 from core.limits import LONG_TEXT, PHONE, SEARCH, SHORT_TEXT
 from core.timeutils import day_start
 from django.utils.timezone import localtime
@@ -746,6 +747,40 @@ class PublishFormMixin(EventAudienceFormMixin):
             if in_foundation_tier(user)
             else Ministry.objects.filter(id__in=administered))
 
+        # --- 地址那两格（2026-09-16，D50）---------------------------------
+        #
+        # 🔴 **换在这里，于是三张发布表单一起拿到**（`EventForm`、
+        #    `ProgramForm`、`EventSeriesForm`）—— 一处改，三处生效。
+        #    各自改一份的话，漏掉的那一张会安安静静地继续收自由文本，
+        #    而它存下来的地址在地图上打不开，**不报任何错**。
+        #
+        # ⚠️ 州是一个**真的** `<select>`（`core.address.state_field()`），
+        #    不是 `contact` 那边那段 JS 换出来的下拉 —— 关掉脚本它照样是下拉。
+        #    两处为什么不一样，整段写在 `core/address.py` 的模块注释里。
+        #
+        # ⚠️ **不加 `address_country`。** `Event` 上没有那一列是有意的
+        #    （`events/models.py` 那段 🔴 写了理由），而这一批做的正是**美国
+        #    地址**的校验 —— 两件事一致，不是矛盾。
+        #
+        # ⚠️ 两格都 `required=False`，而模型上它们是 `blank=True`：
+        #    「地址可以晚一点补」是那一段注释定的，**不许顺手改成必填**。
+        self.fields["address_state"] = state_field()
+        self.fields["address_postal_code"] = postal_code_field()
+        # ⚠️ 另外两格的标签跟着改（2026-09-16 看着截图改的）。模型自动生成的是
+        #    「Address street」「Address city」，而旁边两格现在写着「State」
+        #    「ZIP code」—— 四格并排，两种命名法。上面那句 `location` 的说明
+        #    已经说清了这几格是街道地址，标签里再带一遍 "Address" 是噪音。
+        #    🔴 改的是**表单**的标签，不是模型的 `verbose_name`：那两列
+        #       `contact.Contact` 上也有，一字不差是有意的（见模型注释），
+        #       而这里是这一页怎么说话。
+        self.fields["address_street"].label = "Street"
+        self.fields["address_city"].label = "City"
+        # ⚠️ 那一格是「楼里的哪一间」，不是地址 —— 模型注释里那句话今天只有读
+        #    代码的人看得到，而填表的人正对着它。
+        self.fields["location"].help_text = (
+            "The room or spot inside the building — Chapel, Room 2B, "
+            "Back garden. The street address goes in the boxes below.")
+
         # ⭐ Nothing else is pre-ticked, and that is the expensive decision of
         #    this form. Defaulting to everyone would match today's behaviour and
         #    make the migration free — and its failure mode is publishing a
@@ -772,6 +807,9 @@ class PublishFormMixin(EventAudienceFormMixin):
 
     def clean(self):
         cleaned = super().clean()
+        # ⚠️ 首尾空白去掉 —— `"NY "` 和 `"NY"` 在地图查询和将来任何一次去重上
+        #    都是两个值，而屏幕上一模一样。整段理由在 `core.address.strip_text`。
+        strip_text(cleaned)
         audience = self.clean_audience()
         # ⚠️ Only when the audience itself is usable. An event ticked for nobody
         #    is narrower than every one of its roles, so going on would bury the

@@ -41,6 +41,7 @@ from django.forms.models import modelform_factory
 from django.template.loader import render_to_string
 from django.test import RequestFactory, SimpleTestCase, TestCase, override_settings
 from PIL import Image as PILImage
+from django import forms
 from django.utils import formats, timezone
 from django.utils.text import slugify
 
@@ -93,6 +94,7 @@ from .forms import (
     SHAPE_KINDS,
     AudienceAdminForm,
     EventForm,
+    ProgramForm,
     EventPeriodForm,
     EventRoleForm,
     DurationBoxes,
@@ -23452,3 +23454,162 @@ class MeetingsPageTests(PageTestCase):
         self.assertEqual([row.ordinal for row in rows], [1, 2, 3, 4])
         self.assertEqual([row.session.pk for row in rows],
                          list(self.course.sessions.values_list("pk", flat=True)))
+
+
+class AddressFormatTests(PageTestCase):
+    """地址输入的时候就对（2026-09-16，D50）。
+
+    ⭐ 这四格的唯一去处是「在地图里打开这个地方」，而一个地图打不开的地址
+       **不报错，只是打不开**。所以把能在录入那一刻挡住的都挡住。
+
+    ⚠️ 这一批只做**零依赖**那一半（用户拍板）：下拉、邮编格式、去空白。
+       地图自动补全记在 `deferred.md` 里，带重启条件。
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.login(self.zhang)
+
+    def payload(self, **overrides):
+        return {
+            "name": "Soup run", "ministry": self.pantry.pk,
+            "start_time": "2026-10-01T09:00", "end_time": "2026-10-01T12:00",
+            "status": Event.Status.OPEN, "shape": Event.Shape.SINGLE,
+            "visible_to_outsiders": True,
+            **overrides,
+        }
+
+    def published(self):
+        return Event.objects.get(name="Soup run")
+
+    # --- 州 ----------------------------------------------------------------
+
+    def test_a_state_code_goes_in(self):
+        self.client.post(reverse("events:event_create"),
+                         self.payload(address_state="NY"))
+        self.assertEqual(self.published().address_state, "NY")
+
+    def test_a_spelled_out_state_is_refused(self):
+        """⚠️ 在此之前 `New York` / `纽约` / `new york ` 全都存得进去，
+           而它们在地图上都打不开。
+        """
+        response = self.client.post(reverse("events:event_create"),
+                                    self.payload(address_state="New York"))
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("address_state", response.context["form"].errors)
+        self.assertFalse(Event.objects.filter(name="Soup run").exists())
+
+    def test_a_forged_code_is_refused(self):
+        """⚠️ 收下拉是界面，拒掉提交才是门 —— 两件事，都要有。"""
+        self.client.post(reverse("events:event_create"),
+                         self.payload(address_state="ZZ"))
+        self.assertFalse(Event.objects.filter(name="Soup run").exists())
+
+    def test_the_state_box_is_a_real_select(self):
+        """🔴 **没有 JavaScript 也完整可用。**
+
+        `contact` 那一侧的州是靠 `address_state_toggle.js` 在**界面上**换成
+        下拉的 —— 关掉脚本它就是个文本框。活动这一侧不走那条路（D24：
+        功能不挂在脚本上），所以这里钉的是「它本来就是一个 `<select>`」。
+        """
+        page = self.client.get(reverse("events:event_create"))
+        self.assertIsInstance(
+            page.context["form"].fields["address_state"], forms.ChoiceField)
+        self.assertContains(page, 'name="address_state"')
+        self.assertContains(page, "<option value=\"NY\">New York</option>", html=True)
+
+    # --- 邮编 --------------------------------------------------------------
+
+    def test_five_digits_and_zip_plus_four_both_go_in(self):
+        for code in ("12345", "12345-6789"):
+            with self.subTest(code=code):
+                Event.objects.filter(name="Soup run").delete()
+                self.client.post(reverse("events:event_create"),
+                                 self.payload(address_postal_code=code))
+                self.assertEqual(self.published().address_postal_code, code)
+
+    def test_something_that_is_not_a_zip_is_refused(self):
+        for code in ("1234", "abcde", "12345-67"):
+            with self.subTest(code=code):
+                response = self.client.post(
+                    reverse("events:event_create"),
+                    self.payload(address_postal_code=code))
+                self.assertIn("address_postal_code", response.context["form"].errors)
+                self.assertFalse(Event.objects.filter(name="Soup run").exists())
+
+    # --- 去空白 ------------------------------------------------------------
+
+    def test_the_boxes_are_trimmed(self):
+        """🔴 **最不起眼也最值钱的一条。**
+
+        `"NY "` 和 `"NY"` 在地图查询和将来任何一次去重上都是两个值，
+        而**屏幕上一模一样**。手机的自动补全和粘贴过来的地址都会带着它。
+        """
+        self.client.post(reverse("events:event_create"), self.payload(
+            location="  Chapel  ", address_street=" 12 Main St ",
+            address_city=" Springfield ", address_state="NY",
+            address_postal_code=" 12345 "))
+        made = self.published()
+        self.assertEqual(made.location, "Chapel")
+        self.assertEqual(made.address_street, "12 Main St")
+        self.assertEqual(made.address_city, "Springfield")
+        self.assertEqual(made.address_postal_code, "12345")
+
+    # --- 仍然可以留空 ------------------------------------------------------
+
+    def test_an_event_with_no_address_still_publishes(self):
+        """⚠️ 那四格在模型上全是 `blank=True`，而模型注释写明了理由：
+           「地址可以晚一点补，必填会让『先建草稿、回头再补细节』这条路走不通」。
+           **不许顺手改成必填** —— 这一条就是钉它的。
+        """
+        response = self.client.post(reverse("events:event_create"), self.payload())
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(self.published().address_state, "")
+
+    # --- 三张发布表单一起拿到 ----------------------------------------------
+
+    def test_all_three_publish_forms_get_them(self):
+        """🔴 换在 `PublishFormMixin` 上，一处改三处生效。
+
+        各自改一份的话，漏掉的那一张会安安静静地继续收自由文本 ——
+        而它存下来的地址在地图上打不开，不报任何错。
+        ⚠️ 一门每周的课十二个晚上在地图上全部打不开、而手工建的单场活动好好的,
+           这个分支已经踩过一次（`ForwardAddressTests`）。
+        """
+        for cls in (EventForm, ProgramForm, EventSeriesForm):
+            with self.subTest(form=cls.__name__):
+                built = cls(user=self.zhang, initial={"publish_as": "program"})
+                self.assertIsInstance(
+                    built.fields["address_state"], forms.ChoiceField)
+                self.assertFalse(built.fields["address_state"].required)
+                self.assertFalse(built.fields["address_postal_code"].required)
+
+    def test_the_four_boxes_are_named_the_same_way(self):
+        """⚠️ 四格并排，不能是两种命名法（2026-09-16 看着截图改的）。
+
+        模型自动生成的是「Address street」「Address city」，而州和邮编那两格
+        现在写着「State」「ZIP code」。上面 `location` 那句说明已经说清了这几格
+        是街道地址，标签里再带一遍 "Address" 是噪音。
+        🔴 改的是**表单**的标签，不是模型的 `verbose_name` —— 那两列
+           `contact.Contact` 上也有，一字不差是有意的。
+        """
+        built = EventForm(user=self.zhang)
+        self.assertEqual(
+            [built.fields[name].label for name in
+             ("address_street", "address_city", "address_state",
+              "address_postal_code")],
+            ["Street", "City", "State", "ZIP code"])
+
+    # --- 名单只有一份 ------------------------------------------------------
+
+    def test_the_state_list_has_one_source(self):
+        """⚠️ 抄一份的代价：localflavor 哪天加一个属地，抄件不会跟着变，
+           而没有人在看抄件。这一条钉住活动那一侧的下拉和 `contact` 那段 JS
+           读的是同一份。
+        """
+        from contact.forms import us_state_choices_json
+        from core.address import US_STATE_CHOICES
+
+        in_js = {code for code, _ in json.loads(us_state_choices_json())}
+        in_dropdown = {code for code, _ in US_STATE_CHOICES if code}
+        self.assertEqual(in_js, in_dropdown)

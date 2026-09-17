@@ -1114,6 +1114,22 @@ class RecurrencePickerMixin(metaclass=DeclarativeFieldsMetaclass):
     #: 那一格底下那句话。⚠️ 子类必须给，因为名词不一样（场次／讲）。
     START_TIME_HELP = ""
 
+    #: 选择器那十三格 —— **这里是它们唯一的名单**（2026-09-17 收的）。
+    #:
+    #: 🔴 用它的两张表单此前各抄了一份，只差 `ProgramForm` 多一个
+    #:    `people_pick_meetings`。而这个 mixin 存在的全部理由就是「这套问法
+    #:    只有一份」—— 名单抄两份等于把它最容易漏的那一半留在外面：
+    #:    加第十格时要改两个元组，漏掉一个的表现正是下面那段说的
+    #:    「多列一个名字那一格消失，少列一个它被画两遍」，而只在一页上发生。
+    WHEN_FIELDS = (
+        "repeat_mode", "repeat_every", "repeat_weekdays",
+        "repeat_ordinals", "repeat_weekday",
+        "ends_kind", "ends_after", "ends_on",
+        "use_advanced", "rule",
+        "starts_on", "start_time", "duration",
+    )
+
+
     # --- the picker (2026-09-11) -------------------------------------------
     #
     # 🔴 **None of these is a column.** They are nine controls over the one
@@ -1386,14 +1402,9 @@ class ProgramForm(RecurrencePickerMixin, EventForm):
     #: 这一块由发布页自己画（`_publish_when.html` 的第三支）。
     #: ⚠️ 和模板必须逐字对上：多列一个名字那一格**消失**，少列一个它被画
     #:    **两遍**（后一个空输入覆盖前一个）。`NoFieldIsDrawnTwiceTests` 盯着。
-    WHEN_FIELDS = (
-        "repeat_mode", "repeat_every", "repeat_weekdays",
-        "repeat_ordinals", "repeat_weekday",
-        "ends_kind", "ends_after", "ends_on",
-        "use_advanced", "rule",
-        "starts_on", "start_time", "duration",
-        "people_pick_meetings",
-    )
+    #: ⚠️ 只多一个 `people_pick_meetings` —— 「人自己挑来哪几讲」只有课答得上，
+    #:    而选择器那十三格是**组合**来的，不重抄一份。
+    WHEN_FIELDS = RecurrencePickerMixin.WHEN_FIELDS + ("people_pick_meetings",)
 
     #: ⚠️ `rule` 在这里**是表单自己的一格**，不是列。`RecurrencePickerMixin`
     #:    故意不声明它（那会把 `EventSeriesForm` 从 `Meta` 来的那一格悄悄换掉），
@@ -1506,13 +1517,6 @@ class EventSeriesForm(RecurrencePickerMixin, PublishFormMixin, forms.ModelForm):
     #:    on `EventForm`, a time of day here. Harmless because the two forms are
     #:    never both built for one request — written down because it reads like
     #:    a trap.
-    WHEN_FIELDS = (
-        "repeat_mode", "repeat_every", "repeat_weekdays",
-        "repeat_ordinals", "repeat_weekday",
-        "ends_kind", "ends_after", "ends_on",
-        "use_advanced", "rule",
-        "starts_on", "start_time", "duration",
-    )
 
     #: ⭐ True, unlike `EventForm`'s. The picker below is a **block** — which
     #:    boxes to ask depends on the mode — so it has to be hand-drawn on the

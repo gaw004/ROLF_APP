@@ -15,6 +15,8 @@ from django.core.exceptions import PermissionDenied, ValidationError
 from django.http import Http404
 from django.shortcuts import get_object_or_404, redirect, render
 
+from core.http import posted_pk
+
 from .forms import AssignmentForm, GrantForm, PositionForm
 from .models import Ministry, Position
 from .permissions import (
@@ -83,7 +85,7 @@ def ministry_admin_page(request, pk):
     form = GrantForm(request.POST or None)
     if request.method == "POST":
         if request.POST.get("revoke"):
-            grant = find_grant(ministry, request.POST["revoke"])
+            grant = find_grant(ministry, posted_pk(request, "revoke"))
             if grant is None:
                 raise Http404
             # Revoking dates the row; it never deletes it.
@@ -144,7 +146,11 @@ def _scoped_positions(request):
 
     positions = Position.objects.all() if foundation else Position.objects.filter(
         ministry_id__in=administered)
-    return positions, administered, foundation
+    # ⚠️ **两个值，不是三个。** 这里原来还交回 `administered`，而三个调用方
+    #    都把它解成 `_administered` 然后一次都没读 —— 那个形状是从
+    #    `events.views._scoped_events()` 抄来的，那边它确实有读者
+    #    （`_offered_ministries()`），这边没有。
+    return positions, foundation
 
 
 #: 基金会级岗位（`Position.ministry` 可空）在地址里的写法。
@@ -163,15 +169,20 @@ def staff_roster(request):
        两个 ministry 时读起来还行，而这个基金会的 ministry 只会变多，
        那一页会长成一堵墙。用户要的是先选一个，点进去只看那一个。
 
-    ⚠️ 门问的是 `can_reach_staff_roster()`，不是「他有没有建过岗位」——
+    ⚠️ 门在 `_scoped_positions()` 里（和另外两页同一处），而它问的是
+       「他管不管得了任何一个 ministry」，不是「他有没有建过岗位」——
        「你还没建过」和「这一页不归你」不能长一个样（D27）。
+       ⚠️ 2026-09-17 之前这里还先问了一遍 `can_reach_staff_roster()`，
+          而那是同一个条件、同一个异常、同一句话。
 
     ⚠️ 视图里没有任何算术：四个数在 `services.roster_index()`，两次聚合查询。
        `ViewsAreThinGuardTests` 盯着这件事。
     """
-    if not can_reach_staff_roster(request.user):
-        raise PermissionDenied(SCOPED_DENIAL)
-    positions, _administered, foundation = _scoped_positions(request)
+    # ⚠️ 门在 `_scoped_positions()` 里，和另外两页同一处 —— 这里原来还先问了一遍
+    #    `can_reach_staff_roster()`，而那是**同一个条件、同一个异常、同一句话**
+    #    （`not administered and not foundation` 就是它的否定），白花一次
+    #    `MinistryRole` 查询和一次 group 查询。
+    positions, foundation = _scoped_positions(request)
 
     return render(request, "org/staff_roster.html", {
         "cards": roster_index(positions),
@@ -192,7 +203,7 @@ def ministry_roster_page(request, pk=None):
     ⚠️ 404 而不是 403：一个不归他管的 ministry 的名册对他**不存在**，
        同活动详情页那道门的口径。
     """
-    positions, _administered, foundation = _scoped_positions(request)
+    positions, foundation = _scoped_positions(request)
     mine = positions.filter(ministry_id=pk)
     if not mine.exists():
         raise Http404("No roster matches the given query.")
@@ -261,7 +272,7 @@ def position_detail(request, pk):
        一个按名字分辨的动作）。每一个分支**各自**再问一次权限：隐藏按钮是界面，
        拒绝 POST 才是权限（`can_view_event_records()` 那段注释的原话）。
     """
-    positions, _administered, foundation = _scoped_positions(request)
+    positions, foundation = _scoped_positions(request)
     position = get_object_or_404(
         positions.select_related("ministry", "reports_to"), pk=pk)
     may_manage = can_manage_staff_roster(request.user, position.ministry)
@@ -276,7 +287,8 @@ def position_detail(request, pk):
         if request.POST.get("end"):
             # ⚠️ 从**这个岗位自己的**任职里取，而不是按 pk 全库找 —— 一个来自
             #    表单的 pk 不许够得着别的岗位的行，同 `find_grant()` 的作用域。
-            tenure = get_object_or_404(position.assignments, pk=request.POST["end"])
+            tenure = get_object_or_404(
+                position.assignments, pk=posted_pk(request, "end"))
             end_assignment(tenure)
             messages.success(request, "Ended. The row was dated, not deleted.")
             return redirect("org:position_detail", pk=position.pk)

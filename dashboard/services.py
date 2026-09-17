@@ -106,6 +106,23 @@ def _posts(contact):
 NEEDS_YOU_GROUPS = ("to_verify", "handed_to_me", "short", "unfinished", "open")
 
 
+def _room_left(rows):
+    """这一块还放得下几行 —— **一条规矩，一处实现**（2026-09-17）。
+
+    🔴 各组**加起来**不超过 `BAND_ITEMS`，不是各自不超过（D42 第二条门槛：
+       「内容**天然**不超过四行；常常要截断的，那是一个页面不是一张卡」）。
+
+    ⚠️ 这条预算此前是三句越写越长的减法 —— `BAND_ITEMS - used`、
+       `- len(to_verify) - len(handed_to_me)`、再 `- len(short)`。
+       三种写法一条规矩，而加第五组时要改三处**并且记住顺序**。
+       现在它问的是「已经放了多少」，于是顺序由代码本身决定。
+
+    ⚠️ 名额的**优先级**仍然由调用顺序表达（先「还缺人」后「没收尾」），
+       那是一个真实的判断 —— 一张卡只放得下四行时，先说还救得回来的那几件。
+    """
+    return max(0, BAND_ITEMS - sum(len(group) for group in rows.values()))
+
+
 def _counted(rows):
     """每一组各若干行，加一个总数 —— 通栏那一块的标题要印「2 items」。
 
@@ -202,19 +219,18 @@ def _needs_you(ministry_ids, now, open_to_me, foundation=False, handed=()):
         #    「short 有几条」和「一共有几条」两句话，而它们只在管理员身上相等。
         # ⚠️ 行是 `_open_to_me()` 已经取回来的，这里只挑 —— 挑的条件就是
         #    `needs_people`（报名页那个 short 徽章读的同一个 annotation）。
-        used = len(to_verify) + len(handed_to_me)
-        return _counted({
-            "to_verify": to_verify, "handed_to_me": handed_to_me,
-            "open": [event for event in open_to_me if event.needs_people
-                     ][:max(0, BAND_ITEMS - used)]})
-    short = list(
+        rows = {"to_verify": to_verify, "handed_to_me": handed_to_me}
+        rows["open"] = [event for event in open_to_me
+                        if event.needs_people][:_room_left(rows)]
+        return _counted(rows)
+    rows = {"to_verify": to_verify, "handed_to_me": handed_to_me}
+    rows["short"] = list(
         EventRole.objects.understaffed()
         .filter(event__ministry_id__in=ministry_ids,
                 event__status=Event.Status.OPEN,
                 event__end_time__gt=now)
         .select_related("event", "role")
-        .order_by("event__start_time")[
-            :max(0, BAND_ITEMS - len(to_verify) - len(handed_to_me))]
+        .order_by("event__start_time")[:_room_left(rows)]
     )
     # 🔴 **两组加起来** 不超过 ROWS_PER_CARD，不是各自不超过。
     #
@@ -226,17 +242,15 @@ def _needs_you(ministry_ids, now, open_to_me, foundation=False, handed=()):
     # ⚠️ 名额优先给「还缺人」那一组：它讲的是**还来得及**做点什么的事，
     #    而「结束了没收尾」是已经发生的。一张卡只放得下四行时，
     #    先说还救得回来的那几件。
-    unfinished = list(
+    rows["unfinished"] = list(
         Event.objects.filter(ministry_id__in=ministry_ids, end_time__lte=now)
         .exclude(status__in=[Event.Status.COMPLETED, Event.Status.CANCELLED,
                              Event.Status.DRAFT])
-        .order_by("-end_time")[
-            :max(0, BAND_ITEMS - len(to_verify) - len(handed_to_me) - len(short))]
+        .order_by("-end_time")[:_room_left(rows)]
     )
     # ⚠️ 没给的组由 `_counted()` 补成空列表 —— 一块地方几种形态，而模板问的始终是
     #    「这几个列表里有什么」，不是「我是哪一种人」。
-    return _counted({"to_verify": to_verify, "handed_to_me": handed_to_me,
-                     "short": short, "unfinished": unfinished})
+    return _counted(rows)
 
 
 def _this_month(mine, today):

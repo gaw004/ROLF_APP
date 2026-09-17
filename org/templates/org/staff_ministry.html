@@ -70,9 +70,7 @@
 
   {% if section %}
     <p class="mt-6 text-xs text-ink-600 dark:text-ink-300">
-      {{ section.posts }} post{{ section.posts|pluralize }} ·
-      {{ section.holders }} in post{% if section.serving != section.holders %}
-        ({{ section.serving }} available today){% endif %}
+      {% include "org/_headcounts.html" with counts=section %}
     </p>
 
     {% comment %}

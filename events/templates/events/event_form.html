@@ -1,5 +1,5 @@
 {% extends "core/base.html" %}
-{% block title %}{% if event %}Edit Event{% elif building_a_program %}Publish a Program{% else %}Publish an Event{% endif %}{% endblock %}
+{% block title %}{% if event %}Edit Event{% else %}{% include "events/_publish_title.html" %}{% endif %}{% endblock %}
 {% block main_width %}max-w-2xl{% endblock %}
 
 {% block content %}

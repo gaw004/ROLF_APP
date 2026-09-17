@@ -2879,6 +2879,25 @@ def add_session(event, *, start_time, end_time, source=Source.MANUAL):
     return session
 
 
+def ends_at(moment, duration):
+    """一件开始于 `moment`、持续 `duration` 的事，什么时候结束。
+
+    🔴 **按绝对时间相加，不在墙钟上加 —— 两者在一年里有两个早上不一样。**
+       `moment + duration` 在一个带 zoneinfo 的 datetime 上保留 tzinfo 而
+       **不重新归一化**：于是一场两小时、开始于「春天调表那天 01:30」的活动，
+       算出来的结束时刻是 03:30 —— 晚了整整一个真实小时，而 `Event.duration`
+       会为一条写着 2:00 的规则报出 1:00。
+       ⚠️ `duration` 说的是这件事**持续多久**；墙钟只决定它什么时候**开始**
+          （见 `recurrence.py` 顶上那段）。
+
+    ⚠️ 2026-09-17 抽出来，此前这一行连同它的理由段落在三处各写一遍
+       （`generate_occasions()` 一处、`publish_program()` 两处）。一条只在一年里
+       两个早上才会咬人的规则，是最不该有三份的那种 —— 三份里有一份改漏了，
+       一门课的讲次和一条规则的场次会算出不同的长度，而没有任何东西会报错。
+    """
+    return moment.astimezone(datetime.timezone.utc) + duration
+
+
 @transaction.atomic
 def publish_program(event, *, moments, duration):
     """一门课和它的全部讲次，一次落库。返回建好的那些 `Session`。D49。
@@ -2897,11 +2916,8 @@ def publish_program(event, *, moments, duration):
        `Session.clean()` 拒掉末尾几讲 —— 一个「我填了 12 次、只排出来 9 次」
        的页面，而它不报错。
 
-    ⚠️ 每一讲的结束时刻按 **UTC 相加**，不在墙钟上加。逐字同
-       `generate_occasions()` 那一段：`moment + duration` 在一个带时区的
-       datetime 上保留 tzinfo 且不重新归一化，于是夏令时那天一场两小时的活动
-       会算成一小时 —— 而 `duration` 说的是「持续多久」，墙钟只决定它什么时候
-       开始。
+    ⚠️ 每一讲的结束时刻走 `ends_at()` —— 按绝对时间相加，不在墙钟上加。
+       理由整段在那个函数上（夏令时那两个早上）。
 
     ⚠️ **一个事务。** 半生成的课是一个有起止日期、只排了三讲的壳，
        而它在每一页上都看起来正常。
@@ -2918,15 +2934,14 @@ def publish_program(event, *, moments, duration):
     """
     event.start_time = moments[0]
     # ⚠️ `astimezone(utc)` 之后再加，见上面那段。
-    event.end_time = (
-        moments[-1].astimezone(datetime.timezone.utc) + duration)
+    event.end_time = ends_at(moments[-1], duration)
     event.full_clean()
     event.save()
     return [
         add_session(
             event,
             start_time=moment,
-            end_time=moment.astimezone(datetime.timezone.utc) + duration,
+            end_time=ends_at(moment, duration),
             # ⚠️ `GENERATED`，不是 `MANUAL`：这些讲次是一条规则铺出来的，
             #    而「谁排的」是 Meetings 页要显示的东西 —— 手工补的那一讲
             #    在那一页上该看得出是手工补的。
@@ -3589,7 +3604,19 @@ FEED_LOOKBACK = datetime.timedelta(days=90)
 #: ⚠️ `WITHDREW` 也在内，而它确实会把已经去过的那几讲也一并拿掉。这是有意的：
 #:    日历说的是「接下来要去哪儿」，而「他上过六周」是记录，记录在 My Signups
 #:    和报表里，不在日历里。
-NOT_IN_A_CALENDAR = (Participation.Status.CANCELLED, Participation.Status.WITHDREW)
+#: 一条**被叫停**的报名：它既不进日历，也不占时间。
+#:
+#: 🔴 **一个名字，三个读者**（2026-09-17 收的）。订阅源早就读它；而 D39 那两个
+#:    函数（`_busy_rows()` / `conflicts_among()`）2026-09-15 各把这两个值手写了
+#:    一遍 —— 正是 `_ON_THE_REGISTER` 上那句注释预言的事：
+#:    「a literal in each is how two rules about the same set come to disagree」。
+#: ⚠️ `Participation.Status` 有五个值。加第六个时，忘掉其中一处的表现是
+#:    **撞车提示和日历对「哪些报名还算数」各说各的** —— 两边都渲染正常。
+CALLED_OFF = (Participation.Status.CANCELLED, Participation.Status.WITHDREW)
+
+#: ⚠️ 旧名字留一行别名：它说的是「不进日历」，也就是三个读者里的**一个**用途，
+#:    而那个名字在 `my_calendar_occasions()` 那一段注释里被引着。
+NOT_IN_A_CALENDAR = CALLED_OFF
 
 
 def my_calendar_occasions(contact, *, host, url_for, now=None):
@@ -4390,7 +4417,7 @@ def generate_occasions(series, *, generated_by=None):
             #    later, and `Event.duration` then reported 1:00 for a rule that
             #    says 2:00. `duration` is how long the thing **lasts**; the wall
             #    clock is only how its start is decided (see recurrence.py).
-            end_time=moment.astimezone(datetime.timezone.utc) + series.duration,
+            end_time=ends_at(moment, series.duration),
             location=series.location,
             # 🔴 地址跟着 `location` 一起复制（2026-09-15）。漏掉不报错 ——
             #    表现是一门每周的课，十二个晚上在地图上全部打不开，而手工建的
@@ -5104,46 +5131,30 @@ def _busy_windows(participation):
     return _spots(participation.event_role.event, only=picked or None)
 
 
-def _event_windows(event):
-    """一场活动占住的那些时段 —— 单场是它自己，一门课是它的每一讲。
+def _spots(event, only=None):
+    """这场活动占住的那些时段；`only` 给一组 session id 时只留那几讲。
 
-    ⚠️ 走 `schedule.occurrences()`，**不在这里写第二份展开逻辑**：那个函数算的正好
-       是这件事（连「第几讲」那个序号都有），而它是日程面板每天在用的那一份。
+    ⚠️ 走 `schedule.occurrences()`，**不在这里写第二份展开逻辑**：那个函数算的
+       正好是这件事（连「第几讲」那个序号都有），而它是日程面板每天在用的那一份。
        第二份的分歧会是「日程上画着两块、而冲突检测只看见一块」。
 
     🔴 **这正是 D39 没有覆盖到的那个洞。** 一门课是**一个** `Event`，
        `start_time` 三月、`end_time` 六月 —— 按 `Event` 的时间窗去比，四月里
        **每一场**活动都会报「和 ESL 课冲突」。技术上没错，对人是胡说，
        而且它会通过所有只用单场活动写的测试。
-    """
-    return _spots(event)
 
-
-def _spots(event, only=None):
-    """这场活动占住的那些时段；`only` 给一组 session id 时只留那几讲。
-
-    ⚠️ 走 `schedule.occurrences()`，**不在这里写第二份展开逻辑**（同上）。
-
-    🔴 **没有讲次的课占不住任何「已知」的时间**（2026-09-16 修）。
-       `occurrences()` 对一个没有 `Session` 的活动退回它的两端当一个时段 ——
-       那个退路是**给单场活动的**，而套在一门课上就是整整一个学期一个时间窗：
-       四月里每一场活动都报「和 ESL 课冲突」，也就是上面那段 🔴 说它防住的
-       那个洞，从另一个方向回来了。
-       ⚠️ 可达的：D49 之前发布的课（一讲都没排），以及在 Meetings 页上把讲次
-          删光。⚠️ 学期的两端是这门课**招生时说的**日期，不是它开会的时刻 ——
-          不知道它什么时候上课，就不该拿它去和别的东西比。
-
-    ⚠️ **判据写在这里，不写进 `occurrences()`**：那个退路对单场活动是对的，
-       而那一份日程面板每天在用。
+    ⚠️ 「一门没排讲次的课占不住任何已知的时间」**不在这里判**（2026-09-17 挪走）
+       —— 它在 `occurrences()` 里。一度写在这个函数上，而那只挡住了冲突检测
+       这一条路：排课表和日程照旧拿到整个学期。判断在那边，三处一起对。
 
     ⚠️ 查询数不许涨：`only` 收的是 id（调用方用 `row.session_id`，不碰
        `row.session`），而 `event.sessions` 已经被上游两个 prefetch 覆盖。
     """
     spots = occurrences([event])
-    if event.shape == Event.Shape.PROGRAM:
-        spots = [spot for spot in spots if spot.session is not None]
-        if only is not None:
-            spots = [spot for spot in spots if spot.session.pk in only]
+    if only is not None:
+        # ⚠️ 序号来自整门课（`occurrences()` 在收窄之前就定好了），筛掉几项
+        #    不会重编它 —— 不然只报了第 3 讲的人会看到「第 1 讲」。
+        spots = [spot for spot in spots if spot.session.pk in only]
     return [
         ClashTime(start=spot.start_time, end=spot.end_time, ordinal=spot.ordinal)
         for spot in spots
@@ -5199,13 +5210,12 @@ def _busy_rows(contact, *, now=None, exclude_event=None):
     rows = (
         Participation.objects.mine(contact)
         .upcoming(now)
-        .exclude(status__in=[Participation.Status.CANCELLED,
-                             Participation.Status.WITHDREW])
+        .exclude(status__in=CALLED_OFF)
         .exclude(event_role__event__status=Event.Status.CANCELLED)
         .select_related("event_role__event")
         # ⚠️ 两个 prefetch 都要：没有 sessions 就是每门课一次查询，
         #    没有 attendances 就是每条报名一次 —— 而两种都只是**慢**，不报错。
-        .prefetch_related("event_role__event__sessions", "attendances__session")
+        .prefetch_related("event_role__event__sessions", "attendances")
     )
     if exclude_event is not None:
         rows = rows.exclude(event_role__event=exclude_event)
@@ -5229,7 +5239,7 @@ def conflicts_for(contact, event, *, now=None):
     if contact is None:
         return []
     return _clashes(
-        _event_windows(event),
+        _spots(event),
         _busy_rows(contact, now=now, exclude_event=event))
 
 
@@ -5248,8 +5258,7 @@ def conflicts_among(rows):
     """
     live = [
         row for row in rows
-        if row.status not in (Participation.Status.CANCELLED,
-                              Participation.Status.WITHDREW)
+        if row.status not in CALLED_OFF
         and row.event_role.event.status != Event.Status.CANCELLED
     ]
     by_event = {}

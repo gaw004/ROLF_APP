@@ -47,9 +47,7 @@
              写成一条「N 人」会同时说错两件事。
           {% endcomment %}
           <p class="mt-1 text-sm text-ink-600 dark:text-ink-300">
-            {{ card.posts }} post{{ card.posts|pluralize }} ·
-            {{ card.holders }} in post{% if card.serving != card.holders %}
-              ({{ card.serving }} available today){% endif %}
+            {% include "org/_headcounts.html" with counts=card %}
           </p>
 
           {% comment %}

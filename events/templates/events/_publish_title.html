@@ -1,0 +1,9 @@
+{% comment %}
+发布页的标题**文字**，只有这里一份（2026-09-17）。
+
+🔴 `_publish_heading.html` 顶上写着「改这一页的标题**只有一个字符串**」——
+   而那句话当时是假的：`event_form.html` 的 `{% templatetag openblock %} block title {% templatetag closeblock %}`（浏览器标签页上
+   那一句）把同样两个词又拼了一遍。抽成这一份之后那句话才成立。
+⚠️ 只有文字，没有标签：一处要包进 `<h1>`（还要带 `hx-swap-oob`），
+   另一处要落在 `<title>` 里。
+{% endcomment %}{% if building_a_program %}Publish a Program{% else %}Publish an Event{% endif %}

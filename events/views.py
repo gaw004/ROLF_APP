@@ -41,6 +41,7 @@ from django_ratelimit.decorators import ratelimit
 
 
 from core.context_processors import manage_list_name
+from core.http import posted_pk
 from core.pagination import page_holding, page_of
 from core.timeutils import local_date_of
 from org.models import Ministry
@@ -1396,7 +1397,7 @@ def _signups(request, *, past):
         #    `test_more_courses_do_not_cost_more_queries` 当场抓到了它
         #    （四门课比一门多 6 次）；上一个漏掉的 prefetch 是同一页上的
         #    `sessions`，2026-09-14，表现一模一样。
-        "attendances__session",
+        "attendances",
     )
 
     courses, occasions = [], []
@@ -1838,7 +1839,7 @@ def _scoped_events(request):
     )
 
 
-def _offered_ministries(administered, showing_all=False, granted=()):
+def _offered_ministries(administered, *, showing_all, granted):
     """What the filter's dropdown may offer this account.
 
     ⚠️ Interface, not a permission — the queryset is already narrowed. What this
@@ -2141,6 +2142,31 @@ def _typed_so_far(post):
             for key, values in post.lists() if key in carried}
 
 
+def _publish_form_for(chosen):
+    """三档单选选中哪一个 → 建哪一张表单。**一处三岔，两个调用方。**
+
+    ⭐ 决定 32 的那三个答案：两个是 `Event.Shape` 的值，第三个建的是
+       `EventSeries`（它是一个**生成器**，不是一种活动能处在的状态）。
+
+    🔴 **在这之前这段三岔写了两遍**（`event_create` 和 `publish_when`），
+       而当时那句注释自己写着两处分家的后果：「换到『课』那一档，块里换成了
+       选择器、按下发布走的却是另一张表单 —— 于是那几格的值全部落地无声」。
+       ⚠️ 一段**预言了 bug 的注释，不是保留造成它的那个形状的理由**。
+          2026-09-17 收成一处，那个分家从此不可能。
+
+    ⚠️ 「课」那一档 2026-09-16（D49）之前走的是 `EventForm` —— 两个 datetime
+       框问学期的两端，而没有任何地方能排出它的讲次。现在它和「每周」那一档
+       共用同一个重复选择器，两端反过来由排出来的第一讲和最后一讲推。
+
+    返回 `(form_class, building_a_series, building_a_program)` —— 后两个是模板
+    要的，而它们和选出来的那张表单**必须同源**，这正是收成一处要买的东西。
+    """
+    series = chosen == PUBLISH_AS_SERIES
+    program = chosen == Event.Shape.PROGRAM
+    return ((EventSeriesForm if series else ProgramForm if program else EventForm),
+            series, program)
+
+
 @login_required
 def event_create(request):
     """P2: publish an event, for a ministry this person actually runs."""
@@ -2158,16 +2184,7 @@ def event_create(request):
     #    reloading the page.
     chosen = (request.POST.get("publish_as") if request.method == "POST"
               else request.GET.get("publish_as"))
-    building_a_series = chosen == PUBLISH_AS_SERIES
-    # 🔴 **第三张表单，2026-09-16（D49）。** 在此之前「课」那一档走的是
-    #    `EventForm` —— 两个 datetime 框，问的是学期的两端，而**没有任何地方
-    #    能排出它的讲次**：发出来的是一个有起止日期、一讲都没有的壳。
-    #    现在它和「每周」那一档共用同一个重复选择器，学期的两端反过来由排出来
-    #    的第一讲和最后一讲推（`services.publish_program()`）。
-    building_a_program = chosen == Event.Shape.PROGRAM
-    form_class = (EventSeriesForm if building_a_series
-                  else ProgramForm if building_a_program
-                  else EventForm)
+    form_class, building_a_series, building_a_program = _publish_form_for(chosen)
 
     # D24. The radio swaps the "when" block over HTMX; this is the same move
     # without JavaScript — a plain submit that comes back as the other form.
@@ -2656,14 +2673,7 @@ def publish_when(request):
     if not can_reach_publish_page(request.user):
         raise PermissionDenied(SCOPED_DENIAL)
     chosen = request.POST.get("publish_as")
-    building_a_series = chosen == PUBLISH_AS_SERIES
-    building_a_program = chosen == Event.Shape.PROGRAM
-    # ⚠️ 三岔，和 `event_create` 那一处**必须一致**。写两遍是有代价的，而这两处
-    #    分家的表现是：换到「课」那一档，块里换成了选择器、按下发布走的却是
-    #    另一张表单 —— 于是那几格的值全部落地无声。
-    form_class = (EventSeriesForm if building_a_series
-                  else ProgramForm if building_a_program
-                  else EventForm)
+    form_class, building_a_series, building_a_program = _publish_form_for(chosen)
     return render(request, "events/_publish_when.html", {
         "form": form_class(user=request.user, initial={"publish_as": chosen}),
         "building_a_series": building_a_series,
@@ -3053,12 +3063,8 @@ def event_meetings(request, pk):
         if "remove" in request.POST:
             # ⚠️ 用 `event.sessions`，不是 `Session.objects` —— 收窄到这一门课
             #    上，于是一个别的课的 pk 是 404 而不是一次越权删除。
-            # ⚠️ 同上：`get_object_or_404` 接得住「查不到」，接不住
-            #    「这个值根本不是一个 pk」—— 后者是 500。
-            asked = request.POST["remove"]
-            if not asked.isdigit():
-                raise Http404
-            meeting = get_object_or_404(event.sessions, pk=asked)
+            meeting = get_object_or_404(
+                event.sessions, pk=posted_pk(request, "remove"))
             try:
                 remove_session(meeting)
             except ValidationError as refusal:
@@ -3123,7 +3129,7 @@ def event_registrations(request, pk):
             raise PermissionDenied(SCOPED_DENIAL)
         participation = get_object_or_404(
             Participation.objects.filter(event_role__event=event),
-            pk=request.POST.get("participation"),
+            pk=posted_pk(request, "participation"),
         )
         # ⚠️ Judged here, not trusted from the form: the question applies to a
         #    set of people and a POST can name anybody. Asked through the same
@@ -3170,9 +3176,7 @@ def event_registrations(request, pk):
     )
     return render(request, "events/event_registrations.html", {
         **_event_page_context(request.user, event, can_manage=can_manage),
-        # Drives the shared event nav: Edit and Notify are drawn only for
-        # somebody who can actually open them.
-        "can_manage": can_manage, "roles": roles,
+        "roles": roles,
         # ⚠️ One query for the whole page, not one per row. The identity
         #    question applies to the ministry's own people and to nobody else,
         #    and an outside volunteer's row must not offer a control that would
@@ -3212,7 +3216,7 @@ def event_attendance(request, pk):
             raise PermissionDenied(SCOPED_DENIAL)
         participation = get_object_or_404(
             Participation.objects.filter(event_role__event=event),
-            pk=request.POST.get("participation"),
+            pk=posted_pk(request, "participation"),
         )
         action = request.POST.get("action")
         if action == "check_in":
@@ -3294,7 +3298,6 @@ def event_attendance(request, pk):
         **_event_page_context(request.user, event, can_manage=can_manage),
         "participations": rows,
         "hours_form": HoursForm(),
-        "can_manage": can_manage,
         # What the box starts at for somebody with no hours yet. Computed in
         # services, never here — this is date arithmetic, and there is a grep
         # guard on views doing any (D18).
@@ -3433,11 +3436,7 @@ def event_admins(request, pk):
     form = EventGrantForm(request.POST or None)
     if request.method == "POST":
         if request.POST.get("revoke"):
-            # ⚠️ `isdigit()` 不是多余的校验，它挡的是一个 **500**：一个非数字的
-            #    值在字段层就抛 `ValueError`（Django 的「expected a number」），
-            #    根本走不到那句 404。同 `_open_panel()` 里那一句，同一条理由。
-            asked = request.POST["revoke"]
-            grant = find_event_grant(event, asked) if asked.isdigit() else None
+            grant = find_event_grant(event, posted_pk(request, "revoke"))
             if grant is None:
                 raise Http404
             revoke_event_grant(grant)

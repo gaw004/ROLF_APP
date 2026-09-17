@@ -23,5 +23,5 @@
 {% endcomment %}
 <h1 id="publish-heading" {% if oob %}hx-swap-oob="true"{% endif %}
     class="text-2xl font-semibold">
-  {% if building_a_program %}Publish a Program{% else %}Publish an Event{% endif %}
+  {% include "events/_publish_title.html" %}
 </h1>

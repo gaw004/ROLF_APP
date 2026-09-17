@@ -88,7 +88,8 @@ from .management.commands import seed_demo
 from .management.commands.seed_demo import demo_login
 
 from . import schedule, tokens, views
-from .schedule import PREVIEW_MONTHS, month_grids, month_page
+from .schedule import (PREVIEW_MONTHS, columns, month_grids, month_page,
+                       occurrences)
 from .forms import (
     FILTER_PARAMS,
     SHAPE_KINDS,
@@ -148,6 +149,7 @@ from .services import (
     CredentialExpired,
     apply_scan,
     conflicts_among,
+    _spots,
     conflicts_for,
     grant_event_admin,
     revoke_event_grant,
@@ -23799,6 +23801,81 @@ class AddressFormatTests(PageTestCase):
         in_js = {code for code, _ in json.loads(us_state_choices_json())}
         in_dropdown = {code for code, _ in US_STATE_CHOICES if code}
         self.assertEqual(in_js, in_dropdown)
+
+
+class ACourseWithNoMeetingsHoldsNoTimeTests(TestCase):
+    """🔴 一门还没排讲次的课**占不住任何「已知」的时间**（2026-09-17）。
+
+    ⭐ **钉在机制上（`schedule.occurrences()`），不钉在某一页上。**
+       这条判断 2026-09-16 一度写在 `services._spots()` 里，而那只挡住了冲突
+       检测**一条**路 —— 另外两个消费者照旧拿到那整个学期：
+
+         · 排课表画出一行编号 `None`、横跨整学期、而且**删不掉**的幽灵讲次
+           （Remove 提交的是空串，被那道 `isdigit()` 挡成 404），
+           顺带让那一页的空状态永远画不出来；
+         · 日程画出一条整学期的横条 —— D23 那段注释说「彻底没有了入口」的
+           那个 bug。
+
+       所以下面四条一条测机制、三条测它的三个消费者：一页一页地钉，
+       下一个消费者照样会中招。
+
+    ⚠️ 单场活动那一支**必须仍然拿到它自己的两端** —— 那个退路本来就是给它的，
+       而它是日程面板每天在用的东西。
+    """
+
+    def setUp(self):
+        self.pantry = Ministry.objects.create(code="food_pantry", name="Food Pantry")
+        self.owner = make_person("Owner", birth_date=datetime.date(1980, 1, 1))
+        self.term_start = day_start(local_today() + 7 * DAY) + 19 * HOUR
+        self.course = make_run(
+            ministry=self.pantry, owner=self.owner, name="Not scheduled yet",
+            start_time=self.term_start,
+            end_time=day_start(local_today() + 70 * DAY) + 21 * HOUR)
+
+    # --- 机制 --------------------------------------------------------------
+
+    def test_a_course_with_no_meetings_occupies_nothing(self):
+        self.assertEqual(occurrences([self.course]), [])
+
+    def test_a_one_off_occasion_still_falls_back_to_its_own_two_ends(self):
+        """⚠️ 少了这一条，「课占不住时间」很容易被写成「什么都占不住」，
+           而日程面板上每一场单场活动都会消失。
+        """
+        one_off = make_event(ministry=self.pantry, owner=self.owner, name="One night")
+        spots = occurrences([one_off])
+        self.assertEqual(
+            [(s.start_time, s.end_time, s.ordinal) for s in spots],
+            [(one_off.start_time, one_off.end_time, None)])
+
+    def test_a_course_that_has_meetings_is_unaffected(self):
+        add_session(self.course, start_time=self.term_start,
+                    end_time=self.term_start + 2 * HOUR)
+        self.assertEqual([s.ordinal for s in occurrences([self.course])], [1])
+
+    # --- 三个消费者 --------------------------------------------------------
+
+    def test_the_conflict_check_sees_no_busy_time(self):
+        self.assertEqual(_spots(self.course), [])
+
+    def test_the_schedule_draws_nothing_for_it(self):
+        """⚠️ 走 `columns()`，也就是日程面板真正调的那一条路。"""
+        day = local_date_of(self.term_start)
+        drawn = columns([self.course], days=[day])
+        self.assertEqual([card for column in drawn for card in column.cards], [])
+
+    def test_the_meetings_page_shows_its_empty_state_not_a_phantom_row(self):
+        """🔴 那一页的空状态写着「这不是错误状态，是一句邀请」——
+           而在这之前它**永远画不出来**：那一行幽灵占着位置。
+        """
+        admin = make_person("Admin", birth_date=datetime.date(1980, 1, 1))
+        user = get_user_model().objects.create_user(
+            email="admin@example.com", password="x", contact=admin)
+        MinistryRole.objects.create(contact=admin, ministry=self.pantry)
+        self.client.force_login(user)
+        page = self.client.get(
+            reverse("events:event_meetings", args=[self.course.pk]))
+        self.assertEqual(page.context["meetings"], [])
+        self.assertContains(page, "no meetings yet")
 
 
 class EventNavIsTheSameOnEveryPageTests(PageTestCase):

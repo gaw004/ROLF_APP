@@ -6,6 +6,7 @@ reaching into a request. Phase C's views construct the same classes unchanged.
 """
 
 import datetime
+from functools import cached_property
 
 from django import forms
 from django.forms.forms import DeclarativeFieldsMetaclass
@@ -1904,9 +1905,17 @@ class EventPeriodForm(forms.Form):
         """
         return self._multi_ministry
 
-    @property
+    @cached_property
     def ministry_options(self):
         """Ministry 那一格展开时的每一行：`(值, 名字, 选没选中)`。
+
+        ⚠️ **`cached_property`，而这不是微优化**（2026-09-17 量出来的）：
+           `field.choices` 是一个 `ModelChoiceIterator`，**每迭代一次就重查一次
+           `Ministry`**。而这一份有两个读者 —— `ministry_label` 一个、
+           `_ministry_filter.html` 里那个 for 循环一个 ——
+           于是 `/events/` 和 `/programs/`（以及它们每一次 HTMX 筛选片段）
+           上有两条**一模一样**的 `SELECT … FROM org_ministry`。
+           ⚠️ 缓存的作用域是**一张表单实例**，也就是一次请求，所以没有失效问题。
 
         🔴 **从字段派生，不自己拼**（同 `nature_options`，而那一条的注释写着
            不这么做会怎样）：显示那份和把关那份分家之后，人选了一个菜单里明明

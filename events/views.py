@@ -2036,7 +2036,10 @@ def event_manage_list(request):
         #    这个仓库记过五次的那种缺口，而这一次会是第六次。
         #    ⚠️ 判据自成一问（`can_reach_publish_page`），不在这里拼 ——
         #       拼一遍就是同一条规矩有两个答案。
-        "can_publish": can_reach_publish_page(request.user),
+        #    ⚠️ 两个值都传进去：`_scoped_events()` 上面刚算过它们，而这个谓词
+        #       的两半正是它们。不传就是同一个问题在一次请求里问两遍。
+        "can_publish": can_reach_publish_page(
+            request.user, administered=administered, foundation=foundation),
         # 撤销刚才那次状态修改。⚠️ `pop` 而不是 `get`：它是一次性的 ——
         #    留着的话，下一次打开这一页还会看到一颗撤销上上次的按钮，
         #    而那时人已经不记得上上次是什么了。

@@ -265,13 +265,14 @@ class RosterSection:
     posts: int
     holders: int
     serving: int
-    #: 这个 ministry 下还等着核验的岗位数 —— 索引页上那颗红点读它。
-    #:
-    #: ⚠️ 含**已撤销**的岗位，同 `positions_awaiting_review()`：一个建错了又被
-    #:    撤销的岗位仍然该从待办里出现一次，否则「撤销」会变成一条绕过核验的路。
-    #:    ⚠️ 所以这个数可能大于这一段实际画出来的行数（那里只列 `is_active`）——
-    #:       写下来是因为它看起来会像一个 bug。
-    awaiting: int = 0
+    #: ⚠️ **这里曾经有一个 `awaiting`，2026-09-17 删了 —— 它一个读者都没有。**
+    #:    它的 docstring 写着「索引页上那颗红点读它」，而索引页读的是
+    #:    `MinistryCard.awaiting`，另一个 dataclass。于是每一次
+    #:    `/staff/<pk>/` 都白跑一次 `needs_foundation_review` 查询去填一个
+    #:    没人看的数 —— 而那一页**另外**已经为那条横幅跑了
+    #:    `positions_awaiting_review()`，在同一批行上。
+    #:    ⚠️ 真要再用到「这个 ministry 还有几个等着核验」，视图手上就有那个
+    #:       列表（`len(awaiting)`），不必再查一次。
 
 
 #: 名册的分组，**顺序就是画出来的顺序**，而每一组的判据写在 `_roster_group()` 里。
@@ -360,7 +361,8 @@ def roster_index(positions, *, on=None):
     ⚠️ 只数 `is_active=True` 的岗位和在效期内的任职 —— 也就是点进去之后**画得出来
        的那些**。一个统计数字如果和它点进去看到的表算的不是同一批行，那它迟早会
        被人拿去和那张表对，而对不上。
-       ⚠️ 例外是 `awaiting`，理由在 `RosterSection.awaiting` 上。
+       ⚠️ 例外是 `roster_index()` 那颗红点（`MinistryCard.awaiting`），
+          理由在 `positions_awaiting_review()` 上。
 
     ⚠️ `serving` 和 `holders` 的区别是 `AssignmentQuerySet.serving()` 立的：休假和
        停职的人仍然**占着**岗位，但不在值班名单上。这里只是同一条线画在 SQL 那
@@ -450,12 +452,6 @@ def ministry_roster(positions, *, on=None):
     ⚠️ 空组不画：一个 ministry 没有理事，就不该出现一个空的 Board 标题。
     """
     listed = positions.filter(is_active=True).select_related("ministry")
-    # ⚠️ 待核验的数从**没有按 is_active 收窄**的那一份数（见 `RosterSection.awaiting`）。
-    awaiting_by_ministry = defaultdict(int)
-    for ministry_id in positions.filter(needs_foundation_review=True).values_list(
-            "ministry_id", flat=True):
-        awaiting_by_ministry[ministry_id] += 1
-
     holders_by_position = defaultdict(list)
     for assignment in staff_directory(listed, on=on):
         holders_by_position[assignment.position_id].append(assignment)
@@ -489,7 +485,6 @@ def ministry_roster(positions, *, on=None):
             #    剩下的那一半条件就是 status。
             serving=sum(1 for holder in holders
                         if holder.status == Assignment.Status.ACTIVE),
-            awaiting=awaiting_by_ministry.get(ministry_id, 0),
         ))
     return sections
 

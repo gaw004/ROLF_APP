@@ -216,7 +216,9 @@ def _menu_for(user, administered, foundation):
             #    多看得见基金会级岗位）。两条指向同一页读起来像 bug。
             menu.append(_link("Staff Roster", "org:staff_roster", "roster",
                                badge=awaiting_review))
-        if can_grant_ministry_admin(user):
+        # ⚠️ 把这一层已经算好的 `foundation` 递进去 —— 这个函数的函数体就是
+        #    `in_foundation_tier()`，而调用方手上已经有答案了。
+        if can_grant_ministry_admin(user, foundation=foundation):
             menu.append(_link("Ministry Admins", "org:ministry_list", "ministries"))
 
     if user.is_staff:
@@ -272,7 +274,8 @@ def navigation(request):
         #    the seventh time, and it was caught by looking at a screenshot
         #    rather than by any test.
         "can_see_all_events": bool(administered) or foundation,
-        "can_grant_ministry_admin": can_grant_ministry_admin(user),
+        "can_grant_ministry_admin": can_grant_ministry_admin(
+            user, foundation=foundation),
         # ⭐ 这一页叫什么，只定义在一处 —— 见 `manage_list_name()`，
         #    顶栏那一排里它自己那一格读的是同一个函数。
         # ⚠️ 把上面已经算好的 `foundation` 递进去 —— 见那个函数的最后一条。

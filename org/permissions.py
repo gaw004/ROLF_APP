@@ -140,7 +140,7 @@ def can_publish_event(user, ministry) -> bool:
     return administers(user, ministry) or in_foundation_tier(user)
 
 
-def can_reach_publish_page(user) -> bool:
+def can_reach_publish_page(user, *, administered=None, foundation=None) -> bool:
     """能不能打开发布页 —— 替**任意一个** ministry 发得了就算（2026-09-16）。
 
     ⚠️ 自成一问，同 `can_reach_staff_roster()`：「你还没被授权管任何 ministry」
@@ -150,8 +150,20 @@ def can_reach_publish_page(user) -> bool:
     ⚠️ 它同时决定管理列表上那颗 `Publish a new event` 画不画。少了那一处，
        权限放开了而**没有任何东西指向它** —— `phase-d.md` 第四节点名三次、
        `core/context_processors.py` 开头列了五个的同一种缺口。
+
+    ⚠️ 两个关键字让**已经知道答案的调用方**把答案传进来（2026-09-17），
+       照 `core.context_processors.manage_list_name()` 那个先例 —— 它的注释里
+       记着实测数字。两个谓词都是**没有缓存**的查询，而管理列表在调这里的
+       前几行刚由 `_scoped_events()` 算过两者。
+       🔴 **传的是事实，不是记忆 —— 这不是在谓词上加缓存。** 一层没有失效
+          机制的缓存会让撤销不生效，而那正是 2026-09-17 一次 review 实验在这个
+          文件里留下的洞（已还原）。这里每一次调用仍然自己决定要不要查。
     """
-    return bool(ministry_ids_administered_by(user)) or in_foundation_tier(user)
+    if administered is None:
+        administered = ministry_ids_administered_by(user)
+    if foundation is None:
+        foundation = in_foundation_tier(user)
+    return bool(administered) or foundation
 
 
 def can_manage_series(user, series) -> bool:
@@ -390,14 +402,23 @@ def in_foundation_tier(user) -> bool:
     return user.groups.filter(name=FOUNDATION_ADMIN_GROUP).exists()
 
 
-def can_grant_ministry_admin(user) -> bool:
+def can_grant_ministry_admin(user, *, foundation=None) -> bool:
     """P5: appoint somebody as a ministry's admin.
 
     Reads the global Group and does not look at MinistryRole at all — a
     ministry admin must not be able to recruit their own downline. That is what
     makes this tier "higher", and it is the one thing about P5 worth testing.
+
+    ⚠️ `foundation` 让**已经知道答案的调用方**把它传进来（2026-09-17），照
+       `core.context_processors.manage_list_name()` 那个先例。这个函数的**全部
+       函数体**就是 `in_foundation_tier(user)`，而站点菜单那一处在它上面几行
+       刚算过 —— 不给这个口子，每一个登录后的页面（连同每一个 HTMX 片段）
+       都在同一次请求里问两遍同一个问题。
+       🔴 传的是**事实**，不是记忆：不传就自己查，所以撤销照样当场生效。
     """
-    return in_foundation_tier(user)
+    if foundation is None:
+        foundation = in_foundation_tier(user)
+    return foundation
 
 
 def can_view_event_records(user, event) -> bool:
@@ -530,7 +551,7 @@ def can_reach_staff_roster(user) -> bool:
     return _any_management_tier(user)
 
 
-def can_manage_staff_roster(user, ministry) -> bool:
+def can_manage_staff_roster(user, ministry, *, foundation=None) -> bool:
     """在这一个 ministry 里建岗位、把人放进去、结束一段任职。
 
     ⭐ `ministry` 为 `None` 指的是**基金会级的岗位**（`Position.ministry` 可空，
@@ -543,10 +564,17 @@ def can_manage_staff_roster(user, ministry) -> bool:
     ⚠️ foundation tier 在**每一个** ministry 里都过得去，同
        `can_publish_notice()`：他要能替一个还没有 admin 的新 ministry 把第一批
        人录进去，否则一个新 ministry 永远没有第一个员工。
+
+    ⚠️ `foundation` 让**已经知道答案的调用方**把它传进来（2026-09-17），照
+       `core.context_processors.manage_list_name()` 那个先例 —— 岗位详情页在
+       调这里的前两行刚由 `_scoped_positions()` 算过它。
+       🔴 传的是**事实**，不是记忆：不传就自己查。
     """
+    if foundation is None:
+        foundation = in_foundation_tier(user)
     if ministry is None:
-        return in_foundation_tier(user)
-    return administers(user, ministry) or in_foundation_tier(user)
+        return foundation
+    return administers(user, ministry) or foundation
 
 
 def can_define_position_terms(user) -> bool:

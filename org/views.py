@@ -275,7 +275,10 @@ def position_detail(request, pk):
     positions, foundation = _scoped_positions(request)
     position = get_object_or_404(
         positions.select_related("ministry", "reports_to"), pk=pk)
-    may_manage = can_manage_staff_roster(request.user, position.ministry)
+    # ⚠️ 把 `_scoped_positions()` 上面刚算好的那个值递进去 —— 这个谓词的
+    #    另一半正是它。
+    may_manage = can_manage_staff_roster(
+        request.user, position.ministry, foundation=foundation)
 
     form = PositionForm(instance=position, user=request.user)
     assign_form = AssignmentForm(position=position)

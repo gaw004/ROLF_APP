@@ -25,6 +25,7 @@ from org.permissions import (
     in_foundation_tier,
     ministry_ids_administered_by,
 )
+from org.services import positions_awaiting_review_count
 
 
 def manage_list_name(user, *, foundation=None):
@@ -65,8 +66,13 @@ def manage_list_name(user, *, foundation=None):
     return "All Events" if foundation else "Events I Manage"
 
 
-def _link(label, url_name, icon, query=""):
+def _link(label, url_name, icon, query="", badge=None):
     """一个菜单项。
+
+    ⚠️ `badge` 是那一格右端的**计数**（2026-09-15，员工名册那一条）。
+       `None` 和 `0` 都不画 —— 一颗写着 0 的徽章说的是「没有事在等你」，
+       而那件事的正确说法是**什么都不显示**。同 `_needs_you_band.html` 里
+       「空态照画、但不写 0 item」那一条。
 
     🔴 **`icon` 是必填的位置参数，而那是故意的。** 钉住之后这个菜单收成一条只有
        图标的窄栏（2026-09-14），于是「有没有图标」不再是装饰问题 —— 漏一个就是
@@ -76,7 +82,10 @@ def _link(label, url_name, icon, query=""):
     ⚠️ 名字而不是一段 SVG：这里是**数据**，画在 `_menu_icons.html` 上。
        把标记塞进 context processor 的话，改一个图形要动 Python。
     """
-    return {"label": label, "url": reverse(url_name) + query, "icon": icon}
+    item = {"label": label, "url": reverse(url_name) + query, "icon": icon}
+    if badge:
+        item["badge"] = badge
+    return item
 
 
 def _menu_for(user, administered, foundation):
@@ -155,9 +164,34 @@ def _menu_for(user, administered, foundation):
         _link("My Profile", "accounts:profile", "profile"),
     ]
 
+    # ⭐ 待核验岗位的计数，**只给 foundation tier**（2026-09-15，用户要的
+    #    「一定要让 foundation admin 积极做 review」的两半之一，另一半是仪表盘
+    #    那张卡）。ministry admin 看不到这个数：那批待办他做不了。
+    #
+    # ⚠️ **一次 `COUNT`，落在每一个页面渲染上**（连同每一个 HTMX 片段），
+    #    而且只有 foundation tier 付。这是这颗徽章的全部代价，如实写在这里 ——
+    #    这个模块开头那段正是在讲「每个请求都跑的东西要说得出自己多贵」。
+    #
+    # ⚠️ 算在这里而不是在下面两个分支里各算一次：两顶帽子的人走上面那个分支、
+    #    只有 foundation tier 的走下面那个，各算一遍就是两处要保持一致的东西。
+    awaiting_review = positions_awaiting_review_count() if foundation else None
+
     if administered:
         menu += [
             {"heading": "Ministry Admin"},
+            # ⭐ 员工名册（2026-09-15）。**这一条是这一页唯一的可见入口**，而它
+            #    进菜单而不是走标题行那颗 ⋮，理由和 2026-09-03 把三个管理页撤出
+            #    菜单的理由是同一条、方向相反：那三页各自都有一个**读页面**可以
+            #    挂 ⋮（读公告、读活动），而员工名册没有 —— 组织架构图和 ministry
+            #    详情页都还没建（Phase D 的 D1.9 其余几页）。
+            #    ⚠️ 那两页真建出来之后，这一条该不该改挂 ⋮，是那时候的问题。
+            #
+            # ⚠️ 叫 "Staff Roster" 而不是 "Staff"：这个菜单底下已经有一个叫
+            #    "Staff" 的小标题（`is_staff`，通往 Django admin 的那一组），
+            #    两个都叫 Staff 正是 `ManageListHeadTests` 那条「一个页面两个
+            #    名字」守的反面。页面的 <h1> 和 <title> 用的是同一个词。
+            _link("Staff Roster", "org:staff_roster", "roster",
+                  badge=awaiting_review),
             # ⚠️ The **manage** page, not the wall. The wall's entrance is the
             #    feather (the drifting ones, and the still one in the top bar),
             #    and putting a second door to it in the menu would give away the
@@ -177,7 +211,14 @@ def _menu_for(user, administered, foundation):
         #    tier. Two entries pointing at one page reads as a bug.
         if not administered:
             menu.append(_link("Memories Photos", "gallery:manage", "photos"))
-        if can_grant_ministry_admin(user):
+            # ⚠️ 同上一格：两顶帽子的人只给一条，因为两档进的是同一个 URL，
+            #    而那一页自己会按 tier 变宽（foundation tier 多一块待办面板、
+            #    多看得见基金会级岗位）。两条指向同一页读起来像 bug。
+            menu.append(_link("Staff Roster", "org:staff_roster", "roster",
+                               badge=awaiting_review))
+        # ⚠️ 把这一层已经算好的 `foundation` 递进去 —— 这个函数的函数体就是
+        #    `in_foundation_tier()`，而调用方手上已经有答案了。
+        if can_grant_ministry_admin(user, foundation=foundation):
             menu.append(_link("Ministry Admins", "org:ministry_list", "ministries"))
 
     if user.is_staff:
@@ -233,7 +274,8 @@ def navigation(request):
         #    the seventh time, and it was caught by looking at a screenshot
         #    rather than by any test.
         "can_see_all_events": bool(administered) or foundation,
-        "can_grant_ministry_admin": can_grant_ministry_admin(user),
+        "can_grant_ministry_admin": can_grant_ministry_admin(
+            user, foundation=foundation),
         # ⭐ 这一页叫什么，只定义在一处 —— 见 `manage_list_name()`，
         #    顶栏那一排里它自己那一格读的是同一个函数。
         # ⚠️ 把上面已经算好的 `foundation` 递进去 —— 见那个函数的最后一条。

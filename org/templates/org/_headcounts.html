@@ -1,0 +1,16 @@
+{% comment %}
+「N 个岗位 · M 在职（今天 K 个在岗）」—— 这句话**只有这里一份**（2026-09-17）。
+
+🔴 索引页和单个 ministry 那一页各抄了一遍，两份只差变量名（`card.` / `section.`）。
+   两个 dataclass（`MinistryCard` / `RosterSection`）都带着同样四个计数，
+   所以它们在这句话里本来就可以互换 —— 抄第二遍买不到任何东西，
+   而改口时只会改到其中一页。
+
+⚠️ 「今天在岗」那一段**只在它和在职人数不同时**才写。相同时写出来是一句
+   「3 在职（今天 3 个在岗）」—— 每个字都对，而它什么都没说。
+
+参数：counts —— 任何带 `posts` / `holders` / `serving` 的东西。
+{% endcomment %}
+{{ counts.posts }} post{{ counts.posts|pluralize }} ·
+{{ counts.holders }} in post{% if counts.serving != counts.holders %}
+  ({{ counts.serving }} available today){% endif %}

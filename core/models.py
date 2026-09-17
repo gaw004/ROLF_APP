@@ -35,10 +35,17 @@ class ImmutableCodeMixin:
     """`code` is tidied on save, and refuses to change once it has been stored.
 
     Four dictionary-ish tables want exactly this (RelationshipType, Ministry,
-    EmploymentType, Position) and all four want it for one reason: `code` is
-    what the rest of the codebase matches on, so renaming it breaks lookups
-    *silently* — filter(code="food_pantry") simply stops returning rows, and
-    nothing raises. See goal.md D5.
+    EmploymentType, Position): `code` is what the rest of the codebase matches
+    on, so renaming it breaks lookups *silently* — filter(code="food_pantry")
+    simply stops returning rows, and nothing raises. See goal.md D5.
+
+    ⭐ **`Position` 2026-09-15 起是这四张里的例外，而例外在于「有没有」而不是
+       「能不能改」**：它的 `code` 可空，默认就是空的。理由是那张表和另外三张
+       不是一回事 —— D5 自己的分类表里 `Position` **不在字典表那一列**
+       （见 `phase-b.md` 第 153 行的就地修订）。一个岗位默认不需要被任何代码
+       指向；只有当真的有系统要指向它时，才由人**特意**设一个锚点，
+       而设过之后这里照旧不许改。这是 Stripe 的 `lookup_key` /
+       SuccessFactors 的 `externalCode` 那个形状。
 
     Carries no fields on purpose. An abstract model holding `code` would tie
     four tables' migrations to one class, and their columns differ anyway
@@ -57,7 +64,18 @@ class ImmutableCodeMixin:
 
     def save(self, *args, **kwargs):
         # Cosmetic, like RelationshipType.save() — see the warning above.
-        self.code = (self.code or "").strip().lower()
+        code = (self.code or "").strip().lower()
+        # ⚠️ 空值归一成 `None`**当且仅当这一列可空**（`Position.code`，2026-09-15）。
+        #    那一列上「没有值」是一个真实且常态的状态 —— 「还没有任何系统需要
+        #    指向这个岗位」—— 而 `""` 和 `None` 两种空法并存会让
+        #    `UniqueConstraint(Lower("code"))` 只放行**一行**空的（Postgres 认
+        #    多个 NULL 互不相等，但认两个 `""` 是重复）。表现是建第二个没有 code
+        #    的岗位时一个莫名其妙的唯一性冲突。
+        #
+        # ⚠️ 判据取自字段本身（`null`），不是一个类属性 —— 另立一个开关就是两处
+        #    要手工保持一致的东西，而它们走散时不报错。另外三张表的 code 非空，
+        #    这一行对它们的行为一个字没变。
+        self.code = code or (None if self._meta.get_field("code").null else "")
         super().save(*args, **kwargs)
 
     def code_change_error(self):
@@ -67,6 +85,12 @@ class ImmutableCodeMixin:
         immutability is split in two: the admin makes the field read-only on
         the change page, and this compares against the value in the database
         so a script or a shell session hits the same wall.
+
+        ⭐ **`stored is None` 放行，而 2026-09-15 起这一支有了第二个含义。**
+           它本来只是「这一行不在库里」的兜底；`Position.code` 改成可空之后，
+           它同时是「这个岗位还没有锚点」—— **第一次给它设一个是允许的**，
+           而设过之后再改不行。两件事都该放行，而且理由是同一条：不可改保护的
+           是**已经有人在引用的那个值**，还没有值就没有东西要保护。
         """
         if not self.pk:
             return None

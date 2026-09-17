@@ -16,8 +16,9 @@ from accounts.models import User
 from contact.models import Contact
 from core.timeutils import local_now, local_today, year_bounds
 from dashboard import calendar as month
-from dashboard.services import _greeting, dashboard_for
+from dashboard.services import BAND_ITEMS, _greeting, dashboard_for
 from events.models import (
+    EventGrant,
     Event,
     EventRole,
     Participation,
@@ -27,6 +28,7 @@ from events.models import (
 )
 from notices.models import Notice
 from org.models import Assignment, Ministry, MinistryRole, Position
+from org.permissions import foundation_admin_group
 from org.permissions import FOUNDATION_ADMIN_GROUP
 
 NOW = local_now()
@@ -959,3 +961,155 @@ class TheCalendarAgreesWithTheDateLineTests(DashboardTestCase):
         self.assertEqual(
             marked, [24],
             "月历上的点来自 UTC 那个月，而格子来自本地那个月。")
+
+
+class PostsWaitingForVerificationTests(DashboardTestCase):
+    """待核验的岗位那一组 —— 通栏那一块的第三种形态（2026-09-15）。
+
+    ⭐ 它存在的理由是用户那句「一定要让 foundation admin 积极做 review」：
+       核验不是一道闸（岗位建完就生效），所以**没有任何东西会逼他去做** ——
+       推他的只有这一块和菜单上那颗计数。
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.boss_account = make_account("boss@example.com", make_person("Boss"))
+        self.boss_account.groups.add(foundation_admin_group())
+
+    def a_post_awaiting_review(self, name="Saturday Coordinator", ministry=None):
+        return Position.objects.create(
+            name=name, ministry=ministry or self.pantry,
+            kind=Position.Kind.STAFF,
+            compensation=Position.Compensation.UNPAID,
+            needs_foundation_review=True)
+
+    def test_the_foundation_tier_sees_them(self):
+        self.a_post_awaiting_review()
+        band = self.page(self.boss_account).context["needs_you"]
+        self.assertEqual([p.name for p in band["to_verify"]], ["Saturday Coordinator"])
+        self.assertEqual(band["count"], 1)
+
+    def test_nobody_else_sees_them(self):
+        """⚠️ 给别人画这一组就是给他一张他做不了的待办。"""
+        self.a_post_awaiting_review()
+
+        self.assertEqual(self.page().context["needs_you"]["to_verify"], [])
+
+        self.make_admin(self.me)
+        self.assertEqual(self.page().context["needs_you"]["to_verify"], [])
+
+    def test_a_verified_post_is_not_listed(self):
+        post = self.a_post_awaiting_review()
+        post.needs_foundation_review = False
+        post.save(update_fields=["needs_foundation_review"])
+        self.assertEqual(self.page(self.boss_account).context["needs_you"]["to_verify"], [])
+
+    def test_somebody_wearing_both_hats_still_sees_them(self):
+        """🔴 两件事正交，而那一块底下的分支是按「管不管 ministry」分岔的。
+
+        把这一组塞进任何一支，另一支的 foundation tier 就看不到自己的待办 ——
+        而两顶帽子的人恰恰是最可能兼任的那一个。
+        """
+        self.make_admin(self.boss_account.contact)
+        self.a_post_awaiting_review()
+        band = self.page(self.boss_account).context["needs_you"]
+        self.assertEqual(len(band["to_verify"]), 1)
+
+    def test_they_do_not_crowd_out_the_band(self):
+        """⚠️ 通栏那一块**一行**是它的不变量（BAND_ITEMS=3）。
+
+        这一组排在最前，而总数仍然不许超 —— 一旦长到两行，它就开始和下面的卡片
+        网格抢「这一屏在说什么」。
+        """
+        for n in range(5):
+            self.a_post_awaiting_review(name=f"Post {n}")
+        band = self.page(self.boss_account).context["needs_you"]
+        self.assertEqual(band["count"], BAND_ITEMS)
+
+    def test_the_roster_exit_is_only_drawn_when_something_is_waiting(self):
+        """⚠️ 一个空手的出口（点过去发现没有事做）比没有出口更差。"""
+        html = self.page(self.boss_account).content.decode()
+        self.assertNotIn("Staff roster →", html)
+
+        self.a_post_awaiting_review()
+        self.assertIn("Staff roster →", self.page(self.boss_account).content.decode())
+
+
+class TheReviewBadgeTests(DashboardTestCase):
+    """菜单上那颗红色计数 —— 「像 app 的未读消息一样」（用户 2026-09-15 定的）。"""
+
+    def setUp(self):
+        super().setUp()
+        self.boss_account = make_account("boss@example.com", make_person("Boss"))
+        self.boss_account.groups.add(foundation_admin_group())
+
+    def menu_entry(self, account):
+        self.client.force_login(account)
+        menu = self.client.get("/").context["site_menu"]
+        return next((row for row in menu if row.get("label") == "Staff Roster"), None)
+
+    def test_it_counts_what_is_waiting(self):
+        for n in range(3):
+            Position.objects.create(
+                name=f"Post {n}", ministry=self.pantry, kind=Position.Kind.STAFF,
+                needs_foundation_review=True)
+        self.assertEqual(self.menu_entry(self.boss_account)["badge"], 3)
+
+    def test_zero_draws_nothing_at_all(self):
+        """🔴 一颗写着 0 的徽章说的是「没有事在等你」—— 而那件事的正确说法是
+        **什么都不显示**。所以那个键在 0 的时候根本不存在。"""
+        entry = self.menu_entry(self.boss_account)
+        self.assertNotIn("badge", entry)
+
+    def test_a_ministry_admin_gets_no_badge(self):
+        """⚠️ 那批待办他做不了 —— 一个他点不动的数字只会训练他忽略这个位置。"""
+        Position.objects.create(
+            name="Post", ministry=self.pantry, kind=Position.Kind.STAFF,
+            needs_foundation_review=True)
+        self.make_admin(self.me)
+        self.assertNotIn("badge", self.menu_entry(self.account))
+
+
+class HandedToMeTests(DashboardTestCase):
+    """别人交到他手上的那几场活动 —— 通栏那一块的第四种形态（D47，2026-09-15）。
+
+    ⭐ 它是用户要的两个通知落点里的第二个（另一个是授权当时那封信）。
+       **两个都要，而理由是它们错过的方式不一样**：一封信会被归档、会被漏看；
+       只有仪表盘的话，一个不常登录的人会在活动前一天才发现自己该办它。
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.helper = make_account("helper@example.com", make_person("Helper"))
+        self.event = self.an_event()
+
+    def hand_it_over(self, event=None):
+        return EventGrant.objects.create(
+            contact=self.helper.contact, event=event or self.event)
+
+    def test_he_sees_what_was_handed_to_him(self):
+        self.hand_it_over()
+        band = self.page(self.helper).context["needs_you"]
+        self.assertEqual([e.pk for e in band["handed_to_me"]], [self.event.pk])
+
+    def test_nobody_else_sees_it(self):
+        self.hand_it_over()
+        self.assertEqual(self.page().context["needs_you"]["handed_to_me"], [])
+
+    def test_an_event_that_is_over_is_not_waiting_on_anybody(self):
+        """⚠️ 一场已经办完的活动不是「在等你」。"""
+        past = self.an_event(start=NOW - 10 * DAY)
+        self.hand_it_over(past)
+        self.assertEqual(self.page(self.helper).context["needs_you"]["handed_to_me"], [])
+
+    def test_a_revoked_grant_leaves_the_band(self):
+        grant = self.hand_it_over()
+        grant.end_date = TODAY
+        grant.save(update_fields=["end_date"])
+        self.assertEqual(self.page(self.helper).context["needs_you"]["handed_to_me"], [])
+
+    def test_it_does_not_crowd_out_the_band(self):
+        """⚠️ 通栏**一行**是这一块的不变量（BAND_ITEMS=3）。"""
+        for _ in range(5):
+            self.hand_it_over(self.an_event())
+        self.assertEqual(self.page(self.helper).context["needs_you"]["count"], BAND_ITEMS)

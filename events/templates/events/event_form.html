@@ -1,5 +1,5 @@
 {% extends "core/base.html" %}
-{% block title %}{% if event %}Edit Event{% else %}Publish an Event{% endif %}{% endblock %}
+{% block title %}{% if event %}Edit Event{% else %}{% include "events/_publish_title.html" %}{% endif %}{% endblock %}
 {% block main_width %}max-w-2xl{% endblock %}
 
 {% block content %}
@@ -16,9 +16,19 @@
   {% endcomment %}
   {% if event %}{% include "events/_event_nav.html" with current="edit" %}{% endif %}
 
-  <h1 class="text-2xl font-semibold">
-    {% if event %}Edit “{{ event.name }}”{% else %}Publish an Event{% endif %}
-  </h1>
+  {% if event %}
+    <h1 class="text-2xl font-semibold">Edit “{{ event.name }}”</h1>
+  {% else %}
+    {% comment %}
+    ⚠️ 发布页的标题抽成片段（2026-09-16，D49）：它要跟着那三档单选变，而那次
+       换档走 HTMX、只换 `#when-block` —— 所以第二份带 `hx-swap-oob` 的跟在
+       `_publish_when.html` 后面。整段理由写在那个片段里。
+    ⚠️ 改这一页的标题**只有一个字符串**（`_publish_heading.html`）；
+       在这里再写一份就是 OOB 那一份和首屏那一份分家，而分家的表现是
+       「刷新一下标题就变回去」。
+    {% endcomment %}
+    {% include "events/_publish_heading.html" %}
+  {% endif %}
 
   {% if event %}
     <div class="card mt-4 border border-info-fg/30 bg-info-bg dark:border-info-fg-dark/30 dark:bg-info-bg-dark">

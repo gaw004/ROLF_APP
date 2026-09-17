@@ -59,7 +59,11 @@
       {{ courses_heading }} <span class="ml-1 font-normal">{{ courses|length }}</span>
     </h2>
     <ul class="mb-8 space-y-4">
-      {% for row, progress in courses %}
+      {% comment %}
+      ⚠️ 第三个是撞车（D39 第 ④ 类，2026-09-15）。`_course_card.html` 从循环的
+         上下文里读 `clashes`，所以这里的变量名就是它 —— 同 `progress`。
+      {% endcomment %}
+      {% for row, progress, clashes in courses %}
         {% include "events/_course_card.html" %}
       {% endfor %}
     </ul>
@@ -87,7 +91,7 @@
           </tr>
         </thead>
         <tbody>
-          {% for row in occasions %}
+          {% for row, clashes in occasions %}
             <tr>
               <td>
                 <a href="{% url 'events:event_detail' row.event_role.event.pk %}?from=mine"
@@ -95,6 +99,12 @@
                 {% if row.event_role.event.location %}
                   <span class="block text-xs text-ink-600 dark:text-ink-300">{{ row.event_role.event.location }}</span>
                 {% endif %}
+                {% comment %}
+                ⚠️ 撞车标记跟着**活动名字**，不是单开一列：那一列只有极少数行会有
+                   东西，而一个整列的空格读起来是「这里本该有什么」（D27 那条
+                   「没有和没算不能长得一样」的同一面）。
+                {% endcomment %}
+                {% include "events/_conflict_mark.html" %}
               </td>
               {% comment %}
               ⚠️ 只显示开始时间，不显示起止两个。「什么时候」这个问题开始时间答得了

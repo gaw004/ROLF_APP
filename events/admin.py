@@ -24,6 +24,7 @@ from org.audience import Audience
 
 from .models import (
     Event,
+    EventGrant,
     EventRole,
     EventSeries,
     EventSeriesRole,
@@ -613,3 +614,41 @@ class EventSeriesAdmin(SimpleHistoryAdmin):
                     "and what already happened stays. A copy is ready to edit "
                     f"(#{successor.pk}): change when it repeats there, then "
                     "generate its occasions.")
+
+
+@admin.register(EventGrant)
+class EventGrantAdmin(SimpleHistoryAdmin):
+    """谁被指名管理某一场活动（D47）。
+
+    SimpleHistoryAdmin，同 `MinistryRoleAdmin`：一次授权是要有人负责的事，
+    而「去年三月谁能看这场活动的报名」是会被问到的。
+
+    ⚠️ 撤销是填 `end_date`，**永远不是删行** —— 删掉的授权留不下那个答案。
+       ⚠️ 而在这张表上 `end_date` **只有撤销一个来源**（站点那张表单上没有
+          截止日期那一格），正是它敢被读成右开的依据 ——
+          `core.querysets.in_force()`。在这里手填一个今天的日期，效果和撤销一样，
+          那是有意的。
+
+    ⚠️ 这一档的判断在 `org/permissions.py`，不在这里。admin 是脚手架（D18）。
+    """
+
+    list_display = ["contact", "event", "start_date", "end_date",
+                    "is_in_force", "granted_by"]
+    list_filter = ["event__ministry", "event__status"]
+    search_fields = [
+        "contact__legal_last_name", "contact__legal_first_name",
+        "contact__preferred_name", "event__name",
+    ]
+    autocomplete_fields = ["contact", "event"]
+    list_select_related = ["contact", "event", "granted_by"]
+
+    # 🔴 **`is_in_force`，不是 `is_currently_active`**（2026-09-16）。
+    #    这一列要和权限层说同一句话，而权限层 2026-09-15 起走右开的
+    #    `in_force()` —— 读右闭的那一个，撤销当天这一格是打勾的，而那个人
+    #    已经什么都做不了了。两张授权表（这张和另一张）一起改。
+    # ⚠️ **`AssignmentAdmin` 那一列没改**，而那不是漏：任职是**事实**，
+    #    「有效期到今天」在那里是诚实的。两条谓词各管各的一半，
+    #    分界写在 `core/querysets.py` 上。
+    @admin.display(boolean=True, description="In effect")
+    def is_in_force(self, obj):
+        return obj.is_in_force

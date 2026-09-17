@@ -6,28 +6,32 @@ reaching into a request. Phase C's views construct the same classes unchanged.
 """
 
 import datetime
+from functools import cached_property
 
 from django import forms
+from django.forms.forms import DeclarativeFieldsMetaclass
 from django.utils.text import get_text_list
 from django.core.exceptions import ValidationError
 from django.conf import settings
 from django.db.models import Q
 
-from contact.models import EmergencyContact, RelationshipType
+from contact.models import Contact, EmergencyContact, RelationshipType
 from core.images import decode_complaint_for, is_new_upload
-from core.limits import LONG_TEXT, PHONE, SEARCH
+from core.address import postal_code_field, state_field, strip_text
+from core.limits import LONG_TEXT, PHONE, SEARCH, SHORT_TEXT
 from core.timeutils import day_start
 from django.utils.timezone import localtime
 from org.audience import Audience
 from org.forms import AudienceFormMixin
 from org.models import Ministry
-from org.permissions import ministry_ids_administered_by
+from org.permissions import in_foundation_tier, ministry_ids_administered_by
 
 from . import schedule
 # ⚠️ The picker below asks `recurrence` to build and read the rule string
 #    rather than spelling RRULE here: that module owns the syntax, and a
 #    second speller of it is how the preview and the save start disagreeing.
 from .recurrence import (
+    BATCH_CEILING,
     MAX_INTERVAL,
     MONTHLY,
     ORDINALS,
@@ -35,6 +39,7 @@ from .recurrence import (
     WEEKLY,
     compose,
     decompose,
+    occasions,
 )
 from .models import (
     NARROWING_MESSAGE,
@@ -729,7 +734,53 @@ class PublishFormMixin(EventAudienceFormMixin):
     def __init__(self, *args, user, **kwargs):
         super().__init__(*args, **kwargs)
         administered = ministry_ids_administered_by(user)
-        self.fields["ministry"].queryset = Ministry.objects.filter(id__in=administered)
+        # 🔴 **foundation tier 拿全部**（2026-09-16，D48）。它持不了
+        #    `MinistryRole`，所以 `administered` 对它是空集 —— 不分这一支的话，
+        #    它打得开发布页、而那一格里**一个 ministry 都没有**：一张永远提交
+        #    不了的表单，页面上没有任何东西说得出为什么。
+        # ⚠️ `is_active=True`：停办的 ministry 不该再收到新活动。ministry admin
+        #    那一档不用这个条件 —— 他的 `MinistryRole` 本来就挂在一个在办的
+        #    ministry 上。
+        # ⚠️ 这里收窄的是**下拉框**，而它防的是手滑；防越权的是视图里对提交值
+        #    再判一次 `can_publish_event()`。两件事，都要有（见类的 docstring）。
+        self.fields["ministry"].queryset = (
+            Ministry.objects.filter(is_active=True).order_by("name")
+            if in_foundation_tier(user)
+            else Ministry.objects.filter(id__in=administered))
+
+        # --- 地址那两格（2026-09-16，D50）---------------------------------
+        #
+        # 🔴 **换在这里，于是三张发布表单一起拿到**（`EventForm`、
+        #    `ProgramForm`、`EventSeriesForm`）—— 一处改，三处生效。
+        #    各自改一份的话，漏掉的那一张会安安静静地继续收自由文本，
+        #    而它存下来的地址在地图上打不开，**不报任何错**。
+        #
+        # ⚠️ 州是一个**真的** `<select>`（`core.address.state_field()`），
+        #    不是 `contact` 那边那段 JS 换出来的下拉 —— 关掉脚本它照样是下拉。
+        #    两处为什么不一样，整段写在 `core/address.py` 的模块注释里。
+        #
+        # ⚠️ **不加 `address_country`。** `Event` 上没有那一列是有意的
+        #    （`events/models.py` 那段 🔴 写了理由），而这一批做的正是**美国
+        #    地址**的校验 —— 两件事一致，不是矛盾。
+        #
+        # ⚠️ 两格都 `required=False`，而模型上它们是 `blank=True`：
+        #    「地址可以晚一点补」是那一段注释定的，**不许顺手改成必填**。
+        self.fields["address_state"] = state_field()
+        self.fields["address_postal_code"] = postal_code_field()
+        # ⚠️ 另外两格的标签跟着改（2026-09-16 看着截图改的）。模型自动生成的是
+        #    「Address street」「Address city」，而旁边两格现在写着「State」
+        #    「ZIP code」—— 四格并排，两种命名法。上面那句 `location` 的说明
+        #    已经说清了这几格是街道地址，标签里再带一遍 "Address" 是噪音。
+        #    🔴 改的是**表单**的标签，不是模型的 `verbose_name`：那两列
+        #       `contact.Contact` 上也有，一字不差是有意的（见模型注释），
+        #       而这里是这一页怎么说话。
+        self.fields["address_street"].label = "Street"
+        self.fields["address_city"].label = "City"
+        # ⚠️ 那一格是「楼里的哪一间」，不是地址 —— 模型注释里那句话今天只有读
+        #    代码的人看得到，而填表的人正对着它。
+        self.fields["location"].help_text = (
+            "The room or spot inside the building — Chapel, Room 2B, "
+            "Back garden. The street address goes in the boxes below.")
 
         # ⭐ Nothing else is pre-ticked, and that is the expensive decision of
         #    this form. Defaulting to everyone would match today's behaviour and
@@ -757,6 +808,9 @@ class PublishFormMixin(EventAudienceFormMixin):
 
     def clean(self):
         cleaned = super().clean()
+        # ⚠️ 首尾空白去掉 —— `"NY "` 和 `"NY"` 在地图查询和将来任何一次去重上
+        #    都是两个值，而屏幕上一模一样。整段理由在 `core.address.strip_text`。
+        strip_text(cleaned)
         audience = self.clean_audience()
         # ⚠️ Only when the audience itself is usable. An event ticked for nobody
         #    is narrower than every one of its roles, so going on would bury the
@@ -923,7 +977,27 @@ NO_AUDIENCE = object()
 #:    files to add `nature`. The failure is silent: the new box simply stops
 #:    surviving a click into an event and back.
 #:    守卫：events.tests.RoleKindFilterTests.test_the_filter_names_are_declared_once
-FILTER_PARAMS = ("q", "ministry", "nature", "start", "end")
+FILTER_PARAMS = ("q", "ministry", "nature", "kind", "start", "end")
+
+
+#: 两种形状在用户面前怎么称呼 —— **一份**（2026-09-16）。
+#:
+#: 🔴 **`views.SIGNUP_KINDS` 从这里拼，不另敲一遍。** My Signups 那一排
+#:    （决定 50）和管理列表那一格问的是同一个问题，而两份各写的后果是同一门课
+#:    在两页上叫不同的名字 —— 一个每处都渲染正常、只有把两页并排才看得见的错。
+#:
+#: ⚠️ **「不筛」那一档不在这里**，而这不是遗漏：那一格在两页上是两个不同的东西。
+#:    My Signups 上它是一个真的哨兵值（`?kind=all`，三颗按钮里必有一颗按下去）；
+#:    这张表单上「没填」就是空串，和 `ministry` / `nature` / `q` 完全一样 ——
+#:    于是 `filtered_by`、`_list_state`、Clear 一路都不用为它开特例。
+#:
+#: ⚠️ 值是 `events` / `programs`，**不是** `Event.Shape` 的 `single` / `program`。
+#:    这两个词会进查询串、会被人从链接里读到，而 `single` 对着一门「课」是一个
+#:    只有读过模型的人才懂的词。落到 queryset 那一步由 `narrow()` 翻译。
+SHAPE_KINDS = (
+    ("events", "Events"),
+    ("programs", "Programs"),
+)
 
 
 #: 决定「什么时候」的那几格 —— 日期预览只看它们的错误。
@@ -1007,37 +1081,47 @@ class DurationBoxes(forms.MultiWidget):
             return ":".join(str(part or "") for part in (hours, minutes, seconds))
 
 
-class EventSeriesForm(PublishFormMixin, forms.ModelForm):
-    """Publish a repeat rule — the third of the three shapes. L5.8a.
+class RecurrencePickerMixin(metaclass=DeclarativeFieldsMetaclass):
+    """「多久一次」那一块 —— 九个控件写一条 RRULE（2026-09-16 抽出来）。
 
-    ⭐ The same screen as `EventForm` and deliberately so (decision 32): a
-       publisher answers one question — "what am I putting on?" — and there are
-       three answers. Ten of the eleven things this asks are identical to the
-       other two shapes and come from `PublishFormMixin`; only the block below
-       differs, because only *when* differs.
+    🔴 **那个 `metaclass=` 不是装饰，少了它这九格会被整个丢掉。**
+       Django 收集表单字段时，只从「自己的类体」和**带 `declared_fields` 的
+       基类**里取 —— 一个普通 mixin 两样都不是，于是它身上的
+       `forms.ChoiceField(...)` 只是一个普通的类属性，`self.fields` 里一个都没有。
+       ⚠️ 这一条是抽取当天实测撞上的：62 条测试同时红在
+          `ValueError: 'EventSeriesForm' has no field named 'repeat_weekdays'`。
+          **而它之所以吵，纯属运气** —— `clean()` 里恰好有一句
+          `add_error("repeat_weekdays", …)`，Django 对着一个不存在的字段名会抛。
+          没有那一句的话，这九格会安安静静地不出现在页面上，也不参与校验。
+       ⚠️ 旁边的 `PublishFormMixin` **不需要**这个，因为它一个字段都不声明 ——
+          它只有方法。差别在这里，不在「谁是 mixin」。
 
-    ⚠️ The two forms are never both constructed for one request. The view reads
-       `publish_as` and builds one of them from the same POST, so `start_time`
-       meaning a `datetime` on one and a `time` on the other cannot collide —
-       said out loud because it reads like a trap.
+    ⭐ **两张表单共用，而它们存的东西完全不同。** `EventSeriesForm` 把这条规则
+       存进 `EventSeries.rule` 一列，往后每年滚着生成场次；`ProgramForm` 用它
+       **一次**就扔 —— 一门课把规则展开成一串 `Session` 之后，那个字符串就没有
+       第二个读者了（D48b / D49）。共用的是「怎么问」，不是「存不存」。
 
-    ⚠️ No `end_time`, and that is the whole shape of the difference: a rule does
-       not happen at a moment, it happens repeatedly for a length. `duration` is
-       how long each occasion lasts; `Event.end_time` is worked out from it when
-       an occasion is generated (in absolute time — see
-       `services.generate_occasions`).
+    ⚠️ **整块是搬过来的，不是重写的**（原本长在 `EventSeriesForm` 上）。写下来
+       是因为「抽出去之后悄悄改变了原来那张表单」是最贵的那种重构 ——
+       `PublishFormMixin` 自己的 docstring 为同一件事写过一段。
+       验收方式是那一次提交里 `events/tests.py` 关于系列的断言一条都没改。
+
+    ⚠️ 用它的表单必须有 `rule` / `starts_on` / `start_time` / `duration` 四格。
+       `rule` **故意不在这里声明**：`EventSeriesForm` 的那一格从 `Meta.fields`
+       来（带着模型的 `max_length` 和 `help_text`），而 Django 里**声明字段压过
+       Meta** —— 在这里声明一个 `rule` 会把它悄悄换掉。
     """
 
-    # ⚠️ The same field object as `EventForm`'s, taken rather than retyped:
-    #    the three choices and their wording are one list, and a publisher who
-    #    submits a bad rule comes back to a page where "every week" is still
-    #    the selected option.
-    publish_as = EventForm.base_fields["publish_as"]
+    #: 那一格底下那句话。⚠️ 子类必须给，因为名词不一样（场次／讲）。
+    START_TIME_HELP = ""
 
-    #: ⚠️ `start_time` is on both lists and is **not** the same field: a moment
-    #:    on `EventForm`, a time of day here. Harmless because the two forms are
-    #:    never both built for one request — written down because it reads like
-    #:    a trap.
+    #: 选择器那十三格 —— **这里是它们唯一的名单**（2026-09-17 收的）。
+    #:
+    #: 🔴 用它的两张表单此前各抄了一份，只差 `ProgramForm` 多一个
+    #:    `people_pick_meetings`。而这个 mixin 存在的全部理由就是「这套问法
+    #:    只有一份」—— 名单抄两份等于把它最容易漏的那一半留在外面：
+    #:    加第十格时要改两个元组，漏掉一个的表现正是下面那段说的
+    #:    「多列一个名字那一格消失，少列一个它被画两遍」，而只在一页上发生。
     WHEN_FIELDS = (
         "repeat_mode", "repeat_every", "repeat_weekdays",
         "repeat_ordinals", "repeat_weekday",
@@ -1046,11 +1130,6 @@ class EventSeriesForm(PublishFormMixin, forms.ModelForm):
         "starts_on", "start_time", "duration",
     )
 
-    #: ⭐ True, unlike `EventForm`'s. The picker below is a **block** — which
-    #:    boxes to ask depends on the mode — so it has to be hand-drawn on the
-    #:    rule's own page as well as on the publish page. `EventForm`'s two
-    #:    moments are flat fields and stay flat when editing.
-    WHEN_BLOCK_ON_EDIT = True
 
     # --- the picker (2026-09-11) -------------------------------------------
     #
@@ -1127,15 +1206,24 @@ class EventSeriesForm(PublishFormMixin, forms.ModelForm):
         #    on the two publisher pages without a migration for a sentence.
         #    The admin does not show it, and that is the right audience: this
         #    is advice about the picker, and the admin has no picker.
-        self.fields["start_time"].help_text = (
-            "Every occasion starts at this time, and runs for the same length. "
-            "Tuesdays at 19:00 and Thursdays at 10:00 is two rules, not one."
-        )
+        # ⚠️ 措辞由子类给（`START_TIME_HELP`）：一条规则排的是「每一场」，
+        #    一门课排的是「每一讲」，而这句话是写给正在填那一格的人看的。
+        #    ⚠️ 中间那半句（几点开始 + 开多久 + 多个星期几是两条规则）两边一字
+        #       不差，所以它在这里只有一份 —— 分成两份的话，哪天改了措辞，
+        #       只有其中一页会改。
+        self.fields["start_time"].help_text = self.START_TIME_HELP
         # ⚠️ 模型上那句说明写的是「written hours:minutes:seconds — 2:00:00 for
         #    two hours」，而它描述的是一格**已经不存在**的输入框。三个格子之后
         #    那句话不再需要，留着它比没有更糟 —— 页面上找不到它说的那个东西。
         self.fields["duration"].help_text = ""
-        self._fill_the_picker_from(self.initial.get("rule") or self.instance.rule)
+        # ⚠️ `getattr`，因为 `rule` **只有 `EventSeries` 是一列**（2026-09-16
+        #    抽 mixin 时撞上的）。课那一侧它是表单自己的一格，实例上没有它 ——
+        #    写死 `self.instance.rule` 会在构造 `ProgramForm` 时当场
+        #    `AttributeError`。⚠️ 默认给 `""` 而不是 `None`：下面那句
+        #    `if ... or not rule` 对两者都成立，但空串说的是「没有存着的规则」，
+        #    而 `None` 读起来像「不知道」。
+        self._fill_the_picker_from(
+            self.initial.get("rule") or getattr(self.instance, "rule", ""))
 
     def _fill_the_picker_from(self, rule):
         """Set the picker's controls from an existing rule string.
@@ -1225,7 +1313,7 @@ class EventSeriesForm(PublishFormMixin, forms.ModelForm):
             picker_is_answered = False
 
         if picker_is_answered:
-            cleaned["rule"] = self._rule_for(compose(
+            cleaned["rule"] = self.rule_to_store(compose(
                 mode=mode, every=cleaned.get("repeat_every") or 1,
                 weekdays=cleaned.get("repeat_weekdays") or [],
                 ordinals=cleaned.get("repeat_ordinals") or [],
@@ -1233,8 +1321,217 @@ class EventSeriesForm(PublishFormMixin, forms.ModelForm):
                 count=count, until=until))
         return cleaned
 
-    def _rule_for(self, composed):
+    def rule_to_store(self, composed):
+        """拼好的规则最终写成什么 —— 默认就是它本身。
+
+        ⭐ 这是一个**钩子**，存在的唯一理由是 `EventSeriesForm` 要覆写它：
+           那张表单上 `rule` 是一**列**，而列一变就会撞上
+           `_refuse_rewriting_the_rule()`。一门课没有那一列，所以拼出来的
+           字符串直接就是答案。
+        """
+        return composed
+
+
+class MeetingForm(forms.ModelForm):
+    """手工补一讲 —— Meetings 页上那张小表单。D49。
+
+    ⚠️ **不是下面那个 `SessionForm`**，而两张并存是有意的（2026-09-16 撞了一次
+       重名才写下来）：那一张是 **admin 的门**，带着 `event` 和 `source` 两格，
+       并且在 `save()` 里自己开点名册 —— 因为 `ModelAdmin` 那条路不经过
+       `services.add_session()`。这一张是**站点的门**，它把活儿交给
+       `add_session()`，于是那两格在这里没有位置：
+         · 「哪一门课」由地址决定（`/events/<pk>/meetings/`）——
+           一个能指向别的课的下拉，就是一条要在视图里再判一次权限的路，
+           而那一处判断迟早和页面那一处走散（同 D27 那条不变量）；
+         · 「谁排的」由这条路本身回答：从这一页来的一律是 `MANUAL`。
+
+    ⚠️ 落在学期之外的拒绝**不写在这里**：那是 `Session.clean()` 的规矩
+       （「This run ends on …，所以一讲不能超过它」），而 `_post_clean()` 会
+       原样把它搬到这张表单上。在这里再写一句，就是同一条规则有两种说法。
+    """
+
+    class Meta:
+        model = Session
+        fields = ["start_time", "end_time"]
+        widgets = {
+            "start_time": forms.DateTimeInput(attrs={"type": "datetime-local"}),
+            "end_time": forms.DateTimeInput(attrs={"type": "datetime-local"}),
+        }
+
+
+class ProgramForm(RecurrencePickerMixin, EventForm):
+    """发布一门课 —— 三档里的第二档，2026-09-16 才真的能排时间（D49）。
+
+    🔴 **它和 `EventSeriesForm` 用同一个选择器，产出的东西却完全不同**，
+       而这正是决定 16 那张表的第四格：
+
+         · 一条 series 产出 **N 个互相独立的 `Event`**，每一场各自报名；
+         · 一门课是 **一个 `Event` + N 个 `Session`**，报一次管一学期。
+
+       所以这里**不存 `rule`**：规则在发布那一下展开成一串讲次，之后就没有第二
+       个读者了（不滚动生成、不续排）。存下来就是「这门课什么时候上」有两个
+       答案，而 D14 的整个要点是它只许有一个。
+
+    🔴 **学期的两端不问，从生成出来的第一讲和最后一讲推**（见
+       `services.publish_program()`）。问了就是同一件事有两个来源：有人把结束
+       日期填到最后一讲之前，而 `Session.clean()` 会拒掉最后那几讲 —— 一个
+       「我明明填了 12 次，只排出来 9 次」的页面。
+
+    ⚠️ `start_time` 在这张表单上是一个**时刻**（每讲几点开始），在 `EventForm`
+       上是一个**瞬间**。和 `EventSeriesForm` 撞的是同一个名字、同一个理由：
+       视图读 `publish_as` 只建其中一张，两张永不同时构造。
+    """
+
+    #: ⚠️ 名词跟着页面走：这一页排的是「每一讲」。中间那半句和系列页一字不差，
+    #:    而那一半只写在 `RecurrencePickerMixin` 上（见它的注释）。
+    START_TIME_HELP = (
+        "Every meeting starts at this time, and runs for the same length. "
+        "Tuesdays at 19:00 and Thursdays at 10:00 is two courses, not one."
+    )
+
+    class Meta(EventForm.Meta):
+        #: ⚠️ **减掉那两格**（`start_time` / `end_time`），因为它们是推出来的。
+        #:    从 `EventForm.Meta.fields` 里减，不重抄一份 —— 重抄的话，
+        #:    以后给发布页加一格，只有两张表单里的一张会长出来。
+        fields = [f for f in EventForm.Meta.fields
+                  if f not in {"start_time", "end_time"}]
+        #: ⚠️ 跟着减掉那两个 widget，否则 Django 会为一个不在 `fields` 里的
+        #:    名字准备 `datetime-local`，而这一页的 `start_time` 是时刻。
+        widgets = {k: v for k, v in EventForm.Meta.widgets.items()
+                   if k not in {"start_time", "end_time"}}
+
+    #: 这一块由发布页自己画（`_publish_when.html` 的第三支）。
+    #: ⚠️ 和模板必须逐字对上：多列一个名字那一格**消失**，少列一个它被画
+    #:    **两遍**（后一个空输入覆盖前一个）。`NoFieldIsDrawnTwiceTests` 盯着。
+    #: ⚠️ 只多一个 `people_pick_meetings` —— 「人自己挑来哪几讲」只有课答得上，
+    #:    而选择器那十三格是**组合**来的，不重抄一份。
+    WHEN_FIELDS = RecurrencePickerMixin.WHEN_FIELDS + ("people_pick_meetings",)
+
+    #: ⚠️ `rule` 在这里**是表单自己的一格**，不是列。`RecurrencePickerMixin`
+    #:    故意不声明它（那会把 `EventSeriesForm` 从 `Meta` 来的那一格悄悄换掉），
+    #:    所以两张表单各自提供。
+    rule = forms.CharField(
+        required=False, max_length=SHORT_TEXT,
+        label="Repeat rule",
+        help_text="RRULE syntax, e.g. FREQ=WEEKLY;BYDAY=WE;COUNT=12")
+    starts_on = forms.DateField(
+        widget=forms.DateInput(attrs={"type": "date"}),
+        label="First meeting")
+    #: ⚠️ 覆盖 `EventForm` 那一格（它是 `datetime-local` 的瞬间）。这里只问
+    #:    钟点 —— 哪一天由 `starts_on` 和规则决定。
+    start_time = forms.TimeField(
+        widget=forms.TimeInput(attrs={"type": "time"}),
+        label="Each meeting starts at")
+    #: ⚠️ 走 `DurationBoxes`（时:分:秒三格），连那条「`2` 被 `DurationField`
+    #:    读成两秒」的陷阱一起躲掉 —— 理由整段写在那个 widget 上。
+    duration = forms.DurationField(
+        widget=DurationBoxes, label="Each meeting lasts")
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # 🔴 **「不结束」那一档在课上不存在，而理由是硬的**：`Event.end_time`
+        #    是 `NOT NULL`，而它由**最后一讲**推出来 —— 一条不结束的规则没有
+        #    最后一讲。不是「对课没意义」，是存不下来。
+        # ⚠️ 改 `choices` 而不是另写一个字段：`_recurrence_picker.html` 里那句
+        #    `{% for option in form.ends_kind %}` 因此自动只画两档，模板一个字
+        #    不用改，而伪造一个 `ends_kind=never` 会被 `ChoiceField` 当场拒掉。
+        self.fields["ends_kind"].choices = [
+            (value, label) for value, label in self.fields["ends_kind"].choices
+            if value != "never"]
+
+    def clean(self):
+        """把规则**当场展开一次**，而这一次就是保存要用的那一份。
+
+        🔴 **不许另算第二遍。** 页面上那份预览、这里的校验、和
+           `services.publish_program()` 真正落库的那一串，必须是同一个列表 ——
+           各算一遍的结果是「页面说 12 讲，按下去排了 13 讲」，而两边各自都
+           渲染正常。所以展开的结果留在 `cleaned_data["moments"]` 里交出去。
+
+        ⚠️ 「写规则我自己来」那一档的校验**就是这次展开**。系列那边靠
+           `EventSeries.clean()`（`rule` 在那儿是一列，模型判得了它）；
+           课没有那张表，所以这里是它唯一的把关处。
+        """
+        cleaned = super().clean()
+        rule = cleaned.get("rule")
+        starts_on = cleaned.get("starts_on")
+        start_time = cleaned.get("start_time")
+        # ⚠️ 三格缺一就不展开，而**不报第二遍错**：缺的那一格自己已经说了
+        #    「这一格是必填的」，在这里再说一句是同一件事的两种说法。
+        if not (rule and starts_on and start_time):
+            return cleaned
+        try:
+            moments = occasions(rule, starts_on=starts_on, start_time=start_time,
+                                limit=BATCH_CEILING + 1)
+        except (ValidationError, ValueError) as complaint:
+            # ⚠️ 落在 `rule` 上：那是唯一可能写错的那一格（选择器拼出来的
+            #    字符串走不到这里 —— 它拼得出来就一定展得开）。
+            self.add_error("rule", f"That rule cannot be read: {complaint}")
+            return cleaned
+        if not moments:
+            self.add_error("rule", "That rule does not fall on any date.")
+            return cleaned
+        if len(moments) > BATCH_CEILING:
+            # ⚠️ 措辞照 `services.generate_occasions()` 那一句，因为它拦的是
+            #    同一件事的同一个上限。
+            self.add_error("ends_after", (
+                f"That is more than {BATCH_CEILING} meetings. Nothing was "
+                "scheduled — shorten the course and try again."))
+            return cleaned
+        cleaned["moments"] = moments
+        return cleaned
+
+
+class EventSeriesForm(RecurrencePickerMixin, PublishFormMixin, forms.ModelForm):
+    """Publish a repeat rule — the third of the three shapes. L5.8a.
+
+    ⭐ The same screen as `EventForm` and deliberately so (decision 32): a
+       publisher answers one question — "what am I putting on?" — and there are
+       three answers. Ten of the eleven things this asks are identical to the
+       other two shapes and come from `PublishFormMixin`; only the block below
+       differs, because only *when* differs.
+
+    ⚠️ The two forms are never both constructed for one request. The view reads
+       `publish_as` and builds one of them from the same POST, so `start_time`
+       meaning a `datetime` on one and a `time` on the other cannot collide —
+       said out loud because it reads like a trap.
+
+    ⚠️ No `end_time`, and that is the whole shape of the difference: a rule does
+       not happen at a moment, it happens repeatedly for a length. `duration` is
+       how long each occasion lasts; `Event.end_time` is worked out from it when
+       an occasion is generated (in absolute time — see
+       `services.generate_occasions`).
+    """
+
+    # ⚠️ The same field object as `EventForm`'s, taken rather than retyped:
+    #    the three choices and their wording are one list, and a publisher who
+    #    submits a bad rule comes back to a page where "every week" is still
+    #    the selected option.
+    publish_as = EventForm.base_fields["publish_as"]
+
+    #: ⚠️ 逐字保留 2026-09-11 那句 —— 一条规则排的是「每一场」。
+    START_TIME_HELP = (
+        "Every occasion starts at this time, and runs for the same length. "
+        "Tuesdays at 19:00 and Thursdays at 10:00 is two rules, not one."
+    )
+
+    #: ⚠️ `start_time` is on both lists and is **not** the same field: a moment
+    #:    on `EventForm`, a time of day here. Harmless because the two forms are
+    #:    never both built for one request — written down because it reads like
+    #:    a trap.
+
+    #: ⭐ True, unlike `EventForm`'s. The picker below is a **block** — which
+    #:    boxes to ask depends on the mode — so it has to be hand-drawn on the
+    #:    rule's own page as well as on the publish page. `EventForm`'s two
+    #:    moments are flat fields and stay flat when editing.
+    WHEN_BLOCK_ON_EDIT = True
+
+
+    def rule_to_store(self, composed):
         """The composed rule — or the stored one, when they mean the same thing.
+
+        ⚠️ 2026-09-16 起这是 `RecurrencePickerMixin.rule_to_store()` 的覆写
+           （原名 `_rule_for`）。**只有这张表单需要它**，理由就是下面这一段：
+           `rule` 在这里是一**列**。
 
         🔴 **Without this, opening a series and saving anything at all can lock
            the publisher out of it.** `compose()` writes one canonical spelling,
@@ -1398,18 +1695,38 @@ class EventPeriodForm(forms.Form):
     #    somebody picks a ministry and watches it vanish from the dropdown it
     #    was just chosen from — the options would then depend on the filter
     #    they are part of.
-    ministry = forms.ModelChoiceField(
+    # 🔴 **多选**（2026-09-15，用户定的）。「食物银行**和**报税援助」是一个真实
+    #    的筛选，而单选说不出它 —— 同 `Audience` 那三个勾当初不做成一个三值枚举
+    #    的理由（「那一句是一个 enum 说不出来的」）。
+    #
+    # ⚠️ **只有浏览那两页多选**（`/events/`、`/programs/`），管理列表和报表页
+    #    仍然是单选 —— 见 `__init__` 的 `multi_ministry`。
+    #
+    # ⚠️ `ModelMultipleChoiceField` 交回来的是一个 **queryset**，不是一个对象。
+    #    `description()` 和 `narrow()` 各自为此分了支，两处都写了理由。
+    ministry = forms.ModelMultipleChoiceField(
         queryset=Ministry.objects.filter(is_active=True).order_by("name"),
-        # ⚠️ 空选项从「All ministries」改成「Ministry」（2026-09-15，跟着新版式）。
-        #    **代价如实说**：原来那句说的是「当前没筛」，新的说的是「这一格管什么」。
-        #    可接受，是因为「筛了什么」现在由底下那行 `Filtered by …` 承担 ——
-        #    在此之前没有那一行，所以那时选「All ministries」是唯一说得出状态的地方。
-        required=False, label="Ministry", empty_label="Ministry",
+        widget=forms.CheckboxSelectMultiple,
+        # ⚠️ 多选这一档**没有 `empty_label`** —— `ModelMultipleChoiceField` 不收它
+        #    （多选里没有「空选项」这回事，一个都不勾就是没筛）。
+        #    那句「这一格管什么」由收起时按钮上的字承担，见 `ministry_label`。
+        #    ⚠️ 单选那一档的 `empty_label="Ministry"` 在 `__init__` 里重建时给，
+        #       连同它当初那条改口的理由：原来写的是「All ministries」（说的是
+        #       「当前没筛」），改成「Ministry」（说的是「这一格管什么」），
+        #       而「筛了什么」由底下那行 `Filtered by …` 承担。
+        required=False, label="Ministry",
     )
 
     def __init__(self, *args, ministries=None, audience=NO_AUDIENCE,
-                 noun="event", **kwargs):
+                 noun="event", multi_ministry=False, by_shape=False, **kwargs):
         """`ministries` narrows the dropdown to a scope the page already has.
+
+        `by_shape` (2026-09-16) 决定这张表单**有没有**「活动还是课」那一格。
+        和 `audience` 同一条写法、同一条理由：不传的页面上根本没有这个字段，
+        于是一个伪造的 `?kind=programs` **什么都不筛**，而不是筛掉一半、
+        屏幕上却没有任何控件说明为什么。
+        ⚠️ 只有管理列表传它。浏览那两页（`/events/` `/programs/`）是**互斥**的
+           —— 那里「哪一种」由地址本身回答，再给一格只会问一个已经答过的问题。
 
         `audience` (2026-09-08) is the person the "kind of role" box is judged
         for. Passing it is what **creates** that box: pages that do not pass it
@@ -1441,6 +1758,34 @@ class EventPeriodForm(forms.Form):
             f"Search {noun}s or locations")
         if ministries is not None:
             self.fields["ministry"].queryset = ministries
+        # 🔴 **单选那一档换回 `ModelChoiceField`**（2026-09-15）。
+        #    多选只给浏览那两页；管理列表和报表页仍然是单选，因为 `description()`
+        #    —— 那句印在**报表正文**上、被人当口径读的话 —— 说的是「一个
+        #    ministry」，而让它说得出 N 个名字是另一件事（用户当时判的「只改浏览
+        #    列表」）。
+        #
+        #    ⚠️ **字段名一个字没改**（仍然是 `ministry`），所以
+        #       `test_the_filter_names_are_declared_once` 那条守卫照旧成立 ——
+        #       `FILTER_PARAMS` 和 `LIST_STATE` 都不用动。
+        if not multi_ministry:
+            self.fields["ministry"] = forms.ModelChoiceField(
+                queryset=self.fields["ministry"].queryset,
+                required=False, label="Ministry", empty_label="Ministry")
+        self._multi_ministry = multi_ministry
+        self._by_shape = by_shape
+        if by_shape:
+            # ⚠️ 空选项说的是**这一格管什么**（"Kind"），不是「当前没筛」——
+            #    逐字照旁边 `ministry` 的 `empty_label="Ministry"` 和 `nature`
+            #    那一格 2026-09-15 的改口。一条式的版式里标签是 `sr-only`，
+            #    所以框里那个词是看得见的人唯一读得到的说明。
+            #
+            # 🔴 **画成原生 `<select>`（走 `_filter_select.html`），不是 Role 那种
+            #    弹层。** 判据写在 `_role_filter.html` 顶上：「选项需不需要一句
+            #    解释」。Events / Programs 已经是全站主导航上那两格的名字、
+            #    在那里也不带解释 —— 再在这里补一句，就是同一对词有两套说法。
+            self.fields["kind"] = forms.ChoiceField(
+                required=False, label="Kind",
+                choices=[("", "Kind"), *SHAPE_KINDS])
         self._audience = audience
         if audience is not NO_AUDIENCE:
             # L1's axis, finally askable (2026-09-08). Until now `nature` was
@@ -1501,7 +1846,17 @@ class EventPeriodForm(forms.Form):
         #    kind of thing am I looking at", and the dates answer "when". A name
         #    absent from the list is simply left where it was declared, so this
         #    stays correct on the pages that have no `nature` field at all.
-        self.order_fields(["q", "ministry", "nature", "start", "end"])
+        self.order_fields(["q", "ministry", "kind", "nature", "start", "end"])
+
+    @property
+    def by_shape(self):
+        """这张表单被要求问「活动还是课」了吗。
+
+        ⚠️ 模板问**这个**，不问 `{% if period.kind %}` —— 逐字同下面那条：
+           缺字段时 `Form.__getitem__` 抛的 `KeyError` 会被模板引擎吞掉变成
+           空串，于是那是一条失败路径在冒充一个问句。
+        """
+        return self._by_shape
 
     @property
     def by_role_kind(self):
@@ -1539,6 +1894,70 @@ class EventPeriodForm(forms.Form):
             day_start(start) if start else None,
             day_start(end + datetime.timedelta(days=1)) if end else None,
         )
+
+    @property
+    def by_many_ministries(self):
+        """这一格是不是多选的 —— 模板问这个，决定画哪一份。
+
+        ⚠️ 模板问**这个**，不是 `{% if period.multi_ministry %}` 之类 ——
+           同 `by_role_kind` 那一条：一个不存在的属性在模板里会被吞掉变成空串，
+           那是一条失败路径冒充一个问题。
+        """
+        return self._multi_ministry
+
+    @cached_property
+    def ministry_options(self):
+        """Ministry 那一格展开时的每一行：`(值, 名字, 选没选中)`。
+
+        ⚠️ **`cached_property`，而这不是微优化**（2026-09-17 量出来的）：
+           `field.choices` 是一个 `ModelChoiceIterator`，**每迭代一次就重查一次
+           `Ministry`**。而这一份有两个读者 —— `ministry_label` 一个、
+           `_ministry_filter.html` 里那个 for 循环一个 ——
+           于是 `/events/` 和 `/programs/`（以及它们每一次 HTMX 筛选片段）
+           上有两条**一模一样**的 `SELECT … FROM org_ministry`。
+           ⚠️ 缓存的作用域是**一张表单实例**，也就是一次请求，所以没有失效问题。
+
+        🔴 **从字段派生，不自己拼**（同 `nature_options`，而那一条的注释写着
+           不这么做会怎样）：显示那份和把关那份分家之后，人选了一个菜单里明明
+           画着的选项 → 校验判它无效 → 筛选什么都没筛 → 列出**全部** ——
+           **全程没有任何报错**。
+           守卫：`MinistryFilterTests.test_the_options_come_from_the_field`。
+
+        ⚠️ 选中与否也在这里算：模板里判 `{% if value in period.ministry.value %}`
+           要靠字符串和整数的隐式比较，而那件事在 Django 模板里既看不出来也测不了。
+        """
+        field = self.fields.get("ministry")
+        if field is None or not self._multi_ministry:
+            return []
+        chosen = {str(v) for v in (self.data.getlist("ministry")
+                                   if hasattr(self.data, "getlist") else [])}
+        return [(value, label, str(value) in chosen)
+                for value, label in field.choices]
+
+    @property
+    def ministry_label(self):
+        """收起时那一格上写的字：`Ministry` / `Food Pantry` / `Food Pantry +1`。
+
+        ⚠️ 用户 2026-09-15 定的三种形态。和 `nature_label` 同一条规矩：选了就
+           显示那个词，没选就是字段自己的标签 —— 收起状态下也看得出筛着什么。
+
+        ⚠️ 和 `ministry_options` **同一个来源**（那个 property）：在此之前
+           `nature_label` 和 `nature_options` 各推一遍，而改措辞时只改一处的表现是
+           「收起时按钮上的词和展开后第一行的词对不上」。
+        """
+        field = self.fields.get("ministry")
+        if field is None:
+            return ""
+        if not self._multi_ministry:
+            chosen = self.cleaned_data.get("ministry") if self.is_valid() else None
+            return chosen.name if chosen else field.label
+        picked = [label for _value, label, is_on in self.ministry_options if is_on]
+        if not picked:
+            return field.label
+        # ⚠️ 「第一个名字 +N」而不是「2 ministries」（用户定的）：一个数字说不出
+        #    是哪几个，而这一条筛选栏上一个多余的年份就能把那一格挤宽 ——
+        #    所以只带第一个名字。
+        return picked[0] if len(picked) == 1 else f"{picked[0]} +{len(picked) - 1}"
 
     @property
     def nature_options(self):
@@ -1618,6 +2037,8 @@ class EventPeriodForm(forms.Form):
             named.append("ministry")
         if self.cleaned_data.get("nature"):
             named.append("role")
+        if self.cleaned_data.get("kind"):
+            named.append("kind")
         if self.cleaned_data.get("start") or self.cleaned_data.get("end"):
             named.append("dates")
         # ⚠️ `get_text_list` 而不是 `", ".join` —— 它给的是「a, b and c」，
@@ -1657,7 +2078,15 @@ class EventPeriodForm(forms.Form):
             return "All ministries · all dates"
         ministry = self.cleaned_data.get("ministry")
         start, end = self.cleaned_data.get("start"), self.cleaned_data.get("end")
-        who = ministry.name if ministry else "All ministries"
+        # ⚠️ 单选那一档**一个字没动** —— 这句话印在报表正文上，被人当口径读。
+        #    多选那一档今天没有读者（报表页是单选），写在这里是因为
+        #    `ministry` 在那一档是 queryset，而 `.name` 会当场 `AttributeError`。
+        if not ministry:
+            who = "All ministries"
+        elif self._multi_ministry:
+            who = get_text_list([m.name for m in ministry], "and")
+        else:
+            who = ministry.name
         if start and end:
             when = f"{start:%d %b %Y} – {end:%d %b %Y}"
         elif start:
@@ -1699,8 +2128,28 @@ class EventPeriodForm(forms.Form):
         if end is not None:
             events = events.filter(start_time__lt=end)
         ministry = self.cleaned_data.get("ministry") if self.is_valid() else None
-        if ministry is not None:
-            events = events.filter(ministry=ministry)
+        if ministry:
+            # ⚠️ 多选那一档交回来的是 queryset，单选是一个对象 —— 两种都在这里
+            #    落地，而**不是**在调用方分支：`narrow()` 是全项目唯一落筛选的
+            #    地方，分支挪出去就变成两份。
+            # ⚠️ `ministry__in` 对一个 FK **不会**造成 join 重复行（不同于受众那个
+            #    M2M —— `for_audience()` 专门用 `Exists` 躲的正是那件事）。
+            events = events.filter(
+                ministry__in=ministry if self._multi_ministry else [ministry])
+        kind = self.cleaned_data.get("kind") if self.is_valid() else ""
+        if kind:
+            # 🔴 **用 `EventQuerySet` 上现成的两个谓词，不在这里重写判据。**
+            #    `views._of_shape()`（决定 45，那两张互斥的浏览页）调的是同一对
+            #    方法，而它自己的注释写着「用的是 `EventQuerySet` 上那两个谓词
+            #    （models.py），不是在这里重写判据」。两个调用方，一份判据 ——
+            #    各写一遍 `filter(shape=…)` 的表现是同一门课在浏览页上是课、
+            #    在管理列表上不是。
+            #
+            # ⚠️ 这里**不**收 `_of_shape()` 当函数用：那个函数是二选一，没有
+            #    「两种都要」这一档，而这一格的默认就是那一档。把第三档加进它
+            #    会让那两页多出一个它们不许有的状态。
+            events = (events.programs() if kind == "programs"
+                      else events.single_occasions())
         search = (self.cleaned_data.get("q") or "").strip() if self.is_valid() else ""
         if search:
             # ⚠️ `.strip()` above, and it matters more than it looks: a trailing
@@ -2094,3 +2543,31 @@ class SessionForm(forms.ModelForm):
 
         self.save_m2m = save_m2m
         return session
+
+
+class EventGrantForm(forms.Form):
+    """把这一场活动交给某个人管。D47。
+
+    A plain Form，不是 ModelForm：`granted_by` 从 session 来、`event` 从地址栏来，
+    两个都不许是表单上的格子 —— 一个能填的格子就是一个能撒谎的格子
+    （同 `org.forms.GrantForm`）。
+
+    🔴 **只列有登录账号的人**（用户 2026-09-15 定的）。授权一个登不进来的人，
+       那一行是死的 —— 而页面上没有任何东西会说它是死的。
+       ⚠️ 账号就是邮箱（D12/D30），所以「没有邮箱的人」天然不在这张名单里。
+    """
+
+    contact = forms.ModelChoiceField(queryset=None, label="Who")
+    start_date = forms.DateField(
+        required=False, label="Starting on",
+        widget=forms.DateInput(attrs={"type": "date"}))
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields["contact"].queryset = Contact.objects.filter(
+            is_active=True,
+            contact_type=Contact.ContactType.INDIVIDUAL,
+            # ⚠️ `user` 是 `accounts.User.contact` 的反向名（OneToOne），
+            #    所以这一句读作「有账号的人」。
+            user__isnull=False,
+        ).order_by("legal_last_name", "legal_first_name")

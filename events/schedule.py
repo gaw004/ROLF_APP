@@ -125,6 +125,17 @@ class Occurrence:
        course); this one asks what to draw, and an event with meetings is drawn
        as its meetings whatever it is called.
 
+    🔴 **2026-09-17 补一句，因为上面那条只覆盖了一半。** 「有讲次的按讲次画」
+       没问题；而**没有讲次**的那一半，「画什么」在两种形状上是两个答案：
+       一场单场活动就是它自己的两端，一门课则是**什么都不知道** ——
+       它的两端是招生时说的学期，不是它开会的时刻。
+       ⚠️ 分辨这两种，`shape` 是唯一的依据 —— 「没有讲次」本身答不上来。
+          所以 `occurrences()` 现在**确实读那一列**，而上面那句「not on what
+          the event calls itself」仅对「有讲次」那一半成立。
+       ⚠️ 不这么分的后果是具体的，三处一起：排课表画出一行编号 `None`、
+          横跨整学期、删不掉的幽灵；日程画出一条整学期的横条；冲突检测把
+          四月里每一场活动都报成和这门课撞车。
+
     ⚠️ `ordinal` is worked out from the run's own order, never stored — the
        meetings already know their sequence (Session.Meta.ordering), so a column
        holding "this is the seventh" would be a second truth free to disagree
@@ -136,6 +147,35 @@ class Occurrence:
     start_time: object
     end_time: object
     ordinal: int | None = None      # "Session 7"; None on a single occasion
+    #: ⚠️ 那一讲本身，`None` 表示这是一场单场活动（没有 `Session` 行）。
+    #:    2026-09-16 加，给 Meetings 页用 —— 它每一行要一颗「去掉这一讲」的键，
+    #:    而那需要主键。
+    #: 🔴 **加在这里，而不是让那一页自己 `enumerate(event.sessions.all(), 1)`。**
+    #:    上面那段写着序号「never stored」正是因为它只许有一个算法：另数一遍
+    #:    的表现是同一讲在报名页上是「Session 7」、在排课页上是「第 6 讲」，
+    #:    而两页各自都渲染正常。
+    session: object | None = None
+
+    @property
+    def starts_at(self):
+        """开始时刻，站里统一的写法（`7pm` / `10:15am`）。2026-09-16。
+
+        🔴 **走 `clock()`，而这正是它存在的理由。** 模板里一句
+           `date:"g:ia"` 给的是 `7:00p.m.`，而管理列表和日程写的是 `7pm` ——
+           这个模块顶上那段说得很直白：「同一场活动在两处写着不一样的时间，
+           是最廉价的一种不可信」。放在这里而不是某一页的视图里，是因为下一个
+           要画讲次的页面也会需要它。
+
+        ⚠️ `localtime()` 不能省（D16）：库里存的是 UTC，直接格式化会把基金会的
+           晚上七点写成访客时区的某个别的时刻，而没有任何东西会报错。
+        """
+        return clock(localtime(self.start_time))
+
+    @property
+    def ends_at(self):
+        """结束时刻，同上。"""
+        return clock(localtime(self.end_time))
+
 
 
 def occurrences(events):
@@ -150,11 +190,37 @@ def occurrences(events):
     for event in events:
         meetings = list(event.sessions.all())
         if not meetings:
+            # 🔴 **一门还没排讲次的课占不住任何「已知」的时间**（2026-09-17）。
+            #    下面那个退路 —— 把活动的两端当成它占的那一段 —— **是给单场活动
+            #    的**：一场活动的两端就是它本身。套在一门课上，那两端是它
+            #    **招生时说的**学期，不是它开会的时刻，于是它变成一条横跨三个月
+            #    的东西。
+            #
+            #    ⚠️ 这条判断 2026-09-16 一度写在调用方（`services._spots()`），
+            #       而那只挡住了冲突检测那一条路。另外两个消费者照旧拿到那一段：
+            #         · 排课表（`views.event_meetings`）画出一行编号是 `None`、
+            #           横跨整学期、而且**删不掉**的幽灵讲次 —— 顺带让那一页的
+            #           空状态永远画不出来；
+            #         · 日程（下面 `columns()` 那条路）画出一条整学期的横条，
+            #           也就是 D23 那段注释说「彻底没有了入口」的那个 bug。
+            #       判断挪进来之后三处一起对。
+            #
+            #    ⚠️ 单场活动**走不到**这一支的另一半：`Session.clean()` 只许
+            #       课有讲次，所以一场单场活动永远 `not meetings` —— 它照旧
+            #       落到下面那一行，一个字没变。
+            # ⚠️ 延迟 import：`events/models.py` 自己也是这么反过来引这个模块的
+            #    （那一处在 `Event.when_line` 里）。顶层引会成环，而这一支每次
+            #    调用只多一次模块字典查找。
+            from .models import Event
+
+            if event.shape == Event.Shape.PROGRAM:
+                continue
             found.append(Occurrence(event, event.start_time, event.end_time))
             continue
         for number, meeting in enumerate(meetings, 1):
             found.append(
-                Occurrence(event, meeting.start_time, meeting.end_time, number))
+                Occurrence(event, meeting.start_time, meeting.end_time, number,
+                           session=meeting))
     return found
 
 

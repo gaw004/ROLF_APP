@@ -28,6 +28,7 @@ import re
 from django.contrib import messages
 from django.contrib.auth.decorators import login_required
 from django.core.exceptions import PermissionDenied, ValidationError
+from django.db import models
 from django.db.models import Prefetch
 from django.http import Http404, HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
@@ -40,16 +41,20 @@ from django_ratelimit.decorators import ratelimit
 
 
 from core.context_processors import manage_list_name
+from core.http import posted_pk
 from core.pagination import page_holding, page_of
 from core.timeutils import local_date_of
 from org.models import Ministry
 from org.permissions import (
     SCOPED_DENIAL,
     in_foundation_tier,
-    administers_one_of,
+    can_grant_event_admin,
     can_manage_event,
+    can_revoke_event_grant,
+    event_ids_granted_to,
     can_manage_series,
     can_publish_event,
+    can_reach_publish_page,
     event_access,
     ministry_ids_administered_by,
 )
@@ -57,6 +62,7 @@ from org.permissions import (
 from . import ics, schedule, tokens
 from .recurrence import has_an_ending
 from .forms import (
+    SHAPE_KINDS,
     SHARED_PUBLISH_FIELDS,
     WHEN_ANSWERS,
     FILTER_PARAMS,
@@ -66,6 +72,9 @@ from .forms import (
     EventRoleForm,
     EventSeriesForm,
     EventSeriesRoleForm,
+    EventGrantForm,
+    MeetingForm,
+    ProgramForm,
     EventStatusForm,
     HoursForm,
     NotifyForm,
@@ -81,6 +90,7 @@ from .models import (
     EventSeriesRole,
     Participation,
     Session,
+    Source,
     askable_served_as,
 )
 from .tokens import (
@@ -94,6 +104,9 @@ from .tokens import (
 )
 from .services import (
     SPLITTABLE_FIELDS,
+    add_session,
+    publish_program,
+    remove_session,
     generated_through,
     is_running_low,
     resumes_on_after_split,
@@ -119,6 +132,13 @@ from .services import (
     clear_hours,
     calendar_occasions,
     confirm_signup,
+    conflicts_among,
+    event_grants,
+    find_event_grant,
+    grant_event_admin,
+    revoke_event_grant,
+    tell_them_they_can_manage,
+    conflicts_for,
     course_progress,
     default_message,
     event_summary,
@@ -217,15 +237,23 @@ def _list_state(request, page=None, panel=None):
        的链接就少一截，人从它进整页详情再返回，面板是关着的 —— 也就是这一整批
        要修的那件事，在最主要的那条路上原样复发。
     """
-    values = {key: request.GET[key] for key in LIST_STATE
-              if request.GET.get(key, "").strip()}
+    # 🔴 **`getlist`，不是 `request.GET[key]`**（2026-09-15，Ministry 改多选时）。
+    #    字典推导每个键只取得到**最后一个**值，于是 `?ministry=3&ministry=7`
+    #    带回来只剩一个 —— 症状正是这个函数下面那几段警告的那种：那一格点进活动
+    #    再返回时自己少了几个，而**页面看起来完全正常**。
+    values = {key: [v for v in request.GET.getlist(key) if v.strip()]
+              for key in LIST_STATE}
+    values = {key: picked for key, picked in values.items() if picked}
     if page is not None:
         values.pop("page", None)
         if page.number > 1:
-            values["page"] = str(page.number)
+            values["page"] = [str(page.number)]
     if panel is not None:
-        values["panel"] = str(panel)
-    return f"?{urlencode(values)}" if values else ""
+        values["panel"] = [str(panel)]
+    # ⚠️ `doseq=True` 配上面那个 `getlist` —— 少了它，一个列表会被拼成
+    #    `ministry=%5B%273%27%5D`（那串是 `['3']` 的百分号编码），而它**不报错**：
+    #    表单收到一个看不懂的值，按「没筛」处理。
+    return f"?{urlencode(values, doseq=True)}" if values else ""
 
 
 def _back_link(request, event=None):
@@ -371,7 +399,13 @@ def _volunteer_period(request, noun="event"):
        一串参数。
     """
     return EventPeriodForm(request.GET or None, audience=_my_contact(request),
-                           noun=noun)
+                           noun=noun,
+                           # ⚠️ **只有这三页多选**（2026-09-15，用户定的）。
+                           #    管理列表和报表页不走这个构造器（见上面那段），
+                           #    所以它们自动留在单选 —— 而那是有意的：
+                           #    `description()` 那句印在报表正文上的话说的是
+                           #    「一个 ministry」。
+                           multi_ministry=True)
 
 
 # --- B9: the volunteer's own pages --------------------------------------
@@ -1260,6 +1294,18 @@ def event_signup(request, pk):
         request, "events/event_signup.html", "events/_schedule_signup.html"), {
         "event": event, "form": form, "needs_consent": form.needs_consent,
         "in_panel": in_panel,
+        # ⚠️ D39 第 ④ 类。**只在这条渲染路径上算** —— POST 成功那一支换回的是
+        #    活动详情（走 `_detail()`），那时他已经报完了，一个撞车提示在那里
+        #    只会读成「你刚才做错了」。
+        # ⚠️ 算在服务层，视图不碰时间 —— `ViewsAreThinGuardTests` 盯着这件事。
+        #    🔴 **别在这条注释里把它找的那几个名字写出来**：那条守卫扫全项目
+        #       **包括注释**，写出来它当场就红。今天第二次了（另一次在
+        #       `core/tests.py` 那条新守卫自己的注释里），而 `core/tests.py`
+        #       开头那条规矩数到第六次。
+        "clashes": conflicts_for(contact, event),
+        # ⚠️ 措辞在这里给，不在片段里写死：同一个片段 My Signups 也要用，
+        #    而那边说的是「这一条」，这边说的是「你要报的这一场」。
+        "clash_lead": "This clashes with something you are already down for",
         # ⚠️ 手搭的上下文，所以这一份要单独补 —— 这一次 render 不走 `_detail()`。
         #    少了它，面板里报名表单右下角那颗圆球会通向一个**丢掉筛选**的整页，
         #    而同一块面板上的详情那颗不会。两颗球两种行为，正是这一格要防的。
@@ -1273,13 +1319,21 @@ def event_signup(request, pk):
 
 #: My Signups 那一排筛选（2026-09-14，决定 50）。两页共用。
 #:
-#: ⚠️ 值进查询串（`?kind=`），而**不进 `FILTER_PARAMS`**：那个常量是活动列表页
-#:    那张筛选卡的名单，`LIST_STATE` 从它来。混进去的话，管理列表页会长出一个
-#:    它根本没有的控件 —— `_open_panel()` 的 docstring 记着同一个坑。
+#: 🔴 **两种形状怎么称呼，从 `forms.SHAPE_KINDS` 来，这里不敲第二遍**
+#:    （2026-09-16）。管理列表那一格问的是同一个问题，而两份各写的后果是同一门课
+#:    在两页上叫不同的名字 —— 每处都渲染正常，只有把两页并排才看得见。
+#:
+#: ⚠️ **2026-09-16 改口的半句。** 这里原本写着「值进查询串而**不进
+#:    `FILTER_PARAMS`**：混进去的话，管理列表页会长出一个它根本没有的控件」。
+#:    管理列表现在**有**那个控件了（用户当天提的），所以那句话的前提没了 ——
+#:    `kind` 已经在 `FILTER_PARAMS` 里，跟着 `LIST_STATE` 走。
+#:    ⚠️ 两页的**「不筛」那一档仍然是两个东西**，而那才是这条注释真正该守的：
+#:       这里是一个哨兵值 `all`（三颗按钮必有一颗按下去），那边是空串（和
+#:       `ministry` / `nature` 一样「没填就是没筛」）。所以 `all` 那一行留在
+#:       这里，没有搬进 `SHAPE_KINDS`。
 SIGNUP_KINDS = (
     ("all", "All"),
-    ("events", "Events"),
-    ("programs", "Programs"),
+    *SHAPE_KINDS,
 )
 
 #: 两页各自的标题和地址，同 `LIST_PAGES` 的写法。
@@ -1336,12 +1390,26 @@ def _signups(request, *, past):
     #    少了这个 prefetch 就是**每张卡一次查询**。⚠️ 同一个坑本轮已经在
     #    `_visible_events()` 上踩过一次（2026-09-14 同日），两处的表现一样：
     #    页面一个字不差，只是慢。钉住它的两条测试都数两次查询再比较。
-    ).prefetch_related("event_role__event__sessions")
+    ).prefetch_related(
+        "event_role__event__sessions",
+        # 🔴 **撞车检测要读「他报了哪几讲」**（`services._busy_windows()`），
+        #    而少了这一个就是**每门课一次查询** —— 而它只是慢，不报错。
+        #    `test_more_courses_do_not_cost_more_queries` 当场抓到了它
+        #    （四门课比一门多 6 次）；上一个漏掉的 prefetch 是同一页上的
+        #    `sessions`，2026-09-14，表现一模一样。
+        "attendances",
+    )
 
     courses, occasions = [], []
     for row in rows:
         (courses if row.event_role.event.shape == Event.Shape.PROGRAM
          else occasions).append(row)
+    # ⚠️ D39 第 ④ 类。一次查完，和行数无关 —— 逐行去问是每行一次查询
+    #    （同 `course_progress()` 那一条，形状也是照它写的）。
+    # ⚠️ **只在未来那一页算**：历史页上「你这两场撞了」是一句已经无法处理的话，
+    #    而它还会把那一页每一行都点亮。`rows` 在上面已经按 past/upcoming 分过了，
+    #    所以这里只要一个条件。
+    clashes = {} if past else conflicts_among(rows)
     # ⚠️ 点名册一次查完，和课的张数无关 —— 逐张卡去问是每张一次查询。
     progress = course_progress(courses) if courses else {}
 
@@ -1371,9 +1439,12 @@ def _signups(request, *, past):
         "page_tabs": _page_tabs(
             [(name, label, reverse(name)) for label, name in SIGNUP_PAGES],
             here[1]),
-        "courses": [(row, progress.get(row.pk)) for row in courses]
-                   if kind in ("all", "programs") else [],
-        "occasions": occasions if kind in ("all", "events") else [],
+        # ⚠️ zip 进去而不是挂在 row 上：`course_progress` 那一份就是这么交的，
+        #    而两种交法并存会让下一个人猜某一行的额外数据在哪。
+        "courses": [(row, progress.get(row.pk), clashes.get(row.pk))
+                    for row in courses] if kind in ("all", "programs") else [],
+        "occasions": [(row, clashes.get(row.pk)) for row in occasions]
+                     if kind in ("all", "events") else [],
         # 🔴 **签到和工时两列画不画，问的是「有没有东西可画」，不是「这是哪一页」。**
         #    第一版按 `is_past` 分，而签到**发生在活动进行中** —— 而进行中的活动
         #    按 `end_time` 算还在「未来」那一页上。于是那两列恰好在它们被填上的
@@ -1718,6 +1789,14 @@ def _scoped_events(request):
        *change* is decided per row (see `event_manage_list`). The mode switch
        had nothing left to do and went with it.
 
+       🔴 **那句引文的后半句 2026-09-16 被用户自己改口了**（D48）：
+          「只有 Food Pantry 他可以改」不再成立 —— 他改得了全部。
+          ⚠️ **前半句才是这一段真正在记的事，而它一个字没变**：
+             这一页不再有两种模式，它列全部，而不是靠 `?scope=all` 切换。
+             那次合并买到的东西（一条代码路径、报表不会宽过它画在的那一页）
+             和「谁能改」无关，所以 9-16 那次改口没有动它。
+          ⚠️ 引文原样留着，不改写成新结论 —— 它是当时说过的话。改口写在这里。
+
        ⭐ Notices has worked this way since it was written — `_mine_to_manage()`
           hands the foundation tier `Notice.objects.all()`. Events was the last
           place in the project with two modes.
@@ -1736,19 +1815,31 @@ def _scoped_events(request):
     """
     administered = ministry_ids_administered_by(request.user)
     foundation = in_foundation_tier(request.user)
-    if not administered and not foundation:
+    # 🔴 **第三支，而没有它这个功能是半个**（D47，2026-09-15）。
+    #    在此之前这里对「没有 MinistryRole 又不在 foundation tier」的人直接拒绝
+    #    —— 于是一个被指名管理某一场活动的人**走不到任何页面**：权限对、页面在、
+    #    没有任何东西指向它。而那正是 `phase-d.md` 第四节点名三次、
+    #    `core/context_processors.py` 开头列了五个的同一种缺口。
+    granted = event_ids_granted_to(request.user)
+    if not administered and not foundation and not granted:
         raise PermissionDenied(SCOPED_DENIAL)
 
-    events = Event.objects.all() if foundation else Event.objects.filter(
-        ministry_id__in=administered)
+    if foundation:
+        events = Event.objects.all()
+    else:
+        # ⚠️ `|` 而不是两次查询再拼：被授权人的那几场和他自己 ministry 的那些
+        #    可能重叠（他既是 admin 又被别的 ministry 授权），而拼起来会重复。
+        events = Event.objects.filter(
+            models.Q(ministry_id__in=administered) | models.Q(pk__in=granted))
     return (
         events.select_related("ministry").order_by("-start_time"),
         administered,
         foundation,
+        granted,
     )
 
 
-def _offered_ministries(administered, showing_all=False):
+def _offered_ministries(administered, *, showing_all, granted):
     """What the filter's dropdown may offer this account.
 
     ⚠️ Interface, not a permission — the queryset is already narrowed. What this
@@ -1763,10 +1854,25 @@ def _offered_ministries(administered, showing_all=False):
        caught it. The symptom would be a filter that silently omits ministries
        whose events are right there on the page.
     """
-    if showing_all or not administered:
+    if showing_all:
+        return None
+    # 🔴 **被授权人那一档**（2026-09-15 补，而这是 D47 落地时留下的回归）。
+    #    在此之前这里是 `if showing_all or not administered`，于是一个**只**被
+    #    指名管理某一场活动的人（`administered` 为空、不在 foundation tier）
+    #    拿到 `None` = **列出全部 ministry** —— 而他的列表里只有那一场活动。
+    #    那正是这个函数开头那句话在防的事：「被提供了基金会的每一个 ministry，
+    #    选了一个，拿到空列表而没有任何东西说明为什么」。
+    #
+    # ⚠️ 取的是**他那几场活动的 ministry**，不是「他管的 ministry」——
+    #    两者对他不是一回事，而页面上列的是前者。
+    reachable = set(administered)
+    if granted:
+        reachable |= set(Event.objects.filter(pk__in=granted)
+                         .values_list("ministry_id", flat=True))
+    if not reachable:
         return None
     return Ministry.objects.filter(
-        pk__in=administered, is_active=True).order_by("name")
+        pk__in=reachable, is_active=True).order_by("name")
 
 
 @login_required
@@ -1791,7 +1897,7 @@ def event_manage_list(request):
        Thirteen figures are a dozen aggregate queries, and most of the time
        somebody changing a date is only reading the list.
     """
-    events, administered, foundation = _scoped_events(request)
+    events, administered, foundation, granted = _scoped_events(request)
 
     # Set by the POST branch below, and read twice at the bottom: it decides
     # whether the fragment carries the messages back out of band.
@@ -1860,9 +1966,14 @@ def event_manage_list(request):
             return redirect(request.get_full_path())
         wrote = True
 
+    # ⚠️ `by_shape=True` 只有这一页传（2026-09-16）。它列的是
+    #    `Event.objects.all()` —— 单场、课、以及一条规则生成出来的那些，全在
+    #    一张表里，所以「哪一种」在这里是一个真问题。浏览那两页是**互斥**的
+    #    （决定 45），地址本身已经答了它。
     period = EventPeriodForm(
-        request.GET or None,
-        ministries=_offered_ministries(administered, showing_all=foundation))
+        request.GET or None, by_shape=True,
+        ministries=_offered_ministries(administered, showing_all=foundation,
+                                       granted=granted))
     events = period.narrow(events)
     page = page_of(request, events, MANAGED_EVENTS_PER_PAGE)
     # When 那一格的两行字：开始一行、结束一行（2026-08-29 第二轮）。
@@ -1882,21 +1993,23 @@ def event_manage_list(request):
     #    翻不到的那几百场也各算一遍。
     for event in page:
         event.when_start, event.when_end = schedule.when_labels(event)
-        # 🔴 **逐行的「你能不能改这一行」**（2026-09-03）。
-        #
-        #    这一页现在一张列表列全部（见 `_scoped_events`），所以「可不可改」
-        #    不再是整页的属性。它决定这一行画状态下拉还是一枚标签，
-        #    以及 Go to 那一格画三个链接还是六个。
-        #
-        # ⚠️ **一次集合判断，不是每行一次 `administers()` 查询** ——
-        #    `administered` 是上面那一次查询的结果（一个 id 集合）。
-        #    每行各问一次的话，50 行就是 50 次查询，而答案完全相同。
-        #
-        # 🔴 **这只决定「画什么」，不决定「准不准」。** 每一个写操作仍然走
-        #    `_managed_event()` → `can_manage_event()`，问的是真实账号和真实
-        #    活动。藏起一颗按钮挡不住任何人，真正的拒绝在视图里 ——
-        #    `button.html` 的 `disabled` 那段注释写的是同一条。
-        event.can_manage = administers_one_of(event.ministry_id, administered)
+    # 🔴 **2026-09-16（D48）：`event.can_manage` 这一行删掉了，而它不是被忘了。**
+    #
+    #    2026-09-03 到 9-16 之间它是逐行算的「你能不能改这一行」，决定这一行画
+    #    状态下拉还是一枚标签、Go to 那一格画三个链接还是六个。它当时有事可做，
+    #    因为 foundation tier 读得了每一场、改不了别人那几场。
+    #
+    #    现在它**只有一个答案**：这一页的行只有三个来源（`_scoped_events()` 里
+    #    那三支 —— 自己管的、被指名管的、foundation tier 看到的全部），而这三种
+    #    今天都改得动。一个恒为真的旗子加上两处永远不走的分支，是这个仓库反复
+    #    判刑的那种东西：读它的人会以为这一页上有改不了的行。
+    #
+    # ⚠️ **判断一处都没少。** 每一个写操作照旧走 `_managed_event()` →
+    #    `can_manage_event()`，问的是真实账号和真实活动。这里删掉的是「画什么」
+    #    那一半，不是「准不准」那一半 —— 后者从来就不在这里。
+    #
+    # ⚠️ 要是哪天这一页再长出一档读得了改不了的身份，回到这里把它算回来，
+    #    形状照旧是「一次集合判断，不是每行一次 `administers()` 查询」。
     return render(request, _template(
         request, "events/event_manage_list.html",
         "events/_event_manage_results.html"), {
@@ -1918,7 +2031,15 @@ def event_manage_list(request):
         #
         #    而「这一行能不能改」是第三个问题，答案挂在每一行上（见上面循环）。
         "showing_all": foundation,
-        "can_publish": bool(administered),
+        # 🔴 **不是 `bool(administered)`**（2026-09-16，D48）。放开了发布权却
+        #    不改这一行，就是「权限对、页面在、没有任何东西指向它」——
+        #    这个仓库记过五次的那种缺口，而这一次会是第六次。
+        #    ⚠️ 判据自成一问（`can_reach_publish_page`），不在这里拼 ——
+        #       拼一遍就是同一条规矩有两个答案。
+        #    ⚠️ 两个值都传进去：`_scoped_events()` 上面刚算过它们，而这个谓词
+        #       的两半正是它们。不传就是同一个问题在一次请求里问两遍。
+        "can_publish": can_reach_publish_page(
+            request.user, administered=administered, foundation=foundation),
         # 撤销刚才那次状态修改。⚠️ `pop` 而不是 `get`：它是一次性的 ——
         #    留着的话，下一次打开这一页还会看到一颗撤销上上次的按钮，
         #    而那时人已经不记得上上次是什么了。
@@ -1970,12 +2091,13 @@ def ministry_report_page(request):
     keep in step, and swapping in a server-side renderer later changes only who
     rasterises this HTML.
     """
-    events, administered, foundation = _scoped_events(request)
+    events, administered, foundation, granted = _scoped_events(request)
     # ⚠️ 和列表页同一个判断（2026-09-03）：列全部时下拉必须能选全部，
     #    否则筛选选不到自己看得见的行。
     period = EventPeriodForm(
         request.GET or None,
-        ministries=_offered_ministries(administered, showing_all=foundation))
+        ministries=_offered_ministries(administered, showing_all=foundation,
+                                       granted=granted))
     events = period.narrow(events)
     return render(request, "events/ministry_report.html", {
         "events": events.order_by("start_time", "pk"),
@@ -2023,10 +2145,35 @@ def _typed_so_far(post):
             for key, values in post.lists() if key in carried}
 
 
+def _publish_form_for(chosen):
+    """三档单选选中哪一个 → 建哪一张表单。**一处三岔，两个调用方。**
+
+    ⭐ 决定 32 的那三个答案：两个是 `Event.Shape` 的值，第三个建的是
+       `EventSeries`（它是一个**生成器**，不是一种活动能处在的状态）。
+
+    🔴 **在这之前这段三岔写了两遍**（`event_create` 和 `publish_when`），
+       而当时那句注释自己写着两处分家的后果：「换到『课』那一档，块里换成了
+       选择器、按下发布走的却是另一张表单 —— 于是那几格的值全部落地无声」。
+       ⚠️ 一段**预言了 bug 的注释，不是保留造成它的那个形状的理由**。
+          2026-09-17 收成一处，那个分家从此不可能。
+
+    ⚠️ 「课」那一档 2026-09-16（D49）之前走的是 `EventForm` —— 两个 datetime
+       框问学期的两端，而没有任何地方能排出它的讲次。现在它和「每周」那一档
+       共用同一个重复选择器，两端反过来由排出来的第一讲和最后一讲推。
+
+    返回 `(form_class, building_a_series, building_a_program)` —— 后两个是模板
+    要的，而它们和选出来的那张表单**必须同源**，这正是收成一处要买的东西。
+    """
+    series = chosen == PUBLISH_AS_SERIES
+    program = chosen == Event.Shape.PROGRAM
+    return ((EventSeriesForm if series else ProgramForm if program else EventForm),
+            series, program)
+
+
 @login_required
 def event_create(request):
     """P2: publish an event, for a ministry this person actually runs."""
-    if not ministry_ids_administered_by(request.user):
+    if not can_reach_publish_page(request.user):
         raise PermissionDenied(SCOPED_DENIAL)
 
     # ⭐ Decision 32: one screen, three answers. Two of them build an `Event`
@@ -2040,8 +2187,7 @@ def event_create(request):
     #    reloading the page.
     chosen = (request.POST.get("publish_as") if request.method == "POST"
               else request.GET.get("publish_as"))
-    building_a_series = chosen == PUBLISH_AS_SERIES
-    form_class = EventSeriesForm if building_a_series else EventForm
+    form_class, building_a_series, building_a_program = _publish_form_for(chosen)
 
     # D24. The radio swaps the "when" block over HTMX; this is the same move
     # without JavaScript — a plain submit that comes back as the other form.
@@ -2071,7 +2217,19 @@ def event_create(request):
         if not building_a_series:
             # The two Event shapes: the radio is the column, for those two.
             published.shape = form.cleaned_data.get("publish_as") or Event.Shape.SINGLE
-        published.save()
+        if building_a_program:
+            # 🔴 **不是 `published.save()`。** 一门课这时候**还没有两端** ——
+            #    `ProgramForm` 根本不问它们（见那张表单的 docstring），而
+            #    `Event.start_time` / `end_time` 是 `NOT NULL`。落库、推两端、
+            #    排讲次是一件事，一个事务，写在服务层。
+            # ⚠️ `moments` 是表单 `clean()` 里展开的**那一份**，不是在这里重算
+            #    的 —— 重算一遍就是「页面说 12 讲、按下去排了 13 讲」。
+            meetings = publish_program(
+                published,
+                moments=form.cleaned_data["moments"],
+                duration=form.cleaned_data["duration"])
+        else:
+            published.save()
         # ⚠️ **Not optional**, for the same reason request.FILES above is not:
         #    without it the tick is silently dropped. `commit=False` defers the
         #    many-to-many, and `visible_to_ministries` is the only part of an
@@ -2090,11 +2248,23 @@ def event_create(request):
                 request, "Series created. Next, open the roles it needs — "
                          "then generate the occasions.")
             return redirect("events:series_detail", pk=published.pk)
+        if building_a_program:
+            # ⚠️ 说出排了几讲，而不是只说「建好了」：这一页上人填的是一条
+            #    规则，而规则和它铺出来的东西之间隔着一次展开 —— 那个数字是
+            #    他唯一能当场核对的凭据。预览里写的是同一个数。
+            messages.success(
+                request,
+                f"Program created with {len(meetings)} meeting"
+                f"{'' if len(meetings) == 1 else 's'}. "
+                "Next, open the roles it needs.")
+            return redirect("events:event_update", pk=published.pk)
         messages.success(request, "Event created. Next, open the roles it needs.")
         return redirect("events:event_update", pk=published.pk)
 
     return render(request, "events/event_form.html", {
-        "form": form, "event": None, "building_a_series": building_a_series,
+        "form": form, "event": None,
+        "building_a_series": building_a_series,
+        "building_a_program": building_a_program,
     })
 
 
@@ -2503,14 +2673,18 @@ def publish_when(request):
        form, and putting that in a query string would scatter a draft event
        through the server logs.
     """
-    if not ministry_ids_administered_by(request.user):
+    if not can_reach_publish_page(request.user):
         raise PermissionDenied(SCOPED_DENIAL)
     chosen = request.POST.get("publish_as")
-    building_a_series = chosen == PUBLISH_AS_SERIES
-    form_class = EventSeriesForm if building_a_series else EventForm
+    form_class, building_a_series, building_a_program = _publish_form_for(chosen)
     return render(request, "events/_publish_when.html", {
         "form": form_class(user=request.user, initial={"publish_as": chosen}),
         "building_a_series": building_a_series,
+        "building_a_program": building_a_program,
+        # ⚠️ 只有 HTMX 那一趟要那份带 `hx-swap-oob` 的标题（整页那一次
+        #    `event_form.html` 已经画过一遍了）—— 两份同名 id 在 DOM 里，
+        #    OOB 的落点从此是不确定的那一个。
+        "heading_oob": True,
     })
 
 
@@ -2528,7 +2702,7 @@ def series_preview(request):
        here and the sentence shown on save are the same sentence, and a rule
        added to `clean()` tomorrow reaches this page for free.
     """
-    if not ministry_ids_administered_by(request.user):
+    if not can_reach_publish_page(request.user):
         raise PermissionDenied(SCOPED_DENIAL)
     form = EventSeriesForm(request.POST, user=request.user)
     # ⚠️ Only the four that decide *when*. The rest of the form is very likely
@@ -2540,6 +2714,49 @@ def series_preview(request):
             series_moments(form.instance) if _rule_is_usable(form) else [],
             page=_month_page_asked_for(request), rule=form.instance.rule),
         "complaint": _rule_complaint(form),
+    })
+
+
+@login_required
+def program_preview(request):
+    """一门课会排在哪几天，趁人还在填的时候就画出来。D49。
+
+    ⭐ 和 `series_preview` 是同一件事的两半，而**差别只有一处**：那边把值灌进
+       一个没保存的 `EventSeries`，让 `full_clean()` 来判这条规则；课没有那张
+       表，所以规则的把关写在 `ProgramForm.clean()` 里，而它展开出来的那一串
+       就存在 `cleaned_data["moments"]`。
+
+    🔴 **这里读的正是保存会用的那一份**，不是在这里重算一遍。页面上的数字和
+       按下去真正排出来的讲数必须是同一个来源 —— 各算一遍的结果是「页面说
+       12 讲，按下去排了 13 讲」，而两边各自都渲染正常。
+
+    ⚠️ 版式、月历分页、那句摘要全部复用 `_series_dates.html` 和
+       `_dates_context()`：两块长得不一样没有任何理由，而它们回答的是同一个
+       问题（「按下去会排哪几天」）。
+    """
+    if not can_reach_publish_page(request.user):
+        raise PermissionDenied(SCOPED_DENIAL)
+    form = ProgramForm(request.POST, user=request.user)
+    # ⚠️ 和兄弟那一处同一条理由：这一趟是在人还在打字的时候发的，表单其余部分
+    #    十有八九是半填的，而那些错误不归这一块管。
+    form.is_valid()
+    # ⚠️ `cleaned_data` 一定在：这张表单永远是 bound 的（上面用 `request.POST`
+    #    构造），而 Django 在跑 `clean()` **之前**就把它建好了 —— 校验失败只是
+    #    让某些键缺席，不会让这个字典不存在。
+    moments = form.cleaned_data.get("moments") or []
+    return render(request, "events/_series_dates.html", {
+        **_dates_context(moments, page=_month_page_asked_for(request),
+                         rule=form.cleaned_data.get("rule") or ""),
+        "complaint": _rule_complaint(form),
+        # 🔴 一门课排的是**讲**，不是场次（2026-09-16，浏览器走查抓到的）。
+        #    这一块三页共用，而默认那个词是给系列的 —— 不传的话，发布一门课时
+        #    这一行说「This makes 12 occasions」：每个字都对，名词是错的。
+        "noun": "meeting",
+        # 🔴 月历的翻页键打到**这一条**路由，不是系列那一条。少了它，在这一页
+        #    上翻一个月会把一份课的表单打到 `series_preview` —— 它按
+        #    `EventSeriesForm` 读，说的是「occasions」，算的可能是另一批日期，
+        #    而整件事不报任何错。
+        "preview_url": reverse("events:program_preview"),
     })
 
 
@@ -2638,7 +2855,10 @@ def event_update(request, pk):
         return redirect("events:event_detail", pk=event.pk)
 
     return render(request, "events/event_form.html",
-                  _edit_page_context(event, form=form))
+                  # ⚠️ `user` 不是可选的了（D47）：`can_grant` 从它算。少了它，
+                  #    编辑页上 Admins 那一格对 ministry admin 自己**不见了**，
+                  #    而它不报错 —— `EventNavTests` 逐页盯着这件事。
+                  _edit_page_context(event, form=form, user=request.user))
 
 
 def _mention_audience_gaps(request, event):
@@ -2668,6 +2888,57 @@ def _mention_audience_gaps(request, event):
         ))
 
 
+def _event_page_context(user, event, *, can_manage):
+    """管理侧每一页都要的那三样 —— 那一排导航靠它们决定画什么（2026-09-16）。
+
+    🔴 **在这之前这三个键是在七个视图里各写一遍的**，而那不是「代码长得像」，
+       是**一条规则有七个书写位置**。漏改一处的表现是静默的：那一页少画（或多画）
+       一个链接，页面照常渲染、测试照常绿。而它连着咬过两次 ——
+       一次是七处问的都是 `can_grant`（而那一页的门更宽，于是 foundation tier 是
+       唯一进得来、却没有任何链接的人），一次是改对了七处代码、漏改了四处紧挨着
+       的注释。
+
+    ⚠️ 收的只有导航要的这三样。那七页其余的上下文**没有一个键是共享的**
+       （`roles` / `participations` / `summary` / `grants`…）—— 硬合会造一个
+       「什么都知道一点」的构造器，那比七份重复更难拆。
+
+    ## Admins 那一格问的是**那一页自己的门**
+
+    `can_revoke_event_grant`，**既不是** `can_manage`（被授权人管得了这场活动，
+    却进不去那一页），**也不是** `can_grant`（foundation tier 进得去、只是授不出，
+    它的 docstring 明写「进得来这一页，只是画不出下面那张表单」）。
+    画一个必定 403 的链接，读起来是「站坏了」而不是「这一页不归你」。
+
+    ⚠️ `event_admins` 自己也走这里，尽管它的门已经证明了这个谓词。
+       **代价如实记**：那一页因此多一次 `can_revoke_event_grant()`
+       （`administers()` + `in_foundation_tier()`，1–2 次查询）。换来的是全仓
+       **只有一处**写着「Admins 那一格问什么」—— 而原来那个硬写的 `True` 正是
+       「门一改、这里不跟着改」的下一个候选。
+
+    ## 🔴 `can_manage` 是**参数**，不在这里算
+
+    因为它在调用方有**两种来源**，而两种都不该被「再算一遍」取代：
+
+      · 走 `_managed_event()` 进来的那几页，它是 `True` **by construction** ——
+        再问一次是多花一次查询去求一个不可能为假的值，而且等于不信任那道门；
+      · 走 `event_access()` 的那几页，它和 `may_view_records` 是**一次**授权表
+        读取出来的两个答案（那个函数的 docstring 写着「One read of the grant
+        table, not two」）—— 在这里再算就是把它刚省下的那次查询又花掉。
+
+    ⚠️ 写成 `can_manage=None` 表示「你自己算」**不行**：一个改变行为的可选参数
+       正是 `forms.NO_AUDIENCE` 那条注释在拦的东西 —— `None` 是一个合法答案，
+       不能兼职当哨兵。
+
+    ⚠️ 守卫：`core.tests.NavContextComesFromOneBuilderGuardTests` —— 这个键
+       全仓只许这一个函数写。
+    """
+    return {
+        "event": event,
+        "can_manage": can_manage,
+        "can_reach_admins": can_revoke_event_grant(user, event),
+    }
+
+
 def _edit_page_context(event, *, form=None, role_form=None, user=None):
     """Everything the merged edit page needs, from whichever view got the POST.
 
@@ -2682,11 +2953,9 @@ def _edit_page_context(event, *, form=None, role_form=None, user=None):
        a fresh one or the page comes back with somebody else's errors on it.
     """
     return {
-        "event": event,
-        # Always true here: every path into this page goes through
-        # _managed_event() first. Passed explicitly rather than left out, so the
-        # shared nav does not have to treat "missing" as "false".
-        "can_manage": True,
+        # ⚠️ `can_manage=True`：进这一页的每一条路都先走过 `_managed_event()`。
+        #    显式传而不是省略，好让共用的那一排不必把「没给」当成「假」。
+        **_event_page_context(user, event, can_manage=True),
         "form": form if form is not None else EventForm(instance=event, user=user),
         "role_form": role_form if role_form is not None else EventRoleForm(parent=event),
         "roles": event.roles.with_signup_counts().select_related("role"),
@@ -2771,6 +3040,69 @@ def role_delete(request, pk):
 
 
 @login_required
+def event_meetings(request, pk):
+    """一门课的讲次：列出来、补一讲、去掉一讲。D49。
+
+    ⭐ **`services.add_session()` 等的那扇门。** 它的 docstring 从 L5.6 起写着
+       「⚠️ Until L5.6 its only callers are tests」—— 在这一页之前，全站唯一能
+       补一讲的地方是 Django admin，而 ministry admin 被
+       `StaffOnlyAdminMiddleware` 挡在 `/admin/` 外面。发布时铺出来的那一批是
+       对的，而现实里总有一周要挪、一周要加。
+
+    ⚠️ **写权限问的是 `can_manage_event()`，和编辑页同一个**（不是
+       `can_view_event_records()`）：排课表是办这场活动的一部分。
+       `_managed_event()` 一处判完，这里不再判第二次。
+
+    ⚠️ **只对课开。** 一场单场活动没有「讲次」可言 —— `Session.clean()` 那条
+       「it is the occasion」写的就是这件事。不是 404 而是 404：这个地址对一场
+       单场活动**不存在**，而不是「存在但不给你」。
+    """
+    event = _managed_event(request, pk)
+    if event.shape != Event.Shape.PROGRAM:
+        raise Http404("Only a course has meetings.")
+
+    form = MeetingForm(request.POST or None)
+    if request.method == "POST":
+        if "remove" in request.POST:
+            # ⚠️ 用 `event.sessions`，不是 `Session.objects` —— 收窄到这一门课
+            #    上，于是一个别的课的 pk 是 404 而不是一次越权删除。
+            meeting = get_object_or_404(
+                event.sessions, pk=posted_pk(request, "remove"))
+            try:
+                remove_session(meeting)
+            except ValidationError as refusal:
+                # ⚠️ 说出来而不是吞掉：一颗按下去悄悄什么都不做的键，读起来是
+                #    「站坏了」—— 人会再点一次，然后去别处找那一行。
+                messages.error(request, refusal.messages[0])
+            else:
+                messages.success(request, "That meeting was removed.")
+            return redirect("events:event_meetings", pk=event.pk)
+        # ⚠️ `instance.event` 在校验**之前**就要挂上：`Session.clean()` 要拿
+        #    这门课的两端来比，而没有它那一句会静静地提前 return（它对
+        #    `event_id is None` 是放行的），于是一讲排到学期之外也能存进去。
+        form.instance.event = event
+        if form.is_valid():
+            add_session(event,
+                        start_time=form.cleaned_data["start_time"],
+                        end_time=form.cleaned_data["end_time"],
+                        source=Source.MANUAL)
+            messages.success(request, "That meeting was added.")
+            return redirect("events:event_meetings", pk=event.pk)
+
+    return render(request, "events/event_meetings.html", {
+        # ⚠️ `can_manage=True`：这一页走的是 `_managed_event()`。
+        **_event_page_context(request.user, event, can_manage=True),
+        "form": form,
+        # ⭐ 序号走 `schedule.occurrences()`，**不在模板里数** —— 「第几讲」
+        #    全站只有一个算法，而报名页和日历读的也是它。
+        # ⚠️ 每一行的时刻（`7pm`）由 `Occurrence.starts_at` 给 —— 走的是
+        #    `schedule.clock()`，全站同一个写法。模板里一句 `date:"g:ia"`
+        #    给的是 `7:00p.m.`，而那是 2026-09-16 走查当场看见的样子。
+        "meetings": schedule.occurrences([event]),
+    })
+
+
+@login_required
 def event_registrations(request, pk):
     """P4's first half: who signed up, by role — and where an identity is corrected.
 
@@ -2800,7 +3132,7 @@ def event_registrations(request, pk):
             raise PermissionDenied(SCOPED_DENIAL)
         participation = get_object_or_404(
             Participation.objects.filter(event_role__event=event),
-            pk=request.POST.get("participation"),
+            pk=posted_pk(request, "participation"),
         )
         # ⚠️ Judged here, not trusted from the form: the question applies to a
         #    set of people and a POST can name anybody. Asked through the same
@@ -2846,10 +3178,8 @@ def event_registrations(request, pk):
         )
     )
     return render(request, "events/event_registrations.html", {
-        "event": event,
-        # Drives the shared event nav: Edit and Notify are drawn only for
-        # somebody who can actually open them.
-        "can_manage": can_manage, "roles": roles,
+        **_event_page_context(request.user, event, can_manage=can_manage),
+        "roles": roles,
         # ⚠️ One query for the whole page, not one per row. The identity
         #    question applies to the ministry's own people and to nobody else,
         #    and an outside volunteer's row must not offer a control that would
@@ -2889,7 +3219,7 @@ def event_attendance(request, pk):
             raise PermissionDenied(SCOPED_DENIAL)
         participation = get_object_or_404(
             Participation.objects.filter(event_role__event=event),
-            pk=request.POST.get("participation"),
+            pk=posted_pk(request, "participation"),
         )
         action = request.POST.get("action")
         if action == "check_in":
@@ -2968,10 +3298,9 @@ def event_attendance(request, pk):
         .order_by("event_role__role__name", "contact")
     )
     return render(request, "events/event_attendance.html", {
-        "event": event,
+        **_event_page_context(request.user, event, can_manage=can_manage),
         "participations": rows,
         "hours_form": HoursForm(),
-        "can_manage": can_manage,
         # What the box starts at for somebody with no hours yet. Computed in
         # services, never here — this is date arithmetic, and there is a grep
         # guard on views doing any (D18).
@@ -3002,8 +3331,7 @@ def event_report(request, pk):
     if not may_view_records:
         raise PermissionDenied(SCOPED_DENIAL)
     return render(request, "events/event_report.html", {
-        "event": event,
-        "can_manage": can_manage,
+        **_event_page_context(request.user, event, can_manage=can_manage),
         "summary": event_summary(event),
         "staff": ministry_staff_participation(event),
     })
@@ -3060,9 +3388,8 @@ def event_notify(request, pk):
         })
 
     return render(request, "events/event_notify.html", {
-        "event": event,
-        # Always true: this view is gated on can_manage_event above.
-        "can_manage": True,
+        # ⚠️ `can_manage=True`：这一页 gated on can_manage_event above。
+        **_event_page_context(request.user, event, can_manage=True),
         "form": form,
         "recipients": [r for r in recipients if not r.is_guardian],
         "guardian_recipients": [r for r in recipients if r.is_guardian],
@@ -3085,6 +3412,82 @@ def event_notify(request, pk):
 #    allows. Merging them back into one view — the obvious simplification —
 #    reintroduces the failure D28 was written to remove: every volunteer's first
 #    ever check-in ends with an expired token and a walk back to the iPad.
+
+
+@login_required
+def event_admins(request, pk):
+    """把这一场活动交给别人管，以及收回。D47。
+
+    ⭐ **这一页是这个功能的另一半。** 权限判断改一个函数就全站生效
+       （`can_manage_event()` 是唯一的写判断），但**一个没有入口的权限等于没有**
+       —— `phase-d.md` 第四节点名三次的正是这件事。
+
+    ⚠️ 两道判断，而它们**宽窄不同**（用户 2026-09-15 定的）：
+       授权只有这个 ministry 的 admin 做得了；**收回**还多一个 foundation tier。
+       形状照公告那一对（发布窄、收回宽）—— 一条不该再有的权限等不了授权的那个
+       admin 接电话。
+
+    ⚠️ 门问的是「收得回吗」而不是「授得出吗」：foundation tier 进得来这一页，
+       只是画不出下面那张表单。给他 403 的话，他连**看**一眼谁有权限都做不到，
+       而那是他本来就读得到的东西。
+    """
+    event = get_object_or_404(Event.objects.select_related("ministry"), pk=pk)
+    may_grant = can_grant_event_admin(request.user, event)
+    if not can_revoke_event_grant(request.user, event):
+        raise PermissionDenied(SCOPED_DENIAL)
+
+    form = EventGrantForm(request.POST or None)
+    if request.method == "POST":
+        if request.POST.get("revoke"):
+            grant = find_event_grant(event, posted_pk(request, "revoke"))
+            if grant is None:
+                raise Http404
+            revoke_event_grant(grant)
+            messages.success(request, "Revoked. The grant was dated, not deleted.")
+            return redirect("events:event_admins", pk=event.pk)
+
+        # ⚠️ 授权那一支**再判一次** —— 上面那道门是「收得回」，比这里宽。
+        #    藏起表单是界面，拒绝 POST 才是边界（同 `can_view_event_records()`
+        #    那段注释）。
+        if not may_grant:
+            raise PermissionDenied(SCOPED_DENIAL)
+        if form.is_valid():
+            # ⚠️ 服务层可能拒绝（他已经有了）—— 接住它落到表单上，而不是让
+            #    一个 `ValidationError` 变成 500。`add_error(None, …)` 对一个
+            #    带 `error_dict` 的异常会**按 key 分发**到那一格上。
+            try:
+                grant = grant_event_admin(
+                    contact=form.cleaned_data["contact"],
+                    event=event,
+                    start_date=form.cleaned_data["start_date"],
+                    # 从 session 来，永远不从页面来。
+                    granted_by=request.user,
+                )
+            except ValidationError as refusal:
+                form.add_error(None, refusal)
+            else:
+                # ⚠️ 通知是授权之上的一份礼貌，不是它的一部分：发不出去绝不能把
+                #    一次已经生效的授权撤回来，所以它返回而不抛
+                #    （同 `confirm_signup()`）。
+                tell_them_they_can_manage(grant)
+                messages.success(request, "Granted. We have let them know.")
+                return redirect("events:event_admins", pk=event.pk)
+
+    return render(request, "events/event_admins.html", {
+        # 🔴 **`can_manage` 仍然是真算出来的那个值。** 这一页的门证明的是
+        #    `can_revoke_event_grant`，**没有**证明 `can_manage` —— 一个只被
+        #    指名管别的活动的人进不来，而 foundation tier 两者都真。
+        #    ⚠️ 这里原来还硬写了一个 `"can_reach_admins": True`（门恰好就是那个
+        #       谓词）。现在它跟着走那个共用的构造器 —— 多一次权限调用，换来的是
+        #       全仓只有一处写着「Admins 那一格问什么」。
+        **_event_page_context(request.user, event,
+                              can_manage=can_manage_event(request.user, event)),
+        "form": form,
+        "grants": event_grants(event),
+        # ⚠️ 下面那张授权表单问的是「**授得出吗**」，和导航那一格不是一个问题 ——
+        #    foundation tier 前者为假、后者为真。
+        "can_grant": may_grant,
+    })
 
 
 def checkin_scan(request, token):

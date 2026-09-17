@@ -29,6 +29,7 @@ from core.constraints import ConstraintErrorFieldMixin
 from core.limits import LONG_TEXT, SHORT_TEXT
 from core.models import ImmutableCodeMixin, TimeStampedModel
 from core.timeutils import day_start, local_date_of, local_now, local_today
+from core.querysets import DateRangeMixin, DateRangeQuerySet
 # ⚠️ The audience machinery moved to org/audience.py on 2026-08-31 — the three
 #    ticks, Spec, for_audience(), and "who counts as on the books". It is
 #    written entirely in org vocabulary (Ministry, Position, Assignment) and
@@ -896,15 +897,14 @@ class Event(PostalAddressMixin, Audience, ConstraintErrorFieldMixin, TimeStamped
            fourth cell of decision 16's table: an event you click in week three
            and find you have signed up for all twelve.
 
-           🔴 **And it is not on the publish form yet.** Decision 21 asks for a
-              three-way radio there; L5.4 built the generator and the admin
-              door, and never went back to `EventForm`. So the foundation's own
-              sentence — "可以让 admin **选**…", a choice offered to a
-              publisher — is not offered to any publisher today: building a
-              series is superuser-only, through the admin. Written down as a
-              gap in participants.md §9 with L5.8 as its restart condition,
-              because this docstring claimed the opposite for a day and a
-              requirements review caught it.
+           ⚠️ **这一段 2026-09-11（L5.8a）和 2026-09-16（D49）两次作废了。**
+              它原来写着「And it is not on the publish form yet」—— 那时三档
+              单选只有前两档能真的用，建一条规则是超级用户在 admin 里的事。
+              现在：第三档 L5.8a 起在发布页上（`EventSeriesForm`），
+              而**第二档（课）D49 起才真的排得出讲次** —— 在那之前它发得出
+              一个有起止日期、一讲都没有的壳。
+              ⚠️ 留着原话比没有更糟：它描述的是一个已经不存在的缺口，而读它的
+                 人会去找一个不需要再补的洞。
 
         ⚠️ Why a column at all, rather than asking `sessions.exists()`. Two
            reasons, and they answer **classification**, which is a different
@@ -3442,3 +3442,90 @@ class CalendarFeed(TimeStampedModel):
         `CalendarFeedTests.test_printing_one_never_prints_the_address`。
         """
         return f"Calendar feed for {self.contact}"
+
+
+class EventGrant(ConstraintErrorFieldMixin, DateRangeMixin, TimeStampedModel):
+    """谁被指名管理**这一场**活动 —— ministry 和 foundation 之间的第三档。
+
+    ⭐ **它不是 `MinistryRole` 上的一个新档位，而
+       [D20](../docs/planning/decisions/D20-ministry-role.md) 自己的判据说清了
+       为什么**：那一条的测试是「这句话里有没有『某个 ministry
+       的』？有就进 `MinistryRole`」。而「某**一场活动**的完全管理权」过不了那个
+       判据 —— 它比一个 ministry 窄，所以它是一张自己的表。
+       ⚠️ 判断照旧只写在 `org/permissions.py`（那条 grep 守卫盯着它）。
+
+    ⚠️ 放 `events` 而不是 `org`，因为**这张表的主语是一场活动**（D17：一个 app
+       一个业务域）。对照：`MinistryRole` 在 org，因为它的主语是 ministry。
+
+    ⚠️ **没有 `role` 列，也不会有。** 只有「和 ministry admin 对这一场完全一致」
+       一档 —— 没有任何代码会分支它，而那正是 D5 判「这该不该是个字典表 / 枚举」
+       的测试。真要第二档时，那是一次要连同 `permissions.py` 的判断一起改的
+       改动，不是加一行枚举。
+
+    ⚠️ **不能转授。** 被授权人开不了这一页（`can_grant_event_admin()` 只读
+       `MinistryRole`）—— 同 ministry admin 不能任命 ministry admin 的理由：
+       一个能自我繁殖的权限，没有人数得清最后有多少人能看未成年人的紧急联系人。
+    """
+
+    event = models.ForeignKey(
+        Event,
+        # CASCADE，同 `EventRole`：活动没了，「谁能管它」不是一条要留着的记录 ——
+        # 它说的是一件不存在的事。
+        # ⚠️ 和下面 `contact` 那个 PROTECT 不矛盾：留痕要留的是「**这个人**曾经
+        #    有过这个权限」，而那条记录的意义随着活动一起消失。
+        on_delete=models.CASCADE,
+        related_name="grants",
+    )
+    contact = models.ForeignKey(
+        Contact,
+        # PROTECT，一字不差照 `MinistryRole.contact`：一次授权是要有人负责的事，
+        # 所以删掉一个人不许悄悄抹掉他曾经拿过这个权限的记录。
+        on_delete=models.PROTECT,
+        related_name="event_grants",
+    )
+    granted_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        # SET_NULL，绝不是 CASCADE：删掉授权人的账号会一次性撤销一批人的权限。
+        # NULL 读作「授权的那个账号没了」，比这一行凭空消失好。同 `MinistryRole`。
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name="+",
+    )
+    start_date = models.DateField(null=True, blank=True)
+    end_date = models.DateField(null=True, blank=True)
+
+    history = HistoricalRecords()
+
+    # 授权有起止，和任职、和 ministry 的授权一模一样 —— 所以复用同一个
+    # `active()`，「在效期内」全项目没有第二个定义。
+    objects = models.Manager.from_queryset(DateRangeQuerySet)()
+
+    class Meta:
+        ordering = ["-start_date", "contact"]
+        constraints = [
+            # ⚠️ `nulls_distinct=False` **不是可选的**，A7 的教训：`start_date`
+            #    可空且经常留空，而 Postgres 认 NULL != NULL —— 没有它，这条约束
+            #    会放行任意多条一模一样的授权。
+            models.UniqueConstraint(
+                fields=["contact", "event", "start_date"],
+                name="eventgrant_unique_grant",
+                nulls_distinct=False,
+                violation_error_message="They already have this event from that date.",
+                violation_error_code="eventgrant_duplicate_grant",
+            ),
+            models.CheckConstraint(
+                condition=(
+                    models.Q(end_date__isnull=True)
+                    | models.Q(start_date__isnull=True)
+                    | models.Q(end_date__gte=models.F("start_date"))
+                ),
+                name="eventgrant_end_date_not_before_start_date",
+                violation_error_message="The end date cannot be before the start date.",
+                violation_error_code="eventgrant_end_before_start",
+            ),
+        ]
+        # 每一次「他能管这场活动吗」都走这个查询，而管理侧的每一个页面都要问一次。
+        indexes = [models.Index(fields=["contact", "end_date"])]
+
+    def __str__(self):
+        return f"{self.contact} — {self.event.name}"

@@ -26,13 +26,22 @@
     ⚠️ 两种说法，因为这是两件事（L5.9）：一条有结束的规则**一共**这么多场；
        一条没有结束的规则不是「共 52 场」—— 它只是这一年排了 52 场，而说成
        前者会让人以为排完就没了，然后没有人回来按第二次。
+
+    🔴 **名词跟着页面走**（2026-09-16，D49，浏览器走查抓到的）。这一块现在
+       三页共用，而一门课排的不是「场次」是「讲」—— 写死 `occasion` 的话，
+       发布一门课时这一行说的是「This makes 12 occasions」，一个每个字都对
+       而名词是错的句子。⚠️ 这个分支已经为同一种错修过好几次（「课程页上三处
+       写着 event」）。
+    ⚠️ 默认仍然是 `occasion`，所以系列那两页**一个字没变** —— 只有课那一支
+       传 `noun`。
     {% endcomment %}
+    {% firstof noun "occasion" as unit %}
     <p class="text-sm font-medium">
       {% if rule_ends %}
-        This makes {{ moments|length }} occasion{{ moments|length|pluralize }},
+        This makes {{ moments|length }} {{ unit }}{{ moments|length|pluralize }},
         {{ moments.0|date:"j M Y" }} to {{ moments|last|date:"j M Y" }}.
       {% else %}
-        {{ moments|length }} occasion{{ moments|length|pluralize }} over the next
+        {{ moments|length }} {{ unit }}{{ moments|length|pluralize }} over the next
         year, {{ moments.0|date:"j M Y" }} to {{ moments|last|date:"j M Y" }} —
         it repeats until you stop it.
       {% endif %}
@@ -55,8 +64,16 @@
          需要把一份还没保存的规则放进查询串，而 `publish_when` 的 docstring
          里写着为什么不能那么做。
       {% endcomment %}
+      {% comment %}
+      🔴 **翻页打到哪条预览路由，由调用方给**（2026-09-16，D49）。
+         这里原来写死 `events:series_preview`，而这一块 2026-09-16 起有了第三个
+         调用方（发布一门课）—— 写死的话，在那一页上翻一个月，会把一份**课**的
+         表单打到**系列**的预览视图上：它按 `EventSeriesForm` 读，说的是
+         「occasions」，算的可能是另一批日期，而整件事**不报任何错**。
+      ⚠️ 默认仍然是系列那一条，所以原来两处调用方一个字没动。
+      {% endcomment %}
+      {% if not preview_url %}{% url 'events:series_preview' as preview_url %}{% endif %}
       <div class="month-pager mt-3">
-        {% url 'events:series_preview' as preview_url %}
         {% include "core/components/button.html" with label="← Earlier" variant="ghost" type="button" hx_post=preview_url hx_target="#series-dates" hx_include="#when-form" hx_vals=months.earlier_vals disabled=months.at_the_start %}
         <span class="text-sm text-ink-600 dark:text-ink-300">
           Month{{ months.total|pluralize }}

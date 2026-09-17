@@ -1,0 +1,77 @@
+{% extends "core/base.html" %}
+{% block title %}Staff Roster{% endblock %}
+
+{% comment %}
+员工名册的**索引页**：先选一个 ministry（2026-09-15 用户定的版式）。
+
+⭐ **这一页不列任何一个岗位。** 初版是一页列全部、按 ministry 分段 —— 两个
+   ministry 时读起来还行，而这个基金会的 ministry 只会变多，那一页会长成一堵墙。
+
+⭐ 而这一整块东西存在的理由不是「看看有谁」，是**把人录进去**：受众轴
+   （`org/audience.py::for_audience()`）早就能按 ministry 判「在编」了 ——
+   `Position(kind=staff)` + 一条在效期内的 `Assignment` —— 而在这一页之前，
+   录这两行的唯一入口是 Django admin，ministry admin 被
+   `StaffOnlyAdminMiddleware` 挡在外面。缺的一直是入口，不是机制。
+
+⚠️ 版式照 `org/ministry_list.html`（P5 那一页）—— 两页是同一件事的两种：
+   都是「先挑一个 ministry」。长得一样是有意的。
+{% endcomment %}
+
+{% block content %}
+  <h1 class="mb-2 text-2xl font-semibold">Staff Roster</h1>
+  <p class="mb-6 text-sm text-ink-600 dark:text-ink-300">
+    Pick a ministry to see its posts and who holds them.
+  </p>
+
+  {% if cards %}
+    <ul class="grid gap-3 sm:grid-cols-2">
+      {% for card in cards %}
+        <li class="card roster-card">
+          {% comment %}
+          ⚠️ `ministry` 为 None 的那一张是**基金会级岗位**（Executive Director
+             之类），不是缺数据 —— 所以它有自己的名字和自己的地址。
+             它只会出现在 foundation tier 的页面上：ministry admin 的 queryset
+             里根本没有那些行。
+          {% endcomment %}
+          {% if card.ministry %}
+            <a href="{% url 'org:ministry_roster' card.ministry.pk %}"
+               class="text-lg font-semibold prose-link">{{ card.ministry.name }}</a>
+          {% else %}
+            <a href="{% url 'org:foundation_wide_roster' %}"
+               class="text-lg font-semibold prose-link">Foundation-wide</a>
+          {% endif %}
+
+          {% comment %}
+          ⚠️ 三个数**不求和**：一个岗位可以有几个人，所以 posts 和 holders 不是
+             一回事；而 serving 是 holders 的子集（休假和停职的人仍然占着岗位）。
+             写成一条「N 人」会同时说错两件事。
+          {% endcomment %}
+          <p class="mt-1 text-sm text-ink-600 dark:text-ink-300">
+            {% include "org/_headcounts.html" with counts=card %}
+          </p>
+
+          {% comment %}
+          🔴 右上角那颗红点 —— 这个 ministry 还有几个岗位等着核验（用户要的形状：
+             「像 app 未读信息一样红色的 number count 在右上角」）。
+
+          ⚠️ 只有 foundation tier 看得到这个数：那批待办别人做不了，而一个他点不动
+             的数字只会训练他忽略这个位置。判断走 `can_define_terms`，
+             模板里只问这一个布尔（D20：权限判断不许变成两份）。
+
+          ⚠️ 0 不画。一颗写着 0 的徽章说的是「没有事在等你」，而那件事的正确说法
+             是什么都不显示 —— 同菜单上那一颗。
+          {% endcomment %}
+          {% if can_define_terms and card.awaiting %}
+            <span class="count-badge">
+              <span aria-hidden="true">{{ card.awaiting }}</span>
+              <span class="sr-only">{{ card.awaiting }} posts waiting for you to verify</span>
+            </span>
+          {% endif %}
+        </li>
+      {% endfor %}
+    </ul>
+  {% else %}
+    {% url 'org:position_create' as new_post_url %}
+    {% include "core/components/empty.html" with message="No posts on the chart yet. A post is a box on the org chart — it exists whether or not anybody is in it, and it is what lets somebody count as staff of this ministry." action_label="Create the first post" action_href=new_post_url %}
+  {% endif %}
+{% endblock %}

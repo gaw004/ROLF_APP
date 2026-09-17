@@ -31,6 +31,10 @@ urlpatterns = [
     # 上下文、同一道权限，只是外面少了一层页面 —— 见 views.event_detail_panel。
     path("events/<int:pk>/panel/", views.event_detail_panel, name="event_detail_panel"),
     path("events/<int:pk>/signup/", views.event_signup, name="event_signup"),
+    # D47 —— 把这一场活动交给别人管。⚠️ 词形的段在 `<int:pk>` 之后是安全的
+    # （`<int:pk>` 只吃数字），而它挂在这里是因为它属于「这一场活动的某一面」，
+    # 同 registrations / attendance / report / notify 那一排。
+    path("events/<int:pk>/admins/", views.event_admins, name="event_admins"),
     path("me/participations/", views.my_participations, name="my_participations"),
     # L5.8b（2026-09-14，决定 48）。⚠️ 上面那条**保持原样**不改名：它已经进过
     #    六处登录后跳转、站点菜单和别人的书签，而改地址换来的只是对称。
@@ -64,6 +68,10 @@ urlpatterns = [
     #    two that are not series at all.
     path("events/publish/when/", views.publish_when, name="publish_when"),
     path("events/series/preview/", views.series_preview, name="series_preview"),
+    # ⚠️ 兄弟路由，D49。两条各自一个视图，因为两边的规则**存不存**不一样
+    #    （系列存进一列、课用一次就扔），而那是判这条规则时唯一的差别。
+    path("events/programs/preview/", views.program_preview,
+         name="program_preview"),
     path("events/series/roles/<int:pk>/delete/",
          views.series_role_delete, name="series_role_delete"),
     path("events/series/<int:pk>/", views.series_detail, name="series_detail"),
@@ -89,6 +97,10 @@ urlpatterns = [
         views.event_registrations,
         name="event_registrations",
     ),
+    # ⚠️ 只对课有意义，而视图对一场单场活动答 404 —— 这个地址在那里
+    #    **不存在**，不是「存在但不给你」。D49。
+    path("events/<int:pk>/meetings/", views.event_meetings,
+         name="event_meetings"),
     path("events/<int:pk>/attendance/", views.event_attendance, name="event_attendance"),
     # D28 — the iPad page and the endpoint that feeds it. ⚠️ The token endpoint
     # is gated on can_manage_event; without that check the whole rotating-code

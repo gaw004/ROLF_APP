@@ -302,10 +302,10 @@ AWS 便宜是**有专职运维、多服务共摊、上预留实例**之后的事
 
 | 页面 | 暴露什么 | 谁应该看得到 |
 |---|---|---|
-| `event_notify` 的预览行 | 未成年人那几行显示的是**家长的邮箱 / 电话**（`row.to`） | 只有本 ministry 的 admin。这是 [D22](decisions/D22-event-notifications.md) 有意为之，不是泄露 —— 但要确认换个 ministry 的账号打同一个 URL 是 403。⚠️ **foundation tier 也进不来这一页** |
-| `event_registrations` | 只有姓名和报名状态，不含生日地址 | 本 ministry 的 admin，**外加 foundation tier（只读）** |
-| `event_attendance` | ⚠️ **未成年标记 + 紧急联系人的姓名、电话、邮箱** —— 那是当天出事时拨的号码 | 本 ministry 的 admin，**外加 foundation tier（只读）** |
-| `event_report` | 工时和人数的汇总，不含联系方式 | 本 ministry 的 admin，**外加 foundation tier（只读）** |
+| `event_notify` 的预览行 | 未成年人那几行显示的是**家长的邮箱 / 电话**（`row.to`） | 只有本 ministry 的 admin **和这一场的被授权人**（[D47](decisions/D47-event-level-grant.md)）。这是 [D22](decisions/D22-event-notifications.md) 有意为之，不是泄露 —— 但要确认换个 ministry 的账号打同一个 URL 是 403。⚠️ **foundation tier 仍然进不来这一页** |
+| `event_registrations` | 只有姓名和报名状态，不含生日地址 | 本 ministry 的 admin **和这一场的被授权人**，**外加 foundation tier（只读）** |
+| `event_attendance` | ⚠️ **未成年标记 + 紧急联系人的姓名、电话、邮箱** —— 那是当天出事时拨的号码 | 本 ministry 的 admin **和这一场的被授权人**，**外加 foundation tier（只读）** |
+| `event_report` | 工时和人数的汇总，不含联系方式 | 本 ministry 的 admin **和这一场的被授权人**，**外加 foundation tier（只读）** |
 | `accounts/profile` | 生日 / 地址 / 紧急联系人全在这里 | 只有本人。它读的是 `request.user.contact`，**从不认提交的 id** —— 别人的行只能 404 |
 | `/admin/` | 全都看得到，包括同意记录和 simple-history | 只有 staff。所以「基金会的人不用 superuser 登录 + 不给 delete」那两条，是这一层唯一的闸门 |
 
@@ -323,6 +323,29 @@ AWS 便宜是**有专职运维、多服务共摊、上预留实例**之后的事
 >
 > **所以第 1 条验收要多打一遍**：拿 `foundation_admin` 账号
 > **POST** 一次签到（`action=check_in`）—— 必须 403，且那个人**没有被签到**。
+
+> ### 2026-09-15 第二次改写：多了「这一场的被授权人」这一档（[D47](decisions/D47-event-level-grant.md)）
+>
+> 基金会要的是「ministry admin 可以把**某一场**活动的完全管理权交给指定的人」。
+> 「完全一致」是用户拍的板，而它的具体含义就是上面那四行多出来的那一句：
+> **被授权人在那一场活动上看得到未成年人的标记、紧急联系人电话，
+> 以及通知预览里家长的邮箱和电话。**
+>
+> ⚠️ **范围仍然是一场活动**，不是一个 ministry：同一个 ministry 的别的活动对他
+> 是 403，而那一条有测试（`EventGrantTests
+> .test_another_event_in_the_same_ministry_is_still_refused`）。
+>
+> ⭐ **而这一档会自己到期**，前两档不会：一条单场授权管到这场活动标成
+> **Wrapped up** 为止，或者被撤销为止。所以它不会像前两档那样把可见范围**永久**
+> 扩大 —— 这是用户在定「不给截止日期」时顺带买到的安全性质。
+>
+> ⚠️ **撤销当场生效**（2026-09-15 同日定的）。在此之前撤销一条 `MinistryRole`
+> 要到第二天才失效（`end_date` 右闭），而没有任何测试钉着那个行为 ——
+> 是 D47 落地时撞上的。两张授权表现在都是即时的，理由整段在
+> `core.querysets._ended_on_or_before()`。
+>
+> **所以第 1 条验收要多打一遍**：拿一个**被授权人**的账号打同 ministry 的
+> **另一场**活动的 `event_attendance` —— 必须 403。
 
 > ⚠️ 用 superuser 点这些页面会得到一串 403，看起来像坏了 —— 那是
 > `org/permissions.py` 的设计（superuser 没有 ministry scope），

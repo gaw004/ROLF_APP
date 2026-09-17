@@ -264,9 +264,49 @@ class Position(ImmutableCodeMixin, ConstraintErrorFieldMixin, TimeStampedModel):
         UNPAID = "unpaid", "Unpaid"
         STIPEND = "stipend", "Stipend"
 
+    #: 哪几档算「拿钱的」，写一次（2026-09-15，员工名册分组时第一次需要）。
+    #:
+    #: ⚠️ 这不是一个新判断 —— `Compensation.STIPEND` 自己的注释里已经写着
+    #:    「`stipend` groups with `paid`，而这是本项目替基金会做的政策选择，
+    #:    不是一条法律事实」。名册页把岗位分成「拿钱的 / 不拿钱的」两组时需要
+    #:    同一句话，而把它拼第二遍就是那条注释迟早说不上话的开始。
+    #:
+    #: ⚠️ 列全两档，不写成 `~UNPAID`。同 `Event.VISIBLE_TO_PARTICIPANTS` 那条：
+    #:    补集的写法在加第四档的那一天会把它默默算成「拿钱的」。
+    PAID_ARRANGEMENTS = frozenset({Compensation.PAID, Compensation.STIPEND})
+
+    # ⭐ **可空，而且默认就是空的**（2026-09-15，用户拍板）。这一列和 `Ministry`
+    #    / `EmploymentType` 上那个同名的列**不是一回事**。
+    #
+    # 🔴 一个格子做不了两件事：**标识符不许变，描述不许过期。** 一个从名字自动
+    #    生成的 code 看起来像描述（所以人会当描述读），却因为不可改而必然在某次
+    #    改名之后变成一句假话 —— 这正是身份证号不叫「北京-张三」的原因。
+    #
+    #    所以这里走企业系统那一套（Stripe 的 `lookup_key`、SuccessFactors 的
+    #    `externalCode`、Workday 的 Job Code），而不是内容平台那一套（从标题生成
+    #    的 slug）。判据是一句话：**这个东西有没有一个人会分享出去的公开网址？**
+    #    岗位页是 `/org/staff/positions/<int:pk>/`，只有管理员进得去，没有。
+    #
+    # ⚠️ 两个状态，各说一件事：
+    #      空  —— 还没有任何系统需要指向这个岗位（绝大多数岗位，永远如此）；
+    #      有值 —— 有人**特意**给它设了一个锚点。`seed_demo` 那五行
+    #             （`pantry_lead` / `pantry_driver` …）就是样板：它们是手挑的、
+    #             有含义的，而且一个都不是 slugify(名字) 会产生的东西。
+    #
+    # ⚠️ **网页表单上永远没有这一格。** 「什么时候该填」是一个技术判断（有没有
+    #    别的系统要指向它），而 foundation admin 答不出它 —— 给他看这一格等于
+    #    请他猜。设锚点的人在 Django admin 里设，那里是工程师干活的地方。
+    #
+    # ⚠️ 空着的时候 admin 里可以填；填过之后 `get_readonly_fields` 冻住它，
+    #    而 `code_change_error()` 挡住脚本那条路。不可改保护的是**已经有人在引用
+    #    的那个值**，还没有值就没有东西要保护。
     code = models.SlugField(
         max_length=50,
-        help_text="Stable identifier used by code. Lowercase, cannot be changed later.",
+        null=True,
+        blank=True,
+        help_text="Leave empty. Only needed when another system or a script has to "
+                  "refer to this exact post — whoever sets that up knows what to "
+                  "type. Once set it cannot be changed.",
     )
     name = models.CharField(max_length=100, help_text='e.g. "Program Director".')
     # ⚠️ default=STAFF, where it used to be VOLUNTEER — the old default is not
@@ -318,6 +358,48 @@ class Position(ImmutableCodeMixin, ConstraintErrorFieldMixin, TimeStampedModel):
         help_text="Whether the post still exists. Nothing to do with anybody holding it.",
     )
     description = models.TextField(blank=True, max_length=LONG_TEXT)
+
+    #: 🔴 **要 foundation tier 核验的那几格，名单只在这里写一次。**
+    #:    四个读者：`org.forms.PositionForm`（画哪几格、以及那句说明）、
+    #:    `org.services.update_position()`（改了它们就重新待核验）、
+    #:    仪表盘那一块、以及测试。抄四遍的话，加第四格时漏掉其中一处 ——
+    #:    表现是那一格改了却没人来看，而它**不报错**。
+    #:
+    #: ⚠️ `kind` 在里面，但 ministry admin **填不了它**（见 `PositionForm`）——
+    #:    它对他永远是 `STAFF`，那不是一个没人声明过的猜测，是一句真话
+    #:    （理事席位是基金会的事，D32：「board seats are the rare, deliberate
+    #:    ones」）。列在这里是因为 foundation tier 改了它同样要留痕。
+    VERIFIED_FIELDS = ("compensation", "reports_to", "kind")
+
+    # ⭐ 这个岗位的编制条件还没有人核验过（2026-09-15，用户定的流程）。
+    #
+    # 🔴 **它不是一道闸。** 岗位建出来就是真岗位：进名册、能往里加人，而加进去
+    #    的人**当场**就算「在编」（`org.audience.on_the_books_q` 只看 `kind` 和
+    #    `is_active`，不看这一列）。核验说的是「整个岗位的创建到此才算完成」，
+    #    不是「在此之前它不作数」。
+    #
+    #    ⚠️ 做成真闸的代价是具体的：基金会批量录人的那几周，每建一个新岗位都要
+    #       等人批才能往里加人 —— 而这一整轮要的恰恰是「先让员工看到该看的活动」。
+    #
+    # 🔴 **它标的是「没人核验过」，不是「那几格是空的」。** 两者的区别在
+    #    `reports_to` 上尤其明显：基金会级岗位本来就没有上级，所以「没上级」和
+    #    「还没填」在那一列上长得一模一样 —— 一个「哪几格是空的」的判断答不出
+    #    这件事，而这一列答得出。
+    #
+    # ⚠️ 改了 `VERIFIED_FIELDS` 里任何一格，它**重新变回 True**
+    #    （`org.services.update_position()`）—— 否则核验是一次性的：核完之后
+    #    那几格再也没人看，而改一格比建一个新岗位容易得多。
+    #    ⚠️ 改名字、改说明、改 `is_leader` **不触发**：那几样不是核验的对象，
+    #       而一张被无关改动塞满的待办列表正是让人开始无视它的原因。
+    #
+    # ⚠️ 只由 `org.services` 里那三个函数写。admin 是不写代码就存在的第四条写入
+    #    路径，它在那里可以直接改这一格 —— 那正是 superuser 该有的样子。
+    needs_foundation_review = models.BooleanField(
+        default=False,
+        verbose_name="Awaiting foundation review",
+        help_text="A ministry admin set this post's pay, reporting line or kind, "
+                  "and the foundation has not verified them yet.",
+    )
 
     # Org chart changes are exactly the thing somebody asks about a year later.
     history = HistoricalRecords()

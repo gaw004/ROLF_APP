@@ -1,0 +1,126 @@
+{% extends "core/base.html" %}
+{% block title %}Who can manage — {{ event.name }}{% endblock %}
+
+{% comment %}
+把这一场活动交给别人管（D47，2026-09-15）。
+
+⭐ **这一页是这个功能的另一半。** 权限判断改一个函数就全站生效，但**一个没有
+   入口的权限等于没有** —— `phase-d.md` 第四节点名三次的正是这件事。
+
+⚠️ 版式照 `org/ministry_admins.html`（P5 那一页）：两页是同一件事的两个尺度 ——
+   一个授整个 ministry，一个授一场活动。长得一样是有意的。
+{% endcomment %}
+
+{% block content %}
+  {% include "events/_event_nav.html" with current="admins" %}
+
+  <h1 class="text-2xl font-semibold">Who can manage this event</h1>
+  <p class="mt-1 text-sm text-ink-600 dark:text-ink-300">{{ event.name }}</p>
+
+  <div class="card mt-4 border border-info-fg/30 bg-info-bg dark:border-info-fg-dark/30 dark:bg-info-bg-dark">
+    <p class="text-sm text-info-fg dark:text-info-fg-dark">
+      {% comment %}
+      ⚠️ 说清楚范围，因为它比人预期的宽：出勤页上有未成年人的标记和紧急联系人
+         电话，通知页上有家长的邮箱和电话。授权的人该在按下去之前知道这件事。
+      {% endcomment %}
+      Somebody named here gets <strong>the same access to this one event</strong>
+      as this ministry's own admins: the signup list, attendance and hours —
+      including under-18 markers and emergency contact numbers — and the power to
+      message everybody signed up. They cannot publish new events, manage the
+      repeat rule, or pass this on to anybody else.
+    </p>
+    {% comment %}
+    ⭐ **这条授权管多久，要在按下去之前说清楚**（用户 2026-09-15 定的形状）。
+       表单上没有截止日期那一格 —— 一条单场授权的自然寿命就是这场活动本身，
+       而它会在活动标成 Wrapped up 的那一刻自己到期。
+       ⚠️ 不说的话，人会以为这是一条永久权限，而它不是 —— 那种意外发生在
+          「他去年办过一次，今年打不开了」的时候。
+    {% endcomment %}
+    <p class="mt-2 text-sm text-info-fg dark:text-info-fg-dark">
+      It lasts until this event is marked <strong>Wrapped up</strong>, or until
+      you revoke it — whichever comes first. Revoking takes effect at once.
+    </p>
+  </div>
+
+  <h2 class="mb-3 mt-8 text-lg font-semibold">Named so far</h2>
+  {% if grants %}
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th>Who</th><th>From</th><th>Until</th><th>In effect</th><th>Granted by</th><th></th></tr>
+        </thead>
+        <tbody>
+          {% for grant in grants %}
+            <tr>
+              <td class="font-medium">
+                {{ grant.contact }}
+                {% comment %}
+                ⚠️ 两条标注，两条都**不改权限**，只是说出来（用户 2026-09-15 定的）：
+                   授权继续有效，标出来让接手的人自己决定要不要收回。
+                {% endcomment %}
+                {% if not grant.contact.user %}
+                  <span class="block text-xs text-warning-fg dark:text-warning-fg-dark">
+                    Their account is gone — this grant does nothing until they have one again
+                  </span>
+                {% endif %}
+              </td>
+              <td>{{ grant.start_date|default_if_none:"—" }}</td>
+              <td>{{ grant.end_date|default_if_none:"—" }}</td>
+              <td>
+                {% comment %}
+                🔴 **`is_in_force`，不是 `is_currently_active`**（2026-09-16）。
+                   这一列要和**权限层**说同一句话，而权限层 2026-09-15 起走的是
+                   右开的 `in_force()`（撤销当天就失效）。读右闭的那一个，
+                   撤销当天这里写着 **Yes** —— 而这张页面自己的横幅写着
+                   「Revoking takes effect at once」，他其实一点权限都没有了。
+                ⚠️ 两条谓词并排住在 `core/querysets.py` 里，各管各的一半：
+                   事实（任职、工时、报表）走 `is_currently_active`，
+                   授权走这一个。
+                {% endcomment %}
+                {% if grant.is_in_force %}
+                  {% include "core/components/badge.html" with label="Yes" tone="success" %}
+                {% else %}
+                  {% include "core/components/badge.html" with label="No" %}
+                {% endif %}
+              </td>
+              <td>{{ grant.granted_by|default:"(account deleted)" }}</td>
+              <td>
+                {% if not grant.end_date %}
+                  <form method="post">
+                    {% csrf_token %}
+                    {% include "core/components/button.html" with label="Revoke" variant="danger" name="revoke" value=grant.pk confirm="Revoke this? It sets an end date; the row stays, so the record of who could see this event's signups is not lost." %}
+                  </form>
+                {% endif %}
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <p class="mt-2 text-xs text-ink-600 dark:text-ink-300">
+      Revoking sets an end date; it never deletes the row, so the record of who
+      could see this event's signups stands.
+    </p>
+  {% else %}
+    {% include "core/components/empty.html" with message="Nobody else has been named. Only this ministry's admins can manage this event." %}
+  {% endif %}
+
+  {% if can_grant %}
+    <form method="post" class="card mt-8">
+      {% csrf_token %}
+      <h2 class="mb-4 text-lg font-semibold">Hand it to somebody</h2>
+      {% include "core/components/form_fields.html" %}
+      <div class="mt-6">
+        {% include "core/components/button.html" with label="Grant" variant="primary" %}
+      </div>
+      <p class="mt-3 text-xs text-ink-600 dark:text-ink-300">
+        {% comment %}
+        ⚠️ 两句都要：第一句解释为什么名单比他预期的短，第二句说明按下去之后
+           会发生什么（会发一封信）—— 不说的话那封信是一次意外。
+        {% endcomment %}
+        Only people with a login are listed — a grant to somebody who cannot sign
+        in would do nothing. We will email them that they can manage this event.
+      </p>
+    </form>
+  {% endif %}
+{% endblock %}

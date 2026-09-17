@@ -2107,7 +2107,21 @@ document.addEventListener("click", (event) => {
   for (const field of form.querySelectorAll("input, select, textarea")) {
     // ⚠️ 判据是 `type === "hidden"`，不是「看不看得见」：一个被 CSS 藏起来的
     //    真筛选字段仍然该被清掉，而一个隐藏字段就算画出来了也仍然是上下文。
-    if (field.type !== "hidden") field.value = "";
+    if (field.type === "hidden") continue;
+    // 🔴 **勾选类的要清 `checked`，不是 `value`**（2026-09-15 在浏览器里复现的）。
+    //    对一个 radio / checkbox 设 `.value = ""` **不会取消选中** —— 它把那一项
+    //    的**值**改成了空串。而 HTMX 只换 `#event-results` 和 `#filter-summary`，
+    //    **表单本身不重画**，于是点一次 Clear 之后：那一格看起来还能选、选中的
+    //    圆点也是黑的，**而提交上去永远是空值**。整格在刷新之前彻底失效。
+    //
+    //    ⚠️ 这一版之前 Role 那一格（三个 radio）就是这样，而它**不报错、
+    //       HTML 一个字不差** —— 只有真在页面上点两下才看得见（revisions 六十五
+    //       那三个 bug 的同一类）。Ministry 改成多选 checkbox 之后会撞上同一段。
+    if (field.type === "checkbox" || field.type === "radio") {
+      field.checked = false;
+    } else {
+      field.value = "";
+    }
   }
   htmx.trigger(form, "submit");
 });

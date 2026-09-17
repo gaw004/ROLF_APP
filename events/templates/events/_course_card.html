@@ -7,7 +7,8 @@
    四五个空格 —— My Signups 那张六列表在课上就是这样，Hours 那一列对一门课
    **永远是空的**（决定 20：课的工时在点名册上）。
 
-参数：row（一行 Participation）、progress（services.course_progress 的一格，可能是 None）。
+参数：row（一行 Participation）、progress（services.course_progress 的一格，可能是 None）、
+      clashes（services.conflicts_among 给这一行的那个列表，可能是 None）。
 {% endcomment %}
 <li class="card">
   <div class="flex items-baseline justify-between gap-3">
@@ -28,6 +29,10 @@
       {{ when.0 }}{% if when.1 %} · {{ when.1 }}{% endif %} · {{ row.event_role.role.name }}
     </p>
   {% endwith %}
+  {% comment %}
+  ⚠️ 撞车标记紧跟着这门课的时间那一行 —— 它说的正是那一行的问题（D39 第 ④ 类）。
+  {% endcomment %}
+  {% include "events/_conflict_mark.html" %}
   {% comment %}
   🔴 **身份和「是谁定的」，D38 第四节那条「看得见不可交易」的唯一落点。**
 

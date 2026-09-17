@@ -7,6 +7,15 @@
    现在每一页都带着全套链接，任何一页都是入口。
 
 参数：event、current（当前页的名字，用来高亮）。
+
+🔴 **这一排要的三个上下文键（`event` / `can_manage` / `can_reach_admins`）
+   由 `views._event_page_context()` 一处给**（2026-09-16）。新加一页画这一排，
+   调它 —— 别自己拼那个字典。
+   ⚠️ 此前七个视图各拼一遍，而漏改一处的表现是**那一页少画一个链接，
+      页面照常渲染、测试照常绿**。它连着咬过两次，经过写在那个函数上。
+   ⚠️ 守卫 `core.tests.NavContextComesFromOneBuilderGuardTests` 盯着这件事。
+⚠️ `manage_list_name` 不在那三个里面 —— 它是**全站**的（那一页叫什么），
+   由 `core/context_processors.py` 给。
 {% endcomment %}
 <nav class="mb-6 flex flex-wrap items-center gap-1 text-sm" aria-label="This event">
   {% comment %}
@@ -36,10 +45,38 @@
   {% if can_manage %}
     {% include "events/_event_nav_link.html" with label="Edit &amp; Roles" to="events:event_update" name="edit" %}
   {% endif %}
+  {% comment %}
+  ⚠️ Meetings 只对**课**画，而且只给管得了这场活动的人（2026-09-16，D49）。
+     两个条件都不能少：那一页对一场单场活动答 404，对管不了的人 403 ——
+     两种情况下画出来的都是一个拒绝点它的人的链接，读起来是「站坏了」
+     而不是「这一页不归你」。上面 Edit / Notify 那两格跟的是同一条。
+  ⚠️ 排在 Signups 前面：排课表是「这门课长什么样」，而报名是它的后果。
+  {% endcomment %}
+  {% if can_manage and event.shape == "program" %}
+    {% include "events/_event_nav_link.html" with label="Meetings" to="events:event_meetings" name="meetings" %}
+  {% endif %}
   {% include "events/_event_nav_link.html" with label="Signups" to="events:event_registrations" name="registrations" %}
   {% include "events/_event_nav_link.html" with label="Attendance" to="events:event_attendance" name="attendance" %}
   {% include "events/_event_nav_link.html" with label="Report" to="events:event_report" name="report" %}
   {% if can_manage %}
     {% include "events/_event_nav_link.html" with label="Notify" to="events:event_notify" name="notify" %}
+  {% endif %}
+  {% comment %}
+  ⚠️ Admins 那一格问的是「**进得来吗**」，**不是 `can_manage`**（D47，2026-09-15）。
+     被授权人管得了这场活动，但那一页对他是 403 —— 给他画一个必定 403 的链接，
+     读起来是「站坏了」而不是「这一页不归你」（同上面那段对 Edit / Notify 的理由）。
+
+  🔴 **2026-09-16 改口：这一格从 `can_grant` 换成 `can_reach_admins`。**
+     `event_admins` 那一页的门是 `can_revoke_event_grant`（**更宽**，含
+     foundation tier —— 它的 docstring 明写「进得来这一页，只是画不出下面那张
+     表单」），而这一格此前问的是更窄的 `can_grant`。于是 foundation tier 是
+     唯一**进得来、却没有任何链接**的人 —— 连它站在那一页上时这一格都是空的。
+     ⚠️ 「画出来的链接必须点得动」这条**没有变**，变的是这一格问对了问题：
+        导航跟的是**门**，不是门后面那张表单。表单仍然只画给 `can_grant`。
+
+  ⚠️ 排在最后：交给谁办是低频的事，而它旁边那几格是每次办活动都要点的。
+  {% endcomment %}
+  {% if can_reach_admins %}
+    {% include "events/_event_nav_link.html" with label="Admins" to="events:event_admins" name="admins" %}
   {% endif %}
 </nav>

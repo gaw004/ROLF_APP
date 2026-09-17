@@ -1,0 +1,27 @@
+{% comment %}
+一行上的撞车标记 —— My Signups 的列表和课卡上那一小块（2026-09-15）。
+
+⚠️ **和 `_conflict_notice.html` 是同一件事的两种形状，不是两份说法。**
+   那一份是报名页上的整块黄框（他正在做决定，要看得清撞在哪几个时刻）；
+   这一份是一行里的一个标记（他在扫一张列表，要的是「这一条有事」加「和谁」）。
+   一行里塞进一个整块黄框会把列表撑成一堵墙。
+   ⚠️ 两处的**措辞**共用一个词根（clashes with），改一处要看另一处。
+
+⭐ **两条撞在一起的报名，两条都标，各自指向对方**（用户 2026-09-15 定的）。
+   只标后报的那一条更省，但人很少记得自己先报的是哪个 —— 只看到一边有标记
+   会以为另一边没事。
+
+🔴 不用红色：红色在这个系统里是「出事了」（D27）。撞车是「你可能不知道」。
+
+参数：clashes —— `conflicts_among()` 给这一行的那个列表。
+{% endcomment %}
+{% if clashes %}
+  <span class="mt-0.5 block text-xs text-warning-fg dark:text-warning-fg-dark">
+    Clashes with
+    <a href="{% url 'events:event_detail' clashes.0.event.pk %}?from=mine"
+       class="underline">{{ clashes.0.event.name }}</a>
+    {% if clashes|length > 1 %}
+      and {{ clashes|length|add:"-1" }} more
+    {% endif %}
+  </span>
+{% endif %}

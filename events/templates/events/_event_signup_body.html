@@ -27,6 +27,13 @@
 {% endif %}
 <p class="mt-1 text-sm text-ink-600 dark:text-ink-300">{{ event.name }}</p>
 
+{% comment %}
+⚠️ 撞车提示画在**表单上方**：D39 第一节的口径是「让做决定的人知道他在做什么」，
+   而他做决定的那一刻是在填这张表之前。画在提交键旁边就成了事后通知。
+⚠️ 整页和面板两条路共用这一份 —— 这个文件本来就是为「不许有第二份」抽出来的。
+{% endcomment %}
+{% include "events/_conflict_notice.html" with clashes=clashes lead=clash_lead %}
+
 {% if needs_consent %}
   {% comment %}
   ⚠️ 「邮箱或电话至少填一个」那句提示**不能丢**。丢了不报错，只是用户不知道

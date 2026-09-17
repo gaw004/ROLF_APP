@@ -1,0 +1,164 @@
+{% extends "core/base.html" %}
+{% block title %}{{ position.name }}{% endblock %}
+
+{% comment %}
+一个岗位：它的事实、谁在上面、以及 foundation tier 的确认。
+
+⚠️ 薪酬档、汇报线、类型三样对 ministry admin 是**看得见、改不了** ——
+   `phase-d.md` 第五节那张权限表是这么判的（compensation 本部门的 admin 该看得见，
+   他要排班、要招人）。所以它们在下面那段事实里画出来，而不在表单里。
+{% endcomment %}
+
+{% block content %}
+  <p class="mb-4 text-sm">
+    {% comment %}
+    ⚠️ 返回**这个岗位所属 ministry 的那一页**，不是索引页：人是从那里点进来的，
+       送他回索引等于让他再选一次自己刚选过的东西。基金会级岗位（`ministry`
+       为空）回它自己那一页。
+    {% endcomment %}
+    {% if position.ministry_id %}
+      <a href="{% url 'org:ministry_roster' position.ministry_id %}" class="prose-link">
+        &larr; {{ position.ministry.name }}</a>
+    {% else %}
+      <a href="{% url 'org:foundation_wide_roster' %}" class="prose-link">
+        &larr; Foundation-wide</a>
+    {% endif %}
+  </p>
+
+  <h1 class="text-2xl font-semibold">
+    {{ position.name }}
+    {% if not position.is_active %}
+      {% include "core/components/badge.html" with label="Retired" tone="neutral" %}
+    {% endif %}
+  </h1>
+  <p class="mt-1 text-sm text-ink-600 dark:text-ink-300">
+    {{ position.ministry.name|default:"Foundation-wide" }}
+  </p>
+
+  <dl class="card mt-4 grid grid-cols-2 gap-4 text-sm sm:grid-cols-4">
+    <div>
+      <dt class="text-xs text-ink-600 dark:text-ink-300">Kind</dt>
+      <dd class="font-medium">{{ position.get_kind_display }}</dd>
+    </div>
+    <div>
+      <dt class="text-xs text-ink-600 dark:text-ink-300">Pay</dt>
+      <dd class="font-medium">{{ position.get_compensation_display }}</dd>
+    </div>
+    <div>
+      <dt class="text-xs text-ink-600 dark:text-ink-300">Reports to</dt>
+      <dd class="font-medium">{{ position.reports_to|default:"—" }}</dd>
+    </div>
+    {% comment %}
+    ⚠️ **设了才画这一格。** `code` 默认是空的，而空是它的正常状态
+       （「还没有任何系统需要指向这个岗位」）。画一个空的「Identifier —」
+       会暗示这里有什么没填完，而实际上没有人该去填它。
+    {% endcomment %}
+    {% if position.code %}
+      <div>
+        <dt class="text-xs text-ink-600 dark:text-ink-300">Identifier</dt>
+        <dd class="font-mono text-xs">{{ position.code }}</dd>
+      </div>
+    {% endif %}
+  </dl>
+
+  {% if position.needs_foundation_review %}
+    <div class="card mt-4 border border-warning-fg/30 bg-warning-bg dark:border-warning-fg-dark/30 dark:bg-warning-bg-dark">
+      {% comment %}
+      🔴 **措辞 2026-09-15 当天改过一次，而那正是这个流程改口的地方。**
+         上一版写的是「still at their defaults — nobody has said they are right」，
+         对应的是那天上午那一版设计：薪酬档和汇报线**收给** foundation tier 填，
+         于是 ministry admin 建的岗位上那两格留着默认值。
+         用户当天推翻了它 —— 他填，foundation tier 核验。所以这两格现在**是有人
+         声明过的**，那句话成了假话。
+      ⚠️ 这类过期文案 curl 抓不到：HTML 一个字不差，错的是那句话和现在的流程的
+         关系。同 revisions.md 六十五那三个 bug。
+      {% endcomment %}
+      <p class="text-sm text-warning-fg dark:text-warning-fg-dark">
+        A ministry admin set <strong>Pay</strong> and <strong>Reports to</strong>
+        on this post. Check them — correcting a field and saving counts as
+        verifying it.
+      </p>
+      {% if can_define_terms %}
+        <form method="post" class="mt-3">
+          {% csrf_token %}
+          {% include "core/components/button.html" with label="These are correct" variant="primary" name="confirm" value="1" %}
+        </form>
+      {% endif %}
+    </div>
+  {% endif %}
+
+  <h2 class="mb-3 mt-8 text-lg font-semibold">In post now</h2>
+  {% if holders %}
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th>Who</th><th>Engagement</th><th>Since</th><th>Standing</th><th></th></tr>
+        </thead>
+        <tbody>
+          {% for tenure in holders %}
+            <tr>
+              <td class="font-medium">{{ tenure.contact }}</td>
+              <td>{{ tenure.employment_type|default:"—" }}</td>
+              <td>{{ tenure.start_date|default_if_none:"—" }}</td>
+              <td>{{ tenure.get_status_display }}</td>
+              <td>
+                {% if may_manage %}
+                  <form method="post">
+                    {% csrf_token %}
+                    {% include "core/components/button.html" with label="End" variant="danger" name="end" value=tenure.pk confirm="End this tenure today? The row is dated, never deleted — and they stop counting as this ministry's staff straight away, so staff-only events disappear for them." %}
+                  </form>
+                {% endif %}
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <p class="mt-2 text-xs text-ink-600 dark:text-ink-300">
+      Ending a tenure sets an end date; it never deletes the row, so the service
+      history stands.
+    </p>
+  {% else %}
+    {% include "core/components/empty.html" with message="Nobody holds this post. That is a normal state for a box on the chart — it is what a vacancy is." %}
+  {% endif %}
+
+  {% if may_manage and position.is_active %}
+    <form method="post" class="card mt-6">
+      {% csrf_token %}
+      <h2 class="mb-4 text-lg font-semibold">Put somebody in this post</h2>
+      {% include "core/components/form_fields.html" with form=assign_form %}
+      <div class="mt-6">
+        {% include "core/components/button.html" with label="Add" variant="primary" name="assign" value="1" %}
+      </div>
+    </form>
+  {% endif %}
+
+  {% if past %}
+    <h2 class="mb-3 mt-8 text-lg font-semibold">Previously</h2>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Who</th><th>From</th><th>Until</th></tr></thead>
+        <tbody>
+          {% for tenure in past %}
+            <tr>
+              <td>{{ tenure.contact }}</td>
+              <td>{{ tenure.start_date|default_if_none:"—" }}</td>
+              <td>{{ tenure.end_date|default_if_none:"—" }}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% endif %}
+
+  {% if may_manage %}
+    <form method="post" class="card mt-8">
+      {% csrf_token %}
+      <h2 class="mb-4 text-lg font-semibold">Edit this post</h2>
+      {% include "core/components/form_fields.html" %}
+      <div class="mt-6">
+        {% include "core/components/button.html" with label="Save" variant="primary" %}
+      </div>
+    </form>
+  {% endif %}
+{% endblock %}

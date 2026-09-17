@@ -152,6 +152,21 @@
                   dark:border-ink-700 dark:text-ink-100 dark:hover:text-brand-300">
           {% include "core/components/_menu_icons.html" with icon=item.icon %}
           <span class="home-menu-label">{{ item.label }}</span>
+          {% comment %}
+          ⚠️ 计数徽章（2026-09-15）。**只有 `badge` 为真的项才画** —— context
+             processor 那边 `0` 和 `None` 都不写这个键，因为一颗写着 0 的徽章
+             说的是「没有事在等你」，而那件事的正确说法是什么都不显示。
+
+          ⚠️ 文字里带上「waiting」而不是只有一个数字：窄栏收起时旁边那行小字会被
+             截断，而读屏的人听到的是这一整句。数字本身用 `aria-hidden`，
+             否则会念两遍。
+          {% endcomment %}
+          {% if item.badge %}
+            <span class="count-badge">
+              <span aria-hidden="true">{{ item.badge }}</span>
+              <span class="sr-only">{{ item.badge }} waiting</span>
+            </span>
+          {% endif %}
         </a>
       {% endif %}
     {% endfor %}

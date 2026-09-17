@@ -87,7 +87,7 @@ Phase C 之前的判据是「是不是那 14 条需求的前置条件」。
 | 只有一处回答「某天谁在班」 | `org/services.py::on_duty()` | `status` 该数哪几档有两份口径，页面和报表对不上 |
 | 只有一处算「实际投入」 | `org/services.py::staff_hours()` | 见 [D36](decisions/D36-two-hour-ledgers.md) |
 | 只有一处删生成班次 | `org/services.py::_drop_generated_after()` | 撤销 / 任职结束 / 生成器各写一遍那两个条件，漏掉 `date__gt` 就是静默改写考勤史（[D40](decisions/D40-undo-a-pattern-batch.md)） |
-| 只有一处检测冲突 | `org/services.py::conflicts_for()` | 报名页和指派页各写一套重叠判断，两边算出来的「撞没撞」不一样，而两边都不报错（[D39](decisions/D39-scheduling-conflicts.md)） |
+| 只有一处检测冲突 | ~~`org/services.py`~~ → **`events/services.py::conflicts_for()`**（2026-09-15 改口，理由见 [D39 第二节那个框](decisions/D39-scheduling-conflicts.md#二四类冲突一个函数)：落地的第 ④ 类全是 events 的词汇，而 events → org 是允许方向、反过来不是） | 报名页和指派页各写一套重叠判断，两边算出来的「撞没撞」不一样，而两边都不报错（[D39](decisions/D39-scheduling-conflicts.md)） |
 | 只有一处写「这一次是志愿还是工作」 | `events/services.py::set_served_as()`<br>+ admin 里那两个字段 **readonly** | 三条写入路径各带一套默认规则；⚠️ 而 admin 是**不写代码就存在**的第四条，grep 拦不住它（[D38 第四节](decisions/D38-served-as-volunteer-or-work.md)） |
 
 ## ⭐ 四、页面与入口总表
@@ -115,8 +115,10 @@ Phase C 之前的判据是「是不是那 14 条需求的前置条件」。
 | 班表订阅 + **撤销并换一个** | `/me/schedule.ics` · `/me/schedule/token/` | 本人（带 token） | My Schedule 上的两个按钮 | D2a |
 | Ministry 详情 | `/org/ministries/<pk>/` | 全体登录用户（敏感列除外） | ministry 列表 | D1 |
 | 组织架构图 | `/org/chart/` | 全体登录用户 | 顶栏 · ministry 详情 | D1 |
-| 员工名册 | `/org/staff/` | ministry admin（限自己的）· foundation tier | 管理菜单 | D1 |
-| 岗位详情 | `/org/positions/<pk>/` | 同上 | 员工名册 · 组织架构图 | D1 |
+| 员工名册 | `/staff/` | ministry admin（限自己的）· foundation tier | 站点菜单「Ministry Admin / Foundation Admin」那一组 | ✅ **2026-09-15 已建**（本阶段之外的一轮，见下面那个框） |
+| 新建岗位 | `/staff/positions/new/` | 同上 | 名册页那颗按钮 | ✅ 同上 |
+| 岗位详情（含加人 / 结束任职 / foundation 确认） | `/staff/positions/<pk>/` | 同上 | 名册页每一行 | ✅ 同上。⚠️ 地址不是初版写的 `/org/positions/<pk>/`。两处都不对：`org.urls` 挂在**根**上而不是 `/org/` 下（`org:ministry_list` 就是 `/ministries/`），而岗位详情和名册是一套，所以挂在 `staff/` 底下 |
+| 待确认岗位（不是页面，是名册页顶上一块） | — | **仅** foundation tier | 名册页自带 | ✅ 同上 |
 | 周班表 | `/org/schedule/` | ministry admin（限自己的）· foundation tier | 管理菜单 | D2a |
 | 某天 / 某场的出勤确认 | `/org/schedule/<date>/` | 同上 | 周班表 · 「上周有 N 小时未确认」那条提示 | D2a（确认按钮 D2b） |
 | 班表模板编辑 | `/org/assignments/<pk>/pattern/` | 同上 | 岗位详情 · 员工名册 | D2a |
@@ -124,6 +126,7 @@ Phase C 之前的判据是「是不是那 14 条需求的前置条件」。
 | 撤销一批例会模板 | `/org/ministries/<pk>/pattern/batches/` · `…/<uuid>/undo/` | 同上 | 建完之后那条横幅 · 批量建模板页 | D2a |
 | 请假**代录**（只给没有账号的人） | `/org/leave/new/` | foundation tier | 员工名册 | D2b |
 | 活动指派 / 代录 | 现有活动管理页加两个动作 | 该活动 ministry 的 admin | 活动管理页 | D3 |
+| 一场活动的授权页 | `/events/<pk>/admins/` | 该 ministry 的 admin（授 + 收）· foundation tier（**只收得回**） | 那一排页间导航上的 Admins 一格 | ✅ **2026-09-15 已建**（[D47](decisions/D47-event-level-grant.md)，本阶段之外的一轮） |
 | 「在编人员投入」 | D27 报表面板加一块（不是页面） | 同报表 | 管理列表旁 | D2b |
 
 > #### 2026-09-02：这张表原来把 `/me/` 写给了证照页，而那个 URL 现在是仪表盘的
@@ -136,6 +139,48 @@ Phase C 之前的判据是「是不是那 14 条需求的前置条件」。
 > 就地改成 `/me/profile/`，并且给仪表盘补了一行。⚠️ 两者在路由上**不冲突**
 > （`accounts.urls` 挂得更早，`path("me/", include(...))` 也吞不掉 `me/profile/`），
 > 冲突的只是这张表 —— 而这张表自己开头就写着「每一个入口在写之前就要有一行」。
+
+> ### 2026-09-15：员工名册提前交付了，而它不是 Phase D 开工
+>
+> 基金会问的是另一件事 —— **「有没有办法先让系统知道这个人是某个 ministry 的内部
+> 员工，让他们先看到该看的 event？」** 答案是这件事**早就做完了**：
+> `org/audience.py::for_audience()` 判「在编」走的就是
+> `Position(kind=staff, is_active)` + 一条在效期内的 `Assignment`。
+> **缺的一直是入口，不是机制** —— 录这两行的唯一门是 Django admin，
+> 而 ministry admin 被 `StaffOnlyAdminMiddleware` 挡在外面。
+>
+> ⚠️ 所以这一轮**只交付了上面那四行**，D1 的其余部分（[D1.6](05-roadmap.md) 的
+> `fte` / `agreed_hours_per_week` / `Position.headcount` / `understaffed()`、
+> [D1.7](05-roadmap.md) 的 `Credential`、组织架构图、ministry 详情页）
+> **一样都没做**。名册页上因此没有这些列 —— 照着 05-roadmap 的 D1.8 / D1.9 抄的时候
+> 要按这一条对一遍，那两节是在「D1 整节一起做」的前提下写的。
+>
+> #### 核验不是一道闸，而这一句是这个流程的全部
+>
+> 岗位**建完立刻生效**：进名册、能往里加人，而加进去的人**当场**就算「在编」
+> （`org.audience.on_the_books_q()` 只看 `kind` 和 `is_active`，不看核验那一列）。
+> 核验说的是「整个岗位的创建到此才算完成」，不是「在此之前它不作数」。
+>
+> ⚠️ 做成真闸的代价是具体的：基金会批量录人的那几周，每建一个新岗位都要等人批
+> 才能往里加人 —— 而这一整轮要的恰恰是「先让员工看到该看的活动」。
+>
+> ⚠️ 代价也如实记：**没有任何机制逼 foundation tier 去核验**。推他的只有那三个
+> 入口，而它们都是「他看得见」而不是「他必须做」。真出现「待办堆了三十条没人动」
+> 的时候，那是一个关于**人**的问题，先问是不是那三个入口还不够响，
+> 而不是顺手把它改成闸 —— 闸会把代价转嫁给录数据的那个人。
+>
+> ⚠️ 改了 `Position.VERIFIED_FIELDS` 里任何一格就**重新待核验**，否则核验是一次
+> 性的：核完之后那几格再也没人看，而改一格比建一个新岗位容易得多。
+> 改名字 / 说明 / `is_leader` 不触发 —— 一张被无关改动塞满的待办列表正是让人
+> 开始无视它的原因。
+>
+> ⚠️ 三处照抄会出错的地方，都已在代码里就地写了理由：
+> `staff_directory()` 收的是 **`Position` queryset** 而不是一组 ministry
+> （`Position.ministry` 可空 = 基金会级岗位，按 ministry 收窄会静默漏掉它们 ——
+> 同 [D2a.10](05-roadmap.md) 给 `on_duty()` 记的那个坑）；
+> `ministry_headcounts()` **没有写**（它没有读者，过不了[第二节判据第 2 条](#二判据这一阶段的东西该不该做)，
+> 三个数折进了 `RosterSection`，从同一批已取出的行上数）；
+> 以及 `Position.code` 改成了可空（[D46](decisions/D46-position-code-is-an-optional-anchor.md)）。
 
 **18 行 + 1 块报表面板**，其中 6 行是自助侧。
 对外模板数会从 20 涨到 30 出头 —— 这是本项目单轮加页面最多的一次，比加表更值得盯。
@@ -287,6 +332,17 @@ Phase D 之后，一个 ministry admin 会一次性获得：谁拿钱、拿哪�
 专业系统也是这么分的。把它们一起收进 foundation tier 会让 ministry admin
 做不了自己的事，那是另一种失败。）
 
+> ### 2026-09-15：这张表多了第三列的一半（[D47](decisions/D47-event-level-grant.md)）
+>
+> 「某**一场活动**的完全管理权」是 [D20](decisions/D20-ministry-role.md) 判据的
+> 第三档 —— 它比一个 ministry 窄，所以是第三张表。被授权人在**那一场**活动上
+> 拿到的，和这个 ministry 的 admin 一模一样（含未成年人的标记和紧急联系人电话，
+> 见 [`phase-c.md`](phase-c.md) 那张表）；同 ministry 的**别的**活动对他是 403。
+>
+> ⚠️ 下面这张表管的是**员工数据**，而那一档一格都碰不到 —— 他拿到的是一场活动
+> 的报名、签到、工时和通知，不是任何人的任职、薪酬或请假。所以这张表不用改，
+> 写在这里是为了让下一个人不必去比对一遍。
+
 | 数据 | ministry admin（限自己的 ministry） | foundation tier |
 |---|---|---|
 | 姓名 / 岗位 / 汇报线 / 在职状态 | ✅ | ✅ |
@@ -294,7 +350,10 @@ Phase D 之后，一个 ministry admin 会一次性获得：谁拿钱、拿哪�
 | 请假的**日期**和「请假」这个事实 | ✅ | ✅ |
 | 请假的**类型和备注** | ❌ | ✅ |
 | 请假的录入 | ❌ —— 录入的人必须选类型，开给他就等于让他看见（[D34 第四节](decisions/D34-leave.md)） | ✅ 但只给没有账号的人代录；有账号的一律本人在 `/me/leave/new/` 提交 |
-| `compensation` / `employment_type` / `fte` / `agreed_hours_per_week` | ✅ | ✅ |
+| `compensation` / `employment_type` / `fte` / `agreed_hours_per_week` | ✅ **看得见** | ✅ |
+| **填** `compensation` 和 `reports_to`（建岗位时） | ✅ **他填**，而 foundation tier 事后**核验**（2026-09-15 用户定的流程）。⚠️ 本条当天改过一次口：上午那一版是「这两格收给 foundation tier 填」，而它有个真问题 —— 那两格会留着默认值 `unpaid` / 空，**没有任何人声明过它们**。现在是他声明、另一个人签字 | ✅ 核验（改完保存即核验；他也可以只签字不改） |
+| **填** `kind`（staff / board） | ❌ —— 理事席位是基金会的（[D32](decisions/D32-worker-axes-schedule-and-assignment.md)：「board seats are the rare, deliberate ones」）。对他恒为 `STAFF`，而那**不是一个没人声明过的猜测**：他建的就是本部门的员工岗。⚠️ 顺带挡住一个不显眼的后果：`kind=board` 的人**不算在编**，选错一格那个人会静默地看不见发给员工的活动 | ✅ |
+| 核验这件事本身 | ❌ 看不到待办，也点不了 | ✅ 三个入口：名册页顶上那块面板、仪表盘「Needs you」通栏、站内菜单那颗红色计数 |
 | 证照 | ✅ | ✅ |
 | `is_rehirable` / `end_reason` | — 本轮不做（[D37 第二节](decisions/D37-hris-fields-and-credentials.md)） | — |
 | 组织架构图 | 全体登录用户可见（汇报线不是秘密） | |

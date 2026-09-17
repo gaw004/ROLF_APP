@@ -13,6 +13,33 @@
    375px 下那个 bug 是同一个（见 _period_filter.html）。
 {% endcomment %}
 <div id="event-results" class="flex flex-col gap-6 lg:flex-row-reverse">
+  {% comment %}
+  🔴 **筛选栏底下那行「Filtered by … / Clear」和 Dates 那颗按钮上的字，
+     都在 `#event-results` 外面** —— 而 HTMX 只换这一块（2026-09-16 补）。
+     少了下面这两句，这一页上：动一下筛选，列表变了而那行摘要**永远不出现**
+     （于是 Clear 也永远点不到），Dates 按钮上的字停在筛之前那一版。
+     ⚠️ 兄弟页 `_event_list_results.html` 2026-09-15 已经为同一件事画了五份，
+        这一页是当时唯一漏掉的 —— 症状一模一样，而 curl 抓不到：**整页加载时
+        两处都是对的**，只有真的在页面上点一下才看得见。
+
+  🔴 **只在 HTMX 那条路上画**（`is_htmx`）。整页那一次
+     `_period_filter.html` / `_date_range.html` 已经各画过一遍，不加这个条件
+     就是同一个 id 在 DOM 里有两份，而 OOB 的落点从此是不确定的那一个 ——
+     不报错，页面看起来也完全正常。
+
+  ⚠️ **只有这两份，另外三份不画，而这不是漏**：
+       · `_event_count.html` —— 这一页的计数印在下面、在这块**里面**，跟着换；
+       · `_ministry_chip_label.html` —— 那一份是给多选那颗按钮的，而这一页是
+         单选、走原生 `<select>`，浏览器自己显示选中那个 `<option>` 的字；
+       · `_role_chip_label.html` —— 这一页没有 `nature` 那一格。
+     ⚠️ 落点不在 DOM 里时 OOB **静默失败**，所以多画一份不是「保险」，
+        是往响应里塞一块谁都不知道去了哪的 HTML。
+     ⚠️ 新加的 Kind 那一格同理不需要：它也是原生 `<select>`。
+  {% endcomment %}
+  {% if is_htmx %}
+    {% include "events/_filter_summary.html" with oob=1 %}
+    {% include "events/_date_chip_label.html" with oob=1 %}
+  {% endif %}
   {% if report %}
     {% comment %}
     ⚠️ 这个外壳存在的唯一理由是**让面板不参与决定这一行有多高**（2026-08-05 拍板：
@@ -156,17 +183,19 @@
                     </span>
                   {% endif %}
                   {% comment %}
-                  🔴 **`event.can_manage` 是**逐行**的**（2026-09-03）。这一页现在
-                     一张列表列全部 ministry，所以「能不能改」不再是整页的属性 ——
-                     两顶帽子的人在自己那几个 ministry 的行上看到下拉，
-                     在别人的行上看到一枚标签。视图在那个循环里算好（views.py）。
+                  🔴 **2026-09-16（D48）：这里不再分支，每一行都画下拉。**
 
-                  ⚠️ 藏起一个下拉挡不住任何人 —— 真正的拒绝在 POST 那一支的
-                     `_managed_event()` 里。这里只决定画什么。
+                     2026-09-03 到 9-16 之间，这一格按**逐行**的 `event.can_manage`
+                     分两支：自己 ministry 的行画下拉，别人的行画一枚只读标签。
+                     那个区别现在没有人属于了 —— foundation tier 拿到了全部
+                     ministry 的写权限，而这一页上的行只有三个来源（自己管的、
+                     被指名管的、以及 foundation tier 看到的全部），三种今天都
+                     改得动。⚠️ 留着那一支就是留一段描述着一个不存在的区别的
+                     代码，而读它的人会以为这一页上有改不了的行。
+
+                  ⚠️ 藏起一个下拉本来就挡不住任何人 —— 真正的拒绝在 POST 那一支的
+                     `_managed_event()` 里，那一句一个字没动。
                   {% endcomment %}
-                  {% if not event.can_manage %}
-                    {% include "core/components/badge.html" with label=event.get_status_display %}
-                  {% else %}
                   {% comment %}
                   🔴 **换一个状态就存，没有 Save 按钮**（2026-08-29）。
 
@@ -218,21 +247,23 @@
                       {% include "core/components/button.html" with label="Save" variant="secondary" %}
                     </noscript>
                   </form>
-                  {% endif %}
                 </td>
                 <td class="col-goto">
                   {% comment %}
-                  ⚠️ **这一行改不了的时候只画三个链接**（2026-09-03 起是逐行判断，
-                     此前是整页）。给他画 Edit / Notify 的话，点进去是 403 ——
-                     一个拒绝点它的人的链接，读起来是「站坏了」而不是
-                     「这一页不归你」。
+                  ⚠️ **六个链接，不再按行分支**（2026-09-16，D48）。9-03 到 9-16
+                     之间「改不了的行只画三个」是一条真规矩 —— 给一个改不了的人
+                     画 Edit / Notify，点进去是 403，读起来是「站坏了」而不是
+                     「这一页不归你」。现在这一页上**没有改不了的行**（理由写在
+                     上面那一格的注释里），于是那三个 `{% templatetag openblock %} if {% templatetag closeblock %}` 全部拿掉。
+                     ⚠️ 「拒绝点它的人的链接读起来像站坏了」这条道理**没有过期**，
+                        过期的是它在这一页的适用前提。下一次这一页长出一档读得了
+                        改不了的身份时，要回到这里。
 
                   🔴 **固定三列网格，六个链接排成 3+3 两排**（2026-08-29 第二轮）。
 
                      ⚠️ 固定三列，不是 `flex-wrap`。自由折行的行数取决于字号、
                         字体和链接文案，改任何一个都可能悄悄变成三排；固定三列
-                        则是「六个就是两排」，可预测。只读身份只有三个链接，
-                        自然就是一排。
+                        则是「六个就是两排」，可预测。
 
                   🔴 **网格写在 app.css 的 `.manage-events .goto-grid` 上，
                      不是 Tailwind 的 `grid-cols-3`。** 那个工具类展开是
@@ -251,23 +282,17 @@
                      撤的是这一处的应用。
                   {% endcomment %}
                   <div class="goto-grid text-sm">
-                    {% if event.can_manage %}
-                      <a href="{% url 'events:event_update' event.pk %}" class="prose-link whitespace-nowrap">Edit &amp; roles</a>
-                    {% endif %}
+                    <a href="{% url 'events:event_update' event.pk %}" class="prose-link whitespace-nowrap">Edit &amp; roles</a>
                     <a href="{% url 'events:event_registrations' event.pk %}" class="prose-link whitespace-nowrap">Signups</a>
                     <a href="{% url 'events:event_attendance' event.pk %}" class="prose-link whitespace-nowrap">Attendance</a>
                     {% comment %}
-                    ⚠️ 和 Edit / Notify 同一条规矩：只读身份不画。这一页开的是
-                       打卡码，能打开它的人等于能给全场发卡 —— 它的权限和
-                       「改这场活动」是同一个，不是「看这场活动」。
+                    ⚠️ 打卡码那一格的权限是「改这场活动」，不是「看这场活动」——
+                       能打开它的人等于能给全场发卡。今天这一页上两者同集合
+                       （D48），所以它和旁边几个一样无条件画；判据没变。
                     {% endcomment %}
-                    {% if event.can_manage %}
-                      <a href="{% url 'events:checkin_display' event.pk %}" class="prose-link whitespace-nowrap">Check-in QR</a>
-                    {% endif %}
+                    <a href="{% url 'events:checkin_display' event.pk %}" class="prose-link whitespace-nowrap">Check-in QR</a>
                     <a href="{% url 'events:event_report' event.pk %}" class="prose-link whitespace-nowrap">Report</a>
-                    {% if event.can_manage %}
-                      <a href="{% url 'events:event_notify' event.pk %}" class="prose-link whitespace-nowrap">Notify</a>
-                    {% endif %}
+                    <a href="{% url 'events:event_notify' event.pk %}" class="prose-link whitespace-nowrap">Notify</a>
                   </div>
                 </td>
               </tr>

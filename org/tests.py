@@ -19,19 +19,22 @@ from core.timeutils import local_now, local_today
 from events.models import Event
 
 from .admin import StaffingFilter
+from .forms import PositionForm
 from .models import Assignment, EmploymentType, Ministry, MinistryRole, Position
 from .permissions import (
     FOUNDATION_ADMIN_GROUP,
     FOUNDATION_ADMIN_PERMISSIONS,
     can_grant_ministry_admin,
     can_manage_event,
+    can_manage_staff_roster,
     can_publish_event,
     can_view_event_records,
     foundation_admin_group,
+    in_foundation_tier,
     ministry_ids_administered_by,
     unresolved_permissions,
 )
-from .services import build_org_tree
+from .services import build_org_tree, revoke_ministry_role
 
 TODAY = local_today()
 YESTERDAY = TODAY - datetime.timedelta(days=1)
@@ -841,6 +844,52 @@ class PermissionTests(TestCase):
         self.user.groups.add(foundation_admin_group())
         self.assertTrue(can_grant_ministry_admin(self.user.__class__.objects.get(pk=self.user.pk)))
 
+    def test_revoking_takes_effect_at_once_not_tomorrow(self):
+        """🔴 **撤销当场生效**（2026-09-15，用户拍板）。
+
+        `end_date` 是右闭的 —— 「有效期到 3 月 15 日」的日常含义是 15 号那天还
+        算数，而那对**事实记录**是对的（一段任职「做到 15 号」，15 号当天不算
+        在职的话工时会少算一天）。`core.tests.ActiveQuerySetTests
+        .test_active_includes_a_row_ending_today` 专门钉着那个语义。
+
+        ⭐ 而撤销一条授权不是一段事实，是一个**即时动作**。按右闭读的话，
+           被撤销的人**今天剩下的时间里照旧有权限** —— 按钮说「撤销」，发生的是
+           「明天起撤销」，而页面上没有任何地方说这件事。
+
+        ⚠️ 这一条在 2026-09-15 之前**不存在**，而那正是问题：这个行为一直是这样，
+           没有任何东西确认过它是有意的。是 D47 落地时撞上的。
+
+        ⚠️ 记录本身一个字不改：那一行仍然写着 `end_date = 今天`，因为那是事实。
+           变的只是权限判断读哪一个谓词（`core.querysets._ended_on_or_before()`）。
+        """
+        grant = MinistryRole.objects.get(contact=self.zhang, ministry=self.pantry)
+        self.assertEqual(ministry_ids_administered_by(self.user), {self.pantry.pk})
+
+        revoke_ministry_role(grant)
+        self.assertEqual(ministry_ids_administered_by(self.user), set())
+
+        # ⚠️ 而那一行**还在**，日期也还是今天 —— 「去年三月谁能看这个 ministry
+        #    的报名」仍然答得出来。
+        grant.refresh_from_db()
+        self.assertEqual(grant.end_date, TODAY)
+        self.assertTrue(MinistryRole.objects.filter(pk=grant.pk).exists())
+
+    def test_a_tenure_ending_today_still_counts_today(self):
+        """⚠️ 上面那条**不适用于任职**，而两条并排是这件事唯一说得清的地方。
+
+        `end_date` 在授权表上右开（填到今天＝今天起失效），在 `Assignment` 上
+        右闭（「做到 15 号」，15 号那天还在职）。两条各自都对，因为那一列在两张表
+        上的**来源不同**：授权那一列只有撤销写得了它，任职那一列是人填的事实。
+
+        🔴 少了这一条，下一个人会把授权那条右开规矩顺手搬到任职上 ——
+           而那会让每个人的最后一天凭空少算一天工时。
+        """
+        post = make_position(None, "Greeter", ministry=self.pantry)
+        tenure = Assignment.objects.create(
+            contact=self.zhang, position=post, end_date=TODAY)
+        self.assertTrue(tenure.is_currently_active)
+        self.assertIn(tenure, Assignment.objects.active())
+
     def test_the_id_set_is_ids_not_objects(self):
         # The name says ids because the return value is ids. Two documents once
         # gave this function two names; it is the most-called one we have.
@@ -855,6 +904,25 @@ class FoundationAdminGroupTests(TestCase):
        库上，往清单里加一条权限都不会生效** —— 清单是对的，组是旧的，没有任何东西
        报告这个差别。症状是 admin 首页少一个模块，看起来像「页面没做」。
     """
+
+    def test_an_unsaved_account_is_answered_not_raised(self):
+        """🔴 `is_authenticated` **拦不住一个没存过的 User**。
+
+        Django 的 `AbstractBaseUser.is_authenticated` 是一个硬编码的 `True`，
+        所以 `in_foundation_tier(User())` 走得到 `user.groups` —— 而那个关系对
+        一个没有主键的实例直接抛 `ValueError`，也就是一个 500 而不是一句「不是」。
+
+        ⚠️ 这不是编出来的输入：2026-09-16 `PublishFormMixin.__init__` 开始问这个
+           问题之后，`core.tests.TextLengthLimitTests` 那两条（用一个空 `User()`
+           构造 `EventForm`，只为了验一个字数上限）当场变成 ERROR。
+
+        ⚠️ 它的兄弟 `ministry_ids_administered_by()` 早就兜住了同一种输入。
+           两个并排的谓词对同一个输入一个答 False、一个 500，是这个模块最不该
+           有的那种不一致 —— 这一条钉的是它们答得一样。
+        """
+        nobody = get_user_model()()
+        self.assertFalse(in_foundation_tier(nobody))
+        self.assertEqual(ministry_ids_administered_by(nobody), set())
 
     def test_the_group_grants_what_the_list_says(self):
         group = foundation_admin_group()
@@ -1061,3 +1129,568 @@ class FoundationAdminGroupTests(TestCase):
         granted = {p.codename for p in refreshed.permissions.all()}
         self.assertIn("add_ministry", granted)
         self.assertGreater(len(granted), 1)
+
+
+class StaffRosterTests(TestCase):
+    """`/org/staff/` —— 两档权限、两格收窄，以及这一整轮真正要的那件事。
+
+    ⭐ **最后一条（`test_a_new_assignment_makes_staff_only_events_visible`）才是这
+       一页存在的理由。** 受众轴早就能按 ministry 判「在编」了；在这一页之前，
+       录那两行的唯一入口是 Django admin，而 ministry admin 被
+       `StaffOnlyAdminMiddleware` 挡在外面。缺的是入口，不是机制 ——
+       所以验收点是「从这一页录进去的人，看得见发给本部门的活动」。
+    """
+
+    def setUp(self):
+        self.pantry = make_ministry()
+        self.tax = make_ministry(code="tax_help", name="Tax Help")
+
+        self.zhang = make_person("Zhang")
+        self.admin = get_user_model().objects.create_user(
+            email="zhang@example.com", password="x", contact=self.zhang)
+        MinistryRole.objects.create(contact=self.zhang, ministry=self.pantry)
+
+        self.li = make_person("Li")
+        self.boss = get_user_model().objects.create_user(
+            email="li@example.com", password="x", contact=self.li)
+        self.boss.groups.add(foundation_admin_group())
+
+        self.wang = make_person("Wang")
+
+    def as_admin(self):
+        self.client.force_login(self.admin)
+
+    def as_boss(self):
+        self.client.force_login(self.boss)
+
+    def create_post(self, **overrides):
+        # ⚠️ `compensation` 在这里，因为 2026-09-15 起 ministry admin **填得了它**
+        #    （而且它必填 —— 那一格没有「不知道」这个答案）。foundation tier 还多
+        #    一个 `kind`，那一档的测试自己传。
+        payload = {"ministry": self.pantry.pk, "name": "Pantry Coordinator",
+                   "compensation": Position.Compensation.UNPAID,
+                   "description": "", "is_leader": ""}
+        payload.update(overrides)
+        return self.client.post(reverse("org:position_create"), payload)
+
+    # --- review 2026-09-16 抓到的两条 -----------------------------------
+
+    def test_the_new_post_button_preselects_the_ministry_it_came_from(self):
+        """🔴 后果不只是多点一下。
+
+        `roster_index` 拼了 `?ministry=<pk>`、那颗「New post」带着它，而
+        `position_create` **从不读 `request.GET`** —— 预选静默地什么都没做。
+        而对 foundation tier，那一格的空值是**合法**的「Foundation-wide
+        (no ministry)」：于是从某个 ministry 页点进来建出的岗位可以
+        **不属于任何 ministry**，而没有任何东西说过这件事。
+        """
+        self.as_boss()
+        page = self.client.get(
+            reverse("org:position_create") + f"?ministry={self.pantry.pk}")
+        self.assertEqual(
+            str(page.context["form"]["ministry"].value()), str(self.pantry.pk))
+
+    def test_a_ministry_with_only_a_retired_post_waiting_still_gets_a_card(self):
+        """🔴 **那条岗位在界面上够不着，而菜单红点在数它。**
+
+        卡片从 `is_active=True` 的岗位来，而 `awaiting` 数全部 —— 后者是
+        **有意的**（`positions_awaiting_review()`：「撤销」不能变成一条绕过确认
+        的路）。而待确认的那份名单画在单个 ministry 那一页上，去那一页的唯一
+        入口就是这里的卡片。
+
+        于是一个 ministry 唯一的待确认岗位被撤销时：红点说「1 waiting」，
+        点进去一张卡片都没有。
+        """
+        retired = Position.objects.create(
+            ministry=self.tax, name="Built by mistake",
+            compensation=Position.Compensation.UNPAID,
+            needs_foundation_review=True, is_active=False)
+        self.as_boss()
+        page = self.client.get(reverse("org:staff_roster"))
+        cards = {card.ministry: card for card in page.context["cards"]}
+        self.assertIn(self.tax, cards, "红点在数它，而这一页上没有任何路到得了")
+        self.assertEqual(cards[self.tax].awaiting, 1)
+        # ⚠️ 三个 0 是诚实的：这个 ministry 确实一个在办岗位都没有。
+        self.assertEqual(cards[self.tax].posts, 0)
+        self.assertContains(page, retired.ministry.name)
+
+    # --- 两格收窄 ------------------------------------------------------
+
+    def test_a_ministry_admin_is_not_offered_the_foundation_column(self):
+        """`kind` 那一格对他**不存在**，不是灰的。
+
+        ⚠️ 2026-09-15 从三格收到一格：薪酬档和汇报线还给他填了（用户定的），
+           而 `kind` 留着 —— 理事席位是基金会的事（D32）。名单读
+           `FOUNDATION_ONLY_FIELDS`，不在这里抄第二份。
+        """
+        self.as_admin()
+        form = self.client.get(reverse("org:position_create")).context["form"]
+        # ⚠️ 读 `FOUNDATION_ONLY_FIELDS` 而不是在这里再抄一份名单 —— 抄一份的话，
+        #    「哪几格收给 foundation」就有两个答案，而它们走散时这条测试照样绿。
+        #    （顺带绕开 `OrgTreeGuardTests`：那条守卫按 `reports_to` 扫全仓库，
+        #    而一个字符串字面量在它看来和一次遍历长得一样。）
+        for name in PositionForm.FOUNDATION_ONLY_FIELDS:
+            self.assertNotIn(name, form.fields)
+        self.assertIn("name", form.fields)
+
+    def test_the_foundation_tier_is_offered_them(self):
+        self.as_boss()
+        form = self.client.get(reverse("org:position_create")).context["form"]
+        for name in PositionForm.FOUNDATION_ONLY_FIELDS:
+            self.assertIn(name, form.fields)
+
+    def test_he_sets_the_pay_himself_but_a_forged_kind_does_not_reach_the_row(self):
+        """两半：薪酬档**是他填的**，而 `kind` 伪造不进来。
+
+        ⭐ 前一半 2026-09-15 改口（用户定的）：薪酬档和汇报线还给 ministry admin
+           填，foundation tier 改成事后核验。这比原来好，而且治掉一个真问题 ——
+           那两格原来留着默认值，**没有任何人声明过它们**。
+
+        🔴 后一半是「删字段而不是 `disabled`」买到的东西，一个字没变：
+           `disabled=True` 会让 Django 拿 initial 顶替提交上来的值 —— 对**改**
+           安全，对**建**不安全（新建时 initial 就是字段默认值，于是这个 POST 会
+           被悄悄换成 `staff`，看起来像挡住了）。删掉字段之后，那个值连进
+           `cleaned_data` 的机会都没有。
+        """
+        self.as_admin()
+        self.create_post(compensation=Position.Compensation.PAID,
+                         kind=Position.Kind.BOARD)
+        post = Position.objects.get(name="Pantry Coordinator")
+        self.assertEqual(post.compensation, Position.Compensation.PAID)
+        self.assertEqual(post.kind, Position.Kind.STAFF)
+
+    def test_a_ministry_admin_is_only_offered_his_own_ministries(self):
+        self.as_admin()
+        form = self.client.get(reverse("org:position_create")).context["form"]
+        self.assertEqual(list(form.fields["ministry"].queryset), [self.pantry])
+
+    def test_the_ministry_box_does_not_tell_him_to_leave_it_empty(self):
+        """🔴 模型的 help_text 对这一档是一句假话（2026-09-15 在浏览器里看到的）。
+
+        `Position.ministry` 的 help_text 写着「Leave empty for foundation-wide
+        posts」—— 对 foundation tier 成立，而 ministry admin 这一格是**必填**的，
+        照做会被拒绝。⚠️ curl 抓不到：HTML 一个字不差，错的是那句话和这张表单的
+        关系。
+        """
+        self.as_admin()
+        form = self.client.get(reverse("org:position_create")).context["form"]
+        self.assertNotIn("Leave empty", form.fields["ministry"].help_text)
+
+        self.as_boss()
+        form = self.client.get(reverse("org:position_create")).context["form"]
+        self.assertIn("Leave empty", form.fields["ministry"].help_text)
+
+    def test_a_ministry_admin_cannot_leave_the_ministry_empty(self):
+        """空着的 `ministry` 意思是「基金会级岗位」，而那只有 foundation tier 建得了。
+
+        ⚠️ 表单把这一格设成必填，正是因为**不设的话它是可空的** ——
+           `Position.ministry` 允许 null，所以留空提交会静静地建出一个他没有权限
+           建的东西。
+        """
+        self.as_admin()
+        response = self.create_post(ministry="")
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(Position.objects.filter(name="Pantry Coordinator").exists())
+
+    def test_a_forged_ministry_id_creates_nothing(self):
+        """别人 ministry 的 id 提交上来 —— 什么都没建出来。
+
+        ⚠️ **实际拦住它的是表单那道收窄**（`ministry` 的 queryset 只有他那几个），
+           所以这里是 200 加一条字段报错，不是 403。视图里那句
+           `can_manage_staff_roster()` 是**纵深防御**，今天走不到 ——
+           `events.views.event_create` 里那句 `can_publish_event()` 是同一个形状、
+           同一个处境。规则本身由下面那条测试直接钉。
+        """
+        self.as_admin()
+        response = self.create_post(ministry=self.tax.pk)
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(Position.objects.exists())
+
+    def test_who_may_manage_which_ministrys_roster(self):
+        """规则本身，直接问 —— 不经过任何一张表单。
+
+        ⚠️ 这条测试存在，是因为上面那条走不到视图里那句检查：没有它，
+           `can_manage_staff_roster()` 删掉也不会有任何测试变红。
+        """
+        self.assertTrue(can_manage_staff_roster(self.admin, self.pantry))
+        self.assertFalse(can_manage_staff_roster(self.admin, self.tax))
+        # ⭐ `None` = 基金会级岗位，只有 foundation tier 过得去。
+        self.assertFalse(can_manage_staff_roster(self.admin, None))
+        self.assertTrue(can_manage_staff_roster(self.boss, None))
+        self.assertTrue(can_manage_staff_roster(self.boss, self.tax))
+
+    # --- 待确认标记 ----------------------------------------------------
+
+    def test_a_post_a_ministry_admin_created_waits_for_the_foundation(self):
+        self.as_admin()
+        self.create_post()
+        self.assertTrue(Position.objects.get().needs_foundation_review)
+
+    def test_a_post_the_foundation_created_does_not_wait(self):
+        self.as_boss()
+        self.create_post(kind=Position.Kind.STAFF,
+                         compensation=Position.Compensation.PAID)
+        self.assertFalse(Position.objects.get().needs_foundation_review)
+
+    def test_the_foundation_saving_an_edit_counts_as_verifying_it(self):
+        """⭐ **「改完就算核验过」**（用户 2026-09-15 定的）。
+
+        他打开一个待核验的岗位、把填错的薪酬档改对、保存 —— 那一下既是修正也是
+        核验。再让他点第二颗「Verified」只会制造「已经改对了却还赖在待办里」。
+        """
+        self.as_admin()
+        self.create_post()
+        post = Position.objects.get()
+        self.assertTrue(post.needs_foundation_review)
+
+        self.as_boss()
+        self.client.post(reverse("org:position_detail", kwargs={"pk": post.pk}), {
+            "ministry": self.pantry.pk, "name": post.name,
+            "kind": Position.Kind.STAFF,
+            "compensation": Position.Compensation.PAID,
+            "reports_to": "", "description": "", "is_leader": "", "is_active": "on"})
+        post.refresh_from_db()
+        self.assertEqual(post.compensation, Position.Compensation.PAID)
+        self.assertFalse(post.needs_foundation_review)
+
+    def test_changing_the_pay_afterwards_sends_it_back_for_verification(self):
+        """🔴 核验不是一次性的 —— 改那几格就重新待核验（用户定的）。
+
+        不这么做的话，核完之后那几格再也没人看，而**改一格比建一个新岗位容易
+        得多**。
+        """
+        self.as_boss()
+        self.create_post(kind=Position.Kind.STAFF,
+                         compensation=Position.Compensation.UNPAID)
+        post = Position.objects.get()
+        self.assertFalse(post.needs_foundation_review)
+
+        self.as_admin()
+        self.client.post(reverse("org:position_detail", kwargs={"pk": post.pk}), {
+            "ministry": self.pantry.pk, "name": post.name,
+            "compensation": Position.Compensation.PAID,
+            "reports_to": "", "description": "", "is_leader": "", "is_active": "on"})
+        post.refresh_from_db()
+        self.assertEqual(post.compensation, Position.Compensation.PAID)
+        self.assertTrue(post.needs_foundation_review)
+
+    def test_renaming_a_post_does_not_send_it_back_for_verification(self):
+        """⚠️ 只有 `VERIFIED_FIELDS` 触发。
+
+        一张被无关改动塞满的待办列表，正是让人开始无视它的原因 —— 同
+        `deferred.md` 里那条「下周班表已生成」的周期通知被否掉的理由。
+        """
+        self.as_boss()
+        self.create_post(kind=Position.Kind.STAFF,
+                         compensation=Position.Compensation.UNPAID)
+        post = Position.objects.get()
+
+        self.as_admin()
+        self.client.post(reverse("org:position_detail", kwargs={"pk": post.pk}), {
+            "ministry": self.pantry.pk, "name": "Weekend Coordinator",
+            "compensation": Position.Compensation.UNPAID,
+            "reports_to": "", "description": "", "is_leader": "", "is_active": "on"})
+        post.refresh_from_db()
+        self.assertEqual(post.name, "Weekend Coordinator")
+        self.assertFalse(post.needs_foundation_review)
+
+    def test_confirming_takes_it_off_the_list(self):
+        self.as_admin()
+        self.create_post()
+        post = Position.objects.get()
+
+        self.as_boss()
+        self.client.post(reverse("org:position_detail", kwargs={"pk": post.pk}),
+                         {"confirm": "1"})
+        post.refresh_from_db()
+        self.assertFalse(post.needs_foundation_review)
+
+    def test_a_ministry_admin_cannot_confirm(self):
+        self.as_admin()
+        self.create_post()
+        post = Position.objects.get()
+        response = self.client.post(
+            reverse("org:position_detail", kwargs={"pk": post.pk}), {"confirm": "1"})
+        self.assertEqual(response.status_code, 403)
+        post.refresh_from_db()
+        self.assertTrue(post.needs_foundation_review)
+
+    def roster_of(self, ministry):
+        return self.client.get(
+            reverse("org:ministry_roster", kwargs={"pk": ministry.pk}))
+
+    def test_the_review_panel_is_drawn_for_the_foundation_and_nobody_else(self):
+        """⚠️ 给 ministry admin 画这块面板就是给他一张他做不了的待办。"""
+        self.as_admin()
+        self.create_post()
+
+        self.assertIsNone(self.roster_of(self.pantry).context["awaiting"])
+        self.as_boss()
+        self.assertEqual(len(self.roster_of(self.pantry).context["awaiting"]), 1)
+
+    def test_the_review_note_says_somebody_set_them_not_that_they_are_defaults(self):
+        """🔴 文案跟着流程走（2026-09-15 当天改过一次）。
+
+        上一版写的是「still at their defaults — nobody has said they are right」，
+        对应的是「那两格收给 foundation tier 填」那一版设计。用户推翻它之后，
+        那两格**是 ministry admin 声明过的**，那句话成了假话。
+        ⚠️ curl 抓不到这种东西：HTML 一个字不差，错的是那句话和流程的关系。
+        """
+        self.as_admin()
+        self.create_post()
+        post = Position.objects.get()
+
+        self.as_boss()
+        html = self.client.get(
+            reverse("org:position_detail", kwargs={"pk": post.pk})).content.decode()
+        self.assertIn("A ministry admin set", html)
+        self.assertNotIn("still at their defaults", html)
+
+    def test_the_index_counts_what_is_waiting_per_ministry(self):
+        """⭐ 索引页上每张卡片右上角那颗红点（用户 2026-09-15 定的）。"""
+        self.as_admin()
+        self.create_post()
+        self.create_post(name="Pantry Greeter")
+
+        self.as_boss()
+        cards = {c.ministry: c for c in
+                 self.client.get(reverse("org:staff_roster")).context["cards"]}
+        self.assertEqual(cards[self.pantry].awaiting, 2)
+
+    def test_the_index_lists_one_card_per_ministry_and_no_posts(self):
+        """⭐ **索引页不列任何一个岗位** —— 先选一个 ministry，点进去才看。
+
+        初版是一页列全部、按 ministry 分段，而这个基金会的 ministry 只会变多。
+        """
+        make_position(None, "Tax Lead", ministry=self.tax)
+        make_position(None, "Greeter", ministry=self.pantry)
+        self.as_boss()
+        page = self.client.get(reverse("org:staff_roster"))
+        self.assertEqual([c.ministry for c in page.context["cards"]],
+                         [self.pantry, self.tax])
+        self.assertNotIn("sections", page.context)
+        self.assertNotIn("Greeter", page.content.decode())
+
+    def test_a_ministry_admin_only_sees_his_own_card(self):
+        make_position(None, "Tax Lead", ministry=self.tax)
+        make_position(None, "Greeter", ministry=self.pantry)
+        self.as_admin()
+        cards = self.client.get(reverse("org:staff_roster")).context["cards"]
+        self.assertEqual([c.ministry for c in cards], [self.pantry])
+
+    def test_another_ministrys_roster_does_not_exist_for_him(self):
+        """404 —— 不归他管的 ministry 的名册对他**不存在**，同活动那道门的口径。"""
+        make_position(None, "Tax Lead", ministry=self.tax)
+        self.as_admin()
+        self.assertEqual(self.roster_of(self.tax).status_code, 404)
+
+    def test_the_foundation_wide_roster_is_only_for_the_foundation(self):
+        """🔴 基金会级岗位那一页没有 pk 可挂，所以它是一个词形的地址。
+
+        ⚠️ 而挡住 ministry admin 的**不是**这一页自己的判断：`_scoped_positions()`
+           给他的 queryset 里根本没有 `ministry` 为空的那些行。
+        """
+        make_position(None, "Executive Director")
+        self.as_admin()
+        self.assertEqual(
+            self.client.get(reverse("org:foundation_wide_roster")).status_code, 404)
+        self.as_boss()
+        page = self.client.get(reverse("org:foundation_wide_roster"))
+        self.assertEqual(page.status_code, 200)
+        self.assertIn("Executive Director", page.content.decode())
+
+    # --- 作用域 --------------------------------------------------------
+
+    def test_another_ministrys_post_does_not_exist_for_him(self):
+        """404，不是 403 —— 不归他管的岗位对他**不存在**，同活动那道门的口径。"""
+        other = make_position("tax-lead", "Tax Lead", ministry=self.tax)
+        self.as_admin()
+        response = self.client.get(
+            reverse("org:position_detail", kwargs={"pk": other.pk}))
+        self.assertEqual(response.status_code, 404)
+
+    def test_a_foundation_wide_post_is_only_on_the_foundations_page(self):
+        """🔴 `Position.ministry` 可空，空着的意思是「基金会级岗位」。
+
+        按 ministry 收窄天然把它们排除在 ministry admin 之外 —— 而那正是想要的
+        （Executive Director 不是食物银行的岗位）。这一条钉的是**另一半**：
+        foundation tier 那边它们必须在，否则这批人一个页面都进不去而且不报错
+        （D2a.10 给 `on_duty()` 记的就是这个症状）。
+        """
+        top = make_position("exec-director", "Executive Director")
+        self.as_admin()
+        self.assertEqual(
+            self.client.get(reverse("org:position_detail"
+                                    , kwargs={"pk": top.pk})).status_code, 404)
+        self.as_boss()
+        self.assertEqual(
+            self.client.get(reverse("org:position_detail",
+                                    kwargs={"pk": top.pk})).status_code, 200)
+
+    def test_somebody_with_neither_hat_is_refused(self):
+        outsider = get_user_model().objects.create_user(
+            email="nobody@example.com", password="x", contact=self.wang)
+        self.client.force_login(outsider)
+        self.assertEqual(
+            self.client.get(reverse("org:staff_roster")).status_code, 403)
+
+    # --- code：默认没有，需要时才手设一个 --------------------------------
+
+    def test_a_new_post_has_no_code(self):
+        """⭐ 建出来的岗位**没有** code，而那是它的正常状态。
+
+        一个格子做不了两件事：标识符不许变，描述不许过期。所以这一列不再试图
+        从名字派生任何东西 —— 空的意思是「还没有任何系统需要指向这个岗位」。
+        """
+        self.as_admin()
+        self.create_post()
+        self.assertIsNone(Position.objects.get().code)
+
+    def test_the_form_never_offers_a_code_to_anybody(self):
+        """两档都没有这一格：「什么时候该填」是技术判断，不是业务判断。"""
+        self.as_admin()
+        self.assertNotIn(
+            "code", self.client.get(reverse("org:position_create")).context["form"].fields)
+        self.as_boss()
+        self.assertNotIn(
+            "code", self.client.get(reverse("org:position_create")).context["form"].fields)
+
+    def test_any_number_of_posts_can_have_no_code(self):
+        """⚠️ `position_code_ci_unique` 是 `UniqueConstraint(Lower("code"))`。
+
+        这一条钉的是「多个空 code 不算重复」—— Postgres 认多个 NULL 互不相等，
+        所以约束一个字不用改。**而它只在归一化把 `""` 收成 `None` 的前提下成立**：
+        两个 `""` 数据库是认作重复的，那会让建第二个没有 code 的岗位撞上一个
+        莫名其妙的唯一性冲突（`core.models.ImmutableCodeMixin.save()`）。
+        """
+        self.as_admin()
+        self.create_post()
+        self.create_post(name="Pantry Greeter")
+        self.create_post(name="Pantry Driver")
+        self.assertEqual(Position.objects.filter(code__isnull=True).count(), 3)
+
+    def test_an_anchor_can_be_set_once_and_then_not_changed(self):
+        """空着可以设；设过之后不可改 —— 不可改保护的是**已经有人在引用**的值。"""
+        post = make_position(None, "Coordinator", ministry=self.pantry)
+        post.code = "pantry_coordinator"
+        post.full_clean()                      # 第一次设：放行
+        post.save()
+
+        post.code = "something_else"
+        with self.assertRaises(ValidationError) as caught:
+            post.full_clean()
+        self.assertIn("code", caught.exception.error_dict)
+
+    # --- 名册的分组 ------------------------------------------------------
+
+    def test_a_vacant_leader_post_is_listed_once_and_only_under_vacant(self):
+        """🔴 `PositionQuerySet` 那条三态不变量，画在页面上的那一半。
+
+        把「空缺」写成一个附加标记的话，一个没人的组长岗位会**同时**出现在
+        Leaders 和 Vacant 两组里 —— 同一行列两遍，而顶上那两个数跟着对不上。
+        """
+        make_position(None, "Lead", ministry=self.pantry, is_leader=True)
+        self.as_admin()
+        section = self.roster_of(self.pantry).context["section"]
+        groups = dict(section.groups)
+        self.assertEqual([row.position.name for row in groups["Vacant"]], ["Lead"])
+        self.assertNotIn("Leaders", groups)
+        self.assertEqual(section.posts, 1)
+        self.assertEqual(section.holders, 0)
+
+    def test_a_stipend_post_is_grouped_with_the_paid_ones(self):
+        """⚠️ `stipend` 归在拿钱那一档，是 `Compensation` 自己的注释定的政策。"""
+        post = make_position(None, "Greeter", ministry=self.pantry,
+                             compensation=Position.Compensation.STIPEND)
+        Assignment.objects.create(contact=self.wang, position=post)
+        self.as_admin()
+        self.assertIn("Staff — paid", dict(self.roster_of(self.pantry).context["section"].groups))
+
+    # --- 写入路径上的两道拦 ---------------------------------------------
+
+    def test_a_post_somebody_still_holds_cannot_be_retired(self):
+        post = make_position("greeter", "Greeter", ministry=self.pantry)
+        Assignment.objects.create(contact=self.wang, position=post)
+        self.as_admin()
+        response = self.client.post(
+            reverse("org:position_detail", kwargs={"pk": post.pk}),
+            {"ministry": self.pantry.pk, "name": "Greeter", "description": "",
+             "is_leader": "", "is_active": ""})
+        self.assertEqual(response.status_code, 200)
+        post.refresh_from_db()
+        self.assertTrue(post.is_active)
+
+    def test_the_same_person_cannot_hold_one_post_twice_at_once(self):
+        """⚠️ 不和「允许交接期重叠」冲突 —— 那说的是**两个人**并存。"""
+        post = make_position("greeter", "Greeter", ministry=self.pantry)
+        Assignment.objects.create(contact=self.wang, position=post, start_date=LAST_YEAR)
+        self.as_admin()
+        response = self.client.post(
+            reverse("org:position_detail", kwargs={"pk": post.pk}),
+            {"assign": "1", "contact": self.wang.pk, "start_date": TODAY})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(Assignment.objects.filter(position=post).count(), 1)
+
+    def test_ending_a_tenure_dates_it_rather_than_deleting_it(self):
+        post = make_position("greeter", "Greeter", ministry=self.pantry)
+        tenure = Assignment.objects.create(contact=self.wang, position=post)
+        self.as_admin()
+        self.client.post(reverse("org:position_detail", kwargs={"pk": post.pk}),
+                         {"end": tenure.pk})
+        tenure.refresh_from_db()
+        self.assertEqual(tenure.end_date, TODAY)
+
+    def test_a_tenure_pk_from_another_post_is_not_reachable(self):
+        """来自表单的 pk 不许够得着别的岗位的行，同 `find_grant()` 的作用域。"""
+        mine = make_position("greeter", "Greeter", ministry=self.pantry)
+        theirs = make_position("tax-lead", "Tax Lead", ministry=self.tax)
+        tenure = Assignment.objects.create(contact=self.wang, position=theirs)
+        self.as_admin()
+        response = self.client.post(
+            reverse("org:position_detail", kwargs={"pk": mine.pk}), {"end": tenure.pk})
+        self.assertEqual(response.status_code, 404)
+        tenure.refresh_from_db()
+        self.assertIsNone(tenure.end_date)
+
+    # --- ⭐ 这一整轮真正要的那件事 ---------------------------------------
+
+    def staff_only_event(self):
+        event = Event.objects.create(
+            name="Staff briefing", ministry=self.pantry,
+            start_time=local_now() + datetime.timedelta(days=3),
+            end_time=local_now() + datetime.timedelta(days=3, hours=1),
+            owner=self.zhang, status=Event.Status.OPEN,
+        )
+        event.visible_to_ministries.add(self.pantry)
+        return event
+
+    def test_a_new_assignment_makes_staff_only_events_visible(self):
+        """⭐ 从这一页录进去的人，当场看得见发给本部门的活动。
+
+        受众判断走 `Position(kind=staff, is_active)` + 一条在效期内的
+        `Assignment` —— 也就是这一页建的那两行，一个新字段都没有。
+        """
+        event = self.staff_only_event()
+        self.assertNotIn(event, Event.objects.for_audience(self.wang))
+
+        post = make_position("greeter", "Greeter", ministry=self.pantry)
+        tenure = Assignment.objects.create(contact=self.wang, position=post)
+        self.assertIn(event, Event.objects.for_audience(self.wang))
+
+        # 而结束任职当场收回可见性 —— `end_assignment()` 的注释写着这一条，
+        # 因为它看起来会像一个 bug。
+        tenure.end_date = YESTERDAY
+        tenure.save(update_fields=["end_date"])
+        self.assertNotIn(event, Event.objects.for_audience(self.wang))
+
+    def test_a_board_seat_does_not_count_as_being_on_the_books(self):
+        """⚠️ `kind=board` 的人**不算在编**（`on_the_books_q` 只认 STAFF）。
+
+        这正是 `kind` 被收给 foundation tier 的那个不显眼的理由：选错一格，
+        这个人静默地看不见发给员工的活动，而他不会知道为什么。
+        """
+        event = self.staff_only_event()
+        seat = make_position("trustee", "Trustee", ministry=self.pantry,
+                             kind=Position.Kind.BOARD)
+        Assignment.objects.create(contact=self.wang, position=seat)
+        self.assertNotIn(event, Event.objects.for_audience(self.wang))

@@ -1446,6 +1446,47 @@ class PosterIsAskedGuardTests(TestCase):
         )
 
 
+class NavContextComesFromOneBuilderGuardTests(TestCase):
+    """Lint-as-test：活动那一排导航的上下文**只许一个函数构造**（2026-09-16）。
+
+    ⭐ **它守的不是「别写重复的代码」，是「一条规则只许有一个书写位置」。**
+       那一排画在七个页面上，而它要的三个键此前是在七个视图里各写一遍的。
+       漏改一处的失败是**静默的**：那一页少画（或多画）一个链接，
+       页面照常渲染、测试照常绿。
+
+    ⚠️ 而它连着咬过两次，两次都是同一个形状：
+         · 七处问的都是 `can_grant`，而那一页的门是更宽的
+           `can_revoke_event_grant` —— foundation tier 是唯一进得来、
+           却没有任何链接的人；
+         · 修它时七处代码改对了，四处紧挨着的注释没跟着改。
+
+    🔴 **扫全仓，不只扫 `events/views.py`。** 哪天 `dashboard` 里也画这一排，
+       只盯一个文件的守卫看不见它 —— 而那正是「第八个页面」会出现的地方。
+
+    ⚠️ 走 `our_functions()`，它已经把 docstring 和 `#` 注释剥掉了
+       （`PROSE`）。所以上面这段话里出现那个键名是安全的 ——
+       这个仓库六次栽在「守卫匹到自己的注释」上，而这一次是**机制**挡住的，
+       不是靠我记得别写。
+    """
+
+    #: 唯一允许构造那份上下文的函数。
+    BUILDER = "_event_page_context"
+
+    #: 那一排靠它决定画不画 Admins 那一格。⚠️ 另外两个键（`event` /
+    #: `can_manage`）**故意不守**：它们在别处有正当的独立用途，守了就会把这条
+    #: 测试变成一张长长的豁免名单 —— 而 D36 的第四条代价警告过那种守卫。
+    #: 这一个键只有那一排读，所以它是这份上下文的**指纹**。
+    KEY = '"can_reach_admins"'
+
+    def test_only_one_function_builds_the_event_nav_context(self):
+        writers = sorted(
+            name for _where, name, code in our_functions() if self.KEY in code)
+        self.assertEqual(
+            writers, [self.BUILDER],
+            "那一排导航的上下文只许 `%s` 构造，而这些函数也在写它：\n%s"
+            % (self.BUILDER, "\n".join(writers)))
+
+
 class DeletesInServicesAreEnumeratedGuardTests(TestCase):
     """Lint-as-test: every delete in the events service layer is named here.
 

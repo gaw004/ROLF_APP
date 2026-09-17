@@ -7,6 +7,15 @@
    现在每一页都带着全套链接，任何一页都是入口。
 
 参数：event、current（当前页的名字，用来高亮）。
+
+🔴 **这一排要的三个上下文键（`event` / `can_manage` / `can_reach_admins`）
+   由 `views._event_page_context()` 一处给**（2026-09-16）。新加一页画这一排，
+   调它 —— 别自己拼那个字典。
+   ⚠️ 此前七个视图各拼一遍，而漏改一处的表现是**那一页少画一个链接，
+      页面照常渲染、测试照常绿**。它连着咬过两次，经过写在那个函数上。
+   ⚠️ 守卫 `core.tests.NavContextComesFromOneBuilderGuardTests` 盯着这件事。
+⚠️ `manage_list_name` 不在那三个里面 —— 它是**全站**的（那一页叫什么），
+   由 `core/context_processors.py` 给。
 {% endcomment %}
 <nav class="mb-6 flex flex-wrap items-center gap-1 text-sm" aria-label="This event">
   {% comment %}

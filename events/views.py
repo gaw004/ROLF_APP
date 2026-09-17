@@ -2875,6 +2875,57 @@ def _mention_audience_gaps(request, event):
         ))
 
 
+def _event_page_context(user, event, *, can_manage):
+    """管理侧每一页都要的那三样 —— 那一排导航靠它们决定画什么（2026-09-16）。
+
+    🔴 **在这之前这三个键是在七个视图里各写一遍的**，而那不是「代码长得像」，
+       是**一条规则有七个书写位置**。漏改一处的表现是静默的：那一页少画（或多画）
+       一个链接，页面照常渲染、测试照常绿。而它连着咬过两次 ——
+       一次是七处问的都是 `can_grant`（而那一页的门更宽，于是 foundation tier 是
+       唯一进得来、却没有任何链接的人），一次是改对了七处代码、漏改了四处紧挨着
+       的注释。
+
+    ⚠️ 收的只有导航要的这三样。那七页其余的上下文**没有一个键是共享的**
+       （`roles` / `participations` / `summary` / `grants`…）—— 硬合会造一个
+       「什么都知道一点」的构造器，那比七份重复更难拆。
+
+    ## Admins 那一格问的是**那一页自己的门**
+
+    `can_revoke_event_grant`，**既不是** `can_manage`（被授权人管得了这场活动，
+    却进不去那一页），**也不是** `can_grant`（foundation tier 进得去、只是授不出，
+    它的 docstring 明写「进得来这一页，只是画不出下面那张表单」）。
+    画一个必定 403 的链接，读起来是「站坏了」而不是「这一页不归你」。
+
+    ⚠️ `event_admins` 自己也走这里，尽管它的门已经证明了这个谓词。
+       **代价如实记**：那一页因此多一次 `can_revoke_event_grant()`
+       （`administers()` + `in_foundation_tier()`，1–2 次查询）。换来的是全仓
+       **只有一处**写着「Admins 那一格问什么」—— 而原来那个硬写的 `True` 正是
+       「门一改、这里不跟着改」的下一个候选。
+
+    ## 🔴 `can_manage` 是**参数**，不在这里算
+
+    因为它在调用方有**两种来源**，而两种都不该被「再算一遍」取代：
+
+      · 走 `_managed_event()` 进来的那几页，它是 `True` **by construction** ——
+        再问一次是多花一次查询去求一个不可能为假的值，而且等于不信任那道门；
+      · 走 `event_access()` 的那几页，它和 `may_view_records` 是**一次**授权表
+        读取出来的两个答案（那个函数的 docstring 写着「One read of the grant
+        table, not two」）—— 在这里再算就是把它刚省下的那次查询又花掉。
+
+    ⚠️ 写成 `can_manage=None` 表示「你自己算」**不行**：一个改变行为的可选参数
+       正是 `forms.NO_AUDIENCE` 那条注释在拦的东西 —— `None` 是一个合法答案，
+       不能兼职当哨兵。
+
+    ⚠️ 守卫：`core.tests.NavContextComesFromOneBuilderGuardTests` —— 这个键
+       全仓只许这一个函数写。
+    """
+    return {
+        "event": event,
+        "can_manage": can_manage,
+        "can_reach_admins": can_revoke_event_grant(user, event),
+    }
+
+
 def _edit_page_context(event, *, form=None, role_form=None, user=None):
     """Everything the merged edit page needs, from whichever view got the POST.
 
@@ -2889,15 +2940,9 @@ def _edit_page_context(event, *, form=None, role_form=None, user=None):
        a fresh one or the page comes back with somebody else's errors on it.
     """
     return {
-        "event": event,
-        # Always true here: every path into this page goes through
-        # _managed_event() first. Passed explicitly rather than left out, so the
-        # shared nav does not have to treat "missing" as "false".
-        "can_manage": True,
-        # ⚠️ **而这一个不是恒真的**（D47，2026-09-15）：被授权人打得开这一页
-        #    （他管得了这场活动），但转授不了。两个值在他身上分岔，正是
-        #    `_event_nav.html` 里那两格分开问的原因。
-        "can_reach_admins": can_revoke_event_grant(user, event),
+        # ⚠️ `can_manage=True`：进这一页的每一条路都先走过 `_managed_event()`。
+        #    显式传而不是省略，好让共用的那一排不必把「没给」当成「假」。
+        **_event_page_context(user, event, can_manage=True),
         "form": form if form is not None else EventForm(instance=event, user=user),
         "role_form": role_form if role_form is not None else EventRoleForm(parent=event),
         "roles": event.roles.with_signup_counts().select_related("role"),
@@ -3036,10 +3081,9 @@ def event_meetings(request, pk):
             return redirect("events:event_meetings", pk=event.pk)
 
     return render(request, "events/event_meetings.html", {
-        "event": event,
+        # ⚠️ `can_manage=True`：这一页走的是 `_managed_event()`。
+        **_event_page_context(request.user, event, can_manage=True),
         "form": form,
-        "can_manage": True,
-        "can_reach_admins": can_revoke_event_grant(request.user, event),
         # ⭐ 序号走 `schedule.occurrences()`，**不在模板里数** —— 「第几讲」
         #    全站只有一个算法，而报名页和日历读的也是它。
         # ⚠️ 每一行的时刻（`7pm`）由 `Occurrence.starts_at` 给 —— 走的是
@@ -3125,13 +3169,7 @@ def event_registrations(request, pk):
         )
     )
     return render(request, "events/event_registrations.html", {
-        # ⚠️ 那一排导航要知道画不画 Admins 那一格（D47）。它问的是**那一页自己
-        #    的门**（`can_revoke_event_grant`），不是 `can_manage`，也不是
-        #    `can_grant` —— 被授权人管得了这场活动却进不去那一页，而 foundation
-        #    tier 进得去、只是授不出。2026-09-16 之前这里问的是后者，于是
-        #    foundation tier 是唯一进得来、却没有任何链接的人。
-        "can_reach_admins": can_revoke_event_grant(request.user, event),
-        "event": event,
+        **_event_page_context(request.user, event, can_manage=can_manage),
         # Drives the shared event nav: Edit and Notify are drawn only for
         # somebody who can actually open them.
         "can_manage": can_manage, "roles": roles,
@@ -3253,13 +3291,7 @@ def event_attendance(request, pk):
         .order_by("event_role__role__name", "contact")
     )
     return render(request, "events/event_attendance.html", {
-        # ⚠️ 那一排导航要知道画不画 Admins 那一格（D47）。它问的是**那一页自己
-        #    的门**（`can_revoke_event_grant`），不是 `can_manage`，也不是
-        #    `can_grant` —— 被授权人管得了这场活动却进不去那一页，而 foundation
-        #    tier 进得去、只是授不出。2026-09-16 之前这里问的是后者，于是
-        #    foundation tier 是唯一进得来、却没有任何链接的人。
-        "can_reach_admins": can_revoke_event_grant(request.user, event),
-        "event": event,
+        **_event_page_context(request.user, event, can_manage=can_manage),
         "participations": rows,
         "hours_form": HoursForm(),
         "can_manage": can_manage,
@@ -3293,14 +3325,7 @@ def event_report(request, pk):
     if not may_view_records:
         raise PermissionDenied(SCOPED_DENIAL)
     return render(request, "events/event_report.html", {
-        # ⚠️ 那一排导航要知道画不画 Admins 那一格（D47）。它问的是**那一页自己
-        #    的门**（`can_revoke_event_grant`），不是 `can_manage`，也不是
-        #    `can_grant` —— 被授权人管得了这场活动却进不去那一页，而 foundation
-        #    tier 进得去、只是授不出。2026-09-16 之前这里问的是后者，于是
-        #    foundation tier 是唯一进得来、却没有任何链接的人。
-        "can_reach_admins": can_revoke_event_grant(request.user, event),
-        "event": event,
-        "can_manage": can_manage,
+        **_event_page_context(request.user, event, can_manage=can_manage),
         "summary": event_summary(event),
         "staff": ministry_staff_participation(event),
     })
@@ -3357,15 +3382,8 @@ def event_notify(request, pk):
         })
 
     return render(request, "events/event_notify.html", {
-        # ⚠️ 那一排导航要知道画不画 Admins 那一格（D47）。它问的是**那一页自己
-        #    的门**（`can_revoke_event_grant`），不是 `can_manage`，也不是
-        #    `can_grant` —— 被授权人管得了这场活动却进不去那一页，而 foundation
-        #    tier 进得去、只是授不出。2026-09-16 之前这里问的是后者，于是
-        #    foundation tier 是唯一进得来、却没有任何链接的人。
-        "can_reach_admins": can_revoke_event_grant(request.user, event),
-        "event": event,
-        # Always true: this view is gated on can_manage_event above.
-        "can_manage": True,
+        # ⚠️ `can_manage=True`：这一页 gated on can_manage_event above。
+        **_event_page_context(request.user, event, can_manage=True),
         "form": form,
         "recipients": [r for r in recipients if not r.is_guardian],
         "guardian_recipients": [r for r in recipients if r.is_guardian],
@@ -3454,16 +3472,19 @@ def event_admins(request, pk):
                 return redirect("events:event_admins", pk=event.pk)
 
     return render(request, "events/event_admins.html", {
-        "event": event,
+        # 🔴 **`can_manage` 仍然是真算出来的那个值。** 这一页的门证明的是
+        #    `can_revoke_event_grant`，**没有**证明 `can_manage` —— 一个只被
+        #    指名管别的活动的人进不来，而 foundation tier 两者都真。
+        #    ⚠️ 这里原来还硬写了一个 `"can_reach_admins": True`（门恰好就是那个
+        #       谓词）。现在它跟着走那个共用的构造器 —— 多一次权限调用，换来的是
+        #       全仓只有一处写着「Admins 那一格问什么」。
+        **_event_page_context(request.user, event,
+                              can_manage=can_manage_event(request.user, event)),
         "form": form,
         "grants": event_grants(event),
-        # ⚠️ **这一页两个键都要**：导航那一格问的是「进得来吗」
-        #    （和这个视图的门同一个问题），而下面那张授权表单问的是
-        #    「授得出吗」—— foundation tier 前者为真、后者为假。
-        "can_reach_admins": True,
+        # ⚠️ 下面那张授权表单问的是「**授得出吗**」，和导航那一格不是一个问题 ——
+        #    foundation tier 前者为假、后者为真。
         "can_grant": may_grant,
-        # ⚠️ 这一页也画那一排导航，而那一排要知道画不画 Edit / Notify / Admins。
-        "can_manage": can_manage_event(request.user, event),
     })
 
 

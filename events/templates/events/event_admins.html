@@ -67,7 +67,17 @@
               <td>{{ grant.start_date|default_if_none:"—" }}</td>
               <td>{{ grant.end_date|default_if_none:"—" }}</td>
               <td>
-                {% if grant.is_currently_active %}
+                {% comment %}
+                🔴 **`is_in_force`，不是 `is_currently_active`**（2026-09-16）。
+                   这一列要和**权限层**说同一句话，而权限层 2026-09-15 起走的是
+                   右开的 `in_force()`（撤销当天就失效）。读右闭的那一个，
+                   撤销当天这里写着 **Yes** —— 而这张页面自己的横幅写着
+                   「Revoking takes effect at once」，他其实一点权限都没有了。
+                ⚠️ 两条谓词并排住在 `core/querysets.py` 里，各管各的一半：
+                   事实（任职、工时、报表）走 `is_currently_active`，
+                   授权走这一个。
+                {% endcomment %}
+                {% if grant.is_in_force %}
                   {% include "core/components/badge.html" with label="Yes" tone="success" %}
                 {% else %}
                   {% include "core/components/badge.html" with label="No" %}

@@ -5095,15 +5095,13 @@ def _busy_windows(participation):
     ⚠️ 没有点名行时退回这门课的全部讲次：那是**报名之前**的状态（报名页上还没有
        这条 `Participation`），以及这一列到来之前的老行。
     """
-    event = participation.event_role.event
-    meetings = [row.session for row in participation.attendances.all()]
-    if meetings:
-        meetings.sort(key=lambda session: session.start_time)
-        return [
-            ClashTime(start=meeting.start_time, end=meeting.end_time, ordinal=number)
-            for number, meeting in enumerate(meetings, 1)
-        ]
-    return _event_windows(event)
+    picked = {row.session_id for row in participation.attendances.all()}
+    # 🔴 **序号在收窄之前就定好了**（2026-09-16 修）。这一行以前是
+    #    `enumerate(meetings, 1)` —— 在**他挑的那几讲**上重新从 1 数。于是只报了
+    #    第 3/7/11 讲的人，撞车提示写「第 1 讲」，而报名页和日历写「第 3 讲」。
+    #    ⚠️ 这个仓库只允许「第几讲」有一个算法（`schedule.occurrences()`，
+    #       `Occurrence.session` 那段注释写着同一条）—— 筛掉几项不许重编它。
+    return _spots(participation.event_role.event, only=picked or None)
 
 
 def _event_windows(event):
@@ -5118,9 +5116,37 @@ def _event_windows(event):
        **每一场**活动都会报「和 ESL 课冲突」。技术上没错，对人是胡说，
        而且它会通过所有只用单场活动写的测试。
     """
+    return _spots(event)
+
+
+def _spots(event, only=None):
+    """这场活动占住的那些时段；`only` 给一组 session id 时只留那几讲。
+
+    ⚠️ 走 `schedule.occurrences()`，**不在这里写第二份展开逻辑**（同上）。
+
+    🔴 **没有讲次的课占不住任何「已知」的时间**（2026-09-16 修）。
+       `occurrences()` 对一个没有 `Session` 的活动退回它的两端当一个时段 ——
+       那个退路是**给单场活动的**，而套在一门课上就是整整一个学期一个时间窗：
+       四月里每一场活动都报「和 ESL 课冲突」，也就是上面那段 🔴 说它防住的
+       那个洞，从另一个方向回来了。
+       ⚠️ 可达的：D49 之前发布的课（一讲都没排），以及在 Meetings 页上把讲次
+          删光。⚠️ 学期的两端是这门课**招生时说的**日期，不是它开会的时刻 ——
+          不知道它什么时候上课，就不该拿它去和别的东西比。
+
+    ⚠️ **判据写在这里，不写进 `occurrences()`**：那个退路对单场活动是对的，
+       而那一份日程面板每天在用。
+
+    ⚠️ 查询数不许涨：`only` 收的是 id（调用方用 `row.session_id`，不碰
+       `row.session`），而 `event.sessions` 已经被上游两个 prefetch 覆盖。
+    """
+    spots = occurrences([event])
+    if event.shape == Event.Shape.PROGRAM:
+        spots = [spot for spot in spots if spot.session is not None]
+        if only is not None:
+            spots = [spot for spot in spots if spot.session.pk in only]
     return [
         ClashTime(start=spot.start_time, end=spot.end_time, ordinal=spot.ordinal)
-        for spot in occurrences([event])
+        for spot in spots
     ]
 
 
@@ -5276,9 +5302,54 @@ def grant_event_admin(*, contact, event, granted_by, start_date=None):
 
     ⚠️ `granted_by` 由调用方从 session 里取，**永远不是表单上的一个格子** ——
        一个能填的格子就是一个能撒谎的格子（同 `grant_ministry_admin()`）。
+
+    🔴 **同一把钥匙上已经有一行时，这里是「恢复」，不是第二条**（2026-09-16，
+       用户拍板）。约束是 `(contact, event, start_date)` 且
+       `nulls_distinct=False`，而表单的 `start_date` 默认留空 —— 于是
+       「授权 → 手滑撤销 → 再授权」在此之前是一个 **`IntegrityError`（500）**，
+       双击那颗键也是。而那条路上人的意图明明白白：把它还给他。
+
+         · 那一行还在效期内 → 拒绝（他本来就有）
+         · 那一行已经结束   → **恢复**：清掉 `end_date`
+         · 没有那一行       → 照旧新建
+
+       ⚠️ 「已经结束」**不分今天还是上个月**：分档会多一条挡不住任何事的分支
+          —— 上个月结束的那一行键是一样的，不恢复它就照样是 500。
+
+       ⚠️ **代价如实记**：恢复会把当前行的 `end_date` 抹掉，于是「中间断过
+          一段」只活在 simple-history 里。这是可以接受的 —— 这张表带 history
+          的理由**正是**那个问题（「去年三月谁能看这个」）—— 但当前行**不是
+          全部真相**，别照着它回答「他从什么时候起一直有权限」。
+
+    ⚠️ `full_clean()` 不能省，即使上面那一支已经处理了重复：别的约束
+       （`end_date >= start_date`）照旧要在存之前被问一次，而
+       `core/constraints.py` 已经把违约码接到了具体那一格上 ——
+       于是一次真正的冲突是表单上的一句话，不是 500。
+
+    ⚠️ 和 `org.services.grant_ministry_admin()` **形状一样、各写一份**：
+       它们是两张表，不是一条规则的两份实现。改这里想一想那边。
+
+    抛 `ValidationError`，由调用方落到表单上。
     """
-    return EventGrant.objects.create(
-        contact=contact, event=event, start_date=start_date, granted_by=granted_by)
+    standing = EventGrant.objects.filter(
+        contact=contact, event=event, start_date=start_date).first()
+    if standing is not None:
+        if standing.is_in_force:
+            raise ValidationError(
+                {"contact": "They already manage this event."})
+        standing.end_date = None
+        # ⚠️ 记的是**这一次**是谁给的：恢复也是一次授权行为，而「谁给的」
+        #    是这张表要留痕的东西之一。
+        standing.granted_by = granted_by
+        standing.full_clean()
+        standing.save()
+        return standing
+
+    grant = EventGrant(contact=contact, event=event,
+                       start_date=start_date, granted_by=granted_by)
+    grant.full_clean()
+    grant.save()
+    return grant
 
 
 def revoke_event_grant(grant, *, on=None):

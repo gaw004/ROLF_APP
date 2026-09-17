@@ -11,7 +11,7 @@ here too, next to it.
 
 from django.contrib import messages
 from django.contrib.auth.decorators import login_required
-from django.core.exceptions import PermissionDenied
+from django.core.exceptions import PermissionDenied, ValidationError
 from django.http import Http404
 from django.shortcuts import get_object_or_404, redirect, render
 
@@ -92,15 +92,22 @@ def ministry_admin_page(request, pk):
             return redirect("org:ministry_admins", pk=ministry.pk)
 
         if form.is_valid():
-            grant_ministry_admin(
-                contact=form.cleaned_data["contact"],
-                ministry=ministry,
-                start_date=form.cleaned_data["start_date"],
-                # From the session, never from the page.
-                granted_by=request.user,
-            )
-            messages.success(request, "Granted.")
-            return redirect("org:ministry_admins", pk=ministry.pk)
+            # ⚠️ 服务层可能拒绝（他已经有了）—— 接住它落到表单上，而不是让
+            #    一个 `ValidationError` 变成 500。`add_error(None, …)` 对一个
+            #    带 `error_dict` 的异常会**按 key 分发**到那一格上。
+            try:
+                grant_ministry_admin(
+                    contact=form.cleaned_data["contact"],
+                    ministry=ministry,
+                    start_date=form.cleaned_data["start_date"],
+                    # From the session, never from the page.
+                    granted_by=request.user,
+                )
+            except ValidationError as refusal:
+                form.add_error(None, refusal)
+            else:
+                messages.success(request, "Granted.")
+                return redirect("org:ministry_admins", pk=ministry.pk)
 
     return render(request, "org/ministry_admins.html", {
         "ministry": ministry,

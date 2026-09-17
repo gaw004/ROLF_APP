@@ -860,7 +860,7 @@ class PermissionTests(TestCase):
            没有任何东西确认过它是有意的。是 D47 落地时撞上的。
 
         ⚠️ 记录本身一个字不改：那一行仍然写着 `end_date = 今天`，因为那是事实。
-           变的只是权限判断读哪一个谓词（`core.querysets.not_revoked_by()`）。
+           变的只是权限判断读哪一个谓词（`core.querysets._ended_on_or_before()`）。
         """
         grant = MinistryRole.objects.get(contact=self.zhang, ministry=self.pantry)
         self.assertEqual(ministry_ids_administered_by(self.user), {self.pantry.pk})

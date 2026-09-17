@@ -5,8 +5,12 @@
 建一个岗位。
 
 ⚠️ 表单上**没有 code 这一格**，而那不是漏了：它建了就改不了
-   （`ImmutableCodeMixin`），由 `org.services.create_position()` 从名字生成。
-   理由写在 `_free_position_code()` 上。
+   （`ImmutableCodeMixin`），而让一个非技术的人敲一个永久性的 slug，
+   敲错之后没有任何一条路能改。
+   🔴 **2026-09-16 改口**：这里原来写着「由 `create_position()` 从名字生成，
+      理由写在 `_free_position_code()` 上」——**两句都是假的**，D46 当天就把
+      自动生成删掉了，而那个函数从来没有存在过。
+      真实情况：`code` 默认为空，只有真有东西要指着这个岗位时才手填（D46）。
 ⚠️ 薪酬档 / 汇报线 / 类型三格只对 foundation tier 出现，而它们是被
    **删掉**的不是禁用的 —— 见 `org.forms.PositionForm` 的第一段。
 {% endcomment %}

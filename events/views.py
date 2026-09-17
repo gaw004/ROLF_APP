@@ -2897,7 +2897,7 @@ def _edit_page_context(event, *, form=None, role_form=None, user=None):
         # ⚠️ **而这一个不是恒真的**（D47，2026-09-15）：被授权人打得开这一页
         #    （他管得了这场活动），但转授不了。两个值在他身上分岔，正是
         #    `_event_nav.html` 里那两格分开问的原因。
-        "can_grant": can_grant_event_admin(user, event),
+        "can_reach_admins": can_revoke_event_grant(user, event),
         "form": form if form is not None else EventForm(instance=event, user=user),
         "role_form": role_form if role_form is not None else EventRoleForm(parent=event),
         "roles": event.roles.with_signup_counts().select_related("role"),
@@ -3034,7 +3034,7 @@ def event_meetings(request, pk):
         "event": event,
         "form": form,
         "can_manage": True,
-        "can_grant": can_grant_event_admin(request.user, event),
+        "can_reach_admins": can_revoke_event_grant(request.user, event),
         # ⭐ 序号走 `schedule.occurrences()`，**不在模板里数** —— 「第几讲」
         #    全站只有一个算法，而报名页和日历读的也是它。
         # ⚠️ 每一行的时刻（`7pm`）由 `Occurrence.starts_at` 给 —— 走的是
@@ -3122,7 +3122,7 @@ def event_registrations(request, pk):
     return render(request, "events/event_registrations.html", {
         # ⚠️ 那一排导航要知道画不画 Admins 那一格（D47）。它问的是
         #    `can_grant`，不是 `can_manage` —— 被授权人管得了这场活动、转授不了。
-        "can_grant": can_grant_event_admin(request.user, event),
+        "can_reach_admins": can_revoke_event_grant(request.user, event),
         "event": event,
         # Drives the shared event nav: Edit and Notify are drawn only for
         # somebody who can actually open them.
@@ -3247,7 +3247,7 @@ def event_attendance(request, pk):
     return render(request, "events/event_attendance.html", {
         # ⚠️ 那一排导航要知道画不画 Admins 那一格（D47）。它问的是
         #    `can_grant`，不是 `can_manage` —— 被授权人管得了这场活动、转授不了。
-        "can_grant": can_grant_event_admin(request.user, event),
+        "can_reach_admins": can_revoke_event_grant(request.user, event),
         "event": event,
         "participations": rows,
         "hours_form": HoursForm(),
@@ -3284,7 +3284,7 @@ def event_report(request, pk):
     return render(request, "events/event_report.html", {
         # ⚠️ 那一排导航要知道画不画 Admins 那一格（D47）。它问的是
         #    `can_grant`，不是 `can_manage` —— 被授权人管得了这场活动、转授不了。
-        "can_grant": can_grant_event_admin(request.user, event),
+        "can_reach_admins": can_revoke_event_grant(request.user, event),
         "event": event,
         "can_manage": can_manage,
         "summary": event_summary(event),
@@ -3345,7 +3345,7 @@ def event_notify(request, pk):
     return render(request, "events/event_notify.html", {
         # ⚠️ 那一排导航要知道画不画 Admins 那一格（D47）。它问的是
         #    `can_grant`，不是 `can_manage` —— 被授权人管得了这场活动、转授不了。
-        "can_grant": can_grant_event_admin(request.user, event),
+        "can_reach_admins": can_revoke_event_grant(request.user, event),
         "event": event,
         # Always true: this view is gated on can_manage_event above.
         "can_manage": True,
@@ -3411,23 +3411,35 @@ def event_admins(request, pk):
         if not may_grant:
             raise PermissionDenied(SCOPED_DENIAL)
         if form.is_valid():
-            grant = grant_event_admin(
-                contact=form.cleaned_data["contact"],
-                event=event,
-                start_date=form.cleaned_data["start_date"],
-                # 从 session 来，永远不从页面来。
-                granted_by=request.user,
-            )
-            # ⚠️ 通知是授权之上的一份礼貌，不是它的一部分：发不出去绝不能把一次
-            #    已经生效的授权撤回来，所以它返回而不抛（同 `confirm_signup()`）。
-            tell_them_they_can_manage(grant)
-            messages.success(request, "Granted. We have let them know.")
-            return redirect("events:event_admins", pk=event.pk)
+            # ⚠️ 服务层可能拒绝（他已经有了）—— 接住它落到表单上，而不是让
+            #    一个 `ValidationError` 变成 500。`add_error(None, …)` 对一个
+            #    带 `error_dict` 的异常会**按 key 分发**到那一格上。
+            try:
+                grant = grant_event_admin(
+                    contact=form.cleaned_data["contact"],
+                    event=event,
+                    start_date=form.cleaned_data["start_date"],
+                    # 从 session 来，永远不从页面来。
+                    granted_by=request.user,
+                )
+            except ValidationError as refusal:
+                form.add_error(None, refusal)
+            else:
+                # ⚠️ 通知是授权之上的一份礼貌，不是它的一部分：发不出去绝不能把
+                #    一次已经生效的授权撤回来，所以它返回而不抛
+                #    （同 `confirm_signup()`）。
+                tell_them_they_can_manage(grant)
+                messages.success(request, "Granted. We have let them know.")
+                return redirect("events:event_admins", pk=event.pk)
 
     return render(request, "events/event_admins.html", {
         "event": event,
         "form": form,
         "grants": event_grants(event),
+        # ⚠️ **这一页两个键都要**：导航那一格问的是「进得来吗」
+        #    （和这个视图的门同一个问题），而下面那张授权表单问的是
+        #    「授得出吗」—— foundation tier 前者为真、后者为假。
+        "can_reach_admins": True,
         "can_grant": may_grant,
         # ⚠️ 这一页也画那一排导航，而那一排要知道画不画 Edit / Notify / Admins。
         "can_manage": can_manage_event(request.user, event),

@@ -120,3 +120,29 @@ class DateRangeMixin:
             (self.start_date is None or self.start_date <= on)
             and (self.end_date is None or self.end_date >= on)
         )
+
+    @property
+    def is_in_force(self):
+        """`in_force()` 的行级那一半 —— **授权专用**，`end_date` 右开。
+
+        🔴 **它 2026-09-16 才补上，而 `in_force()` 是 9-15 加的 —— 那一天之间，
+           上面那句「change one, change the other should be a glance」没有被
+           兑现。** 后果不是抽象的：权限层按右开判，而两张授权页按右闭画，
+           于是**撤销当天那一行写着「In effect: Yes」**，正下方是横幅
+           「Revoking takes effect at once」。他其实一点权限都没有了。
+           ⚠️ 加一个查询集谓词而不加它的行级双胞胎，症状**永远**是这一种：
+              页面和权限各说各的，而两边都不报错。
+
+        ⚠️ **上面那个一个字没改**，而这不是遗留：两条谓词各管各的一半 ——
+           `is_currently_active` 服务**事实**（任职、工时、报表，那里「有效期到
+           今天」是诚实的），这一条服务**权限**。`in_force()` 的 docstring
+           划的是同一条线。
+        """
+        on = local_today()
+        return (
+            (self.start_date is None or self.start_date <= on)
+            # 🔴 **`>` 而不是 `>=`** —— 这一个字符就是这两条谓词的全部差别。
+            #    撤销把 `end_date` 填成今天，而在授权表上那一行的唯一含义是
+            #    「今天被收回了」。整段理由在 `_ended_on_or_before()` 上。
+            and (self.end_date is None or self.end_date > on)
+        )

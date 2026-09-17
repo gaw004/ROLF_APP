@@ -82,7 +82,7 @@ from core.timeutils import (
     month_bounds,
 )
 from org.models import Assignment, Ministry, MinistryRole, Position
-from org.permissions import foundation_admin_group
+from org.permissions import can_manage_event, foundation_admin_group
 
 from .management.commands import seed_demo
 from .management.commands.seed_demo import demo_login
@@ -22487,6 +22487,49 @@ class SignupConflictTests(TestCase):
         self.assertEqual(found[second.pk][0].event, first.event_role.event)
 
 
+
+    # --- review 2026-09-16 抓到的两条 -------------------------------------
+
+    def test_a_course_with_no_meetings_yet_holds_no_time_at_all(self):
+        """🔴 **那个洞从另一个方向回来了一次。**
+
+        `schedule.occurrences()` 对一个没有 `Session` 的活动退回它的两端当一个
+        时段 —— 那个退路是**给单场活动的**，而套在一门课上就是整整一个学期一个
+        时间窗：四月里每一场活动都报「和这门课冲突」，也就是这一组顶上那段
+        ⭐ 说的那件事。
+
+        ⚠️ 可达的：D49 之前发布的课（一讲都没排），以及在 Meetings 页上把讲次
+           删光。⚠️ 学期的两端是这门课**招生时说的**日期，不是它开会的时刻。
+        """
+        term = make_run(ministry=self.pantry, name="Shell course",
+                        start_time=day_start(local_today() + 7 * DAY) + 9 * HOUR,
+                        end_time=day_start(local_today() + 70 * DAY) + 21 * HOUR)
+        self.signed_up_for(term)
+        inside = self.an_event(
+            "Right in the middle",
+            day_start(local_today() + 30 * DAY) + 10 * HOUR)
+        self.assertEqual(conflicts_for(self.me, inside), [])
+
+    def test_the_meeting_number_is_the_courses_own_not_the_ones_he_picked(self):
+        """🔴 「第几讲」全站只有一个算法。
+
+        这一条以前是 `enumerate(meetings, 1)` —— 在**他挑的那几讲**上重新从 1
+        数。于是只报了第 3 讲的人，撞车提示写「第 1 讲」，而报名页和日历写
+        「第 3 讲」。两边各自都渲染正常。
+        """
+        first = day_start(local_today() + 7 * DAY) + 19 * HOUR
+        course = self.a_course("Picky ESL",
+                               [first + n * 7 * DAY for n in range(4)],
+                               people_pick_meetings=True)
+        third = list(course.sessions.all())[2]
+        self.signed_up_for(course, sessions=[third])
+
+        clash = self.an_event("Clashes with week three", third.start_time)
+        found = conflicts_for(self.me, clash)
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0].times[0].ordinal, 3, "序号被按他挑的那几讲重编了")
+
+
 class EventGrantTests(PageTestCase):
     """把一场活动交给别人管 —— D47（2026-09-15）。
 
@@ -22510,6 +22553,97 @@ class EventGrantTests(PageTestCase):
     def grant_to(self, user, **kwargs):
         return grant_event_admin(contact=user.contact, event=self.event,
                                  granted_by=self.zhang, **kwargs)
+
+    # --- review 2026-09-16 抓到的三条 -------------------------------------
+
+    def test_the_page_says_no_the_moment_it_is_revoked(self):
+        """🔴 **撤销当天，那一行写着「In effect: Yes」而他一点权限都没有。**
+
+        根因：D47（9-15）把权限路径改成右开的 `in_force()`，却没给它行级的
+        双胞胎 —— 显示侧还是右闭的 `is_currently_active`。而这一页正上方的
+        横幅写着「Revoking takes effect at once」。
+
+        ⚠️ 这一条同时钉住**两条谓词各管各的一半**：`is_currently_active`
+           仍然为真，而那不是 bug —— 它服务的是事实（任职、工时、报表），
+           那里「有效期到今天」是诚实的。
+        """
+        grant = self.grant_to(self.helper)
+        revoke_event_grant(grant)
+        grant.refresh_from_db()
+
+        self.assertFalse(can_manage_event(self.helper, self.event))
+        self.assertFalse(grant.is_in_force, "权限说没有，而这一格说有")
+        self.assertTrue(grant.is_currently_active, "事实那一条不该跟着改")
+
+        self.as_(self.zhang)
+        page = self.client.get(
+            reverse("events:event_admins", args=[self.event.pk])).content.decode()
+        self.assertNotIn(">Yes<", page)
+
+    def test_granting_again_after_a_mistaken_revoke_restores_the_row(self):
+        """🔴 在此之前这是一个 **500**。
+
+        约束是 `(contact, event, start_date)` 且 `nulls_distinct=False`，而表单
+        的 `start_date` 默认留空 —— 于是「授权 → 手滑撤销 → 再授权」撞上
+        `IntegrityError`。双击那颗键也是。
+
+        用户拍板：当成「恢复」。⚠️ 仍然**只有一行** —— 「中间断过一段」活在
+        simple-history 里，当前行不是全部真相（服务层 docstring 写着这一条）。
+        """
+        grant = self.grant_to(self.helper)
+        revoke_event_grant(grant)
+
+        again = self.grant_to(self.helper)
+        self.assertEqual(again.pk, grant.pk, "恢复应该是同一行，不是第二行")
+        self.assertIsNone(again.end_date)
+        self.assertTrue(can_manage_event(self.helper, self.event))
+        self.assertEqual(
+            EventGrant.objects.filter(contact=self.helper.contact,
+                                      event=self.event).count(), 1)
+
+    def test_granting_to_somebody_who_already_has_it_is_a_form_error(self):
+        """⚠️ 「恢复」只对已经结束的那一行。还在效期内的重复是一次真的重复，
+           而它该是表单上的一句话，不是 500。
+        """
+        self.grant_to(self.helper)
+        self.as_(self.zhang)
+        response = self.client.post(
+            reverse("events:event_admins", args=[self.event.pk]),
+            {"contact": self.helper.contact.pk, "start_date": ""})
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.context["form"].errors)
+        self.assertEqual(
+            EventGrant.objects.filter(contact=self.helper.contact,
+                                      event=self.event).count(), 1)
+
+    def test_the_foundation_tier_is_offered_the_admins_page_it_may_enter(self):
+        """🔴 它是唯一**进得来、却没有任何链接**的人。
+
+        这一页的门是 `can_revoke_event_grant`（更宽，含 foundation tier ——
+        它的 docstring 明写「进得来这一页，只是画不出下面那张表单」），
+        而导航那一格此前问的是更窄的 `can_grant`。连它站在那一页上时，
+        那一格都是空的。
+        """
+        self.as_(self.boss)
+        admins_url = reverse("events:event_admins", args=[self.event.pk])
+        report = self.client.get(
+            reverse("events:event_report", args=[self.event.pk])).content.decode()
+        self.assertIn(admins_url, report, "它看不到通往那一页的链接")
+
+        page = self.client.get(admins_url)
+        self.assertEqual(page.status_code, 200)
+        # ⚠️ 进得来，但**授不出** —— 那张表单仍然只画给 ministry admin。
+        self.assertFalse(page.context["can_grant"])
+
+    def test_a_grantee_is_offered_neither(self):
+        """⚠️ 放宽的只有 foundation tier。少了这一条，上面那条用一句
+           「谁都看得见」也能满足 —— 而被授权人**转授不了**（D47）。
+        """
+        self.grant_to(self.helper)
+        self.as_(self.helper)
+        page = self.client.get(
+            reverse("events:event_report", args=[self.event.pk])).content.decode()
+        self.assertNotIn(reverse("events:event_admins", args=[self.event.pk]), page)
 
     def as_(self, user):
         self.client.force_login(user)

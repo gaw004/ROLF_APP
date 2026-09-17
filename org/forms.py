@@ -387,8 +387,13 @@ class PositionForm(forms.ModelForm):
 
     ⚠️ `code` **这张表单上永远没有**（2026-09-15 用户拍板）：它建了就改不了，
        而让一个非技术的人敲一个永久性的 slug，敲错之后没有任何一条路能改。
-       由 `org.services.create_position()` 从名字生成，理由写在
-       `_free_position_code()` 上。
+       🔴 **2026-09-16 改口**：这里原来写着「由 `create_position()` 从名字生成，
+          理由写在 `_free_position_code()` 上」——**两句都是假的**。
+          D46 当天把自动生成整个删掉了（用户的原话：「我不能接受名字改对后
+          code 依然错误」），`create_position()` 现在明写着「code 一个字不碰」，
+          而 `_free_position_code()` 这个函数从来没有存在过。
+          ⚠️ 真实情况：`code` 默认是空的，只有在**真有东西要指着这个岗位**时
+             才由 foundation tier 手填 —— D46（可空 + 需要时手填）。
 
     ⚠️ `is_active` 只在**改**的时候出现：一个刚建出来的岗位当然是存在的，
        而一颗建的时候就能勾掉的「这个岗位已撤销」是一个没有意义的状态。

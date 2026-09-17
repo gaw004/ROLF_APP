@@ -633,7 +633,7 @@ class EventGrantAdmin(SimpleHistoryAdmin):
     """
 
     list_display = ["contact", "event", "start_date", "end_date",
-                    "is_currently_active", "granted_by"]
+                    "is_in_force", "granted_by"]
     list_filter = ["event__ministry", "event__status"]
     search_fields = [
         "contact__legal_last_name", "contact__legal_first_name",
@@ -642,6 +642,13 @@ class EventGrantAdmin(SimpleHistoryAdmin):
     autocomplete_fields = ["contact", "event"]
     list_select_related = ["contact", "event", "granted_by"]
 
+    # 🔴 **`is_in_force`，不是 `is_currently_active`**（2026-09-16）。
+    #    这一列要和权限层说同一句话，而权限层 2026-09-15 起走右开的
+    #    `in_force()` —— 读右闭的那一个，撤销当天这一格是打勾的，而那个人
+    #    已经什么都做不了了。两张授权表（这张和另一张）一起改。
+    # ⚠️ **`AssignmentAdmin` 那一列没改**，而那不是漏：任职是**事实**，
+    #    「有效期到今天」在那里是诚实的。两条谓词各管各的一半，
+    #    分界写在 `core/querysets.py` 上。
     @admin.display(boolean=True, description="In effect")
-    def is_currently_active(self, obj):
-        return obj.is_currently_active
+    def is_in_force(self, obj):
+        return obj.is_in_force

@@ -48,7 +48,9 @@
                 {% comment %}
                 ⚠️ 时刻是**服务端**算好的（`schedule.clock()`），不是这里
                    `date:"g:ia"` —— 那个过滤器给的是 `7:00p.m.`，而全站写的是
-                   `7pm`。理由整段在 `views._meeting_rows()` 上。
+                   `7pm`。理由整段在 `schedule.Occurrence.starts_at` 上。
+                   ⚠️ 这里 2026-09-16 一度写着 `views._meeting_rows()` ——
+                      那个函数当天就被并回去了，而注释没跟着改。
                 {% endcomment %}
                 <td>{{ meeting.start_time|date:"D j M Y" }}, {{ meeting.starts_at }}</td>
                 <td>{{ meeting.ends_at }}</td>

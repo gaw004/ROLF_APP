@@ -133,14 +133,58 @@ def grant_ministry_admin(*, contact, ministry, granted_by, start_date=None):
 
     granted_by is passed in from the session by the caller and is never a field
     on a form — a box somebody can type in is a box somebody can lie in.
+
+    🔴 **同一把钥匙上已经有一行时，这里是「恢复」，不是第二条**（2026-09-16，
+       用户拍板）。约束是 `(contact, ministry, role, start_date)` 且
+       `nulls_distinct=False`，而表单的 `start_date` 默认留空 —— 于是
+       「授权 → 手滑撤销 → 再授权」在此之前是一个 **`IntegrityError`（500）**，
+       双击那颗键也是。而那条路上人的意图明明白白：把它还给他。
+
+         · 那一行还在效期内 → 拒绝（他本来就有）
+         · 那一行已经结束   → **恢复**：清掉 `end_date`
+         · 没有那一行       → 照旧新建
+
+       ⚠️ 「已经结束」**不分今天还是上个月**：分档会多一条挡不住任何事的分支
+          —— 上个月结束的那一行键是一样的，不恢复它就照样是 500。
+
+       ⚠️ **代价如实记**：恢复会把当前行的 `end_date` 抹掉，于是「中间断过
+          一段」只活在 simple-history 里。这是可以接受的 —— 这张表带 history
+          的理由**正是**那个问题（「去年三月谁能看这个」）—— 但当前行**不是
+          全部真相**，别照着它回答「他从什么时候起一直有权限」。
+
+    ⚠️ `full_clean()` 不能省，即使上面那一支已经处理了重复：别的约束
+       （`end_date >= start_date`）照旧要在存之前被问一次，而
+       `core/constraints.py` 已经把违约码接到了具体那一格上 ——
+       于是一次真正的冲突是表单上的一句话，不是 500。
+
+    ⚠️ 和 `events.services.grant_event_admin()` **形状一样、各写一份**：
+       它们是两张表，不是一条规则的两份实现。改这里想一想那边。
+
+    抛 `ValidationError`，由调用方落到表单上。
     """
-    return MinistryRole.objects.create(
+    standing = MinistryRole.objects.filter(
+        contact=contact, ministry=ministry, role=MinistryRole.Role.ADMIN,
+        start_date=start_date).first()
+    if standing is not None:
+        if standing.is_in_force:
+            raise ValidationError(
+                {"contact": "They already administer this ministry."})
+        standing.end_date = None
+        standing.granted_by = granted_by
+        standing.full_clean()
+        standing.save()
+        return standing
+
+    grant = MinistryRole(
         contact=contact,
         ministry=ministry,
         role=MinistryRole.Role.ADMIN,
         start_date=start_date,
         granted_by=granted_by,
     )
+    grant.full_clean()
+    grant.save()
+    return grant
 
 
 def find_grant(ministry, pk):

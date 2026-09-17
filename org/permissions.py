@@ -66,7 +66,7 @@ def ministry_ids_administered_by(user, on=None) -> set[int]:
        **今天剩下的时间里照旧管着这个 ministry**，明天才失效。按钮说「撤销」，
        发生的是「明天起撤销」，而页面上没有任何地方说这件事。
        ⚠️ 这是一个**既有的**行为，不是这一轮引入的 —— 它没有任何测试钉着，
-          是 D47 落地时撞上的。整段理由在 `core.querysets.not_revoked_by()`。
+          是 D47 落地时撞上的。整段理由在 `core.querysets._ended_on_or_before()`。
        ⚠️ 报表和记录那一侧**照旧走 `active()`**：那一行诚实地写着「有效期到
           今天」，因为那是事实。变的只是权限判断。
     """
@@ -225,22 +225,12 @@ def event_ids_granted_to(user, on=None) -> set[int]:
     )
 
 
-#: 🔴 **`administers_one_of()` 和 `holds_grant_on()` 2026-09-16 删掉了（D48）。**
-#:
-#:    两个都是「同一条规则的集合版」，给管理列表逐行判「这一行能不能改」用的，
-#:    唯一的调用方是 `events.views.event_manage_list`。D48 把 foundation tier 的
-#:    写权限放开之后，那一页上**每一行都改得动** —— 那个逐行判断只剩一个答案，
-#:    连同这两个函数一起清掉了（phase-d 的判据 2：它没有读者）。
-#:
-#:    ⚠️ 它们解决的问题**没有消失**：一页 50 行要判权限时，逐行 `administers()`
-#:       就是 50 次查询。哪天再需要，形状照旧是「调用方先取一次 id 集合，
-#:       这里只做集合判断」，而且要**紧挨着** `administers()` / `event_ids_granted_to()`
-#:       放 —— 同一条规则的两份实现分开放，是它们走散的开始。
-#:    ⚠️ 还有一条当时写下的理由值得留着：把 `event.ministry_id in administered`
-#:       直接内联进 `views.py`，等于把这个函数的函数体写在 grep 守卫看不见的
-#:       地方（`PermissionGuardTests` 找的是 `MinistryRole.objects`，一个集合
-#:       判断它一个字都认不出来）。所以那一天真要回来，是回来**一个函数**，
-#:       不是回来一行内联。
+#: ⚠️ `holds_grant_on()` 2026-09-16 也删掉了（D48）—— 它和 `administers_one_of()`
+#:    是同一件事的两半，整段理由写在上面 `administers()` 旁边那一块，
+#:    **这里不抄第二遍**。
+#:    🔴 抄第二遍正是这个位置 9-16 当天犯的错：同一段十五行的注释在这个文件里
+#:       出现了两次，而其中一份从此和它描述的那个函数没有任何关系 ——
+#:       下一个人删掉一份，另一份还在，说着同样的话、指着另一个地方。
 
 
 def can_manage_event(user, event) -> bool:

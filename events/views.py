@@ -3125,8 +3125,11 @@ def event_registrations(request, pk):
         )
     )
     return render(request, "events/event_registrations.html", {
-        # ⚠️ 那一排导航要知道画不画 Admins 那一格（D47）。它问的是
-        #    `can_grant`，不是 `can_manage` —— 被授权人管得了这场活动、转授不了。
+        # ⚠️ 那一排导航要知道画不画 Admins 那一格（D47）。它问的是**那一页自己
+        #    的门**（`can_revoke_event_grant`），不是 `can_manage`，也不是
+        #    `can_grant` —— 被授权人管得了这场活动却进不去那一页，而 foundation
+        #    tier 进得去、只是授不出。2026-09-16 之前这里问的是后者，于是
+        #    foundation tier 是唯一进得来、却没有任何链接的人。
         "can_reach_admins": can_revoke_event_grant(request.user, event),
         "event": event,
         # Drives the shared event nav: Edit and Notify are drawn only for
@@ -3250,8 +3253,11 @@ def event_attendance(request, pk):
         .order_by("event_role__role__name", "contact")
     )
     return render(request, "events/event_attendance.html", {
-        # ⚠️ 那一排导航要知道画不画 Admins 那一格（D47）。它问的是
-        #    `can_grant`，不是 `can_manage` —— 被授权人管得了这场活动、转授不了。
+        # ⚠️ 那一排导航要知道画不画 Admins 那一格（D47）。它问的是**那一页自己
+        #    的门**（`can_revoke_event_grant`），不是 `can_manage`，也不是
+        #    `can_grant` —— 被授权人管得了这场活动却进不去那一页，而 foundation
+        #    tier 进得去、只是授不出。2026-09-16 之前这里问的是后者，于是
+        #    foundation tier 是唯一进得来、却没有任何链接的人。
         "can_reach_admins": can_revoke_event_grant(request.user, event),
         "event": event,
         "participations": rows,
@@ -3287,8 +3293,11 @@ def event_report(request, pk):
     if not may_view_records:
         raise PermissionDenied(SCOPED_DENIAL)
     return render(request, "events/event_report.html", {
-        # ⚠️ 那一排导航要知道画不画 Admins 那一格（D47）。它问的是
-        #    `can_grant`，不是 `can_manage` —— 被授权人管得了这场活动、转授不了。
+        # ⚠️ 那一排导航要知道画不画 Admins 那一格（D47）。它问的是**那一页自己
+        #    的门**（`can_revoke_event_grant`），不是 `can_manage`，也不是
+        #    `can_grant` —— 被授权人管得了这场活动却进不去那一页，而 foundation
+        #    tier 进得去、只是授不出。2026-09-16 之前这里问的是后者，于是
+        #    foundation tier 是唯一进得来、却没有任何链接的人。
         "can_reach_admins": can_revoke_event_grant(request.user, event),
         "event": event,
         "can_manage": can_manage,
@@ -3348,8 +3357,11 @@ def event_notify(request, pk):
         })
 
     return render(request, "events/event_notify.html", {
-        # ⚠️ 那一排导航要知道画不画 Admins 那一格（D47）。它问的是
-        #    `can_grant`，不是 `can_manage` —— 被授权人管得了这场活动、转授不了。
+        # ⚠️ 那一排导航要知道画不画 Admins 那一格（D47）。它问的是**那一页自己
+        #    的门**（`can_revoke_event_grant`），不是 `can_manage`，也不是
+        #    `can_grant` —— 被授权人管得了这场活动却进不去那一页，而 foundation
+        #    tier 进得去、只是授不出。2026-09-16 之前这里问的是后者，于是
+        #    foundation tier 是唯一进得来、却没有任何链接的人。
         "can_reach_admins": can_revoke_event_grant(request.user, event),
         "event": event,
         # Always true: this view is gated on can_manage_event above.

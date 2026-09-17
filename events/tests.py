@@ -23799,3 +23799,106 @@ class AddressFormatTests(PageTestCase):
         in_js = {code for code, _ in json.loads(us_state_choices_json())}
         in_dropdown = {code for code, _ in US_STATE_CHOICES if code}
         self.assertEqual(in_js, in_dropdown)
+
+
+class EventNavIsTheSameOnEveryPageTests(PageTestCase):
+    """🔴 **那一排导航不许取决于你站在哪一页上**（2026-09-16）。
+
+    ⭐ 这个类是一次**重构的安全网**，写在改动之前：那三个上下文键
+       （`event` / `can_manage` / `can_reach_admins`）此前在**七个视图里各写了
+       一遍**，而在这个类之前，没有任何测试比对过两页的导航。
+
+       漏改一处的表现是静默的 —— 那一页少画（或多画）一个链接，页面照常渲染、
+       测试照常绿。而它刚刚连着咬了两次：
+         · review 抓到七处问的都是 `can_grant`，而那一页的门是更宽的
+           `can_revoke_event_grant`，于是 foundation tier 是唯一进得来、
+           却没有任何链接的人；
+         · 修它时七处代码改对了，四处紧挨着的注释没跟着改。
+
+    ⚠️ 夹具用一门**课**：`event_meetings` 对单场活动答 404，拿单场活动做的话
+       七页里有一页根本走不到 —— 而那一页恰恰是最新加的那一页。
+    """
+
+    #: 那一排上每一格对应的路由名。⚠️ 七个 URL 互不前缀重叠（`edit` / `meetings`
+    #: / `registrations` / `attendance` / `report` / `notify` / `admins`），
+    #: 所以下面那句「这个地址出现在导航块里吗」是可靠的。
+    TABS = ["event_update", "event_meetings", "event_registrations",
+            "event_attendance", "event_report", "event_notify", "event_admins"]
+
+    def setUp(self):
+        super().setUp()
+        self.course = make_run(
+            ministry=self.pantry, owner=self.zhang.contact, name="Spring ESL",
+            start_time=day_start(local_today() + datetime.timedelta(days=7)) + 19 * HOUR,
+            end_time=day_start(local_today() + datetime.timedelta(days=70)) + 21 * HOUR,
+        )
+        make_role(self.course, "greeting")
+        add_session(self.course, start_time=self.course.start_time,
+                    end_time=self.course.start_time + 2 * HOUR)
+        self.boss = self.account("boss", "Boss", birth_date=datetime.date(1970, 1, 1))
+        self.boss.groups.add(foundation_admin_group())
+        self.helper = self.account("helper", "Helper",
+                                   birth_date=datetime.date(1990, 1, 1))
+
+    def nav_on(self, page):
+        """那一页顶栏上画出来的那几格，或者 `None`（进不去）。
+
+        ⚠️ 只在 `<nav aria-label="This event">` 那一块里找 —— 页面正文里也可能
+           出现同一个地址（比如 Meetings 页正文里那条「edit it」），
+           整页找会把它算成一格。
+        """
+        response = self.client.get(
+            reverse(f"events:{page}", args=[self.course.pk]))
+        if response.status_code != 200:
+            return None
+        block = re.search(r'<nav[^>]*aria-label="This event".*?</nav>',
+                          response.content.decode(), re.S)
+        self.assertIsNotNone(block, f"{page} 上没有那一排导航")
+        return {name for name in self.TABS
+                if reverse(f"events:{name}", args=[self.course.pk]) in block.group(0)}
+
+    def navs_for(self, user):
+        """他进得去的那几页各画了什么，外加他进不去的那几页。"""
+        self.client.force_login(user)
+        drawn, refused = {}, []
+        for page in self.TABS:
+            tabs = self.nav_on(page)
+            if tabs is None:
+                refused.append(page)
+            else:
+                drawn[page] = tabs
+        return drawn, refused
+
+    # --- 同一个人，七页一模一样 --------------------------------------------
+
+    def test_a_ministry_admin_sees_the_same_row_on_every_page(self):
+        drawn, refused = self.navs_for(self.zhang)
+        self.assertEqual(refused, [], "他该七页都进得去")
+        self.assertEqual(len(set(map(frozenset, drawn.values()))), 1,
+                         f"同一个人在不同页上看到的导航不一样：{drawn}")
+        self.assertEqual(set(next(iter(drawn.values()))), set(self.TABS))
+
+    def test_the_foundation_tier_sees_the_same_row_on_every_page(self):
+        """⚠️ 这一层是上面那两次 bug 的受害者 —— 它进得去 Admins 那一页，
+           而在 2026-09-16 之前七页上都看不到通往它的链接。
+        """
+        drawn, refused = self.navs_for(self.boss)
+        self.assertEqual(refused, [], "它该七页都进得去")
+        self.assertEqual(len(set(map(frozenset, drawn.values()))), 1,
+                         f"同一个人在不同页上看到的导航不一样：{drawn}")
+        self.assertIn("event_admins", next(iter(drawn.values())))
+
+    def test_a_grantee_sees_the_same_row_on_every_page_he_can_open(self):
+        """⚠️ 他进不去的那一页**显式列出来**，不是让它静静地不参与比较 ——
+           那样这条测试会随着「哪些页 403」悄悄变松。
+        """
+        grant_event_admin(contact=self.helper.contact, event=self.course,
+                          granted_by=self.zhang)
+        drawn, refused = self.navs_for(self.helper)
+        self.assertEqual(refused, ["event_admins"],
+                         "被授权人转授不了，那一页对他该是 403")
+        self.assertEqual(len(set(map(frozenset, drawn.values()))), 1,
+                         f"同一个人在不同页上看到的导航不一样：{drawn}")
+        # 而那一格在他看得见的六页上**一格都不画** —— 画一个必定 403 的链接，
+        # 读起来是「站坏了」而不是「这一页不归你」。
+        self.assertNotIn("event_admins", next(iter(drawn.values())))

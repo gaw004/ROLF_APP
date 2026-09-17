@@ -1173,6 +1173,47 @@ class StaffRosterTests(TestCase):
         payload.update(overrides)
         return self.client.post(reverse("org:position_create"), payload)
 
+    # --- review 2026-09-16 抓到的两条 -----------------------------------
+
+    def test_the_new_post_button_preselects_the_ministry_it_came_from(self):
+        """🔴 后果不只是多点一下。
+
+        `roster_index` 拼了 `?ministry=<pk>`、那颗「New post」带着它，而
+        `position_create` **从不读 `request.GET`** —— 预选静默地什么都没做。
+        而对 foundation tier，那一格的空值是**合法**的「Foundation-wide
+        (no ministry)」：于是从某个 ministry 页点进来建出的岗位可以
+        **不属于任何 ministry**，而没有任何东西说过这件事。
+        """
+        self.as_boss()
+        page = self.client.get(
+            reverse("org:position_create") + f"?ministry={self.pantry.pk}")
+        self.assertEqual(
+            str(page.context["form"]["ministry"].value()), str(self.pantry.pk))
+
+    def test_a_ministry_with_only_a_retired_post_waiting_still_gets_a_card(self):
+        """🔴 **那条岗位在界面上够不着，而菜单红点在数它。**
+
+        卡片从 `is_active=True` 的岗位来，而 `awaiting` 数全部 —— 后者是
+        **有意的**（`positions_awaiting_review()`：「撤销」不能变成一条绕过确认
+        的路）。而待确认的那份名单画在单个 ministry 那一页上，去那一页的唯一
+        入口就是这里的卡片。
+
+        于是一个 ministry 唯一的待确认岗位被撤销时：红点说「1 waiting」，
+        点进去一张卡片都没有。
+        """
+        retired = Position.objects.create(
+            ministry=self.tax, name="Built by mistake",
+            compensation=Position.Compensation.UNPAID,
+            needs_foundation_review=True, is_active=False)
+        self.as_boss()
+        page = self.client.get(reverse("org:staff_roster"))
+        cards = {card.ministry: card for card in page.context["cards"]}
+        self.assertIn(self.tax, cards, "红点在数它，而这一页上没有任何路到得了")
+        self.assertEqual(cards[self.tax].awaiting, 1)
+        # ⚠️ 三个 0 是诚实的：这个 ministry 确实一个在办岗位都没有。
+        self.assertEqual(cards[self.tax].posts, 0)
+        self.assertContains(page, retired.ministry.name)
+
     # --- 两格收窄 ------------------------------------------------------
 
     def test_a_ministry_admin_is_not_offered_the_foundation_column(self):

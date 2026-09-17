@@ -3008,7 +3008,12 @@ def event_meetings(request, pk):
         if "remove" in request.POST:
             # ⚠️ 用 `event.sessions`，不是 `Session.objects` —— 收窄到这一门课
             #    上，于是一个别的课的 pk 是 404 而不是一次越权删除。
-            meeting = get_object_or_404(event.sessions, pk=request.POST["remove"])
+            # ⚠️ 同上：`get_object_or_404` 接得住「查不到」，接不住
+            #    「这个值根本不是一个 pk」—— 后者是 500。
+            asked = request.POST["remove"]
+            if not asked.isdigit():
+                raise Http404
+            meeting = get_object_or_404(event.sessions, pk=asked)
             try:
                 remove_session(meeting)
             except ValidationError as refusal:
@@ -3398,7 +3403,11 @@ def event_admins(request, pk):
     form = EventGrantForm(request.POST or None)
     if request.method == "POST":
         if request.POST.get("revoke"):
-            grant = find_event_grant(event, request.POST["revoke"])
+            # ⚠️ `isdigit()` 不是多余的校验，它挡的是一个 **500**：一个非数字的
+            #    值在字段层就抛 `ValueError`（Django 的「expected a number」），
+            #    根本走不到那句 404。同 `_open_panel()` 里那一句，同一条理由。
+            asked = request.POST["revoke"]
+            grant = find_event_grant(event, asked) if asked.isdigit() else None
             if grant is None:
                 raise Http404
             revoke_event_grant(grant)

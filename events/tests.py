@@ -22490,6 +22490,41 @@ class SignupConflictTests(TestCase):
 
     # --- review 2026-09-16 抓到的两条 -------------------------------------
 
+    def test_a_second_role_on_the_same_course_brings_its_own_meetings(self):
+        """🔴 `conflicts_among()` 以前只看每场活动的**第一条**报名。
+
+        而「他报了哪几讲」是逐条报名的事（点名行挂在 `Participation` 上），
+        所以同一门课上开了两个工种、各自挑了不同几讲的人，第二条挑的那几周
+        **从不参与比较** —— 撞车被静静漏掉。
+
+        ⚠️ **两场撞车，一边一场，而且断言两场都被标出来** —— 这个形状是有意的：
+           只放一场的话，这条测试就取决于 `group[0]` 恰好是哪一条报名，
+           于是它在旧代码上时红时绿。⚠️ 第一版正是那么写的，反向验证当场露馅：
+           旧代码跑出来是绿的。**一条靠行序碰运气的守卫等于没有守卫。**
+        """
+        first = day_start(local_today() + 7 * DAY) + 19 * HOUR
+        weeks = [first + n * 7 * DAY for n in range(4)]
+        course = self.a_course("Two jobs", weeks, people_pick_meetings=True)
+        meetings = list(course.sessions.all())
+        # 一个工种挑第 1 讲，另一个挑第 4 讲。
+        sign_up(contact=self.me, event_role=make_role(course, "lifting"),
+                sessions=[meetings[0]])
+        sign_up(contact=self.me, event_role=make_role(course, "greeting"),
+                sessions=[meetings[3]])
+        # 两场活动，各压在其中一讲上 —— 旧代码只可能认出其中**一场**。
+        early = self.signed_up_for(
+            self.an_event("Clashes with week one", meetings[0].start_time))
+        late = self.signed_up_for(
+            self.an_event("Clashes with week four", meetings[3].start_time))
+
+        rows = list(Participation.objects.filter(contact=self.me)
+                    .select_related("event_role__event")
+                    .prefetch_related("event_role__event__sessions",
+                                      "attendances__session"))
+        found = conflicts_among(rows)
+        self.assertIn(early.pk, found, "第一讲那一场没被标出来")
+        self.assertIn(late.pk, found, "第四讲那一场没被标出来 —— 只看了第一条报名")
+
     def test_a_course_with_no_meetings_yet_holds_no_time_at_all(self):
         """🔴 **那个洞从另一个方向回来了一次。**
 
@@ -22615,6 +22650,18 @@ class EventGrantTests(PageTestCase):
         self.assertEqual(
             EventGrant.objects.filter(contact=self.helper.contact,
                                       event=self.event).count(), 1)
+
+    def test_a_revoke_that_is_not_a_number_is_a_404_not_a_500(self):
+        """⚠️ `get_object_or_404` / `filter(pk=…)` 接得住「查不到」，接不住
+           「这个值根本不是一个 pk」—— 后者在字段层就抛 `ValueError`，
+           也就是一个 500。伪造输入才到得了，但它是**无人接管的** 500。
+           同 `_open_panel()` 里那句 `isdigit()`，一模一样的理由。
+        """
+        self.as_(self.zhang)
+        response = self.client.post(
+            reverse("events:event_admins", args=[self.event.pk]),
+            {"revoke": "not-a-number"})
+        self.assertEqual(response.status_code, 404)
 
     def test_the_foundation_tier_is_offered_the_admins_page_it_may_enter(self):
         """🔴 它是唯一**进得来、却没有任何链接**的人。
@@ -23562,6 +23609,11 @@ class MeetingsPageTests(PageTestCase):
             status=Participation.Status.ATTENDED)
         response = self.client.post(self.url(), {"remove": self.first.pk}, follow=True)
         self.assertContains(response, "Clear the register first")
+
+    def test_a_remove_that_is_not_a_number_is_a_404_not_a_500(self):
+        """⚠️ 同授权页那一条：伪造的 pk 该是 404，不是一个无人接管的 500。"""
+        self.assertEqual(
+            self.client.post(self.url(), {"remove": "../../etc"}).status_code, 404)
 
     def test_a_meeting_of_another_course_cannot_be_removed_from_here(self):
         """⚠️ 收窄到 `event.sessions`，于是别的课的 pk 是 404 而不是一次越权删除。"""

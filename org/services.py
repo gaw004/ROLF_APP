@@ -386,8 +386,13 @@ def roster_index(positions, *, on=None):
     )
     # ⚠️ 一次取回 Ministry 对象，而不是在循环里逐个取 —— 卡片上要画名字，
     #    而 `.values()` 只给得出 id 和名字，给不出一个能 `{% url %}` 的对象。
+    # ⚠️ 名单要**两批都收**：只有待确认、一个在办岗位都没有的 ministry 不在
+    #    `rows` 里，而它下面也要出一张卡（见那一段 🔴）。少了它，那张卡的
+    #    `ministry` 是 `None` —— 而 `None` 在这一页上的意思是「基金会级岗位」，
+    #    于是它会伪装成另一种东西，还排到最后去。
     ministries = {m.pk: m for m in Ministry.objects.filter(
-        id__in=[r["ministry_id"] for r in rows if r["ministry_id"]])}
+        id__in=[r["ministry_id"] for r in rows if r["ministry_id"]]
+               + [mid for mid in awaiting if mid])}
 
     cards = [
         MinistryCard(
@@ -397,6 +402,27 @@ def roster_index(positions, *, on=None):
         )
         for row in rows
     ]
+    # 🔴 **只有待确认、一个在办岗位都没有的 ministry 也要有一张卡**
+    #    （2026-09-16 修）。上面那批卡从 `is_active=True` 来，而 `awaiting` 数的
+    #    是全部（**有意的** —— `positions_awaiting_review()` 写着理由：
+    #    「一个建错了又被撤销的岗位仍然该从待办里出现一次，否则『撤销』会变成
+    #    一条绕过确认的路」）。
+    #
+    #    两者岔开时的后果不是数字难看，是**够不着**：待确认的那份名单画在
+    #    `staff_ministry.html`（单个 ministry 那一页），而去那一页的唯一入口就是
+    #    这里的卡片。于是菜单上那颗红点说「1 waiting」，点进去这一页一张卡片都
+    #    没有，那条岗位在界面上**没有任何一条路到得了**。
+    #
+    #    ⚠️ **不是**把 `awaiting` 改成只数在办的 —— 那会打掉上面引的那条理由。
+    listed = {row["ministry_id"] for row in rows}
+    for ministry_id, count in awaiting.items():
+        if ministry_id not in listed:
+            cards.append(MinistryCard(
+                # ⚠️ 这几个 0 是诚实的：这个 ministry 确实一个在办的岗位都没有。
+                #    卡片上那颗红点才是它此刻的全部内容。
+                ministry=ministries.get(ministry_id),
+                posts=0, holders=0, serving=0, awaiting=count,
+            ))
     # ⚠️ 排序按名字，基金会级（`ministry` 为 None）排最后 —— 它不属于任何一个
     #    ministry，夹在字母序中间读起来像一个叫不出名字的部门。
     cards.sort(key=lambda card: (card.ministry is None,

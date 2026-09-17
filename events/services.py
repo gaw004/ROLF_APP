@@ -5256,8 +5256,26 @@ def conflicts_among(rows):
     for row in live:
         by_event.setdefault(row.event_role.event_id, []).append(row)
 
-    windows = {event_id: _busy_windows(group[0])
-               for event_id, group in by_event.items()}
+    # 🔴 **一场活动的忙碌时段 = 它上面**全部**报名的并集**（2026-09-16 修）。
+    #    这一行以前是 `_busy_windows(group[0])` —— 只看第一条。而
+    #    `people_pick_meetings` 开着时，「他报了哪几讲」是**逐条报名**的事
+    #    （点名行挂在 `Participation` 上），于是同一门课上开了两个工种、各自挑了
+    #    不同几讲的人，第二条挑的那几周**从不参与比较**，撞车被静静漏掉。
+    #    ⚠️ 下面那句「两行撞的是同一批东西」正是被打破的那个假设 —— 现在它
+    #       重新成立了，因为「那一批」是并集。
+    # ⚠️ 按 `(start, end, ordinal)` 去重：两个工种多半挑了重叠的几讲，不去重
+    #    就是同一讲在结果里出现两次，而页面会把它数成两次撞车。
+    windows = {}
+    for event_id, group in by_event.items():
+        seen, merged = set(), []
+        for row in group:
+            for spot in _busy_windows(row):
+                key = (spot.start, spot.end, spot.ordinal)
+                if key not in seen:
+                    seen.add(key)
+                    merged.append(spot)
+        merged.sort(key=lambda spot: spot.start)
+        windows[event_id] = merged
     found = {}
     for event_id, group in by_event.items():
         others = [(by_event[other][0].event_role.event, windows[other])

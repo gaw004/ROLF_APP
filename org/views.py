@@ -228,7 +228,16 @@ def position_create(request):
     if not can_reach_staff_roster(request.user):
         raise PermissionDenied(SCOPED_DENIAL)
 
-    form = PositionForm(request.POST or None, user=request.user)
+    # 🔴 **把 `?ministry=` 接住**（2026-09-16）。`roster_index` 拼了
+    #    `new_post_query`、`staff_ministry.html` 那颗「New post」带着它 ——
+    #    而这里从不读 `request.GET`，于是那个预选**静默地什么都没做**。
+    #    ⚠️ 后果不只是多点一下：对 foundation tier 那一格的空值是**合法**的
+    #       「Foundation-wide (no ministry)」，于是从某个 ministry 页点进来建出
+    #       的岗位可以**不属于任何 ministry**，而没有任何东西说过这件事。
+    #    ⚠️ 伪造一个别人 ministry 的 id 无害：它只是 initial。挡住越权的是下面
+    #       那一句 `can_manage_staff_roster(...)`，一个字没动 ——「下拉不是门」。
+    form = PositionForm(request.POST or None, user=request.user,
+                        initial={"ministry": request.GET.get("ministry")})
     if request.method == "POST" and form.is_valid():
         if not can_manage_staff_roster(request.user, form.cleaned_data.get("ministry")):
             raise PermissionDenied(SCOPED_DENIAL)

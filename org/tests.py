@@ -37,6 +37,7 @@ from .permissions import (
 )
 from .audience import on_the_books_q
 from .services import (build_org_tree, end_assignment, grant_ministry_admin,
+                       ministry_admins, refuse_a_second_live_tenure,
                        revoke_ministry_role)
 
 TODAY = local_today()
@@ -196,6 +197,28 @@ class ConstraintFieldErrorTests(TestCase):
         messages = self.assertFieldError(
             Assignment(contact=self.person, position=self.position), "contact")
         self.assertIn("already holds this post", " ".join(messages))
+
+    def test_an_inverted_range_does_not_blow_up_the_overlap_check(self):
+        """🔴 **`refuse_a_second_live_tenure()` 自己会发一次 `daterange()`**
+           （2026-09-18 review 抓到）。
+
+        `daterange('2023-01-01','2020-01-01')` 在 Postgres 里是
+        `DataError: range lower bound must be less than or equal to ...` ——
+        一个连「哪一格错了」都说不出的 500。排他约束上那个 `condition=` 挡的是
+        同一件事，但它挡不到这个函数：这个函数自己发查询。
+
+        ⚠️ **这一条直接调那个函数，不走 `full_clean()`** —— 走 `full_clean()`
+           的话落到的是排他约束的 `condition`，那条路上面已经有测试，
+           而这个函数一个字都不会被执行到。第一版就是这么写的，验红时没红。
+
+        ⚠️ 挡住之后，「结束早于开始」由**下一道关**回答（`end_date >=
+           start_date` 那条 CheckConstraint，经 `ConstraintErrorFieldMixin`
+           落到 `end_date` 那一格）。这个函数的职责只是别在它之前炸掉。
+        """
+        refuse_a_second_live_tenure(
+            contact=self.person, position=self.position,
+            start_date=datetime.date(2023, 1, 1),
+            end_date=datetime.date(2020, 1, 1))  # 不抛，尤其不抛 DataError
 
     def test_two_overlapping_historical_tenures_are_refused(self):
         """🔴 **旧版的重复检查一条都拦不住这一格**（D51）。
@@ -680,9 +703,11 @@ class AssignmentTests(TestCase):
         managers = {a.position.reports_to_id for a in self.person.assignments.all()}
         self.assertEqual(managers, {head_cook.pk, chair.pk})
 
-    def test_duplicate_assignment_with_null_start_date_is_rejected(self):
-        # nulls_distinct=False. Postgres's default NULL != NULL would let any
-        # number of these through, which is what A7 got wrong.
+    def test_a_second_tenure_covering_the_same_day_is_rejected(self):
+        # ⚠️ 这一条从前叫 `test_duplicate_assignment_with_null_start_date_is_rejected`，
+        #    钉的是 `nulls_distinct=False`（那时 `start_date` 可空、常常留空，
+        #    而 Postgres 认 NULL != NULL）。D51 之后起始日期不可为空、两条都默认
+        #    今天，拦下它们的是**区间重叠**。
         Assignment.objects.create(contact=self.person, position=self.cook)
         with self.assertRaises(IntegrityError), transaction.atomic():
             Assignment.objects.create(contact=self.person, position=self.cook)
@@ -909,6 +934,49 @@ class MinistryRoleTests(TestCase):
         self.assertEqual(grant.end_date, TODAY, "旧行不许被改回来")
         self.assertEqual(MinistryRole.objects.filter(
             contact=self.wang, ministry=self.pantry).count(), 2)
+
+    def test_the_two_rows_are_listed_in_a_total_order(self):
+        """⚠️ 同 `events.tests.EventGrantTests.test_the_two_rows_are_listed_in_a_total_order`
+           —— 两张授权页一样的形状，一样的并列。
+
+        ⚠️ 只断言「这一次顺序对不对」是抓不住的（那边记着验红的经过）；
+           钉住它的是「排序键是不是全序」。
+        """
+        first = grant_ministry_admin(
+            contact=self.wang, ministry=self.pantry, granted_by=None)
+        revoke_ministry_role(first)
+        second = grant_ministry_admin(
+            contact=self.wang, ministry=self.pantry, granted_by=None)
+
+        rows = ministry_admins(self.pantry)
+        self.assertEqual([row.pk for row in rows], [second.pk, first.pk])
+
+        keys = list(rows.query.order_by) or list(MinistryRole._meta.ordering)
+        self.assertIn(
+            keys[-1].lstrip("-"), {"pk", "id"},
+            f"排序键 {keys} 不是全序 —— 并列的两行先后由数据库随手定")
+
+    def test_revoking_a_row_that_already_ended_changes_nothing(self):
+        """🔴 **不挡的话这是一个无人接管的 500**（2026-09-18 review 抓到）。
+
+        `find_grant()` 只按 ministry 收窄，拿得到**已经结束的**行，而 D51 之后
+        「同一把钥匙上两行」是常态。一个带旧 pk 的 POST（页面开着没刷新，别人
+        同时撤了又发了一次）会把旧行的 `end_date` 重写成今天 —— 那一段区间
+        因此**撑进**新行里，撞上排他约束。
+
+        ⚠️ 顺带还抹掉了这一轮特意保住的那段断档，而那是静默的那一半。
+        """
+        old = self.grant(start_date=LAST_YEAR,
+                         end_date=LAST_YEAR + datetime.timedelta(days=30))
+        live = self.grant(start_date=YESTERDAY)
+
+        revoke_ministry_role(old)  # 不抛
+
+        old.refresh_from_db()
+        self.assertEqual(old.end_date, LAST_YEAR + datetime.timedelta(days=30),
+                         "旧行的结束日期不许被重写")
+        live.refresh_from_db()
+        self.assertIsNone(live.end_date)
 
     def test_granting_to_somebody_who_already_has_it_is_refused(self):
         grant_ministry_admin(
@@ -1830,6 +1898,33 @@ class StaffRosterTests(TestCase):
         #    「Sept. 16, 2026」。
         self.assertIn(date_filter(YESTERDAY), page)
         self.assertNotIn(date_filter(TODAY), page, "印的是存的那一天，晚了一天")
+
+    def test_the_post_page_lists_tenures_in_a_total_order(self):
+        """🔴 **这一页的两个 `order_by()` 覆盖 `Meta.ordering`**（2026-09-18
+           review 抓到），所以那边补的 `-pk` 在这条路上不生效。
+
+        并列是可达的，而最容易忽略的是 `past`：一段**未来才生效**的任职不算
+        active，于是它落进 past 而 `end_date` 是空的 —— 那一栏里每一条这样的
+        行彼此全部并列。
+        """
+        post = make_position("greeter", "Greeter", ministry=self.pantry)
+        # 两条未来才生效的任职：都不 active，都没有结束日期。
+        one = Assignment.objects.create(
+            contact=self.wang, position=post,
+            start_date=TODAY + datetime.timedelta(days=10))
+        two = Assignment.objects.create(
+            contact=self.li, position=post,
+            start_date=TODAY + datetime.timedelta(days=20))
+        self.as_admin()
+        context = self.client.get(
+            reverse("org:position_detail", kwargs={"pk": post.pk})).context
+
+        for name in ("holders", "past"):
+            keys = list(context[name].query.order_by)
+            self.assertIn(
+                keys[-1].lstrip("-"), {"pk", "id"},
+                f"{name} 的排序键 {keys} 不是全序 —— 并列时先后由数据库随手定")
+        self.assertEqual({row.pk for row in context["past"]}, {one.pk, two.pk})
 
     def test_a_tenure_pk_from_another_post_is_not_reachable(self):
         """来自表单的 pk 不许够得着别的岗位的行，同 `find_grant()` 的作用域。"""

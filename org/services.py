@@ -125,7 +125,10 @@ def ministry_admins(ministry):
     return (
         MinistryRole.objects.filter(ministry=ministry)
         .select_related("contact", "granted_by")
-        .order_by("-start_date")
+        # ⚠️ `-pk` 收尾：这里的 `order_by()` **覆盖** `Meta.ordering`，所以那边的
+        #    收尾键在这条路上不生效。D51 之后同一天撤销再授权得到两行，
+        #    `start_date` 一样 —— 少了它，两行的先后每次请求都可能不同。
+        .order_by("-start_date", "-pk")
     )
 
 
@@ -194,7 +197,19 @@ def revoke_ministry_role(grant, *, on=None):
     deleted grant leaves no answer to "who could see this ministry's signups
     last March", and this table carries simple-history precisely because that
     question gets asked.
+
+    ⚠️ **已经结束的行再撤一次是 no-op，而这不是洁癖**（2026-09-18，review 抓到）。
+       `find_grant()` 只按 ministry 收窄，拿得到**已经结束的**行，而 D51 之后
+       「同一把钥匙上两行」是常态。于是一个带着旧 pk 的 POST（页面开着没刷新，
+       别人同时撤了又发了一次）会把那一行的 `end_date` 重写成今天 ——
+       轻则抹掉这一轮特意保住的那段断档，重则和新的那一行**区间重叠**，
+       撞上排他约束变成一个无人接管的 500。
+       ⚠️ 页面上那颗键对已结束的行不渲染，所以这只有伪造输入和陈旧页面到得了 ——
+          判据同 `test_a_revoke_that_is_not_a_number_is_a_404_not_a_500`：
+          **无人接管的 500 也是 500**。
     """
+    if grant.end_date is not None:
+        return grant
     grant.end_date = on or local_today()
     grant.save(update_fields=["end_date", "updated_at"])
     return grant
@@ -684,7 +699,15 @@ def refuse_a_second_live_tenure(*, contact, position, start_date=None, end_date=
     if contact is None or position is None:
         return
     # 表单留空时的那一段，和 `assign()` 存下去的会是同一段（那里也填今天）。
-    span = (start_date or local_today(), end_date)
+    start_date = start_date or local_today()
+    # ⚠️ 倒置的区间交给下一道关 —— `daterange('2023-01-01','2020-01-01')` 在
+    #    Postgres 里是一个 `DataError`，而 `end_date >= start_date` 那条
+    #    CheckConstraint 会给出一句人话。这一行和排他约束上那个 `condition=`
+    #    挡的是同一件事（理由写在 `org/models.py` 上），而它在这里**也**要写
+    #    一遍，因为这个函数自己发一次 `daterange`。2026-09-18 review 抓到。
+    if end_date is not None and end_date < start_date:
+        return
+    span = (start_date, end_date)
     clash = (Assignment.objects
              .annotate(span=DateRange())
              .filter(contact=contact, position=position, span__overlap=span))

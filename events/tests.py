@@ -152,6 +152,7 @@ from .services import (
     _spots,
     conflicts_for,
     grant_event_admin,
+    event_grants,
     revoke_event_grant,
     tell_them_they_can_manage,
     TurnedUp,
@@ -22650,6 +22651,54 @@ class EventGrantTests(PageTestCase):
         # 旧行一个字没被改 —— 「他从哪天到哪天有过权限」照旧答得出来。
         grant.refresh_from_db()
         self.assertEqual(grant.end_date, local_today())
+
+    def test_the_two_rows_are_listed_in_a_total_order(self):
+        """🔴 **D51 之后这个并列才是可达的，而它会看起来像页面自己在动。**
+
+        同一天撤销再授权得到两行，`start_date` 和 `contact` **都一样** ——
+        排序键到此为止的话，两行的先后由 Postgres 随手定，刷新一次就可能对调。
+        从前不可能并列，因为 `UNIQUE(contact, event, start_date)` 挡着。
+        ⚠️ 这两张授权页**不分页**，所以 `core.pagination.stable_order()`
+           （它给分页列表补 `-pk`）在这条路上够不到。
+
+        ⚠️ **下面第一句断言抓不住这个 bug，第二句才抓得住。**
+           验红时把 `-pk` 去掉跑了三遍，三遍都绿：没有收尾键时顺序是「任意」，
+           而 Postgres 在一张两行的表上多半照插入顺序返回 —— 于是一条只看
+           「这一次的顺序对不对」的测试会一直绿着，直到线上某天换了执行计划。
+           钉住它的必须是「排序键是不是全序」这件结构上的事。
+        """
+        first = self.grant_to(self.helper)
+        revoke_event_grant(first)
+        second = self.grant_to(self.helper)
+
+        rows = event_grants(self.event)
+        self.assertEqual([row.pk for row in rows], [second.pk, first.pk])
+
+        keys = list(rows.query.order_by) or list(EventGrant._meta.ordering)
+        self.assertIn(
+            keys[-1].lstrip("-"), {"pk", "id"},
+            f"排序键 {keys} 不是全序 —— 并列的两行先后由数据库随手定")
+
+    def test_revoking_a_row_that_already_ended_changes_nothing(self):
+        """⚠️ 同 `org.tests.MinistryRoleTests
+           .test_revoking_a_row_that_already_ended_changes_nothing` —— 两张
+           授权表一样的形状，一样的 500。2026-09-18 review 抓到。
+        """
+        # ⚠️ 旧行的起止都要在**过去**：两行都从今天起的话，重盖一次值不变、
+        #    区间还是空的，什么都不会发生 —— 那样的测试永远绿。
+        long_ago = local_today() - datetime.timedelta(days=200)
+        first = self.grant_to(self.helper, start_date=long_ago)
+        revoke_event_grant(first, on=long_ago + datetime.timedelta(days=30))
+        second = self.grant_to(self.helper)
+        ended_on = first.end_date
+
+        revoke_event_grant(first)  # 不抛
+
+        first.refresh_from_db()
+        second.refresh_from_db()
+        self.assertEqual(first.end_date, ended_on, "旧行的结束日期不许被重写")
+        self.assertIsNone(second.end_date, "新行不许被旧行的撤销波及")
+        self.assertTrue(can_manage_event(self.helper, self.event))
 
     def test_a_second_grant_overlapping_a_live_one_is_a_form_error(self):
         """⚠️ 上面那条的另一半：**压着的**第二条仍然要被拦下，而且是一句人话。

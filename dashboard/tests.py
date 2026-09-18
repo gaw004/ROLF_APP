@@ -517,45 +517,44 @@ class HappeningSoonTests(DashboardTestCase):
                       self.page().content.decode())
 
 
-class ThePostsLineIsDefensiveTests(DashboardTestCase):
-    """⚠️ 数据干净时 active() 本来就不会返回同岗位两条 —— 这是防御，不是修复。
+class ThePostsLineListsEveryLivePostTests(DashboardTestCase):
+    """一个人同时多岗时，这一行把每一个都列出来（D32 的不变量）。
 
-    走查那天页面上出现了四行一模一样的 `Food Pantry lead · Food Pantry`，
-    起因是 seed 的 get_or_create 键里含一个每天都在变的日期。那个 bug 修了，
-    而这一行自己也要站得住。
+    🔴 **这个类 2026-09-18 换过一次钉的东西，而换的过程本身值得记。**
 
-    🔴 **这个类原来钉的是「两段重叠的任职」，而 D51 把那一格拿掉了**
-       （2026-09-17）：`assignment_no_overlapping_tenure` 之后，重叠的两行在
-       数据库里存不下，那条测试连 setUp 都跑不完。原话是「数据库仍然拦不住
-       重叠任职」—— 现在拦得住了。
+       它原来叫 `ThePostsLineIsDefensiveTests`，钉的是「两段重叠的任职只显示
+       一行」—— 走查那天页面上真出现过四行一模一样的岗位。D51 给
+       `Assignment` 上了区间排他约束之后，那条测试连 setUp 都跑不完：
+       重叠的两行在数据库里存不下了。
 
-    ⚠️ 但同一个风险有一个**现在才合法**的版本，而且它是 D51 顺带带来的：
-       「离职之后回来」从此是**同一个岗位上的第二行**（不是把旧行改回来）。
-       于是这一页很自然地会拿到同岗位的两条任职记录，只是其中一条已经结束。
-       下面钉的就是那一格 —— 同一个可见后果，可达的那条路。
+       ⚠️ 当时把它翻成了「离职之后回来」，而**那一版是空的** ——
+          `_posts()` 先 `active()` 过滤，结束了的那一段根本到不了去重那一步。
+          把整段去重删掉，这个 app 的 72 条测试照样全绿。是 2026-09-18 的
+          code review 指出来的，而它正是本项目一再自首的那种「永远绿的守卫」。
+          于是那段去重和那条测试一起删了（判据同 D48：它没有读者）。
+
+    ⚠️ 留下的是这一条：**多岗要全部列出来**。它和被删的那条不是一回事 ——
+       那条说的是「同一个岗位别说两遍」（现在由数据库保证），这条说的是
+       「别把第二个身份悄悄吃掉」，而后者是 `_posts()` 不许写成 `.first()`
+       的全部理由。
     """
 
-    def test_a_post_held_twice_over_time_shows_as_one_line(self):
-        post = Position.objects.create(
-            code="lead", name="Food Pantry lead", kind=Position.Kind.STAFF,
-            compensation=Position.Compensation.PAID, ministry=self.pantry)
-        # 走了又回来：两段不重叠，所以数据库收得下 —— 这正是 D51 之后
-        # 「再授权/再入职」的标准形状。
-        Assignment.objects.create(
-            contact=self.me, position=post,
-            start_date=TODAY - 30 * DAY, end_date=TODAY - 20 * DAY)
-        Assignment.objects.create(
-            contact=self.me, position=post, start_date=TODAY - 10 * DAY)
-        page = self.page().content.decode()
-        self.assertEqual(page.count("Food Pantry lead"), 1)
-
-    def test_two_different_posts_still_show_as_two_lines(self):
-        """⚠️ 去重按**岗位**，不是「只显示一条」—— D32：一人可以多岗。"""
+    def test_two_different_posts_show_as_two_lines(self):
         self.employ(self.me, code="pantry_lead", ministry=self.pantry)
         self.employ(self.me, code="tax_lead", ministry=self.tax)
         page = self.page().content.decode()
         self.assertIn("Pantry Lead", page)
         self.assertIn("Tax Lead", page)
+
+    def test_a_post_that_has_ended_is_not_listed(self):
+        """⚠️ 「此刻持有」—— 走的是右开的 `active()`（D51）。"""
+        post = Position.objects.create(
+            code="lead", name="Food Pantry lead", kind=Position.Kind.STAFF,
+            compensation=Position.Compensation.PAID, ministry=self.pantry)
+        Assignment.objects.create(
+            contact=self.me, position=post,
+            start_date=TODAY - 30 * DAY, end_date=TODAY - 20 * DAY)
+        self.assertNotIn("Food Pantry lead", self.page().content.decode())
 
 
 class TheLandingPageAfterLoginTests(DashboardTestCase):

@@ -327,11 +327,17 @@ def position_detail(request, pk):
         "position": position,
         "form": form,
         "assign_form": assign_form,
+        # ⚠️ 两处都 `-pk` 收尾：显式 `order_by()` **覆盖** `Meta.ordering`，
+        #    那边的收尾键在这条路上不生效。并列是可达的 —— 同一天上任的两个
+        #    交接人（`Position` 明说允许不同人重叠）、同一天结束的两段，
+        #    以及 `past` 里**每一条还没结束的行**（未来才生效的任职不算 active，
+        #    于是落进 past 而 `end_date` 是空的，它们彼此全部并列）。
+        #    2026-09-18 review 抓到。
         "holders": position.assignments.active().select_related(
-            "contact", "employment_type").order_by("-start_date"),
+            "contact", "employment_type").order_by("-start_date", "-pk"),
         "past": position.assignments.exclude(
             pk__in=position.assignments.active().values("pk")
-        ).select_related("contact").order_by("-end_date"),
+        ).select_related("contact").order_by("-end_date", "-pk"),
         "may_manage": may_manage,
         "can_define_terms": foundation,
     })

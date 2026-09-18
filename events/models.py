@@ -3507,7 +3507,9 @@ class EventGrant(ConstraintErrorFieldMixin, DateRangeMixin, TimeStampedModel):
     objects = models.Manager.from_queryset(DateRangeQuerySet)()
 
     class Meta:
-        ordering = ["-start_date", "contact"]
+        # `-pk` 收尾，理由同 `org.Assignment.Meta.ordering`：D51 之后
+        # 「同天撤销再授权」的两行在前两个键上完全并列。
+        ordering = ["-start_date", "contact", "-pk"]
         constraints = [
             # ⭐ 区间不相交，同两张 org 表 —— 理由一字不差，见
             #    `org.Assignment` 上那一条和 D51 第三节。

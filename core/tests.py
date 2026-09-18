@@ -449,8 +449,8 @@ class DatePredicateHalvesAgreeTests(TestCase):
                                 f"{name}：问一批行和问这一行，答案不一样",
                             )
                 finally:
-                    # 一格一行：`assignment_unique_tenure` 的键含 `start_date`，
-                    # 而这个矩阵会把同一个起始日期用上四遍。
+                    # 一格一行：这些行的区间大量重叠，而
+                    # `assignment_no_overlapping_tenure` 不许两条压着（D51）。
                     row.delete()
 
 

@@ -566,7 +566,12 @@ class Assignment(ConstraintErrorFieldMixin, DateRangeMixin, TimeStampedModel):
     objects = models.Manager.from_queryset(AssignmentQuerySet)()
 
     class Meta:
-        ordering = ["-start_date", "contact"]
+        # ⚠️ `-pk` 收尾 —— **D51 之后这个并列是可达的**：同一天撤销再授权会得到
+        #    两行，`start_date` 和 `contact` 都一样，于是没有 `-pk` 的话它们的
+        #    先后由 Postgres 随手定，刷新一次可能对调。从前不可能并列，因为
+        #    `UNIQUE(..., start_date)` 挡着。同 `core.pagination.stable_order()`
+        #    对分页列表做的事（这两张页面不分页，够不到那个函数）。
+        ordering = ["-start_date", "contact", "-pk"]
         constraints = [
             models.CheckConstraint(
                 condition=(
@@ -696,7 +701,8 @@ class MinistryRole(ConstraintErrorFieldMixin, DateRangeMixin, TimeStampedModel):
     objects = models.Manager.from_queryset(DateRangeQuerySet)()
 
     class Meta:
-        ordering = ["ministry__name", "contact"]
+        # `-pk` 收尾，理由同 `Assignment.Meta.ordering`。
+        ordering = ["ministry__name", "contact", "-pk"]
         constraints = [
             # ⭐ 区间不相交，同 `Assignment` 上那一条 —— 理由一字不差，见那里
             #    和 D51 第三节。键里多一个 `role`：同一个人在同一个 ministry 上

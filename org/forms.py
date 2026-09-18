@@ -536,8 +536,11 @@ class AssignmentForm(forms.ModelForm):
         """同一个人在这个岗位上已经有一段没结束的任职 —— 让 `contact` 那一格变红。
 
         ⚠️ 规则在 `org.services.refuse_a_second_live_tenure()`，这里只是请过来 ——
-           同 `PositionForm.clean()`。那个函数写着它和
-           `assignment_unique_tenure` 那条约束管的**不是同一件事**。
+           同 `PositionForm.clean()`。
+        🔴 **那句「它和那条约束管的不是同一件事」2026-09-17 之后反过来了**（D51）：
+           它们管的正是同一件事（区间不相交），而这个调用之所以还在，是因为
+           **这一条路上数据库那句话到不了** —— 这张表单不含 `end_date`，于是
+           `ExclusionConstraint.validate()` 整条跳过。理由写在那个函数上。
         """
         cleaned = super().clean()
         refuse_a_second_live_tenure(

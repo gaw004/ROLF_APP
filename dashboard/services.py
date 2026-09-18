@@ -75,29 +75,29 @@ def _posts(contact):
     🔴 **存在的每一条，不是 `.first()`。** D32 的不变量是一个人可以同时多岗，
        而 `.first()` 在这张表上是 bug —— 它会在页面上把一个人的第二个身份
        悄悄抹掉，什么都不报。
+
+    🔴 **这里原来还有一段按岗位去重，2026-09-18 删了。** 它是走查那天加的防御
+       （页面上出现过四行一模一样的 `Food Pantry lead · Food Pantry`），当时的
+       理由写着「数据库拦不住重叠任职」。D51 之后
+       `assignment_no_overlapping_tenure` 拦得住了，而那条防御要挡的东西因此
+       **在结构上不可能发生**：两条同时生效意味着两段区间都含今天，也就是重叠。
+
+       ⚠️ 真正让它非删不可的是**它的测试已经空了**。翻面那一版换成了「离职之后
+          回来」，而那条路根本到不了去重 —— 上面这个查询先 `active()` 过滤，
+          结束了的那一段一开始就不在里面。把整段去重删掉，dashboard 72 条
+          照样全绿。一条不会红的测试守着一段不会跑的代码，两个一起走。
+          （判据同 D48：**它没有读者**。）
     """
     if contact is None:
         return []
-    rows = (
+    return list(
         Assignment.objects.active()
         .filter(contact=contact)
         .select_related("position__ministry")
-        .order_by("position__name", "start_date")
+        # ⚠️ `-pk` 收尾：`position__name` 和 `start_date` 上并列是可达的
+        #    （一个人同一天上任两个同名岗位），而并列时的先后由数据库随手定。
+        .order_by("position__name", "start_date", "-pk")
     )
-    # ⚠️ 按**岗位**去重，而这是防御不是修复：数据干净时 active() 本来就不会
-    #    返回同一个岗位的两条。它挡的是重叠任职（同一人同一岗位两段同时生效），
-    #    而那个数据库现在还拦不住 —— 走查那天页面上真的出现了四行一模一样的
-    #    `Food Pantry lead · Food Pantry`。
-    #
-    # ⚠️ 去重本身也是这一行该有的语义，不只是补丁：它答的是「**你现在是什么
-    #    身份**」，不是「你有几段任职记录」。同一个岗位说一次就够了。
-    seen, posts = set(), []
-    for row in rows:
-        if row.position_id in seen:
-            continue
-        seen.add(row.position_id)
-        posts.append(row)
-    return posts
 
 
 #: 通栏那一块画得出的每一组，**名单只在这里写一次**（2026-09-15 加第四组时抽的）。

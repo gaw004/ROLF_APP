@@ -5311,7 +5311,8 @@ def event_grants(event):
     return (
         EventGrant.objects.filter(event=event)
         .select_related("contact", "contact__user", "granted_by")
-        .order_by("-start_date")
+        # ⚠️ `-pk` 收尾，理由同 `org.services.ministry_admins()`。
+        .order_by("-start_date", "-pk")
     )
 
 
@@ -5375,7 +5376,14 @@ def revoke_event_grant(grant, *, on=None):
     一字一理由照 `org.services.revoke_ministry_role()`：删掉的授权留不下
     「去年三月谁能看这场活动的报名」的答案，而这张表带 simple-history 正是
     因为这个问题会被问。
+
+    ⚠️ **已经结束的行再撤一次是 no-op** —— 一字一理由照那边，见那个函数。
+       `find_event_grant()` 同样只按活动收窄，而 D51 之后「同一把钥匙上两行」
+       是常态，于是一个带旧 pk 的 POST 会把那一行的区间**撑进**新的那一行里，
+       撞上排他约束变成一个无人接管的 500。
     """
+    if grant.end_date is not None:
+        return grant
     grant.end_date = on or local_today()
     grant.save(update_fields=["end_date", "updated_at"])
     return grant

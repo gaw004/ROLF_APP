@@ -5330,23 +5330,20 @@ def grant_event_admin(*, contact, event, granted_by, start_date=None):
     ⚠️ `granted_by` 由调用方从 session 里取，**永远不是表单上的一个格子** ——
        一个能填的格子就是一个能撒谎的格子（同 `grant_ministry_admin()`）。
 
-    🔴 **同一把钥匙上已经有一行时，这里是「恢复」，不是第二条**（2026-09-16，
-       用户拍板）。约束是 `(contact, event, start_date)` 且
-       `nulls_distinct=False`，而表单的 `start_date` 默认留空 —— 于是
-       「授权 → 手滑撤销 → 再授权」在此之前是一个 **`IntegrityError`（500）**，
-       双击那颗键也是。而那条路上人的意图明明白白：把它还给他。
+    🔴 **他已经有一条压着的授权 → 拒绝；否则新建一行。没有「恢复」那一支了**
+       （D51，2026-09-17）。
 
-         · 那一行还在效期内 → 拒绝（他本来就有）
-         · 那一行已经结束   → **恢复**：清掉 `end_date`
-         · 没有那一行       → 照旧新建
+       2026-09-16 到 09-17 之间这里有一个「恢复」分支：同一把钥匙上已经有一行
+       （键是 `(contact, event, start_date)`，而表单的 `start_date` 默认留空）
+       就把它的 `end_date` 清掉。它解决的是一个真问题 ——「授权 → 手滑撤销 →
+       再授权」在那之前是一个 `IntegrityError`（500）—— 但它是**在给一条键错了
+       列的约束打补丁**，代价是把「中间断过一段」从当前行上抹掉，
+       在当前表里造出一段**从未存在过的连续授权**。
 
-       ⚠️ 「已经结束」**不分今天还是上个月**：分档会多一条挡不住任何事的分支
-          —— 上个月结束的那一行键是一样的，不恢复它就照样是 500。
-
-       ⚠️ **代价如实记**：恢复会把当前行的 `end_date` 抹掉，于是「中间断过
-          一段」只活在 simple-history 里。这是可以接受的 —— 这张表带 history
-          的理由**正是**那个问题（「去年三月谁能看这个」）—— 但当前行**不是
-          全部真相**，别照着它回答「他从什么时候起一直有权限」。
+       约束换成区间排他之后，那个问题根上就没有了：今天撤销的那一行是
+       `[…, 今天)`，今天再授权的是 `[今天, …)`，两段不重叠，于是那是**第二行**，
+       断档如实留在当前表里。HRIS 的规范做法也正是这个（重新授权开新行、
+       旧行不动，SCD Type 2）。
 
     ⚠️ `full_clean()` 不能省，即使上面那一支已经处理了重复：别的约束
        （`end_date >= start_date`）照旧要在存之前被问一次，而
@@ -5362,19 +5359,8 @@ def grant_event_admin(*, contact, event, granted_by, start_date=None):
     #    服务层（D18），而一个 `None` 走到模型层就是一次 NOT NULL 违约（D51 起
     #    `start_date` 不可为空）。
     start_date = start_date or local_today()
-    standing = EventGrant.objects.filter(
-        contact=contact, event=event, start_date=start_date).first()
-    if standing is not None:
-        if standing.is_currently_active:
-            raise ValidationError(
-                {"contact": "They already manage this event."})
-        standing.end_date = None
-        # ⚠️ 记的是**这一次**是谁给的：恢复也是一次授权行为，而「谁给的」
-        #    是这张表要留痕的东西之一。
-        standing.granted_by = granted_by
-        standing.full_clean()
-        standing.save()
-        return standing
+    if EventGrant.objects.active().filter(contact=contact, event=event).exists():
+        raise ValidationError({"contact": "They already manage this event."})
 
     grant = EventGrant(contact=contact, event=event,
                        start_date=start_date, granted_by=granted_by)

@@ -36,7 +36,8 @@ from .permissions import (
     unresolved_permissions,
 )
 from .audience import on_the_books_q
-from .services import build_org_tree, end_assignment, revoke_ministry_role
+from .services import (build_org_tree, end_assignment, grant_ministry_admin,
+                       revoke_ministry_role)
 
 TODAY = local_today()
 YESTERDAY = TODAY - datetime.timedelta(days=1)
@@ -104,8 +105,8 @@ class ConstraintFieldErrorTests(TestCase):
         "position_code_taken",
         "position_reports_to_self",
         "assignment_end_before_start",
-        "assignment_duplicate_tenure",
-        "ministryrole_duplicate_grant",
+        "assignment_overlapping_tenure",
+        "ministryrole_overlapping_grant",
         "ministryrole_end_before_start",
     }
 
@@ -169,6 +170,14 @@ class ConstraintFieldErrorTests(TestCase):
         )
 
     def test_an_assignment_end_date_before_the_start_date_points_at_end_date(self):
+        """🔴 这一条差点被排他约束变成一个 500（D51）。
+
+        `ExclusionConstraint.validate()` 会把这一行的值代进 `daterange(...)`
+        发给 Postgres，而 `daterange('2023-01-01','2020-01-01')` 是一个
+        `DataError` —— 人话消息根本来不及产生。修法是给那条排他约束加一个
+        `condition`（终点不早于起点），它在数据库里一行都不排除，
+        只是让 `validate()` 走另一条分支。整段写在 `org/models.py` 上。
+        """
         messages = self.assertFieldError(
             Assignment(contact=self.person, position=self.position,
                        start_date=datetime.date(2023, 1, 1),
@@ -177,18 +186,57 @@ class ConstraintFieldErrorTests(TestCase):
         )
         self.assertIn("The end date cannot be before the start date.", messages)
 
-    def test_a_duplicate_tenure_points_at_start_date(self):
-        # nulls_distinct=False, so the pair collides even with no start date —
-        # the case Postgres would otherwise wave through.
+    def test_an_overlapping_tenure_points_at_contact(self):
+        """⚠️ 落在 `contact` 上，不是 `start_date`（D51）。
+
+        约束问的是「这个人在这个岗位上有没有一段压着的时间」，而人是那张表单上
+        唯一可选的格子 —— `AssignmentForm` 的 `position` 来自地址栏。
+        """
         Assignment.objects.create(contact=self.person, position=self.position)
         messages = self.assertFieldError(
-            Assignment(contact=self.person, position=self.position), "start_date")
-        self.assertIn("already has a tenure in this position", " ".join(messages))
+            Assignment(contact=self.person, position=self.position), "contact")
+        self.assertIn("already holds this post", " ".join(messages))
 
-    def test_a_duplicate_grant_points_at_start_date(self):
+    def test_two_overlapping_historical_tenures_are_refused(self):
+        """🔴 **旧版的重复检查一条都拦不住这一格**（D51）。
+
+        它查的是 `active(on=今天)`「两条今天都活着」，而这两段都在 2020 年 ——
+        今天一条都不活。于是补录进去不报错，而 `with_headcounts(on=2020…)`
+        在回溯报表里把这个人数成两个。现在问的是区间重叠，和数据库那条约束
+        同一句话。
+        """
+        Assignment.objects.create(
+            contact=self.person, position=self.position,
+            start_date=datetime.date(2020, 1, 1), end_date=datetime.date(2021, 1, 1))
+        messages = self.assertFieldError(
+            Assignment(contact=self.person, position=self.position,
+                       start_date=datetime.date(2020, 6, 1),
+                       end_date=datetime.date(2020, 8, 1)),
+            "contact")
+        self.assertIn("already holds this post", " ".join(messages))
+
+    def test_a_tenure_that_does_not_overlap_is_fine(self):
+        """⭐ 而这一格正是旧约束办不到的：**同一个人、同一个岗位、回来第二段**。
+
+        旧的 `UNIQUE(contact, position, start_date)` 只比日期是不是一样，
+        于是「离职 → 回来」撞不撞全看那一格填了什么。区间不相交问的是真规则。
+        """
+        Assignment.objects.create(
+            contact=self.person, position=self.position,
+            start_date=datetime.date(2020, 1, 1), end_date=datetime.date(2021, 1, 1))
+        again = Assignment(
+            contact=self.person, position=self.position,
+            start_date=datetime.date(2021, 1, 1))
+        again.full_clean()  # 不抛 —— `[2020,2021)` 和 `[2021,)` 不重叠。
+        again.save()
+        self.assertEqual(
+            Assignment.objects.filter(
+                contact=self.person, position=self.position).count(), 2)
+
+    def test_an_overlapping_grant_points_at_contact(self):
         MinistryRole.objects.create(contact=self.person, ministry=self.ministry)
         messages = self.assertFieldError(
-            MinistryRole(contact=self.person, ministry=self.ministry), "start_date")
+            MinistryRole(contact=self.person, ministry=self.ministry), "contact")
         self.assertIn("already have that role in this ministry", " ".join(messages))
 
     def test_a_grant_ending_before_it_starts_points_at_end_date(self):
@@ -792,9 +840,12 @@ class MinistryRoleTests(TestCase):
         return MinistryRole.objects.create(
             contact=contact or self.wang, ministry=ministry or self.pantry, **kwargs)
 
-    def test_duplicate_grant_with_no_start_date_is_rejected(self):
-        # nulls_distinct=False: start_date is nullable and routinely left empty,
-        # and without it Postgres would wave every duplicate through.
+    def test_two_grants_covering_the_same_day_are_rejected(self):
+        # 区间不相交（D51）。⚠️ 这一条从前叫
+        # `test_duplicate_grant_with_no_start_date_is_rejected`，钉的是
+        # `nulls_distinct=False` —— 那时 `start_date` 可空且常常留空，Postgres
+        # 认 NULL != NULL，没有那个标志就会放行任意多条。现在起始日期不可为空，
+        # 两条都默认今天，拦下它们的是区间重叠。
         self.grant()
         with self.assertRaises(IntegrityError), transaction.atomic():
             self.grant()
@@ -839,6 +890,33 @@ class MinistryRoleTests(TestCase):
         expired = self.grant(start_date=LAST_YEAR, end_date=TODAY)
         self.assertNotIn(expired, MinistryRole.objects.active())
         self.assertIn(expired, MinistryRole.objects.active(on=YESTERDAY))
+
+    def test_granting_again_after_a_revoke_opens_a_second_row(self):
+        """⚠️ 和 `events.tests.EventGrantTests` 那条对称 —— 两张表，一条规矩。
+
+        「恢复」分支 2026-09-17 删掉了（D51）：撤销那一行是 `[…, 今天)`，
+        再授权那一行是 `[今天, …)`，两段不重叠，所以是第二行，
+        而中间断过那件事**留在当前表里**，不是只留在 simple-history 里。
+        """
+        grant = grant_ministry_admin(
+            contact=self.wang, ministry=self.pantry, granted_by=None)
+        revoke_ministry_role(grant)
+
+        again = grant_ministry_admin(
+            contact=self.wang, ministry=self.pantry, granted_by=None)
+        self.assertNotEqual(again.pk, grant.pk)
+        grant.refresh_from_db()
+        self.assertEqual(grant.end_date, TODAY, "旧行不许被改回来")
+        self.assertEqual(MinistryRole.objects.filter(
+            contact=self.wang, ministry=self.pantry).count(), 2)
+
+    def test_granting_to_somebody_who_already_has_it_is_refused(self):
+        grant_ministry_admin(
+            contact=self.wang, ministry=self.pantry, granted_by=None)
+        with self.assertRaises(ValidationError) as caught:
+            grant_ministry_admin(
+                contact=self.wang, ministry=self.pantry, granted_by=None)
+        self.assertIn("contact", caught.exception.message_dict)
 
 
 class PermissionTests(TestCase):

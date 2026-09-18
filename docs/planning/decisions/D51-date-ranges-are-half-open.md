@@ -101,7 +101,34 @@ effective date 就是 last day of employment；失业金申请和 COBRA 也以�
 
 ⚠️ Django **不支持** PG18 的 `WITHOUT OVERLAPS`（ticket #36627，
 `needsnewfeatureprocess`，未进任何版本），走 `ExclusionConstraint` —— 它从 PG 9.x
-起就有，不依赖线上是不是 18，反而更稳。
+起就有，不依赖线上是不是 18，反而更稳。`btree_gist` 是前提：排他约束里那几个
+`=` 比的是整数外键，而 GiST 默认不认识整数的 `=`。
+
+### 落地时踩到的两件事，都不报错在该报的地方
+
+🔴 **一、`condition` 不是可选的，而它挡的不是数据库那一侧。**
+`ExclusionConstraint.validate()` 会把待存行的值代进 `daterange(...)` 发给
+Postgres，而 `daterange('2023-01-01','2020-01-01')` 直接是一个 `DataError` ——
+于是「结束日期不能早于开始日期」那句人话变成了一个 500。三条约束因此都带
+`condition=(end_date 为空 或 end_date >= start_date)`。它在数据库里**一行都不
+排除**（那种行本来就过不了 CheckConstraint），只是让 `validate()` 走另一条分支。
+
+🔴 **二、`AssignmentForm` 那条路够不到这条约束。**
+`validate()` 开头有一句 `if exclude and self._expression_refs_exclude(...): return`，
+而 `AssignmentForm` 是 ModelForm，字段只有
+`["contact", "employment_type", "start_date"]` —— `_get_validation_exclusions()`
+因此把 `end_date` 放进 `exclude`（跑出来确认过），约束的表达式引用了它，
+**整条校验被跳过**。所以 `org.services.refuse_a_second_live_tenure()` **留着**，
+但从「`active(on=今天)` 两条都活着」改成真正的区间重叠判断（复用同一个
+`DateRange`）。它不是约束的第二份实现，是约束在那一条路上够不到的地方补的一句话。
+⚠️ 两张授权表没有这个问题（plain `forms.Form`，服务层 `full_clean()` 不传
+`exclude`），`AssignmentInline` 也没有（它的 `fields` 含 `end_date`）。
+⚠️ 顺带修掉旧版的一个真漏洞：它只看今天，于是**历史上的重叠一条都拦不住** ——
+补录一段 2020 年的任职压在另一段上，`with_headcounts()` 在回溯报表里把人数成两个。
+
+⚠️ **迁移不带数据清理，而这是有意的。** 建约束时如果现存行已经有重叠，迁移
+当场失败 —— 写这条迁移时就撞到了一次（两行 `start_date` 不同、时间压着，
+正是旧约束放行的那一种）。那是一次要人看一眼的数据冲突，不是可以自动合并的东西。
 
 ⚠️ **已知的粒度限制**：日期粒度表达不了「上午 10 点发、下午 2 点撤」。那种情况
 `end_date == start_date`，是一个**零长度**区间（什么都没覆盖），合法且有意义；
@@ -143,6 +170,13 @@ Postgres 里空区间不和任何东西重叠，所以这样的行可以有任�
   守卫**：加了集合谓词而忘了行级双胞胎，下一次就是红的。
 - `core.tests.ActiveQuerySetTests` —— 右开的四个边界，含
   `test_active_excludes_a_row_ending_today`（它 2026-09-17 翻了面，此前被标着「别动」）。
+- 区间不相交那一条，两侧各有钉子：`org.tests.ConstraintFieldErrorTests
+  .test_an_overlapping_tenure_points_at_contact`（拦得住）、
+  `..._a_tenure_that_does_not_overlap_is_fine`（**旧约束办不到的那一格**：
+  同一个人、同一个岗位、离职之后回来第二段）、
+  `..._two_overlapping_historical_tenures_are_refused`（旧版的重复检查一条都
+  拦不住的那一格），以及两张授权表各一条
+  `test_granting_again_after_a_revoke_opens_a_second_row` —— 断档留在当前表里。
 - `in_effect_on()` 的另外三条调用路径各有自己的边界测试，因为它们是**四段不同的
   SQL**：`org.tests.VacancyTests.test_a_post_is_still_held_on_its_holders_last_day`
   （`OuterRef("pk")`）、
@@ -164,3 +198,11 @@ Postgres 里空区间不和任何东西重叠，所以这样的行可以有任�
   症状会和 09-15 那次一模一样。
 - **`WorkPattern` / `Leave` / `Shift`（[D33](D33-work-schedule.md) /
   [D34](D34-leave.md)）还没建**，建的时候按本条来。
+- 仪表盘那一行的去重**留着**，尽管重叠那一格现在到不了。
+  `dashboard` 有一段按岗位去重的防御，它的理由原文是「数据库仍然拦不住重叠任职」——
+  本条把那句话撤了。但**顺手删掉它不在本条的范围里**，而且它还有一条可达的路：
+  「离职之后回来」从此是同一个岗位上的第二行，于是这一页很自然地会拿到同岗位的
+  两条记录（其中一条已结束）。钉子改成了那一格
+  （`dashboard.tests.ThePostsLineIsDefensiveTests
+  .test_a_post_held_twice_over_time_shows_as_one_line`）。
+  ⚠️ 哪天要清它，判据是 phase-d 的第二条（「它没有读者」），而那是另一次改动。

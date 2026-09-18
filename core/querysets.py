@@ -2,8 +2,9 @@
 
 import datetime
 
+from django.contrib.postgres.fields import DateRangeField
 from django.db import models
-from django.db.models import Q
+from django.db.models import F, Q
 
 from core.timeutils import local_today
 
@@ -52,6 +53,27 @@ def in_effect_on(on=None, prefix=""):
         #    `end_date` 为空读作「还没有结束」，那一支不能省。
         & (Q(**{f"{end}__isnull": True}) | Q(**{f"{end}__gt": on}))
     )
+
+
+class DateRange(models.Func):
+    """`daterange(start_date, end_date)` —— 同一条规则的**数据库一等形态**。
+
+    ⭐ **`daterange` 的默认边界就是 `[)`，和 `in_effect_on()` 逐字相同**（D51）。
+       这不是巧合被拿来用，它是这条决策选 Postgres 排他约束而不是自己写重叠
+       判断的理由：规则在数据库里有了一个权威副本，而 Python 这边的两处是它的
+       投影。再写一遍 `start < other_end and end > other_start` 就是第三份实现。
+
+    ⚠️ 空的 `end_date` 出来是 `[start,)` —— 无上界，正好读作「还没有结束」。
+    ⚠️ `end_date == start_date` 出来是**空区间**，而空区间不和任何东西重叠。
+       那一行的含义是「当天发、当天撤」，什么都没覆盖 —— 所以它可以有任意多条，
+       这是对的，不是漏洞。整段写在 D51 第三节。
+    """
+
+    function = "DATERANGE"
+    output_field = DateRangeField()
+
+    def __init__(self, start="start_date", end="end_date", **extra):
+        super().__init__(F(start), F(end), **extra)
 
 
 class DateRangeQuerySet(models.QuerySet):

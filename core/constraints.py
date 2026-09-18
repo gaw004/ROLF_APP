@@ -44,9 +44,12 @@ CONSTRAINT_FIELD = {
     "position_reports_to_self": "reports_to",
     # org.Assignment
     "assignment_end_before_start": "end_date",
-    "assignment_duplicate_tenure": "start_date",
+    # ⚠️ 落在 `contact` 上，不是 `start_date`：区间重叠说的是「这个人在这个
+    #    岗位上已经有一段压着的任职」，而人是那张表单上唯一可选的格子
+    #    （`AssignmentForm` 的 `position` 来自地址栏）。D51。
+    "assignment_overlapping_tenure": "contact",
     # org.MinistryRole
-    "ministryrole_duplicate_grant": "start_date",
+    "ministryrole_overlapping_grant": "contact",
     "ministryrole_end_before_start": "end_date",
     # events.ParticipationRole
     "participationrole_code_taken": "code",
@@ -56,9 +59,10 @@ CONSTRAINT_FIELD = {
     #    and nobody picks the series by hand — the generator sets it.
     "event_series_moment_taken": "start_time",
     # events.EventGrant
-    # ⚠️ 和 `ministryrole_duplicate_grant` 落在同一格上（`start_date`），因为
-    #    两条约束是同一个形状：同一个人、同一个东西、同一天，重复的是日期那一格。
-    "eventgrant_duplicate_grant": "start_date",
+    # ⚠️ 和 `ministryrole_overlapping_grant` 落在同一格上（`contact`），因为两条
+    #    约束是同一个形状：同一个人、同一个东西、一段压着的时间。重叠的是人，
+    #    而日期那一格在两张授权表单上都是选填的。
+    "eventgrant_overlapping_grant": "contact",
     "eventgrant_end_before_start": "end_date",
     # events.EventRole
     "eventrole_duplicate": "role",

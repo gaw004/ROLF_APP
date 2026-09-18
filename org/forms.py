@@ -541,5 +541,9 @@ class AssignmentForm(forms.ModelForm):
         """
         cleaned = super().clean()
         refuse_a_second_live_tenure(
-            contact=cleaned.get("contact"), position=self.instance.position_id)
+            contact=cleaned.get("contact"), position=self.instance.position_id,
+            # ⚠️ 日期一起传：这一条问的是**区间重叠**，不是「今天两条都活着」。
+            #    不传的话它只拿默认的「今天起、没有终点」去比，一段补录的历史
+            #    任职压在另一段上会被它放过（D51）。
+            start_date=cleaned.get("start_date"))
         return cleaned

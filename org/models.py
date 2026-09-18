@@ -9,6 +9,8 @@ Assignment is the other half: who is in which box, and between which dates.
 
 from django.conf import settings
 from django.core.exceptions import ValidationError
+from django.contrib.postgres.constraints import ExclusionConstraint
+from django.contrib.postgres.fields import RangeOperators
 from django.db import models
 from django.db.models.functions import Lower
 from simple_history.models import HistoricalRecords
@@ -18,7 +20,8 @@ from core.constraints import ConstraintErrorFieldMixin
 from core.limits import LONG_TEXT
 from core.models import ImmutableCodeMixin, TimeStampedModel
 from core.timeutils import local_today
-from core.querysets import DateRangeMixin, DateRangeQuerySet, in_effect_on
+from core.querysets import (DateRange, DateRangeMixin, DateRangeQuerySet,
+                            in_effect_on)
 
 
 class Ministry(ImmutableCodeMixin, ConstraintErrorFieldMixin, TimeStampedModel):
@@ -575,24 +578,42 @@ class Assignment(ConstraintErrorFieldMixin, DateRangeMixin, TimeStampedModel):
                 violation_error_message="The end date cannot be before the start date.",
                 violation_error_code="assignment_end_before_start",
             ),
-            # Short, and that is the news. The old version was
-            # (contact, ministry, kind, title, start_date), with a paragraph
-            # arguing why title had to be in it — splitting Position out made
-            # that whole argument moot, because two jobs are two positions.
-            # Worth remembering: a constraint that keeps growing columns is
-            # usually a model that has not been split yet.
+            # ⭐ **真规则是「区间不相交」，而它现在由数据库说**（D51 第三节）。
+            #    `daterange` 的 `[)` 边界和 `in_effect_on()` 逐字相同，所以这条
+            #    约束和那条谓词说的是同一句话 —— 数据库第一次成为它的权威副本。
             #
-            # nulls_distinct=False is not optional. start_date is nullable and
-            # often left empty, and Postgres treats NULL != NULL, so without it
-            # the constraint would wave through any number of duplicates with
-            # no start date. A7's lesson.
-            models.UniqueConstraint(
-                fields=["contact", "position", "start_date"],
-                name="assignment_unique_tenure",
-                nulls_distinct=False,
-                violation_error_message="This person already has a tenure in this position "
-                                        "starting on that date.",
-                violation_error_code="assignment_duplicate_tenure",
+            # 🔴 它**取代**了原来的 `UNIQUE(contact, position, start_date)`，而那条约束
+            #    键在一个**偶然量**上：`start_date` 表单默认留空，于是它同时
+            #    过松（起始日期不同的两行可以同时生效）和过紧（去年就结束的
+            #    那一行再来一次也是 500）。整段病历在 D51 第三节。
+            #
+            # ⚠️ `end_date == start_date` 是**空区间**，不和任何东西重叠 ——
+            #    「当天发、当天撤」因此可以有任意多条。那一行什么都没覆盖，
+            #    所以这是对的；`end_date >= start_date` 那条 CheckConstraint
+            #    因此保持 `>=`。
+            ExclusionConstraint(
+                name="assignment_no_overlapping_tenure",
+                # 🔴 **`condition` 不是可选的，而它挡的不是数据库那一侧。**
+                #    `end_date < start_date` 的行在数据库里本来就存不下
+                #    （上面那条 CheckConstraint），所以这个条件在库里一行都不排除。
+                #    它存在是为了 `full_clean()`：`ExclusionConstraint.validate()`
+                #    会把这一行的值代进 `daterange(...)` 发给 Postgres，而
+                #    `daterange('2023-01-01','2020-01-01')` 直接是一个 `DataError`
+                #    —— 于是「结束日期不能早于开始日期」那句人话变成了一个 500。
+                #    加上它，validate() 走另一条分支，check 约束的消息照常落到
+                #    `end_date` 那一格上。跑出来确认过两边的行为。
+                condition=(models.Q(end_date__isnull=True)
+                           | models.Q(end_date__gte=models.F("start_date"))),
+                expressions=[
+                    ("contact", RangeOperators.EQUAL),
+                    ("position", RangeOperators.EQUAL),
+                    (DateRange(), RangeOperators.OVERLAPS),
+                ],
+                violation_error_message=(
+                    "This person already holds this post over part of that "
+                    "period. End that tenure first — two live tenures on one "
+                    "post count them twice."),
+                violation_error_code="assignment_overlapping_tenure",
             ),
         ]
         # position + status + end_date covers serving() in one index; active()
@@ -677,16 +698,25 @@ class MinistryRole(ConstraintErrorFieldMixin, DateRangeMixin, TimeStampedModel):
     class Meta:
         ordering = ["ministry__name", "contact"]
         constraints = [
-            # nulls_distinct=False for A7's reason: start_date is nullable and
-            # is routinely left empty, and Postgres treats NULL != NULL, so
-            # without it the constraint waves through any number of duplicates.
-            models.UniqueConstraint(
-                fields=["contact", "ministry", "role", "start_date"],
-                name="ministryrole_unique_grant",
-                nulls_distinct=False,
-                violation_error_message="They already have that role in this ministry "
-                                        "from that date.",
-                violation_error_code="ministryrole_duplicate_grant",
+            # ⭐ 区间不相交，同 `Assignment` 上那一条 —— 理由一字不差，见那里
+            #    和 D51 第三节。键里多一个 `role`：同一个人在同一个 ministry 上
+            #    可以同时有两种不同的角色。
+            ExclusionConstraint(
+                name="ministryrole_no_overlapping_grant",
+                # `condition` 的理由见 `org.Assignment` 上那一条：它挡的是
+                # `full_clean()` 里那个 `DataError`，不是数据库里的任何一行。
+                condition=(models.Q(end_date__isnull=True)
+                           | models.Q(end_date__gte=models.F("start_date"))),
+                expressions=[
+                    ("contact", RangeOperators.EQUAL),
+                    ("ministry", RangeOperators.EQUAL),
+                    ("role", RangeOperators.EQUAL),
+                    (DateRange(), RangeOperators.OVERLAPS),
+                ],
+                violation_error_message=(
+                    "They already have that role in this ministry over part of "
+                    "that period."),
+                violation_error_code="ministryrole_overlapping_grant",
             ),
             models.CheckConstraint(
                 condition=(

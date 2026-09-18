@@ -522,17 +522,30 @@ class ThePostsLineIsDefensiveTests(DashboardTestCase):
 
     走查那天页面上出现了四行一模一样的 `Food Pantry lead · Food Pantry`，
     起因是 seed 的 get_or_create 键里含一个每天都在变的日期。那个 bug 修了，
-    但**数据库仍然拦不住重叠任职**，所以这一行自己也要站得住。
+    而这一行自己也要站得住。
+
+    🔴 **这个类原来钉的是「两段重叠的任职」，而 D51 把那一格拿掉了**
+       （2026-09-17）：`assignment_no_overlapping_tenure` 之后，重叠的两行在
+       数据库里存不下，那条测试连 setUp 都跑不完。原话是「数据库仍然拦不住
+       重叠任职」—— 现在拦得住了。
+
+    ⚠️ 但同一个风险有一个**现在才合法**的版本，而且它是 D51 顺带带来的：
+       「离职之后回来」从此是**同一个岗位上的第二行**（不是把旧行改回来）。
+       于是这一页很自然地会拿到同岗位的两条任职记录，只是其中一条已经结束。
+       下面钉的就是那一格 —— 同一个可见后果，可达的那条路。
     """
 
-    def test_two_overlapping_tenures_in_one_post_show_as_one_line(self):
+    def test_a_post_held_twice_over_time_shows_as_one_line(self):
         post = Position.objects.create(
             code="lead", name="Food Pantry lead", kind=Position.Kind.STAFF,
             compensation=Position.Compensation.PAID, ministry=self.pantry)
+        # 走了又回来：两段不重叠，所以数据库收得下 —— 这正是 D51 之后
+        # 「再授权/再入职」的标准形状。
         Assignment.objects.create(
-            contact=self.me, position=post, start_date=TODAY - 30 * DAY)
+            contact=self.me, position=post,
+            start_date=TODAY - 30 * DAY, end_date=TODAY - 20 * DAY)
         Assignment.objects.create(
-            contact=self.me, position=post, start_date=TODAY - 20 * DAY)
+            contact=self.me, position=post, start_date=TODAY - 10 * DAY)
         page = self.page().content.decode()
         self.assertEqual(page.count("Food Pantry lead"), 1)
 

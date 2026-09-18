@@ -18,7 +18,7 @@ from django.core.exceptions import ValidationError
 
 from django.db import models
 
-from core.querysets import in_effect_on
+from core.querysets import DateRange, in_effect_on
 from core.timeutils import local_today
 
 from .models import Assignment, Ministry, MinistryRole, Position
@@ -135,23 +135,20 @@ def grant_ministry_admin(*, contact, ministry, granted_by, start_date=None):
     granted_by is passed in from the session by the caller and is never a field
     on a form — a box somebody can type in is a box somebody can lie in.
 
-    🔴 **同一把钥匙上已经有一行时，这里是「恢复」，不是第二条**（2026-09-16，
-       用户拍板）。约束是 `(contact, ministry, role, start_date)` 且
-       `nulls_distinct=False`，而表单的 `start_date` 默认留空 —— 于是
-       「授权 → 手滑撤销 → 再授权」在此之前是一个 **`IntegrityError`（500）**，
-       双击那颗键也是。而那条路上人的意图明明白白：把它还给他。
+    🔴 **他已经有一条压着的授权 → 拒绝；否则新建一行。没有「恢复」那一支了**
+       （D51，2026-09-17）。
 
-         · 那一行还在效期内 → 拒绝（他本来就有）
-         · 那一行已经结束   → **恢复**：清掉 `end_date`
-         · 没有那一行       → 照旧新建
+       2026-09-16 到 09-17 之间这里有一个「恢复」分支：同一把钥匙上已经有一行
+       （键是 `(contact, ministry, role, start_date)`，而表单的 `start_date` 默认留空）
+       就把它的 `end_date` 清掉。它解决的是一个真问题 ——「授权 → 手滑撤销 →
+       再授权」在那之前是一个 `IntegrityError`（500）—— 但它是**在给一条键错了
+       列的约束打补丁**，代价是把「中间断过一段」从当前行上抹掉，
+       在当前表里造出一段**从未存在过的连续授权**。
 
-       ⚠️ 「已经结束」**不分今天还是上个月**：分档会多一条挡不住任何事的分支
-          —— 上个月结束的那一行键是一样的，不恢复它就照样是 500。
-
-       ⚠️ **代价如实记**：恢复会把当前行的 `end_date` 抹掉，于是「中间断过
-          一段」只活在 simple-history 里。这是可以接受的 —— 这张表带 history
-          的理由**正是**那个问题（「去年三月谁能看这个」）—— 但当前行**不是
-          全部真相**，别照着它回答「他从什么时候起一直有权限」。
+       约束换成区间排他之后，那个问题根上就没有了：今天撤销的那一行是
+       `[…, 今天)`，今天再授权的是 `[今天, …)`，两段不重叠，于是那是**第二行**，
+       断档如实留在当前表里。HRIS 的规范做法也正是这个（重新授权开新行、
+       旧行不动，SCD Type 2）。
 
     ⚠️ `full_clean()` 不能省，即使上面那一支已经处理了重复：别的约束
        （`end_date >= start_date`）照旧要在存之前被问一次，而
@@ -167,18 +164,10 @@ def grant_ministry_admin(*, contact, ministry, granted_by, start_date=None):
     #    服务层（D18），而一个 `None` 走到模型层就是一次 NOT NULL 违约（D51 起
     #    `start_date` 不可为空）。
     start_date = start_date or local_today()
-    standing = MinistryRole.objects.filter(
-        contact=contact, ministry=ministry, role=MinistryRole.Role.ADMIN,
-        start_date=start_date).first()
-    if standing is not None:
-        if standing.is_currently_active:
-            raise ValidationError(
-                {"contact": "They already administer this ministry."})
-        standing.end_date = None
-        standing.granted_by = granted_by
-        standing.full_clean()
-        standing.save()
-        return standing
+    if MinistryRole.objects.active().filter(
+            contact=contact, ministry=ministry,
+            role=MinistryRole.Role.ADMIN).exists():
+        raise ValidationError({"contact": "They already administer this ministry."})
 
     grant = MinistryRole(
         contact=contact,
@@ -650,34 +639,60 @@ def confirm_position(position):
     return position
 
 
-def refuse_a_second_live_tenure(*, contact, position, on=None):
-    """同一个人在同一个岗位上已经有一段没结束的任职了 —— 拦住。
+def refuse_a_second_live_tenure(*, contact, position, start_date=None, end_date=None):
+    """同一个人在同一个岗位上已经有一段时间压着了 —— 拦住，给一句人话。
 
-    ⚠️ **不是 `assignment_unique_tenure` 那条约束的重复。** 那条约束管的是
-       `(contact, position, start_date)` 完全相同的行，它已经映射到 `start_date`
-       这一格上（`core/constraints.py`），报错很干净。这里管的是**起始日期不同、
-       而两段在时间上重叠**的那一种 —— 数据库看不见它，因为那是一个区间重叠判断
-       （Postgres 的 exclusion constraint 做得了，而这个仓库没有用过那个东西，
-       为一张几十行的表引入它不划算）。
+    🔴 **规则本身在数据库上**（`assignment_no_overlapping_tenure`，D51）。
+       这个函数**不是**那条约束的第二份实现，它是那条约束在**一条特定路径上
+       够不到的地方**补的一句话，而那条路径是实测出来的：
 
-    ⚠️ 而这一条**不和 `Position` 那句「允许交接期重叠」冲突**：那句话说的是
+       `ExclusionConstraint.validate()` 开头有一句
+       `if exclude and self._expression_refs_exclude(...): return`。
+       而 `AssignmentForm` 是 ModelForm，字段只有
+       `["contact", "employment_type", "start_date"]` ——
+       `_get_validation_exclusions()` 因此把 `end_date` 放进 `exclude`
+       （跑出来确认过），而约束的表达式 `daterange(start_date, end_date)`
+       引用了它，于是**整条约束的模型层校验被直接跳过**。
+       没有这个函数，那条路上一次重叠就是一个 `IntegrityError`（500），
+       而不是表单上的一句话。
+
+       ⚠️ 两张授权表没有这个问题：它们是 plain `forms.Form`，服务层
+          `full_clean()` 不传 `exclude`，约束自己就落到 `contact` 那一格上。
+          `AssignmentInline` 也没有 —— 它的 `fields` 含 `end_date`。
+          **只有站点侧那张任职表单中招。**
+
+    ⚠️ **问的是区间重叠，不是「今天两条都活着」。** 旧版查的是
+       `active(on=今天)`，于是**历史上的重叠一条都拦不住** —— 补录一段 2020 年
+       的任职压在另一段 2020 年的任职上，两条都不在今天生效，它一声不吭，
+       而 `with_headcounts()` 在回溯报表里把这个人数成两个。
+       现在复用 `DateRange`，和约束问的是同一句话。
+
+    ⚠️ 旧版的 docstring 写着「exclusion constraint 做得了，而这个仓库没有用过
+       那个东西，为一张几十行的表引入它不划算」。那条成本论证 D51 之后不成立 ——
+       东西已经在库里了。
+
+    ⚠️ 收**两个具体的对象**，不收一个 Assignment 实例，而这是踩出来的：
+       `ModelForm.clean()` 跑在 `_post_clean()` **之前**，那一刻 instance 上的
+       `contact_id` 还是空的，而 `Assignment.contact` 是非空外键 —— 读它抛的是
+       `RelatedObjectDoesNotExist`，不是 None。收对象就没有这个生命周期可踩。
+
+    ⚠️ 这一条**不和 `Position` 那句「允许交接期重叠」冲突**：那句话说的是
        **两个人**在同一个岗位上短暂并存（`Position` 的 docstring：
        「it would block co-holders and handover overlaps」），这里拦的是
        **同一个人**在同一个岗位上并存 —— 那不是交接，那是把一个人数成两个。
-
-    ⚠️ 不拦的后果：`with_headcounts()` 会把他数两遍，于是岗位详情页上写着
-       「2 people in post」而名字只有一个。
     """
-    # ⚠️ 收**两个具体的对象**，不收一个 Assignment 实例，而这是踩出来的：
-    #    `ModelForm.clean()` 跑在 `_post_clean()` **之前**，那一刻 instance 上的
-    #    `contact_id` 还是空的，而 `Assignment.contact` 是非空外键 —— 读它抛的是
-    #    `RelatedObjectDoesNotExist`，不是 None。收对象就没有这个生命周期可踩。
     if contact is None or position is None:
         return
-    if Assignment.objects.active(on=on).filter(contact=contact, position=position).exists():
+    # 表单留空时的那一段，和 `assign()` 存下去的会是同一段（那里也填今天）。
+    span = (start_date or local_today(), end_date)
+    clash = (Assignment.objects
+             .annotate(span=DateRange())
+             .filter(contact=contact, position=position, span__overlap=span))
+    if clash.exists():
         raise ValidationError({"contact": (
-            "They already hold this post. End that tenure first, or pick "
-            "somebody else — two live tenures on one post counts them twice.")})
+            "They already hold this post over part of that period. End that "
+            "tenure first, or pick somebody else — two live tenures on one "
+            "post count them twice.")})
 
 
 def assign(assignment):
@@ -698,7 +713,8 @@ def assign(assignment):
     # ⚠️ 只在**建**的时候问：改一段已有的任职（比如翻成休假）当然会撞上它自己。
     if assignment.pk is None:
         refuse_a_second_live_tenure(
-            contact=assignment.contact, position=assignment.position)
+            contact=assignment.contact, position=assignment.position,
+            start_date=assignment.start_date, end_date=assignment.end_date)
     assignment.save()
     return assignment
 

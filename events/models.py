@@ -18,6 +18,8 @@ from decimal import Decimal
 
 from django.conf import settings
 from django.core.exceptions import ValidationError
+from django.contrib.postgres.constraints import ExclusionConstraint
+from django.contrib.postgres.fields import RangeOperators
 from django.db import models
 from django.db.models import Count, F, Q
 from django.db.models.functions import Lower
@@ -29,7 +31,7 @@ from core.constraints import ConstraintErrorFieldMixin
 from core.limits import LONG_TEXT, SHORT_TEXT
 from core.models import ImmutableCodeMixin, TimeStampedModel
 from core.timeutils import day_start, local_date_of, local_now, local_today
-from core.querysets import DateRangeMixin, DateRangeQuerySet
+from core.querysets import DateRange, DateRangeMixin, DateRangeQuerySet
 # ⚠️ The audience machinery moved to org/audience.py on 2026-08-31 — the three
 #    ticks, Spec, for_audience(), and "who counts as on the books". It is
 #    written entirely in org vocabulary (Ministry, Position, Assignment) and
@@ -3507,15 +3509,25 @@ class EventGrant(ConstraintErrorFieldMixin, DateRangeMixin, TimeStampedModel):
     class Meta:
         ordering = ["-start_date", "contact"]
         constraints = [
-            # ⚠️ `nulls_distinct=False` **不是可选的**，A7 的教训：`start_date`
-            #    可空且经常留空，而 Postgres 认 NULL != NULL —— 没有它，这条约束
-            #    会放行任意多条一模一样的授权。
-            models.UniqueConstraint(
-                fields=["contact", "event", "start_date"],
-                name="eventgrant_unique_grant",
-                nulls_distinct=False,
-                violation_error_message="They already have this event from that date.",
-                violation_error_code="eventgrant_duplicate_grant",
+            # ⭐ 区间不相交，同两张 org 表 —— 理由一字不差，见
+            #    `org.Assignment` 上那一条和 D51 第三节。
+            # 🔴 它取代的那条 `UNIQUE(contact, event, start_date)` 正是
+            #    「恢复」分支存在的全部原因，而那个分支会抹掉 `end_date`、
+            #    在当前表里造出一段从未存在过的连续授权。两者同一个 commit 去掉。
+            ExclusionConstraint(
+                name="eventgrant_no_overlapping_grant",
+                # `condition` 的理由见 `org.Assignment` 上那一条：它挡的是
+                # `full_clean()` 里那个 `DataError`，不是数据库里的任何一行。
+                condition=(models.Q(end_date__isnull=True)
+                           | models.Q(end_date__gte=models.F("start_date"))),
+                expressions=[
+                    ("contact", RangeOperators.EQUAL),
+                    ("event", RangeOperators.EQUAL),
+                    (DateRange(), RangeOperators.OVERLAPS),
+                ],
+                violation_error_message=(
+                    "They already manage this event over part of that period."),
+                violation_error_code="eventgrant_overlapping_grant",
             ),
             models.CheckConstraint(
                 condition=(

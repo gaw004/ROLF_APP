@@ -22617,23 +22617,55 @@ class EventGrantTests(PageTestCase):
             reverse("events:event_admins", args=[self.event.pk])).content.decode()
         self.assertNotIn(">Yes<", page)
 
-    def test_granting_again_after_a_mistaken_revoke_restores_the_row(self):
-        """🔴 在此之前这是一个 **500**。
+    def test_granting_again_after_a_mistaken_revoke_opens_a_second_row(self):
+        """⭐ **断档留在当前表里，而这是 D51 这一轮真正买到的东西。**
 
-        约束是 `(contact, event, start_date)` 且 `nulls_distinct=False`，而表单
-        的 `start_date` 默认留空 —— 于是「授权 → 手滑撤销 → 再授权」撞上
-        `IntegrityError`。双击那颗键也是。
+        这条路曾经有过两个版本，都不对：
 
-        用户拍板：当成「恢复」。⚠️ 仍然**只有一行** —— 「中间断过一段」活在
-        simple-history 里，当前行不是全部真相（服务层 docstring 写着这一条）。
+        · 2026-09-16 之前是一个 **500** —— 约束是
+          `(contact, event, start_date)` 且 `nulls_distinct=False`，表单的
+          `start_date` 默认留空，于是「授权 → 手滑撤销 → 再授权」撞
+          `IntegrityError`，双击那颗键也是；
+        · 09-16 到 09-17 之间是「恢复」：把那一行的 `end_date` 清掉。它不再 500，
+          代价是当前表里多出一段**从未存在过的连续授权** —— 中间那段没有权限的
+          日子只活在 simple-history 里。
+
+        🔴 约束换成区间不相交之后，那个问题根上就没有了：撤销那一行是
+           `[…, 今天)`，再授权那一行是 `[今天, …)`，**两段不重叠**，
+           所以这是第二行，而断档如实写在当前表上。
+           ⚠️ 右开这件事在这里是承重的：右闭的话这两段会撞在「今天」那一天上，
+              同一天再授权仍然要 500。
         """
         grant = self.grant_to(self.helper)
         revoke_event_grant(grant)
 
         again = self.grant_to(self.helper)
-        self.assertEqual(again.pk, grant.pk, "恢复应该是同一行，不是第二行")
+        self.assertNotEqual(again.pk, grant.pk, "该是第二行，不是把旧行改回来")
         self.assertIsNone(again.end_date)
         self.assertTrue(can_manage_event(self.helper, self.event))
+
+        rows = list(EventGrant.objects.filter(
+            contact=self.helper.contact, event=self.event).order_by("pk"))
+        self.assertEqual(len(rows), 2)
+        # 旧行一个字没被改 —— 「他从哪天到哪天有过权限」照旧答得出来。
+        grant.refresh_from_db()
+        self.assertEqual(grant.end_date, local_today())
+
+    def test_a_second_grant_overlapping_a_live_one_is_a_form_error(self):
+        """⚠️ 上面那条的另一半：**压着的**第二条仍然要被拦下，而且是一句人话。
+
+        两张授权表走的是 plain `forms.Form`，服务层 `full_clean()` 不传
+        `exclude`，所以排他约束的模型层校验会跑，消息落在 `contact` 那一格上
+        （`core/constraints.py`）。只有站点侧那张**任职**表单够不到它 ——
+        理由写在 `org.services.refuse_a_second_live_tenure()` 上。
+        """
+        self.grant_to(self.helper)
+        self.as_(self.zhang)
+        response = self.client.post(
+            reverse("events:event_admins", args=[self.event.pk]),
+            {"contact": self.helper.contact.pk, "start_date": ""})
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.context["form"].errors)
         self.assertEqual(
             EventGrant.objects.filter(contact=self.helper.contact,
                                       event=self.event).count(), 1)

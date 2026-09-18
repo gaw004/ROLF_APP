@@ -244,6 +244,28 @@ def freeze_service_clock(moment):
         yield
 
 
+def generate_as_of(series, moment):
+    """按下「生成」的那一刻是 `moment` —— 夹具造出**过去的场次**的唯一正路。
+
+    🔴 **2026-09-17 之后，在「现在」按一次是造不出过去的场次的。** 生成有了
+       下界（`services.gone_and_to_come()`）：已经开始的时刻不会被建成活动，
+       因为那样造出来的是一批发布出去、带着工种、被牧区报表算成「开了但没人来」
+       的聚会，而且删不掉 —— `_collectable_occasions()` 按设计不碰已经开始的
+       场次。
+
+    ⭐ **真实的系列是这样长出历史的：时间流逝，不是回填。** 三周前那位 admin
+       按下去的时候，八个周二**全都在未来**。夹具走同一条路，测试问的才是真
+       问题；用回填造出来的历史，是在一条真人走不到的路上摆前提。
+
+    ⚠️ 它顺带把这些夹具从「今天几点」里摘了出来。此前它们靠 `NOW`（模块导入时
+       的那个瞬间，UTC）和 `local_today()`（当地的那一天）**两个基准**去跨越
+       今天，而这两个在 UTC 已翻页、当地还没翻的那几个小时里并不一致 ——
+       `deferred.md` 那条「三条在午夜前后会自己变红的测试」记的就是这个。
+    """
+    with freeze_service_clock(moment):
+        return generate_occasions(series)
+
+
 def make_person(last_name, **kwargs):
     # ⚠️ A first name by default (2026-08-19): an individual without one is
     #    refused by `contact_individual_has_a_first_name`, the same way one
@@ -4354,7 +4376,8 @@ class SeriesChangesTests(TestCase):
         inherit_audience(
             EventSeriesRole.objects.create(series=self.series, role=role),
             self.series)
-        generate_occasions(self.series)
+        # ⚠️ 三周前按的那一下 —— 为什么不能在「现在」按，见 `generate_as_of()`。
+        generate_as_of(self.series, NOW - 21 * DAY)
 
     def past(self):
         return self.series.occasions.filter(start_time__lt=NOW)
@@ -4907,7 +4930,9 @@ class SeriesReviewFindingsTests(TestCase):
         re-make. Both buttons are on the same screen.
         """
         series = self.build()
-        generate_occasions(series)
+        # ⚠️ 三周前按的那一下 —— 这一条要的正是一批**跨越今天**的场次，
+        #    而那种批次只能这样造出来。见 `generate_as_of()`。
+        generate_as_of(series, NOW - 21 * DAY)
         tonight = series.occasions.filter(
             start_time__gt=NOW).order_by("start_time").first()
         self.assertIsNotNone(tonight, "the fixture must straddle today")
@@ -4925,7 +4950,9 @@ class SeriesReviewFindingsTests(TestCase):
         #    make it too blunt if it were wrong: a meeting that ran this morning
         #    is not re-made, but it is not removed either.
         series = self.build()
-        generate_occasions(series)
+        # ⚠️ 同上：这一条问的是「今天早上跑过的那一场还在不在」，
+        #    所以夹具必须真的有一场在过去。见 `generate_as_of()`。
+        generate_as_of(series, NOW - 21 * DAY)
         past = series.occasions.filter(
             start_time__lt=NOW).order_by("start_time").last()
         evening = series.occasions.filter(
@@ -5457,7 +5484,12 @@ class SeriesSecondReviewTests(TestCase):
         series = self.build(rule="FREQ=DAILY;COUNT=1",
                             starts_on=datetime.date(2026, 3, 8),
                             start_time=datetime.time(1, 30))
-        occasion = generate_occasions(series)[0]
+        # ⚠️ 那个春天的早上**已经过去了**，而生成从 2026-09-17 起有了下界，
+        #    所以这一下必须按在它之前。⚠️ 换成「下一个夏令时切换日」是另一种
+        #    修法，没有采纳：那是一个写死的未来日期，明年这条测试会再坏一次，
+        #    而这条测试问的本来就是那个**具体的早上**。见 `generate_as_of()`。
+        occasion = generate_as_of(
+            series, day_start(datetime.date(2026, 3, 1)))[0]
         self.assertEqual(occasion.duration, datetime.timedelta(hours=2))
 
     # --- finding 10: an attribute assertion replaced by the behaviour -------
@@ -6113,7 +6145,9 @@ class RoleTopUpTests(TestCase):
         """
         series = self.build(starts_on=a_weekday(
             TUESDAY, near=local_today() - datetime.timedelta(days=21)))
-        generate_occasions(series)
+        # ⚠️ 第一次按是**三周前**（那时八个周二都还在未来），第二次按是现在 ——
+        #    两次之间隔着的正是这条测试要问的东西。见 `generate_as_of()`。
+        generate_as_of(series, NOW - 21 * DAY)
         self.add_template(series, "door")
         generate_occasions(series)
 

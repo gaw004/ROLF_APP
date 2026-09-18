@@ -454,6 +454,86 @@ class DatePredicateHalvesAgreeTests(TestCase):
                     row.delete()
 
 
+class DisplayDatesTests(TestCase):
+    """`last_day` 和 `revoked_on` —— 同一列存的值，两个领域各自诚实的读法（D51 第四节）。
+
+    ⚠️ 守卫（下面那一条）只证明模板**没有裸印** `end_date`，证明不了它印对了。
+       这两件事要各有各的钉子，否则「不裸印」可以靠印一个错的东西满足。
+    """
+
+    def setUp(self):
+        self.alice = Contact.objects.create(
+            contact_type=Contact.ContactType.INDIVIDUAL,
+            legal_first_name="Ann", legal_last_name="Alice")
+        self.post = Position.objects.create(code="greeter", name="Greeter")
+
+    def row(self, end_date):
+        return Assignment.objects.create(
+            contact=self.alice, position=self.post,
+            start_date=datetime.date(2026, 3, 1), end_date=end_date)
+
+    def test_the_last_day_is_the_day_before_the_stored_one(self):
+        # 存 3-16 的那一行，人该看到的是 3-15。
+        row = self.row(datetime.date(2026, 3, 16))
+        self.assertEqual(row.last_day, datetime.date(2026, 3, 15))
+
+    def test_the_revoked_day_is_the_stored_one(self):
+        # 「撤销于 3-16」本来就读作「16 号起没了」—— 这一个不减一天。
+        row = self.row(datetime.date(2026, 3, 16))
+        self.assertEqual(row.revoked_on, datetime.date(2026, 3, 16))
+
+    def test_both_are_none_when_nothing_has_ended(self):
+        # 模板靠 `default_if_none` 印一个「—」，所以 None 要原样传下去。
+        row = self.row(None)
+        self.assertIsNone(row.last_day)
+        self.assertIsNone(row.revoked_on)
+
+
+class EndDateIsNeverShownRawGuardTests(TestCase):
+    """Lint-as-test: `end_date` 不许被直接印给人看（D51）。
+
+    🔴 **存的那个日期和人该看到的那个日期，差一天。** `end_date` 是**第一个不
+       算数的日子**（右开），所以一个做到 3 月 15 日的人，那一列存的是 3 月 16 日。
+       直接印出来，读的人会以为他做到 16 号 —— 而这不报错，页面看上去完全正常。
+
+    ⭐ **业界的做法正是「存 exclusive、显示 inclusive」**：RFC 5545 的 `DTEND`
+       是 non-inclusive 的，而 Google Calendar 照样把全天事件显示成含最后一天，
+       因为 "most users don't appreciate the difference"。D51 第四节因此定了
+       两个**具名**展示器，各一处实现：任职走 `last_day`（= `end_date − 1`），
+       授权走 `revoked_on`（= `end_date`，「撤销于 X 日」本来就读作 X 日起没了）。
+
+    ⚠️ **只管 `{{ }}` 里的打印，不管 `{% if %}` 里的判断。** 「它结束了没有」
+       是一个合法的问题，问它不会把差一天的日期摆到人脸上。守卫要窄到只盯住
+       真正会骗人的那一种写法，否则下一个人会给它加白名单 —— 而白名单是守卫
+       被悄悄放空的方式（`GeneratedEventDeleteGuardTests` 记着这一课）。
+
+    ⚠️ 先剥模板注释再扫：这一条的理由就写在它守着的那几个模板里，而一条连
+       自己的理由都不许被写下来的守卫，会被下一个想解释原因的人删掉。
+
+    ⚠️ 反向验过：这一条**先于**三个模板的修改落地，当场红 3 处
+       （`ministry_admins.html`、`event_admins.html`、`position_detail.html`）。
+    """
+
+    #: `{{ ... end_date ... }}`。写成正则而不在上面的散文里写出字面形式 ——
+    #: 这些守卫会扫到自己，同 `HoursWriteGuardTests` 记下的那一条。
+    RAW_PRINT = re.compile(r"\{\{[^}]*\bend_date\b[^}]*\}\}")
+
+    def test_no_template_prints_an_end_date_straight_out_of_the_column(self):
+        problems = []
+        for relative, markup in project_template_files():
+            for number, line in enumerate(
+                    _blank_out_comments(markup).split("\n"), start=1):
+                if self.RAW_PRINT.search(line):
+                    problems.append(f"{relative}:{number}: {line.strip()}")
+        self.assertEqual(
+            problems,
+            [],
+            "`end_date` 是第一个**不**算数的日子（D51），直接印出来比实际晚一天。"
+            "任职那一列走 `last_day`，授权那一列走 `revoked_on`：\n"
+            + "\n".join(problems),
+        )
+
+
 class TimezoneTests(TestCase):
     """D16: "today" is the foundation's today — not the server's, not UTC."""
 

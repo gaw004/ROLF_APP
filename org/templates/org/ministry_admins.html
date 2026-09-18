@@ -22,14 +22,14 @@
     <div class="table-wrap">
       <table>
         <thead>
-          <tr><th>Who</th><th>From</th><th>Until</th><th>In effect</th><th>Granted by</th><th></th></tr>
+          <tr><th>Who</th><th>From</th><th>Revoked</th><th>In effect</th><th>Granted by</th><th></th></tr>
         </thead>
         <tbody>
           {% for grant in grants %}
             <tr>
               <td class="font-medium">{{ grant.contact }}</td>
               <td>{{ grant.start_date|default_if_none:"—" }}</td>
-              <td>{{ grant.end_date|default_if_none:"—" }}</td>
+              <td>{{ grant.revoked_on|default_if_none:"—" }}</td>
               <td>
                 {% comment %}
                 ⚠️ 这一列和**权限层**读的是同一条谓词，而 D51 之后全项目只有

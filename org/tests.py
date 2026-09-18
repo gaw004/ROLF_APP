@@ -10,6 +10,7 @@ from django.core.management import call_command
 from django.core.exceptions import ValidationError
 from django.db import IntegrityError, connection, transaction
 from django.db.models import ProtectedError
+from django.template.defaultfilters import date as date_filter
 from django.test import TestCase
 from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
@@ -1731,6 +1732,26 @@ class StaffRosterTests(TestCase):
         # 最后一天是今天 → 存明天（右开，D51）。他今天还在名单上。
         self.assertEqual(tenure.end_date, TOMORROW)
         self.assertIn(tenure, Assignment.objects.active())
+
+    def test_the_page_shows_the_last_day_not_the_stored_one(self):
+        """⚠️ 存的和印的差一天，而印错不报错 —— 页面看上去完全正常。
+
+        守卫（`core.tests.EndDateIsNeverShownRawGuardTests`）只证明模板没有裸印
+        `end_date`；它证明不了印出来的是对的。这一条走一遍真页面。
+        """
+        post = make_position("greeter", "Greeter", ministry=self.pantry)
+        tenure = Assignment.objects.create(
+            contact=self.wang, position=post, start_date=LAST_YEAR)
+        end_assignment(tenure, last_day=YESTERDAY)
+
+        self.as_admin()
+        page = self.client.get(
+            reverse("org:position_detail", kwargs={"pk": post.pk})).content.decode()
+        # ⚠️ 按模板实际用的格式比对（Django 的默认 `DATE_FORMAT`），不是 ISO ——
+        #    这一条第一版拿 `isoformat()` 比，红了一次才发现页面印的是
+        #    「Sept. 16, 2026」。
+        self.assertIn(date_filter(YESTERDAY), page)
+        self.assertNotIn(date_filter(TODAY), page, "印的是存的那一天，晚了一天")
 
     def test_a_tenure_pk_from_another_post_is_not_reachable(self):
         """来自表单的 pk 不许够得着别的岗位的行，同 `find_grant()` 的作用域。"""

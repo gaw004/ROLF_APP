@@ -1,5 +1,7 @@
 """QuerySet behaviour shared by every table that carries a start/end date."""
 
+import datetime
+
 from django.db import models
 from django.db.models import Q
 
@@ -110,3 +112,36 @@ class DateRangeMixin:
             #    而它们分成两处写，只是因为一个问一批行、一个问一行。
             and (self.end_date is None or self.end_date > on)
         )
+
+    # --- 给人看的那两个日期（D51 第四节）---------------------------------
+    #
+    # 🔴 **存的那一天和人该看到的那一天，差一天。** `end_date` 是第一个不算数的
+    #    日子，所以一段做到 3 月 15 日的任职，那一列存的是 3 月 16 日。裸打印
+    #    出来不报错，只是把每个人的最后一天说晚了一天。
+    #
+    # ⭐ 所以有**两个具名展示器**，各一处实现，模板只许用它们
+    #    （守卫 `core.tests.EndDateIsNeverShownRawGuardTests`）。
+    #    这不是又养出两条规则：被消灭的是两种**查询语义**，留下的是两个**标签**，
+    #    而标签本来就该随业务领域不同 —— Google Calendar 对全天事件做的是同一件事
+    #    （存 exclusive、显示 inclusive）。
+
+    @property
+    def last_day(self):
+        """最后一个算数的日子，给**事实**那一侧看（任职：「做到哪天」）。
+
+        没有结束日期就是 None —— 模板照旧印一个「—」。
+        """
+        if self.end_date is None:
+            return None
+        return self.end_date - datetime.timedelta(days=1)
+
+    @property
+    def revoked_on(self):
+        """失效的那一天，给**授权**那一侧看（「撤销于 X 日」＝ X 日起没了）。
+
+        ⚠️ 这一个**不减一天**，而那不是漏：右开的边界正是「撤销发生在哪一天」的
+           自然说法，ISO 27001 A.5.18 说的「termination 时移除访问权」也是这个
+           形状。它存在是为了让模板不必裸取 `end_date` —— 有一个名字，
+           下一个人就不会顺手把任职那一列也照抄成裸打印。
+        """
+        return self.end_date

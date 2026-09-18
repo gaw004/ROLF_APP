@@ -137,13 +137,19 @@
     <h2 class="mb-3 mt-8 text-lg font-semibold">Previously</h2>
     <div class="table-wrap">
       <table>
-        <thead><tr><th>Who</th><th>From</th><th>Until</th></tr></thead>
+        {% comment %}
+        ⚠️ Through，不是 Until：这一格印的是 `last_day`（最后一个在岗的日子），
+           而列里存的 `end_date` 是第一个**不**算数的日子 —— 裸印出来会把每个人
+           的最后一天说晚一天。D51 第四节，守卫
+           `core.tests.EndDateIsNeverShownRawGuardTests`。
+        {% endcomment %}
+        <thead><tr><th>Who</th><th>From</th><th>Through</th></tr></thead>
         <tbody>
           {% for tenure in past %}
             <tr>
               <td>{{ tenure.contact }}</td>
               <td>{{ tenure.start_date|default_if_none:"—" }}</td>
-              <td>{{ tenure.end_date|default_if_none:"—" }}</td>
+              <td>{{ tenure.last_day|default_if_none:"—" }}</td>
             </tr>
           {% endfor %}
         </tbody>

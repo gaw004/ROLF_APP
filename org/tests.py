@@ -15,7 +15,7 @@ from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
 
 from contact.models import Contact
-from core.timeutils import local_now, local_today
+from core.timeutils import local_date_of, local_now, local_today
 from events.models import Event
 
 from .admin import StaffingFilter
@@ -34,10 +34,12 @@ from .permissions import (
     ministry_ids_administered_by,
     unresolved_permissions,
 )
-from .services import build_org_tree, revoke_ministry_role
+from .audience import on_the_books_q
+from .services import build_org_tree, end_assignment, revoke_ministry_role
 
 TODAY = local_today()
 YESTERDAY = TODAY - datetime.timedelta(days=1)
+TOMORROW = TODAY + datetime.timedelta(days=1)
 LAST_YEAR = TODAY - datetime.timedelta(days=365)
 
 
@@ -410,6 +412,28 @@ class VacancyTests(TestCase):
         self.assertIn(self.position, Position.objects.vacant())
         self.assertNotIn(self.position, Position.objects.vacant(on=LAST_YEAR))
 
+    def test_a_post_whose_only_tenure_ends_today_is_not_vacant_yet(self):
+        """⚠️ 「结束日期正好是今天」那一格，隔着一层关系从来没有人问过。
+
+        上面每一条边界用的都是 `end_date=YESTERDAY`。而空缺查询走的是
+        `_has_a_holder()` —— `active()` 套一个 `OuterRef("pk")`，和直接调
+        `active()` **不是同一段 SQL**。这一条和下面那条各钉一条路径。
+        """
+        self.hold(start_date=LAST_YEAR, end_date=TODAY)
+        self.assertNotIn(self.position, Position.objects.vacant())
+        self.assertIn(self.position, Position.objects.occupied())
+
+    def test_a_tenure_ending_today_still_counts_in_the_headcount(self):
+        """⚠️ 第三条路径：`in_effect_on(prefix="assignments__")`（`org/models.py`
+           的 `with_headcounts()`）。它跨的是关系前缀而不是子查询，同样没被问过
+           这一格。
+        """
+        self.hold(start_date=LAST_YEAR, end_date=TODAY)
+        counted = Position.objects.with_headcounts().get(pk=self.position.pk)
+        self.assertEqual(counted.holder_count, 1)
+        tomorrow = Position.objects.with_headcounts(on=TOMORROW).get(pk=self.position.pk)
+        self.assertEqual(tomorrow.holder_count, 0)
+
     def test_a_position_held_by_someone_on_leave_is_not_vacant(self):
         # vacant() is built on active(), not serving(): the post-holder is away,
         # not gone, and the box is not open.
@@ -695,6 +719,47 @@ class AssignmentStatusTests(TestCase):
         # Ending is said by end_date and nowhere else. A second place to say it
         # is a second answer, and one of them goes stale.
         self.assertNotIn("ended", Assignment.Status.values)
+
+
+class EndAssignmentTests(TestCase):
+    """`end_assignment()` 写了哪一天，以及那一天当天他还算不算在编。
+
+    🔴 **这个函数此前没有任何服务层测试** —— 只有一条视图测试
+       （`OrgViewTests.test_ending_a_tenure_dates_it_rather_than_deleting_it`）
+       断言它写了今天的日期。而「写下哪个日期」不是这个函数的行为，
+       「从哪一天起他不在名单上」才是，那一半一直没有网。
+
+    ⚠️ 这三条是**特征化测试**：它们记录当前行为，不主张当前行为是对的。
+       `org/services.py` 的 `end_assignment()` docstring 写着「结束之后这个人
+       **当场**不再算这个 ministry 的在编人员」—— 而第二条证明那句话是假的：
+       他今天还在。两者之中错的是那句注释，不是代码。
+    """
+
+    def setUp(self):
+        self.ministry = make_ministry()
+        self.person = make_person("王强")
+        self.position = make_position("cook", "Cook", self.ministry)
+        self.assignment = Assignment.objects.create(
+            contact=self.person, position=self.position, start_date=LAST_YEAR)
+
+    def on_the_books(self, on):
+        return Assignment.objects.filter(
+            on_the_books_q(on), contact=self.person).exists()
+
+    def test_ending_a_tenure_records_the_day_it_was_ended(self):
+        end_assignment(self.assignment)
+        self.assignment.refresh_from_db()
+        self.assertEqual(self.assignment.end_date, TODAY)
+
+    def test_somebody_ended_today_is_still_on_the_books_for_the_rest_of_today(self):
+        end_assignment(self.assignment)
+        self.assertIn(self.assignment, Assignment.objects.active())
+        self.assertTrue(self.on_the_books(TODAY))
+
+    def test_they_are_off_the_books_from_tomorrow(self):
+        end_assignment(self.assignment)
+        self.assertNotIn(self.assignment, Assignment.objects.active(on=TOMORROW))
+        self.assertFalse(self.on_the_books(TOMORROW))
 
 
 class MinistryRoleTests(TestCase):
@@ -1680,6 +1745,37 @@ class StaffRosterTests(TestCase):
         # 而结束任职当场收回可见性 —— `end_assignment()` 的注释写着这一条，
         # 因为它看起来会像一个 bug。
         tenure.end_date = YESTERDAY
+        tenure.save(update_fields=["end_date"])
+        self.assertNotIn(event, Event.objects.for_audience(self.wang))
+
+    def test_a_tenure_ending_on_the_event_day_still_sees_that_event(self):
+        """⚠️ 第四条路径：`on=OuterRef(...)` —— 受众判断里那个相关子查询。
+
+        `for_audience()` 给每一行标上**它自己的那一天**（`Event.AUDIENCE_DAY`），
+        再把那一列当作 `on` 交给 `in_effect_on()`（`org.audience.on_the_books_q`）。
+        同一个谓词、第四种 SQL 形状，而「结束日期正好等于判定那一天」这一格
+        从来没有被问过。
+
+        🔴 **判的是活动那一天，不是今天** —— 这条测试第一版写成「今天结束任职、
+           今天还看得见」，红了：那场活动在三天后，而他到那天已经走了。
+           边界必须踩在**活动当天**，这也正是这条路径要单独有一张网的理由。
+
+        ⚠️ 特征化测试：记录当前行为（结束日期＝活动当天 → 那天仍算在编），
+           不主张它是对的。上面那条兄弟测试的注释写着「结束任职当场收回可见性」，
+           而它用的是昨天 —— 那句话在边界这一格上不成立。
+        """
+        event = self.staff_only_event()
+        event_day = local_date_of(event.start_time)
+        post = make_position("greeter", "Greeter", ministry=self.pantry)
+        tenure = Assignment.objects.create(contact=self.wang, position=post)
+        self.assertIn(event, Event.objects.for_audience(self.wang))
+
+        tenure.end_date = event_day
+        tenure.save(update_fields=["end_date"])
+        self.assertIn(event, Event.objects.for_audience(self.wang))
+
+        # 而前一天结束，那场活动就看不见了 —— 两格并排，边界才说得清。
+        tenure.end_date = event_day - datetime.timedelta(days=1)
         tenure.save(update_fields=["end_date"])
         self.assertNotIn(event, Event.objects.for_audience(self.wang))
 

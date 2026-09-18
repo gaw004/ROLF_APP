@@ -356,6 +356,132 @@ class ActiveQuerySetTests(TestCase):
         self.assertEqual(DateRangeQuerySet.active.__defaults__, (None,))
 
 
+class InForceQuerySetTests(TestCase):
+    """`in_force()` 的四个边界 —— 它加进来的时候一条都没写。
+
+    🔴 `in_force()` 是 2026-09-15 加的，而上面那四条 `active()` 边界测试的镜像
+       **从来没有过**。权限层每一次判断都走它
+       （`org.permissions.ministry_ids_administered_by`），而它和 `active()` 的
+       全部差别只有一行：**结束日期正好是今天**。那一行就是撤销当天那一行，
+       也是这条规则里唯一有安全后果的一格 —— 于是覆盖率最低的那一格，恰好是
+       代价最高的那一格。
+
+    ⚠️ 和上面一样，谓词直接从 `DateRangeQuerySet` 建，不走某个 manager ——
+       钉的是共享的那条谓词本身。
+    """
+
+    def setUp(self):
+        self.alice = Contact.objects.create(
+            contact_type=Contact.ContactType.INDIVIDUAL,
+            legal_first_name="Ann", legal_last_name="Alice")
+        self.post = Position.objects.create(code="greeter", name="Greeter")
+
+    def grants(self):
+        return DateRangeQuerySet(model=Assignment)
+
+    def make(self, start_date=None, end_date=None):
+        return Assignment.objects.create(
+            contact=self.alice, position=self.post,
+            start_date=start_date, end_date=end_date,
+        )
+
+    def test_in_force_excludes_a_row_ending_today(self):
+        # 🔴 这一格就是 in_force() 存在的全部理由，也是它和 active() 的唯一差别。
+        row = self.make(end_date=local_today())
+        self.assertNotIn(row, self.grants().in_force())
+
+    def test_in_force_excludes_a_row_that_ended_yesterday(self):
+        row = self.make(end_date=local_today() - datetime.timedelta(days=1))
+        self.assertNotIn(row, self.grants().in_force())
+
+    def test_in_force_includes_a_row_ending_tomorrow(self):
+        row = self.make(end_date=local_today() + datetime.timedelta(days=1))
+        self.assertIn(row, self.grants().in_force())
+
+    def test_in_force_excludes_a_row_that_starts_in_the_future(self):
+        row = self.make(start_date=local_today() + datetime.timedelta(days=1))
+        self.assertNotIn(row, self.grants().in_force())
+
+    def test_in_force_includes_a_row_with_no_dates_at_all(self):
+        row = self.make()
+        self.assertIn(row, self.grants().in_force())
+
+    def test_in_force_accepts_an_explicit_date(self):
+        row = self.make(
+            start_date=datetime.date(2020, 1, 1), end_date=datetime.date(2020, 12, 31))
+        self.assertNotIn(row, self.grants().in_force())
+        self.assertIn(row, self.grants().in_force(on=datetime.date(2020, 6, 1)))
+        # 而结束那一天自己，照旧不算 —— 右开对任何一天都成立，不只对今天。
+        self.assertNotIn(row, self.grants().in_force(on=datetime.date(2020, 12, 31)))
+
+
+class DatePredicateHalvesAgreeTests(TestCase):
+    """Lint-as-test: 每条日期谓词的 SQL 那一半和行级那一半，逐格给同一个答案。
+
+    🔴 **2026-09-15 到 09-16 之间，它们不给同一个答案。** `in_force()` 是 15 号
+       加的，行级的 `is_in_force` 16 号才补 —— 中间那一天，权限层按右开判，而两张
+       授权页按右闭画：撤销当天那一行写着「In effect: Yes」，正下方的横幅写着
+       「Revoking takes effect at once」，而他其实一点权限都没有了。
+       ⚠️ 两边都不报错，因为两边**各自都是对的**，只是不是同一条规则。
+
+    ⚠️ 这条测试**不判哪个答案对** —— 那是 `ActiveQuerySetTests` 和
+       `InForceQuerySetTests` 各自的事。它只钉一句话：**同一个问题，问一批行和
+       问一行，不许得到两个答案。** 于是「加了集合谓词却忘了它的行级双胞胎」
+       下一次就是红的，而不是等人用眼睛在页面上看出来。
+
+    ⚠️ 只在**今天**这一格比对，而这不是偷懒：行级谓词按定义读 `local_today()`，
+       它没有 `on` 可传 —— 有的话 D16 那条「别把日期冻进默认参数」就要再讲一遍。
+       所以矩阵摆在日期**数据**上（起止各四种），不摆在「问哪一天」上。
+    """
+
+    #: 起止各四种取值，两两组合 —— 十六格，减去结束早于开始那几格（约束不许）。
+    def offsets(self):
+        today = local_today()
+        return {
+            "yesterday": today - datetime.timedelta(days=1),
+            "today": today,
+            "tomorrow": today + datetime.timedelta(days=1),
+            "unset": None,
+        }
+
+    #: (名字, 问一批行, 问一行)。加一条新谓词就在这里加一行，而忘了补它的
+    #: 另一半时，这张表本身就是那条忘记的记录。
+    PAIRS = [
+        ("active", lambda qs: qs.active(), lambda row: row.is_currently_active),
+        ("in_force", lambda qs: qs.in_force(), lambda row: row.is_in_force),
+    ]
+
+    def setUp(self):
+        self.alice = Contact.objects.create(
+            contact_type=Contact.ContactType.INDIVIDUAL,
+            legal_first_name="Ann", legal_last_name="Alice")
+        self.post = Position.objects.create(code="greeter", name="Greeter")
+
+    def test_every_predicate_answers_the_same_for_one_row_and_for_a_set(self):
+        rows = DateRangeQuerySet(model=Assignment)
+        offsets = self.offsets()
+        for start_name, start in offsets.items():
+            for end_name, end in offsets.items():
+                if start and end and end < start:
+                    # `*_end_date_not_before_start_date` 不许这一格存在。
+                    continue
+                row = Assignment.objects.create(
+                    contact=self.alice, position=self.post,
+                    start_date=start, end_date=end)
+                try:
+                    for name, ask_the_set, ask_the_row in self.PAIRS:
+                        with self.subTest(predicate=name, start=start_name, end=end_name):
+                            self.assertEqual(
+                                ask_the_set(rows).filter(pk=row.pk).exists(),
+                                ask_the_row(row),
+                                f"{name}：问一批行和问这一行，答案不一样",
+                            )
+                finally:
+                    # 一格一行：`assignment_unique_tenure` 的键含 `start_date`，
+                    # 而这个矩阵会把同一个起始日期用上四遍。
+                    row.delete()
+
+
 class TimezoneTests(TestCase):
     """D16: "today" is the foundation's today — not the server's, not UTC."""
 

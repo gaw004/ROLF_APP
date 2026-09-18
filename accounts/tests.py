@@ -3,6 +3,7 @@ import json
 import re
 from unittest import mock
 
+from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.contrib.auth.hashers import check_password
 from django.core import mail
@@ -473,6 +474,53 @@ class RegistrationRateLimitTests(TestCase):
         self.attempt("a@example.com", ip="203.0.113.1")
         response = self.attempt("b@example.com", ip="203.0.113.2")
         self.assertRedirects(response, reverse("accounts:verify_email"))
+
+
+    # --- 默认值本身（不是限流行为，那是上面那些 override 的事）-----------------
+
+    @staticmethod
+    def per_hour(rate):
+        """把 django-ratelimit 的 "N/period" 换算成每小时多少次。"""
+        count, _, period = rate.partition("/")
+        return int(count) * {"s": 3600, "m": 60, "h": 1, "d": 1 / 24}[period[-1]]
+
+    def test_the_default_allowance_fits_the_evening_it_was_written_for(self):
+        """🔴 默认值必须装得下它**自己举的那个例子**。
+
+        base.py 上面那段注释给的理由是一个真实场景，不是谨慎：
+
+            四十个志愿者在教会大厅的 wifi 上注册是**一个 IP 地址**。过紧的
+            per-IP 限制会拒掉他们中的大部分，而那看起来和网站坏了一模一样。
+
+        而在 2026-09-18 之前那个值是 `20/h` —— **正好拒掉那四十人里的后二十个**。
+        推理是对的，数字没跟上推理。这条守卫钉的是那个场景。
+
+        ⚠️ 钉的是「≥ 40」而不是「== 60」：为一次招募活动调高它是设计好的动作
+           （见 render.yaml 里那段「故意不写进 blueprint」），把它调**低**到
+           装不下一场 onboarding 才是回归。
+
+        ⚠️ 真正的反滥用闸门是**邮箱验证**（注册不 login，地址没验证之前进不来），
+           限流是纵深防御的第二道。60/h 离脚本要的几千仍差两个数量级。
+        """
+        self.assertGreaterEqual(
+            self.per_hour(settings.REGISTRATION_RATELIMIT_PER_IP), 40,
+            "per-IP 的默认值装不下一场四十人的 onboarding —— 而那正是 base.py "
+            "里写着的、这个数字存在的理由；后面那些人看到的是 429，和网站坏了"
+            "长得一样")
+
+    def test_the_site_wide_allowance_does_not_become_the_new_bottleneck(self):
+        """🔴 两个数必须一起动，否则提高 per-IP 等于没提。
+
+        站点级的限额如果比单个 IP 的还低，那么**同一个共用出口**的那场
+        onboarding 会先撞在站点级上 —— 症状一字不差（429、看起来像坏了），
+        而你以为已经修好了。2026-09-18 之前是 per-IP 20/h 配站点 100/h，
+        只把 per-IP 提到 60 会让 100 成为新的那堵墙。
+        """
+        self.assertGreaterEqual(
+            self.per_hour(settings.REGISTRATION_RATELIMIT_SITE),
+            self.per_hour(settings.REGISTRATION_RATELIMIT_PER_IP),
+            "站点级的限额比单个 IP 的还低 —— 一个 IP 用满自己的额度就会把"
+            "全站的也用满，于是 per-IP 那个数字再大也没有意义")
 
 
 class ClientIpTests(TestCase):

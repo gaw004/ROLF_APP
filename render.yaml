@@ -188,6 +188,23 @@ services:
     #    ⚠️ 打点间隔是 MEMORY_PROBE_SECONDS，**故意不写进这个文件** —— 同
     #       REGISTRATION_RATELIMIT_* 那条：写进来的话，为查一件事在面板上调过的
     #       值会在下一次 blueprint 同步时被静默按回去。
+    # ⚠️ **--access-logformat 是为了让访问日志能回答「慢不慢」**（2026-09-18）。
+    #    gunicorn 的默认格式里**一个耗时字段都没有** —— `%(h)s %(l)s %(u)s
+    #    %(t)s "%(r)s" %(s)s %(b)s "%(f)s" "%(a)s"`，就这些。于是在这一行存在
+    #    之前，「离 workers×threads=4 这个天花板还有多远」这个问题**问不出答案**：
+    #    Sentry 那边 traces_sample_rate=0（故意的，额度留给错误），四个黄金信号
+    #    里 Latency 整条是瞎的。
+    #    ⚠️ **纯追加，一个字段都没删。** 本可以顺手砍掉 `%(l)s %(u)s`（这个站
+    #       永远是 `-`）和 referer/UA 来换行宽 —— 不砍，因为这个文件已经吃过
+    #       「为了当时好看而丢掉半夜要用的东西」的亏（见 gunicorn_logger.py 里
+    #       那段 "Silence, not aggregation"）。多几个字符换出事那天 UA 还在。
+    #    ⚠️ `%(M)s` 是毫秒。gunicorn 认四个：%(T)s 秒、%(M)s 毫秒、%(D)s 微秒、
+    #       %(L)s 小数秒。选毫秒因为它最好 awk、也最好肉眼扫。
+    #       守卫钉的是「**有**耗时」而不是这个拼法，换单位不会红。
+    #    ⚠️ **和 --logger-class 正交**：那个类只覆写 access() 决定**哪些行要打**
+    #       （健康检查那行不打），格式是另一个设置。两者互不影响。
+    #    ⚠️ 单引号必须留着 —— 这是个折叠标量（`>-`），行与行用空格拼起来，
+    #       格式串里有空格，没有引号会被 shell 拆成一堆参数。
     startCommand: >-
       gunicorn config.wsgi:application
       --bind 0.0.0.0:$PORT
@@ -196,6 +213,7 @@ services:
       --threads 4
       --timeout 60
       --access-logfile -
+      --access-logformat '%(h)s %(l)s %(u)s %(t)s "%(r)s" %(s)s %(b)s "%(f)s" "%(a)s" %(M)sms'
       --error-logfile -
       --logger-class config.gunicorn_logger.QuietHealthCheckLogger
       --config config/gunicorn_conf.py

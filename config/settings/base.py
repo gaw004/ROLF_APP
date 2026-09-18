@@ -172,6 +172,20 @@ NOTIFICATION_BACKEND = env(
 NOVU_API_KEY = env("NOVU_API_KEY", "")
 NOVU_WORKFLOW = env("NOVU_WORKFLOW", "event-change")
 
+# 整批发送的时间预算（秒）。prod.py 的 EMAIL_TIMEOUT 管**一条**消息能卡多久，
+# 这个数管**一批**。两个都要：只有前者的话，最坏情况从「永远」变成「N × 10 秒」，
+# 而 notify_event_change() 的 N 是一场活动报名的人数。
+#
+# ⚠️ **它有一面刀刃朝内，所以这个数不能小。** 健康的 provider 每条大约 200ms，
+#    一场一百人的活动因此要 ~20 秒。预算低于那个数，**一批完全正常的邮件会被
+#    从中间切断** —— 后面那些真实的人被记进 `failed`，而没有任何东西报错。
+#    钉这件事的是 core.tests.UnboundedWaitGuardTests，它钉的是那个场景不是数字。
+#
+# ⚠️ **故意不写进 render.yaml**，同下面 REGISTRATION_RATELIMIT_* 那条：凡是
+#    blueprint 里点了名的变量，每次同步都会把面板上的调整静默按回去 —— 而这个
+#    值正是「今晚要给三百人发通知，先调高」会去动的那种。
+EMAIL_BATCH_BUDGET_SECONDS = int(env("EMAIL_BATCH_BUDGET_SECONDS", "30") or "30")
+
 
 # --- Authentication ---------------------------------------------------------
 
@@ -209,14 +223,26 @@ GOOGLE_OAUTH_CLIENT_ID = env("GOOGLE_OAUTH_CLIENT_ID", "")
 #    rather than caution: forty volunteers signing up on a church hall's wifi at
 #    an onboarding evening are one IP address. A tight per-IP limit would refuse
 #    most of them and look exactly like a broken site. A script, meanwhile, wants
-#    thousands — so twenty an hour separates the two cases perfectly well, and
+#    thousands — so sixty an hour separates the two cases perfectly well, and
 #    anything tighter only breaks the good one.
+#
+# 🔴 **20/h → 60/h、100/h → 300/h（2026-09-18）。** 上面那段推理一直是对的，
+#    **数字没跟上它**：`20/h` 正好拒掉那四十人里的**后二十个** —— 这个默认值
+#    一直在制造它自己举例要避免的那个场景，而症状（429）和网站坏了长得一样。
+#    ⚠️ **两个数必须一起动。** 只把 per-IP 提到 60，站点级的 100/h 立刻变成新的
+#       那堵墙：同一个共用出口的那场 onboarding 会先撞在站点级上，症状一字不差，
+#       而你以为已经修好了。
+#    ⚠️ 真正的反滥用闸门是**邮箱验证** —— 注册不 login，地址没验证之前进不来
+#       （accounts/views.py）。限流是纵深防御的第二道，不是第一道；60/h 离一个
+#       脚本要的几千仍差两个数量级。
+#    ⚠️ 钉住这条推理的是 accounts.tests.RegistrationRateLimitTests 末尾那两条，
+#       它们钉的是「装得下四十人」和「站点级不低于 per-IP」，**不是字面量**。
 #
 # ⚠️ Both are environment variables so that a signup drive can raise them
 #    without a deploy, and core/ratelimit.py reads them per request rather than
 #    at import so the change takes effect on restart alone.
-REGISTRATION_RATELIMIT_PER_IP = env("REGISTRATION_RATELIMIT_PER_IP", "20/h")
-REGISTRATION_RATELIMIT_SITE = env("REGISTRATION_RATELIMIT_SITE", "100/h")
+REGISTRATION_RATELIMIT_PER_IP = env("REGISTRATION_RATELIMIT_PER_IP", "60/h")
+REGISTRATION_RATELIMIT_SITE = env("REGISTRATION_RATELIMIT_SITE", "300/h")
 
 # The password-reset request page, limited for a different reason: it is a form
 # that makes this application send mail to any address a stranger types, and the

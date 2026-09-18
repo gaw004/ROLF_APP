@@ -2235,6 +2235,138 @@ class NotificationBackendTests(TestCase):
         self.assertEqual([r.accepted for r in results], [False, False])
         self.assertIn("connection refused", results[0].detail)
 
+    # --- 整批的时间预算（2026-09-18）------------------------------------------
+    #
+    # ⚠️ 为什么需要它：EMAIL_TIMEOUT 管的是**一条**消息能卡多久，而这个循环是
+    #    串行的 N 条。只有前者的话，最坏情况从「永远」变成「N × 10 秒」，
+    #    而 notify_event_change() 的 N 是一场活动报名的人数。
+
+    @staticmethod
+    def fake_clock(*readings):
+        """一个按剧本走的 monotonic 时钟。最后一个读数会一直重复。
+
+        ⚠️ 注入而不是 mock 掉 time.monotonic()：整个测试进程里还有别的东西在
+           读时钟（logging、数据库驱动），全局打补丁会把它们一起改掉，而那种
+           测试失败起来根本指不到这里。同 `check_in(at=...)` 的理由。
+        """
+        readings = list(readings)
+        return lambda: readings.pop(0) if len(readings) > 1 else readings[0]
+
+    def test_a_batch_inside_its_budget_is_sent_whole(self):
+        """预算够的时候，它必须完全不插手。"""
+        from django.core import mail
+
+        from core.notifications.django_email import DjangoEmailBackend
+
+        messages = [self.message(to=f"v{n}@example.com") for n in range(3)]
+        with self.settings(EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend"):
+            results = DjangoEmailBackend(
+                budget_seconds=30,
+                clock=self.fake_clock(0.0, 0.1, 0.2, 0.3),
+            ).send(messages)
+        self.assertEqual([r.accepted for r in results], [True, True, True])
+        self.assertEqual(len(mail.outbox), 3)
+
+    def test_a_batch_that_runs_out_of_time_still_answers_for_every_message(self):
+        """🔴 超预算之后返回的列表**仍是满长度**，不是一个短列表。
+
+        notify_event_change() 确实会把缺的补成 False，但它那段注释把「短列表」
+        定义成 **backend 坏了**。故意走一条被文档定义成「坏了」的路，下一个
+        读代码的人会当成 bug 去查。所以未尝试的那些也各自带一个明确的 verdict，
+        契约「一条消息一个答案、顺序对应」一个字都不用改。
+
+        ⚠️ 而且 `detail` 必须说得出**为什么** —— 「没发出去」和「因为这一批
+           超时了所以没轮到你」是两件事，而管理员要拿着它决定下一步做什么。
+        """
+        from django.core import mail
+
+        from core.notifications.django_email import DjangoEmailBackend
+
+        messages = [self.message(to=f"v{n}@example.com") for n in range(4)]
+        with self.settings(EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend"):
+            # 第三条之前就已经用掉 40 秒，预算 30 秒。
+            results = DjangoEmailBackend(
+                budget_seconds=30,
+                clock=self.fake_clock(0.0, 1.0, 2.0, 40.0),
+            ).send(messages)
+
+        self.assertEqual(len(results), len(messages),
+                         "超预算把结果退化成了短列表 —— 那是 backend 坏掉的形状")
+        self.assertEqual([r.accepted for r in results], [True, True, False, False])
+        self.assertEqual(len(mail.outbox), 2, "超预算之后还在继续发")
+        for result in results[2:]:
+            self.assertTrue(result.detail,
+                            "未尝试的消息没有说明原因，管理员无从判断下一步")
+
+    def test_a_budget_of_zero_turns_the_limit_off_rather_than_blocking_everything(self):
+        """🔴 0 是**关闭**，不是「预算为零，一封都不发」。
+
+        这是两个失败里挑伤害小的那个。0 当成「全部拦下」的话，有人在面板上
+        手误填一个 0，表现是**全站邮件静默停发** —— 没有任何东西报错，人就是
+        没收到，而这正是这个项目反复定罪的那种失败。0 当成关闭，最坏只是退回
+        到没有整批上限（EMAIL_TIMEOUT 仍在，每条仍有上限）。
+
+        ⚠️ 和 MEMORY_PROBE_SECONDS 那条同一个口径：「0 是一个被支持的值，
+           不是一种把它弄坏的方式」。
+        ⚠️ 它不会变成发布出去的默认值 —— UnboundedWaitGuardTests 钉着 ≥ 20。
+        """
+        from django.core import mail
+
+        from core.notifications.django_email import DjangoEmailBackend
+
+        messages = [self.message(to=f"v{n}@example.com") for n in range(3)]
+        with self.settings(EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend"):
+            results = DjangoEmailBackend(
+                budget_seconds=0,
+                clock=self.fake_clock(0.0, 9999.0),
+            ).send(messages)
+        self.assertEqual([r.accepted for r in results], [True, True, True])
+        self.assertEqual(len(mail.outbox), 3)
+
+    def test_a_failed_connection_is_named_even_when_the_budget_is_also_gone(self):
+        """🔴 两个原因同时成立时，报**根因**那一个。
+
+        连不上 provider 且这一批也超了预算 —— 说「这一批超时了」是真的，但它是
+        **后果**。管理员拿着「超时了」会去重发一次，而重发同样连不上；拿着
+        「connection refused」才会去看 provider 那边。
+
+        ⚠️ 这也是为什么预算的计时**从 `send()` 进来就开始**，而不是从连上之后：
+           `EMAIL_BATCH_BUDGET_SECONDS` 说的是整批的上限，把建连那一段排除在外
+           的话，最坏总时长其实是 `EMAIL_TIMEOUT + 预算`，而不是它字面写的那个数。
+        """
+        from unittest import mock
+
+        from core.notifications.django_email import OUT_OF_TIME, DjangoEmailBackend
+
+        messages = [self.message(), self.message(to="other@example.com")]
+        with self.settings(EMAIL_BACKEND="core.tests.QuotaEmailBackend"):
+            with mock.patch.object(QuotaEmailBackend, "open",
+                                   side_effect=OSError("connection refused")):
+                results = DjangoEmailBackend(
+                    budget_seconds=30,
+                    clock=self.fake_clock(0.0, 999.0),
+                ).send(messages)
+
+        self.assertEqual([r.accepted for r in results], [False, False])
+        for result in results:
+            self.assertIn("connection refused", result.detail)
+            self.assertNotEqual(
+                result.detail, OUT_OF_TIME,
+                "把「连不上」报成了「这一批超时了」—— 后果盖住了根因，"
+                "而管理员会照着它去重发")
+
+    def test_the_budget_comes_from_settings_when_the_caller_names_none(self):
+        """⚠️ 钉的是**有人真的读了那个设置**。
+
+        没有这一条，`EMAIL_BATCH_BUDGET_SECONDS` 可以是一个谁都不读的常量，
+        而 UnboundedWaitGuardTests 里那条「预算 ≥ 20 秒」会照样绿 —— 一条
+        永远绿的守卫，正是这个项目已经差点写出来两次的那个形状。
+        """
+        from core.notifications.django_email import DjangoEmailBackend
+
+        with self.settings(EMAIL_BATCH_BUDGET_SECONDS=1234):
+            self.assertEqual(DjangoEmailBackend().budget_seconds, 1234)
+
     def test_the_novu_backend_posts_to_the_api(self):
         # Mocked on purpose: there is no domain and no sender identity on a
         # laptop, so a live integration could be neither sent nor verified.
@@ -9236,6 +9368,173 @@ class HealthCheckGuardTests(TestCase):
             logged, ["/", "/events/"],
             "the access log either still carries the health check, or has "
             "stopped carrying the requests somebody will need to read")
+
+
+class UnboundedWaitGuardTests(TestCase):
+    """Lint-as-test：这个系统里不许有**没有上限**的等待。
+
+    ⚠️ 这个类存在，是因为有一个形状代码反复描述、而它**从来不存在**。
+       `config/settings/prod.py` 讲端口和加密方式不自洽时写着「the connection
+       **hangs** until it times out」，`check_deployment.py` 用中文写了同一句
+       「不自洽时不报错，是**卡住**」。**可是没有那个 timeout。**
+       `EMAIL_TIMEOUT` 一直没设，Django 退到 `socket.getdefaulttimeout()`，
+       而那个默认也是 `None` —— 于是「until it times out」讲的是一个不存在的上限。
+
+    🔴 **而且上面那一层也接不住它。** `--worker-class gthread` 让
+       `--timeout 60` 变成**心跳超时而不是请求超时**：一个线程卡住时 worker
+       主循环照转、`notify()` 照打，arbiter 永远不会杀它。一次挂死的 SMTP 对话
+       **永久**占掉四个线程里的一个，没有任何自愈，直到进程重启为止。
+       ⚠️ 而且这条 SMTP 路径同时驮着注册验证信和密码重置信
+       （`accounts/services.py` 的裸 `send_mail`）—— 那是**匿名用户的门**。
+
+    这里钉三件事，正好是那个上限会重新丢失的三条路：每条消息的超时、
+    整批的时间预算，以及**能不能看见一个请求变慢**。
+    """
+
+    @property
+    def blueprint(self):
+        return (Path(settings.BASE_DIR) / "render.yaml").read_text(encoding="utf-8")
+
+    @property
+    def prod_settings(self):
+        return (Path(settings.BASE_DIR) / "config" / "settings" / "prod.py"
+                ).read_text(encoding="utf-8")
+
+    def test_production_bounds_how_long_one_message_may_hang(self):
+        """🔴 `EMAIL_TIMEOUT` 必须在 prod.py 里，而且是个正数。
+
+        ⚠️ 读源码而不是读 `settings.EMAIL_TIMEOUT`：prod.py 里有四个
+           `required=True` 的变量，在测试进程里 import 它会直接抛异常 ——
+           `HealthCheckGuardTests` 读 `SECURE_REDIRECT_EXEMPT` 时就是这么做的，
+           同一个理由，同一个办法。
+
+        ⚠️ 钉「有一个正的秒数」，不钉字面量 10。改成 15 不该让这条红；
+           删掉它、或者写成 0（Django 认 0 为「用全局默认」，也就是回到永不超时）
+           才该红。
+        """
+        line = re.search(r"^EMAIL_TIMEOUT\s*=\s*(.+)$", self.prod_settings, re.M)
+        self.assertIsNotNone(
+            line,
+            "prod.py 没有设 EMAIL_TIMEOUT —— Django 会退到 "
+            "socket.getdefaulttimeout()，而那是 None。一次挂住的 SMTP 会永久"
+            "占掉四个线程里的一个，且 gthread 的 --timeout 不会回收它")
+        seconds = [int(n) for n in re.findall(r"\d+", line.group(1))]
+        self.assertTrue(
+            seconds and all(n > 0 for n in seconds),
+            f"EMAIL_TIMEOUT 读起来是 {line.group(1)!r} —— 0 或空在 Django 里"
+            "等于「用全局默认」，也就是等回永不超时")
+
+    def test_the_access_log_records_how_long_each_request_took(self):
+        """🔴 没有这一行，四个黄金信号里的 Latency 整条是瞎的。
+
+        gunicorn 默认的 access 格式里**一个耗时字段都没有**（`%(h)s %(l)s
+        %(u)s %(t)s "%(r)s" %(s)s %(b)s "%(f)s" "%(a)s"`），而 render.yaml
+        原先只给了 `--access-logfile -`。也就是说「离 4 并发的天花板还有多远」
+        这个问题，在这一行存在之前**问不出答案**。
+
+        ⚠️ 钉的是「**有**耗时」而不是某一个拼法。gunicorn 认四个：
+           `%(T)s` 秒、`%(M)s` 毫秒、`%(D)s` 微秒、`%(L)s` 小数秒。
+           哪天有人换一个单位，这条不该红 —— 只有把耗时整个丢掉才该红。
+        """
+        start = re.search(r"^\s*startCommand:(.+?)(?=^\s{4}\w)",
+                          self.blueprint, re.M | re.S)
+        self.assertIsNotNone(start, "render.yaml 里找不到 startCommand")
+        command = start.group(1)
+        self.assertIn(
+            "--access-logformat", command,
+            "启动命令没有 --access-logformat，于是用的是 gunicorn 的默认格式 —— "
+            "那里面没有任何耗时字段，访问日志记不下任何一个请求花了多久")
+        self.assertTrue(
+            any(atom in command for atom in ("%(T)s", "%(M)s", "%(D)s", "%(L)s")),
+            "--access-logformat 在，但格式串里没有 gunicorn 的四个耗时字段"
+            "（%(T)s 秒 / %(M)s 毫秒 / %(D)s 微秒 / %(L)s 小数秒）之一，"
+            "等于加了这个 flag 又没拿到它唯一的用处")
+
+    def test_the_configured_format_actually_prints_a_duration(self):
+        """⭐ 上一条钉「flag 在」，这一条钉「它真的输出耗时」—— 两件事。
+
+        一个语法上正确、但把耗时字段拼错的格式串（`%(m)s`、`%{M}s`）会让
+        gunicorn 原样打印那几个字符，**不报错**。于是日志里每行结尾是一串
+        没有意义的文本，而你要等到出事那天翻日志才发现。
+
+        ⚠️ **和静音一起验**，因为它们是同一个 logger 的两半：格式换了之后
+           健康检查那行必须**仍然**不出现。分开验的话，一个「每行都有耗时、
+           但日志又被健康检查淹掉」的组合会两条都绿。
+
+        ⚠️ 用正则从 render.yaml 取格式串，**不引 PyYAML**：那个包在这台机器上
+           只是 pre-commit 的传递依赖，让一条测试挂在一个开发工具的依赖图上，
+           是那种会在某天因为完全无关的原因变红的耦合。
+        """
+        import datetime
+        import logging
+
+        from gunicorn.config import Config
+
+        from config.gunicorn_logger import QuietHealthCheckLogger
+        from core.health import HEALTH_PATH
+
+        quoted = re.search(r"--access-logformat\s+'([^']*)'", self.blueprint)
+        self.assertIsNotNone(
+            quoted,
+            "取不到 --access-logformat 的值 —— 要么它不在，要么它没有被单引号"
+            "包起来，而格式串里有空格，没有引号会被 shell 拆成一堆参数")
+
+        cfg = Config()
+        cfg.set("access_log_format", quoted.group(1))
+        cfg.set("accesslog", "-")
+        logger = QuietHealthCheckLogger(cfg)
+        logged = []
+        logger.access_log.handlers = []
+        logger.access_log.addHandler(type("Collect", (logging.Handler,), {
+            "emit": lambda self, record: logged.append(record.getMessage())})())
+        logger.access_log.setLevel(logging.INFO)
+
+        class Resp:
+            status = "200 OK"
+            status_code = 200
+            sent = 1234
+            headers = [("Content-Type", "text/html")]
+
+        class Req:
+            headers = [("Referer", "-"), ("User-Agent", "-")]
+
+        for path in ("/events/", "/" + HEALTH_PATH.strip("/")):
+            logger.access(Resp(), Req(), {
+                "REQUEST_METHOD": "GET", "PATH_INFO": path, "RAW_URI": path,
+                "SERVER_PROTOCOL": "HTTP/1.1", "REMOTE_ADDR": "10.0.0.7",
+            }, datetime.timedelta(milliseconds=137))
+
+        self.assertEqual(
+            len(logged), 1,
+            f"健康检查那一行又回到日志里了（共 {len(logged)} 行）—— 格式改动"
+            "不该碰到静音，两者本来正交")
+        self.assertRegex(
+            logged[0], r"\b137(\.0+)?(ms)?\s*$",
+            f"这一行是 {logged[0]!r} —— 137 毫秒没有出现在行尾，说明格式串里那个"
+            "耗时字段拼错了，而 gunicorn 对拼错的字段是原样打印、不报错")
+
+
+    def test_the_batch_budget_is_large_enough_for_a_real_event(self):
+        """⚠️ 预算太小的失败**是静默的**，所以它值一条守卫。
+
+        整批的时间预算存在，是为了给 `EMAIL_TIMEOUT` 之后仍然成立的最坏情况
+        （N × 每条超时）封顶。但它有一面刀刃朝内：一个健康的 provider 每条大约
+        200ms，一场一百人的活动因此要 ~20 秒。预算低于这个数，**一批完全正常的
+        邮件会被从中间切断** —— 后面那些真实的人被记进 `failed`，而没有任何东西
+        报错，页面只是说「N 条没发出去」。
+
+        🔴 钉的是那个场景（一百人 × 200ms），不是数字 30 本身。
+        """
+        missing = object()
+        budget = getattr(settings, "EMAIL_BATCH_BUDGET_SECONDS", missing)
+        self.assertIsNot(
+            budget, missing,
+            "没有 EMAIL_BATCH_BUDGET_SECONDS —— 群发那个 N 条消息的串行循环"
+            "没有任何总上限，EMAIL_TIMEOUT 只把最坏情况变成 N × 每条超时")
+        self.assertGreaterEqual(
+            budget, 20,
+            f"预算是 {budget} 秒，装不下一场一百人的活动（健康时每条约 200ms，"
+            "共约 20 秒）—— 这会把一批正常邮件从中间切断，而被切掉的是真实的人")
 
 
 class PaginationHelperTests(TestCase):

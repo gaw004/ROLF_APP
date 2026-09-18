@@ -10944,6 +10944,39 @@ class NotificationTests(TestCase):
         self.assertEqual(
             [row.contact for row in notification.failed.all()], people[1:])
 
+    def test_people_the_batch_never_got_to_are_recorded_as_not_told(self):
+        """🔴 超出时间预算的那些人必须进 `failed`，**不能**进 `recipients`。
+
+        这是上面那条拒信测试的另一半：那边是 provider 说「不」，这边是**根本
+        没轮到**。两者对这份记录的意义完全一样 —— 这个人没收到 —— 而记错的方向
+        只有一个是不可恢复的：把没通知到的人写成「已通知」，从此没有人会去找他。
+
+        ⚠️ 预算本身存在的理由在 `core/notifications/django_email.py`：群发是一个
+           串行的 N 条循环，跑在请求路径上，而整台机器只有 4 个线程；
+           `EMAIL_TIMEOUT` 只管一条，不管一批。
+        """
+        from core.notifications.django_email import DjangoEmailBackend
+
+        people = self.three_adults()
+        # 第一条发得出去，之后预算就用光了。最后一个读数会一直重复。
+        readings = [0.0, 1.0, 50.0]
+        clock = lambda: readings.pop(0) if len(readings) > 1 else readings[0]  # noqa: E731
+
+        with self.settings(EMAIL_BACKEND="django.core.mail.backends.locmem.EmailBackend"):
+            notification = notify_event_change(
+                self.event,
+                reason=EventNotification.Reason.TIME_CHANGED,
+                message="Moved to Sunday.",
+                sent_by=self.sender,
+                backend=DjangoEmailBackend(budget_seconds=30, clock=clock),
+            )
+
+        self.assertEqual(
+            [row.contact for row in notification.recipients.all()], people[:1],
+            "被预算切掉的人被记成了「已通知」—— 而没有人会再去找他们")
+        self.assertEqual(
+            [row.contact for row in notification.failed.all()], people[1:])
+
     def test_the_record_survives_the_quota_running_out_partway(self):
         # The regression itself. What must exist afterwards is the record —
         # the messages that already went out cannot be un-sent, so a rollback

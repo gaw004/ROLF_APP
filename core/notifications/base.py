@@ -56,6 +56,16 @@ class NotificationBackend(Protocol):
     able to say what happened to the other 99. The caller writes those verdicts
     down, so a backend that raises instead costs a record that cannot be
     rebuilt — the messages that already went out cannot be un-sent.
+
+    🔴 **一个做网络 I/O 的 backend 必须给整批封顶**（2026-09-18），因为
+       `send()` 跑在请求路径上，而那台机器一共只有 4 个线程
+       （gunicorn workers 1 × threads 4）。单条超时不够：一批 N 条的最坏情况
+       是 N 倍的单条上限，而 N 是一场活动报名的人数。
+       ⚠️ 上面那一层接不住它 —— `--worker-class gthread` 的 `--timeout` 是
+          **心跳**超时，卡住的线程不会被 arbiter 回收。
+       ⚠️ 封顶之后**仍然一条消息一个 verdict**：上面那句「顺序对应、长度相等」
+          不因为封顶而放宽。没轮到的那些是一个说得出理由的拒绝，不是缺席。
+       今天只有 django_email 需要它（见那个文件）；console 和 locmem 不碰网络。
     """
 
     def send(self, messages: Sequence[Message]) -> list[DeliveryResult]: ...

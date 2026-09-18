@@ -118,6 +118,32 @@ EMAIL_HOST_PASSWORD = env("EMAIL_HOST_PASSWORD", required=True)
 #    until it times out, which arrives as "the site is slow", not as a setting.
 EMAIL_USE_SSL = EMAIL_PORT == 465
 EMAIL_USE_TLS = not EMAIL_USE_SSL
+# 🔴 **没有这一行就是「永不超时」** —— 而那不是一个保守的默认，是这个部署里
+#    唯一一个**没有上限**的失效。Django 的 EMAIL_TIMEOUT 默认为 None，退到
+#    `socket.getdefaulttimeout()`，而那个默认**也是** None。也就是说上面那句
+#    「the connection **hangs** until it times out」，以及 check_deployment.py
+#    里那句「不自洽时不报错，是卡住」，讲的一直是一个**不存在**的上限。
+#
+# ⚠️ **上面那一层接不住它。** `--worker-class gthread` 让 `--timeout 60` 成为
+#    **心跳**超时而不是请求超时：一个线程卡在 SMTP 上时，worker 主循环照转、
+#    `notify()` 照打，arbiter 永远不会杀它。一次挂死的对话**永久**占掉四个
+#    线程里的一个（workers 1 × threads 4），没有任何自愈，直到进程重启。
+#    ⚠️ 而且血溅范围不止管理员那个群发按钮：`accounts/services.py` 的注册
+#       验证信和密码重置信走同一条 SMTP 路径，**那是匿名用户的门**。
+#
+# ⚠️ **10 秒，不是社区常见的 120。** 那个数是给「在后台任务里发信」的场景；
+#    这里发信在**请求路径上**，而整台机器一共只有 4 个线程。健康的 provider
+#    正常在 1 秒以内，10 秒对它绰绰有余；对卡住的那个，它把「永远」变成「10 秒」。
+#
+# ⚠️ `or "10"`：和上面 EMAIL_PORT 同一个坑。这个变量**不在 render.yaml 里**
+#    （故意的，见那边 REGISTRATION_RATELIMIT_* 那段），但凡有人在面板上加了这个
+#    键又把值留空，平台传过来的是空字符串，而 `int("")` 在 import 期抛异常 ——
+#    那不是「超时没配好」，是**整个服务起不来**，包括 build.sh 里的 collectstatic。
+#
+# ⚠️ 它给的是**每条消息**的上限。整批的上限是另一件事，在 base.py 的
+#    EMAIL_BATCH_BUDGET_SECONDS —— 没有那一个，最坏情况只是从「永远」变成
+#    「N × 10 秒」。两个都要。
+EMAIL_TIMEOUT = int(env("EMAIL_TIMEOUT", "10") or "10")
 # ⚠️ Must be an address at the domain that was authenticated with the provider
 #    (the DKIM/SPF records from C3.0). A From: the provider has not been told
 #    about is the case where nothing errors, nothing bounces, and the message

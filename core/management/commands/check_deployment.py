@@ -132,6 +132,29 @@ class Command(BaseCommand):
             else "an unusual port; if the provider's page says otherwise, "
                  "believe the provider")
 
+        # 🔴 **没有上限的等待是这个部署里唯一一个无界的失效。** Django 的
+        #    EMAIL_TIMEOUT 默认是 None，退到 socket.getdefaulttimeout()，
+        #    而那个默认也是 None —— 于是上面那句「不自洽时……是卡住」讲的一直是
+        #    一个**不存在**的上限。
+        #    ⚠️ 而且上面那一层接不住：--worker-class gthread 让 --timeout 成为
+        #       心跳超时而不是请求超时，卡住的线程不会被 arbiter 回收。整台机器
+        #       一共 4 个线程，而注册验证信和密码重置信走同一条路。
+        timeout = getattr(settings, "EMAIL_TIMEOUT", None)
+        self.line(
+            OK if timeout else BAD,
+            "EMAIL_TIMEOUT", f"{timeout} seconds" if timeout else "(unset)",
+            "" if timeout
+            else "没有上限：一次挂住的 SMTP 对话会**永久**占掉四个 worker 线程"
+                 "里的一个，而 gunicorn 的 --timeout 是心跳超时，不会回收它")
+        # 整批的上限是另一件事：单条有上限之后，最坏情况仍是 N × 单条。
+        budget = getattr(settings, "EMAIL_BATCH_BUDGET_SECONDS", None)
+        self.line(
+            OK if budget else WARN,
+            "EMAIL_BATCH_BUDGET_SECONDS",
+            f"{budget} seconds" if budget else "(unset or off)",
+            "" if budget
+            else "群发那个串行循环没有整批上限，最坏情况是收件人数 × EMAIL_TIMEOUT")
+
         for name, value in (("EMAIL_HOST_USER", user),
                             ("EMAIL_HOST_PASSWORD", password)):
             self.line(BAD if not value else OK, name, self.shape(value),

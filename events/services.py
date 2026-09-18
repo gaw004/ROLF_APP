@@ -17,7 +17,7 @@ from django.core.exceptions import ValidationError
 from django.core.files.base import ContentFile
 from django.db import transaction
 from django.db import models
-from django.db.models import Count, F, Q, Sum
+from django.db.models import Count, F, Max, Q, Sum
 from django.db.models.functions import TruncMonth
 from django.urls import reverse
 from django.utils import formats, timezone
@@ -29,7 +29,8 @@ from contact.models import Contact, ContactQuerySet
 from core.images import (decode_complaint, draft_to, over_decode_budget,
                          stored_size, upright_size)
 from core.notifications.base import EMAIL, SMS, Message, get_backend
-from core.timeutils import local_date_of, local_day, local_now, local_today
+from core.timeutils import (day_start, local_date_of, local_day, local_now,
+                            local_today)
 from org.audience import Audience, on_the_books_exists, on_the_books_q
 from org.models import Assignment
 
@@ -4426,6 +4427,78 @@ def is_running_low(series, *, booked_to=None, standing=None, now=None):
     return bool(booked_to
                 and booked_to <= local_date_of(now) + RUNNING_LOW
                 and has_more_to_build(series, now=now, standing=standing))
+
+
+def series_running_low(queryset, *, now=None):
+    """`queryset` 里哪几条快排完了 —— **两次查询，不是每条两次**。
+
+    ⭐ 仪表盘通栏那一块的来源（2026-09-17）。在这之前「快排完了」只说在系列
+       自己那一页上，而那要 admin **主动打开那一条系列**才看得见：没人打开，
+       系列就静默过期，然后过期的代价由 `gone_and_to_come()` 那段注释接着讲。
+
+    🔴 **不能逐条调 `is_running_low()`**，而这不是风格问题：那样是每条系列两次
+       查询（一次问排到哪天、一次问场次时刻），一个管着三个牧区的 admin 打开
+       首页就能把仪表盘的查询预算吃光。那个预算是一条**回归**测试
+       （`dashboard.tests.TheQueryBudgetTests`），它的注释写着数字爬升的那一次
+       该问的是「这一块值不值这次查询」，不是把上限往上调。
+
+    所以两次：
+
+      1. 一次带聚合的筛选，把「最后一场还很远」的直接挡在 SQL 里 —— 绝大多数
+         系列在这一步就没了；
+      2. 一次把**剩下那几条**的场次时刻取回来，在内存里分组。
+
+    然后逐条问 `is_running_low()`，而那一问**一次查询都不花** —— 两样它要的
+    东西（`booked_to`、`standing`）都在这里备好递进去了。判据仍然只有那一份。
+
+    ⚠️ 右开的边界：`booked_to` 是当地日期，而列里存的是瞬间。
+       「最后一场在 `今天 + RUNNING_LOW` 那天或更早」写成瞬间，就是「早于
+       那天的**后一天**的零点」。用 `day_start()` 取零点，不用 `TruncDate`
+       —— 后者只许出现在 `core/timeutils.py`（`LocalDayInSqlGuardTests`），
+       而且在存着的瞬间上按 UTC 截天，六个小时里会截错。
+
+    ⚠️ 一场都没排过的系列 `Max` 是 NULL，被 `__lt` 自然排除 —— 「还没开始」
+       不是「快没了」，和 `is_running_low()` 那句 docstring 是同一条规矩。
+
+    ⚠️ 收 queryset 不收 id：**权限由调用方判，这里只筛**（D27，和
+       `org.services.positions_awaiting_review()` 同一个形状）。
+
+    ⚠️ 按「还剩多久」排序，最急的在前 —— 调用方要按名额切，而切掉的应该是
+       还宽裕的那几条。
+    """
+    now = now or local_now()
+    today = local_date_of(now)
+    cutoff = day_start(today + RUNNING_LOW + datetime.timedelta(days=1))
+    candidates = list(
+        queryset.annotate(booked_to=Max("occasions__start_time"))
+        .filter(booked_to__lt=cutoff)
+        # 🔴 **停掉的那些先挡在 SQL 里**（2026-09-17 代码评审）。这个筛选**没有
+        #    下界**，而它不能有 —— 一条断了两个月的系列，`booked_to` 正是在过去，
+        #    那恰恰是要找的。代价是每一条**早就办完的**系列也一并落进候选，
+        #    然后走一遍 rrule 展开才被否掉。「即日停止」过的那些是其中问得起
+        #    的一半：`_occasion_moments()` 本来就按 `ended_on` 截断，所以它们
+        #    必然答 False，在这里挡掉不改变任何结果。
+        # ⚠️ 剩下那一半（`COUNT` 跑完、没有 `ended_on` 的）SQL 问不出来，
+        #    仍然要展开一次才知道。如实写在这里，不假装筛干净了。
+        .exclude(ended_on__isnull=False, ended_on__lte=today)
+        .select_related("ministry")
+        .order_by("booked_to"))
+    if not candidates:
+        return []
+    standing = {}
+    # 🔴 **只取还没开始的那些场次**（同一轮评审）。`has_more_to_build()` 拿
+    #    `standing` 只做一件事：问 `to_come` 里的时刻在不在里面 —— 而 `to_come`
+    #    整个在 `now` 之后。过去的那些场次一行都不会被问到，取回来纯属白搬。
+    #    一条办了两年的老系列因此贡献 0 行，而不是一百多行。
+    for series_id, moment in Event.objects.filter(
+            series__in=candidates, start_time__gt=now).values_list(
+            "series_id", "start_time"):
+        standing.setdefault(series_id, set()).add(moment)
+    return [series for series in candidates
+            if is_running_low(series,
+                              booked_to=local_date_of(series.booked_to),
+                              standing=standing.get(series.pk, set()),
+                              now=now)]
 
 
 @transaction.atomic

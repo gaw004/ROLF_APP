@@ -51,6 +51,27 @@
         </a>
       {% endfor %}
 
+      {% comment %}
+      ⭐ 快排完了的重复规则（2026-09-17）。排在「还缺人」之前：缺人的岗位别的
+         admin 也补得了，而一条重复规则**只有这个牧区的 admin 按得动**，
+         而且它有一个真正的截止日期 —— 过了那天，断掉的那几周不会被补造出来
+         （生成有下界），那几场活动就是真的没办成。
+
+      ⚠️ 链到系列页，因为「Generate the occasions」那颗按钮在那一页上。
+         这一块的规矩是出口通向**已经存在**的页面，而这一条正是。
+
+      ⚠️ 第三行说的是「只排到哪天」，不是规则本身 —— 这一块问的是
+         「什么在等你」，而那个日期就是等他的理由。措辞和系列页上那一行
+         （`Booked through …`）同一个意思、同一个日期格式。
+      {% endcomment %}
+      {% for series in needs_you.running_low %}
+        <a class="band-tile" href="{% url 'events:series_detail' series.pk %}">
+          <span class="band-when">{{ series.ministry.name }}</span>
+          <span class="band-what">{{ series.name }}</span>
+          <span class="band-note">Booked only to {{ series.booked_to|date:"j M Y" }}</span>
+        </a>
+      {% endfor %}
+
       {% for role in needs_you.short %}
         <a class="band-tile" href="{% url 'events:event_registrations' role.event.pk %}">
           <span class="band-when">{{ role.event.start_time|date:"D j M" }} · {{ role.event.start_time|date:"H:i" }}</span>

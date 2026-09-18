@@ -22594,23 +22594,23 @@ class EventGrantTests(PageTestCase):
     # --- review 2026-09-16 抓到的三条 -------------------------------------
 
     def test_the_page_says_no_the_moment_it_is_revoked(self):
-        """🔴 **撤销当天，那一行写着「In effect: Yes」而他一点权限都没有。**
+        """🔴 **撤销当天，那一行曾经写着「In effect: Yes」而他一点权限都没有。**
 
         根因：D47（9-15）把权限路径改成右开的 `in_force()`，却没给它行级的
         双胞胎 —— 显示侧还是右闭的 `is_currently_active`。而这一页正上方的
         横幅写着「Revoking takes effect at once」。
 
-        ⚠️ 这一条同时钉住**两条谓词各管各的一半**：`is_currently_active`
-           仍然为真，而那不是 bug —— 它服务的是事实（任职、工时、报表），
-           那里「有效期到今天」是诚实的。
+        ⚠️ 初版这一条钉的是**两条谓词各管各的一半**（权限说没有、显示说有，
+           而两边都"对"）。D51 把语义轴消掉之后**没有第二条谓词可选了** ——
+           权限和显示读同一个 `is_currently_active`，这一格不可能再说两句话。
+           这才是真正的修法：当时那一版只是让两个答案碰巧一致。
         """
         grant = self.grant_to(self.helper)
         revoke_event_grant(grant)
         grant.refresh_from_db()
 
         self.assertFalse(can_manage_event(self.helper, self.event))
-        self.assertFalse(grant.is_in_force, "权限说没有，而这一格说有")
-        self.assertTrue(grant.is_currently_active, "事实那一条不该跟着改")
+        self.assertFalse(grant.is_currently_active, "权限说没有，而这一格说有")
 
         self.as_(self.zhang)
         page = self.client.get(
@@ -22906,11 +22906,13 @@ class EventGrantTests(PageTestCase):
                 reverse("events:event_notify", args=[self.event.pk])).status_code, 200)
 
     def test_the_form_has_no_end_date(self):
-        """🔴 **没有截止日期那一格，而这是上面两条规矩成立的条件。**
+        """🔴 **没有截止日期那一格**，于是这张表上的 `end_date` 只有一个来源：撤销。
 
-        授权表上的 `end_date` 因此**只有一个来源**：撤销。
-        于是「`end_date` = 今天」只可能是「今天被撤销了」，没有第二种读法 ——
-        而那正是 `core.querysets.in_force()` 敢把它读成右开的全部依据。
+        ⚠️ 2026-09-17 之前，这一条被当成「授权表敢读右开」的**依据**。D51 之后
+           那条论证不再承重：右开是全项目的读法（`core.querysets.in_effect_on`），
+           不是这张表靠「只有一个来源」挣来的特例。
+           这一条现在钉的是它本来就该钉的东西 —— 一条单场授权的自然寿命是这场
+           活动本身，不需要人去填一个截止日期。
         """
         self.as_(self.zhang)
         form = self.client.get(

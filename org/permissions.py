@@ -56,25 +56,22 @@ def ministry_ids_administered_by(user, on=None) -> set[int]:
     Ministry.objects.filter(id__in=...) themselves.
 
     ⚠️ Three filters, none of them optional:
-       in_force(on)        — an expired **or just-revoked** grant must stop
+       active(on)          — an expired **or just-revoked** grant must stop
                              conferring anything;
        ministry__is_active — authority over a retired ministry is not authority;
        a Contact           — see the module docstring.
 
-    🔴 **`in_force()` 而不是 `active()`（2026-09-15，用户拍板）。**
-       `active()` 的 `end_date` 是右闭的 —— 撤销把它填成今天，于是被撤销的人
-       **今天剩下的时间里照旧管着这个 ministry**，明天才失效。按钮说「撤销」，
-       发生的是「明天起撤销」，而页面上没有任何地方说这件事。
-       ⚠️ 这是一个**既有的**行为，不是这一轮引入的 —— 它没有任何测试钉着，
-          是 D47 落地时撞上的。整段理由在 `core.querysets._ended_on_or_before()`。
-       ⚠️ 报表和记录那一侧**照旧走 `active()`**：那一行诚实地写着「有效期到
-          今天」，因为那是事实。变的只是权限判断。
+    ⭐ **撤销当场生效**，而这一条现在由 `active()` 自己保证（D51）：`end_date`
+       右开，撤销把它填成今天，于是今天起就不在效期内了。
+       ⚠️ 2026-09-15 到 09-17 之间这里调的是 `in_force()` —— 那时 `active()`
+          还是右闭的，被撤销的人今天剩下的时间里照旧管着这个 ministry。
+          D51 把两条谓词合并之后，这里调回 `active()`，判断结果一个字不变。
     """
     contact = _contact_of(user)
     if contact is None:
         return set()
     return set(
-        MinistryRole.objects.in_force(on=on)
+        MinistryRole.objects.active(on=on)
         .filter(
             contact=contact,
             role=MinistryRole.Role.ADMIN,
@@ -197,7 +194,7 @@ def event_ids_granted_to(user, on=None) -> set[int]:
 
     ⚠️ 三个 filter，一个都不能少 —— 逐条对着
        `ministry_ids_administered_by()` 那三条写的，因为它们防的是同一批事：
-         active(on)          一条过期的授权必须不再授予任何东西；
+         active(on)          一条过期的、或者刚被撤销的授权必须不再授予任何东西；
          event__ministry__is_active   一个已停用的 ministry 的活动，权限不再成立；
          一个 Contact        账号没有 Contact 是正常状态，见本模块开头。
 
@@ -215,9 +212,8 @@ def event_ids_granted_to(user, on=None) -> set[int]:
     from events.models import Event, EventGrant
 
     return set(
-        # ⚠️ `in_force()`，不是 `active()`：撤销当场生效，而不是明天
-        #    （`core.querysets._ended_on_or_before()`）。
-        EventGrant.objects.in_force(on=on)
+        # ⚠️ 撤销当场生效 —— `active()` 的 `end_date` 是右开的（D51）。
+        EventGrant.objects.active(on=on)
         .filter(contact=contact, event__ministry__is_active=True)
         # ⭐ **管到这场活动收尾为止**（2026-09-15，用户拍板）。授权的表单上没有
         #    截止日期那一格，因为一条单场授权的自然寿命就是这场活动本身 ——

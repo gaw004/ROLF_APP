@@ -326,16 +326,17 @@ class Command(BaseCommand):
             birth_date=datetime.date(1979, 9, 9))
         # Two ministries, two admins. One of each cannot demonstrate scoping:
         # "she can see her own" passes just as well with no scoping at all.
-        MinistryRole.objects.get_or_create(
-            contact=self.pantry_admin.contact, ministry=self.pantry,
-            role=MinistryRole.Role.ADMIN, start_date=None,
-            defaults={"granted_by": self.boss},
-        )
-        MinistryRole.objects.get_or_create(
-            contact=self.tax_admin.contact, ministry=self.tax,
-            role=MinistryRole.Role.ADMIN, start_date=None,
-            defaults={"granted_by": self.boss},
-        )
+        # ⚠️ `start_date` 在 `defaults` 里，**不在查找键里**（D51 起它不可为空）。
+        #    放进查找键的话，第二天重跑 seed_demo 会因为日期变了而多造一行 ——
+        #    而「重跑不该多造东西」是这个命令自己的验收条件之一。
+        for admin, ministry in ((self.pantry_admin, self.pantry),
+                                (self.tax_admin, self.tax)):
+            MinistryRole.objects.get_or_create(
+                contact=admin.contact, ministry=ministry,
+                role=MinistryRole.Role.ADMIN,
+                defaults={"granted_by": self.boss,
+                          "start_date": local_today() - datetime.timedelta(days=400)},
+            )
 
         self.adult = self.account(
             demo_login("participant_adult"), "Li", "Si",

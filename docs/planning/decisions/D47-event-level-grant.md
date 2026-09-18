@@ -89,7 +89,7 @@ to answer the phone」——**一条不该再有的权限同样等不了**。
 `in_effect_on()` 的 `end_date` 是**右闭**的——「有效期到 3 月 15 日」的日常含义是
 15 号那天还算数。对**事实记录**这是对的：一段任职「做到 15 号」，15 号当天不算
 在职的话工时会少算一天（`core/tests.py` 的
-`test_active_includes_a_row_ending_today` 钉着它）。
+`test_active_includes_a_row_ending_today` 钉着它 —— ⚠️ 那条测试2026-09-17 随 [D51](D51-date-ranges-are-half-open.md) 翻了面，现在叫 `test_active_excludes_a_row_ending_today`）。
 
 ⚠️ **而撤销把 `end_date` 填成今天。** 按右闭读，那等于
 「今天剩下的时间里他照旧有权限，明天起失效」。按钮说「撤销」，发生的是
@@ -102,6 +102,12 @@ to answer the phone」——**一条不该再有的权限同样等不了**。
 
 ### ⭐ 而它能这么改，是因为授权表单上**没有截止日期那一格**
 
+> 🔴 **本小节的论证被 [D51](D51-date-ranges-are-half-open.md) 改写了（2026-09-17）。**
+> 下面这两个谓词只存在了两天：D51 把语义轴整个消掉，`active()` 自己就是右开的，
+> **没有第二个谓词可选**。「撤销当场生效」这个结论一个字没变，变的是它的依据 ——
+> 右开是全项目的读法，不是这张表靠「`end_date` 只有一个来源」挣来的特例。
+> 原文留在下面，因为本文件的价值正在于「为什么改口」。
+
 ```python
 core/querysets.py::DateRangeQuerySet.in_force()   # 授权走这个：end_date 右开
 core/querysets.py::DateRangeQuerySet.active()     # 记录走这个：end_date 右闭
@@ -109,6 +115,10 @@ core/querysets.py::DateRangeQuerySet.active()     # 记录走这个：end_date �
 
 两个谓词只在「`end_date` 正好是今天」的那一行上不同。而在授权表上，那一行**只有
 一种含义**：今天被撤销了——因为那一列在这两张表上只有一个来源，就是撤销。
+
+> ⚠️ 而「加一个查询集谓词却不加它的行级双胞胎」在第二天（09-16）就咬了一次：
+> 撤销当天那一行写着「In effect: Yes」，正下方横幅写着「即刻生效」。
+> 经过和守卫见 [D51 第一节](D51-date-ranges-are-half-open.md#一为什么不是把语义轴参数化)。
 
 ⚠️ **第一版试过用 `updated_at` 的那一天当判据，不成立**：
 `TimeStampedModel.updated_at` 是 `auto_now`，任何一次保存都会写它，

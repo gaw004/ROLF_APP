@@ -624,16 +624,17 @@ class EventGrantAdmin(SimpleHistoryAdmin):
     而「去年三月谁能看这场活动的报名」是会被问到的。
 
     ⚠️ 撤销是填 `end_date`，**永远不是删行** —— 删掉的授权留不下那个答案。
-       ⚠️ 而在这张表上 `end_date` **只有撤销一个来源**（站点那张表单上没有
-          截止日期那一格），正是它敢被读成右开的依据 ——
-          `core.querysets.in_force()`。在这里手填一个今天的日期，效果和撤销一样，
-          那是有意的。
+       ⚠️ 这一列右开读（D51）：填今天 = 今天起失效。所以在这里手填一个今天的
+          日期，效果和点撤销一样，那是有意的。
+          ⚠️ 旧注释说这一条的依据是「这张表上 `end_date` 只有撤销一个来源」——
+             D51 之后那条论证不再承重：右开是**全项目**的读法，不是这张表
+             挣来的特例。
 
     ⚠️ 这一档的判断在 `org/permissions.py`，不在这里。admin 是脚手架（D18）。
     """
 
     list_display = ["contact", "event", "start_date", "end_date",
-                    "is_in_force", "granted_by"]
+                    "is_currently_active", "granted_by"]
     list_filter = ["event__ministry", "event__status"]
     search_fields = [
         "contact__legal_last_name", "contact__legal_first_name",
@@ -642,13 +643,11 @@ class EventGrantAdmin(SimpleHistoryAdmin):
     autocomplete_fields = ["contact", "event"]
     list_select_related = ["contact", "event", "granted_by"]
 
-    # 🔴 **`is_in_force`，不是 `is_currently_active`**（2026-09-16）。
-    #    这一列要和权限层说同一句话，而权限层 2026-09-15 起走右开的
-    #    `in_force()` —— 读右闭的那一个，撤销当天这一格是打勾的，而那个人
-    #    已经什么都做不了了。两张授权表（这张和另一张）一起改。
-    # ⚠️ **`AssignmentAdmin` 那一列没改**，而那不是漏：任职是**事实**，
-    #    「有效期到今天」在那里是诚实的。两条谓词各管各的一半，
-    #    分界写在 `core/querysets.py` 上。
+    # ⚠️ 这一列和权限层读的是**同一条**谓词（D51 之后只剩一条）—— 撤销当天
+    #    这一格就是不打勾的，因为 `end_date` 右开。
+    #    🔴 2026-09-16 到 09-17 之间这里是一个叫 `is_in_force` 的双胞胎，
+    #       而 `AssignmentAdmin` 那一列读的是右闭的另一个。两列说两句话，
+    #       两边都不报错。D51 之后没有第二条谓词可选了。
     @admin.display(boolean=True, description="In effect")
-    def is_in_force(self, obj):
-        return obj.is_in_force
+    def is_currently_active(self, obj):
+        return obj.is_currently_active

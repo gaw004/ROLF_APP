@@ -9,6 +9,7 @@
    discipline — the kind this project has already thrown out twice.
 """
 
+import datetime
 import logging
 from collections import defaultdict
 from dataclasses import dataclass
@@ -162,11 +163,15 @@ def grant_ministry_admin(*, contact, ministry, granted_by, start_date=None):
 
     抛 `ValidationError`，由调用方落到表单上。
     """
+    # ⚠️ 表单上那一格留空时填**今天**，而不是交给数据库的 `default` —— 写入口在
+    #    服务层（D18），而一个 `None` 走到模型层就是一次 NOT NULL 违约（D51 起
+    #    `start_date` 不可为空）。
+    start_date = start_date or local_today()
     standing = MinistryRole.objects.filter(
         contact=contact, ministry=ministry, role=MinistryRole.Role.ADMIN,
         start_date=start_date).first()
     if standing is not None:
-        if standing.is_in_force:
+        if standing.is_currently_active:
             raise ValidationError(
                 {"contact": "They already administer this ministry."})
         standing.end_date = None
@@ -686,6 +691,10 @@ def assign(assignment):
     ⚠️ 这里再拦一次重复，同 `update_position()`：表单挡的是人，这里挡的是别的
        写入路径 ——「检查不是门」，`can_publish_notice()` 那段注释记着这个教训。
     """
+    # ⚠️ 表单上留空时填**今天**，同两个 `grant_*_admin()`：`start_date` 自 D51
+    #    起不可为空，而 `blank=True` 让表单交上来的是一个 `None`。
+    if assignment.start_date is None:
+        assignment.start_date = local_today()
     # ⚠️ 只在**建**的时候问：改一段已有的任职（比如翻成休假）当然会撞上它自己。
     if assignment.pk is None:
         refuse_a_second_live_tenure(
@@ -694,8 +703,21 @@ def assign(assignment):
     return assignment
 
 
-def end_assignment(assignment, *, on=None):
+def end_assignment(assignment, *, last_day=None):
     """结束一段任职：**记结束日期，永远不删行。**
+
+    `last_day` 是他**最后一个在岗的日子**（默认今天），而存进去的是它的**次日** ——
+    `end_date` 右开，是第一个不算数的日子（D51）。「做到 15 号」存 16 号。
+
+    ⭐ **参数叫 `last_day` 而不是 `on`，这是这次改动的一半。** HR 语境里的「结束
+       日期」永远是最后一天：Workday 的 termination effective date 就是 last day
+       of employment，失业金和 COBRA 也以那一天为锚。调用方手上有的是那个日期，
+       所以签名收那个日期，`+1` 只发生在这一行 —— 而不是让每个调用方自己记得加。
+
+    ⚠️ **和撤销授权的区别只在这里，不在读法上。** `revoke_ministry_role()` 存的是
+       「今天」，因为撤销那一刻起就不算了；这里存「最后一天的次日」，因为最后
+       一天他还在岗。两者读的是同一条右开谓词。D51 之前，这个区别是靠**两套
+       谓词**表达的，于是四种写法里有两种会走散。
 
     和 `revoke_ministry_role()` 一个字一个理由 —— 删掉的任职留不下「去年三月谁在
     这个岗位上」的答案，而 `Assignment` 带 simple-history 正是因为这个问题会被问。
@@ -705,11 +727,14 @@ def end_assignment(assignment, *, on=None):
        写着「there is no is_active」「Ending is said by end_date and by nothing
        else」—— 顺手翻个状态是那句话预防的东西。
 
-    ⚠️ 结束之后这个人**当场**不再算这个 ministry 的在编人员：
-       `org.audience.on_the_books_q()` 走 `in_effect_on()`，而今天已经不在
-       `[start_date, end_date]` 里了。也就是说他会立刻看不见勾了这个 ministry 的
-       活动 —— 这是对的，写在这里是因为它看起来会像一个 bug。
+    ⚠️ 他**从次日起**不再算这个 ministry 的在编人员（`org.audience.on_the_books_q()`
+       走 `in_effect_on()`），于是那一天起看不见勾了这个 ministry 的活动。
+       🔴 这里原来写的是「**当场**不再算在编」，而那句话是**假的** —— 右闭的时候
+          今天还在 `[start, end]` 里。写注释的人脑子里是右开、代码是右闭，
+          没有任何测试钉这一格。D51 那一轮把它验出来了，钉子是
+          `EndAssignmentTests.test_somebody_ended_today_is_still_on_the_books_for_the_rest_of_today`。
     """
-    assignment.end_date = on or local_today()
+    last_day = last_day or local_today()
+    assignment.end_date = last_day + datetime.timedelta(days=1)
     assignment.save(update_fields=["end_date", "updated_at"])
     return assignment

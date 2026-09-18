@@ -3491,7 +3491,11 @@ class EventGrant(ConstraintErrorFieldMixin, DateRangeMixin, TimeStampedModel):
         null=True, blank=True,
         related_name="+",
     )
-    start_date = models.DateField(null=True, blank=True)
+    # ⭐ **不可为空**（D51）：一个区间没有起点就无从判「在不在里面」，而
+    #    SQL:2011 对 `PERIOD` 的起止列要求的正是这个。`blank=True` 是给表单留的
+    #    ——留空由服务层填成今天，那才是写入口（`org/services.py`）。
+    start_date = models.DateField(default=local_today, blank=True)
+    # ⭐ **右开：这是第一个不算数的日子**（D51）。空 = 还没有结束。
     end_date = models.DateField(null=True, blank=True)
 
     history = HistoricalRecords()

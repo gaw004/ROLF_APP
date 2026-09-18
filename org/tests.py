@@ -412,23 +412,28 @@ class VacancyTests(TestCase):
         self.assertIn(self.position, Position.objects.vacant())
         self.assertNotIn(self.position, Position.objects.vacant(on=LAST_YEAR))
 
-    def test_a_post_whose_only_tenure_ends_today_is_not_vacant_yet(self):
-        """⚠️ 「结束日期正好是今天」那一格，隔着一层关系从来没有人问过。
+    def test_a_post_is_still_held_on_its_holders_last_day(self):
+        """⚠️ 边界那一格，隔着一层关系从来没有人问过（在这条之前）。
 
         上面每一条边界用的都是 `end_date=YESTERDAY`。而空缺查询走的是
         `_has_a_holder()` —— `active()` 套一个 `OuterRef("pk")`，和直接调
         `active()` **不是同一段 SQL**。这一条和下面那条各钉一条路径。
+
+        ⚠️ `end_date=TOMORROW` 读作「最后一天是今天」（右开，D51），也正是
+           `end_assignment(last_day=今天)` 会写下的那个值。
         """
-        self.hold(start_date=LAST_YEAR, end_date=TODAY)
+        self.hold(start_date=LAST_YEAR, end_date=TOMORROW)
         self.assertNotIn(self.position, Position.objects.vacant())
         self.assertIn(self.position, Position.objects.occupied())
+        # 而明天起它就空了。
+        self.assertIn(self.position, Position.objects.vacant(on=TOMORROW))
 
-    def test_a_tenure_ending_today_still_counts_in_the_headcount(self):
+    def test_a_tenure_on_its_last_day_still_counts_in_the_headcount(self):
         """⚠️ 第三条路径：`in_effect_on(prefix="assignments__")`（`org/models.py`
            的 `with_headcounts()`）。它跨的是关系前缀而不是子查询，同样没被问过
            这一格。
         """
-        self.hold(start_date=LAST_YEAR, end_date=TODAY)
+        self.hold(start_date=LAST_YEAR, end_date=TOMORROW)
         counted = Position.objects.with_headcounts().get(pk=self.position.pk)
         self.assertEqual(counted.holder_count, 1)
         tomorrow = Position.objects.with_headcounts(on=TOMORROW).get(pk=self.position.pk)
@@ -746,10 +751,23 @@ class EndAssignmentTests(TestCase):
         return Assignment.objects.filter(
             on_the_books_q(on), contact=self.person).exists()
 
-    def test_ending_a_tenure_records_the_day_it_was_ended(self):
+    def test_ending_a_tenure_records_the_day_after_the_last_day(self):
+        """⚠️ 存的是**次日**：`end_date` 右开，是第一个不算数的日子（D51）。
+
+        参数也叫 `last_day` 而不是 `on` —— HR 手上有的日期是「最后一班是哪天」
+        （Workday 的 termination effective date 就是 last day of employment），
+        `+1` 只发生在服务层那一行。
+        """
         end_assignment(self.assignment)
         self.assignment.refresh_from_db()
+        self.assertEqual(self.assignment.end_date, TOMORROW)
+
+    def test_an_explicit_last_day_is_stored_as_the_day_after(self):
+        end_assignment(self.assignment, last_day=YESTERDAY)
+        self.assignment.refresh_from_db()
         self.assertEqual(self.assignment.end_date, TODAY)
+        self.assertFalse(self.on_the_books(TODAY))
+        self.assertTrue(self.on_the_books(YESTERDAY))
 
     def test_somebody_ended_today_is_still_on_the_books_for_the_rest_of_today(self):
         end_assignment(self.assignment)
@@ -814,7 +832,10 @@ class MinistryRoleTests(TestCase):
     def test_grants_reuse_the_shared_active_predicate(self):
         # Not a permanent boolean: authority starts and ends, exactly like a
         # tenure, so it uses the one definition of "in effect".
-        expired = self.grant(start_date=LAST_YEAR, end_date=YESTERDAY)
+        # ⚠️ 「昨天还有效」现在写成 `end_date = 今天` —— 右开，结束日期是第一个
+        #    不算数的日子（D51）。写 `end_date = 昨天` 的意思变成了「昨天就已经
+        #    不算了」，那是另一句话。
+        expired = self.grant(start_date=LAST_YEAR, end_date=TODAY)
         self.assertNotIn(expired, MinistryRole.objects.active())
         self.assertIn(expired, MinistryRole.objects.active(on=YESTERDAY))
 
@@ -850,7 +871,10 @@ class PermissionTests(TestCase):
         self.assertFalse(can_manage_event(self.user, self.make_event(self.tax)))
 
     def test_an_expired_grant_stops_conferring_permission(self):
-        MinistryRole.objects.update(end_date=YESTERDAY)
+        # ⚠️ 起止一起给：`start_date` 自 D51 起不可为空、默认今天，而
+        #    「今天开始、昨天结束」过不了 `end_date >= start_date` —— 那条约束
+        #    是对的，这一行本来就是胡说，只是从前 `start_date` 为空所以看不见。
+        MinistryRole.objects.update(start_date=LAST_YEAR, end_date=YESTERDAY)
         self.assertFalse(can_publish_event(self.user, self.pantry))
 
     def test_a_future_grant_does_not_confer_permission_yet(self):
@@ -912,20 +936,19 @@ class PermissionTests(TestCase):
     def test_revoking_takes_effect_at_once_not_tomorrow(self):
         """🔴 **撤销当场生效**（2026-09-15，用户拍板）。
 
-        `end_date` 是右闭的 —— 「有效期到 3 月 15 日」的日常含义是 15 号那天还
-        算数，而那对**事实记录**是对的（一段任职「做到 15 号」，15 号当天不算
-        在职的话工时会少算一天）。`core.tests.ActiveQuerySetTests
-        .test_active_includes_a_row_ending_today` 专门钉着那个语义。
+        ⭐ 撤销不是一段事实，是一个**即时动作**：按钮说「撤销」，发生的就该是
+           「现在起撤销」。写进去的是**今天**，而 `end_date` 右开 —— 今天是第一个
+           不算数的日子，所以他今天就什么都做不了了。
+           钉这条读法的是 `core.tests.ActiveQuerySetTests
+           .test_active_excludes_a_row_ending_today`。
 
-        ⭐ 而撤销一条授权不是一段事实，是一个**即时动作**。按右闭读的话，
-           被撤销的人**今天剩下的时间里照旧有权限** —— 按钮说「撤销」，发生的是
-           「明天起撤销」，而页面上没有任何地方说这件事。
+        ⚠️ 这一条在 2026-09-15 之前**不存在**，而那正是问题：这个行为一直是
+           右闭的（明天才失效），没有任何东西确认过它是有意的。是 D47 落地时
+           撞上的。
 
-        ⚠️ 这一条在 2026-09-15 之前**不存在**，而那正是问题：这个行为一直是这样，
-           没有任何东西确认过它是有意的。是 D47 落地时撞上的。
-
-        ⚠️ 记录本身一个字不改：那一行仍然写着 `end_date = 今天`，因为那是事实。
-           变的只是权限判断读哪一个谓词（`core.querysets._ended_on_or_before()`）。
+        ⚠️ 2026-09-15 到 09-17 之间，它靠的是一条**第二谓词**（`in_force()`）；
+           D51 把语义轴消掉之后，靠的是**写进去的是哪一天** ——
+           而下面那条任职测试就是同一条读法的另一半。
         """
         grant = MinistryRole.objects.get(contact=self.zhang, ministry=self.pantry)
         self.assertEqual(ministry_ids_administered_by(self.user), {self.pantry.pk})
@@ -939,21 +962,23 @@ class PermissionTests(TestCase):
         self.assertEqual(grant.end_date, TODAY)
         self.assertTrue(MinistryRole.objects.filter(pk=grant.pk).exists())
 
-    def test_a_tenure_ending_today_still_counts_today(self):
-        """⚠️ 上面那条**不适用于任职**，而两条并排是这件事唯一说得清的地方。
+    def test_a_tenure_whose_last_day_is_today_still_counts_today(self):
+        """⚠️ 和上面那条撤销测试并排 —— 两种事实，**一条读法**（D51）。
 
-        `end_date` 在授权表上右开（填到今天＝今天起失效），在 `Assignment` 上
-        右闭（「做到 15 号」，15 号那天还在职）。两条各自都对，因为那一列在两张表
-        上的**来源不同**：授权那一列只有撤销写得了它，任职那一列是人填的事实。
+        差别全在**写进去的是哪一天**：撤销存「今天」（今天起失效），任职结束
+        存「最后一天的次日」（`end_assignment(last_day=...)`）。读的都是右开的
+        `active()`。
 
-        🔴 少了这一条，下一个人会把授权那条右开规矩顺手搬到任职上 ——
-           而那会让每个人的最后一天凭空少算一天工时。
+        🔴 2026-09-17 之前这两句话是靠**两条谓词**表达的（`active()` 右闭、
+           `in_force()` 右开），而那正是四种写法走散的根。少了这一条，下一个人
+           会以为任职也该在最后一天当天就下名单。
         """
         post = make_position(None, "Greeter", ministry=self.pantry)
         tenure = Assignment.objects.create(
-            contact=self.zhang, position=post, end_date=TODAY)
+            contact=self.zhang, position=post, end_date=TOMORROW)
         self.assertTrue(tenure.is_currently_active)
         self.assertIn(tenure, Assignment.objects.active())
+        self.assertNotIn(tenure, Assignment.objects.active(on=TOMORROW))
 
     def test_the_id_set_is_ids_not_objects(self):
         # The name says ids because the return value is ids. Two documents once
@@ -1703,7 +1728,9 @@ class StaffRosterTests(TestCase):
         self.client.post(reverse("org:position_detail", kwargs={"pk": post.pk}),
                          {"end": tenure.pk})
         tenure.refresh_from_db()
-        self.assertEqual(tenure.end_date, TODAY)
+        # 最后一天是今天 → 存明天（右开，D51）。他今天还在名单上。
+        self.assertEqual(tenure.end_date, TOMORROW)
+        self.assertIn(tenure, Assignment.objects.active())
 
     def test_a_tenure_pk_from_another_post_is_not_reachable(self):
         """来自表单的 pk 不许够得着别的岗位的行，同 `find_grant()` 的作用域。"""
@@ -1742,10 +1769,12 @@ class StaffRosterTests(TestCase):
         tenure = Assignment.objects.create(contact=self.wang, position=post)
         self.assertIn(event, Event.objects.for_audience(self.wang))
 
-        # 而结束任职当场收回可见性 —— `end_assignment()` 的注释写着这一条，
+        # 而结束任职收回可见性 —— `end_assignment()` 的注释写着这一条，
         # 因为它看起来会像一个 bug。
-        tenure.end_date = YESTERDAY
-        tenure.save(update_fields=["end_date"])
+        # ⚠️ 走服务而不是手填 `end_date`：今天入职、昨天结束过不了
+        #    `end_date >= start_date`（D51 起 `start_date` 不可为空）。而那场
+        #    活动在三天后，所以今天结束就够了。
+        end_assignment(tenure)
         self.assertNotIn(event, Event.objects.for_audience(self.wang))
 
     def test_a_tenure_ending_on_the_event_day_still_sees_that_event(self):
@@ -1760,9 +1789,8 @@ class StaffRosterTests(TestCase):
            今天还看得见」，红了：那场活动在三天后，而他到那天已经走了。
            边界必须踩在**活动当天**，这也正是这条路径要单独有一张网的理由。
 
-        ⚠️ 特征化测试：记录当前行为（结束日期＝活动当天 → 那天仍算在编），
-           不主张它是对的。上面那条兄弟测试的注释写着「结束任职当场收回可见性」，
-           而它用的是昨天 —— 那句话在边界这一格上不成立。
+        ⚠️ 这一条 Step 1 写下时是**特征化**的（当时存的是活动当天），D51 之后
+           存的值变成次日而**答案一个字没变** —— 那正是「行为不变」的意思。
         """
         event = self.staff_only_event()
         event_day = local_date_of(event.start_time)
@@ -1770,12 +1798,13 @@ class StaffRosterTests(TestCase):
         tenure = Assignment.objects.create(contact=self.wang, position=post)
         self.assertIn(event, Event.objects.for_audience(self.wang))
 
-        tenure.end_date = event_day
+        # 最后一天正好是活动当天 → 存次日（右开，D51）。
+        tenure.end_date = event_day + datetime.timedelta(days=1)
         tenure.save(update_fields=["end_date"])
         self.assertIn(event, Event.objects.for_audience(self.wang))
 
-        # 而前一天结束，那场活动就看不见了 —— 两格并排，边界才说得清。
-        tenure.end_date = event_day - datetime.timedelta(days=1)
+        # 而前一天就走了，那场活动就看不见了 —— 两格并排，边界才说得清。
+        tenure.end_date = event_day
         tenure.save(update_fields=["end_date"])
         self.assertNotIn(event, Event.objects.for_audience(self.wang))
 

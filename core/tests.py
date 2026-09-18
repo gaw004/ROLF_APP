@@ -303,11 +303,15 @@ class NoMissingMigrationsTests(TestCase):
 
 
 class ActiveQuerySetTests(TestCase):
-    """The four date boundaries of .active() — the most reused predicate we have.
+    """The date boundaries of .active() — the most reused predicate we have.
 
     Exercised against Assignment. The queryset is built directly rather than
     through Assignment.objects, so these boundaries are pinned to the shared
     predicate itself and not to whichever manager happens to expose it.
+
+    ⭐ **`end_date` 是第一个不算数的日子**（D51）。2026-09-17 之前这里钉的是
+       右闭，而项目里同时还有一个右开的 `in_force()` 给权限用 —— 两条谓词、
+       四种写法。现在只有这一条。
     """
 
     def setUp(self):
@@ -320,17 +324,40 @@ class ActiveQuerySetTests(TestCase):
         return DateRangeQuerySet(model=Assignment)
 
     def make(self, start_date=None, end_date=None):
+        # ⚠️ `start_date` 不传就交给模型的 default（今天），**不显式传 None** ——
+        #    D51 起那一列不可为空，传 None 是一次 NOT NULL 违约而不是「不限」。
+        fields = {"end_date": end_date}
+        if start_date is not None:
+            fields["start_date"] = start_date
         return Assignment.objects.create(
-            contact=self.alice, position=self.post,
-            start_date=start_date, end_date=end_date,
-        )
+            contact=self.alice, position=self.post, **fields)
 
-    def test_active_includes_a_row_ending_today(self):
+    def test_active_excludes_a_row_ending_today(self):
+        """🔴 **这一条 2026-09-17 翻了面，而它此前被注释标着「别动」。**
+
+        标记作废是 D51 判的，理由在那条决策上，一句话版本：那个「别动」保护的是
+        「『做到 15 号』的日常含义是 15 号还算数」—— 而 D51 没有推翻那句话，
+        它把那句话搬到了**写入**那一侧（`end_assignment(last_day=15 号)` 存 16 号）。
+        读法只剩一条，写法负责表达两种事实。
+
+        ⚠️ 它当初保护的那个具体后果（「15 号当天不算在职的话工时会少算一天」）
+           查无实据：全项目没有任何地方拿 `end_date` 做算术，工时来自
+           `Participation.hours` 和 `Shift`。
+        """
         row = self.make(end_date=local_today())
+        self.assertNotIn(row, self.tenures().active())
+
+    def test_active_includes_a_row_ending_tomorrow(self):
+        # 右开的另一半：明天才是第一个不算数的日子，所以今天还算数。
+        row = self.make(end_date=local_today() + datetime.timedelta(days=1))
         self.assertIn(row, self.tenures().active())
 
     def test_active_excludes_a_row_that_ended_yesterday(self):
-        row = self.make(end_date=local_today() - datetime.timedelta(days=1))
+        # ⚠️ 起始日期要显式给：不给就是今天（模型 default），而「今天开始、
+        #    昨天结束」过不了 `end_date >= start_date` —— 那条约束是对的，
+        #    这一行本来就是胡说。D51 之前 `start_date` 为空，约束看不见它。
+        row = self.make(start_date=local_today() - datetime.timedelta(days=30),
+                        end_date=local_today() - datetime.timedelta(days=1))
         self.assertNotIn(row, self.tenures().active())
 
     def test_active_excludes_a_row_that_starts_in_the_future(self):
@@ -339,7 +366,8 @@ class ActiveQuerySetTests(TestCase):
         row = self.make(start_date=local_today() + datetime.timedelta(days=1))
         self.assertNotIn(row, self.tenures().active())
 
-    def test_active_includes_a_row_with_no_dates_at_all(self):
+    def test_active_includes_a_row_with_no_end_date(self):
+        # 起始日期不再可能为空（D51），所以这一条问的是「还没有结束」那一支。
         row = self.make()
         self.assertIn(row, self.tenures().active())
 
@@ -348,71 +376,14 @@ class ActiveQuerySetTests(TestCase):
             start_date=datetime.date(2020, 1, 1), end_date=datetime.date(2020, 12, 31))
         self.assertNotIn(row, self.tenures().active())
         self.assertIn(row, self.tenures().active(on=datetime.date(2020, 6, 1)))
+        # 而结束那一天自己不算 —— 右开对任何一天都成立，不只对今天。
+        self.assertNotIn(row, self.tenures().active(on=datetime.date(2020, 12, 31)))
 
     def test_active_is_not_frozen_at_import_time(self):
         # `def active(self, on=local_today())` would evaluate once, at import,
         # and a long-lived gunicorn worker would drift further off every day.
         # A default argument holding a date object is the tell.
         self.assertEqual(DateRangeQuerySet.active.__defaults__, (None,))
-
-
-class InForceQuerySetTests(TestCase):
-    """`in_force()` 的四个边界 —— 它加进来的时候一条都没写。
-
-    🔴 `in_force()` 是 2026-09-15 加的，而上面那四条 `active()` 边界测试的镜像
-       **从来没有过**。权限层每一次判断都走它
-       （`org.permissions.ministry_ids_administered_by`），而它和 `active()` 的
-       全部差别只有一行：**结束日期正好是今天**。那一行就是撤销当天那一行，
-       也是这条规则里唯一有安全后果的一格 —— 于是覆盖率最低的那一格，恰好是
-       代价最高的那一格。
-
-    ⚠️ 和上面一样，谓词直接从 `DateRangeQuerySet` 建，不走某个 manager ——
-       钉的是共享的那条谓词本身。
-    """
-
-    def setUp(self):
-        self.alice = Contact.objects.create(
-            contact_type=Contact.ContactType.INDIVIDUAL,
-            legal_first_name="Ann", legal_last_name="Alice")
-        self.post = Position.objects.create(code="greeter", name="Greeter")
-
-    def grants(self):
-        return DateRangeQuerySet(model=Assignment)
-
-    def make(self, start_date=None, end_date=None):
-        return Assignment.objects.create(
-            contact=self.alice, position=self.post,
-            start_date=start_date, end_date=end_date,
-        )
-
-    def test_in_force_excludes_a_row_ending_today(self):
-        # 🔴 这一格就是 in_force() 存在的全部理由，也是它和 active() 的唯一差别。
-        row = self.make(end_date=local_today())
-        self.assertNotIn(row, self.grants().in_force())
-
-    def test_in_force_excludes_a_row_that_ended_yesterday(self):
-        row = self.make(end_date=local_today() - datetime.timedelta(days=1))
-        self.assertNotIn(row, self.grants().in_force())
-
-    def test_in_force_includes_a_row_ending_tomorrow(self):
-        row = self.make(end_date=local_today() + datetime.timedelta(days=1))
-        self.assertIn(row, self.grants().in_force())
-
-    def test_in_force_excludes_a_row_that_starts_in_the_future(self):
-        row = self.make(start_date=local_today() + datetime.timedelta(days=1))
-        self.assertNotIn(row, self.grants().in_force())
-
-    def test_in_force_includes_a_row_with_no_dates_at_all(self):
-        row = self.make()
-        self.assertIn(row, self.grants().in_force())
-
-    def test_in_force_accepts_an_explicit_date(self):
-        row = self.make(
-            start_date=datetime.date(2020, 1, 1), end_date=datetime.date(2020, 12, 31))
-        self.assertNotIn(row, self.grants().in_force())
-        self.assertIn(row, self.grants().in_force(on=datetime.date(2020, 6, 1)))
-        # 而结束那一天自己，照旧不算 —— 右开对任何一天都成立，不只对今天。
-        self.assertNotIn(row, self.grants().in_force(on=datetime.date(2020, 12, 31)))
 
 
 class DatePredicateHalvesAgreeTests(TestCase):
@@ -434,21 +405,23 @@ class DatePredicateHalvesAgreeTests(TestCase):
        所以矩阵摆在日期**数据**上（起止各四种），不摆在「问哪一天」上。
     """
 
-    #: 起止各四种取值，两两组合 —— 十六格，减去结束早于开始那几格（约束不许）。
-    def offsets(self):
+    #: 起止取值两两组合，减去结束早于开始那几格（约束不许）。
+    #: ⚠️ `start` 没有 "unset" 那一档：D51 起 `start_date` 不可为空。
+    def offsets(self, unset=True):
         today = local_today()
-        return {
+        days = {
             "yesterday": today - datetime.timedelta(days=1),
             "today": today,
             "tomorrow": today + datetime.timedelta(days=1),
-            "unset": None,
         }
+        return {**days, "unset": None} if unset else days
 
-    #: (名字, 问一批行, 问一行)。加一条新谓词就在这里加一行，而忘了补它的
+    #: (名字, 问一批行, 问一行)。加一条新谓词就在这里加一行 —— 而忘了补它的
     #: 另一半时，这张表本身就是那条忘记的记录。
+    #: ⚠️ D51 之后只剩一对：曾经还有 `in_force` / `is_in_force`，而它们正是
+    #:    这条测试写下来的起因。
     PAIRS = [
         ("active", lambda qs: qs.active(), lambda row: row.is_currently_active),
-        ("in_force", lambda qs: qs.in_force(), lambda row: row.is_in_force),
     ]
 
     def setUp(self):
@@ -459,9 +432,8 @@ class DatePredicateHalvesAgreeTests(TestCase):
 
     def test_every_predicate_answers_the_same_for_one_row_and_for_a_set(self):
         rows = DateRangeQuerySet(model=Assignment)
-        offsets = self.offsets()
-        for start_name, start in offsets.items():
-            for end_name, end in offsets.items():
+        for start_name, start in self.offsets(unset=False).items():
+            for end_name, end in self.offsets().items():
                 if start and end and end < start:
                     # `*_end_date_not_before_start_date` 不许这一格存在。
                     continue

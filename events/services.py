@@ -5358,10 +5358,14 @@ def grant_event_admin(*, contact, event, granted_by, start_date=None):
 
     抛 `ValidationError`，由调用方落到表单上。
     """
+    # ⚠️ 表单上那一格留空时填**今天**，而不是交给数据库的 `default` —— 写入口在
+    #    服务层（D18），而一个 `None` 走到模型层就是一次 NOT NULL 违约（D51 起
+    #    `start_date` 不可为空）。
+    start_date = start_date or local_today()
     standing = EventGrant.objects.filter(
         contact=contact, event=event, start_date=start_date).first()
     if standing is not None:
-        if standing.is_in_force:
+        if standing.is_currently_active:
             raise ValidationError(
                 {"contact": "They already manage this event."})
         standing.end_date = None

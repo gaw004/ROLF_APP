@@ -194,7 +194,7 @@ class MinistryRoleAdmin(SimpleHistoryAdmin):
     """
 
     list_display = ["contact", "ministry", "role", "start_date", "end_date",
-                    "is_in_force", "granted_by"]
+                    "is_currently_active", "granted_by"]
     list_filter = [InEffectFilter, "role", "ministry"]
     search_fields = [
         "contact__legal_last_name", "contact__legal_first_name",
@@ -203,16 +203,14 @@ class MinistryRoleAdmin(SimpleHistoryAdmin):
     autocomplete_fields = ["contact", "ministry"]
     list_select_related = ["contact", "ministry", "granted_by"]
 
-    # 🔴 **`is_in_force`，不是 `is_currently_active`**（2026-09-16）。
-    #    这一列要和权限层说同一句话，而权限层 2026-09-15 起走右开的
-    #    `in_force()` —— 读右闭的那一个，撤销当天这一格是打勾的，而那个人
-    #    已经什么都做不了了。两张授权表（这张和另一张）一起改。
-    # ⚠️ **`AssignmentAdmin` 那一列没改**，而那不是漏：任职是**事实**，
-    #    「有效期到今天」在那里是诚实的。两条谓词各管各的一半，
-    #    分界写在 `core/querysets.py` 上。
+    # ⚠️ 这一列和权限层读的是**同一条**谓词（D51 之后只剩一条）—— 撤销当天
+    #    这一格就是不打勾的，因为 `end_date` 右开。
+    #    🔴 2026-09-16 到 09-17 之间这里是一个叫 `is_in_force` 的双胞胎，
+    #       而 `AssignmentAdmin` 那一列读的是右闭的另一个。两列说两句话，
+    #       两边都不报错。D51 之后没有第二条谓词可选了。
     @admin.display(boolean=True, description="In effect")
-    def is_in_force(self, obj):
-        return obj.is_in_force
+    def is_currently_active(self, obj):
+        return obj.is_currently_active
 
 
 class AssignmentInline(admin.TabularInline):

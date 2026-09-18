@@ -129,6 +129,7 @@
 | 一次批量建了 30 条模板，建错了怎么收？ | [D40](decisions/D40-undo-a-pattern-batch.md) —— 整批撤销，⚠️ 但「撤销」是**停止并收回未来**，过去的班次一行都不动 |
 | 一个人被排了两件同时的事，系统会说话吗？ | [D39](decisions/D39-scheduling-conflicts.md) —— 四类冲突走一个函数，⚠️ **一类都不拦截**；而其中一半的检测 D36 / D38 早就写好了，只是挂错了条件、也出现在事后的报表上 |
 | 员工要不要打卡？ | [D33 第七节](decisions/D33-work-schedule.md) —— 取决于 exempt / non-exempt，不取决于机构偏好；而一行班次就是法律认的例外记录表 |
+| 「有效期到 X 日」，X 日那天还算不算数？ | [D51](decisions/D51-date-ranges-are-half-open.md) —— **不算**，`end_date` 是第一个不算数的日子。事实和权限的区别在**写进去的是哪一天**，不在读法上：任职结束写最后一天的次日，撤销写当天。⚠️ 给人看的那一格走 `last_day` / `revoked_on`，**不许裸印** `end_date` |
 | ⭐ 一个员工参加活动，怎么分清是**献爱心**还是**工作安排**？ | [D38](decisions/D38-served-as-volunteer-or-work.md) —— 一个字段 `served_as`，**当事人自己声明**、admin 可更正、改动本人看得见。⚠️ 不许从「谁点的按钮」或「那天有没有排班」推 |
 | 员工在哪里看自己的排班和工时？ | [`phase-d.md` 的 My Schedule](phase-d.md#my-schedule-的形状) —— 一页、两条泳道、三个数、永不求和，外加一个 `.ics` 订阅 |
 | 一种新关系该用字段、自引用 FK 还是专用表？ | [D15 四条判据 + 选择规则](decisions/D15-relationship-carriers.md) |

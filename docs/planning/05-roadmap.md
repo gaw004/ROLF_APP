@@ -866,6 +866,14 @@ PatternBatch(id=UUID, ministry → PROTECT, created_by → Contact PROTECT,
 `UniqueConstraint(assignment, weekday, start_time, start_date, nulls_distinct=False)`
 （⚠️ `nulls_distinct=False` 是 A7 的老教训，`start_date` 可空）。
 
+> 🔴 **上面那条约束的写法 2026-09-17 之后不再是本项目的做法**
+> （[D51](decisions/D51-date-ranges-are-half-open.md)）。写这张表的时候按现在的来：
+> `start_date` **不可为空**（于是 `nulls_distinct` 那个补丁不需要了），
+> `end_date` 读作**第一个不算数的日子**，而「同一段任职上不许有两条时间压着的
+> 模板」用区间排他约束表达，不是键在 `start_date` 上的唯一约束 ——
+> 键在一个表单常常留空的列上，会同时过松和过紧，整段病历在 D51 第三节。
+> 原文留着，因为这张 roadmap 记的是当时怎么想的。
+
 **跨午夜的班次先不支持**，`end_time > start_time` 直接挡掉。
 
 ## D2a.2 `Shift`

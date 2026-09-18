@@ -21,6 +21,9 @@
 | **整张 `Session` 表**没有 | [`../06-roadmap.md`](../06-roadmap.md) L5.1 |
 | **整张 `SessionAttendance` 表**没有（以及 `Participation` 下面多出来的那一层） | [`../06-roadmap.md`](../06-roadmap.md) L5.2 |
 | **整张 `EventSeries` / `EventSeriesRole` 表**没有，`Event` 下面那两列（`series` / `source`）也没有 | [`../06-roadmap.md`](../06-roadmap.md) L5.4 |
+| `Assignment` / `MinistryRole` 画的 `uniq …_start UK "nulls_distinct False"` **已经不存在** —— 换成了区间排他约束（`EXCLUDE … daterange(start_date, end_date) WITH &&`），而 `start_date` 也不再可空 | [D51](../decisions/D51-date-ranges-are-half-open.md) 第三节 |
+| 图上没画、但读图的人会默认反了的一件事：`end_date` 是**第一个不算数的日子**（右开）。「做到 3 月 15 日」存 3 月 16 日 | [D51](../decisions/D51-date-ranges-are-half-open.md) |
+| 整张 `EventGrant` 表没有（单场活动的管理授权） | [D47](../decisions/D47-event-level-grant.md) |
 | `Event.status` 画的是 `confirmed` | 2026-08-19 已改名 `full`（迁移 0011） |
 | 谓词画的是 `visible_to_volunteers` | 2026-08-20 已改名 `visible_to_participants` |
 | 画着 `EventType` 和 `Event.event_type` | 2026-09-04 连表一起删了 |

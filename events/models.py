@@ -3057,18 +3057,23 @@ class EventSeries(PostalAddressMixin, Audience, ConstraintErrorFieldMixin, TimeS
         if self.pk is None or not self.occasions.exists():
             behind = [m for m in found if local_date_of(m) < local_today()]
             if behind:
-                # 🔴 **Occasions in the past are made and cannot be taken back.**
-                #    A rule anchored twelve weeks ago generates nine evenings
-                #    that already happened — published, with roles, counted by
-                #    the ministry report as meetings that ran with nobody there
-                #    — and `_collectable_occasions()` refuses to touch anything
-                #    that has started, by design. So undo cannot reach them and
-                #    the only way out is deleting nine rows by hand. Measured.
+                # 🔴 **这段话 2026-09-17 改口，因为它描述的后果已经不会发生了。**
+                #    原文写的是「生成会把这些已经过去的晚上建成真的活动，而且
+                #    撤销不回来」—— 那在当时是实测过的。但生成从那天起有了下界
+                #    （`services.gone_and_to_come()`），已经开始的时刻**不会**
+                #    再被建出来。一句描述某个后果、而那个后果不再发生的错误消息，
+                #    正是这个仓库反复判刑的那一类，所以它跟着改。
                 #
-                # ⚠️ Refused at the door rather than skipped by the generator,
-                #    and that is the choice worth writing down: skipping is
-                #    tempting and worse, because "why are there only three"
-                #    would then have no answer anywhere on the page.
+                # ⭐ **拒绝本身留着，而理由换了一个**：它现在挡的不是数据损坏，
+                #    是一个**说不通的排法** —— 「第一场在三个月前」的新系列，
+                #    保存下来之后那几场永远不会存在，于是这条规则从第一天起就和
+                #    它排出来的东西对不上。让人当场把第一场改对，比事后对着
+                #    「为什么少了九场」去猜要好。
+                #
+                # ⚠️ 那句「跳过是诱人的、而且更糟，因为『为什么只有三场』在页面上
+                #    没有地方答得出来」**对已经存在的系列不再成立**：
+                #    `services.already_gone_sentence()` 就是那个答案，两个按得动
+                #    生成的入口都印它。这里之所以仍然拒绝，是上面那条新理由。
                 #
                 # ⚠️ Only while the series has no occasions. Afterwards the
                 #    whole point is that the early ones are in the past, and
@@ -3076,10 +3081,10 @@ class EventSeries(PostalAddressMixin, Audience, ConstraintErrorFieldMixin, TimeS
                 raise ValidationError({"starts_on": (
                     f"This rule falls on {len(behind)} date(s) that have "
                     f"already gone, the first on "
-                    f"{local_date_of(found[0]):%-d %B %Y}. Generating would "
-                    "create real events for evenings that have already "
-                    "happened, and they cannot be undone afterwards — set the "
-                    "first date to the next one you actually want."
+                    f"{local_date_of(found[0]):%-d %B %Y}. Those will never be "
+                    "created — generating only ever builds occasions that have "
+                    "not started — so set the first date to the next one you "
+                    "actually want."
                 )})
         first = local_date_of(found[0])
         if first != self.starts_on:

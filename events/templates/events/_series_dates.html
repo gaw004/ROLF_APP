@@ -47,6 +47,46 @@
       {% endif %}
     </p>
 
+    {% comment %}
+    🔴 **已经过去的那几天要说一句**（2026-09-17）。生成从这天起有了下界
+       （`services.gone_and_to_come()`）：已经开始的时刻不会被建成活动。
+       不说的话，一条跑了两年的系列在这一块列出全部历史日期、上面那句写着
+       「53 occasions，4 Sep 2024 到 17 Sep 2027」，而按下去一场过去的都不会造
+       —— 页面说一个数、按钮做另一件事，正是 services 那边点名的「这一块最贵
+       的失败」。切线和生成器读的是**同一个函数**。
+
+    ⚠️ **接在上面那句后面，不是重写它。** 上面是两支（有结束 / 没结束），
+       把这件事织进去就要在两支里各写一遍，而它们迟早说不一样的话。
+
+    ⚠️ 措辞是「Generate 只建还没到的那些」，**不是「按下去会造 N 场」**。
+       后者在一条健康的老系列上是假的：那 39 场早就在库里了，按下去一场都不会
+       多（`has_more_to_build()` 问的就是这个）。这一块答的是「这条规则落在哪
+       几天」，「按下去会发生什么」由按完那句消息答（`_generated_sentence()`）。
+
+    🔴 **这句话由调用方开口要（`skips_the_past`），而这一格是承重的。**
+       这一块三页共用，而那句话只在**系列**那两页上是真的：课那一支没有下界
+       —— `ProgramForm.clean()` 不拒绝落在过去的日期，`publish_program()` 给
+       每一个时刻都建一讲。在发布一门课的页面上印这句话是两重假话（过去那些
+       讲次照样会被建出来，而且那一页没有 Generate 这颗键）。
+       ⚠️ 这段注释原来写的是「课那一支同理」，2026-09-17 代码评审抓出来那是
+          错的。判据写在 `views._dates_context()` 上，不在这里重述第二份。
+
+    ⚠️ 发布**新系列**那一页看得到这句话、但它天然是空的：那里
+       `EventSeries.clean()` 拒绝落在过去的规则，`gone` 于是是 0。
+    {% endcomment %}
+    {% if gone %}
+      <p class="mt-1 text-sm text-ink-600 dark:text-ink-300">
+        {% comment %}
+        ⚠️ 「the ones」而不是 `{{ unit }}` 的复数：这里要数的是**还没到的**那些，
+           而这一块只拿到了「过去了几个」。照 `moments|length` 去变复数，
+           就是用总数给另一个数配单复数 —— 一条只剩一场未来的系列会写成
+           「builds the occasions still to come」。名词在上面那句已经说过了。
+        {% endcomment %}
+        {{ gone }} of them {{ gone|pluralize:"has,have" }} already gone —
+        Generate only builds the ones still to come.
+      </p>
+    {% endif %}
+
     <div class="month-grids mt-3">
       {% for grid in months.grids %}{% include "events/_month_grid.html" %}{% endfor %}
     </div>

@@ -5581,10 +5581,16 @@ def revoke_event_grant(grant, *, on=None):
        `find_event_grant()` 同样只按活动收窄，而 D51 之后「同一把钥匙上两行」
        是常态，于是一个带旧 pk 的 POST 会把那一行的区间**撑进**新的那一行里，
        撞上排他约束变成一个无人接管的 500。
+
+    ⭐ **还没开始生效的那一条，存的是它自己的 `start_date`** —— 一字一理由照
+       那边（2026-09-18，用户拍板）。写「今天」会得到一个终点早于起点的区间，
+       而那是一个**点两下就能撞到**的 500：表单上「起始日期」收将来的日子，
+       发出来那一行旁边就渲染着撤销键。夹住之后它是一个空区间，永不生效，
+       两个日期都如实留着。
     """
     if grant.end_date is not None:
         return grant
-    grant.end_date = on or local_today()
+    grant.end_date = max(on or local_today(), grant.start_date)
     grant.save(update_fields=["end_date", "updated_at"])
     return grant
 

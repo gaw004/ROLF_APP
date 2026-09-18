@@ -207,10 +207,30 @@ def revoke_ministry_role(grant, *, on=None):
        ⚠️ 页面上那颗键对已结束的行不渲染，所以这只有伪造输入和陈旧页面到得了 ——
           判据同 `test_a_revoke_that_is_not_a_number_is_a_404_not_a_500`：
           **无人接管的 500 也是 500**。
+
+    ⭐ **还没开始生效的那一条，存的是它自己的 `start_date`**（2026-09-18，用户拍板）。
+       撤销写的是「今天」，而右开读作「从今天起不算数」—— 这对一条**正在生效**的
+       授权完全正确，对一条 `start_date` 在未来的授权却写出了一个**终点早于起点**
+       的区间，也就是根本不是一个区间。`end_date >= start_date` 那条
+       CheckConstraint 在数据库层拒绝它，而这里走的是
+       `save(update_fields=...)`、**不经过 `full_clean()`** —— 于是没有任何一条
+       能落到表单上的路，异常直接是 `IntegrityError`，视图没接，一个 500。
+
+       🔴 **它不需要伪造输入：表单上「起始日期」那一格本来就收将来的日子**
+          （「她下周一接手」是正常需求），而那一行发出来之后旁边就渲染着撤销键
+          （模板只问 `end_date` 空不空）。点它就炸。
+
+       ⚠️ 夹成 `start_date` 之后那一行是 `[9/25, 9/25)` —— 一个**空区间**，
+          什么都不覆盖、永不生效，而两个日期都如实留着：「从 9/25 起，9/25 撤销」
+          读作「还没开始就被取消了」。不删行，和这张表其余的规矩一致。
+
+       ⚠️ 根因在动词上：「撤销」其实承担了两件事 —— **终止**一件正在进行的事，
+          和**作废**一件还没开始的事。原来的代码只建模了前者。
+
     """
     if grant.end_date is not None:
         return grant
-    grant.end_date = on or local_today()
+    grant.end_date = max(on or local_today(), grant.start_date)
     grant.save(update_fields=["end_date", "updated_at"])
     return grant
 

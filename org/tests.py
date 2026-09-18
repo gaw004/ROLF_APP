@@ -978,6 +978,33 @@ class MinistryRoleTests(TestCase):
         live.refresh_from_db()
         self.assertIsNone(live.end_date)
 
+    def test_revoking_a_grant_that_has_not_started_yet_cancels_it(self):
+        """🔴 **不夹住的话这是一个点两下就能撞到的 500**（2026-09-18，用户拍板）。
+
+        「起始日期」那一格收将来的日子（「她下周一接手」是正常需求），而那一行
+        发出来之后旁边就渲染着撤销键（模板只问 `end_date` 空不空）。点它，
+        服务层写下「到今天为止」—— 一个**终点早于起点**的区间，
+        `end_date >= start_date` 那条 CheckConstraint 当场拒绝，
+        而这里不走 `full_clean()`，于是那是一个无人接管的 `IntegrityError`。
+
+        ⚠️ 夹成 `start_date` 之后它是一个**空区间**：什么都不覆盖、永不生效，
+           而两个日期都如实留着 —— 「从下周一起，下周一撤销」读作「还没开始
+           就被取消了」。行不删，审计线完整。
+        """
+        future = TODAY + datetime.timedelta(days=7)
+        grant = self.grant(start_date=future)
+        self.assertFalse(grant.is_currently_active, "它本来就还没生效")
+
+        revoke_ministry_role(grant)  # 不抛
+
+        grant.refresh_from_db()
+        self.assertEqual(grant.end_date, future, "夹到起始日期，不是今天")
+        self.assertFalse(grant.is_currently_active)
+        # ⭐ 空区间 —— 到了那一天也不生效。
+        self.assertNotIn(grant, MinistryRole.objects.active(on=future))
+        self.assertNotIn(
+            grant, MinistryRole.objects.active(on=future + datetime.timedelta(days=1)))
+
     def test_granting_to_somebody_who_already_has_it_is_refused(self):
         grant_ministry_admin(
             contact=self.wang, ministry=self.pantry, granted_by=None)

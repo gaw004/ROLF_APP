@@ -22972,6 +22972,25 @@ class EventGrantTests(PageTestCase):
         self.assertIsNone(second.end_date, "新行不许被旧行的撤销波及")
         self.assertTrue(can_manage_event(self.helper, self.event))
 
+    def test_revoking_a_grant_that_has_not_started_yet_cancels_it(self):
+        """⚠️ 同 `org.tests.MinistryRoleTests
+           .test_revoking_a_grant_that_has_not_started_yet_cancels_it` ——
+           两张授权表一样的形状，一样的 500（2026-09-18，用户拍板）。
+
+        撤销写「今天」，而这一条下周才生效 —— 那是一个终点早于起点的区间，
+        `end_date >= start_date` 当场拒绝，而这条路不走 `full_clean()`。
+        夹成 `start_date` 之后它是空区间：永不生效，两个日期都如实留着。
+        """
+        future = local_today() + datetime.timedelta(days=7)
+        grant = self.grant_to(self.helper, start_date=future)
+        self.assertFalse(can_manage_event(self.helper, self.event))
+
+        revoke_event_grant(grant)  # 不抛
+
+        grant.refresh_from_db()
+        self.assertEqual(grant.end_date, future, "夹到起始日期，不是今天")
+        self.assertNotIn(grant, EventGrant.objects.active(on=future))
+
     def test_a_second_grant_overlapping_a_live_one_is_a_form_error(self):
         """⚠️ 上面那条的另一半：**压着的**第二条仍然要被拦下，而且是一句人话。
 

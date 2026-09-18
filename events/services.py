@@ -20,7 +20,7 @@ from django.db import models
 from django.db.models import Count, F, Q, Sum
 from django.db.models.functions import TruncMonth
 from django.urls import reverse
-from django.utils import timezone
+from django.utils import formats, timezone
 from django.utils.text import slugify
 from PIL import Image as PILImage
 from PIL import ImageOps as PILImageOps
@@ -4269,26 +4269,139 @@ def generated_through(series):
 RUNNING_LOW = datetime.timedelta(weeks=6)
 
 
-def has_more_to_build(series):
-    """这条规则还有没有**没建过**的场次？
+def gone_and_to_come(moments, *, now=None):
+    """规则落的这些时刻，切成「已经开始的」和「还没开始的」两半。
+
+    ⚠️ **没有下划线**，因为它有一个模块外的读者：日期预览要按这条线说话
+       （`views._dates_context()`）。预览和生成器必须从**同一个函数**拿这条线
+       —— 各判各的话，页面上写着「这条规则落 53 天」而按下去造出 39 场，
+       而这正是 `_occasion_moments()` 上面点名的「这一块最贵的失败」。
+
+    ⚠️ `now` 可以不传，是为了那个视图读者：`ViewsAreThinGuardTests` 不许
+       views.py 里出现 `local_now()`。所以钟点在这里读，不在那里读。
+       服务层内部的三个调用方都**传自己那一次读数** —— 一次按下只读一次钟，
+       那是 `generate_occasions()` 早就定下的规矩。
+
+    🔴 **生成的下界住在这里**（2026-09-17）。在这之前窗口只有上界：
+       `_occasion_moments()` 从 `starts_on` 一路排到一年后，而生成器照单全收。
+       于是一条忘了续排、断了三个月的系列，在有人想起来按「生成」的那一下，
+       会把断掉的那十三个周二**建成真的活动** —— 发布出去、带着工种、被牧区
+       报表算成「开了但没人来」的聚会。而它们删不掉：`_collectable_occasions()`
+       按设计不碰任何已经开始的场次，所以撤销够不着，只剩手工删十三行。
+       `EventSeries.clean()` 那段注释早就把这个后果写死了，但它只在系列
+       **还一场都没有**的时候拦（`self.pk is None or not self.occasions.exists()`），
+       而一条跑了一年的系列正好落在它够不着的地方。
+
+    🔴 **判据是 `> now` —— 一个瞬间，不是一天。** 和 `_top_up_roles()`
+       （`occasion.start_time <= now`）、`_drop_generated_after()` 读的是同一列、
+       同一个问题：**它开始了没有**，不是「它过去了没有」。那两处各自写下了
+       为什么这一块不适用本仓库通常那条 `end_time` 的规矩；这里是第三个读者，
+       不新发明第三种口径。
+       ⚠️ 于是**今天早上七点那一场**（当地日期还是今天，但已经开过了）也不会
+       被造出来 —— 按「天」切的话它会被造出来，而那正是要防的东西。
+
+    ⚠️ 它和 `EventSeries.clean()` 那条按「天」判的拒绝**不是同一条尺子，也不
+       冲突**：那条问「这条规则该不该锚在过去」（新建时，一次性的），这条问
+       「这个晚上开始了没有」（每次按，反复的）。两个问题，两种读法。
+
+    ⚠️ 纯函数，不碰数据库 —— 三个读者共用它，是「预览和按钮说同一个数」
+       唯一的落点（见 `_occasion_moments()` 上面那段）。
+    """
+    now = now or local_now()
+    gone = [moment for moment in moments if moment <= now]
+    return gone, [moment for moment in moments if moment > now]
+
+
+def moments_already_gone(series, *, now=None):
+    """这条规则想要、而**时间已经过去**的那些时刻。
+
+    ⭐ 按下「生成」之后跳过的就是这一批，而**页面必须把它说出来**。
+       `EventSeries.clean()` 里那段注释反对过「跳过」这个做法，理由是
+       「跳过是诱人的、而且更糟，因为『为什么只有三场』到时候在页面上
+       没有任何地方答得出来」。那条反对成立，所以这个函数存在 —— 它就是
+       那个答案的来源：结果句子和日期预览都读它。
+
+    ⚠️ 已经**站着**的过去场次不算 —— 它们不是这次跳过的，它们本来就在。
+       算进来的话，一条正常的老系列每次按生成都会被告知「跳过了 47 场」。
+
+    ⚠️ 读不懂的规则交回空表，和 `series_moments()` 同样的理由：调用方是页面。
+    """
+    now = now or local_now()
+    try:
+        moments = _occasion_moments(series)
+    except ValidationError:
+        return []
+    standing = set(series.occasions.values_list("start_time", flat=True))
+    gone, _ = gone_and_to_come(moments, now=now)
+    return [moment for moment in gone if moment not in standing]
+
+
+def already_gone_sentence(series, *, now=None):
+    """按下「生成」之后，跳过的那几场用一句话说清 —— 没跳过就是空串。
+
+    🔴 **这句话是「跳过」这个做法唯一的辩护**（2026-09-17）。
+       `EventSeries.clean()` 当时反对跳过的理由是「跳过是诱人的、而且更糟，
+       因为『为什么只有三场』到时候在页面上没有任何地方答得出来」。那条反对
+       完全成立 —— 所以答案就是这句话，而且**两个按得动生成的入口都要说**
+       （系列页那颗按钮、Django admin 那个批量动作）。少说一处，那一处就是
+       「按下去少了十三场，而页面一个字都没提」。
+       ⚠️ 那段注释本身已经跟着改口了（同一天）：它原来描述的后果 ——
+          「生成会把过去的晚上建出来、而且撤销不回来」—— 在有了下界之后
+          不再发生。它现在拒绝的是另一件事（一个说不通的排法）。
+
+    ⚠️ 措辞只有这一份。两处各写一句的话，它们迟早说不一样的话 —— 这个仓库
+       为「同一句话两个版本」付过好几次账（`Happening soon` 那句、
+       课程页上三处写着 event）。
+
+    ⚠️ 日期格式跟着 `_generated_sentence()` 里 `Booked through …` 那一句走
+       （`j M Y`）：这两句话紧挨着显示在同一条消息里，两种日期写法会读成
+       两个来源。
+    """
+    gone = moments_already_gone(series, now=now)
+    if not gone:
+        return ""
+    first = formats.date_format(local_date_of(gone[0]), "j M Y")
+    if len(gone) == 1:
+        return (f"1 date ({first}) had already gone and was not made — "
+                "an occasion that has already started cannot be created.")
+    last = formats.date_format(local_date_of(gone[-1]), "j M Y")
+    return (f"{len(gone)} dates between {first} and {last} had already gone "
+            "and were not made — occasions that have already started cannot "
+            "be created.")
+
+
+def has_more_to_build(series, *, now=None, standing=None):
+    """这条规则还有没有**没建过、而且还没开始**的场次？
 
     ⚠️ 问的不是「还有没有未来的场次」—— 一条 `COUNT=12` 全部生成完的系列，
        未来当然还有十一场，但它们都已经在库里了，按「生成」一个都不会多。
        两个问题差一个词，而答错的表现是页面一直劝人按一颗按不出东西的按钮。
 
+    🔴 **「而且还没开始」是 2026-09-17 补的**，漏掉它，这句话又会变成谎话：
+       一条断了三个月的系列，缺口全在过去，而生成器现在**不造过去的场次**了
+       —— 只问「有没有没建过的」的话，系列页和仪表盘会一直劝人按一颗
+       按不出东西的按钮。2026-09-11 评审为同一句话修过一次（那次是
+       `COUNT=12` 跑完的系列），这是同一个坑的第二个入口。
+
     ⚠️ `_occasion_moments()` 已经把 `ended_on` 算进去了，所以一条「即日停止」
        过的系列在这里自然答 False —— 不需要另写一条判断。
+
+    ⚠️ `standing` 是给**已经把场次时刻取回来**的调用方的，理由和
+       `is_running_low()` 的 `booked_to` 一模一样：仪表盘一次问一批系列，
+       不传它就是每条系列一次 `values_list`。不传照常自己去问。
     """
-    standing = set(series.occasions.values_list("start_time", flat=True))
+    now = now or local_now()
+    if standing is None:
+        standing = set(series.occasions.values_list("start_time", flat=True))
     try:
-        return any(moment not in standing
-                   for moment in _occasion_moments(series))
+        _, to_come = gone_and_to_come(_occasion_moments(series), now=now)
     except ValidationError:
         # 读不懂的规则产不出东西。它有它自己的那句拒绝，不在这里说。
         return False
+    return any(moment not in standing for moment in to_come)
 
 
-def is_running_low(series, *, booked_to=None):
+def is_running_low(series, *, booked_to=None, standing=None, now=None):
     """排到头的那天近了，**而且**再按一次真的还能排出东西吗？
 
     ⚠️ `booked_to` 是给已经问过 `generated_through()` 的调用方的 —— 系列页两样
@@ -4302,11 +4415,17 @@ def is_running_low(series, *, booked_to=None):
 
     ⚠️ 「没排过」不算快没了 —— 那是「还没开始」，是另一件事，页面上也不该
        用同一句话说它。
+
+    ⚠️ `standing` / `now` 和 `booked_to` 是同一个用意的三个参数，为仪表盘那一
+       批加的（`series_running_low()`）：一次问一批系列时，这三样调用方都已经
+       拿在手里了，不递进来就是每条系列各跑一次同样的查询。都不传照常自己去问，
+       所以系列页那一个调用点一个字没改。
     """
+    now = now or local_now()
     booked_to = generated_through(series) if booked_to is None else booked_to
     return bool(booked_to
-                and booked_to <= local_today() + RUNNING_LOW
-                and has_more_to_build(series))
+                and booked_to <= local_date_of(now) + RUNNING_LOW
+                and has_more_to_build(series, now=now, standing=standing))
 
 
 @transaction.atomic
@@ -4396,7 +4515,15 @@ def generate_occasions(series, *, generated_by=None):
                 for occasion in series.occasions.prefetch_related("roles")}
 
     made = []
-    for moment in _occasion_moments(series):
+    # 🔴 **下界**（2026-09-17）：这一批只走还没开始的那些时刻。为什么不造过去的
+    #    场次、为什么判据是瞬间而不是天，全写在 `gone_and_to_come()` 上面。
+    #
+    # ⚠️ **补工种的行为一个字都没变**，这是敢这么切的原因：`_top_up_roles()`
+    #    自己第一行就是 `if occasion.start_time <= now: return []`，所以被切掉的
+    #    那些已经站着的过去场次，本来走进去也是原地返回。切之前切之后，
+    #    收到新工种的是同一批晚上。
+    _, to_come = gone_and_to_come(_occasion_moments(series), now=now)
+    for moment in to_come:
         if moment in standing:
             _top_up_roles(standing[moment], templates, now=now)
             continue

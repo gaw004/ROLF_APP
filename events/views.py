@@ -107,7 +107,9 @@ from .services import (
     add_session,
     publish_program,
     remove_session,
+    already_gone_sentence,
     generated_through,
+    gone_and_to_come,
     is_running_low,
     resumes_on_after_split,
     split_series,
@@ -2274,7 +2276,7 @@ def event_create(request):
 #    and which redirect — the rules are all in events/services.py.
 
 
-def _dates_context(moments, page=0, *, rule=""):
+def _dates_context(moments, page=0, *, rule="", skips_the_past=False):
     """The dates a rule falls on, laid out as one page of small calendars.
 
     ⚠️ One helper, two callers (the rule's page and the live preview). Two
@@ -2285,9 +2287,41 @@ def _dates_context(moments, page=0, *, rule=""):
     ⚠️ The paging arithmetic is `schedule.month_page()`, not here: this file's
        third rule is that views hold no arithmetic, and that module's opening
        line is that layout arithmetic belongs to it.
+
+    🔴 **`gone` 是 2026-09-17 加的，而不加它这一块就开始说谎。** 生成那一天起
+       有了下界（`services.gone_and_to_come()`），于是一条跑了两年的系列，
+       这一块列出它全部的历史日期、写着「53 occasions … 4 Sep 2024 到
+       17 Sep 2027」，而按下去一场过去的都不会造 —— 页面说 53、按钮做另一件事，
+       正是 `services._occasion_moments()` 上面点名的「这一块最贵的失败」。
+       **切线和生成器是同一个函数**，所以两边不可能对不上。
+
+    🔴 **而它必须由调用方开口要（`skips_the_past`），因为这一块三页共用，
+       而那句话只在其中两页上是真的。** 课那一支**没有下界**：
+       `ProgramForm.clean()` 不拒绝落在过去的日期（系列那边靠
+       `EventSeries.clean()`，而课没有那张表），`publish_program()` 给
+       `moments` 里的**每一个**时刻都建一讲。所以在发布一门课的页面上印
+       「Generate only builds the ones still to come」是**两重假话**：按下去
+       那些过去的讲次照样会被建出来，而且那一页上根本没有 Generate 这颗键。
+       ⚠️ 这一段原来写的是「课那一支同理（`clean()` 会拒）」，而那是错的 ——
+          2026-09-17 代码评审抓出来的。一句断言某个保护存在、而它并不存在的
+          注释，正是这个仓库反复判刑的那一类。
+
+    ⚠️ 默认**关**，由两个系列调用方开口要 —— 和隔壁 `noun` 的默认方向相反，
+       而这是有意的：`noun` 漏传只是名词不够贴切，这一格漏传是**印出一句假话**。
+       将来多一个非系列的调用方时，它什么都不说比它默认说谎要好。
+
+    ⚠️ 切线从服务层拿，不在这里算 —— 这个文件读不了钟
+       （`ViewsAreThinGuardTests`），所以 `gone_and_to_come()` 的 `now` 留空，
+       由它自己去读。
+       ⚠️ 这段注释**不照抄那个被禁的写法**，否则守卫会红在注释上 ——
+          和 `dashboard/services.py` 里那条一样的规矩。
     """
+    gone, _ = gone_and_to_come(moments) if skips_the_past else ([], moments)
     return {
         "moments": moments,
+        # ⚠️ 给的是**条数**不是列表：模板只要说一句话，而把两串时刻递进模板
+        #    就是邀请它自己去数、去排版第二份日期。月历已经把日期画完了。
+        "gone": len(gone),
         # ⚠️ 有没有结束决定这一块**怎么说话**，不决定它画什么（L5.9）：
         #    一条不结束的规则不是「共 52 场」—— 它是「这一年里 52 场」，
         #    而说成前者会让人以为排完就没了。`has_an_ending()` 自 2026-09-11
@@ -2370,7 +2404,10 @@ def _series_page_context(series, *, form=None, role_form=None, user=None):
         # ⚠️ The dates the rule falls on, computed rather than stored — the
         #    same expander the generator uses, so the page cannot promise a
         #    different set of evenings from the one the button would build.
-        **_dates_context(series_moments(series), rule=series.rule),
+        # ⚠️ `skips_the_past=True`：这一页上那颗键是 Generate，而它有下界。
+        #    课那一页没有，所以它不传 —— 理由在 `_dates_context()` 上。
+        **_dates_context(series_moments(series), rule=series.rule,
+                         skips_the_past=True),
         # ⚠️ 一个数，不是一整套行。模板只问「有没有」和「有几个」，而这一格
         #    原来是把每一场的整行（说明、图片、受众那几列）都拉过来 —— 一条排满
         #    一年的系列是五十二行，三个视图每渲染一次各付一遍。
@@ -2599,23 +2636,44 @@ def _generated_sentence(series, made):
        still have done something — topping up a job on evenings that already
        existed. "0 occasions generated" alone would read as "nothing
        happened", which would be false.
+
+    🔴 **跳过的那几场也要说**（2026-09-17）——措辞在
+       `services.already_gone_sentence()`，这里只决定它接在哪一句后面。
+       三支各接一次，而**第三支是换掉、不是追加**：一条整条落在过去的系列，
+       「检查规则和第一场」是**完全错的**建议（规则和第一场都没有问题），
+       而那正是这一块 2026-09-11 修过的那种「唯一的线索指向两个没有问题的
+       格子」的死胡同。
     """
     standing = series.occasions.count()
     # ⚠️ 「排到哪天」也说一句（L5.9）：生成是滚动的，一条没有结束的规则这一press
     #    只买到一年。不说的话，按完只知道「造了 52 场」，不知道它有尽头。
     booked = generated_through(series)
     through = f" Booked through {formats.date_format(booked, 'j M Y')}." if booked else ""
+    skipped = already_gone_sentence(series)
+    tail = f" {skipped}" if skipped else ""
     if made:
         return (f"{_occasions_worded(len(made))} generated — "
                 f"{standing} in this series now. "
                 f"{'It is' if standing == 1 else 'They are'} "
-                f"{series.get_status_display().lower()}.{through}")
+                f"{series.get_status_display().lower()}.{through}{tail}")
+    if standing and skipped:
+        # 🔴 **不能说「all N occasions already exist」**（2026-09-17 代码评审）。
+        #    一条 `COUNT=52` 断在半路的系列，库里 39 场、剩下 13 个日期已经
+        #    过去了 —— 那句话会变成「全部 39 场都在了」紧接着「13 场没有造」，
+        #    自相矛盾，而且 39 根本不是这条规则要的场数。
+        #    ⚠️ 第三支（下面那个 `if skipped`）本来就是为这种系列写的，
+        #       但它只在**一场都没有**时才够得着。
+        return (f"Nothing new to make — everything still to come already "
+                f"exists.{through} {skipped}")
     if standing:
         already = ("the one occasion this rule makes already exists"
                    if standing == 1
                    else f"all {standing} occasions already exist")
         return (f"Nothing new to make — {already}.{through} Any job you have "
                 "added since is now open on the ones still to come.")
+    if skipped:
+        return (f"Nothing was generated. {skipped} Set the first date to the "
+                "next one you actually want.")
     return ("Nothing was generated. Check the rule and the first date — the "
             "dates it falls on are listed above.")
 
@@ -2712,7 +2770,9 @@ def series_preview(request):
     return render(request, "events/_series_dates.html", {
         **_dates_context(
             series_moments(form.instance) if _rule_is_usable(form) else [],
-            page=_month_page_asked_for(request), rule=form.instance.rule),
+            page=_month_page_asked_for(request), rule=form.instance.rule,
+            # ⚠️ 同系列页：发布出来的这条规则，按生成时不会造已经开始的场次。
+            skips_the_past=True),
         "complaint": _rule_complaint(form),
     })
 

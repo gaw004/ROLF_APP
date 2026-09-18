@@ -187,6 +187,7 @@ from .services import (
     resolve_recipients,
     scan_targets,
     scheduled_hours,
+    already_gone_sentence,
     generated_through,
     has_more_to_build,
     is_running_low,
@@ -21753,6 +21754,243 @@ class EndlessRuleThroughThePagesTests(PageTestCase):
             self.assertIn("press Generate again", page.content.decode())
 
 
+class TheLowerBoundOnGenerationTests(PageTestCase):
+    """忘了续排之后再按「生成」，断掉的那几周会怎么样。2026-09-17。
+
+    🔴 **它补的是滚动生成留下的一个洞。** L5.8e 给了窗口一个上界（一次排一年），
+       却没有给下界：`_occasion_moments()` 从 `starts_on` 一路排到一年后，生成器
+       照单全收。于是一条忘了按、断了两个月的系列，在有人想起来按的那一下，
+       会把断掉的那八个周二**建成真的活动** —— 发布出去、带着工种、被牧区报表
+       算成「开了但没人来」的聚会。而且删不掉：`_collectable_occasions()`
+       按设计不碰已经开始的场次，撤销够不着，只剩手工删八行。
+
+    ⚠️ `EventSeries.clean()` 里那条拒绝拦不住它 —— 那条只在系列**还一场都没有**
+       的时候生效（`self.pk is None or not self.occasions.exists()`），
+       而一条跑了一年的系列正好落在它够不着的地方。
+
+    ⭐ 做法是**跳过 + 说出来**，而不是拒绝整次按键。拒绝在这里是死胡同：
+       `starts_on` 被 `_refuse_rewriting_the_rule()` 冻着，改不了，于是这条系列
+       再也续不上。跳过配上那句话，正好回答 `clean()` 那段注释担心的
+       「『为什么只有三场』在页面上没有地方答得出来」。
+    """
+
+    #: 一条**断了**的系列：一年前按过一次（排到两个月前），之后没人再按。
+    #: ⚠️ 这就是滚动生成下真实的断法 —— 不是谁删了几行，是窗口滑过去了。
+    LAPSED_MONTHS = 14
+
+    def setUp(self):
+        super().setUp()
+        self.login(self.zhang)
+
+    def lapsed(self):
+        """一条一年前按过、如今断了两个月的每周系列。"""
+        started = a_weekday(
+            TUESDAY,
+            near=local_today() - relativedelta(months=self.LAPSED_MONTHS))
+        series = EventSeries.objects.create(
+            name="Tuesday prayer", ministry=self.pantry,
+            owner=self.zhang.contact, rule="FREQ=WEEKLY;BYDAY=TU",
+            starts_on=started, start_time=datetime.time(19, 0),
+            duration=datetime.timedelta(hours=2), status=Event.Status.OPEN)
+        set_audience(series, Audience.Spec(
+            outsiders=True, all_staff=True, ministries=frozenset()))
+        # ⚠️ 当初那一按是在**一年多以前**，那时这些周二都还在未来。
+        #    见 `generate_as_of()`。
+        generate_as_of(series, NOW - relativedelta(months=self.LAPSED_MONTHS))
+        return series
+
+    def test_the_weeks_that_were_missed_are_not_built(self):
+        """🔴 这一轮的整个理由：断掉的那几周**不会**被凭空造出来。"""
+        series = self.lapsed()
+        before = series.occasions.count()
+        gap = [m for m in series_moments(series)
+               if m <= local_now()
+               and not series.occasions.filter(start_time=m).exists()]
+        self.assertTrue(gap, "夹具必须真的断出一个口子，否则这条测试什么都没问")
+
+        made = generate_occasions(series)
+
+        self.assertTrue(made, "未来那一年还是要排出来的")
+        for occasion in made:
+            self.assertGreater(
+                occasion.start_time, NOW,
+                f"造出了一场已经开始的活动：{occasion.start_time}")
+        self.assertEqual(
+            series.occasions.filter(start_time__lte=NOW).count(), before,
+            "过去那一头一行都不该多")
+
+    def test_an_occasion_earlier_today_is_not_built_either(self):
+        """🔴 判据是**瞬间**不是天，而这一条是两者唯一分得开的地方。
+
+        今天凌晨那一场，当地日期还是今天 —— 按「天」切的话它会被造出来，
+        而它已经开过了。`_top_up_roles()` 和 `_drop_generated_after()` 读的
+        是同一列同一种问法（「它开始了没有」），这里是第三个读者。
+        """
+        series = EventSeries.objects.create(
+            name="Dawn prayer", ministry=self.pantry, owner=self.zhang.contact,
+            rule="FREQ=DAILY;COUNT=2", starts_on=local_today(),
+            start_time=datetime.time(0, 1),
+            duration=datetime.timedelta(hours=1), status=Event.Status.OPEN)
+        set_audience(series, Audience.Spec(
+            outsiders=True, all_staff=True, ministries=frozenset()))
+
+        made = generate_occasions(series)
+
+        self.assertEqual(
+            len(made), 1,
+            "今天 00:01 那一场已经开过了，不该被造出来")
+        self.assertEqual(local_date_of(made[0].start_time),
+                         local_today() + datetime.timedelta(days=1))
+
+    def test_the_press_says_how_many_dates_had_already_gone(self):
+        """⭐ 「跳过」这个做法唯一的辩护：页面得说得出为什么少了几场。"""
+        series = self.lapsed()
+        response = self.client.post(
+            reverse("events:series_generate", args=[series.pk]), follow=True)
+
+        said = " ".join(m.message for m in response.context["messages"])
+        self.assertIn("had already gone", said)
+        self.assertRegex(said, r"\d+ dates between .+ and .+ had already gone")
+
+    def test_the_admin_action_says_it_too(self):
+        """🔴 admin 那条路自己拼句子，所以它会**独立地**漏掉这件事。
+
+        ⚠️ 而它还是**批量**的：一次按下可以在好几条系列上同时不说话。
+        """
+        series = self.lapsed()
+        self.client.force_login(get_user_model().objects.create_superuser(
+            email="root@example.invalid", password="a-good-long-password"))
+
+        response = self.client.post(
+            reverse("admin:events_eventseries_changelist"), {
+                "action": "generate_occasions",
+                helpers.ACTION_CHECKBOX_NAME: [str(series.pk)],
+            }, follow=True)
+
+        said = " ".join(m.message for m in response.context["messages"])
+        self.assertIn("had already gone", said)
+
+    def test_a_rule_that_is_entirely_in_the_past_is_not_told_to_check_itself(self):
+        """🔴 「检查规则和第一场」对这种系列是**完全错的**建议。
+
+        规则没问题、第一场也没问题 —— 问题是那些日子全过去了。而这正是
+        这一块 2026-09-11 修过的那种「唯一的线索指向两个没有问题的格子」。
+        """
+        series = self.lapsed()
+        series.occasions.all().delete()
+        series.ended_on = local_today() - datetime.timedelta(days=30)
+        series.save(update_fields=["ended_on", "updated_at"])
+
+        response = self.client.post(
+            reverse("events:series_generate", args=[series.pk]), follow=True)
+
+        said = " ".join(m.message for m in response.context["messages"])
+        self.assertIn("had already gone", said)
+        self.assertNotIn("Check the rule and the first date", said)
+
+    def test_a_gap_that_is_only_in_the_past_is_not_worth_pressing_for(self):
+        """⚠️ 否则系列页和仪表盘会一直劝人按一颗按不出东西的按钮 ——
+           2026-09-11 评审为这句话修过一次，这是同一个坑的第二个入口。
+        """
+        series = self.lapsed()
+        generate_occasions(series)
+        series.ended_on = local_today()
+        series.save(update_fields=["ended_on", "updated_at"])
+
+        self.assertFalse(has_more_to_build(series))
+        self.assertFalse(is_running_low(series))
+
+    def test_a_lapsed_run_is_not_told_that_all_of_it_already_exists(self):
+        """🔴 两句话摆在一起自相矛盾（2026-09-17 代码评审抓到的）。
+
+        一条 `COUNT` 断在半路的系列：库里 N 场、剩下几个日期已经过去了。
+        旧措辞是「Nothing new to make — all N occasions already exist」，
+        紧接着「M dates … had already gone and were not made」——
+        全都在了，又有几场没造出来。而且 N 根本不是这条规则要的场数。
+        """
+        series = self.lapsed()
+        # ⚠️ 给它一个**已经过去的结束**：于是「还没到的」一个都没有，
+        #    而「已经过去、没造出来的」有一批 —— 正是这条测试要的那种系列。
+        #    ⚠️ 用 `UNTIL` 而不是数出一个 `COUNT`：后者要算「到今天为止是第几场」，
+        #       而那个数每天都不一样。
+        ended = local_today() - datetime.timedelta(days=1)
+        series.rule = f"FREQ=WEEKLY;BYDAY=TU;UNTIL={ended:%Y%m%d}T000000Z"
+        series.save(update_fields=["rule", "updated_at"])
+
+        response = self.client.post(
+            reverse("events:series_generate", args=[series.pk]), follow=True)
+        said = " ".join(m.message for m in response.context["messages"])
+
+        self.assertIn("had already gone", said)
+        self.assertNotIn("already exist.", said)
+        self.assertIn("everything still to come already exists", said)
+
+    def test_the_preview_and_the_press_agree_on_what_is_still_to_come(self):
+        """🔴 **这一条是这一轮唯一防得住那类失败的东西。**
+
+        `_occasion_moments()` 上面点名过：页面说会造 12 场、按下去造了 53 场，
+        是这一块最贵的失败。加了下界之后它有了第二个入口 —— 预览列出全部
+        历史日期、上面写着「53 occasions」，而按下去一场过去的都不会造。
+
+        所以这里钉的是**两个方向**，而少了任何一个它都是一条永远绿的守卫：
+
+          · 预览说还没到的那些，按完之后**一场不少**地站着；
+          · 按下去造出来的每一场，**都必须是**预览说它会造的那些里的一个。
+
+        🔴 **第二条是反向验证补上的。** 第一版只有第一条，而把下界拆掉之后
+           它照样绿 —— 旧行为把未来那些也造了，未来的条数当然还是对的，
+           它多造的是**过去**那一批，而没有任何一句断言看着那一头。
+           这个仓库为「永远绿的守卫」判过刑，这一条差点又是一个。
+        """
+        series = self.lapsed()
+        page = self.client.get(
+            reverse("events:series_detail", args=[series.pk]))
+        moments = page.context["moments"]
+        gone = page.context["gone"]
+        self.assertTrue(gone, "夹具必须有已经过去的日期，否则这条什么都没问")
+
+        made = generate_occasions(series)
+
+        still_to_come = [m for m in moments if m > NOW]
+        self.assertEqual(
+            len(still_to_come), len(moments) - gone,
+            "页面数的『已经过去』和这条测试数的对不上")
+        self.assertEqual(
+            series.occasions.filter(start_time__gt=NOW).count(),
+            len(still_to_come),
+            "预览列出来还没到的那些，按完之后必须一场不少地站着")
+        for occasion in made:
+            self.assertIn(
+                occasion.start_time, still_to_come,
+                f"按下去造了一场预览说它不会造的：{occasion.start_time}")
+
+    def test_the_page_says_how_many_of_the_dates_have_gone(self):
+        """⚠️ 上面那句不变（两支各说各的），这一句接在它后面。"""
+        series = self.lapsed()
+        html = self.client.get(
+            reverse("events:series_detail", args=[series.pk])).content.decode()
+
+        self.assertIn("already gone", html)
+        self.assertIn("Generate only builds the ones still to come", html)
+
+    def test_a_healthy_new_series_is_told_none_of_this(self):
+        """⚠️ 一条正常的新系列上，这一整套**一个字都不该出现**。"""
+        series = EventSeries.objects.create(
+            name="Fresh", ministry=self.pantry, owner=self.zhang.contact,
+            rule="FREQ=WEEKLY;BYDAY=TU;COUNT=4",
+            starts_on=a_weekday(TUESDAY,
+                                near=local_today() + datetime.timedelta(days=7)),
+            start_time=datetime.time(19, 0),
+            duration=datetime.timedelta(hours=2), status=Event.Status.OPEN)
+        set_audience(series, Audience.Spec(
+            outsiders=True, all_staff=True, ministries=frozenset()))
+
+        self.assertEqual(already_gone_sentence(series), "")
+        html = self.client.get(
+            reverse("events:series_detail", args=[series.pk])).content.decode()
+        self.assertNotIn("already gone", html)
+
+
 class DurationBoxesTests(SimpleTestCase):
     """「开多久」的三个格子。L5.8e，2026-09-11。
 
@@ -23307,6 +23545,31 @@ class ProgramPublishTests(PageTestCase):
         return Event.objects.get(name="Spring ESL")
 
     # --- 它排出来的东西 ----------------------------------------------------
+
+    def test_the_course_preview_does_not_claim_the_past_is_skipped(self):
+        """🔴 **课这一支没有下界，所以那句话在这一页上是假的。**
+
+        日期预览三页共用（D49）。系列那两页上「Generate only builds the ones
+        still to come」是真的 —— 生成 2026-09-17 起不造已经开始的场次。
+        课这边**两条都不成立**：`ProgramForm.clean()` 不拒绝落在过去的日期
+        （系列那边靠 `EventSeries.clean()`，而课没有那张表），
+        `publish_program()` 给每一个时刻都建一讲；而且这一页上根本没有
+        Generate 这颗键，它叫 Publish。
+
+        ⚠️ 2026-09-17 代码评审抓到的：第一版让 `_dates_context()` 无条件算
+           那个数，于是这一页会印出一句两重假话。⚠️ 这条测试钉的是**不出现**，
+           所以它同时也拦住「将来给这一块加第四个调用方时顺手打开它」。
+        """
+        started = a_weekday(
+            WEDNESDAY, near=local_today() - datetime.timedelta(days=21))
+        response = self.client.post(
+            reverse("events:program_preview"),
+            self.payload(starts_on=started.isoformat()))
+        html = response.content.decode()
+
+        self.assertIn("meeting", html, "夹具没排出讲次，这条测试什么都没问")
+        self.assertNotIn("already gone", html)
+        self.assertNotIn("still to come", html)
 
     def test_one_event_and_twelve_meetings(self):
         """⭐ 这一条就是这一批要的东西本身。"""

@@ -14,6 +14,7 @@ from simple_history.admin import SimpleHistoryAdmin
 
 from .forms import AudienceAdminForm, EventSeriesAdminForm, SessionForm
 from .services import (
+    already_gone_sentence,
     generate_occasions,
     register_kept_at,
     split_series,
@@ -519,11 +520,18 @@ class EventSeriesAdmin(SimpleHistoryAdmin):
                     request, f"“{series.name}”: {'; '.join(refused.messages)}",
                     level=messages.WARNING)
                 continue
+            # 🔴 跳过的那几场这里也要说（2026-09-17）。⚠️ **这一句不在这里
+            #    重写**：措辞归 `services.already_gone_sentence()`，两个入口
+            #    共用一份。漏掉这一行的表现是 admin 这条路按下去少了十三场，
+            #    而页面一个字都没提 —— 而这个 action 恰好是批量的，
+            #    一次按下去可以在好几条系列上同时不说话。
+            skipped = already_gone_sentence(series)
             self.message_user(
                 request,
                 f"“{series.name}”: {len(made)} occasion(s) generated. "
                 f"They are {series.get_status_display().lower()} — nothing was "
-                "removed from occasions people had already signed up for.")
+                "removed from occasions people had already signed up for."
+                + (f" {skipped}" if skipped else ""))
 
     @admin.action(description="Stop this series", permissions=["change"])
     def stop_series(self, request, queryset):

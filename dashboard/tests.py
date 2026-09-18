@@ -17,14 +17,17 @@ from contact.models import Contact
 from core.timeutils import local_now, local_today, year_bounds
 from dashboard import calendar as month
 from dashboard.services import BAND_ITEMS, _greeting, dashboard_for
+from events.services import series_running_low
 from events.models import (
     EventGrant,
     Event,
     EventRole,
+    EventSeries,
     Participation,
     ParticipationRole,
     Session,
     SessionAttendance,
+    Source,
 )
 from notices.models import Notice
 from org.models import Assignment, Ministry, MinistryRole, Position
@@ -114,6 +117,33 @@ class DashboardTestCase(TestCase):
             ministry=ministry or self.pantry)
         dates.setdefault("start_date", TODAY - 30 * DAY)
         return Assignment.objects.create(contact=contact, position=post, **dates)
+
+    def a_running_low_series(self, ministry=None, name="Tuesday prayer"):
+        """一条**只排到三周后**的无限规则 —— 「快排完了」的最小形态。
+
+        ⚠️ 场次直接建，不走 `generate_occasions()`：这里要的只是「最后一场在
+           三周后」这个**状态**，而真去生成一年的日更场次是三百多行，
+           为一个状态付的代价太大。⚠️ 但 `source=GENERATED` 不能省 ——
+           少了它这一行就不是「规则排出来的」，而这条系列的历史就不成立。
+
+        ⚠️ `FREQ=DAILY` 是故意的：它对 `starts_on` 落在星期几没有要求，
+           于是这个夹具不会因为今天是星期几而时灵时不灵。
+        """
+        start = TODAY + 21 * DAY
+        series = EventSeries.objects.create(
+            name=name, ministry=ministry or self.pantry,
+            owner=make_person("Owner"), rule="FREQ=DAILY",
+            starts_on=start, start_time=datetime.time(19, 0),
+            duration=2 * HOUR, status=Event.Status.OPEN,
+            visible_to_outsiders=True, visible_to_all_staff=True)
+        moment = timezone.make_aware(
+            datetime.datetime.combine(start, datetime.time(19, 0)))
+        Event.objects.create(
+            name=name, ministry=series.ministry, owner=series.owner,
+            start_time=moment, end_time=moment + 2 * HOUR,
+            status=Event.Status.OPEN, series=series, source=Source.GENERATED,
+            visible_to_outsiders=True, visible_to_all_staff=True)
+        return series
 
     def make_admin(self, contact, ministry=None):
         return MinistryRole.objects.create(
@@ -438,9 +468,42 @@ class TheQueryBudgetTests(DashboardTestCase):
        差出来的就是外壳（会话、鉴权、`HomePage`、导航）那几次。
     """
 
-    #: 实测 10（2026-09-12，ministry admin 那条最贵的路径）。
+    #: 实测 **14**（2026-09-17，ministry admin + 一条快排完的系列，也就是
+    #: 上面那条最贵的路径）。没有快排完的系列时是 13 —— 差的那一次是
+    #: `services.series_running_low()` 取候选系列场次的第二次查询，它只在
+    #: 真有候选时才跑。
+    #:
+    #: ⭐ 这一轮 12 → 15 是**买东西花掉的**，不是顺手抬的：两次查询买到的是
+    #:    「一条忘了续排的重复规则会出现在 admin 的必经之路上」。在这之前那句
+    #:    提醒只写在系列自己那一页，要他主动打开那一条系列才看得见 —— 而
+    #:    过期之后断掉的那几周不会被补造出来（生成有下界），那几场活动就是
+    #:    真的没办成。
+    #:
+    #: ⚠️ 留一格而不是两格（这个文件原来的习惯是实测 +2）：上面那条最贵的路径
+    #:    现在是**量出来的**，不是某一个夹具碰巧走到的，所以不需要那么多余量。
+    #:    余量越大，悄悄爬上来的那一次就越晚被拦住。
     #: ⚠️ 改这个数之前先读上面那段。
-    BUDGET = 12
+    BUDGET = 15
+
+    def test_it_stays_within_its_budget_with_a_series_running_low(self):
+        """🔴 **最贵的那一形态，而不是最省的。**
+
+        「快排完了」那一块是两次查询，但**第二次只在真有候选时才跑**
+        （`services.series_running_low()` 没有候选就早返回）。一个不含任何
+        快排完的系列的夹具因此量到的是 13，而真实的上限是 14 —— 照 13 定上限
+        就是给一个**从来不会发生的场景**定的预算，而真正吃预算的那一屏
+        从第一天起就超着，并且这条测试永远不会说。
+        """
+        self.make_admin(self.me)
+        self.employ(self.me)
+        self.sign_up()
+        self.a_running_low_series()
+        with CaptureQueriesContext(connection) as queries:
+            dashboard_for(self.account)
+        self.assertLessEqual(
+            len(queries), self.BUDGET,
+            f"装配仪表盘用了 {len(queries)} 次查询，上限是 {self.BUDGET}。"
+            "先问这张新卡值不值这次查询，再考虑抬这个数。")
 
     def test_it_stays_within_its_budget(self):
         """⚠️ 上限，不是精确值 —— 所以用 `CaptureQueriesContext` 而不是
@@ -861,9 +924,12 @@ class TheFrontPageQueryBudgetTests(DashboardTestCase):
        看不出任何区别。
     """
 
-    #: 实测 18（2026-09-11），比 `/me/` 多一次 —— 那一次是首页那一行
-    #: `HomePage`。⚠️ 改这个数之前先读上面那段。
-    BUDGET = 20
+    #: 实测 19（2026-09-17；此前 18），比装配那一条多一次 —— 那一次是首页
+    #: 那一行 `HomePage`。⚠️ 最贵的那一形态是 **20**：仪表盘那边多的那一次
+    #: （`series_running_low()` 的第二次查询）在这一页上同样要付，而这个夹具
+    #: 里没有快排完的系列。上限留在它之上一格。
+    #: ⚠️ 改这个数之前先读上面那段。
+    BUDGET = 21
     #: 🔴 实测 **1**：只有 `HomePage` 那一行。这个数字小得刺眼是有意的 ——
     #: 它是「陌生人不付仪表盘的账」这句话唯一说得出口的证据。
     #: ⚠️ 上限写 2 留一格，而**真正钉住那句话的不是这个数**（2026-09-12 补）：
@@ -1125,3 +1191,159 @@ class HandedToMeTests(DashboardTestCase):
         for _ in range(5):
             self.hand_it_over(self.an_event())
         self.assertEqual(self.page(self.helper).context["needs_you"]["count"], BAND_ITEMS)
+
+
+class ASeriesRunningLowIsWaitingOnYouTests(DashboardTestCase):
+    """快排完了的重复规则，摆到 admin 的必经之路上。2026-09-17。
+
+    ⭐ **它补的是一条提醒的落点，不是一条新提醒。** 判据（`RUNNING_LOW`，六周）
+       和系列页上那行黄字是**同一个** `services.is_running_low()` —— 两处说的是
+       同一件事，不许有两个口径。差别只在**够得着谁**：那一行要 admin 主动打开
+       那一条系列才看得见，而滚动生成的整条设计靠的就是他记得回来按。
+
+    🔴 **过期不是「续一下就好」。** 生成从 2026-09-17 起有下界：断掉的那几周
+       不会被补造出来（`services.gone_and_to_come()`），那几场活动就是真的
+       没办成。所以这一行有一个真正的、不可逆的截止日期 —— 这也是它凭什么
+       排在「还缺人」前面。
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.make_admin(self.me)
+
+    def band(self, account=None):
+        return self.page(account).context["needs_you"]
+
+    def test_the_admin_of_that_ministry_sees_it(self):
+        series = self.a_running_low_series()
+        self.assertEqual(
+            [s.pk for s in self.band()["running_low"]], [series.pk])
+
+    def test_it_says_how_far_it_is_booked(self):
+        """⚠️ 第三行说的是「只排到哪天」—— 这一块问「什么在等你」，
+           而那个日期就是等他的理由。"""
+        self.a_running_low_series()
+        self.assertIn("Booked only to", self.page().content.decode())
+
+    def test_it_links_to_the_page_with_the_button_on_it(self):
+        """⚠️ 出口要通向**做得成那件事**的页面，而 Generate 那颗键在系列页上。"""
+        series = self.a_running_low_series()
+        self.assertIn(f"/events/series/{series.pk}/",
+                      self.page().content.decode())
+
+    def test_a_series_with_plenty_of_room_left_is_not_waiting_on_anybody(self):
+        """⚠️ 判据是「最后一场还有多远」，不是「有没有重复规则」。"""
+        series = self.a_running_low_series()
+        far_off = series.occasions.first()
+        far_off.start_time = NOW + 200 * DAY
+        far_off.end_time = far_off.start_time + 2 * HOUR
+        far_off.save(update_fields=["start_time", "end_time"])
+        self.assertEqual(self.band()["running_low"], [])
+
+    def test_a_series_that_cannot_build_anything_more_is_not_either(self):
+        """🔴 一条排完了的规则**不该**被劝去按一颗按不出东西的按钮。
+
+        这半句 2026-09-11 评审在系列页那一侧补过一次；通栏这一侧读的是同一个
+        `is_running_low()`，所以它天生带着这半句 —— 这条测试钉的正是
+        「天生带着」这件事，而不是让它在这里被重写一遍。
+        """
+        series = self.a_running_low_series()
+        series.ended_on = TODAY
+        series.save(update_fields=["ended_on"])
+        self.assertEqual(self.band()["running_low"], [])
+
+    def test_another_ministrys_series_is_not_his_to_press(self):
+        self.a_running_low_series(ministry=self.tax, name="Tax clinic")
+        self.assertEqual(self.band()["running_low"], [])
+
+    def test_a_volunteer_is_not_shown_any_of_it(self):
+        """⚠️ 一条重复规则不是「在等一个志愿者」—— 他按不动那颗键。"""
+        self.a_running_low_series()
+        volunteer = make_account("v@example.com", make_person("Vol"))
+        self.assertEqual(self.band(volunteer)["running_low"], [])
+
+    def test_it_takes_a_slot_from_the_understaffed_roles(self):
+        """🔴 **定下来的优先级**：一个忙到通栏已经满了的牧区，正是最可能
+           忘记续排的那一个 —— 排在后面就等于永远看不见，而那恰好是这一轮
+           要堵的洞。
+
+        ⚠️ 缺人的岗位别的 admin 也补得了；重复规则只有这个牧区的 admin
+           按得动，而且过了期不可逆。
+        """
+        series = self.a_running_low_series()
+        for _ in range(BAND_ITEMS):
+            self.a_role(self.an_event(), needed_count=5)
+
+        band = self.band()
+
+        self.assertEqual(band["count"], BAND_ITEMS,
+                         "通栏一行是这一块的不变量")
+        self.assertEqual([s.pk for s in band["running_low"]], [series.pk])
+        self.assertEqual(len(band["short"]), BAND_ITEMS - 1,
+                         "它应该挤掉其中一个缺人的岗位，而不是被它们挤掉")
+
+    def test_the_batch_check_does_not_scale_its_queries(self):
+        """🔴 逐条问就是每条系列两次查询，而这一屏有预算
+           （`TheQueryBudgetTests`）。四条系列和一条系列**一样贵**。
+        """
+        for n in range(4):
+            self.a_running_low_series(name=f"Series {n}")
+        with CaptureQueriesContext(connection) as queries:
+            rows = series_running_low(EventSeries.objects.all())
+        self.assertEqual(len(rows), 4)
+        self.assertLessEqual(
+            len(queries), 2,
+            f"series_running_low() 用了 {len(queries)} 次查询 —— 它必须是两次，"
+            "而且不随系列条数涨。")
+
+    def test_a_stopped_series_never_reaches_the_rule_expansion(self):
+        """⚠️ 这个筛选**没有下界，也不能有** —— 一条断了两个月的系列
+           `booked_to` 正在过去，那恰恰是要找的。代价是每一条早就办完的系列
+           也落进候选。「即日停止」过的那些是其中问得起的一半：挡在 SQL 里
+           不改变任何结果（`_occasion_moments()` 本来就按 `ended_on` 截断）。
+
+        ⚠️ 钉的是**第二次查询根本没发生**：候选空了就早返回。
+        """
+        old = self.a_running_low_series(name="Stopped long ago")
+        old.ended_on = TODAY - 30 * DAY
+        old.save(update_fields=["ended_on"])
+
+        with CaptureQueriesContext(connection) as queries:
+            rows = series_running_low(EventSeries.objects.all())
+
+        self.assertEqual(rows, [])
+        self.assertEqual(
+            len(queries), 1,
+            "停掉的系列该在第一次查询里就被挡掉，而不是取回场次再展开规则")
+
+    def test_only_the_occasions_still_to_come_are_fetched(self):
+        """🔴 **查询条数看不见这一条，所以它得自己看。**
+
+        `has_more_to_build()` 拿 `standing` 只做一件事：问 `to_come` 里的时刻
+        在不在里面 —— 而 `to_come` 整个在「现在」之后。过去的场次一行都不会
+        被问到。第一版把候选系列的**全部**场次取回内存，于是一条办了两年的
+        系列每渲染一次首页就搬一次它全部的历史。
+
+        `TheQueryBudgetTests` 抓不到：查询**条数**不变，变的是每条搬多少行。
+        """
+        series = self.a_running_low_series(name="Long runner")
+        for n in range(20):
+            moment = NOW - (60 + n) * DAY
+            Event.objects.create(
+                name=f"past {n}", ministry=series.ministry, owner=series.owner,
+                start_time=moment, end_time=moment + HOUR,
+                status=Event.Status.COMPLETED, series=series,
+                source=Source.GENERATED)
+
+        with CaptureQueriesContext(connection) as queries:
+            rows = series_running_low(EventSeries.objects.all())
+
+        self.assertEqual([s.pk for s in rows], [series.pk])
+        occasions_query = [q["sql"] for q in queries
+                           if "events_event" in q["sql"]
+                           and "events_eventseries" not in q["sql"]]
+        self.assertEqual(len(occasions_query), 1, "应该正好一条取场次的查询")
+        self.assertIn(
+            '"start_time" >', occasions_query[0],
+            "取场次那一句没有下界 —— 它会把这条系列全部的历史场次搬进内存，"
+            "而其中一行都不会被问到")

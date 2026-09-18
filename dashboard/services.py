@@ -15,7 +15,8 @@ from core.timeutils import (
     month_bounds,
     year_bounds,
 )
-from events.models import Event, EventRole, Participation
+from events.models import Event, EventRole, EventSeries, Participation
+from events.services import series_running_low
 from notices.models import Notice
 from org.models import Assignment, Position
 from org.permissions import (
@@ -103,7 +104,8 @@ def _posts(contact):
 #: 通栏那一块画得出的每一组，**名单只在这里写一次**（2026-09-15 加第四组时抽的）。
 #: `_counted()` 数它、模板按它画。在此之前那三个名字在服务层和模板里各写一遍，
 #: 而加第四组时漏掉其中一处的表现是：那一组的行画出来了，标题上的数字却不算它。
-NEEDS_YOU_GROUPS = ("to_verify", "handed_to_me", "short", "unfinished", "open")
+NEEDS_YOU_GROUPS = ("to_verify", "handed_to_me", "running_low", "short",
+                    "unfinished", "open")
 
 
 def _room_left(rows):
@@ -224,6 +226,24 @@ def _needs_you(ministry_ids, now, open_to_me, foundation=False, handed=()):
                         if event.needs_people][:_room_left(rows)]
         return _counted(rows)
     rows = {"to_verify": to_verify, "handed_to_me": handed_to_me}
+    # ⭐ **快排完了的重复规则**（2026-09-17）。滚动生成一次只排一年，靠**人手
+    #    再按一次**接上 —— 而在这之前那句提醒只写在系列自己那一页上，要 admin
+    #    主动打开那一条系列才看得见。没人打开，系列就静默过期；过期之后再按，
+    #    断掉的那几周会被跳过（`services.gone_and_to_come()`），而那几周的活动
+    #    就是真的没办成。这一行是那句提醒的第二个、也是会被走到的落点。
+    #
+    # ⭐ **排在「还缺人」之前**，这是定下来的：缺人的岗位别的 admin 也补得了，
+    #    而重复规则**只有这个牧区的 admin 按得动**；它还有一个真正的截止日期，
+    #    过了就不可逆。这和 `to_verify` 排最前是同一条理由的两次应用。
+    #
+    # ⚠️ 判据和条数都不在这里算：`services.series_running_low()` 收 queryset、
+    #    只筛（D27），而它自己保证**两次查询**不随系列条数涨。
+    #    ⚠️ 只在 ministry admin 这一支 —— 一条重复规则不是「在等一个志愿者」。
+    # ⚠️ 名额用完就不问了（2026-09-17 代码评审）：那一问是两次查询加若干次
+    #    rrule 展开，而算出来的行一格都摆不下。上面两组把三格占满是常事。
+    rows["running_low"] = series_running_low(
+        EventSeries.objects.filter(ministry_id__in=ministry_ids),
+        now=now)[:_room_left(rows)] if _room_left(rows) else []
     rows["short"] = list(
         EventRole.objects.understaffed()
         .filter(event__ministry_id__in=ministry_ids,
